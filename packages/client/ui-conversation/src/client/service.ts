@@ -61,9 +61,12 @@ export interface IConversation {
 
 /** Create one browser-only draft descriptor; only its id enters input state. */
 function browserDraftAttachment(file: File): ComposerAttachment {
+  const id = typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `draft-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   return {
     kind: 'image',
-    id: crypto.randomUUID() as DraftAttachmentId,
+    id: id as DraftAttachmentId,
     previewUrl: URL.createObjectURL(file),
     file,
   }
