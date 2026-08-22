@@ -111,7 +111,7 @@
   transform: rotate(180deg);
 }
 
-/* Main Model Picker Pop-Up Window (Matching Input Card Material) */
+/* Main Model Picker Pop-Up Window (Matching Liquid Glass Input Card Material) */
 .pickerPopover {
   position: absolute;
   right: 0;
@@ -126,12 +126,21 @@
   overflow-y: hidden;
   box-sizing: border-box;
   padding: 0;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.1));
-  border-radius: 14px;
-  background: rgba(17, 24, 39, 0.97);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: var(--dsw-shadow-lv3, 0 16px 40px rgba(0, 0, 0, 0.5)), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
+  border-radius: 16px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.5));
+  backdrop-filter: blur(28px) saturate(145%);
+  -webkit-backdrop-filter: blur(28px) saturate(145%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 16px 40px rgba(0, 7, 18, 0.45);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.07) 0%,
+    rgba(255, 255, 255, 0.015) 18%,
+    rgba(255, 255, 255, 0) 42%
+  );
   color: var(--dsw-alias-label-primary, #f1f5f9);
 }
 
@@ -146,12 +155,21 @@
   width: 190px;
   padding: 4px;
   box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.1));
-  border-radius: 12px;
-  background: rgba(17, 24, 39, 0.97);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
+  border-radius: 14px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.5));
+  backdrop-filter: blur(28px) saturate(145%);
+  -webkit-backdrop-filter: blur(28px) saturate(145%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 12px 32px rgba(0, 7, 18, 0.45);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.07) 0%,
+    rgba(255, 255, 255, 0.015) 18%,
+    rgba(255, 255, 255, 0) 42%
+  );
 }
 
 .effortItem {
