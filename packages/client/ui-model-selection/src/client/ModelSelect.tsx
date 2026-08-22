@@ -27,6 +27,7 @@ import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
   isGroupCollapsed, toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
+  type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
   IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain,
@@ -47,7 +48,7 @@ function isHidden(provider: string, modelId: string): boolean {
 }
 
 /** Format the model context window compactly (guaranteed display). */
-function resolveModelContext(model: { id: string; contextWindow?: number; [key: string]: unknown }): string {
+function resolveModelContext(model: ModelContextTarget): string {
   const tokens = resolveContextTokens(model)
   return formatCompactContext(tokens)
 }

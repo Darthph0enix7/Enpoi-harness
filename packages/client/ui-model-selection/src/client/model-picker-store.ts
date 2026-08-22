@@ -110,12 +110,18 @@ export function toggleGroupCollapsed(groupId: string): boolean {
   return isNowCollapsed
 }
 
+export interface ModelContextTarget {
+  id: string
+  contextWindow?: number | undefined
+  context?: { contextWindow?: number | undefined } | undefined
+}
+
 /** Resolve context window size in tokens, checking model properties and canonical fallbacks. */
-export function resolveContextTokens(model: { id: string; contextWindow?: number; [key: string]: unknown }): number {
+export function resolveContextTokens(model: ModelContextTarget): number {
   if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
     return model.contextWindow
   }
-  const rawContext = (model as { context?: { contextWindow?: number } }).context?.contextWindow
+  const rawContext = model.context?.contextWindow
   if (typeof rawContext === 'number' && rawContext > 0) {
     return rawContext
   }
