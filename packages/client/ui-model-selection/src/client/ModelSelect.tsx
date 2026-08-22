@@ -1,34 +1,60 @@
 /**
  * ModelSelect: the composer's named model seat (`conversation.input.model`).
- * Two-level selection per figma 496:26454's MenuDropdown: the root menu is
- * the Model / Effort row pair (label + current value + a right chevron),
- * each drilling into its own list — the provider-grouped model list over
- * the shared directory, and the effort levels. The trigger (313:14108's
- * ToggleButton) shows both: model name + effort in the caption tone.
- * Data and submission ride the SAME per-session ModelDirectory as the
- * /model popup; exact-model reasoning metadata and the selected effort come
- * from the Host rather than a client-owned vocabulary. A rejected selection
- * announces through the shared transient Toast anchored to the composer
- * card; the in-menu strip with Retry remains the catalog-load surface.
+ * OpenChamber-style Model Picker & Input Card design:
+ * - Trigger Bar: Clean Model Button (opens picker popover directly) + Conditional Reasoning Effort Pill.
+ * - Model Picker Popover:
+ *   - Search Bar for instant filtering across all providers.
+ *   - Collapsible Favorites group with manual drag-and-drop reordering.
+ *   - Collapsible Recent group with last used models.
+ *   - Collapsible Provider groups with 6-dot drag handles to rearrange provider ordering.
+ *   - Clean model rows: only human-readable Model Name + compact gray context size (e.g. 1M, 128K) + Star toggle.
+ *   - Pure monochrome vector icons throughout.
+ *   - Input-matching glass material & border tokens.
+ *
+ * @module dsh-client-ui-model-selection/ModelSelect
  */
+
 import {
-  useEffect, useId, useMemo, useRef, useState, useSyncExternalStore,
-  type KeyboardEvent, type FocusEvent,
+  useEffect, useMemo, useRef, useState, useSyncExternalStore,
+  type DragEvent,
 } from 'react'
 import clsx from 'clsx'
 import type { ModelReasoningEffort, ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
-import {
-  IconCheckOutline16, IconChevronDownOutline14, IconChevronRightOutline14,
-  IconWarningOutline16, Toast,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelectInjected } from './slots.ts'
+import {
+  isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
+  getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
+  isGroupCollapsed, toggleGroupCollapsed, formatCompactContext,
+} from './model-picker-store.ts'
+import {
+  IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain,
+} from './icons.tsx'
 import css from './ModelSelect.module.css'
 
-/** Which pane the dropdown shows: the two-row root or one drilled-in list. */
-type Pane = 'root' | 'model' | 'effort'
+/** Check if a model has been hidden via Settings > Providers. */
+function isHidden(provider: string, modelId: string): boolean {
+  try {
+    const raw = localStorage.getItem('dsh_hidden_models_v1')
+    if (!raw) return false
+    const map = JSON.parse(raw) as Record<string, string[]>
+    const list = map[provider]
+    return Array.isArray(list) && list.includes(modelId)
+  } catch {
+    return false
+  }
+}
 
-/** One dynamic effort row; undefined means preserve the provider default. */
+/** Format the host-provided context window (no local capacity guessing). */
+function resolveModelContext(model: { id: string; contextWindow?: number }): string {
+  if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
+    return formatCompactContext(model.contextWindow)
+  }
+  return ''
+}
+
+/** One dynamic effort choice row. */
 interface EffortChoice {
   key: string
   effort: string | undefined
@@ -36,12 +62,6 @@ interface EffortChoice {
   description?: string
 }
 
-/**
- * Render the composer model seat.
- * @param props - owner share (locked) + injected face (shared directory
- * store/verbs) + the standard locale seat.
- * @returns the trigger and, while open, the two-level menu.
- */
 export function ModelSelect(
   { locked, available, directory, load, select, t }:
   ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
@@ -50,32 +70,85 @@ export function ModelSelect(
     fn => directory.subscribe(fn),
     () => directory.getSnapshot(),
   )
-  const [open, setOpen] = useState(false)
-  const [pane, setPane] = useState<Pane>('root')
-  // The in-menu error strip serves catalog loads (its Retry re-runs the
-  // load); a rejected SELECTION announces through the transient toast
-  // instead, so the strip renders only while the latest failure-capable
-  // action was a load.
+
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [effortOpen, setEffortOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [prefsVersion, setPrefsVersion] = useState(0)
+  const [draggedProvider, setDraggedProvider] = useState<string | null>(null)
+  const [draggedFavorite, setDraggedFavorite] = useState<number | null>(null)
+  const [dragOverItem, setDragOverItem] = useState<string | null>(null)
+
   const lastActionRef = useRef<'load' | 'select'>('load')
   const [toast, setToast] = useState<{ seq: number; text: string } | null>(null)
   const toastSeq = useRef(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const pickerRef = useRef<HTMLDivElement | null>(null)
+  const effortRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
-  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const id = useId()
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
 
+  // Listen to preference changes across tabs / components
+  useEffect(() => {
+    const onPrefsChange = () => setPrefsVersion(v => v + 1)
+    window.addEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
+    window.addEventListener('dsh:hidden-models-changed', onPrefsChange)
+    window.addEventListener('storage', onPrefsChange)
+    return () => {
+      window.removeEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
+      window.removeEventListener('dsh:hidden-models-changed', onPrefsChange)
+      window.removeEventListener('storage', onPrefsChange)
+    }
+  }, [])
+
+  // Mount-time load
+  useEffect(() => {
+    if (available) {
+      lastActionRef.current = 'load'
+      load()
+    }
+  }, [available, load])
+
+  // Close outside
+  useEffect(() => {
+    if (!pickerOpen && !effortOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (pickerOpen && pickerRef.current && !pickerRef.current.contains(target) && !triggerRef.current?.contains(target)) {
+        setPickerOpen(false)
+        setSearchQuery('')
+      }
+      if (effortOpen && effortRef.current && !effortRef.current.contains(target)) {
+        setEffortOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [pickerOpen, effortOpen])
+
+  // Focus search input on open
+  useEffect(() => {
+    if (pickerOpen) {
+      setTimeout(() => searchInputRef.current?.focus(), 50)
+    }
+  }, [pickerOpen])
+
+  // All enabled model choices
   const choices = useMemo(() => state.groups.flatMap(group =>
-    group.models.map(model => ({
-      group,
-      model,
-      selection: {
-        provider: group.id,
-        model: model.id,
-        ...model.reasoning?.defaultEffort === undefined
-          ? {}
-          : { reasoningEffort: model.reasoning.defaultEffort },
-      } satisfies ModelSelection,
-    }))), [state.groups])
+    group.models
+      .filter(model => !isHidden(group.id, model.id) || (state.current?.provider === group.id && state.current.model === model.id))
+      .map(model => ({
+        group,
+        model,
+        selection: {
+          provider: group.id,
+          model: model.id,
+          ...model.reasoning?.defaultEffort === undefined
+            ? {}
+            : { reasoningEffort: model.reasoning.defaultEffort },
+        } satisfies ModelSelection,
+      }))), [state.groups, prefsVersion, state.current])
+
   const selectedIndex = state.current === null
     ? -1
     : choices.findIndex(c => c.selection.provider === state.current?.provider && c.selection.model === state.current.model)
@@ -87,6 +160,7 @@ export function ModelSelect(
     : effectiveEffort === undefined
       ? t('effort.providerDefault')
       : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
+
   const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
     ? []
     : [
@@ -100,75 +174,14 @@ export function ModelSelect(
         ...effort.description === undefined ? {} : { description: effort.description },
       })),
     ], [reasoning, t])
-  const busy = state.status === 'selecting'
-
-  const reload = (): void => {
-    lastActionRef.current = 'load'
-    load()
-  }
-
-  // Mount-time load resolves the trigger label; every open refreshes.
-  useEffect(() => {
-    if (available) {
-      lastActionRef.current = 'load'
-      load()
-    }
-  }, [available, load])
-
-  useEffect(() => {
-    if (!open) return
-    const closeOutside = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', closeOutside)
-    return () => { document.removeEventListener('mousedown', closeOutside) }
-  }, [open])
 
   if (!available) return null
 
-  const show = (): void => {
-    setPane('root')
-    setOpen(true)
-    reload()
-  }
-
-  const close = (restoreFocus = false): void => {
-    setOpen(false)
-    setPane('root')
-    if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
-  }
-
-  const moveFocus = (offset: number): void => {
-    const items = itemRefs.current.filter(item => item !== null)
-    if (items.length === 0) return
-    const active = items.findIndex(item => item === document.activeElement)
-    const next = (Math.max(active, 0) + offset + items.length) % items.length
-    items[next]?.focus()
-  }
-
-  const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === 'Escape' && open) {
-      event.preventDefault()
-      // Escape backs out of a drilled pane first, then closes.
-      if (pane !== 'root') setPane('root')
-      else close(true)
-      return
-    }
-    if (!open) return
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      moveFocus(event.key === 'ArrowDown' ? 1 : -1)
-    }
-  }
-
-  const onBlur = (event: FocusEvent<HTMLDivElement>): void => {
-    if (event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget)) return
-    close()
-  }
-
   const settleSelection = (accepted: boolean): void => {
     if (accepted) {
-      if (rootRef.current !== null) close(true)
+      setPickerOpen(false)
+      setEffortOpen(false)
+      setSearchQuery('')
       return
     }
     const message = directory.getSnapshot().error
@@ -179,8 +192,10 @@ export function ModelSelect(
   }
 
   const choose = (selection: ModelSelection): void => {
+    recordRecentModel(selection.provider, selection.model)
     if (state.current?.provider === selection.provider && state.current.model === selection.model) {
-      close(true)
+      setPickerOpen(false)
+      setSearchQuery('')
       return
     }
     lastActionRef.current = 'select'
@@ -190,7 +205,7 @@ export function ModelSelect(
   const chooseEffort = (effort: string | undefined): void => {
     if (state.current === null) return
     if (effectiveEffort === effort) {
-      close(true)
+      setEffortOpen(false)
       return
     }
     const selection: ModelSelection = {
@@ -202,172 +217,445 @@ export function ModelSelect(
     void select(selection).then(settleSelection)
   }
 
-  const modelLabel = currentChoice?.model.name ?? t('trigger.fallback')
-  const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
-  const triggerAria = currentChoice === undefined
-    ? t('trigger.selectAria')
-    : effortLabel === undefined
-      ? t('trigger.aria', { model: modelLabel })
-      : t('trigger.ariaEffort', { model: modelLabel, effort: effortLabel })
-  itemRefs.current = []
-  let itemIndex = 0
-  const itemRef = () => {
-    const at = itemIndex++
-    return (node: HTMLButtonElement | null) => { itemRefs.current[at] = node }
+  // Model lookup map for quick access
+  const modelLookup = useMemo(() => {
+    const map = new Map<string, { groupName: string; model: typeof state.groups[0]['models'][0]; group: typeof state.groups[0] }>()
+    for (const g of state.groups) {
+      for (const m of g.models) {
+        map.set(`${g.id}::${m.id}`, { groupName: g.name, model: m, group: g })
+      }
+    }
+    return map
+  }, [state.groups])
+
+  // Custom ordered providers
+  const orderedGroups = useMemo(() => {
+    const customOrder = getProviderOrder()
+    const groupsCopy = [...state.groups]
+    if (customOrder.length === 0) return groupsCopy
+    groupsCopy.sort((a, b) => {
+      const idxA = customOrder.indexOf(a.id)
+      const idxB = customOrder.indexOf(b.id)
+      if (idxA >= 0 && idxB >= 0) return idxA - idxB
+      if (idxA >= 0) return -1
+      if (idxB >= 0) return 1
+      return 0
+    })
+    return groupsCopy
+  }, [state.groups, prefsVersion])
+
+  // Favorites list
+  const favoriteItems = useMemo(() => {
+    const favRefs = getFavoriteModels()
+    const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
+    for (const ref of favRefs) {
+      const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
+      const isCur = state.current?.provider === ref.provider && state.current.model === ref.modelId
+      if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
+        result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
+      }
+    }
+    return result
+  }, [modelLookup, prefsVersion, state.current])
+
+  // Recents list
+  const recentItems = useMemo(() => {
+    const recents = getRecentModels()
+    const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
+    for (const ref of recents) {
+      const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
+      const isCur = state.current?.provider === ref.provider && state.current.model === ref.modelId
+      if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
+        if (!isModelFavorite(ref.provider, ref.modelId)) {
+          result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
+        }
+      }
+    }
+    return result
+  }, [modelLookup, prefsVersion, state.current])
+
+  // Filtered queries
+  const q = searchQuery.toLowerCase().trim()
+
+  const filteredFavorites = useMemo(() => {
+    if (!q) return favoriteItems
+    return favoriteItems.filter(f => f.model.name.toLowerCase().includes(q) || f.model.id.toLowerCase().includes(q))
+  }, [favoriteItems, q])
+
+  // Reorder Provider Groups via Drag & Drop
+  const handleProviderDragStart = (e: DragEvent, providerId: string) => {
+    e.dataTransfer.setData('text/plain', providerId)
+    setDraggedProvider(providerId)
   }
 
+  const handleProviderDragOver = (e: DragEvent, targetProviderId: string) => {
+    e.preventDefault()
+    setDragOverItem(targetProviderId)
+  }
+
+  const handleProviderDrop = (e: DragEvent, targetProviderId: string) => {
+    e.preventDefault()
+    setDragOverItem(null)
+    if (!draggedProvider || draggedProvider === targetProviderId) return
+    const currentOrder = orderedGroups.map(g => g.id)
+    const fromIdx = currentOrder.indexOf(draggedProvider)
+    const toIdx = currentOrder.indexOf(targetProviderId)
+    if (fromIdx >= 0 && toIdx >= 0) {
+      currentOrder.splice(fromIdx, 1)
+      currentOrder.splice(toIdx, 0, draggedProvider)
+      setProviderOrder(currentOrder)
+      setPrefsVersion(v => v + 1)
+    }
+    setDraggedProvider(null)
+  }
+
+  // Reorder Favorites via Drag & Drop
+  const handleFavoriteDragStart = (e: DragEvent, index: number) => {
+    e.dataTransfer.setData('text/plain', String(index))
+    setDraggedFavorite(index)
+  }
+
+  const handleFavoriteDrop = (e: DragEvent, targetIndex: number) => {
+    e.preventDefault()
+    setDragOverItem(null)
+    if (draggedFavorite === null || draggedFavorite === targetIndex) return
+    const favs = getFavoriteModels()
+    const [moved] = favs.splice(draggedFavorite, 1)
+    favs.splice(targetIndex, 0, moved)
+    setFavoriteModels(favs)
+    setPrefsVersion(v => v + 1)
+    setDraggedFavorite(null)
+  }
+
+  const modelLabel = currentChoice?.model.name ?? t('trigger.fallback')
+
   return (
-    <div ref={rootRef} className={css.root} onKeyDown={onRootKeyDown} onBlur={onBlur}>
+    <div ref={rootRef} className={css.root}>
+      {/* 1. Main Model Trigger Button */}
       <button
         ref={triggerRef}
         type="button"
-        className={css.trigger}
-        aria-label={triggerAria}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? `${id}-menu` : undefined}
-        title={triggerLabel}
+        className={clsx(css.modelTrigger, pickerOpen && css.modelTriggerActive)}
+        title={modelLabel}
         disabled={locked}
         onClick={() => {
-          if (open) {
-            close()
-          } else {
-            show()
-          }
+          setEffortOpen(false)
+          setPickerOpen(!pickerOpen)
         }}
       >
-        <span className={css.triggerLabel}>{modelLabel}</span>
-        {effortLabel !== undefined && <span className={css.triggerEffort}>{effortLabel}</span>}
-        <IconChevronDownOutline14 className={clsx(css.chevron, open && css.chevronOpen)} />
+        <span className={css.modelNameLabel}>{modelLabel}</span>
+        <span className={clsx(css.chevronIcon, pickerOpen && css.chevronOpen)}>
+          <IconChevron />
+        </span>
       </button>
 
-      {open && (
-        <div
-          id={`${id}-menu`}
-          className={css.menu}
-          role="menu"
-          aria-label={t('menu.aria')}
-          aria-busy={state.status === 'loading' || busy}
+      {/* 2. Conditional Reasoning Effort Pill (Only rendered if model supports reasoning!) */}
+      {reasoning !== undefined && effortChoices.length > 0 && (
+        <button
+          type="button"
+          className={clsx(css.effortTrigger, effortOpen && css.effortTriggerActive)}
+          title={`Thinking / Reasoning Effort: ${effortLabel}`}
+          disabled={locked}
+          onClick={() => {
+            setPickerOpen(false)
+            setEffortOpen(!effortOpen)
+          }}
         >
-          {pane === 'root' && (
-            <>
-              <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setPane('model') }}>
-                <span className={css.cellLabel}>{t('menu.model')}</span>
-                <span className={css.cellValue}>{modelLabel}</span>
-                <IconChevronRightOutline14 className={css.cellChevron} />
-              </button>
-              {reasoning !== undefined && (
-                <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setPane('effort') }}>
-                  <span className={css.cellLabel}>{t('menu.effort')}</span>
-                  <span className={css.cellValue}>{effortLabel}</span>
-                  <IconChevronRightOutline14 className={css.cellChevron} />
-                </button>
-              )}
-            </>
-          )}
+          <span className={css.triggerIcon}>
+            <IconBrain />
+          </span>
+          <span className={css.effortText}>{effortLabel}</span>
+          <span className={clsx(css.chevronIcon, effortOpen && css.chevronOpen)}>
+            <IconChevron />
+          </span>
+        </button>
+      )}
 
-          {pane === 'model' && (
-            <>
-              {state.status === 'loading' && (
-                <div className={css.status}>{t('status.loading')}</div>
-              )}
-              {state.error !== null && lastActionRef.current === 'load' && (
-                <div className={css.error}>
-                  <span>{t('error.action', { message: state.error })}</span>
-                  <button type="button" className={css.retry} onClick={reload}>{t('retry')}</button>
+      {/* 3. Main Model Picker Popover Window (OpenChamber UX) */}
+      {pickerOpen && (
+        <div ref={pickerRef} className={css.pickerPopover}>
+          {/* Search Header */}
+          <div className={css.searchHeader}>
+            <span className={css.searchIcon}>
+              <IconSearch />
+            </span>
+            <input
+              ref={searchInputRef}
+              className={css.searchInput}
+              type="text"
+              placeholder="Search models..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                className={css.clearSearchBtn}
+                onClick={() => setSearchQuery('')}
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          <div className={clsx(css.pickerScrollable, 'scrollable')}>
+            {/* FAVORITES GROUP */}
+            {filteredFavorites.length > 0 && (
+              <div className={css.groupSection}>
+                <div
+                  className={css.groupHeader}
+                  onClick={() => {
+                    toggleGroupCollapsed('__favorites__')
+                    setPrefsVersion(v => v + 1)
+                  }}
+                >
+                  <div className={css.groupHeaderLeft}>
+                    <span className={css.groupIcon} style={{ color: '#fbbf24' }}>
+                      <IconStar filled />
+                    </span>
+                    <span className={css.groupTitleText}>Favorites</span>
+                    <span className={css.groupBadge}>{filteredFavorites.length}</span>
+                  </div>
+                  <span className={clsx(css.groupChevron, !isGroupCollapsed('__favorites__') && css.groupChevronExpanded)}>
+                    <IconChevron />
+                  </span>
                 </div>
-              )}
-              {state.failures.map(failure => (
-                <div className={css.warning} key={failure.id}>
-                  <span>{t('warning.groupLoad', { name: failure.name, message: failure.message })}</span>
-                  <button type="button" className={css.retry} onClick={reload}>{t('retry')}</button>
+
+                {!isGroupCollapsed('__favorites__') && (
+                  <div className={css.groupBody}>
+                    {filteredFavorites.map((fav, fIdx) => {
+                      const isSelected = state.current?.provider === fav.provider && state.current.model === fav.model.id
+                      const contextStr = resolveModelContext(fav.model)
+
+                      return (
+                        <div
+                          key={`fav-${fav.provider}-${fav.model.id}`}
+                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                          draggable={!q}
+                          onDragStart={e => handleFavoriteDragStart(e, fIdx)}
+                          onDragOver={e => e.preventDefault()}
+                          onDrop={e => handleFavoriteDrop(e, fIdx)}
+                          onClick={() => choose({ provider: fav.provider, model: fav.model.id })}
+                        >
+                          <div className={css.modelRowLeft}>
+                            {!q && (
+                              <span className={css.dragHandle} title="Drag to reorder favorite">
+                                <IconGrip />
+                              </span>
+                            )}
+                            <span className={css.modelNameText}>{fav.model.name}</span>
+                          </div>
+                          <div className={css.modelRowRight}>
+                            {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                            <button
+                              type="button"
+                              className={clsx(css.starBtn, css.starBtnActive)}
+                              title="Remove from favorites"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleModelFavorite(fav.provider, fav.model.id)
+                                setPrefsVersion(v => v + 1)
+                              }}
+                            >
+                              <IconStar filled />
+                            </button>
+                            {isSelected && <IconCheck className={css.checkIcon} />}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* RECENTS GROUP (when not searching) */}
+            {!q && recentItems.length > 0 && (
+              <div className={css.groupSection}>
+                <div
+                  className={css.groupHeader}
+                  onClick={() => {
+                    toggleGroupCollapsed('__recents__')
+                    setPrefsVersion(v => v + 1)
+                  }}
+                >
+                  <div className={css.groupHeaderLeft}>
+                    <span className={css.groupIcon}>
+                      <IconClock />
+                    </span>
+                    <span className={css.groupTitleText}>Recent</span>
+                    <span className={css.groupBadge}>{recentItems.length}</span>
+                  </div>
+                  <span className={clsx(css.groupChevron, !isGroupCollapsed('__recents__') && css.groupChevronExpanded)}>
+                    <IconChevron />
+                  </span>
                 </div>
-              ))}
-              <div className={clsx(css.groups, 'scrollable')}>
-                {state.groups.map((group) => {
-                  const headingId = `${id}-${group.id}`
-                  return (
-                    <section role="group" aria-labelledby={headingId} className={css.group} key={group.id}>
-                      <div className={css.groupTitle} id={headingId}>{group.name}</div>
-                      {group.models.map((model) => {
-                        const selected = state.current?.provider === group.id && state.current.model === model.id
+
+                {!isGroupCollapsed('__recents__') && (
+                  <div className={css.groupBody}>
+                    {recentItems.map((rec) => {
+                      const isSelected = state.current?.provider === rec.provider && state.current.model === rec.model.id
+                      const isFav = isModelFavorite(rec.provider, rec.model.id)
+                      const contextStr = resolveModelContext(rec.model)
+
+                      return (
+                        <div
+                          key={`rec-${rec.provider}-${rec.model.id}`}
+                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                          onClick={() => choose({ provider: rec.provider, model: rec.model.id })}
+                        >
+                          <div className={css.modelRowLeft}>
+                            <span className={css.modelNameText}>{rec.model.name}</span>
+                          </div>
+                          <div className={css.modelRowRight}>
+                            {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                            <button
+                              type="button"
+                              className={clsx(css.starBtn, isFav && css.starBtnActive)}
+                              title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleModelFavorite(rec.provider, rec.model.id)
+                                setPrefsVersion(v => v + 1)
+                              }}
+                            >
+                              <IconStar filled={isFav} />
+                            </button>
+                            {isSelected && <IconCheck className={css.checkIcon} />}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PROVIDER GROUPS */}
+            {orderedGroups.map((group) => {
+              const visibleModels = group.models.filter((m) => {
+                const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
+                if (!matchesSearch) return false
+                const isCurrent = state.current?.provider === group.id && state.current.model === m.id
+                return isCurrent || !isHidden(group.id, m.id)
+              })
+
+              if (visibleModels.length === 0) return null
+
+              const isCollapsed = !q && isGroupCollapsed(group.id)
+
+              return (
+                <div
+                  key={group.id}
+                  className={clsx(css.groupSection, dragOverItem === group.id && css.dragOver)}
+                  onDragOver={e => handleProviderDragOver(e, group.id)}
+                  onDrop={e => handleProviderDrop(e, group.id)}
+                >
+                  <div
+                    className={css.groupHeader}
+                    onClick={() => {
+                      if (!q) {
+                        toggleGroupCollapsed(group.id)
+                        setPrefsVersion(v => v + 1)
+                      }
+                    }}
+                  >
+                    <div className={css.groupHeaderLeft}>
+                      {!q && (
+                        <span
+                          className={css.dragHandle}
+                          draggable
+                          onDragStart={e => handleProviderDragStart(e, group.id)}
+                          onClick={e => e.stopPropagation()}
+                          title="Drag to reorder provider"
+                        >
+                          <IconGrip />
+                        </span>
+                      )}
+                      <span className={css.groupTitleText}>{group.name}</span>
+                      <span className={css.groupBadge}>{visibleModels.length}</span>
+                    </div>
+                    <span className={clsx(css.groupChevron, !isCollapsed && css.groupChevronExpanded)}>
+                      <IconChevron />
+                    </span>
+                  </div>
+
+                  {!isCollapsed && (
+                    <div className={css.groupBody}>
+                      {visibleModels.map((model) => {
+                        const isSelected = state.current?.provider === group.id && state.current.model === model.id
+                        const isFav = isModelFavorite(group.id, model.id)
+                        const contextStr = resolveModelContext(model)
+
                         return (
-                          <button
-                            ref={itemRef()}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            className={clsx(css.option, selected && css.selected)}
+                          <div
                             key={model.id}
-                            title={model.name}
-                            disabled={busy}
-                            onClick={() => { choose({ provider: group.id, model: model.id }) }}
+                            className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                            onClick={() => choose({ provider: group.id, model: model.id })}
                           >
-                            <span className={css.optionCopy}>
-                              <span className={css.modelName}>{model.name}</span>
-                              {model.description !== undefined && (
-                                <span className={css.description}>{model.description}</span>
-                              )}
-                            </span>
-                            <span className={css.check}>
-                              {selected ? <IconCheckOutline16 /> : null}
-                            </span>
-                          </button>
+                            <div className={css.modelRowLeft}>
+                              <span className={css.modelNameText}>{model.name}</span>
+                            </div>
+                            <div className={css.modelRowRight}>
+                              {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                              <button
+                                type="button"
+                                className={clsx(css.starBtn, isFav && css.starBtnActive)}
+                                title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  toggleModelFavorite(group.id, model.id)
+                                  setPrefsVersion(v => v + 1)
+                                }}
+                              >
+                                <IconStar filled={isFav} />
+                              </button>
+                              {isSelected && <IconCheck className={css.checkIcon} />}
+                            </div>
+                          </div>
                         )
                       })}
-                    </section>
-                  )
-                })}
-              </div>
-              {state.status === 'ready' && choices.length === 0 && (
-                <div className={css.empty}>{t('empty.models')}</div>
-              )}
-            </>
-          )}
-
-          {pane === 'effort' && (
-            <>
-              {state.error !== null && lastActionRef.current === 'load' && (
-                <div className={css.error}>
-                  <span>{t('error.action', { message: state.error })}</span>
-                  <button type="button" className={css.retry} onClick={reload}>{t('action.reload')}</button>
+                    </div>
+                  )}
                 </div>
-              )}
-              {effortChoices.length === 0
-                ? <div className={css.empty}>{t('empty.efforts')}</div>
-                : effortChoices.map(level => (
-                  <button
-                    ref={itemRef()}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={effectiveEffort === level.effort}
-                    className={clsx(css.option, effectiveEffort === level.effort && css.selected)}
-                    key={level.key}
-                    disabled={busy}
-                    onClick={() => { chooseEffort(level.effort) }}
-                  >
-                    <span className={css.optionCopy}>
-                      <span className={css.modelName}>{level.label}</span>
-                      {level.description !== undefined && (
-                        <span className={css.description}>{level.description}</span>
-                      )}
-                    </span>
-                    <span className={css.check}>
-                      {effectiveEffort === level.effort ? <IconCheckOutline16 /> : null}
-                    </span>
-                  </button>
-                ))}
-            </>
-          )}
+              )
+            })}
+
+            {/* Empty search results */}
+            {q && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
+              <div className={css.emptyState}>No models matching "{searchQuery}"</div>
+            )}
+          </div>
         </div>
       )}
+
+      {/* 4. Compact Effort Level Popover */}
+      {effortOpen && reasoning !== undefined && (
+        <div ref={effortRef} className={css.effortPopover}>
+          {effortChoices.map((level) => {
+            const isSelected = effectiveEffort === level.effort
+            return (
+              <button
+                key={level.key}
+                type="button"
+                className={clsx(css.effortItem, isSelected && css.effortItemSelected)}
+                onClick={() => chooseEffort(level.effort)}
+              >
+                <span>{level.label}</span>
+                {isSelected && <IconCheck className={css.checkIcon} />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Toast Feedback */}
       {toast !== null && (
         <Toast
           key={toast.seq}
           text={toast.text}
-          icon={<IconWarningOutline16 />}
           anchor={rootRef.current?.closest<HTMLElement>('[data-composer-card]') ?? null}
-          onDone={() => { setToast(null) }}
+          onDone={() => setToast(null)}
         />
       )}
     </div>

@@ -289,10 +289,12 @@ async function buildModelCatalog(ctx: Context): Promise<{
               ? {}
               : { defaultEffort: resolved.reasoning.defaultEffort },
           }
+        const contextWindow = resolved.context?.contextWindow
         return {
           id: model.id,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
+          ...contextWindow === undefined ? {} : { contextWindow },
           ...reasoning === undefined ? {} : { reasoning },
         }
       }))

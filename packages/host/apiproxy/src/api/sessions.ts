@@ -128,6 +128,10 @@ export interface ModelCatalogModel {
   name: string
   /** Optional provider-supplied description. */
   description?: string
+  /** Context window size in tokens when known. */
+  contextWindow?: number
+  /** Maximum output tokens when known. */
+  maxTokens?: number
   /** Exact-route reasoning metadata when the adapter exposes it. */
   reasoning?: ModelReasoning
 }
