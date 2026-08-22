@@ -56,7 +56,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -67,6 +70,7 @@ import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 import { registerPiAiFlows } from './login.ts'
+import { PoolEngine } from './pool.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
@@ -192,9 +196,23 @@ export function apply(ctx: Context, config: Config): void {
   // through `ctx` per call, so they stay correct across the collection rebuilds
   // a configuration change causes, and a sign-in survives one.
   const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
+  // Pool routing state survives restarts under ~/.dsh/pools/<provider>.json.
+  const poolEngine = new PoolEngine({
+    stateDir: join(launchEnvironmentOf(ctx).get('DSH_HOME')?.value ?? join(homedir(), '.dsh'), 'pools'),
+    log: message => ctx.logger.warn(message),
+  })
   const adapter = new PiAiAdapter({
     profiles,
     resolveApiKey,
+    pool: poolEngine,
+    resolveCredential: async (reference) => {
+      const credentials = ctx.get('credentials')
+      const hit = credentials !== undefined
+        ? (await credentials.resolve(credentialRef(reference)))?.value
+        : launchEnvironmentOf(ctx).get(reference)?.value
+      return hit !== undefined && hit.length > 0 ? hit : undefined
+    },
+    log: message => ctx.logger.warn(message),
     auth,
     resolveAttachments: () => ctx.get('attachments'),
     onReplayDegrade: ({ provider, model, reason }) => {

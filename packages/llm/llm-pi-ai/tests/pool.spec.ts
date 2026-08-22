@@ -1,0 +1,175 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  CAPACITY_BACKOFF_TIERS_MS,
+  classifyFailure,
+  CLASS_COOLDOWN_MS,
+  PoolEngine,
+  parseResetMs,
+  ROTATING_CLASSES,
+} from '../src/pool.ts'
+
+let stateDir: string
+
+beforeEach(async () => {
+  stateDir = await mkdtemp(join(tmpdir(), 'pool-spec-'))
+})
+
+afterEach(async () => {
+  await rm(stateDir, { recursive: true, force: true })
+})
+
+function engine(options: Partial<ConstructorParameters<typeof PoolEngine>[0]> = {}): PoolEngine {
+  return new PoolEngine({ stateDir, saveDebounceMs: 5, ...options })
+}
+
+describe('parseResetMs', () => {
+  it('sums every number+unit pair the gateway abbreviates', () => {
+    expect(parseResetMs('Monthly usage limit reached. Resets in 4hr 53min.')).toBe(
+      (4 * 3600 + 53 * 60) * 1000,
+    )
+    expect(parseResetMs('Resets in 14 days.')).toBe(14 * 86_400_000)
+    expect(parseResetMs('Resets in 46min.')).toBe(46 * 60_000)
+    expect(parseResetMs('resets in 1 week 2 days')).toBe((7 + 2) * 86_400_000)
+  })
+
+  it('floors sub-minute resets to one minute and rejects absent/zero hints', () => {
+    expect(parseResetMs('Resets in 30sec.')).toBe(60_000)
+    expect(parseResetMs('quota exhausted')).toBeUndefined()
+    expect(parseResetMs('Resets in 0min.')).toBeUndefined()
+  })
+})
+
+describe('classifyFailure', () => {
+  it('maps the failure vocabulary onto pool decisions', () => {
+    expect(classifyFailure('401 Unauthorized: invalid api key')).toBe('AUTH')
+    expect(classifyFailure('402 payment required: insufficient credits')).toBe('AUTH')
+    expect(classifyFailure('429 rate limit exceeded, too many requests')).toBe('QUOTA')
+    expect(classifyFailure('RESOURCE_EXHAUSTED quota exhausted for project')).toBe('QUOTA')
+    expect(classifyFailure('529 model capacity exhausted, server is busy')).toBe('CAPACITY')
+    expect(classifyFailure('503 overloaded')).toBe('CAPACITY')
+    expect(classifyFailure('400 invalid_request_error: max_tokens above limit')).toBe('INVALID_REQUEST')
+    expect(classifyFailure('terminated before headers')).toBe('UPSTREAM')
+  })
+
+  it('lets transient gateway model rejections win over everything else', () => {
+    expect(classifyFailure(
+      '400 The supported API model names are: a, b, but you passed  deepseek-v4-flash.',
+    )).toBe('GATEWAY_OUTAGE')
+    expect(classifyFailure('model is unavailable right now')).toBe('GATEWAY_OUTAGE')
+    // Even quota-flavoured text naming an unavailable model must not rotate keys.
+    expect(ROTATING_CLASSES.has(classifyFailure('model is unavailable after 429'))).toBe(false)
+  })
+})
+
+describe('PoolEngine ordering', () => {
+  it('serves healthy identities in priority order', () => {
+    const e = engine()
+    const order = e.orderFor('p', [
+      { id: 'c', priority: 3 },
+      { id: 'a', priority: 1 },
+      { id: 'b', priority: 2 },
+    ], 'm')
+    expect(order.map(identity => identity.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('skips disabled and cooling identities, then probes soonest-expiry first when all cool', () => {
+    let now = 1_000_000
+    const e = engine({ now: () => now })
+    const identities = [
+      { id: 'a', priority: 1 },
+      { id: 'b', priority: 2 },
+      { id: 'dead', priority: 0, enabled: false },
+    ]
+    e.recordFailure('p', 'a', 'm', 'QUOTA', 'Resets in 10min.')
+    e.recordFailure('p', 'b', 'm', 'AUTH', '401 invalid api key')
+    // Everything cooling → optimistic probe order by soonest expiry
+    // ('a' resets in 10min, ahead of 'b''s 15min auth cooldown).
+    expect(e.orderFor('p', identities, 'm').map(identity => identity.id)).toEqual(['a', 'b'])
+    now += 11 * 60_000
+    // 'a' recovered; sticky priority resumes.
+    expect(e.orderFor('p', identities, 'm').map(identity => identity.id)).toEqual(['a'])
+  })
+
+  it('applies class cooldowns and lets a parsed reset extend QUOTA', () => {
+    const now = 5_000_000
+    const e = engine({ now: () => now })
+    e.recordFailure('p', 'k', 'm', 'CAPACITY', '503 overloaded')
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(CLASS_COOLDOWN_MS.CAPACITY)
+    e.recordSuccess('p', 'k', 'm')
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(0)
+
+    e.recordFailure('p', 'k', 'm', 'QUOTA', 'limit reached. Resets in 90min.')
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(90 * 60_000)
+    e.recordFailure('p', 'k', 'm', 'QUOTA', 'plain quota body without hint')
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(CLASS_COOLDOWN_MS.QUOTA)
+
+    // Non-rotating classes never cool down.
+    e.recordFailure('p', 'k', 'm', 'GATEWAY_OUTAGE', 'supported api model names are...')
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(0)
+  })
+
+  it('tracks consecutive failures across records until a success clears them', () => {
+    const e = engine()
+    e.recordFailure('p', 'k', 'm', 'UPSTREAM', 'terminated')
+    e.recordFailure('p', 'k', 'm', 'UPSTREAM', 'terminated')
+    expect(e.snapshot('p').k?.m?.consecutiveFailures).toBe(2)
+    e.recordSuccess('p', 'k', 'm')
+    expect(e.snapshot('p').k?.m?.consecutiveFailures).toBe(0)
+  })
+})
+
+describe('PoolEngine persistence', () => {
+  it('writes atomic per-provider state and restores cooldowns in a new engine', async () => {
+    const first = engine()
+    first.recordFailure('myroute', 'key-1', 'model-a', 'QUOTA', 'Resets in 2hr.')
+    await first.flush()
+    const raw = JSON.parse(await readFile(join(stateDir, 'myroute.json'), 'utf8'))
+    expect(raw.version).toBe(1)
+    expect(raw.identities['key-1']['model-a'].cooldownUntil).toBeGreaterThan(0)
+
+    const second = engine()
+    await second.hydrate('myroute')
+    expect(second.cooldownRemaining('myroute', 'key-1', 'model-a')).toBeGreaterThan(119 * 60_000)
+  })
+
+  it('starts clean from corrupt or unknown-shaped files', async () => {
+    await writeFile(join(stateDir, 'broken.json'), '{not json', 'utf8')
+    const e = engine()
+    await e.hydrate('broken')
+    expect(e.snapshot('broken')).toEqual({})
+    await writeFile(join(stateDir, 'weird.json'), JSON.stringify({ version: 9, identities: {} }), 'utf8')
+    const e2 = engine()
+    await e2.hydrate('weird')
+    expect(e2.snapshot('weird')).toEqual({})
+  })
+
+  it('sanitizes hand-edited entries instead of trusting them', async () => {
+    await writeFile(join(stateDir, 'hand.json'), JSON.stringify({
+      version: 1,
+      identities: {
+        k: { m: { cooldownUntil: 'soon', consecutiveFailures: -5, lastError: 42, extra: true } },
+        __proto__: { pollute: {} },
+      },
+    }), 'utf8')
+    const e = engine()
+    await e.hydrate('hand')
+    const snapshot = e.snapshot('hand')
+    expect(snapshot.k?.m?.cooldownUntil).toBe(0)
+    expect(snapshot.k?.m?.consecutiveFailures).toBe(0)
+    expect(snapshot.k?.m?.lastError).toBeUndefined()
+  })
+})
+
+describe('capacity backoff tiers', () => {
+  it('expose progressive delays and honour abort during backoff', async () => {
+    expect(CAPACITY_BACKOFF_TIERS_MS.length).toBeGreaterThanOrEqual(3)
+    const e = engine()
+    const controller = new AbortController()
+    const pending = e.backoff(60_000, controller.signal)
+    controller.abort(new Error('caller went away'))
+    await expect(pending).rejects.toThrow('caller went away')
+  })
+})

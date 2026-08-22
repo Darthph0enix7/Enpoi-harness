@@ -56,6 +56,12 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import {
+  CAPACITY_BACKOFF_TIERS_MS,
+  classifyFailure,
+  PoolEngine,
+  ROTATING_CLASSES,
+} from './pool.ts'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
@@ -82,6 +88,19 @@ export interface PiAiAdapterOptions {
    * `MISSING_CREDENTIAL` rather than falling back.
    */
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
+  /**
+   * Multi-credential pool engine for routes declaring `pool`. When absent,
+   * pooled profiles fail with a configuration diagnostic instead of routing.
+   */
+  pool?: PoolEngine
+  /**
+   * Non-throwing credential resolution for pool identities: `undefined` means
+   * "this identity is not usable right now" and the pool skips it. Only when
+   * every enabled identity lacks its credential does the request fail.
+   */
+  resolveCredential?: (credentialRef: string) => Promise<string | undefined>
+  /** Diagnostic sink for pool decisions (skips, rotations). */
+  log?: (message: string) => void
   /**
    * How every collection this adapter builds resolves auth the request-level
    * `apiKey` override does not cover. Required rather than optional: a
@@ -364,15 +383,155 @@ export class PiAiAdapter extends LlmAdapter {
           maxPixels: profile.requestImagePixelBudget,
           maxBytes: profile.requestImageMaxBytes,
         })
-      const events = snapshot.models.streamSimple(model, context, {
-        ...profileOptions(profile, reasoning, apiKey),
+      const commonOptions = {
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
-        signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
         // Harness-owned and therefore win collisions.
         headers: requestHeaders(profile.headers),
+      }
+      const makeAttempt = (apiKeyOverride: string | undefined, signal: AbortSignal): AsyncGenerator<StreamChunk> =>
+        toStreamChunks(snapshot.models.streamSimple(model, context, {
+          ...profileOptions(profile, reasoning, apiKeyOverride),
+          ...commonOptions,
+          signal,
+        }), model.contextWindow)[Symbol.asyncIterator]()
+
+      // Pooled route: rotate across identities until one commits. The
+      // committal barrier is the first NON-usage chunk — pi-ai delivers
+      // failures as terminal events that toStreamChunks renders as
+      // `usage` + error `finish`, so a bare "first chunk" peek would commit
+      // on the usage chunk of a failed attempt.
+      if (profile.pool !== undefined && this.config.pool !== undefined && profile.pool.identities.length > 0) {
+        const engine = this.config.pool
+        const resolveCredential = this.config.resolveCredential
+        if (resolveCredential === undefined) {
+          throw new LlmError(
+            `llm-pi-ai: provider "${options.provider}" declares a credential pool but this adapter has no credential resolver`,
+            'MISSING_CREDENTIAL',
+          )
+        }
+        await engine.hydrate(options.provider)
+        const order = engine.orderFor(options.provider, profile.pool.identities, options.model)
+        if (order.length === 0) {
+          throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no enabled identities`, 'MISSING_CREDENTIAL')
+        }
+        const identityById = new Map(profile.pool.identities.map(identity => [identity.id, identity]))
+        const maxAttempts = Math.min(order.length, 5)
+        const deadline = Date.now() + 30_000
+        let attempts = 0
+        let lastFailure = 'no identity was attempted'
+        for (const candidate of order) {
+          if (attempts >= maxAttempts || Date.now() > deadline) break
+          if (upstream.aborted) {
+            throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
+          }
+          const identity = identityById.get(candidate.id)
+          if (identity === undefined) continue
+          const key = await resolveCredential(identity.credentialRef)
+          if (key === undefined || key.length === 0) {
+            this.config.log?.(
+              `llm-pi-ai: provider "${options.provider}" pool identity "${identity.id}"`
+              + ` names ${identity.credentialRef}, which resolves to nothing; skipping it`,
+            )
+            continue
+          }
+          attempts += 1
+          // Per-attempt teardown: a rotated-away request must not keep its
+          // upstream connection open alongside the next attempt's.
+          const attemptController = new AbortController()
+          const attemptSignal = AbortSignal.any([watchdog.signal, attemptController.signal])
+          const iterator = makeAttempt(key, attemptSignal)
+          const buffered: StreamChunk[] = []
+          let committed = false
+          let failureMessage: string | undefined
+          try {
+            while (true) {
+              const result = await watchdog.next(iterator)
+              const timeout = timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT')
+              if (timeout !== undefined) throw timeout
+              if (result.done) break
+              const chunk = result.value
+              if (!committed) {
+                if (chunk.type === 'usage') {
+                  buffered.push(chunk)
+                  continue
+                }
+                if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
+                  failureMessage = chunk.reason.failure.message
+                  break
+                }
+                committed = true
+                for (const held of buffered) yield held
+                buffered.length = 0
+              }
+              if (chunk.type === 'finish') {
+                if (chunk.reason.kind === 'error') {
+                  // Mid-stream failure: too late to rotate transparently,
+                  // but the state update steers the NEXT request away.
+                  engine.recordFailure(
+                    options.provider,
+                    identity.id,
+                    options.model,
+                    classifyFailure(chunk.reason.failure.message),
+                    chunk.reason.failure.message,
+                  )
+                } else {
+                  engine.recordSuccess(options.provider, identity.id, options.model)
+                }
+              }
+              yield chunk
+            }
+          } finally {
+            if (!committed) {
+              try {
+                await iterator.return(undefined)
+              } catch (_abortedSdkTeardown) {
+                // Rotation owns teardown via attemptController; return-time abort cannot add an outcome.
+              }
+            }
+          }
+          if (committed) return
+          const failureClass = classifyFailure(failureMessage ?? '')
+          engine.recordFailure(options.provider, identity.id, options.model, failureClass, failureMessage ?? 'unknown failure')
+          lastFailure = failureMessage ?? lastFailure
+          if (!ROTATING_CLASSES.has(failureClass)) {
+            // GATEWAY_OUTAGE / INVALID_REQUEST: rotating cannot help — every
+            // identity hits the same gateway with the same payload.
+            throw new LlmError(
+              `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`,
+              failureClass === 'GATEWAY_OUTAGE' ? 'PROVIDER_MODEL_OUTAGE' : 'INVALID_REQUEST',
+            )
+          }
+          attemptController.abort('llm-pi-ai pool rotated to the next identity')
+          this.config.log?.(
+            `llm-pi-ai: provider "${options.provider}" identity "${identity.id}" failed (${failureClass});`
+            + `${attempts < maxAttempts ? ' rotating' : ' no attempts left'}`,
+          )
+          if (failureClass === 'CAPACITY' && attempts < maxAttempts) {
+            const othersHealthy = engine
+              .orderFor(options.provider, profile.pool.identities, options.model)
+              .some(candidate2 => candidate2.id !== identity.id
+                && engine.cooldownRemaining(options.provider, candidate2.id, options.model) === 0)
+            // Progressive same-identity backoff only helps when rotation
+            // cannot; otherwise move on immediately.
+            if (!othersHealthy) {
+              await engine.backoff(CAPACITY_BACKOFF_TIERS_MS[0] ?? 5000, upstream)
+            }
+          }
+        }
+        throw new LlmError(
+          `llm-pi-ai: provider "${options.provider}" exhausted its credential pool`
+          + ` after ${attempts} attempt(s): ${lastFailure}`,
+          'PROVIDER_POOL_EXHAUSTED',
+        )
+      }
+
+      const events = snapshot.models.streamSimple(model, context, {
+        ...profileOptions(profile, reasoning, apiKey),
+        ...commonOptions,
+        signal: watchdog.signal,
       })
       const iterator = toStreamChunks(events, model.contextWindow)[Symbol.asyncIterator]()
       let exhausted = false
@@ -396,8 +555,7 @@ export class PiAiAdapter extends LlmAdapter {
             // The stable signal already owns SDK termination; return-time abort cannot add an outcome.
           }
         }
-      }
-    } catch (error: unknown) {
+      }    } catch (error: unknown) {
       if (timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT') !== undefined) {
         throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', { cause: error })
       }

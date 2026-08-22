@@ -88,6 +88,13 @@ export type {
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * Multi-credential pool for this route. When present, requests rotate
+   * across the listed identities (priority-sticky) with per-identity ×
+   * per-model cooldowns; a single `apiKeyEnv` remains valid as an implicit
+   * one-identity pool. Configuration carries references, never secrets.
+   */
+  pool?: PiAiPoolConfig
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -173,6 +180,26 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+}
+
+/** One credential identity inside a route's pool. */
+export interface PiAiPoolIdentity {
+  /** Stable identity key (state, logs, UI). */
+  id: string
+  /** Credential reference resolved per request through `ctx.credentials`. */
+  credentialRef: string
+  /** Lower serves first under priority-sticky; omission ranks last. */
+  priority?: number
+  /** Disabled identities are skipped without losing their state. */
+  enabled?: boolean
+}
+
+/** Multi-credential routing for one provider route. */
+export interface PiAiPoolConfig {
+  /** Selection strategy; P1 ships `priority-sticky` only. */
+  strategy?: 'priority-sticky'
+  /** The route's credential identities (≥ 1, unique ids). */
+  identities: PiAiPoolIdentity[]
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
@@ -304,8 +331,21 @@ const modelProfile: z<PiAiModelProfile> = z.object({
 /** A {@link modelProfile} whose id lives in the `modelOverrides` dict key. */
 const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
+const poolIdentity = z.object({
+  id: z.string(),
+  credentialRef: z.string().role('credential-ref'),
+  priority: z.natural(),
+  enabled: z.boolean().default(true),
+})
+
+const poolConfig = z.object({
+  strategy: z.union(['priority-sticky']),
+  identities: z.array(poolIdentity),
+})
+
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
+  pool: poolConfig,
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -437,12 +477,33 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
+    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, pool, ...rest } = source
+    // Schemastery materializes an absent object key's array fields as empty
+    // lists, so an unset `pool` arrives as `{ identities: [] }`. A pool with
+    // no identities IS no pool: treat it exactly like absence instead of
+    // refusing routes that never mentioned one.
+    const hasPool = pool !== undefined && Array.isArray(pool.identities) && pool.identities.length > 0
+    if (hasPool) {
+      const ids = new Set<string>()
+      for (const identity of pool.identities) {
+        if (identity.id.length === 0) {
+          throw new Error(`llm-pi-ai: provider "${provider}" has a pool identity with an empty id`)
+        }
+        if (identity.credentialRef.length === 0) {
+          throw new Error(`llm-pi-ai: provider "${provider}" pool identity "${identity.id}" has an empty credentialRef`)
+        }
+        if (ids.has(identity.id)) {
+          throw new Error(`llm-pi-ai: provider "${provider}" has duplicate pool identity "${identity.id}"`)
+        }
+        ids.add(identity.id)
+      }
+    }
     resolved.set(provider, {
       ...rest,
       provider,
       displayName,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
+      ...hasPool && pool !== undefined ? { pool: { ...pool, identities: pool.identities.map(identity => ({ ...identity })) } } : {},
       streamIdleTimeoutMs,
       maxRequestImageBytes,
       requestImagePixelBudget,
@@ -457,7 +518,7 @@ export function resolveProfiles(
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
-        namesCredential: apiKeyEnv !== undefined,
+        namesCredential: apiKeyEnv !== undefined || hasPool,
       }),
     })
   }
