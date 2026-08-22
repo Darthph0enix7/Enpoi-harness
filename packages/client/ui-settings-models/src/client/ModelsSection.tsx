@@ -315,8 +315,19 @@ export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boo
 export async function removeProviderProfile(
   face: { api: Pick<IApiClient, 'settings' | 'credentials'>; t?: (key: keyof typeof en) => string },
   _controller: ModelsSettingsStore,
-  target: { settingsNs: string; settingsPath: string[] },
+  target: { settingsNs: string; settingsPath: string[]; credentialRef?: string },
 ): Promise<string | null> {
+  if (target.credentialRef) {
+    type UnsetApi = { unset?: (req: { ref: string }) => Promise<{ result: { ok: boolean; error?: { message: string } } }> }
+    const credApi = face.api.credentials as UnsetApi
+    if (typeof credApi.unset === 'function') {
+      const credRes = await credApi.unset({ ref: target.credentialRef })
+      if (!credRes.result.ok && credRes.result.error) {
+        return credRes.result.error.message
+      }
+    }
+  }
+
   const settingsRes = await face.api.settings.mutate({
     ns: target.settingsNs,
     ops: [{ op: 'unset', path: target.settingsPath }],
