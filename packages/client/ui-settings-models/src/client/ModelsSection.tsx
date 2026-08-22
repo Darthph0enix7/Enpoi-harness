@@ -311,30 +311,18 @@ export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boo
   return !readOnly && !row?.configured
 }
 
-/** Helper to remove a provider profile from settings and credentials. */
-export async function removeProviderProfile(params: {
-  api: Pick<IApiClient, 'settings' | 'credentials'>
-  row: ProviderRow
-  namespace: SettingsNamespaceView
-  schema: SettingsSchemaOperations
-  t: (key: keyof typeof en) => string
-}): Promise<string | null> {
-  const { api, row, namespace, schema } = params
-  const raw = schema.getPath(namespace.user, row.entry.settingsPath) as Record<string, unknown> | undefined
-  const keyRef = typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : deriveKeyRef(row.entry.provider)
-
-  const settingsRes = await api.settings.mutate({
-    ns: namespace.ns,
-    ops: [{ op: 'remove', path: row.entry.settingsPath }],
+/** Helper to remove a provider profile from settings. */
+export async function removeProviderProfile(
+  face: { api: Pick<IApiClient, 'settings' | 'credentials'>; t?: (key: keyof typeof en) => string },
+  _controller: ModelsSettingsStore,
+  target: { settingsNs: string; settingsPath: string[] },
+): Promise<string | null> {
+  const settingsRes = await face.api.settings.mutate({
+    ns: target.settingsNs,
+    ops: [{ op: 'unset', path: target.settingsPath }],
   })
-
   if (!settingsRes.result.ok) {
     return settingsRes.result.error.message
   }
-
-  if (row.credential) {
-    void api.credentials.set({ ref: keyRef, value: '' })
-  }
-
   return null
 }
