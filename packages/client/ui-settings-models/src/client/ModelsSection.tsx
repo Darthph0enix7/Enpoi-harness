@@ -53,12 +53,13 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
 
   // Auto-select first provider if none selected
   useEffect(() => {
-    if (configuredRows.length > 0 && !selectedProviderId) {
-      setSelectedProviderId(configuredRows[0].entry.provider)
-    } else if (configuredRows.length > 0 && selectedProviderId) {
+    const first = configuredRows[0]
+    if (first && !selectedProviderId) {
+      setSelectedProviderId(first.entry.provider)
+    } else if (first && selectedProviderId) {
       const exists = configuredRows.some(r => r.entry.provider === selectedProviderId)
       if (!exists) {
-        setSelectedProviderId(configuredRows[0].entry.provider)
+        setSelectedProviderId(first.entry.provider)
       }
     }
   }, [configuredRows, selectedProviderId])
@@ -272,7 +273,7 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
             ? `Deleting "${deleteTarget.entry.displayName}" (${deleteTarget.entry.provider}) will remove its configuration and any stored API key reference.`
             : ''
         }
-        className={styles['deleteDialog']}
+        className={styles['deleteDialog'] ?? ''}
         footer={
           <>
             <Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>
@@ -293,4 +294,47 @@ function Loaded({ injected }: { injected: ModelsSectionFace }): ReactNode {
       </Modal>
     </div>
   )
+}
+
+/** Formats a provider's target label (e.g. "DeepSeek (deepseek-official)"). */
+export function providerTargetLabel(target: { provider: string; displayName: string }): string {
+  return target.displayName === target.provider ? target.displayName : `${target.displayName} (${target.provider})`
+}
+
+/** Injects a provider target label into a localized template string. */
+export function providerCopy(template: string, target: { provider: string; displayName: string }): string {
+  return template.replace('{provider}', providerTargetLabel(target))
+}
+
+/** Returns whether a provider row requires setup. */
+export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boolean {
+  return !readOnly && !row?.configured
+}
+
+/** Helper to remove a provider profile from settings and credentials. */
+export async function removeProviderProfile(params: {
+  api: Pick<IApiClient, 'settings' | 'credentials'>
+  row: ProviderRow
+  namespace: SettingsNamespaceView
+  schema: SettingsSchemaOperations
+  t: (key: keyof typeof en) => string
+}): Promise<string | null> {
+  const { api, row, namespace, schema } = params
+  const raw = schema.getPath(namespace.user, row.entry.settingsPath) as Record<string, unknown> | undefined
+  const keyRef = typeof raw?.apiKeyEnv === 'string' ? raw.apiKeyEnv : deriveKeyRef(row.entry.provider)
+
+  const settingsRes = await api.settings.mutate({
+    ns: namespace.ns,
+    ops: [{ op: 'remove', path: row.entry.settingsPath }],
+  })
+
+  if (!settingsRes.result.ok) {
+    return settingsRes.result.error.message
+  }
+
+  if (row.credential) {
+    void api.credentials.set({ ref: keyRef, value: '' })
+  }
+
+  return null
 }

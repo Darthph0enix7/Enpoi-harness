@@ -314,9 +314,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       const res = await api.llm.discoverModels({
         settingsNs: namespace.ns,
         provider: providerId,
-        baseURL: baseURL.trim() || undefined,
+        ...(baseURL.trim() ? { baseURL: baseURL.trim() } : {}),
         api: protocol,
-        apiKey: keyInput.trim() || undefined,
+        ...(keyInput.trim() ? { apiKey: keyInput.trim() } : {}),
       })
       const latencyMs = Math.round(performance.now() - startTime)
       if (res.result.ok) {
@@ -354,21 +354,21 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       const res = await api.llm.discoverModels({
         settingsNs: namespace.ns,
         provider: providerId,
-        baseURL: baseURL.trim() || undefined,
+        ...(baseURL.trim() ? { baseURL: baseURL.trim() } : {}),
         api: protocol,
-        apiKey: keyInput.trim() || undefined,
+        ...(keyInput.trim() ? { apiKey: keyInput.trim() } : {}),
       })
       if (res.result.ok) {
         const discovered = res.result.value.models || []
         const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
         const merged = discovered.map((d: { id: string; name?: string; contextWindow?: number; maxTokens?: number }) => {
-          const existing = currentModels.find(m => m.id === d.id) || {}
+          const existing = currentModels.find(m => m.id === d.id) as ModelItem | undefined
           return {
-            ...existing,
+            ...(existing || {}),
             id: d.id,
-            name: d.name && d.name !== d.id ? d.name : existing.name || d.id,
-            contextWindow: d.contextWindow || existing.contextWindow || 131072,
-            maxTokens: d.maxTokens || existing.maxTokens || 8192,
+            name: d.name && d.name !== d.id ? d.name : existing?.name || d.id,
+            contextWindow: d.contextWindow || existing?.contextWindow || 131072,
+            maxTokens: d.maxTokens || existing?.maxTokens || 8192,
           }
         })
 

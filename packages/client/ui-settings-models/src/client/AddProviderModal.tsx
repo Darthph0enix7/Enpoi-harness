@@ -141,7 +141,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       onClose={() => onClose(false)}
       title={selectedTemplate === null ? t('add') : `Add ${displayName || 'Provider'}`}
       closeLabel={t('close')}
-      className={styles['addProviderDialog']}
+      className={styles['addProviderDialog'] ?? ''}
       footer={
         selectedTemplate === null ? (
           <Button variant="outline" onClick={() => onClose(false)}>

@@ -320,10 +320,13 @@ export function ModelSelect(
     setDragOverItem(null)
     if (draggedFavorite === null || draggedFavorite === targetIndex) return
     const favs = getFavoriteModels()
-    const [moved] = favs.splice(draggedFavorite, 1)
-    favs.splice(targetIndex, 0, moved)
-    setFavoriteModels(favs)
-    setPrefsVersion(v => v + 1)
+    const moved = favs[draggedFavorite]
+    if (moved) {
+      favs.splice(draggedFavorite, 1)
+      favs.splice(targetIndex, 0, moved)
+      setFavoriteModels(favs)
+      setPrefsVersion(v => v + 1)
+    }
     setDraggedFavorite(null)
   }
 
