@@ -94,31 +94,51 @@ export class ModelDirectory {
   async select(selection: ModelSelection): Promise<void> {
     this.assertAvailable()
     const generation = ++this.generation
-    this.store.update((s) => { s.status = 'selecting'; s.error = null })
-    const { result } = await this.sessions.selectModel({
-      sessionId: this.sessionId,
-      provider: selection.provider,
-      model: selection.model,
-      ...selection.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: selection.reasoningEffort },
-    })
-    if (this.disposed || generation !== this.generation) {
-      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
-      return
-    }
-    if (!result.ok) {
-      this.store.update((s) => { s.status = 'error'; s.error = `${result.error.code}: ${result.error.message}` })
-      throw new Error(`session.selectModel failed: ${result.error.code}: ${result.error.message}`)
-    }
-    // The Host validated the route before accepting it, so a selection that
-    // landed is by construction one it can serve.
+    const prevCurrent = this.store.getSnapshot().current
+    // Optimistic update: instantly reflect the user's choice with 0ms delay!
     this.store.update((s) => {
-      s.current = result.value.selected
+      s.current = selection
       s.routable = true
-      s.status = 'ready'
+      s.status = 'selecting'
       s.error = null
     })
+    try {
+      const { result } = await this.sessions.selectModel({
+        sessionId: this.sessionId,
+        provider: selection.provider,
+        model: selection.model,
+        ...selection.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selection.reasoningEffort },
+      })
+      if (this.disposed || generation !== this.generation) {
+        if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+        return
+      }
+      if (!result.ok) {
+        this.store.update((s) => {
+          s.current = prevCurrent
+          s.status = 'error'
+          s.error = `${result.error.code}: ${result.error.message}`
+        })
+        throw new Error(`session.selectModel failed: ${result.error.code}: ${result.error.message}`)
+      }
+      this.store.update((s) => {
+        s.current = result.value.selected
+        s.routable = true
+        s.status = 'ready'
+        s.error = null
+      })
+    } catch (err: unknown) {
+      if (!this.disposed && generation === this.generation) {
+        this.store.update((s) => {
+          s.current = prevCurrent
+          s.status = 'error'
+          s.error = err instanceof Error ? err.message : String(err)
+        })
+      }
+      throw err
+    }
   }
 
   /**

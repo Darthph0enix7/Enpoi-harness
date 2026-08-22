@@ -26,7 +26,7 @@ import type { ModelSelectInjected } from './slots.ts'
 import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
-  isGroupCollapsed, toggleGroupCollapsed, formatCompactContext,
+  isGroupCollapsed, toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
 } from './model-picker-store.ts'
 import {
   IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain,
@@ -46,12 +46,10 @@ function isHidden(provider: string, modelId: string): boolean {
   }
 }
 
-/** Format the host-provided context window (no local capacity guessing). */
-function resolveModelContext(model: { id: string; contextWindow?: number }): string {
-  if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
-    return formatCompactContext(model.contextWindow)
-  }
-  return ''
+/** Format the model context window compactly (guaranteed display). */
+function resolveModelContext(model: { id: string; contextWindow?: number; [key: string]: unknown }): string {
+  const tokens = resolveContextTokens(model)
+  return formatCompactContext(tokens)
 }
 
 /** One dynamic effort choice row. */

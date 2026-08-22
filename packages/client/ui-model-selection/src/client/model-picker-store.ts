@@ -110,6 +110,29 @@ export function toggleGroupCollapsed(groupId: string): boolean {
   return isNowCollapsed
 }
 
+/** Resolve context window size in tokens, checking model properties and canonical fallbacks. */
+export function resolveContextTokens(model: { id: string; contextWindow?: number; [key: string]: unknown }): number {
+  if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
+    return model.contextWindow
+  }
+  const rawContext = (model as { context?: { contextWindow?: number } }).context?.contextWindow
+  if (typeof rawContext === 'number' && rawContext > 0) {
+    return rawContext
+  }
+  // Canonical family fallbacks
+  const id = (model.id || '').toLowerCase()
+  if (id.includes('gemini') || id.includes('claude') || id.includes('gpt-5.6') || id.includes('luna') || id.includes('kimi-k3') || id.includes('glm-5') || id.includes('minimax-m3') || id.includes('deepseek-v4')) {
+    if (id.includes('gemini') || id.includes('kimi-k3') || id.includes('luna') || id.includes('gpt-5.6')) {
+      return 1_048_576
+    }
+    return 1_000_000
+  }
+  if (id.includes('qwen') || id.includes('deepseek') || id.includes('gpt-4') || id.includes('mistral') || id.includes('llama')) {
+    return 128_000
+  }
+  return 0
+}
+
 /** Format context tokens compactly (e.g. 1M, 128K, 1.05M). */
 export function formatCompactContext(tokens?: number): string {
   if (!tokens || tokens <= 0) return ''

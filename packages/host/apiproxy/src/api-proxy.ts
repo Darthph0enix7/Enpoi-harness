@@ -2214,12 +2214,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 : { reasoningEffort: resolved.reasoningEffort },
             }
             selectionFor(found.agent).current = selected
-            try {
-              await defaults.saveDefaultModelSelection?.(selected)
-            } catch (error: unknown) {
-              ctx.logger.warn(
-                `api-proxy: the model switch applies to this session but was not saved as the default: ${String(error)}`,
-              )
+            if (defaults.saveDefaultModelSelection) {
+              void defaults.saveDefaultModelSelection(selected).catch((error: unknown) => {
+                ctx.logger.warn(
+                  `api-proxy: the model switch applies to this session but was not saved as the default: ${String(error)}`,
+                )
+              })
             }
             return ok(request, { selected: { ...selected } })
           } catch (error: unknown) {
