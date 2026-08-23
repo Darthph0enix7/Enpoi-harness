@@ -48,17 +48,6 @@
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
-    - id: mcp-plane
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        transport: streamable-http
-        serverName: plane
-        url: http://127.0.0.1:8211/http/api-key/mcp
-        headers:
-          Authorization: Bearer plane_api_75727b9e357a41c8b8a67cb5d2fe7c2a
-          X-Workspace-slug: main_base
-        failOnStartupError: false
-
     - id: storage
       name: '@deepseek-ai/dsh-storage'
 
