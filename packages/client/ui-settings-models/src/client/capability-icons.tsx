@@ -163,3 +163,56 @@ export function IconServer({ size = 14 }: { size?: number }): ReactNode {
     </svg>
   )
 }
+
+export function IconPlus({ size = 14 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export function IconRefresh({ size = 14 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M13.5 8A5.5 5.5 0 118 2.5c2.3 0 4.3 1.4 5.1 3.5M14 2.5v3.5h-3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconArrowUp({ size = 13 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 12.5V3.5M4 7.5L8 3.5l4 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconArrowDown({ size = 13 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 3.5v9M4 8.5l4 4 4-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconLayers({ size = 14 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2L1.5 5.5 8 9l6.5-3.5L8 2zM1.5 8.5L8 12l6.5-3.5M1.5 11.5L8 15l6.5-3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconGrip({ size = 14 }: { size?: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="5.5" cy="4" r="1" fill="currentColor" />
+      <circle cx="10.5" cy="4" r="1" fill="currentColor" />
+      <circle cx="5.5" cy="8" r="1" fill="currentColor" />
+      <circle cx="10.5" cy="8" r="1" fill="currentColor" />
+      <circle cx="5.5" cy="12" r="1" fill="currentColor" />
+      <circle cx="10.5" cy="12" r="1" fill="currentColor" />
+    </svg>
+  )
+}

@@ -229,6 +229,34 @@ export interface LlmDiscoveredModel {
   maxTokens?: number
 }
 
+/** Status view for one credential identity inside a provider pool. */
+export interface LlmPoolIdentityStatus {
+  id: string
+  credentialRef: string
+  priority?: number
+  enabled?: boolean
+  cooldownUntil: number
+  consecutiveFailures: number
+  lastStatus?: number
+  lastError?: string
+  quota?: {
+    remainingFraction?: number | null
+    resetTime?: string | number | null
+    source?: string
+  }
+}
+
+/** Provider-owned pool management operations. */
+export interface LlmPoolOperations {
+  status(provider: string): Promise<LlmPoolIdentityStatus[]>
+  resetCooldown(provider: string, identityId?: string): Promise<void>
+  testIdentity(
+    provider: string,
+    identityId: string,
+    apiKey?: string,
+  ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>
+}
+
 /** One adapter-discovered model; catalog membership is advisory, not request validation. */
 export interface LlmModelInfo {
   /** Provider route that owns this model entry. */

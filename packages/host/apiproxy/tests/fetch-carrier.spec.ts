@@ -281,6 +281,15 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async discoverModels(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { models: [] } } }
       },
+      async poolStatus(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { identities: [] } } }
+      },
+      async poolResetCooldown(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { ok: true as const } } }
+      },
+      async poolTestIdentity(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { ok: true, latencyMs: 35 } } }
+      },
     },
     events: {
       mux: (_request, signal) => stream(muxFrames, signal),

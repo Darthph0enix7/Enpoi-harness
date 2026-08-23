@@ -60,7 +60,10 @@ import {
 import {
   credentialsDescribeValueSchema, credentialsSetValueSchema, credentialsUnsetValueSchema,
 } from '../api/credentials.schema.ts'
-import { llmDiscoverModelsValueSchema, llmModelsValueSchema, llmProvidersValueSchema } from '../api/llm.schema.ts'
+import {
+  llmDiscoverModelsValueSchema, llmModelsValueSchema, llmPoolResetCooldownValueSchema,
+  llmPoolStatusValueSchema, llmPoolTestIdentityValueSchema, llmProvidersValueSchema,
+} from '../api/llm.schema.ts'
 import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
@@ -160,6 +163,9 @@ export interface IApiClient {
     providers(payload: RequestPayload<'llm.providers'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.providers'>>>
     models(payload: RequestPayload<'llm.models'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.models'>>>
     discoverModels(payload: RequestPayload<'llm.discoverModels'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.discoverModels'>>>
+    poolStatus(payload: RequestPayload<'llm.poolStatus'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.poolStatus'>>>
+    poolResetCooldown(payload: RequestPayload<'llm.poolResetCooldown'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.poolResetCooldown'>>>
+    poolTestIdentity(payload: RequestPayload<'llm.poolTestIdentity'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.poolTestIdentity'>>>
   }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
@@ -222,6 +228,9 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'llm.providers': llmProvidersValueSchema,
   'llm.models': llmModelsValueSchema,
   'llm.discoverModels': llmDiscoverModelsValueSchema,
+  'llm.poolStatus': llmPoolStatusValueSchema,
+  'llm.poolResetCooldown': llmPoolResetCooldownValueSchema,
+  'llm.poolTestIdentity': llmPoolTestIdentityValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -512,6 +521,9 @@ export abstract class AbstractApiClient implements IApiClient {
     providers: (payload, signal) => this.callUnary('llm.providers', payload, signal),
     models: (payload, signal) => this.callUnary('llm.models', payload, signal),
     discoverModels: (payload, signal) => this.callUnary('llm.discoverModels', payload, signal),
+    poolStatus: (payload, signal) => this.callUnary('llm.poolStatus', payload, signal),
+    poolResetCooldown: (payload, signal) => this.callUnary('llm.poolResetCooldown', payload, signal),
+    poolTestIdentity: (payload, signal) => this.callUnary('llm.poolTestIdentity', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {

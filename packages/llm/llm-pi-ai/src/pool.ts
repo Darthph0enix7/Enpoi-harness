@@ -20,6 +20,8 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm'
+import type { PiAiPoolIdentity } from './config.ts'
 
 /** Why one attempt failed, and what the pool should do about it. */
 export type PoolFailureClass =
@@ -119,6 +121,62 @@ export function classifyFailure(message: string): PoolFailureClass {
   return 'UPSTREAM'
 }
 
+/** Quota metadata for one identity on one model. */
+export interface IdentityQuotaState {
+  remainingFraction?: number | null | undefined
+  resetTime?: string | number | null | undefined
+  source?: string | undefined
+}
+
+/**
+ * Extract remaining fraction and reset time from standard rate-limit response headers
+ * (OpenAI, Anthropic, OpenRouter, Google).
+ */
+export function parseQuotaHeaders(headers: Record<string, string | undefined> | Headers): IdentityQuotaState | undefined {
+  const get = (name: string): string | undefined => {
+    if (typeof (headers as Headers).get === 'function') {
+      return (headers as Headers).get(name) ?? undefined
+    }
+    const rec = headers as Record<string, string | undefined>
+    return rec[name] ?? rec[name.toLowerCase()] ?? undefined
+  }
+
+  // 1. Requests remaining / limit
+  const reqRemStr = get('x-ratelimit-remaining-requests') ?? get('anthropic-ratelimit-requests-remaining')
+  const reqLimStr = get('x-ratelimit-limit-requests') ?? get('anthropic-ratelimit-requests-limit')
+  const reqReset = get('x-ratelimit-reset-requests') ?? get('anthropic-ratelimit-requests-reset')
+
+  // 2. Tokens remaining / limit
+  const tokRemStr = get('x-ratelimit-remaining-tokens') ?? get('anthropic-ratelimit-tokens-remaining')
+  const tokLimStr = get('x-ratelimit-limit-tokens') ?? get('anthropic-ratelimit-tokens-limit')
+  const tokReset = get('x-ratelimit-reset-tokens') ?? get('anthropic-ratelimit-tokens-reset')
+
+  let remainingFraction: number | undefined
+  const reqRem = reqRemStr !== undefined ? Number.parseFloat(reqRemStr) : Number.NaN
+  const reqLim = reqLimStr !== undefined ? Number.parseFloat(reqLimStr) : Number.NaN
+  const tokRem = tokRemStr !== undefined ? Number.parseFloat(tokRemStr) : Number.NaN
+  const tokLim = tokLimStr !== undefined ? Number.parseFloat(tokLimStr) : Number.NaN
+
+  if (!Number.isNaN(reqRem) && !Number.isNaN(reqLim) && reqLim > 0) {
+    remainingFraction = Math.max(0, Math.min(1, reqRem / reqLim))
+  }
+  if (!Number.isNaN(tokRem) && !Number.isNaN(tokLim) && tokLim > 0) {
+    const tokFrac = Math.max(0, Math.min(1, tokRem / tokLim))
+    remainingFraction = remainingFraction !== undefined ? Math.min(remainingFraction, tokFrac) : tokFrac
+  }
+
+  const resetTime = reqReset ?? tokReset
+  if (remainingFraction === undefined && resetTime === undefined) {
+    return undefined
+  }
+
+  return {
+    ...remainingFraction !== undefined ? { remainingFraction } : {},
+    ...resetTime !== undefined ? { resetTime } : {},
+    source: 'headers',
+  }
+}
+
 /** Routing-relevant state for one identity on one model. Counters are
  *  deliberately NOT persisted: they feed observability only, and a restart
  *  must not resurrect stale traffic counts into routing decisions. */
@@ -127,6 +185,7 @@ export interface IdentityModelState {
   consecutiveFailures: number
   lastStatus?: number | undefined
   lastError?: string | undefined
+  quota?: IdentityQuotaState | undefined
 }
 
 interface PersistedProviderState {
@@ -231,6 +290,74 @@ export class PoolEngine {
     entry.lastStatus = status
     entry.lastError = undefined
     this.#scheduleSave(provider)
+  }
+
+  /** Record quota information for one identity on one model. */
+  recordQuota(provider: string, identityId: string, modelId: string, quota: IdentityQuotaState): void {
+    const entry = this.#entry(provider, identityId, modelId)
+    entry.quota = { ...entry.quota, ...quota }
+    this.#scheduleSave(provider)
+  }
+
+  /** Reset cooldowns for one identity or all identities under a provider. */
+  resetCooldown(provider: string, identityId?: string): void {
+    const providerState = this.#providers.get(provider)
+    if (providerState === undefined) return
+    const targets = identityId !== undefined
+      ? (providerState.identities[identityId] ? [providerState.identities[identityId]] : [])
+      : Object.values(providerState.identities)
+    for (const models of targets) {
+      if (!models) continue
+      for (const entry of Object.values(models)) {
+        if (!entry) continue
+        entry.cooldownUntil = 0
+        entry.consecutiveFailures = 0
+        entry.lastError = undefined
+      }
+    }
+    this.#scheduleSave(provider)
+  }
+
+  /** Status view of all identities configured under a provider route. */
+  identitiesStatus(provider: string, identitiesConfig: readonly PiAiPoolIdentity[]): LlmPoolIdentityStatus[] {
+    const providerState = this.#providers.get(provider)
+    const now = this.#now()
+    return identitiesConfig.map((config) => {
+      const models = providerState?.identities[config.id] ?? {}
+      const entries = Object.values(models)
+      let maxCooldown = 0
+      let maxFailures = 0
+      let lastStatus: number | undefined
+      let lastError: string | undefined
+      let quota: IdentityQuotaState | undefined
+
+      for (const entry of entries) {
+        if (!entry) continue
+        if (entry.cooldownUntil > maxCooldown) maxCooldown = entry.cooldownUntil
+        if (entry.consecutiveFailures > maxFailures) maxFailures = entry.consecutiveFailures
+        if (entry.lastStatus !== undefined) lastStatus = entry.lastStatus
+        if (entry.lastError !== undefined) lastError = entry.lastError
+        if (entry.quota !== undefined) quota = entry.quota
+      }
+
+      return {
+        id: config.id,
+        credentialRef: config.credentialRef,
+        ...config.priority === undefined ? {} : { priority: config.priority },
+        ...config.enabled === undefined ? {} : { enabled: config.enabled },
+        cooldownUntil: maxCooldown > now ? maxCooldown : 0,
+        consecutiveFailures: maxFailures,
+        ...lastStatus === undefined ? {} : { lastStatus },
+        ...lastError === undefined ? {} : { lastError },
+        ...quota !== undefined ? {
+          quota: {
+            ...quota.remainingFraction !== undefined ? { remainingFraction: quota.remainingFraction } : {},
+            ...quota.resetTime !== undefined ? { resetTime: quota.resetTime } : {},
+            ...quota.source !== undefined ? { source: quota.source } : {},
+          },
+        } : {},
+      }
+    })
   }
 
   /**

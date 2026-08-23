@@ -1,10 +1,13 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import type { CredentialView, IApiClient, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type {
+  CredentialView, IApiClient, PoolIdentityStatusView, SettingsNamespaceView,
+} from '@deepseek-ai/dsh-api-remotes/client'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   IconEye, IconEyeOff, IconTools, IconBrain, IconVision, IconAudio, IconVideo, IconFile,
   IconKey, IconBolt, IconTrash, IconCheck, IconSearch, IconServer,
+  IconPlus, IconRefresh, IconArrowUp, IconArrowDown, IconLayers,
 } from './capability-icons.tsx'
 import {
   toggleModelHidden, hideAllModels, showAllModels, subscribeHiddenModels,
@@ -220,6 +223,49 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }>({ state: 'idle' })
   const [busy, setBusy] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+
+  // Pool State
+  const poolConfig = useMemo(() => {
+    const p = rawProfile.pool as {
+      strategy?: string
+      identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }>
+    } | undefined
+    return p && Array.isArray(p.identities) ? p : undefined
+  }, [rawProfile.pool])
+
+  const [poolStatusList, setPoolStatusList] = useState<PoolIdentityStatusView[]>([])
+  const [isPoolLoading, setIsPoolLoading] = useState(false)
+  const [identityTestResults, setIdentityTestResults] = useState<Record<string, { state: 'testing' | 'success' | 'error'; message?: string; latencyMs?: number }>>({})
+  const [showAddKeyModal, setShowAddKeyModal] = useState(false)
+  const [newKeyId, setNewKeyId] = useState('')
+  const [newKeyRef, setNewKeyRef] = useState('')
+  const [newKeyValue, setNewKeyValue] = useState('')
+  const [newKeyPriority, setNewKeyPriority] = useState<number>(1)
+  const [newKeyShow, setNewKeyShow] = useState(false)
+
+  // Fetch live pool status from host
+  const fetchPoolStatus = useCallback(async () => {
+    try {
+      setIsPoolLoading(true)
+      const res = await api.llm.poolStatus({
+        settingsNs: namespace.ns,
+        provider: providerId,
+      })
+      if (res.result.ok) {
+        setPoolStatusList(res.result.value.identities || [])
+      }
+    } catch {
+      // Ignored if host or route has no active pool engine
+    } finally {
+      setIsPoolLoading(false)
+    }
+  }, [api.llm, namespace.ns, providerId])
+
+  useEffect(() => {
+    fetchPoolStatus()
+    const timer = setInterval(fetchPoolStatus, 15000)
+    return () => clearInterval(timer)
+  }, [fetchPoolStatus])
 
   // Protocols
   const protocols = useMemo(() => protocolChoices(namespace, schema), [namespace, schema])
@@ -444,6 +490,225 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }
   }
 
+  // Pool Handlers
+  const handleTestIdentity = async (identityId: string, _credentialRef: string) => {
+    setIdentityTestResults(prev => ({
+      ...prev,
+      [identityId]: { state: 'testing' },
+    }))
+    try {
+      const res = await api.llm.poolTestIdentity({
+        settingsNs: namespace.ns,
+        provider: providerId,
+        identityId,
+      })
+      const r = res.result
+      if (r.ok) {
+        if (r.value.ok) {
+          const lat = r.value.latencyMs
+          setIdentityTestResults(prev => ({
+            ...prev,
+            [identityId]: {
+              state: 'success',
+              ...lat !== undefined ? { latencyMs: lat } : {},
+              message: lat !== undefined ? `OK (${lat}ms)` : 'OK',
+            },
+          }))
+        } else {
+          setIdentityTestResults(prev => ({
+            ...prev,
+            [identityId]: {
+              state: 'error',
+              message: r.value.error || 'Test failed',
+            },
+          }))
+        }
+      } else {
+        setIdentityTestResults(prev => ({
+          ...prev,
+          [identityId]: {
+            state: 'error',
+            message: r.error.message,
+          },
+        }))
+      }
+    } catch (err) {
+      setIdentityTestResults(prev => ({
+        ...prev,
+        [identityId]: {
+          state: 'error',
+          message: messageOf(err),
+        },
+      }))
+    }
+    fetchPoolStatus()
+  }
+
+  const handleResetCooldown = async (identityId?: string) => {
+    try {
+      await api.llm.poolResetCooldown({
+        settingsNs: namespace.ns,
+        provider: providerId,
+        ...identityId ? { identityId } : {},
+      })
+      await fetchPoolStatus()
+    } catch (err) {
+      alert(`Reset cooldown failed: ${messageOf(err)}`)
+    }
+  }
+
+  const handleToggleIdentityEnabled = async (identityId: string) => {
+    if (!poolConfig?.identities || readOnly) return
+    const nextIdentities = poolConfig.identities.map((i) => {
+      if (i.id === identityId) {
+        return { ...i, enabled: i.enabled === false }
+      }
+      return i
+    })
+    try {
+      const updated = { ...rawProfile, pool: { ...poolConfig, identities: nextIdentities } }
+      await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+      })
+      onSaved()
+      fetchPoolStatus()
+    } catch (err) {
+      alert(`Update failed: ${messageOf(err)}`)
+    }
+  }
+
+  const handleMoveIdentity = async (index: number, direction: -1 | 1) => {
+    if (!poolConfig?.identities || readOnly) return
+    const targetIdx = index + direction
+    if (targetIdx < 0 || targetIdx >= poolConfig.identities.length) return
+    const list = [...poolConfig.identities]
+    const item = list[index]
+    if (!item) return
+    list.splice(index, 1)
+    list.splice(targetIdx, 0, item)
+    // Update priorities according to new order
+    const updatedIdentities = list.map((idObj, idx) => ({ ...idObj, priority: idx + 1 }))
+    try {
+      const updated = { ...rawProfile, pool: { ...poolConfig, identities: updatedIdentities } }
+      await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+      })
+      onSaved()
+      fetchPoolStatus()
+    } catch (err) {
+      alert(`Reorder failed: ${messageOf(err)}`)
+    }
+  }
+
+  const handleDeleteIdentity = async (identityId: string) => {
+    if (!poolConfig?.identities || readOnly) return
+    if (!confirm(`Remove identity "${identityId}" from pool?`)) return
+    const remaining = poolConfig.identities.filter(i => i.id !== identityId)
+    try {
+      const updated: Record<string, unknown> = {
+        ...rawProfile,
+        ...remaining.length > 0
+          ? { pool: { ...poolConfig, identities: remaining } }
+          : { pool: undefined },
+      }
+      await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+      })
+      onSaved()
+      fetchPoolStatus()
+    } catch (err) {
+      alert(`Delete failed: ${messageOf(err)}`)
+    }
+  }
+
+  const handleAddIdentitySubmit = async () => {
+    const id = newKeyId.trim()
+    const ref = newKeyRef.trim() || `${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_KEY_${Date.now().toString().slice(-4)}`
+    const val = newKeyValue.trim()
+    if (!id || !val) {
+      alert('Identity Name and API Key are required.')
+      return
+    }
+    setBusy(true)
+    try {
+      // 1. Store credential
+      const credRes = await api.credentials.set({ ref, value: val })
+      if (!credRes.result.ok) throw new Error(credRes.result.error.message)
+
+      // 2. Append identity to pool
+      const currentList = poolConfig?.identities ? [...poolConfig.identities] : []
+      const newIdentity = {
+        id,
+        credentialRef: ref,
+        priority: newKeyPriority || (currentList.length + 1),
+        enabled: true,
+      }
+      currentList.push(newIdentity)
+
+      const updated = {
+        ...rawProfile,
+        pool: {
+          strategy: poolConfig?.strategy || 'priority-sticky',
+          identities: currentList,
+        },
+      }
+
+      const res = await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+      })
+      if (!res.result.ok) throw new Error(res.result.error.message)
+
+      // Reset modal state
+      setShowAddKeyModal(false)
+      setNewKeyId('')
+      setNewKeyRef('')
+      setNewKeyValue('')
+      setNewKeyPriority(1)
+      onSaved()
+      fetchPoolStatus()
+    } catch (err) {
+      alert(`Failed to add identity: ${messageOf(err)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleConvertToPool = async () => {
+    if (!row.apiKeyEnv) {
+      // No key configured yet, just open add key modal
+      setShowAddKeyModal(true)
+      return
+    }
+    const initialIdentity = {
+      id: 'primary',
+      credentialRef: row.apiKeyEnv,
+      priority: 1,
+      enabled: true,
+    }
+    try {
+      const updated = {
+        ...rawProfile,
+        pool: {
+          strategy: 'priority-sticky',
+          identities: [initialIdentity],
+        },
+      }
+      const res = await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+      })
+      if (!res.result.ok) throw new Error(res.result.error.message)
+      onSaved()
+      fetchPoolStatus()
+    } catch (err) {
+      alert(`Convert to pool failed: ${messageOf(err)}`)
+    }
+  }
+
   const isConfigured = keyState?.configured === true || !row.apiKeyEnv
 
   return (
@@ -481,55 +746,317 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         </div>
       </div>
 
-      {/* Authentication Card */}
-      <div className={styles['settingsCard']}>
-        <div className={styles['cardHead']}>
-          <div className={styles['cardTitleRow']}>
-            <IconKey size={14} />
-            <h3 className={styles['cardTitle']}>API Key</h3>
-          </div>
-          <span
-            className={`${styles['statusPill']} ${
-              isConfigured ? styles['statusPillSuccess'] : styles['statusPillWarning']
-            }`}
-          >
-            {isConfigured ? '🟢 Connected' : '🟡 Key Missing'}
-          </span>
-        </div>
-
-        <div className={styles['cardBody']}>
-          <div className={styles['keyInputRow']}>
-            <div className={styles['passwordInputWrap']}>
-              <input
-                className={styles['input']}
-                type={showKey ? 'text' : 'password'}
-                autoComplete="off"
-                placeholder={isConfigured ? '•••••••••••••••• (Configured)' : 'Enter API key'}
-                value={keyInput}
-                onChange={e => setKeyInput(e.target.value)}
-                disabled={readOnly || busy}
-              />
-              <button
-                type="button"
-                className={styles['eyeBtn']}
-                onClick={() => setShowKey(!showKey)}
-                title={showKey ? 'Hide key' : 'Show key'}
-              >
-                {showKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
-              </button>
+      {/* Key Pool & Identities Card */}
+      {poolConfig && poolConfig.identities && poolConfig.identities.length > 0 ? (
+        <div className={styles['settingsCard']}>
+          <div className={styles['cardHead']}>
+            <div className={styles['cardTitleRow']}>
+              <IconLayers size={14} />
+              <h3 className={styles['cardTitle']}>Key Pool & Identities</h3>
+              <span className={styles['modelCountBadge']}>
+                {poolConfig.identities.length} {poolConfig.identities.length === 1 ? 'key' : 'keys'}
+              </span>
             </div>
 
-            <Button
-              variant="primary"
-              disabled={readOnly || busy || keyInput.trim().length === 0}
-              onClick={handleSave}
-            >
-              <IconCheck size={12} />
-              Save
-            </Button>
+            <div className={styles['poolHeaderActions']}>
+              <button
+                type="button"
+                className={styles['textActionBtn']}
+                onClick={() => fetchPoolStatus()}
+                disabled={isPoolLoading}
+                title="Refresh pool status"
+              >
+                <IconRefresh size={12} />
+                {isPoolLoading ? 'Checking...' : 'Check Status'}
+              </button>
+              <Button
+                variant="outline"
+                className={styles['testBtn']}
+                onClick={() => setShowAddKeyModal(true)}
+                disabled={readOnly || busy}
+              >
+                <IconPlus size={12} />
+                Add Key
+              </Button>
+            </div>
+          </div>
+
+          <div className={styles['cardBody']}>
+            <div className={styles['identitiesList']}>
+              {poolConfig.identities.map((identity, idx) => {
+                const status = poolStatusList.find(s => s.id === identity.id)
+                const now = Date.now()
+                const isCooling = Boolean(status?.cooldownUntil && status.cooldownUntil > now)
+                const isError = Boolean(status?.lastStatus && (status.lastStatus === 401 || status.lastStatus === 403))
+                const isDisabled = identity.enabled === false
+                const cooldownSeconds = isCooling && status?.cooldownUntil ? Math.ceil((status.cooldownUntil - now) / 1000) : 0
+                const testResult = identityTestResults[identity.id]
+
+                return (
+                  <div
+                    key={identity.id}
+                    className={`${styles['identityRow']} ${isDisabled ? styles['identityRowDisabled'] : ''} ${isCooling ? styles['identityRowCooling'] : ''} ${isError ? styles['identityRowError'] : ''}`}
+                  >
+                    <div className={styles['identityLeft']}>
+                      <span className={styles['priorityBadge']} title={`Priority ${idx + 1}`}>
+                        P{idx + 1}
+                      </span>
+
+                      <div className={styles['identityInfo']}>
+                        <div className={styles['identityNameRow']}>
+                          <span className={styles['identityName']}>{identity.id}</span>
+                          <span className={styles['identityRef']}>{identity.credentialRef}</span>
+                        </div>
+
+                        <div className={styles['identityStatusRow']}>
+                          {isDisabled ? (
+                            <span className={`${styles['identityStatusPill']} ${styles['statusDisabled']}`}>
+                              ⚪ Disabled
+                            </span>
+                          ) : isCooling ? (
+                            <span className={`${styles['identityStatusPill']} ${styles['statusCooling']}`}>
+                              🟡 Cooling ({cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`})
+                            </span>
+                          ) : isError ? (
+                            <span className={`${styles['identityStatusPill']} ${styles['statusError']}`}>
+                              🔴 Auth Error
+                            </span>
+                          ) : (
+                            <span className={`${styles['identityStatusPill']} ${styles['statusReady']}`}>
+                              🟢 Ready
+                            </span>
+                          )}
+
+                          {status?.quota?.remainingFraction !== undefined && status.quota.remainingFraction !== null && (
+                            <div className={styles['quotaMiniWrap']} title={`Quota remaining: ${Math.round(status.quota.remainingFraction * 100)}%`}>
+                              <span>Quota: {Math.round(status.quota.remainingFraction * 100)}%</span>
+                              <div className={styles['quotaMiniBar']}>
+                                <div
+                                  className={styles['quotaMiniBarFill']}
+                                  style={{ width: `${Math.round(status.quota.remainingFraction * 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {testResult && (
+                            <span style={{ fontSize: '10px', color: testResult.state === 'success' ? '#34d399' : testResult.state === 'error' ? '#f87171' : 'inherit' }}>
+                              {testResult.state === 'testing' ? 'Testing...' : testResult.message}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className={styles['identityActions']}>
+                      {/* Move Up */}
+                      <button
+                        type="button"
+                        className={styles['iconMiniBtn']}
+                        onClick={() => handleMoveIdentity(idx, -1)}
+                        disabled={idx === 0 || readOnly || busy}
+                        title="Move Up (Higher Priority)"
+                      >
+                        <IconArrowUp size={12} />
+                      </button>
+
+                      {/* Move Down */}
+                      <button
+                        type="button"
+                        className={styles['iconMiniBtn']}
+                        onClick={() => handleMoveIdentity(idx, 1)}
+                        disabled={idx === (poolConfig?.identities?.length ?? 1) - 1 || readOnly || busy}
+                        title="Move Down (Lower Priority)"
+                      >
+                        <IconArrowDown size={12} />
+                      </button>
+
+                      {/* Reset Cooldown */}
+                      {isCooling && (
+                        <button
+                          type="button"
+                          className={styles['iconMiniBtn']}
+                          onClick={() => handleResetCooldown(identity.id)}
+                          title="Reset Cooldown"
+                        >
+                          <IconRefresh size={12} />
+                        </button>
+                      )}
+
+                      {/* Test Individual Key */}
+                      <button
+                        type="button"
+                        className={styles['iconMiniBtn']}
+                        onClick={() => handleTestIdentity(identity.id, identity.credentialRef)}
+                        disabled={testResult?.state === 'testing' || readOnly}
+                        title="Test this API key"
+                      >
+                        <IconBolt size={12} />
+                      </button>
+
+                      {/* Enable/Disable Toggle */}
+                      <button
+                        type="button"
+                        className={styles['iconMiniBtn']}
+                        onClick={() => handleToggleIdentityEnabled(identity.id)}
+                        disabled={readOnly || busy}
+                        title={isDisabled ? 'Enable key' : 'Disable key'}
+                      >
+                        {isDisabled ? <IconEyeOff size={12} /> : <IconEye size={12} />}
+                      </button>
+
+                      {/* Delete */}
+                      <button
+                        type="button"
+                        className={`${styles['iconMiniBtn']} ${styles['deleteIdentityBtn']}`}
+                        onClick={() => handleDeleteIdentity(identity.id)}
+                        disabled={readOnly || busy}
+                        title="Delete key"
+                      >
+                        <IconTrash size={12} />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        /* Single Key Authentication Card */
+        <div className={styles['settingsCard']}>
+          <div className={styles['cardHead']}>
+            <div className={styles['cardTitleRow']}>
+              <IconKey size={14} />
+              <h3 className={styles['cardTitle']}>API Key</h3>
+            </div>
+            <div className={styles['poolHeaderActions']}>
+              <span
+                className={`${styles['statusPill']} ${
+                  isConfigured ? styles['statusPillSuccess'] : styles['statusPillWarning']
+                }`}
+              >
+                {isConfigured ? '🟢 Connected' : '🟡 Key Missing'}
+              </span>
+              <Button
+                variant="outline"
+                className={styles['testBtn']}
+                onClick={handleConvertToPool}
+                disabled={readOnly || busy}
+                title="Add multiple API keys with auto-failover and load-balancing"
+              >
+                <IconLayers size={12} />
+                Enable Key Pool
+              </Button>
+            </div>
+          </div>
+
+          <div className={styles['cardBody']}>
+            <div className={styles['keyInputRow']}>
+              <div className={styles['passwordInputWrap']}>
+                <input
+                  className={styles['input']}
+                  type={showKey ? 'text' : 'password'}
+                  autoComplete="off"
+                  placeholder={isConfigured ? '•••••••••••••••• (Configured)' : 'Enter API key'}
+                  value={keyInput}
+                  onChange={e => setKeyInput(e.target.value)}
+                  disabled={readOnly || busy}
+                />
+                <button
+                  type="button"
+                  className={styles['eyeBtn']}
+                  onClick={() => setShowKey(!showKey)}
+                  title={showKey ? 'Hide key' : 'Show key'}
+                >
+                  {showKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
+                </button>
+              </div>
+
+              <Button
+                variant="primary"
+                disabled={readOnly || busy || keyInput.trim().length === 0}
+                onClick={handleSave}
+              >
+                <IconCheck size={12} />
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Key Modal */}
+      {showAddKeyModal && (
+        <div className={styles['addKeyModalOverlay']} onClick={() => setShowAddKeyModal(false)}>
+          <div className={styles['addKeyModal']} onClick={e => e.stopPropagation()}>
+            <div className={styles['addKeyModalTitle']}>
+              <IconPlus size={14} />
+              Add Key to Pool ({displayName})
+            </div>
+
+            <div className={styles['field']}>
+              <label className={styles['fieldLabel']}>Identity / Key Name</label>
+              <input
+                className={styles['input']}
+                type="text"
+                placeholder="e.g. backup_key, personal_account"
+                value={newKeyId}
+                onChange={e => setNewKeyId(e.target.value)}
+                autoFocus
+              />
+            </div>
+
+            <div className={styles['field']}>
+              <label className={styles['fieldLabel']}>Credential Ref (Environment key variable)</label>
+              <input
+                className={styles['input']}
+                type="text"
+                placeholder={`e.g. ${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_KEY_2`}
+                value={newKeyRef}
+                onChange={e => setNewKeyRef(e.target.value)}
+              />
+            </div>
+
+            <div className={styles['field']}>
+              <label className={styles['fieldLabel']}>API Key Secret</label>
+              <div className={styles['passwordInputWrap']}>
+                <input
+                  className={styles['input']}
+                  type={newKeyShow ? 'text' : 'password'}
+                  placeholder="Paste API Key secret"
+                  value={newKeyValue}
+                  onChange={e => setNewKeyValue(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className={styles['eyeBtn']}
+                  onClick={() => setNewKeyShow(!newKeyShow)}
+                >
+                  {newKeyShow ? <IconEyeOff size={13} /> : <IconEye size={13} />}
+                </button>
+              </div>
+            </div>
+
+            <div className={styles['addKeyModalActions']}>
+              <Button
+                variant="outline"
+                onClick={() => setShowAddKeyModal(false)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleAddIdentitySubmit}
+                disabled={busy || !newKeyId.trim() || !newKeyValue.trim()}
+              >
+                {busy ? 'Adding...' : 'Add to Pool'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Connection Details Card */}
       <div className={styles['settingsCard']}>

@@ -62,3 +62,60 @@ export const llmDiscoverModelsRequestSchema = z.object({
 export const llmDiscoverModelsValueSchema = z.object({
   models: z.array(discoveredModelViewSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'llm.discoverModels'>>>
+
+/** PoolIdentityStatusView row. */
+export const poolIdentityStatusViewSchema = z.object({
+  id: z.string().min(1),
+  credentialRef: z.string().min(1),
+  priority: z.number().int().optional(),
+  enabled: z.boolean().optional(),
+  cooldownUntil: z.number(),
+  consecutiveFailures: z.number().int(),
+  lastStatus: z.number().int().optional(),
+  lastError: z.string().optional(),
+  quota: z.object({
+    remainingFraction: z.number().nullable().optional(),
+    resetTime: z.union([z.string(), z.number()]).nullable().optional(),
+    source: z.string().optional(),
+  }).optional(),
+}) satisfies z.ZodType<Wire<import('./llm.ts').PoolIdentityStatusView>>
+
+/** llm.poolStatus request payload. */
+export const llmPoolStatusRequestSchema = z.object({
+  settingsNs: z.string().min(1),
+  provider: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.poolStatus'>>>
+
+/** llm.poolStatus response value. */
+export const llmPoolStatusValueSchema = z.object({
+  identities: z.array(poolIdentityStatusViewSchema),
+}) satisfies z.ZodType<Wire<ResponseValue<'llm.poolStatus'>>>
+
+/** llm.poolResetCooldown request payload. */
+export const llmPoolResetCooldownRequestSchema = z.object({
+  settingsNs: z.string().min(1),
+  provider: z.string().min(1),
+  identityId: z.string().min(1).optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.poolResetCooldown'>>>
+
+/** llm.poolResetCooldown response value. */
+export const llmPoolResetCooldownValueSchema = z.object({
+  ok: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'llm.poolResetCooldown'>>>
+
+/** llm.poolTestIdentity request payload. */
+export const llmPoolTestIdentityRequestSchema = z.object({
+  settingsNs: z.string().min(1),
+  provider: z.string().min(1),
+  identityId: z.string().min(1),
+  apiKey: z.string().min(1).optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'llm.poolTestIdentity'>>>
+
+/** llm.poolTestIdentity response value. */
+export const llmPoolTestIdentityValueSchema = z.object({
+  ok: z.boolean(),
+  status: z.number().int().optional(),
+  latencyMs: z.number().int().optional(),
+  error: z.string().optional(),
+  modelsCount: z.number().int().optional(),
+}) satisfies z.ZodType<Wire<ResponseValue<'llm.poolTestIdentity'>>>

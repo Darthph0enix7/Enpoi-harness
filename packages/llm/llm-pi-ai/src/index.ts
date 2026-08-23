@@ -197,6 +197,14 @@ export function apply(ctx: Context, config: Config): void {
   // a configuration change causes, and a sign-in survives one.
   const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
   // Pool routing state survives restarts under ~/.dsh/pools/<provider>.json.
+  const resolveCredential = async (reference: string): Promise<string | undefined> => {
+    const credentials = ctx.get('credentials')
+    const hit = credentials !== undefined
+      ? (await credentials.resolve(credentialRef(reference)))?.value
+      : launchEnvironmentOf(ctx).get(reference)?.value
+    return hit !== undefined && hit.length > 0 ? hit : undefined
+  }
+
   const poolEngine = new PoolEngine({
     stateDir: join(launchEnvironmentOf(ctx).get('DSH_HOME')?.value ?? join(homedir(), '.dsh'), 'pools'),
     log: message => ctx.logger.warn(message),
@@ -205,13 +213,7 @@ export function apply(ctx: Context, config: Config): void {
     profiles,
     resolveApiKey,
     pool: poolEngine,
-    resolveCredential: async (reference) => {
-      const credentials = ctx.get('credentials')
-      const hit = credentials !== undefined
-        ? (await credentials.resolve(credentialRef(reference)))?.value
-        : launchEnvironmentOf(ctx).get(reference)?.value
-      return hit !== undefined && hit.length > 0 ? hit : undefined
-    },
+    resolveCredential,
     log: message => ctx.logger.warn(message),
     auth,
     resolveAttachments: () => ctx.get('attachments'),
@@ -270,6 +272,42 @@ export function apply(ctx: Context, config: Config): void {
   // and never holds a stored secret, so an already-configured route supplies
   // its own here rather than being interrogated unauthenticated.
   ctx.llm.registerModelDiscovery(NS, request => discoverModels(request, () => storedApiKey(request.provider)))
+  ctx.llm.registerPoolOperations(NS, {
+    async status(provider: string) {
+      const profile = profiles().get(provider)
+      await poolEngine.hydrate(provider)
+      return poolEngine.identitiesStatus(provider, profile?.pool?.identities ?? [])
+    },
+    async resetCooldown(provider: string, identityId?: string) {
+      poolEngine.resetCooldown(provider, identityId)
+    },
+    async testIdentity(provider: string, identityId: string, apiKeyOverride?: string) {
+      const profile = profiles().get(provider)
+      if (profile === undefined) return { ok: false, error: `Unknown provider "${provider}"` }
+      const identity = profile.pool?.identities.find(i => i.id === identityId)
+      let key = apiKeyOverride
+      if (!key && identity) {
+        key = await resolveCredential(identity.credentialRef)
+      }
+      if (!key && profile.apiKeyEnv) {
+        key = await resolveCredential(profile.apiKeyEnv)
+      }
+      const startTime = performance.now()
+      try {
+        const models = await discoverModels({
+          provider,
+          ...profile.baseURL !== undefined ? { baseURL: profile.baseURL } : {},
+          ...profile.api !== undefined ? { api: profile.api } : {},
+          ...key !== undefined ? { apiKey: key } : {},
+        }, () => Promise.resolve(key))
+        const latencyMs = Math.round(performance.now() - startTime)
+        return { ok: true, latencyMs, modelsCount: models.length }
+      } catch (err: unknown) {
+        const latencyMs = Math.round(performance.now() - startTime)
+        return { ok: false, latencyMs, error: err instanceof Error ? err.message : String(err) }
+      }
+    },
+  })
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below. A bare
   // mount (zero routes) is the dormant posture: nothing registers until a

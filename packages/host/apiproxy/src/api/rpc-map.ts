@@ -74,6 +74,9 @@ export interface RpcMethodMap {
   'llm.providers': LlmApi['providers']
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
+  'llm.poolStatus': LlmApi['poolStatus']
+  'llm.poolResetCooldown': LlmApi['poolResetCooldown']
+  'llm.poolTestIdentity': LlmApi['poolTestIdentity']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

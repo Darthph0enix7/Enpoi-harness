@@ -74,6 +74,40 @@ export interface LlmApi {
     }>,
     signal?: AbortSignal,
   ): Promise<RpcResponse<{ models: DiscoveredModelView[] }>>
+
+  /**
+   * Query status of identities in a provider's credential pool (cooldowns,
+   * failures, quotas).
+   */
+  poolStatus(
+    request: RpcRequest<{
+      settingsNs: string
+      provider: string
+    }>,
+  ): Promise<RpcResponse<{ identities: PoolIdentityStatusView[] }>>
+
+  /**
+   * Reset cooldowns for one identity or all identities under a provider route.
+   */
+  poolResetCooldown(
+    request: RpcRequest<{
+      settingsNs: string
+      provider: string
+      identityId?: string
+    }>,
+  ): Promise<RpcResponse<{ ok: true }>>
+
+  /**
+   * Test an individual identity in a provider route pool.
+   */
+  poolTestIdentity(
+    request: RpcRequest<{
+      settingsNs: string
+      provider: string
+      identityId: string
+      apiKey?: string
+    }>,
+  ): Promise<RpcResponse<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>>
 }
 
 /** Wire view of one model an interrogated endpoint advertises. */
@@ -86,4 +120,21 @@ export interface DiscoveredModelView {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+}
+
+/** Wire view of one identity's status inside a provider pool. */
+export interface PoolIdentityStatusView {
+  id: string
+  credentialRef: string
+  priority?: number
+  enabled?: boolean
+  cooldownUntil: number
+  consecutiveFailures: number
+  lastStatus?: number
+  lastError?: string
+  quota?: {
+    remainingFraction?: number | null
+    resetTime?: string | number | null
+    source?: string
+  }
 }

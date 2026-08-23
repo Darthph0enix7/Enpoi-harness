@@ -3324,6 +3324,24 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
       },
+
+      async poolStatus(request) {
+        const { settingsNs, provider } = request.payload
+        const identities = await ctx.llm.poolStatus(settingsNs, provider)
+        return ok(request, { identities })
+      },
+
+      async poolResetCooldown(request) {
+        const { settingsNs, provider, identityId } = request.payload
+        await ctx.llm.poolResetCooldown(settingsNs, provider, identityId)
+        return ok(request, { ok: true as const })
+      },
+
+      async poolTestIdentity(request) {
+        const { settingsNs, provider, identityId, apiKey } = request.payload
+        const result = await ctx.llm.poolTestIdentity(settingsNs, provider, identityId, apiKey)
+        return ok(request, result)
+      },
     },
 
     events: {

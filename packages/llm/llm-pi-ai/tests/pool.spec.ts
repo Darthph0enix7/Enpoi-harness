@@ -7,6 +7,7 @@ import {
   classifyFailure,
   CLASS_COOLDOWN_MS,
   PoolEngine,
+  parseQuotaHeaders,
   parseResetMs,
   ROTATING_CLASSES,
 } from '../src/pool.ts'
@@ -160,6 +161,66 @@ describe('PoolEngine persistence', () => {
     expect(snapshot.k?.m?.cooldownUntil).toBe(0)
     expect(snapshot.k?.m?.consecutiveFailures).toBe(0)
     expect(snapshot.k?.m?.lastError).toBeUndefined()
+  })
+})
+
+describe('parseQuotaHeaders', () => {
+  it('extracts remainingFraction and resetTime from rate limit headers', () => {
+    const headers = {
+      'x-ratelimit-remaining-requests': '25',
+      'x-ratelimit-limit-requests': '100',
+      'x-ratelimit-reset-requests': '46s',
+    }
+    const quota = parseQuotaHeaders(headers)
+    expect(quota).toEqual({
+      remainingFraction: 0.25,
+      resetTime: '46s',
+      source: 'headers',
+    })
+  })
+
+  it('handles Anthropic rate limit headers', () => {
+    const headers = {
+      'anthropic-ratelimit-tokens-remaining': '8000',
+      'anthropic-ratelimit-tokens-limit': '10000',
+      'anthropic-ratelimit-tokens-reset': '2026-08-23T12:00:00Z',
+    }
+    const quota = parseQuotaHeaders(headers)
+    expect(quota?.remainingFraction).toBe(0.8)
+    expect(quota?.resetTime).toBe('2026-08-23T12:00:00Z')
+  })
+
+  it('returns undefined when no quota headers are present', () => {
+    expect(parseQuotaHeaders({})).toBeUndefined()
+  })
+})
+
+describe('PoolEngine identitiesStatus & resetCooldown', () => {
+  it('reports identity status across all models and resets cooldowns cleanly', () => {
+    const now = 10_000_000
+    const e = engine({ now: () => now })
+    e.recordFailure('myroute', 'id-1', 'm1', 'QUOTA', 'Resets in 30min.')
+    e.recordQuota('myroute', 'id-1', 'm1', { remainingFraction: 0.1, resetTime: '30m' })
+
+    const status = e.identitiesStatus('myroute', [
+      { id: 'id-1', credentialRef: 'KEY_1', priority: 1, enabled: true },
+      { id: 'id-2', credentialRef: 'KEY_2', priority: 2, enabled: true },
+    ])
+
+    expect(status[0]?.id).toBe('id-1')
+    expect(status[0]?.cooldownUntil).toBeGreaterThan(now)
+    expect(status[0]?.consecutiveFailures).toBe(1)
+    expect(status[0]?.quota?.remainingFraction).toBe(0.1)
+    expect(status[1]?.id).toBe('id-2')
+    expect(status[1]?.cooldownUntil).toBe(0)
+
+    // Reset cooldown
+    e.resetCooldown('myroute', 'id-1')
+    const postReset = e.identitiesStatus('myroute', [
+      { id: 'id-1', credentialRef: 'KEY_1' },
+    ])
+    expect(postReset[0]?.cooldownUntil).toBe(0)
+    expect(postReset[0]?.consecutiveFailures).toBe(0)
   })
 })
 

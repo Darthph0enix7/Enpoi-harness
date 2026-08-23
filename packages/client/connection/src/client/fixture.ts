@@ -3055,6 +3055,9 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       discoverModels: request => ok(request, {
         models: fixtureModelGroups().flatMap(group => group.models.map(model => ({ id: model.id, name: model.name }))),
       }),
+      poolStatus: request => ok(request, { identities: [] }),
+      poolResetCooldown: request => ok(request, { ok: true as const }),
+      poolTestIdentity: request => ok(request, { ok: true, latencyMs: 42, modelsCount: 5 }),
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3227,6 +3230,9 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'llm.poolStatus': return this.api.llm.poolStatus(request)
+      case 'llm.poolResetCooldown': return this.api.llm.poolResetCooldown(request)
+      case 'llm.poolTestIdentity': return this.api.llm.poolTestIdentity(request)
     }
   }
 

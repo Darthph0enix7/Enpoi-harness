@@ -15,6 +15,8 @@ import type {
   LlmModelContext,
   LlmModelDiscoveryRequest,
   LlmModelInfo,
+  LlmPoolIdentityStatus,
+  LlmPoolOperations,
   LlmResolvedModelInfo,
   LlmProviderInfo,
   ModelModality,
@@ -315,6 +317,7 @@ export class LlmRuntime extends Service {
     string,
     (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>
   >()
+  private poolOperations = new Map<string, LlmPoolOperations>()
 
   constructor(ctx: Context) {
     super(ctx, 'llm')
@@ -583,6 +586,62 @@ export class LlmRuntime extends Service {
       })
     }
     return models
+  }
+
+  /**
+   * Register provider pool management operations on behalf of a settings namespace.
+   * @param settingsNs - namespace whose pool this operations set manages.
+   * @param ops - pool operations implementation.
+   * @returns disposer.
+   */
+  registerPoolOperations(
+    settingsNs: string,
+    ops: LlmPoolOperations,
+  ): () => void {
+    const dispose = this.ctx.effect(function* (this: LlmRuntime) {
+      if (settingsNs.length === 0) {
+        throw new LlmError('pool operations need a non-empty settings namespace', 'INVALID_DISCOVERY')
+      }
+      this.poolOperations.set(settingsNs, ops)
+      yield () => {
+        this.poolOperations.delete(settingsNs)
+      }
+    }.bind(this), 'llm.registerPoolOperations()')
+    return () => void dispose()
+  }
+
+  /**
+   * Get pool identities status for a provider route.
+   */
+  async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]> {
+    const ops = this.poolOperations.get(settingsNs)
+    if (ops === undefined) return []
+    return ops.status(provider)
+  }
+
+  /**
+   * Reset cooldowns for one identity or all identities under a provider route.
+   */
+  async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void> {
+    const ops = this.poolOperations.get(settingsNs)
+    if (ops === undefined) return
+    return ops.resetCooldown(provider, identityId)
+  }
+
+  /**
+   * Test an individual identity in a provider route pool.
+   */
+  async poolTestIdentity(
+    settingsNs: string,
+    provider: string,
+    identityId: string,
+    apiKey?: string,
+  ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }> {
+    const ops = this.poolOperations.get(settingsNs)
+    if (ops === undefined) {
+      return { ok: false, error: `No pool operations registered for namespace "${settingsNs}"` }
+    }
+    return ops.testIdentity(provider, identityId, apiKey)
   }
 
   /**
