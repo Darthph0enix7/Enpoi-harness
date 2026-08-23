@@ -194,10 +194,15 @@ export interface PiAiPoolIdentity {
   enabled?: boolean
 }
 
+/** How the pool picks among healthy identities. */
+export type PoolStrategy =
+  | /** Highest-priority healthy identity serves everything; lower identities are failover standbys. Maximizes upstream prompt-cache hits and keeps quota plans at full remaining capacity. */ 'priority-sticky'
+  | /** Round-robin across healthy identities per model. Spreads load for rate-limited (RPM/TPM) plans; fragments upstream caches and depletes quota pools together. */ 'balanced'
+
 /** Multi-credential routing for one provider route. */
 export interface PiAiPoolConfig {
-  /** Selection strategy; P1 ships `priority-sticky` only. */
-  strategy?: 'priority-sticky'
+  /** Selection strategy; defaults to `priority-sticky`. Failure handling, cooldowns, and recovery are strategy-independent. */
+  strategy?: PoolStrategy
   /** The route's credential identities (≥ 1, unique ids). */
   identities: PiAiPoolIdentity[]
 }
@@ -339,7 +344,7 @@ const poolIdentity = z.object({
 })
 
 const poolConfig = z.object({
-  strategy: z.union(['priority-sticky']),
+  strategy: z.union(['priority-sticky', 'balanced']),
   identities: z.array(poolIdentity),
 })
 

@@ -1168,6 +1168,22 @@
   gap: 8px;
 }
 
+.strategySelect {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--dsw-alias-text-primary);
+  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.strategySelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .addKeyModalOverlay {
   position: fixed;
   inset: 0;

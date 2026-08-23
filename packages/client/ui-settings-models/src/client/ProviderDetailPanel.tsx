@@ -578,8 +578,22 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }
   }
 
-  const handleMoveIdentity = async (index: number, direction: -1 | 1) => {
-    if (!poolConfig?.identities || readOnly) return
+  const handleStrategyChange = async (strategy: string) => {
+    if (!poolConfig || readOnly) return
+    try {
+      // Leaf-path write: replacing the whole profile here would revert any
+      // concurrent edit under providers.<id> (e.g. a catalog sync refresh).
+      await api.settings.mutate({
+        ns: namespace.ns,
+        ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'strategy'], value: strategy }],
+      })
+      onSaved()
+    } catch (err) {
+      alert(`Strategy change failed: ${messageOf(err)}`)
+    }
+  }
+
+  const handleMoveIdentity = async (index: number, direction: -1 | 1) => {    if (!poolConfig?.identities || readOnly) return
     const targetIdx = index + direction
     if (targetIdx < 0 || targetIdx >= poolConfig.identities.length) return
     const list = [...poolConfig.identities]
@@ -759,6 +773,16 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             </div>
 
             <div className={styles['poolHeaderActions']}>
+              <select
+                className={styles['strategySelect']}
+                value={poolConfig.strategy ?? 'priority-sticky'}
+                onChange={(e) => { void handleStrategyChange(e.target.value) }}
+                disabled={readOnly || busy}
+                title="How the pool picks among healthy keys"
+              >
+                <option value="priority-sticky">Priority Sticky</option>
+                <option value="balanced">Balanced</option>
+              </select>
               <button
                 type="button"
                 className={styles['textActionBtn']}

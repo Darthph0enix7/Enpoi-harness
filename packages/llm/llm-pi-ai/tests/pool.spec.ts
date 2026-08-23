@@ -76,6 +76,27 @@ describe('PoolEngine ordering', () => {
     expect(order.map(identity => identity.id)).toEqual(['a', 'b', 'c'])
   })
 
+  it('rotates round-robin among healthy identities under balanced without touching cooling order', () => {
+    const e = engine()
+    const identities = [
+      { id: 'a', priority: 1 },
+      { id: 'b', priority: 2 },
+      { id: 'c', priority: 3 },
+    ]
+    // Each call advances the per-model cursor; the healthy set stays priority-sorted underneath.
+    expect(e.orderFor('p', identities, 'm', 'balanced').map(identity => identity.id)).toEqual(['a', 'b', 'c'])
+    expect(e.orderFor('p', identities, 'm', 'balanced').map(identity => identity.id)).toEqual(['b', 'c', 'a'])
+    expect(e.orderFor('p', identities, 'm', 'balanced').map(identity => identity.id)).toEqual(['c', 'a', 'b'])
+    expect(e.orderFor('p', identities, 'm', 'balanced').map(identity => identity.id)).toEqual(['a', 'b', 'c'])
+    // Cursors are per model.
+    expect(e.orderFor('p', identities, 'other', 'balanced').map(identity => identity.id)).toEqual(['a', 'b', 'c'])
+    // Sticky ordering is unaffected by the balanced calls above.
+    expect(e.orderFor('p', identities, 'm').map(identity => identity.id)).toEqual(['a', 'b', 'c'])
+    // A cooling identity drops out of rotation and re-enters when it recovers.
+    e.recordFailure('p', 'b', 'm', 'QUOTA', 'Resets in 10min.')
+    expect(e.orderFor('p', identities, 'm', 'balanced').map(identity => identity.id)).toEqual(['c', 'a'])
+  })
+
   it('skips disabled and cooling identities, then probes soonest-expiry first when all cool', () => {
     let now = 1_000_000
     const e = engine({ now: () => now })

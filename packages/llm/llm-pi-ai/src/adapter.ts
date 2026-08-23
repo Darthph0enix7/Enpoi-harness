@@ -413,7 +413,7 @@ export class PiAiAdapter extends LlmAdapter {
           )
         }
         await engine.hydrate(options.provider)
-        const order = engine.orderFor(options.provider, profile.pool.identities, options.model)
+        const order = engine.orderFor(options.provider, profile.pool.identities, options.model, profile.pool.strategy)
         if (order.length === 0) {
           throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no enabled identities`, 'MISSING_CREDENTIAL')
         }

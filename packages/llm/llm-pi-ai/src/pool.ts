@@ -9,7 +9,6 @@
  * cooldowns survive restarts.
  *
  * Design debts consciously taken (P1):
- * - Strategies: only `priority-sticky`. Round-robin/hybrid-scored land later.
  * - Identity kinds: API keys referenced through the credentials service only.
  * - Cooldown durations are fixed constants (documented below) rather than
  *   per-route configuration; QUOTA always defers to a parsed upstream reset
@@ -21,7 +20,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm'
-import type { PiAiPoolIdentity } from './config.ts'
+import type { PiAiPoolIdentity, PoolStrategy } from './config.ts'
 
 /** Why one attempt failed, and what the pool should do about it. */
 export type PoolFailureClass =
@@ -229,6 +228,11 @@ export class PoolEngine {
   /** Providers whose state changed since their last successful write. */
   readonly #dirty = new Set<string>()
 
+  /** Round-robin cursor per `provider:model` for the `balanced` strategy.
+   *  In-memory only: a restart restarts rotation at the first identity, which
+   *  is harmless (balanced ordering carries no correctness weight). */
+  readonly #rotation = new Map<string, number>()
+
   constructor(options: PoolEngineOptions) {
     this.#stateDir = options.stateDir
     this.#now = options.now ?? Date.now
@@ -247,14 +251,17 @@ export class PoolEngine {
     this.#saveDebounceMs = options.saveDebounceMs ?? DEFAULT_SAVE_DEBOUNCE_MS
   }
 
-  /** Attempt order for one request: enabled identities, healthy ones first in
-   *  priority order; when none are healthy, ALL enabled identities ordered by
-   *  soonest cooldown expiry (optimistic probing — a cached cooldown is a
-   *  guess, a live attempt is the only truth). */
+  /** Attempt order for one request: enabled identities, healthy ones first —
+   *  in priority order (`priority-sticky`) or rotated per model (`balanced`);
+   *  when none are healthy, ALL enabled identities ordered by soonest cooldown
+   *  expiry (optimistic probing — a cached cooldown is a guess, a live attempt
+   *  is the only truth). Only the healthy path advances the rotation cursor,
+   *  so introspection call sites can order without perturbing rotation. */
   orderFor(
     provider: string,
     identities: ReadonlyArray<{ id: string; priority?: number; enabled?: boolean }>,
     modelId: string,
+    strategy: PoolStrategy = 'priority-sticky',
   ): Array<{ id: string; priority?: number }> {
     const enabled = identities
       .filter(identity => identity.enabled !== false)
@@ -264,8 +271,13 @@ export class PoolEngine {
       state?.identities[id]?.[modelId]?.cooldownUntil ?? 0
     const healthy = enabled.filter(identity => cooldownOf(identity.id) <= this.#now())
     if (healthy.length > 0) {
-      return healthy.sort((a, b) =>
+      const byPriority = healthy.sort((a, b) =>
         (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
+      if (strategy !== 'balanced') return byPriority
+      const key = `${provider}:${modelId}`
+      const offset = (this.#rotation.get(key) ?? 0) % byPriority.length
+      this.#rotation.set(key, offset + 1)
+      return [...byPriority.slice(offset), ...byPriority.slice(0, offset)]
     }
     return [...enabled].sort((a, b) => cooldownOf(a.id) - cooldownOf(b.id))
   }
