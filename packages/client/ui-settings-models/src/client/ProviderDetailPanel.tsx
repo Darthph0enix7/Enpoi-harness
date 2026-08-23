@@ -766,10 +766,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['cardHead']}>
             <div className={styles['cardTitleRow']}>
               <IconLayers size={14} />
-              <h3 className={styles['cardTitle']}>Key Pool & Identities</h3>
-              <span className={styles['modelCountBadge']}>
-                {poolConfig.identities.length} {poolConfig.identities.length === 1 ? 'key' : 'keys'}
-              </span>
+              <h3 className={styles['cardTitle']}>Keys</h3>
+              <span className={styles['modelCountBadge']}>{poolConfig.identities.length}</span>
             </div>
 
             <div className={styles['poolHeaderActions']}>
@@ -780,18 +778,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 disabled={readOnly || busy}
                 title="How the pool picks among healthy keys"
               >
-                <option value="priority-sticky">Priority Sticky</option>
+                <option value="priority-sticky">Priority</option>
                 <option value="balanced">Balanced</option>
               </select>
               <button
                 type="button"
-                className={styles['textActionBtn']}
+                className={styles['iconMiniBtn']}
                 onClick={() => fetchPoolStatus()}
                 disabled={isPoolLoading}
                 title="Refresh pool status"
               >
-                <IconRefresh size={12} />
-                {isPoolLoading ? 'Checking...' : 'Check Status'}
+                <IconRefresh size={13} />
               </button>
               <Button
                 variant="outline"
@@ -835,31 +832,35 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         <div className={styles['identityStatusRow']}>
                           {isDisabled ? (
                             <span className={`${styles['identityStatusPill']} ${styles['statusDisabled']}`}>
-                              ⚪ Disabled
+                              <span className={`${styles['statusDot']} ${styles['dotIdle']}`} />
+                              Off
                             </span>
                           ) : isCooling ? (
-                            <span className={`${styles['identityStatusPill']} ${styles['statusCooling']}`}>
-                              🟡 Cooling ({cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`})
+                            <span className={`${styles['identityStatusPill']} ${styles['statusCooling']}`} title="Cooling down">
+                              <span className={`${styles['statusDot']} ${styles['dotCooling']}`} />
+                              {cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`}
                             </span>
                           ) : isError ? (
-                            <span className={`${styles['identityStatusPill']} ${styles['statusError']}`}>
-                              🔴 Auth Error
+                            <span className={`${styles['identityStatusPill']} ${styles['statusError']}`} title="Authentication failed">
+                              <span className={`${styles['statusDot']} ${styles['dotError']}`} />
+                              Auth
                             </span>
                           ) : (
                             <span className={`${styles['identityStatusPill']} ${styles['statusReady']}`}>
-                              🟢 Ready
+                              <span className={`${styles['statusDot']} ${styles['dotReady']}`} />
+                              Ready
                             </span>
                           )}
 
                           {status?.quota?.remainingFraction !== undefined && status.quota.remainingFraction !== null && (
                             <div className={styles['quotaMiniWrap']} title={`Quota remaining: ${Math.round(status.quota.remainingFraction * 100)}%`}>
-                              <span>Quota: {Math.round(status.quota.remainingFraction * 100)}%</span>
                               <div className={styles['quotaMiniBar']}>
                                 <div
                                   className={styles['quotaMiniBarFill']}
                                   style={{ width: `${Math.round(status.quota.remainingFraction * 100)}%` }}
                                 />
                               </div>
+                              <span>{Math.round(status.quota.remainingFraction * 100)}%</span>
                             </div>
                           )}
 
@@ -960,17 +961,18 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                   isConfigured ? styles['statusPillSuccess'] : styles['statusPillWarning']
                 }`}
               >
-                {isConfigured ? '🟢 Connected' : '🟡 Key Missing'}
+                <span className={`${styles['statusDot']} ${isConfigured ? styles['dotReady'] : styles['dotCooling']}`} />
+                {isConfigured ? 'Connected' : 'No Key'}
               </span>
               <Button
                 variant="outline"
                 className={styles['testBtn']}
                 onClick={handleConvertToPool}
                 disabled={readOnly || busy}
-                title="Add multiple API keys with auto-failover and load-balancing"
+                title="Multiple keys with automatic failover"
               >
                 <IconLayers size={12} />
-                Enable Key Pool
+                Pool
               </Button>
             </div>
           </div>
@@ -1016,11 +1018,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['addKeyModal']} onClick={e => e.stopPropagation()}>
             <div className={styles['addKeyModalTitle']}>
               <IconPlus size={14} />
-              Add Key to Pool ({displayName})
+              Add Key
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Identity / Key Name</label>
+              <label className={styles['fieldLabel']}>Name</label>
               <input
                 className={styles['input']}
                 type="text"
@@ -1032,7 +1034,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Credential Ref (Environment key variable)</label>
+              <label className={styles['fieldLabel']}>Credential Ref</label>
               <input
                 className={styles['input']}
                 type="text"
@@ -1043,7 +1045,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>API Key Secret</label>
+              <label className={styles['fieldLabel']}>Secret</label>
               <div className={styles['passwordInputWrap']}>
                 <input
                   className={styles['input']}
@@ -1075,7 +1077,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 onClick={handleAddIdentitySubmit}
                 disabled={busy || !newKeyId.trim() || !newKeyValue.trim()}
               >
-                {busy ? 'Adding...' : 'Add to Pool'}
+                {busy ? '…' : 'Add'}
               </Button>
             </div>
           </div>
@@ -1087,7 +1089,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         <div className={styles['cardHead']}>
           <div className={styles['cardTitleRow']}>
             <IconBolt size={14} />
-            <h3 className={styles['cardTitle']}>Endpoint & Protocol</h3>
+            <h3 className={styles['cardTitle']}>Endpoint</h3>
           </div>
 
           <Button
@@ -1096,7 +1098,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             disabled={busy || testStatus.state === 'testing'}
             onClick={handleTestConnection}
           >
-            {testStatus.state === 'testing' ? 'Testing...' : 'Test Connection'}
+            {testStatus.state === 'testing' ? '…' : 'Test'}
           </Button>
         </div>
 
@@ -1142,28 +1144,28 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     : styles['testResultPending']
               }`}
             >
-              {testStatus.state === 'testing' && 'Pinging endpoint...'}
+              {testStatus.state === 'testing' && 'Testing…'}
               {testStatus.state === 'success' && (
                 <span>
-                  🟢 <strong>{testStatus.latencyMs}ms</strong> — {testStatus.message}
+                  <span className={`${styles['statusDot']} ${styles['dotReady']}`} /> <strong>{testStatus.latencyMs}ms</strong> — {testStatus.message}
                 </span>
               )}
               {testStatus.state === 'error' && (
                 <span>
-                  🔴 <strong>Failed</strong> — {testStatus.message}
+                  <span className={`${styles['statusDot']} ${styles['dotError']}`} /> <strong>Failed</strong> — {testStatus.message}
                 </span>
               )}
             </div>
           )}
 
           <div className={styles['saveRow']}>
-            {saveSuccess && <span className={styles['savedToast']}>Saved!</span>}
+            {saveSuccess && <span className={styles['savedToast']}>Saved</span>}
             <Button
               variant="outline"
               disabled={readOnly || busy}
               onClick={handleSave}
             >
-              Update Settings
+              Save
             </Button>
           </div>
         </div>
@@ -1180,11 +1182,12 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['modelsHeadActions']}>
             <button
               type="button"
-              className={styles['textActionBtn']}
+              className={styles['iconMiniBtn']}
               onClick={handleRefreshModels}
               disabled={refreshState.isRefreshing || readOnly}
+              title="Refresh catalog from provider"
             >
-              {refreshState.isRefreshing ? 'Refreshing...' : '🔄 Refresh'}
+              <IconRefresh size={13} />
             </button>
             <span className={styles['dotSep']}>•</span>
             <button type="button" className={styles['textActionBtn']} onClick={handleShowAll}>

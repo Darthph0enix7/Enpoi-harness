@@ -237,11 +237,23 @@
 }
 
 .detailPanel {
+  /* Modular sizing tokens — every control in the panel derives from these. */
+  --card-radius: 14px;
+  --row-radius: 10px;
+  --ctl-h: 28px;
+  --ctl-h-touch: 34px;
+  --glass-bg: var(--dsw-specific-input-major, rgba(13, 20, 35, 0.72));
+  --glass-border: var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  --glass-specular: inset 0 1px 0 rgba(255, 255, 255, 0.07);
   display: flex;
   flex-direction: column;
   gap: 12px;
   width: 100%;
   min-width: 0;
+}
+
+.detailPanel button {
+  touch-action: manipulation;
 }
 
 .detailHeader {
@@ -347,9 +359,12 @@
 /* ========================================================================= */
 
 .settingsCard {
-  background: var(--dsw-alias-bg-module-platform);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 11px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--glass-specular);
   padding: 10px 14px;
   display: flex;
   flex-direction: column;
@@ -979,15 +994,15 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 12px;
-  background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  transition: all 150ms ease;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--row-radius);
+  transition: background 150ms ease, border-color 150ms ease;
 }
 
 .identityRow:hover {
-  background: var(--dsw-alias-bg-layer-2);
+  background: rgba(255, 255, 255, 0.06);
   border-color: var(--dsw-alias-border-l1);
 }
 
@@ -1101,6 +1116,34 @@
   border: 1px solid rgba(156, 163, 175, 0.2);
 }
 
+/* Single-color vector status dots — no emoji anywhere. */
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.dotReady {
+  background: #34d399;
+  box-shadow: 0 0 5px rgba(52, 211, 153, 0.7);
+}
+
+.dotCooling {
+  background: #facc15;
+  box-shadow: 0 0 5px rgba(250, 204, 21, 0.7);
+}
+
+.dotError {
+  background: #f87171;
+  box-shadow: 0 0 5px rgba(248, 113, 113, 0.7);
+}
+
+.dotIdle {
+  background: #94a3b8;
+}
+
 .quotaMiniWrap {
   display: flex;
   align-items: center;
@@ -1135,20 +1178,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l3);
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: 8px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .iconMiniBtn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.07);
   color: var(--dsw-alias-label-primary);
-  border-color: var(--dsw-alias-border-l1);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .iconMiniBtn:disabled {
@@ -1169,14 +1212,24 @@
 }
 
 .strategySelect {
-  height: 26px;
+  height: var(--ctl-h);
   padding: 0 8px;
   font-size: 11px;
-  color: var(--dsw-alias-text-primary);
-  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 6px;
+  color: var(--dsw-alias-label-primary);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
   cursor: pointer;
+  transition: border-color 120ms ease;
+}
+
+.strategySelect:hover {
+  border-color: var(--dsw-alias-border-l1);
+}
+
+.strategySelect option {
+  background: #0d1423;
+  color: var(--dsw-alias-label-primary);
 }
 
 .strategySelect:disabled {
@@ -1275,6 +1328,52 @@
   .modelMetaRow {
     width: 100%;
     justify-content: space-between;
+  }
+
+  /* Touch ergonomics & mobile card layout */
+  .detailPanel {
+    --ctl-h: var(--ctl-h-touch);
+  }
+
+  .cardHead {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .poolHeaderActions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .identityRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .identityLeft {
+    width: 100%;
+  }
+
+  .identityActions {
+    width: 100%;
+    justify-content: flex-end;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    gap: 6px;
+  }
+
+  .iconMiniBtn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+  }
+
+  .addKeyModal {
+    max-width: none;
+    border-radius: var(--card-radius);
   }
 }
 
