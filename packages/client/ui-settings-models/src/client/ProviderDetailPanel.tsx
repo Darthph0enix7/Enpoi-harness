@@ -225,13 +225,23 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const [saveSuccess, setSaveSuccess] = useState(false)
 
   // Pool State
-  const poolConfig = useMemo(() => {
-    const p = rawProfile.pool as {
-      strategy?: string
-      identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }>
-    } | undefined
+  type PoolShape = {
+    strategy?: string
+    identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }>
+  } | undefined
+
+  const serverPool = useMemo<PoolShape>(() => {
+    const p = rawProfile.pool as PoolShape
     return p && Array.isArray(p.identities) ? p : undefined
   }, [rawProfile.pool])
+
+  const [localPool, setLocalPool] = useState<PoolShape>(serverPool)
+
+  useEffect(() => {
+    setLocalPool(serverPool)
+  }, [serverPool])
+
+  const poolConfig = localPool
 
   const [poolStatusList, setPoolStatusList] = useState<PoolIdentityStatusView[]>([])
   const [isPoolLoading, setIsPoolLoading] = useState(false)
@@ -545,6 +555,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }
 
   const handleResetCooldown = async (identityId?: string) => {
+    // 0ms instant optimistic status update: clear cooldown locally
+    setPoolStatusList(prev => prev.map((s) => {
+      if (!identityId || s.id === identityId) {
+        return { ...s, cooldownUntil: 0 }
+      }
+      return s
+    }))
+
     try {
       await api.llm.poolResetCooldown({
         settingsNs: namespace.ns,
@@ -559,43 +577,56 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   const handleToggleIdentityEnabled = async (identityId: string) => {
     if (!poolConfig?.identities || readOnly) return
+    const prev = poolConfig
     const nextIdentities = poolConfig.identities.map((i) => {
       if (i.id === identityId) {
         return { ...i, enabled: i.enabled === false }
       }
       return i
     })
+    const nextPool = { ...poolConfig, identities: nextIdentities }
+
+    // 0ms instant optimistic update
+    setLocalPool(nextPool)
+
     try {
-      const updated = { ...rawProfile, pool: { ...poolConfig, identities: nextIdentities } }
       await api.settings.mutate({
         ns: namespace.ns,
-        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+        ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: nextIdentities }],
       })
       onSaved()
       fetchPoolStatus()
     } catch (err) {
+      setLocalPool(prev)
       alert(`Update failed: ${messageOf(err)}`)
     }
   }
 
   const handleStrategyChange = async (strategy: string) => {
     if (!poolConfig || readOnly) return
+    const prev = poolConfig
+    const nextPool = { ...poolConfig, strategy }
+
+    // 0ms instant optimistic update
+    setLocalPool(nextPool)
+
     try {
-      // Leaf-path write: replacing the whole profile here would revert any
-      // concurrent edit under providers.<id> (e.g. a catalog sync refresh).
       await api.settings.mutate({
         ns: namespace.ns,
         ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'strategy'], value: strategy }],
       })
       onSaved()
     } catch (err) {
+      setLocalPool(prev)
       alert(`Strategy change failed: ${messageOf(err)}`)
     }
   }
 
-  const handleMoveIdentity = async (index: number, direction: -1 | 1) => {    if (!poolConfig?.identities || readOnly) return
+  const handleMoveIdentity = async (index: number, direction: -1 | 1) => {
+    if (!poolConfig?.identities || readOnly) return
     const targetIdx = index + direction
     if (targetIdx < 0 || targetIdx >= poolConfig.identities.length) return
+    const prev = poolConfig
     const list = [...poolConfig.identities]
     const item = list[index]
     if (!item) return
@@ -603,15 +634,20 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     list.splice(targetIdx, 0, item)
     // Update priorities according to new order
     const updatedIdentities = list.map((idObj, idx) => ({ ...idObj, priority: idx + 1 }))
+    const nextPool = { ...poolConfig, identities: updatedIdentities }
+
+    // 0ms instant optimistic update
+    setLocalPool(nextPool)
+
     try {
-      const updated = { ...rawProfile, pool: { ...poolConfig, identities: updatedIdentities } }
       await api.settings.mutate({
         ns: namespace.ns,
-        ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
+        ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: updatedIdentities }],
       })
       onSaved()
       fetchPoolStatus()
     } catch (err) {
+      setLocalPool(prev)
       alert(`Reorder failed: ${messageOf(err)}`)
     }
   }
@@ -619,7 +655,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const handleDeleteIdentity = async (identityId: string) => {
     if (!poolConfig?.identities || readOnly) return
     if (!confirm(`Remove identity "${identityId}" from pool?`)) return
+    const prev = poolConfig
     const remaining = poolConfig.identities.filter(i => i.id !== identityId)
+    const nextPool = remaining.length > 0 ? { ...poolConfig, identities: remaining } : undefined
+
+    // 0ms instant optimistic update
+    setLocalPool(nextPool)
+
     try {
       const updated: Record<string, unknown> = {
         ...rawProfile,
@@ -634,6 +676,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       onSaved()
       fetchPoolStatus()
     } catch (err) {
+      setLocalPool(prev)
       alert(`Delete failed: ${messageOf(err)}`)
     }
   }
@@ -647,44 +690,48 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       return
     }
     setBusy(true)
+    const prev = poolConfig
+    const currentList = poolConfig?.identities ? [...poolConfig.identities] : []
+    const newIdentity = {
+      id,
+      credentialRef: ref,
+      priority: newKeyPriority || (currentList.length + 1),
+      enabled: true,
+    }
+    const updatedIdentities = [...currentList, newIdentity]
+    const nextPool = {
+      strategy: poolConfig?.strategy || 'priority-sticky',
+      identities: updatedIdentities,
+    }
+
+    // 0ms instant local update & close modal
+    setLocalPool(nextPool)
+    setShowAddKeyModal(false)
+    setNewKeyId('')
+    setNewKeyRef('')
+    setNewKeyValue('')
+    setNewKeyPriority(1)
+
     try {
       // 1. Store credential
       const credRes = await api.credentials.set({ ref, value: val })
       if (!credRes.result.ok) throw new Error(credRes.result.error.message)
 
-      // 2. Append identity to pool
-      const currentList = poolConfig?.identities ? [...poolConfig.identities] : []
-      const newIdentity = {
-        id,
-        credentialRef: ref,
-        priority: newKeyPriority || (currentList.length + 1),
-        enabled: true,
-      }
-      currentList.push(newIdentity)
-
+      // 2. Persist pool settings
       const updated = {
         ...rawProfile,
-        pool: {
-          strategy: poolConfig?.strategy || 'priority-sticky',
-          identities: currentList,
-        },
+        pool: nextPool,
       }
-
       const res = await api.settings.mutate({
         ns: namespace.ns,
         ops: [{ op: 'set', path: [...row.entry.settingsPath], value: updated }],
       })
       if (!res.result.ok) throw new Error(res.result.error.message)
 
-      // Reset modal state
-      setShowAddKeyModal(false)
-      setNewKeyId('')
-      setNewKeyRef('')
-      setNewKeyValue('')
-      setNewKeyPriority(1)
       onSaved()
       fetchPoolStatus()
     } catch (err) {
+      setLocalPool(prev)
       alert(`Failed to add identity: ${messageOf(err)}`)
     } finally {
       setBusy(false)
@@ -703,13 +750,18 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       priority: 1,
       enabled: true,
     }
+    const nextPool = {
+      strategy: 'priority-sticky',
+      identities: [initialIdentity],
+    }
+
+    // 0ms instant switch
+    setLocalPool(nextPool)
+
     try {
       const updated = {
         ...rawProfile,
-        pool: {
-          strategy: 'priority-sticky',
-          identities: [initialIdentity],
-        },
+        pool: nextPool,
       }
       const res = await api.settings.mutate({
         ns: namespace.ns,
@@ -719,6 +771,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       onSaved()
       fetchPoolStatus()
     } catch (err) {
+      setLocalPool(undefined)
       alert(`Convert to pool failed: ${messageOf(err)}`)
     }
   }
