@@ -81,9 +81,9 @@ export function apply(ctx: Context): void {
                   const json: unknown = await res.json()
                   const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
                   const orchestration = Array.isArray(namespaces)
-                    ? (namespaces as Array<{ ns?: string; document?: unknown }>).find(n => n.ns === 'enpoi-orchestration')
+                    ? (namespaces as Array<{ ns?: string; value?: { personas?: Record<string, ModelSelection> }; user?: { personas?: Record<string, ModelSelection> } }>).find(n => n.ns === 'enpoi-orchestration')
                     : undefined
-                  const personas = (orchestration?.document as { personas?: Record<string, ModelSelection> } | undefined)?.personas
+                  const personas = orchestration?.value?.personas ?? orchestration?.user?.personas
                   return personas ?? null
                 })
                 .catch(() => null),

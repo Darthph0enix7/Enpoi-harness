@@ -285,10 +285,10 @@
 }
 
 .fleetName {
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 550;
   color: #cbd5e1;
-  width: 84px;
+  width: 96px;
   flex-shrink: 0;
   white-space: nowrap;
   overflow: hidden;

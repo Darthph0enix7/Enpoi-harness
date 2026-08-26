@@ -242,8 +242,9 @@ export function ModelSelect(
     })
   }
 
-  // Model lookup map for quick access
+  // Model lookup map for quick access (computed on-demand when popover opens)
   const modelLookup = useMemo(() => {
+    if (!pickerOpen) return new Map<string, { groupName: string; model: typeof state.groups[0]['models'][0]; group: typeof state.groups[0] }>()
     const map = new Map<string, { groupName: string; model: typeof state.groups[0]['models'][0]; group: typeof state.groups[0] }>()
     for (const g of state.groups) {
       for (const m of g.models) {
@@ -251,10 +252,11 @@ export function ModelSelect(
       }
     }
     return map
-  }, [state.groups])
+  }, [state.groups, pickerOpen])
 
-  // Custom ordered providers
+  // Custom ordered providers (computed on-demand when popover opens)
   const orderedGroups = useMemo(() => {
+    if (!pickerOpen) return []
     const customOrder = getProviderOrder()
     const groupsCopy = [...state.groups]
     if (customOrder.length === 0) return groupsCopy
@@ -267,10 +269,11 @@ export function ModelSelect(
       return 0
     })
     return groupsCopy
-  }, [state.groups, prefsVersion])
+  }, [state.groups, prefsVersion, pickerOpen])
 
-  // Favorites list
+  // Favorites list (computed on-demand when popover opens)
   const favoriteItems = useMemo(() => {
+    if (!pickerOpen) return []
     const favRefs = getFavoriteModels()
     const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
     for (const ref of favRefs) {
@@ -281,10 +284,11 @@ export function ModelSelect(
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen])
 
-  // Recents list
+  // Recents list (computed on-demand when popover opens)
   const recentItems = useMemo(() => {
+    if (!pickerOpen) return []
     const recents = getRecentModels()
     const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
     for (const ref of recents) {
@@ -297,7 +301,7 @@ export function ModelSelect(
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen])
 
   // Filtered queries
   const q = searchQuery.toLowerCase().trim()
