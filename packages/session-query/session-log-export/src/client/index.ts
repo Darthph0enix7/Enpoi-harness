@@ -4,9 +4,12 @@ import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/c
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { SessionLogDownloadController } from './controller.ts'
-import type { SessionLogDownloadDialogInjected } from './Dialog.tsx'
-import { SessionLogDownloadHeaderAction } from './HeaderAction.tsx'
+import {
+  SessionLogGlobalOverlay,
+  type SessionLogGlobalOverlayInjected,
+} from './Dialog.tsx'
 import { en, NS, zh, type SessionLogDownloadKey } from './locales.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -26,7 +29,9 @@ export type { SessionLogDownloadEntry, SessionLogDownloadState } from './control
 export const inject = ['slots', 'locale']
 
 /**
- * Provide the download controller and mount its modal into the Session Header.
+ * Provide the download controller and mount its modal globally into `shell.overlay`.
+ * Action Hygiene: The dedicated header button is removed from `conversation.session.header.utilities`;
+ * downloads are triggered via the left sidebar 3-dots session menu or `/export`.
  * @param ctx - browser context carrying slots and locale services.
  */
 export function apply(ctx: ClientContext): void {
@@ -37,16 +42,22 @@ export function apply(ctx: ClientContext): void {
   ctx.on('command/executed', (sessionId, commandName, result) => {
     if (commandName === 'export' && result.kind === 'success') void controller.download(sessionId)
   })
-  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
-    name: 'conversation.session.header.utilities',
-    id: 'session-log-download',
+
+  // Global overlay modal for download progress and errors across all sessions
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'session-log-download-overlay',
     locale: NS,
-    inject: (): SessionLogDownloadDialogInjected => ({
+    inject: (): SessionLogGlobalOverlayInjected => ({
       hooks: { sessionLogDownload: controller.store },
-      request: (sessionId: SessionId) => controller.download(sessionId),
       dismiss: (sessionId: SessionId) => { controller.dismiss(sessionId) },
     }),
-  }, SessionLogDownloadHeaderAction))
+  }, SessionLogGlobalOverlay))
 }
 
-export type { SessionLogDownloadDialogInjected, SessionLogDownloadDialogProps } from './Dialog.tsx'
+export type {
+  SessionLogDownloadDialogInjected,
+  SessionLogDownloadDialogProps,
+  SessionLogGlobalOverlayInjected,
+  SessionLogGlobalOverlayProps,
+} from './Dialog.tsx'

@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import clsx from 'clsx'
 import {
-  HoverCard, IconArchiveOutline20, IconBranchOutline16, IconEditOutline16,
+  HoverCard, IconArchiveOutline20, IconBranchOutline16, IconDownloadOutline16, IconEditOutline16,
   IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16, IconPlusOutline16,
   IconTrashOutline16, IconTriangleRightFill14, Menu, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -359,7 +359,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }: {
+export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onDownload, onArchive, drag, flat = false, t }: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -368,6 +368,8 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   onRename: (id: SessionNode['id'], currentTitle: string) => void
   /** Fork a session at its last completed turn (row menu action). */
   onFork: (id: SessionNode['id']) => void
+  /** Download this session's compressed log archive (row menu action). */
+  onDownload?: ((id: SessionNode['id']) => void) | undefined
   /** Archive this session (row menu action; commits without a dialog). */
   onArchive: (id: SessionNode['id']) => void
   /** Present only on draggable rows (workspace-group sessions outside search). */
@@ -389,6 +391,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const sessionMenuItems = [
     { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
     { id: 'fork', label: t('menu.fork'), icon: <IconBranchOutline16 /> },
+    { id: 'download', label: t('menu.downloadLog'), icon: <IconDownloadOutline16 /> },
     // 20-native glyph in the menu's 16px icon slot (Menu.module.css .itemIcon).
     { id: 'archive', label: t('menu.archiveSession'), icon: <IconArchiveOutline20 size={16} /> },
   ]
@@ -425,6 +428,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
         : (e) => {
           if (!drag.active) return
           e.preventDefault()
+          e.dataTransfer.dropEffect = 'move'
           drag.drop(rowHalf(e))
         }}
     >
@@ -452,6 +456,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
               setMenuOpen(false)
               if (id === 'rename') onRename(node.id, row.title)
               if (id === 'fork') onFork(node.id)
+              if (id === 'download') onDownload?.(node.id)
               if (id === 'archive') onArchive(node.id)
             }}
             portal

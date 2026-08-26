@@ -218,6 +218,8 @@ type SessionTreeProps = Pick<
   'useSessions' | 'startSession' | 'open' | 'forkSession'
   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
 > & {
+  /** Download this session's compressed log archive (row menu action). */
+  downloadSession?: ((sessionId: SessionId) => void) | undefined
   /** Host account home for POSIX hover-path abbreviation. */
   home?: string | undefined
   workspaces: readonly WorkspaceView[]
@@ -249,7 +251,7 @@ type SessionTreeProps = Pick<
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
-  useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
+  useSessions, startSession, open, forkSession, downloadSession, workspaces, archivedSessionIds,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
@@ -518,6 +520,7 @@ function SessionTree({
                     onOpen={open}
                     onRename={onSessionRename}
                     onFork={forkSession}
+                    onDownload={downloadSession}
                     onArchive={onSessionArchive}
                     drag={dragProps}
                     t={t}
@@ -547,7 +550,7 @@ function SessionTree({
 
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
-  useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
+  useSessions, open, forkSession, downloadSession, onSessionRename, onSessionArchive, archivedSessionIds,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
@@ -563,7 +566,9 @@ function FlatList({
   | 'syncSessionOrderAccount'
   | 'setSessionOrder'
   | 't'
->) {
+> & {
+  downloadSession?: ((sessionId: SessionId) => void) | undefined
+}) {
   const list = useSessions(s => s)
   const baseRows = useMemo(
     () => deriveFlat(list, archivedSessionIds),
@@ -634,6 +639,7 @@ function FlatList({
               onOpen={open}
               onRename={onSessionRename}
               onFork={forkSession}
+              onDownload={downloadSession}
               onArchive={onSessionArchive}
               flat
               drag={{
@@ -752,6 +758,7 @@ export function WorkspaceBrowser({
   open,
   renameSession,
   forkSession,
+  downloadSession,
   renameWorkspace,
   deleteWorkspace,
   insertWorkspaceBefore,
@@ -1157,7 +1164,7 @@ export function WorkspaceBrowser({
           : groupBy === 'flat'
             ? (
               <FlatList
-                useSessions={useSessions} open={open} forkSession={forkSession}
+                useSessions={useSessions} open={open} forkSession={forkSession} downloadSession={downloadSession}
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                 archivedSessionIds={archivedSessionIds}
                 orderBy={orderBy}
@@ -1174,6 +1181,7 @@ export function WorkspaceBrowser({
                 onSessionRename={onSessionRename}
                 onSessionArchive={onSessionArchive}
                 forkSession={forkSession}
+                downloadSession={downloadSession}
                 workspaces={workspaces}
                 groupExpansion={groupExpansion}
                 setGroupExpanded={actions.setGroupExpanded}
