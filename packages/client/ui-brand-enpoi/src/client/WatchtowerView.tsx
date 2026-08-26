@@ -5,9 +5,15 @@
  * only what the keeper actually wrote, personas carry the globally shared
  * compact ModelSelect (same directory, favorites, and visibility rules).
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import {
+  getPersonaAssignments,
+  subscribePersonaAssignments,
+  setPersonaAssignment,
+  clearPersonaAssignment,
+} from './persona-store.ts'
 import css from './WatchtowerView.module.css'
 
 /** Structural subset of the session snapshot the view reads. */
@@ -170,7 +176,9 @@ function SectionBlock({ icon, label, lines }: { icon: string; label: string; lin
 export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, models, t }: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
-  const [assignments, setAssignments] = useState<Record<string, ModelSelection>>({})
+
+  // Global reactive in-memory cache: 100% synchronous 0ms render across sessions, zero delay, zero reloading
+  const assignments = useSyncExternalStore(subscribePersonaAssignments, getPersonaAssignments)
 
   const hasProjection = typeof useProjection === 'function'
   const livingBrief = hasProjection ? useProjection<BriefLike>('livingBrief') : undefined
@@ -183,23 +191,10 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
     [livingBrief?.prose?.text],
   )
 
-  // Load persisted persona assignments once (best effort; absence = inherit).
+  // Prime model directory once on mount if available
   useEffect(() => {
-    let cancelled = false
-    if (models !== undefined) {
-      void models.readAssignments().then((loaded) => {
-        if (!cancelled && loaded !== null) setAssignments(loaded)
-      })
-    }
-    return () => { cancelled = true }
+    if (models?.available) models.load()
   }, [models])
-
-  // Directory current selection is the inherit-default for unassigned personas.
-  const directory = models?.directory
-  const inheritCurrent = useMemo(() => {
-    if (directory === undefined) return null
-    return (directory.getSnapshot() as { current?: ModelSelection | null }).current ?? null
-  }, [directory])
 
   const handleHalt = () => {
     const target = sessionId ?? session?.sessionId ?? session?.id
@@ -315,28 +310,39 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
                   <div className={css.fleetGroupTitle}>{category.title}</div>
                   <div className={css.fleetRows}>
                     {category.seats.map((seat) => {
-                      const assigned = assignments[seat.id] ?? inheritCurrent
+                      const assigned = assignments[seat.id] ?? null
+                      const isExplicitlyAssigned = assigned !== null && Boolean(assigned.model)
                       const override: ModelSelectOverride = {
-                        current: assigned,
-                        select: (selection) => {
-                          setAssignments(prev => ({ ...prev, [seat.id]: selection }))
-                          return models.assign(seat.id, selection)
-                        },
+                        current: isExplicitlyAssigned ? assigned : null,
+                        placeholder: 'Inherit',
+                        select: selection => setPersonaAssignment(seat.id, selection),
                       }
                       return (
                         <div key={seat.id} className={css.fleetRow} title={seat.name}>
                           <span className={css.fleetIcon}><MicroIcon d={seat.icon} size={11} /></span>
                           <span className={css.fleetName}>{seat.name}</span>
-                          <ModelSelect
-                            locked={false}
-                            available={models.available}
-                            directory={models.directory}
-                            load={models.load}
-                            select={() => Promise.resolve(true)}
-                            compact
-                            override={override}
-                            t={t ?? (() => '')}
-                          />
+                          <div className={css.fleetControls}>
+                            {isExplicitlyAssigned && (
+                              <button
+                                type="button"
+                                className={css.unassignBtn}
+                                onClick={() => void clearPersonaAssignment(seat.id)}
+                                title={`Reset ${seat.name} to Inherit (no explicit model)`}
+                              >
+                                <MicroIcon d="M4 8a4 4 0 118 0A4 4 0 014 8zm1 0h6" size={10} />
+                              </button>
+                            )}
+                            <ModelSelect
+                              locked={false}
+                              available={models.available}
+                              directory={models.directory}
+                              load={() => {}}
+                              select={() => Promise.resolve(true)}
+                              compact
+                              override={override}
+                              t={t ?? (() => '')}
+                            />
+                          </div>
                         </div>
                       )
                     })}

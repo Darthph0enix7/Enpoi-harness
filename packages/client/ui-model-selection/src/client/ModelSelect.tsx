@@ -73,6 +73,8 @@ export interface ModelSelectOverride {
   current: ModelSelection | null
   /** Submit target for both model and effort choices. */
   select: (selection: ModelSelection) => Promise<boolean>
+  /** Optional placeholder when current is null (e.g. "Inherit" or "Auto"). */
+  placeholder?: string
 }
 
 export function ModelSelect(
@@ -361,8 +363,10 @@ export function ModelSelect(
 
   // Enpoi Harness fallback: an old session may name a model no longer in the
   // catalog (renamed/removed route) — show its raw id instead of a blank
-  // trigger so the picker never looks broken on legacy sessions.
-  const modelLabel = currentChoice?.model.name ?? activeSel?.model ?? t('trigger.fallback')
+  // trigger so the picker never looks broken on legacy sessions. When an
+  // override names a placeholder (e.g. "Inherit"), unassigned rows use that.
+  const fallbackLabel = override?.placeholder ?? t('trigger.fallback')
+  const modelLabel = currentChoice?.model.name ?? activeSel?.model ?? fallbackLabel
 
   return (
     <div ref={rootRef} className={clsx(css.root, compact === true && css.compactRoot)}>
