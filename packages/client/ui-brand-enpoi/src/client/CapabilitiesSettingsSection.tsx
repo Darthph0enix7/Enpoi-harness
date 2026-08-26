@@ -1,5 +1,6 @@
 import React, { useSyncExternalStore } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import css from './CapabilitiesSettingsSection.module.css'
 
 export interface CapabilitiesState {
