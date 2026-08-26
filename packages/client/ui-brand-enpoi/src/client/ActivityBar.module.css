@@ -71,8 +71,8 @@
 
 /* ── Dynamic Chat Area Resizing & Layout Push ── */
 :global(#root) {
-  margin-right: calc(44px + var(--dsh-sidebar-width, 0px)) !important;
-  width: calc(100% - 44px - var(--dsh-sidebar-width, 0px)) !important;
+  margin-right: var(--dsh-sidebar-width, 44px) !important;
+  width: calc(100% - var(--dsh-sidebar-width, 44px)) !important;
   transition: margin-right var(--ds-transition-duration-slow, 0.25s) var(--ds-ease-in-out, ease),
               width var(--ds-transition-duration-slow, 0.25s) var(--ds-ease-in-out, ease) !important;
 }

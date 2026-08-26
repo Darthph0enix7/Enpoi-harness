@@ -196,36 +196,32 @@ export function ModelSelect(
 
   if (!available) return null
 
-  const settleSelection = (accepted: boolean): void => {
-    if (accepted) {
-      setPickerOpen(false)
-      setEffortOpen(false)
-      setSearchQuery('')
-      return
-    }
-    const message = directory.getSnapshot().error
-    if (message !== null) {
-      toastSeq.current += 1
-      setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
-    }
-  }
-
   const choose = (selection: ModelSelection): void => {
     recordRecentModel(selection.provider, selection.model)
+    // 0ms instant UI close: popover dismisses immediately on click without waiting for network/disk RPCs
+    setPickerOpen(false)
+    setSearchQuery('')
     if (activeSel?.provider === selection.provider && activeSel.model === selection.model) {
-      setPickerOpen(false)
-      setSearchQuery('')
       return
     }
     lastActionRef.current = 'select'
     const submit = override !== undefined ? override.select : select
-    void submit(selection).then(settleSelection)
+    void submit(selection).then((accepted) => {
+      if (!accepted) {
+        const message = directory.getSnapshot().error
+        if (message !== null) {
+          toastSeq.current += 1
+          setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
+        }
+      }
+    })
   }
 
   const chooseEffort = (effort: string | undefined): void => {
     if (activeSel === null) return
+    // 0ms instant UI close for reasoning effort menu
+    setEffortOpen(false)
     if (effectiveEffort === effort) {
-      setEffortOpen(false)
       return
     }
     const selection: ModelSelection = {
@@ -235,7 +231,15 @@ export function ModelSelect(
     }
     lastActionRef.current = 'select'
     const submit = override !== undefined ? override.select : select
-    void submit(selection).then(settleSelection)
+    void submit(selection).then((accepted) => {
+      if (!accepted) {
+        const message = directory.getSnapshot().error
+        if (message !== null) {
+          toastSeq.current += 1
+          setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
+        }
+      }
+    })
   }
 
   // Model lookup map for quick access

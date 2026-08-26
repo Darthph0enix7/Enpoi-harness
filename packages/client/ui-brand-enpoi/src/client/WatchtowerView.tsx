@@ -67,13 +67,11 @@ interface PersonaCategory {
   seats: PersonaSeat[]
 }
 
-/** Persona categories and seats — identifiers only; models are never defaulted here. */
+/** Persona categories and seats for delegated fleet (Orchestrator/Sysadmin are selected on main input card). */
 const FLEET_CATEGORIES: PersonaCategory[] = [
   {
-    title: 'Core & Agents',
+    title: 'Architecture & Supervision',
     seats: [
-      { id: 'orchestrator', name: 'Orchestrator', icon: 'M3 8l4-4 3 3 4-4' },
-      { id: 'sysadmin', name: 'Sysadmin', icon: 'M3 10h10M5 10V7m4 3V5m3 5V8' },
       { id: 'oracle', name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2' },
     ],
   },
@@ -227,10 +225,19 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
     <div className={css.container}>
       <header className={css.head}>
         <div className={css.headLeft}>
-          <span className={css.freshnessDot} data-state={freshness ?? 'none'} />
+          <div
+            className={css.freshnessBadge}
+            data-state={freshness ?? 'none'}
+            title={`Context Keeper: ${freshness === 'live' ? 'Live (synced)' : freshness === 'cooling' ? 'Ready (recent)' : freshness === 'stale' ? 'Stale' : 'Idle'} (as of seq ${livingBrief?.asOfSeq ?? 0})`}
+          >
+            <span className={css.freshnessDot} data-state={freshness ?? 'none'} />
+            <span className={css.freshnessText}>
+              Keeper · {freshness === 'live' ? 'Live' : freshness === 'cooling' ? 'Ready' : freshness === 'stale' ? 'Stale' : 'Idle'}
+            </span>
+          </div>
           <span className={css.headTitle}>{title ?? 'Watchtower'}</span>
           {cwd !== undefined && <span className={css.headPath}>{cwd}</span>}
-          {livingBrief?.asOfSeq !== undefined && <span className={css.headSeq}>· {livingBrief.asOfSeq}</span>}
+          {livingBrief?.asOfSeq !== undefined && <span className={css.headSeq}>· seq {livingBrief.asOfSeq}</span>}
         </div>
         <div className={css.headRight}>
           {memory?.committedCount !== undefined && (
