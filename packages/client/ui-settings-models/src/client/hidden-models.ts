@@ -19,6 +19,22 @@ function readStore(): HiddenMap {
   return {}
 }
 
+function persistToServer(map: HiddenMap): void {
+  void fetch('/api/settings.mutate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      method: 'settings.mutate',
+      rpcId: 'sync-hidden-models',
+      payload: {
+        ns: 'enpoi-orchestration',
+        ops: [{ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: map }],
+      },
+    }),
+  }).catch(() => {})
+}
+
 function writeStore(map: HiddenMap, notifyProvider?: string): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
@@ -26,6 +42,37 @@ function writeStore(map: HiddenMap, notifyProvider?: string): void {
   try {
     window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: { provider: notifyProvider } }))
   } catch {}
+  persistToServer(map)
+}
+
+// Global server sync on module import: pulls cross-device preferences without blocking local 0ms render
+if (typeof window !== 'undefined') {
+  void fetch('/api/settings.describe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      method: 'settings.describe',
+      rpcId: 'prime-hidden-models',
+      payload: {},
+    }),
+  })
+    .then(async (res) => {
+      if (!res.ok) return
+      const json: unknown = await res.json()
+      const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+      const orch = Array.isArray(namespaces)
+        ? (namespaces as Array<{ ns?: string; value?: { uiPreferences?: { hiddenModels?: HiddenMap } }; user?: { uiPreferences?: { hiddenModels?: HiddenMap } } }>).find(n => n.ns === 'enpoi-orchestration')
+        : undefined
+      const serverHidden = orch?.value?.uiPreferences?.hiddenModels ?? orch?.user?.uiPreferences?.hiddenModels
+      if (serverHidden && typeof serverHidden === 'object') {
+        const local = readStore()
+        const merged: HiddenMap = { ...local, ...serverHidden }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+        window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: {} }))
+      }
+    })
+    .catch(() => {})
 }
 
 /** Check if a model is hidden from the selector. */

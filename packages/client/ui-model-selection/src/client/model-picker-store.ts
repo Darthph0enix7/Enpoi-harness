@@ -30,6 +30,56 @@ function safeSetJson(key: string, value: unknown): void {
   } catch {
     // Local storage disabled or quota exceeded
   }
+
+  // Cross-device server persistence for favorites and provider ordering
+  if (key === KEY_FAVORITES || key === KEY_PROVIDER_ORDER) {
+    const prefField = key === KEY_FAVORITES ? 'favorites' : 'providerOrder'
+    void fetch('/api/settings.mutate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.mutate',
+        rpcId: `sync-${prefField}`,
+        payload: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['uiPreferences', prefField], value }],
+        },
+      }),
+    }).catch(() => {})
+  }
+}
+
+// Global server sync on module import: pulls cross-device preferences without blocking local 0ms render
+if (typeof window !== 'undefined') {
+  void fetch('/api/settings.describe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      method: 'settings.describe',
+      rpcId: 'prime-picker-prefs',
+      payload: {},
+    }),
+  })
+    .then(async (res) => {
+      if (!res.ok) return
+      const json: unknown = await res.json()
+      const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+      const orch = Array.isArray(namespaces)
+        ? (namespaces as Array<{ ns?: string; value?: { uiPreferences?: { favorites?: ModelRef[]; providerOrder?: string[] } }; user?: { uiPreferences?: { favorites?: ModelRef[]; providerOrder?: string[] } } }>).find(n => n.ns === 'enpoi-orchestration')
+        : undefined
+      const prefs = orch?.value?.uiPreferences ?? orch?.user?.uiPreferences
+      if (prefs?.favorites && Array.isArray(prefs.favorites)) {
+        localStorage.setItem(KEY_FAVORITES, JSON.stringify(prefs.favorites))
+        window.dispatchEvent(new CustomEvent('dsh:model-picker-prefs-changed', { detail: { key: KEY_FAVORITES } }))
+      }
+      if (prefs?.providerOrder && Array.isArray(prefs.providerOrder)) {
+        localStorage.setItem(KEY_PROVIDER_ORDER, JSON.stringify(prefs.providerOrder))
+        window.dispatchEvent(new CustomEvent('dsh:model-picker-prefs-changed', { detail: { key: KEY_PROVIDER_ORDER } }))
+      }
+    })
+    .catch(() => {})
 }
 
 /** Check if a model is favorited. */
