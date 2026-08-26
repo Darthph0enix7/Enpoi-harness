@@ -43,11 +43,14 @@ export const SETTINGS_NAMESPACE = 'agent-presets'
 export interface AgentPresetSettings {
   /** Preset mounted when a session names none. */
   default?: string
+  /** Enpoi Harness: hide the shipped (system) presets from every picker surface. */
+  hideSystem?: boolean
 }
 
 /** Runtime schema for the user-writable slice. */
 export const AgentPresetSettingsSchema: z<AgentPresetSettings> = z.object({
   default: z.string(),
+  hideSystem: z.boolean().default(false),
 })
 
 export { COMPOSITION_FILE, discoverPresets, scanRoot } from './discovery.ts'

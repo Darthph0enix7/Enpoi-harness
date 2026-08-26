@@ -618,8 +618,12 @@ export class SessionManager {
    * @param agentPreset - the preset id the host confirmed.
    */
   noteAgentPreset(sessionId: SessionId, agentPreset: string): void {
+    // Enpoi Harness: mid-session switches are allowed — preserve the session's
+    // existing blank state instead of forcing blank: true (a started session
+    // that switches agents must not re-appear as a blank hero seat).
+    const existing = this.summaries.find(summary => summary.sessionId === sessionId)
     this.recordMutation({ kind: 'upsert', summary: {
-      sessionId, updatedAt: Date.now(), running: false, blank: true, agentPreset,
+      sessionId, updatedAt: Date.now(), running: false, blank: existing?.blank ?? false, agentPreset,
     } })
   }
 

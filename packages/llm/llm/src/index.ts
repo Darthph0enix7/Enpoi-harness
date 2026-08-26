@@ -958,6 +958,9 @@ export class LlmRuntime extends Service {
     options: GenerateOptions,
     prepared?: PreparedDispatch,
   ): AsyncGenerator<StreamChunk> {
+    // Enpoi Harness wire capture — the ONE chokepoint every dispatch passes
+    // (both `ctx.llm.stream()` and the agent-loop's prepared-call path).
+    void captureWireRequest(options)
     let iterator: AsyncIterator<StreamChunk>
     try {
       const registration = prepared?.registration ?? this.registration(options.provider)
@@ -1083,3 +1086,49 @@ interface PreparedDispatch {
 }
 
 export default LlmRuntime
+
+/**
+ * Enpoi Harness: capture the exact wire request to a log file (seam-level —
+ * every adapter dispatch flows through `LlmRuntime.stream()`).
+ *
+ * The fully-assembled request (system prompt, ordered messages, tool schemas,
+ * config) is written to `~/.dsh/logs/wire-last.json` (override via
+ * `DSH_WIRE_LOG`) so an operator can inspect byte-for-byte what the agent
+ * actually sent — and prove system-prompt stability across model switches
+ * (only `config` should change; `system`/`tools` must stay identical).
+ * Fire-and-forget: a write failure must never affect the request.
+ */
+let wireCapturePending: Promise<void> | undefined
+
+async function captureWireRequest(options: GenerateOptions): Promise<void> {
+  try {
+    const { homedir } = await import('node:os')
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { dirname, join } = await import('node:path')
+    const root = process.env.DSH_WIRE_LOG ? dirname(process.env.DSH_WIRE_LOG) : homedir() + '/.dsh/logs'
+    const payload = {
+      time: Date.now(),
+      provider: options.provider,
+      model: options.model,
+      ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
+      ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
+      ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+      system: options.system ?? null,
+      messages: options.messages,
+      tools: options.tools ?? [],
+    }
+    await mkdir(root, { recursive: true })
+    // Full audit trail: every call, timestamped. wire-last.json additionally
+    // holds only the MAIN agent call (no `purpose` — auxiliary calls like
+    // session-title/context-keeper are excluded), so it is always inspectable.
+    const serialized = JSON.stringify(payload)
+    wireCapturePending = writeFile(join(root, `wire-${Date.now()}.json`), serialized)
+      .then(() => options.purpose === undefined
+        ? writeFile(process.env.DSH_WIRE_LOG ?? join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
+        : undefined, () => undefined)
+    await wireCapturePending
+  } catch {
+    // Best-effort diagnostics never break a request.
+  }
+}

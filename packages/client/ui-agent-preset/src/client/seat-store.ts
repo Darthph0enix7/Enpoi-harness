@@ -23,6 +23,8 @@ export interface AgentPresetSeatState {
   options: readonly AgentPresetOption[]
   /** The staged choice, empty until the roster loads. */
   current: string
+  /** The CURRENT session's live preset (Enpoi Harness: the input-card picker shows this). */
+  sessionPreset: string
   /** A rejected apply's message, cleared by the next attempt. */
   error: string | null
   busy: boolean
@@ -35,7 +37,7 @@ export interface AgentPresetSeatState {
 }
 
 const INITIAL: AgentPresetSeatState = {
-  options: [], current: '', error: null, busy: false, introduce: false,
+  options: [], current: '', sessionPreset: '', error: null, busy: false, introduce: false,
 }
 
 /** One session's identity and whether it has started. */
@@ -100,6 +102,7 @@ export class AgentPresetSeatController {
         // once the flow's session is current, so the reply can arrive after
         // apply() already composed it.
         current: this.staged ?? this.currentSession()?.agentPreset ?? this.fallback,
+        sessionPreset: this.currentSession()?.agentPreset ?? '',
         error: null,
       })
     } catch (error) {
@@ -141,6 +144,15 @@ export class AgentPresetSeatController {
     this.set({ introduce: false })
   }
 
+  /** Refresh the session's live preset from the current session summary. */
+  refreshSessionPreset(): void {
+    const session = this.currentSession()
+    if (session === undefined) return
+    const snapshot = this.store.getSnapshot()
+    if (snapshot.sessionPreset === (session.agentPreset ?? '')) return
+    this.set({ sessionPreset: session.agentPreset ?? '' })
+  }
+
   /**
    * Hand the staged choice to the current session, if there is one to take it.
    *
@@ -152,9 +164,9 @@ export class AgentPresetSeatController {
     const staged = this.staged
     const session = this.currentSession()
     if (staged === undefined || session === undefined) return
-    // A started session's history was produced under its own composition; the
-    // host refuses the swap, so the stage is no longer meaningful.
-    if (!session.blank || session.agentPreset === staged) {
+    // Enpoi Harness: mid-session switching is supported — a staged preset may
+    // apply to a started session too (the host allows idle-session switches).
+    if (session.agentPreset === staged) {
       this.staged = undefined
       return
     }
@@ -167,7 +179,7 @@ export class AgentPresetSeatController {
         return
       }
       // Consumed: the next new session opens on the deployment default again.
-      this.set({ busy: false, current: response.result.value.agentPreset })
+      this.set({ busy: false, current: response.result.value.agentPreset, sessionPreset: response.result.value.agentPreset })
       this.onApplied?.(session.id, response.result.value.agentPreset)
     } catch (error) {
       this.staged = undefined

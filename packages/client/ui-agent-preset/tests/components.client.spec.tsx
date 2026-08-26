@@ -35,6 +35,7 @@ const ROW_READY: AgentPresetSettingsState = {
 
 const SEAT_READY: AgentPresetSeatState = {
   current: 'standard',
+  sessionPreset: 'standard',
   options: [
     { id: 'standard', trust: 'system', name: '标准模式', description: '完整的编码 agent。' },
     { id: 'mine', trust: 'user' },

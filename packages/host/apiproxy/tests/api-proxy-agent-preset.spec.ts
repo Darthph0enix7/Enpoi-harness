@@ -427,19 +427,35 @@ describe('agentPreset.select', () => {
     expect(resolveSessionPreset(session)).toBe('standard')
   })
 
-  it('refuses once the conversation has started', async () => {
+  it('switches mid-session once the conversation has started but the agent is idle', async () => {
     const { api, ctx } = await harness(['standard', 'minimal'])
     await api.sessions.create(request({ sessionId: SessionId('sel-2'), agentPreset: 'standard' }))
-    // One turn is enough: the history from here on was produced under
-    // `standard`'s tools, and a swap would strand those tool calls.
+    // A completed turn: the history was produced under `standard`'s tools,
+    // but an idle session may recompose (Enpoi Harness mid-session switching).
     ctx.sessions.get(SessionId('sel-2'))?.append('turn/start', { turn: 0 })
+    ctx.sessions.get(SessionId('sel-2'))?.append('turn/end', { turn: 0, reason: { kind: 'completed' } })
 
     const response = await api.agentPresets.select(
       request({ sessionId: SessionId('sel-2'), agentPreset: 'minimal' }))
 
+    expect(response.result.ok).toBe(true)
+    if (!response.result.ok) throw new Error('unreachable')
+    expect(response.result.value.agentPreset).toBe('minimal')
+  })
+
+  it('refuses a switch while the agent is running', async () => {
+    const { api, ctx } = await harness(['standard', 'minimal'])
+    await api.sessions.create(request({ sessionId: SessionId('sel-2b'), agentPreset: 'standard' }))
+    // An OPEN turn with the agent loop in flight: the switch must be refused.
+    ctx.sessions.get(SessionId('sel-2b'))?.append('turn/start', { turn: 0 })
+    ;(ctx.agents.get(SessionId('sel-2b')) as unknown as { status: string }).status = 'running'
+
+    const response = await api.agentPresets.select(
+      request({ sessionId: SessionId('sel-2b'), agentPreset: 'minimal' }))
+
     expect(response.result.ok).toBe(false)
     if (response.result.ok) throw new Error('unreachable')
-    expect(response.result.error.code).toBe('agent-preset-locked')
+    expect(response.result.error.code).toBe('agent-busy')
   })
 
   it('reports an unknown preset without disturbing the session', async () => {

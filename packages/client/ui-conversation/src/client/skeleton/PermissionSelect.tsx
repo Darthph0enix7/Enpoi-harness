@@ -1,17 +1,16 @@
-import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import clsx from 'clsx'
 import type { PermissionSelect as PermissionSelectValue } from '@deepseek-ai/dsh-permission-presets/client'
-import { IconChevronDownOutline14, Menu, RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ComposerBarProps } from '../contract/slots.ts'
 import css from './PermissionSelect.module.css'
 
 const FULL_ACCESS = 'danger-full-access'
 
+/** The three-mode cycle: read-only → workspace-write → full access → read-only. */
+const CYCLE: readonly string[] = ['read-only', 'workspace-write', FULL_ACCESS]
+
 /* Shield glyphs (design set 1556): check = read-only, pencil = workspace
-   write, exclamation = full access. currentColor so the trigger and menu
-   rows tint them with their own text color. */
+   write, exclamation = full access. currentColor so the trigger tints them
+   with its own text color. */
 
 const shieldOutline = 'M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z'
 
@@ -45,20 +44,10 @@ function permissionGlyph(value: string): ReactNode | undefined {
   return permissionGlyphs[value]
 }
 
-/**
- * Display transform: kebab-case machine names render as title-case labels
- * (`workspace-write` → `Workspace Write`); non-kebab host-configured names
- * pass through. Full access intentionally overrides the machine-name
- * transform so both permission surfaces use the product label `Full access`;
- * the warning body remains locale-aware.
- */
+/** Display transform: kebab-case machine names render as title-case labels. */
 function displayName(name: string): string {
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) return name
   return name.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
-}
-
-function optionLabel(option: PermissionSelectValue['options'][number]): string {
-  return option.value === FULL_ACCESS ? 'Full access' : displayName(option.name)
 }
 
 export interface PermissionSelectProps {
@@ -69,104 +58,37 @@ export interface PermissionSelectProps {
   t: ComposerBarProps['t']
 }
 
+/**
+ * Enpoi Harness: icon-only permission toggle. No menu, no confirmation popup —
+ * clicking cycles read-only → workspace-write → full access → read-only.
+ */
 export function PermissionSelect({ value, locked, command, t }: PermissionSelectProps) {
-  const [pick, setPick] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-  const [confirmation, setConfirmation] = useState<string | null>(null)
-  const [acknowledged, setAcknowledged] = useState(false)
-
-  useEffect(() => {
-    if (!locked && value !== undefined) return
-    setOpen(false)
-    setAcknowledged(false)
-    setConfirmation(null)
-  }, [locked, value])
-
   if (value === undefined) return null
 
-  const currentValue = pick ?? value.currentValue
+  const currentValue = value.currentValue
   const current = value.options.find(option => option.value === currentValue)
-  const busy = pick !== null || confirmation !== null
+  const glyph = permissionGlyph(currentValue)
 
-  const items: MenuEntry[] = value.options
-    .filter(o => o.value !== 'custom')
-    .map((option) => {
-      const icon = permissionGlyph(option.value)
-      return { id: option.value, label: optionLabel(option), ...icon === undefined ? {} : { icon } }
-    })
-
-  const submit = (id: string): void => {
-    setPick(id)
-    void command(`/permission ${id}`)
-      .catch(() => false)
-      .then(() => { setPick(null) })
-  }
-
-  const choose = (id: string): void => {
-    setOpen(false)
-    if (id === value.currentValue) return
-    if (id === FULL_ACCESS) {
-      setAcknowledged(false)
-      setConfirmation(id)
-      return
-    }
-    submit(id)
-  }
-
-  const closeConfirmation = (): void => {
-    setAcknowledged(false)
-    setConfirmation(null)
-  }
-
-  const confirmFullAccess = (): void => {
-    if (locked || !acknowledged || confirmation === null) return
-    const id = confirmation
-    closeConfirmation()
-    submit(id)
+  const cycle = (): void => {
+    if (locked) return
+    const index = CYCLE.indexOf(currentValue)
+    const next = CYCLE[(index + 1) % CYCLE.length]
+    if (next === currentValue) return
+    void command(`/permission ${next}`)
   }
 
   return (
-    <>
-      <Menu
-        open={open}
-        items={items}
-        selectedId={currentValue}
-        onSelect={choose}
-        onClose={() => { setOpen(false) }}
-        side="top"
-        anchor={
-          <button
-            type="button"
-            className={css.trigger}
-            aria-label={t('input.accessMode', { name: current === undefined ? displayName(currentValue) : optionLabel(current) })}
-            title={current?.description}
-            disabled={locked || busy}
-            onClick={() => { setOpen(!open) }}
-          >
-            {permissionGlyph(currentValue) !== undefined && (
-              <span className={css.triggerIcon} aria-hidden>{permissionGlyph(currentValue)}</span>
-            )}
-            <span className={css.triggerLabel}>{current === undefined ? displayName(currentValue) : optionLabel(current)}</span>
-            {/* Same glyph + open rotation as the sibling ModelSelect trigger. */}
-            <span className={clsx(css.chevron, open && css.chevronOpen)} aria-hidden>
-              <IconChevronDownOutline14 />
-            </span>
-          </button>
-        }
-      />
-      <RiskConfirmation
-        open={confirmation !== null}
-        title={t('access.confirm.title')}
-        description={t('access.confirm.description')}
-        acknowledgeLabel={t('access.confirm.acknowledge')}
-        cancelLabel={t('access.confirm.cancel')}
-        confirmLabel={t('access.confirm.enable')}
-        acknowledged={acknowledged}
-        disabled={locked}
-        onAcknowledgedChange={setAcknowledged}
-        onCancel={closeConfirmation}
-        onConfirm={confirmFullAccess}
-      />
-    </>
+    <button
+      type="button"
+      className={css.trigger}
+      aria-label={t('input.accessMode', { name: current === undefined ? displayName(currentValue) : current.name })}
+      title={current?.description}
+      disabled={locked}
+      onClick={cycle}
+    >
+      {glyph !== undefined && (
+        <span className={css.triggerIcon} aria-hidden>{glyph}</span>
+      )}
+    </button>
   )
 }

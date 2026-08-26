@@ -269,6 +269,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * a model here.
      */
     'conversation.input.model': { kind: 'single'; scope: 'session'; owner: InputControlOwnerProps }
+    /**
+     * The agent-preset seat at the left end of the composer tool row (Enpoi
+     * Harness): shows the session's current agent and switches it mid-session.
+     * Same `locked`-only owner share and same renders-nothing-while-empty
+     * contract as the plan seat.
+     */
+    'conversation.input.agent': { kind: 'single'; scope: 'session'; owner: InputControlOwnerProps }
   }
 
   /**
@@ -605,7 +612,7 @@ export interface InputControlOwnerProps {
 export type ComposerBarProps =
   PropsRuntime<'conversation.composer.bar'>
   & PropsRenderSlots<
-    'conversation.input.attachments' | 'conversation.input.plan' | 'conversation.input.model'
+    'conversation.input.attachments' | 'conversation.input.plan' | 'conversation.input.model' | 'conversation.input.agent'
   >
   & InjectFace<ComposerBarInjected>
   & PropsLocale<'conversation'>

@@ -459,14 +459,10 @@ describe('approval policy (the approval/policy fold)', () => {
     ctx.approval.setPolicy(liveAgent, 'never')
 
     expect(effectiveApprovalPolicy(session.events)).toBe('never')
-    expect(inject).toHaveBeenCalledOnce()
-    expect(inject.mock.calls[0]?.[0]).toMatchObject({
-      content: [{
-        type: 'text',
-        text: 'The approval policy changed from "ask" to "never" (changed by the user).',
-      }],
-      source: { kind: 'plugin', plugin: 'user-approval' },
-    })
+    // Enpoi Harness: the policy surfaces via the runtime-context snapshot
+    // (next test), never as an injected user message — an injected notice
+    // would persist in history and pollute the model context on every turn.
+    expect(inject).not.toHaveBeenCalled()
   })
 
   it('contributes the complete current ask or never policy as cache-safe context', async () => {

@@ -356,15 +356,16 @@ describe('the new-session chip controller', () => {
     expect(writes).toEqual([{ ns: 'select', patch: 'minimal' }])
   })
 
-  it('drops the stage against a session that already started', async () => {
+  it('applies the stage to a session that already started (Enpoi Harness mid-session switching)', async () => {
     const writes: Recorded[] = []
     const controller = chip(ROSTER, { id: 's1', blank: false, agentPreset: 'standard' }, { writes })
     await controller.load()
 
     await controller.select('minimal')
 
-    // The host enforces the same rule; the chip simply never asks.
-    expect(writes).toEqual([])
+    // Mid-session switching is supported: the stage applies to started
+    // sessions too (the host allows idle-session recomposition).
+    expect(writes).toEqual([{ ns: 'select', patch: 'minimal' }])
   })
 
   it('drops the stage when the session already runs it', async () => {

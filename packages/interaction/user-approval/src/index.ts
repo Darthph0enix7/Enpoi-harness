@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type CallId } from '@deepseek-ai/dsh-llm'
+import { type CallId } from '@deepseek-ai/dsh-llm'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -220,6 +220,13 @@ export class ApprovalService extends Service {
    * Switch one live agent's policy and queue the transition for its next model
    * step. Session initialization uses {@link setApprovalPolicy} directly
    * because there is no previously visible policy to change.
+   *
+   * The new value surfaces to the model through the runtime-context snapshot
+   * (`approval:policy` context described above): the snapshot updates in place
+   * on the next step's assembly. No synthetic user message is appended — an
+   * injected notice would persist as history and reach the model on every
+   * subsequent turn (Enpoi Harness: fixed a cache-hostile, context-polluting
+   * append; the runtime-context snapshot is the only channel).
    * @param agent - the live agent whose policy is changing.
    * @param policy - the new effective policy.
    */
@@ -227,13 +234,6 @@ export class ApprovalService extends Service {
     const previous = this.effectivePolicy(agent.session)
     if (previous === policy) return
     setApprovalPolicy(agent.session, policy)
-    agent.inject(createUserMessage({
-      content: [{
-        type: 'text',
-        text: `The approval policy changed from "${previous}" to "${policy}" (changed by the user).`,
-      }],
-      source: { kind: 'plugin', plugin: 'user-approval' },
-    }))
   }
 
   /**

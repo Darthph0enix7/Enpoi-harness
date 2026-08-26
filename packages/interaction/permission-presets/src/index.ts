@@ -181,6 +181,10 @@ export class PermissionPresetService extends Service {
       name: z.string(),
       description: z.string(),
     })).default({
+      'read-only': {
+        sandbox: 'read-only', approval: 'ask',
+        name: 'read-only', description: 'Read-only access to workspace files; modifications require approval or are blocked.',
+      },
       'workspace-write': {
         sandbox: 'workspace-write', approval: 'ask',
         name: 'workspace-write', description: 'Write inside the workspace and permitted temporary directories; wider retries require approval.',

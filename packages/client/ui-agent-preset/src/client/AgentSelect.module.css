@@ -1,0 +1,67 @@
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
+  border-radius: 8px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.5));
+  color: var(--dsw-alias-label-primary-foreground, #e2e8f0);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.trigger:hover {
+  background: var(--dsw-alias-bg-hover, rgba(103, 220, 231, 0.08));
+  border-color: var(--dsw-alias-border-l2-darkmode, rgba(103, 220, 231, 0.35));
+}
+
+.trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.triggerIcon {
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-primary-foreground, #e2e8f0);
+}
+
+.triggerLabel {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  width: 12px;
+  height: 12px;
+  color: var(--dsw-alias-label-dimmed, #94a3b8);
+  transition: transform 0.15s ease;
+}
+
+.chevron[data-open='true'] {
+  transform: rotate(180deg);
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.itemName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary-foreground, #e2e8f0);
+}
+
+.itemDesc {
+  font-size: 11px;
+  color: var(--dsw-alias-label-dimmed, #94a3b8);
+}

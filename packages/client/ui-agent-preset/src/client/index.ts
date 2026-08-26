@@ -26,6 +26,7 @@ import { AgentPresetRow } from './AgentPresetRow.tsx'
 import type { AgentPresetRowInjected } from './AgentPresetRow.tsx'
 import { AgentPresetSeat } from './AgentPresetSeat.tsx'
 import type { AgentPresetSeatInjected } from './AgentPresetSeat.tsx'
+import { AgentSelect } from './AgentSelect.tsx'
 import { AgentPresetSection } from './AgentPresetSection.tsx'
 import type { AgentPresetSectionInjected } from './AgentPresetSection.tsx'
 import { AgentPresetSeatController } from './seat-store.ts'
@@ -37,6 +38,7 @@ import { AGENT_PRESET_SETTINGS_NS, AgentPresetSettingsController } from './setti
 export type { AgentPresetLabelInjected, AgentPresetLabelProps } from './AgentPresetLabel.tsx'
 export type { AgentPresetRowInjected, AgentPresetRowProps } from './AgentPresetRow.tsx'
 export type { AgentPresetSeatInjected, AgentPresetSeatProps } from './AgentPresetSeat.tsx'
+export type { AgentSelectInjected, AgentSelectProps } from './AgentSelect.tsx'
 export type { AgentPresetSectionInjected, AgentPresetSectionProps } from './AgentPresetSection.tsx'
 export type { AgentPresetSeatState, SeatSessionSummary } from './seat-store.ts'
 export {
@@ -131,7 +133,10 @@ export function apply(ctx: ClientContext): void {
       // Connecting a workspace either creates a blank session or reuses one,
       // and either way the chip's pick predates it — so the stage is applied
       // when the session arrives, not when it was made.
-      const stop = scope.sessions.list.subscribe(() => { void seat.apply() })
+      const stop = scope.sessions.list.subscribe(() => {
+        void seat.apply()
+        seat.refreshSessionPreset()
+      })
       // The chip opens on the deployment default, so a default changed from
       // the settings surface moves it too — otherwise the screen that starts
       // the next session keeps offering the previous default until a reload,
@@ -167,6 +172,13 @@ export function apply(ctx: ClientContext): void {
         locale: 'settings.agentPreset',
         inject: seatInjected,
       }, AgentPresetSeat)
+      // Enpoi Harness: the input-card agent picker — always visible, shows the
+      // session's live preset, switches mid-session (idle sessions only).
+      const agentSelect = scope.slots.register({
+        name: 'conversation.input.agent',
+        locale: 'settings.agentPreset',
+        inject: seatInjected,
+      }, AgentSelect)
       const label = scope.slots.register({
         name: 'conversation.session.header.actions',
         id: 'agent-preset',
@@ -182,6 +194,7 @@ export function apply(ctx: ClientContext): void {
         rosterReaders.delete(readRoster)
         creatorDraft = undefined
         chip()
+        agentSelect()
         label()
       }
     }, 'ui-agent-preset: new-session chip and header label')

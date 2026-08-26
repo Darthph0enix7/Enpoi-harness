@@ -784,6 +784,7 @@ export function InputBar({
               </button>
             </Tooltip>
             <div className={css.modes}>
+              {renderSlot('conversation.input.agent', { locked })}
               {accessSelect}
               {renderSlot('conversation.input.plan', { locked })}
             </div>

@@ -1476,7 +1476,7 @@ describe('command launcher chrome and control seats', () => {
     expect(view.queryByLabelText(/^访问模式/)).toBeNull()
     // Every seat dispatched, nothing rendered.
     expect(slotCalls.map(c => c.key)).toEqual([
-      'conversation.input.attachments', 'conversation.input.plan', 'conversation.input.model',
+      'conversation.input.attachments', 'conversation.input.agent', 'conversation.input.plan', 'conversation.input.model',
     ])
     expect(view.queryByLabelText('Plan mode')).toBeNull()
     expect(view.queryByLabelText('Model')).toBeNull()
@@ -1494,7 +1494,7 @@ describe('command launcher chrome and control seats', () => {
     expect(launcher.getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('the Access chip renders the projection value and submits a non-Full-access pick directly', async () => {
+  it('the Access toggle is icon-only and cycles read-only → workspace-write → full access → read-only', async () => {
     const command = vi.fn(() => Promise.resolve(true))
     const permissions = {
       options: [
@@ -1506,24 +1506,19 @@ describe('command launcher chrome and control seats', () => {
     }
     const { view } = bench({ permissions, command })
     const trigger = view.getByLabelText(/^访问模式/) as HTMLButtonElement
-    // Title-case display is presentation only; the menu ids stay machine names.
-    expect(trigger.textContent).toBe('Read Only')
+    // Icon-only: no visible text, exactly one glyph.
+    expect(trigger.textContent).toBe('')
     expect([...trigger.querySelectorAll('svg')]
       .every(icon => icon.closest('[aria-hidden="true"]') !== null)).toBe(true)
+    // No menu, no dialog — a click cycles directly.
     fireEvent.click(trigger)
-    const items = view.getAllByRole('menuitem')
-    expect(items.map(o => o.textContent)).toEqual(['Read Only', 'Workspace Write', 'Full access'])
-    fireEvent.click(items[1]!)
-    // Optimistic pick + disable until admission resolves (command stub resolves true).
-    const busy = view.getByLabelText(/^访问模式/) as HTMLButtonElement
-    expect(busy.textContent).toBe('Workspace Write')
-    expect(busy.disabled).toBe(true)
+    expect(view.queryByRole('menuitem')).toBeNull()
+    expect(view.queryByRole('dialog')).toBeNull()
     expect(command).toHaveBeenCalledWith('/permission workspace-write')
     await act(async () => {})
-    expect((view.getByLabelText(/^访问模式/) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('requires explicit risk acknowledgement before submitting Full access', async () => {
+  it('the Access toggle cycles from workspace-write to full access without any confirmation popup', async () => {
     const command = vi.fn(() => Promise.resolve(true))
     const permissions = {
       options: [
@@ -1534,51 +1529,30 @@ describe('command launcher chrome and control seats', () => {
     }
     const { view } = bench({ permissions, command })
     fireEvent.click(view.getByLabelText(/^访问模式/))
-    fireEvent.click(view.getByRole('menuitem', { name: 'Full access' }))
-
-    expect(command).not.toHaveBeenCalled()
-    expect(view.getByRole('dialog', { name: '确认启用 Full access？' })).toBeTruthy()
-    const enable = view.getByRole('button', { name: '启用 Full access' }) as HTMLButtonElement
-    expect(enable.disabled).toBe(true)
-
-    fireEvent.click(view.getByRole('checkbox', { name: '我已了解风险，并愿意继续' }))
-    expect(enable.disabled).toBe(false)
-    fireEvent.click(enable)
-
+    // Enpoi Harness: full access needs NO risk acknowledgement — the popup is gone.
+    expect(view.queryByRole('dialog')).toBeNull()
     expect(command).toHaveBeenCalledOnce()
     expect(command).toHaveBeenCalledWith('/permission danger-full-access')
-    expect(view.queryByRole('dialog')).toBeNull()
-    expect((view.getByLabelText(/^访问模式/) as HTMLButtonElement).textContent).toBe('Full access')
     await act(async () => {})
   })
 
-  it('cancels a Full access selection without changing permission and resets acknowledgement', () => {
+  it('the Access toggle cycles from full access back to read-only', async () => {
     const command = vi.fn(() => Promise.resolve(true))
     const permissions = {
       options: [
+        { value: 'read-only', name: 'read-only' },
         { value: 'workspace-write', name: 'workspace-write' },
         { value: 'danger-full-access', name: 'danger-full-access' },
       ],
-      currentValue: 'workspace-write',
+      currentValue: 'danger-full-access',
     }
     const { view } = bench({ permissions, command })
-    const openConfirmation = () => {
-      fireEvent.click(view.getByLabelText(/^访问模式/))
-      fireEvent.click(view.getByRole('menuitem', { name: 'Full access' }))
-    }
-
-    openConfirmation()
-    fireEvent.click(view.getByRole('checkbox'))
-    fireEvent.click(view.getByRole('button', { name: '取消' }))
-    expect(command).not.toHaveBeenCalled()
-    expect((view.getByLabelText(/^访问模式/) as HTMLButtonElement).textContent).toBe('Workspace Write')
-
-    openConfirmation()
-    expect((view.getByRole('checkbox') as HTMLInputElement).checked).toBe(false)
-    expect((view.getByRole('button', { name: '启用 Full access' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(view.getByLabelText(/^访问模式/))
+    expect(command).toHaveBeenCalledWith('/permission read-only')
+    await act(async () => {})
   })
 
-  it('revokes an open Full access confirmation when the task locks', () => {
+  it('the Access toggle is disabled while locked', () => {
     const command = vi.fn(() => Promise.resolve(true))
     const permissions = {
       options: [
@@ -1587,30 +1561,10 @@ describe('command launcher chrome and control seats', () => {
       ],
       currentValue: 'workspace-write',
     }
-    const { view, session } = bench({ permissions, command })
-    fireEvent.click(view.getByLabelText(/^访问模式/))
-    fireEvent.click(view.getByRole('menuitem', { name: 'Full access' }))
-    fireEvent.click(view.getByRole('checkbox'))
-    act(() => { session.set(snapshotOf({ removed: true })) })
-    expect(view.queryByRole('dialog')).toBeNull()
-    expect(command).not.toHaveBeenCalled()
-  })
-
-  it('resets an open Full access confirmation when switching tasks', () => {
-    const command = vi.fn(() => Promise.resolve(true))
-    const permissions = {
-      options: [
-        { value: 'workspace-write', name: 'workspace-write' },
-        { value: 'danger-full-access', name: 'danger-full-access' },
-      ],
-      currentValue: 'workspace-write',
-    }
-    const { view, props } = bench({ permissions, command })
-    fireEvent.click(view.getByLabelText(/^访问模式/))
-    fireEvent.click(view.getByRole('menuitem', { name: 'Full access' }))
-    fireEvent.click(view.getByRole('checkbox'))
-    view.rerender(<InputBar {...props} sessionId={'s2' as SessionId} />)
-    expect(view.queryByRole('dialog')).toBeNull()
+    const { view } = bench({ permissions, command, disabled: true })
+    const trigger = view.getByLabelText(/^访问模式/) as HTMLButtonElement
+    expect(trigger.disabled).toBe(true)
+    fireEvent.click(trigger)
     expect(command).not.toHaveBeenCalled()
   })
 

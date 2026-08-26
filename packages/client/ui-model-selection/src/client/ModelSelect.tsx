@@ -329,7 +329,10 @@ export function ModelSelect(
     setDraggedFavorite(null)
   }
 
-  const modelLabel = currentChoice?.model.name ?? t('trigger.fallback')
+  // Enpoi Harness fallback: an old session may name a model no longer in the
+  // catalog (renamed/removed route) — show its raw id instead of a blank
+  // trigger so the picker never looks broken on legacy sessions.
+  const modelLabel = currentChoice?.model.name ?? state.current?.model ?? t('trigger.fallback')
 
   return (
     <div ref={rootRef} className={css.root}>

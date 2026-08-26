@@ -2969,8 +2969,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const presets = ctx.get('agentPresets')
         if (presets === undefined) return ok(request, { presets: [], authorable: false, hasDocument: false })
         const defaultId = presets.defaultId
+        // Enpoi Harness: `agent-presets.hideSystem` (settings.yaml) hides the
+        // shipped presets from picker surfaces — our orchestration ships its
+        // own preset fleet; system presets stay composable but unlisted.
+        const settings = ctx.get('settings')
+        const hideSystem = settings?.get(settingsNamespace('agent-presets')) as { hideSystem?: boolean } | undefined
+        const listed = (await presets.list()).filter(preset => !(hideSystem?.hideSystem === true && preset.trust === 'system'))
         return ok(request, {
-          presets: (await presets.list()).map(preset => ({
+          presets: listed.map(preset => ({
             id: preset.id,
             trust: preset.trust,
             isDefault: preset.id === defaultId,
@@ -3000,13 +3006,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if ('error' in found) return err(request, found.error)
         const { agent } = found
         const swap = async (): Promise<RpcResponse<{ agentPreset: string }>> => {
-          // Re-read inside the queue: an earlier switch may have run, and a
-          // conversation may have started, since this request arrived.
-          if (!sessionBlank(agent.session)) {
+          // Enpoi Harness: mid-session switching is allowed while the session
+          // is IDLE (the engine recomposes the scope parent; session, history,
+          // and model connection survive). A running turn must finish first —
+          // recomposing mid-turn would resolve tool lookups and prompt
+          // assembly against the new composition while the old turn executes.
+          if (agent.status === 'running') {
             return err(request, {
-              code: 'agent-preset-locked',
-              message: `session "${sessionId}" has already started; its agent preset is fixed`,
-              details: { sessionId, agentPreset },
+              code: 'agent-busy',
+              message: `session "${sessionId}" is currently running; wait for the turn to finish before switching agents`,
+              details: { reason: 'agent-preset-switch-while-running' },
             })
           }
           try {
