@@ -1,6 +1,11 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import css from './ActivityBar.module.css'
 
+/** CSS-module index access is `string | undefined` under noUncheckedIndexedAccess; module keys are static. */
+function cls(name: string | undefined): string {
+  return name ?? ''
+}
+
 interface BetterSidebarService {
   getSnapshot(): { state?: { panelOpen?: boolean; bottomOpen?: boolean; splits?: unknown } }
   subscribe(listener: () => void): () => void
@@ -79,11 +84,11 @@ export function mountActivityBar(ctx: ClientContext): () => void {
 
   rail = document.createElement('aside')
   rail.id = 'enpoi-activity-bar'
-  rail.className = css.activityRail
+  rail.className = cls(css.activityRail)
   rail.setAttribute('aria-label', 'Workbench Activity Bar')
 
   const topGroup = document.createElement('div')
-  topGroup.className = css.topGroup
+  topGroup.className = cls(css.topGroup)
 
   const toolButtons: Map<string, HTMLButtonElement> = new Map()
 
@@ -93,9 +98,9 @@ export function mountActivityBar(ctx: ClientContext): () => void {
   const updateActiveUI = () => {
     for (const [id, btn] of toolButtons.entries()) {
       if (isRightPanelOpen && currentActiveType === id) {
-        btn.classList.add(css.activityButtonActive)
+        btn.classList.add(cls(css.activityButtonActive))
       } else {
-        btn.classList.remove(css.activityButtonActive)
+        btn.classList.remove(cls(css.activityButtonActive))
       }
     }
   }
@@ -103,7 +108,7 @@ export function mountActivityBar(ctx: ClientContext): () => void {
   for (const tool of TOOLS) {
     const btn = document.createElement('button')
     btn.type = 'button'
-    btn.className = css.activityButton
+    btn.className = cls(css.activityButton)
     btn.title = tool.title
     btn.setAttribute('aria-label', tool.title)
     btn.innerHTML = tool.svg
@@ -139,11 +144,11 @@ export function mountActivityBar(ctx: ClientContext): () => void {
   }
 
   const bottomGroup = document.createElement('div')
-  bottomGroup.className = css.bottomGroup
+  bottomGroup.className = cls(css.bottomGroup)
 
   const bottomBtn = document.createElement('button')
   bottomBtn.type = 'button'
-  bottomBtn.className = css.activityButton
+  bottomBtn.className = cls(css.activityButton)
   bottomBtn.title = 'Toggle Bottom Panel'
   bottomBtn.setAttribute('aria-label', 'Toggle Bottom Panel')
   bottomBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -173,9 +178,9 @@ export function mountActivityBar(ctx: ClientContext): () => void {
     const bottomPanel = host?.querySelector('div[class*="bottomPanel"]') as HTMLElement | null
     const isBottomOpen = bottomPanel !== null && (typeof bottomPanel.className === 'string' ? !bottomPanel.className.includes('bottomPanelHidden') : true) && bottomPanel.style.visibility !== 'hidden'
     if (isBottomOpen) {
-      bottomBtn.classList.add(css.activityButtonActive)
+      bottomBtn.classList.add(cls(css.activityButtonActive))
     } else {
-      bottomBtn.classList.remove(css.activityButtonActive)
+      bottomBtn.classList.remove(cls(css.activityButtonActive))
     }
 
     const activeTabEl = document.querySelector('div[class*="paneTab"]:not([class*="paneTabHidden"])')

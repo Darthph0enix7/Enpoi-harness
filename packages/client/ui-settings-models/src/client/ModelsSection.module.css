@@ -89,6 +89,9 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -653,6 +656,9 @@
   gap: 4px;
   max-height: 380px;
   overflow-y: auto;
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   padding-right: 2px;
 }
 
@@ -840,6 +846,9 @@
   gap: 8px;
   max-height: 340px;
   overflow-y: auto;
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   padding-right: 2px;
 }
 

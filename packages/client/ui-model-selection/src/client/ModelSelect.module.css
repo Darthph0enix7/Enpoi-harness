@@ -253,6 +253,9 @@
   padding: 4px 4px 6px 4px;
   max-height: 380px;
   box-sizing: border-box;
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 /* Section / Group Header */
