@@ -8,6 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { WatchtowerView, type WatchtowerModelFace } from './WatchtowerView.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
+import { CapabilitiesSettingsSection } from './CapabilitiesSettingsSection.tsx'
 
 /** Required services: the UI slot registry, the shared model directory, sessions, and locale. */
 export const inject = ['slots', 'modelDirectories', 'sessions', 'locale']
@@ -101,4 +102,13 @@ export function apply(ctx: Context): void {
     yield ctx.slots.register({ name: 'tool.call.toolview', key: 'roundtable' }, TheMarkTaskCardAdapter)
     yield ctx.slots.register({ name: 'tool.call.toolview', key: 'chorus' }, TheMarkTaskCardAdapter)
   })
+
+  // 4. Capabilities Settings Section inside the Settings modal
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    key: 'capabilities',
+    id: 'capabilities',
+    order: 15,
+    label: () => 'Capabilities',
+  }, CapabilitiesSettingsSection))
 }
