@@ -1,6 +1,14 @@
-import { useState, useMemo } from 'react'
-import styles from './WatchtowerView.module.css'
-import { FleetPersonaModelPicker } from './FleetPersonaModelPicker.tsx'
+/**
+ * The Watchtower: full-canvas session cockpit (`conversation.view` @30).
+ * Minimal Liquid-Glass surface — icon+label micro headers, muted palette,
+ * every value projected live (zero hardcoded copy): the Living Brief renders
+ * only what the keeper actually wrote, personas carry the globally shared
+ * compact ModelSelect (same directory, favorites, and visibility rules).
+ */
+import { useEffect, useMemo, useState } from 'react'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
+import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import css from './WatchtowerView.module.css'
 
 /** Structural subset of the session snapshot the view reads. */
 interface SessionLike {
@@ -26,16 +34,17 @@ interface BriefLike {
   readonly filesTouched?: readonly string[]
 }
 
-interface OracleLike {
-  readonly status?: string
-}
+interface OracleLike { readonly status?: string }
+interface CouncilLike { readonly status?: string }
+interface MemoryLedgerLike { readonly committedCount?: number }
 
-interface CouncilLike {
-  readonly status?: string
-}
-
-interface MemoryLedgerLike {
-  readonly committedCount?: number
+/** Injected model face built in apply() (directory + persona persistence). */
+export interface WatchtowerModelFace {
+  available: boolean
+  directory: Parameters<typeof ModelSelect>[0]['directory']
+  load: () => void
+  assign: (persona: string, selection: ModelSelection) => Promise<boolean>
+  readAssignments: () => Promise<Record<string, ModelSelection> | null>
 }
 
 export interface WatchtowerViewProps {
@@ -43,307 +52,295 @@ export interface WatchtowerViewProps {
   sessionId?: string
   useProjection?: <T>(key: string, selector?: (v: unknown) => T) => T
   useWorkspaces?: <S>(selector: (w: WorkspaceLike) => S) => S
+  models?: WatchtowerModelFace
+  t?: (key: string) => string
 }
 
 interface PersonaSeat {
   id: string
   name: string
-  role: string
   icon: string
-  defaultModel: string
 }
 
-const PERSONA_SEATS: PersonaSeat[] = [
-  { id: 'orchestrator', name: 'Orchestrator', role: 'Lead Conductor & Main Loop', icon: '👑', defaultModel: 'deepseek/deepseek-v4-flash' },
-  { id: 'sysadmin', name: 'Sysadmin', role: 'Fleet & Infrastructure Ops', icon: '⚙️', defaultModel: 'deepseek/deepseek-v4-flash' },
-  { id: 'oracle', name: 'The Oracle', role: 'Architectural Supervisor & Review', icon: '🔮', defaultModel: 'antigravity/gemini-3.7-flash-tiered' },
-  { id: 'fixer', name: 'Fixer', role: 'Bounded Code Implementer', icon: '🛠️', defaultModel: 'deepseek/deepseek-v4-flash' },
-  { id: 'explorer', name: 'Explorer', role: 'Codebase Mapping & Search', icon: '🧭', defaultModel: 'deepseek/deepseek-v4-flash' },
-  { id: 'librarian', name: 'Librarian', role: 'Web Research & Documentation', icon: '📚', defaultModel: 'antigravity/gemini-3.7-flash-tiered' },
-  { id: 'designer', name: 'Designer', role: 'UI/UX & Visual Styling', icon: '🎨', defaultModel: 'antigravity/gemini-3.7-flash-tiered' },
-  { id: 'council', name: 'High Council', role: 'Debaters (Skeptic, Architect, Pragmatist)', icon: '🏛️', defaultModel: 'antigravity/gemini-3.7-flash-tiered' },
+interface PersonaCategory {
+  title: string
+  seats: PersonaSeat[]
+}
+
+/** Persona categories and seats — identifiers only; models are never defaulted here. */
+const FLEET_CATEGORIES: PersonaCategory[] = [
+  {
+    title: 'Core & Agents',
+    seats: [
+      { id: 'orchestrator', name: 'Orchestrator', icon: 'M3 8l4-4 3 3 4-4' },
+      { id: 'sysadmin', name: 'Sysadmin', icon: 'M3 10h10M5 10V7m4 3V5m3 5V8' },
+      { id: 'oracle', name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2' },
+    ],
+  },
+  {
+    title: 'Specialist Workers',
+    seats: [
+      { id: 'fixer', name: 'Fixer', icon: 'M10.5 2.5l3 3L6 13H3v-3z' },
+      { id: 'explorer', name: 'Explorer', icon: 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4' },
+      { id: 'librarian', name: 'Librarian', icon: 'M3 4h4v9H3zM8 4h5v9H8zM3 13h10' },
+      { id: 'designer', name: 'Designer', icon: 'M8 3l1.8 3.6L13.5 8l-3.7 1.4L8 13l-1.8-3.6L2.5 8l3.7-1.4z' },
+    ],
+  },
+  {
+    title: 'Roundtable Debaters',
+    seats: [
+      { id: 'skeptic', name: 'Skeptic', icon: 'M12 4l-8 8m0-8l8 8' },
+      { id: 'architect', name: 'Architect', icon: 'M3 13V8m3 5V5m3 8V3m3 10V7' },
+      { id: 'pragmatist', name: 'Pragmatist', icon: 'M3 8h10M10 4l3 4-3 4' },
+      { id: 'critic', name: 'Critic', icon: 'M8 2a6 6 0 100 12A6 6 0 008 2zm0 3v4l3 2' },
+    ],
+  },
+  {
+    title: 'Chorus Brainstormers',
+    seats: [
+      { id: 'visionary', name: 'Visionary', icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z' },
+      { id: 'experiencer', name: 'Experiencer', icon: 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z' },
+      { id: 'integrator', name: 'Integrator', icon: 'M4 4h4v4H4zM8 8h4v4H8z' },
+      { id: 'curator', name: 'Curator', icon: 'M8 3v10M3 8h10' },
+    ],
+  },
 ]
 
-/** Parsed sections of the keeper's structured prose brief. */
+const TOTAL_SEATS_COUNT = FLEET_CATEGORIES.reduce((acc, cat) => acc + cat.seats.length, 0)
+
+/** Parsed sections of the keeper's structured prose brief (no invented data). */
 interface BriefSections {
-  goal?: string
+  goal?: string[]
   docs?: string[]
   invariants?: string[]
   rejected?: string[]
   blockers?: string[]
 }
 
-/** Parse structured sections from Living Brief prose. */
 function parseBriefSections(text: string): BriefSections {
   const sections: BriefSections = {}
-  const lines = text.split('\n')
   let currentSection = ''
   const currentLines: Record<string, string[]> = {}
 
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     const t = line.trim()
-    if (t.includes('GOAL') || t.startsWith('🎯')) {
-      currentSection = 'goal'
-    } else if (t.includes('DOCUMENTATION') || t.includes('SPECIFICATION') || t.startsWith('📚')) {
-      currentSection = 'docs'
-    } else if (t.includes('INVARIANT') || t.includes('DECISION') || t.startsWith('🏛️')) {
-      currentSection = 'invariants'
-    } else if (t.includes('REJECTED') || t.includes('EDGE CASE') || t.startsWith('🚫')) {
-      currentSection = 'rejected'
-    } else if (t.includes('BLOCKER') || t.includes('OPEN') || t.startsWith('⚡')) {
-      currentSection = 'blockers'
-    } else if (currentSection !== '' && t.length > 0) {
+    if (t.length === 0) continue
+    if (t.includes('GOAL') || t.startsWith('🎯')) currentSection = 'goal'
+    else if (t.includes('DOCUMENTATION') || t.includes('SPECIFICATION') || t.startsWith('📚')) currentSection = 'docs'
+    else if (t.includes('INVARIANT') || t.includes('DECISION') || t.startsWith('🏛')) currentSection = 'invariants'
+    else if (t.includes('REJECTED') || t.includes('EDGE CASE') || t.startsWith('🚫')) currentSection = 'rejected'
+    else if (t.includes('BLOCKER') || t.includes('OPEN') || t.startsWith('⚡')) currentSection = 'blockers'
+    else if (currentSection !== '') {
       const bucket = currentLines[currentSection] ?? []
-      bucket.push(t)
+      bucket.push(t.replace(/^[-•]\s*/, ''))
       currentLines[currentSection] = bucket
     }
   }
 
-  if (currentLines.goal !== undefined) sections.goal = currentLines.goal.join('\n')
+  if (currentLines.goal !== undefined) sections.goal = currentLines.goal
   if (currentLines.docs !== undefined) sections.docs = currentLines.docs
   if (currentLines.invariants !== undefined) sections.invariants = currentLines.invariants
   if (currentLines.rejected !== undefined) sections.rejected = currentLines.rejected
   if (currentLines.blockers !== undefined) sections.blockers = currentLines.blockers
-
   return sections
 }
 
-export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces }: WatchtowerViewProps) {
-  // Observable selector hooks require an explicit selector (no identity default).
+/** Micro monochrome icon (10px, stroke currentColor). */
+function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d={d} />
+    </svg>
+  )
+}
+
+function SectionBlock({ icon, label, lines }: { icon: string; label: string; lines: string[] }) {
+  if (lines.length === 0) return null
+  return (
+    <div className={css.section}>
+      <div className={css.sectionHead}>
+        <MicroIcon d={icon} />
+        <span>{label}</span>
+      </div>
+      <div className={css.sectionBody}>
+        {lines.map((line, i) => <div key={i}>{line}</div>)}
+      </div>
+    </div>
+  )
+}
+
+export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, models, t }: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
-  const [halting, setHalting] = useState(false)
-  const [modelAssignments, setModelAssignments] = useState<Record<string, string>>({})
+  const [assignments, setAssignments] = useState<Record<string, ModelSelection>>({})
 
-  // Read real projections from framework standard seats (UI-1)
   const hasProjection = typeof useProjection === 'function'
   const livingBrief = hasProjection ? useProjection<BriefLike>('livingBrief') : undefined
-  const oracleScorecard = hasProjection ? useProjection<OracleLike>('oracleScorecard') : undefined
-  const councilState = hasProjection ? useProjection<CouncilLike>('councilState') : undefined
-  const memoryLedger = hasProjection ? useProjection<MemoryLedgerLike>('memoryLedger') : undefined
+  const oracle = hasProjection ? useProjection<OracleLike>('oracleScorecard') : undefined
+  const council = hasProjection ? useProjection<CouncilLike>('councilState') : undefined
+  const memory = hasProjection ? useProjection<MemoryLedgerLike>('memoryLedger') : undefined
 
-  const briefSections = useMemo(
+  const sections = useMemo(
     () => (livingBrief?.prose?.text !== undefined ? parseBriefSections(livingBrief.prose.text) : null),
     [livingBrief?.prose?.text],
   )
 
-  const handleSelectModel = (personaId: string, provider: string, model: string) => {
-    const full = `${provider}/${model}`
-    setModelAssignments(prev => ({ ...prev, [personaId]: full }))
-    // Dispatch model mutation
-    void fetch('/api/settings.mutate', {
+  // Load persisted persona assignments once (best effort; absence = inherit).
+  useEffect(() => {
+    let cancelled = false
+    if (models !== undefined) {
+      void models.readAssignments().then((loaded) => {
+        if (!cancelled && loaded !== null) setAssignments(loaded)
+      })
+    }
+    return () => { cancelled = true }
+  }, [models])
+
+  // Directory current selection is the inherit-default for unassigned personas.
+  const directory = models?.directory
+  const inheritCurrent = useMemo(() => {
+    if (directory === undefined) return null
+    return (directory.getSnapshot() as { current?: ModelSelection | null }).current ?? null
+  }, [directory])
+
+  const handleHalt = () => {
+    const target = sessionId ?? session?.sessionId ?? session?.id
+    if (target === undefined) return
+    void fetch('/api/session.cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'client-request',
-        method: 'settings.mutate',
-        rpcId: `assign-model-${personaId}`,
-        payload: {
-          key: `enpoi-orchestration.personas.${personaId}`,
-          value: full,
-        },
-      }),
+      body: JSON.stringify({ type: 'client-request', method: 'session.cancel', rpcId: 'wt-halt', payload: { sessionId: target } }),
     }).catch(() => {})
   }
 
-  const handleHalt = async () => {
-    if (halting) return
-    setHalting(true)
-    const targetSessionId = sessionId ?? session?.sessionId ?? session?.id
-    try {
-      await fetch('/api/session.cancel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'client-request',
-          method: 'session.cancel',
-          rpcId: 'emergency-halt',
-          payload: { sessionId: targetSessionId },
-        }),
-      })
-    } catch {
-      // Best effort halt
-    } finally {
-      setTimeout(() => setHalting(false), 1500)
-    }
-  }
+  const freshness = livingBrief?.freshness
+  const hasBrief = sections !== null
+    && (sections.goal !== undefined || sections.docs !== undefined || sections.invariants !== undefined
+      || sections.rejected !== undefined || sections.blockers !== undefined)
+      || (livingBrief?.decisions !== undefined && livingBrief.decisions.length > 0)
+      || (livingBrief?.blockers !== undefined && livingBrief.blockers.length > 0)
 
-  const title = session?.displayTitle ?? session?.title ?? 'Enpoi Active Session'
-  const cwd = session?.cwd ?? workspaces?.activeWorkspace?.path ?? '/home/adam'
-  const freshness = livingBrief?.freshness ?? 'live'
-  const freshnessClass =
-    freshness === 'live' ? styles.badgeLive : freshness === 'cooling' ? styles.badgeCooling : styles.badgeStale
+  const title = session?.displayTitle ?? session?.title
+  const cwd = session?.cwd ?? workspaces?.activeWorkspace?.path
 
   return (
-    <div className={styles.watchtowerContainer}>
-      {/* Top Header Card */}
-      <div className={styles.watchtowerHeader}>
-        <div className={styles.headerTitleGroup}>
-          <div className={styles.headerTitle}>
-            <span>🌟 The Watchtower</span>
-            <span className={`${styles.badge} ${freshnessClass}`}>● {freshness.toUpperCase()}</span>
-          </div>
-          <div className={styles.headerSubtitle}>
-            <span>{title}</span>
-            <span>•</span>
-            <span className={styles.specPath}>{cwd}</span>
-          </div>
+    <div className={css.container}>
+      <header className={css.head}>
+        <div className={css.headLeft}>
+          <span className={css.freshnessDot} data-state={freshness ?? 'none'} />
+          <span className={css.headTitle}>{title ?? 'Watchtower'}</span>
+          {cwd !== undefined && <span className={css.headPath}>{cwd}</span>}
+          {livingBrief?.asOfSeq !== undefined && <span className={css.headSeq}>· {livingBrief.asOfSeq}</span>}
         </div>
-
-        <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={styles.haltButton}
-            onClick={handleHalt}
-            disabled={halting}
-            title="Emergency Halt: Terminate active task fibers"
-          >
-            {halting ? '🛑 Halting Fleet...' : '🛑 Emergency Halt'}
+        <div className={css.headRight}>
+          {memory?.committedCount !== undefined && (
+            <span className={css.microStat} title="Durable memory facts">
+              <MicroIcon d="M3 3h2v2H3zM3 7h2v2H3zM3 11h2v2H3zM7 4h6M7 8h6M7 12h6" />
+              {memory.committedCount}
+            </span>
+          )}
+          {oracle?.status !== undefined && (
+            <span className={css.microStat} title={`Oracle: ${oracle.status}`}>
+              <MicroIcon d="M8 3a5 5 0 100 10A5 5 0 008 3z" />
+              {oracle.status}
+            </span>
+          )}
+          {council?.status !== undefined && (
+            <span className={css.microStat} title={`Council: ${council.status}`}>
+              <MicroIcon d="M3 13V8m3 5V5m3 8V3m3 10V7" />
+              {council.status}
+            </span>
+          )}
+          <button type="button" className={css.haltBtn} onClick={handleHalt} title="Emergency Halt">
+            <MicroIcon d="M4 4h8v8H4z" size={9} />
           </button>
         </div>
-      </div>
+      </header>
 
-      {/* Main Grid: Living Brief + Fleet Routing */}
-      <div className={styles.gridTwoCol}>
-        {/* Card 1: 5-Section Living Brief */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div className={styles.cardTitle}>
-              <span>📜 Active Living Brief</span>
-            </div>
-            <span className={`${styles.badge} ${freshnessClass}`}>
-              Seq #{livingBrief?.asOfSeq ?? 0}
-            </span>
+      <div className={css.grid}>
+        {/* Living Brief — projected only, no fallback copy */}
+        <section className={css.card}>
+          <div className={css.cardHead}>
+            <MicroIcon d="M3 2h8l2 2v10H3zM6 6h4M6 9h4" />
+            <span>Brief</span>
           </div>
-
-          {/* Goal Section */}
-          <div className={styles.sectionBlock}>
-            <div className={styles.sectionTitle}>🎯 Active Goal & Core Trajectory</div>
-            <div className={styles.sectionContent}>
-              {briefSections?.goal || livingBrief?.goal || 'Developing current milestone and active objectives.'}
-            </div>
-          </div>
-
-          {/* Docs Section */}
-          <div className={styles.sectionBlock}>
-            <div className={styles.sectionTitle}>📚 Specifications & Documentation Map</div>
-            <div className={styles.sectionContent}>
-              {briefSections?.docs !== undefined && briefSections.docs.length > 0 ? (
-                briefSections.docs.map((d, i) => <div key={i}>{d}</div>)
-              ) : (
-                <>
-                  <span className={styles.specPath}>~/dsh-migration/39-phase5-ui-experience-plan.md</span> — UI Architecture<br />
-                  <span className={styles.specPath}>~/dsh-migration/38-orchestration-parameters-manifest.md</span> — Parameters Manifest
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Invariants & Decisions Section */}
-          <div className={styles.sectionBlock}>
-            <div className={styles.sectionTitle}>🏛️ Architectural Invariants & Concrete Decisions</div>
-            <div className={styles.sectionContent}>
-              {briefSections?.invariants !== undefined && briefSections.invariants.length > 0 ? (
-                briefSections.invariants.map((inv, i) => <div key={i}>{inv}</div>)
-              ) : livingBrief?.decisions !== undefined && livingBrief.decisions.length > 0 ? (
-                livingBrief.decisions.map((d, i) => <div key={i}>• {d.text}</div>)
-              ) : (
-                '• Reactive projection consumption; 0ms optimistic model hot-swapping; calligraphy latching.'
-              )}
-            </div>
-          </div>
-
-          {/* Rejected Approaches Section */}
-          <div className={styles.sectionBlock}>
-            <div className={styles.sectionTitle}>🚫 Rejected Approaches & Edge Cases</div>
-            <div className={styles.sectionContent}>
-              {briefSections?.rejected !== undefined && briefSections.rejected.length > 0 ? (
-                briefSections.rejected.map((r, i) => <div key={i}>{r}</div>)
-              ) : (
-                '• Prohibited docked vertical headers over composer; child stream noise isolated from chat.'
-              )}
-            </div>
-          </div>
-
-          {/* Blockers & Open Threads Section */}
-          <div className={styles.sectionBlock}>
-            <div className={styles.sectionTitle}>⚡ Active Blockers & Open Threads</div>
-            <div className={styles.sectionContent}>
-              {briefSections?.blockers !== undefined && briefSections.blockers.length > 0 ? (
-                briefSections.blockers.map((b, i) => <div key={i}>{b}</div>)
-              ) : livingBrief?.blockers !== undefined && livingBrief.blockers.length > 0 ? (
-                livingBrief.blockers.map((b, i) => <div key={i}>⚠️ {b.text}</div>)
-              ) : (
-                '• Verified and green: zero active blockers.'
-              )}
-            </div>
-          </div>
-
-          {/* Files Touched */}
-          {livingBrief?.filesTouched !== undefined && livingBrief.filesTouched.length > 0 && (
-            <div className={styles.sectionBlock}>
-              <div className={styles.sectionTitle}>📁 Files Touched ({livingBrief.filesTouched.length})</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {livingBrief.filesTouched.map((f, i) => (
-                  <span key={i} className={styles.specPath}>{f}</span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Card 2: Fleet & Model Routing Command */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div className={styles.cardTitle}>
-              <span>⚡ Fleet & Persona Routing</span>
-            </div>
-            <span className={`${styles.badge} ${styles.badgeLive}`}>
-              {PERSONA_SEATS.length} Personas Online
-            </span>
-          </div>
-
-          <div style={{ fontSize: 12, color: '#94a3b8' }}>
-            Hot-swap models per persona with 0ms optimistic switching. Respects Settings visibility preferences.
-          </div>
-
-          <div className={styles.personaGrid}>
-            {PERSONA_SEATS.map((seat) => {
-              const activeModel = modelAssignments[seat.id] ?? seat.defaultModel
-              return (
-                <div key={seat.id} className={styles.personaRow}>
-                  <div className={styles.personaInfo}>
-                    <div className={styles.personaIcon}>{seat.icon}</div>
-                    <div>
-                      <div className={styles.personaName}>{seat.name}</div>
-                      <div className={styles.personaRole}>{seat.role}</div>
-                    </div>
+          {hasBrief ? (
+            <>
+              <SectionBlock icon="M8 2l1.5 4.5H14l-3.5 2.8L11.8 14 8 11.2 4.2 14l1.3-4.7L2 6.5h4.5z" label="Goal"
+                lines={sections?.goal ?? (livingBrief?.goal !== undefined ? [livingBrief.goal] : [])} />
+              <SectionBlock icon="M3 3h2v2H3zM3 7h2v2H3zM3 11h2v2H3zM7 4h6M7 8h6M7 12h6" label="Docs"
+                lines={sections?.docs ?? []} />
+              <SectionBlock icon="M3 13V8m3 5V5m3 8V3m3 10V7" label="Decisions"
+                lines={sections?.invariants ?? (livingBrief?.decisions ?? []).map(d => d.text)} />
+              <SectionBlock icon="M3 3l10 10M13 3L3 13" label="Rejected"
+                lines={sections?.rejected ?? []} />
+              <SectionBlock icon="M9 2L3 9h4l-1 5 6-7H8z" label="Blockers"
+                lines={sections?.blockers ?? (livingBrief?.blockers ?? []).map(b => b.text)} />
+              {livingBrief?.filesTouched !== undefined && livingBrief.filesTouched.length > 0 && (
+                <div className={css.section}>
+                  <div className={css.sectionHead}>
+                    <MicroIcon d="M3 3h4l1 2h5v8H3z" />
+                    <span>Files · {livingBrief.filesTouched.length}</span>
                   </div>
-
-                  <FleetPersonaModelPicker
-                    persona={seat.name}
-                    currentModel={activeModel}
-                    onSelectModel={(provider, model) => handleSelectModel(seat.id, provider, model)}
-                  />
+                  <div className={css.chipRow}>
+                    {livingBrief.filesTouched.slice(0, 12).map((f, i) => (
+                      <span key={i} className={css.pathChip} title={f}>{f}</span>
+                    ))}
+                  </div>
                 </div>
-              )
-            })}
-          </div>
+              )}
+            </>
+          ) : (
+            <div className={css.empty}>keeper idle — no brief yet</div>
+          )}
+        </section>
 
-          {/* Oracle & Council Telemetry */}
-          <div style={{ borderTop: '1px solid rgba(255, 255, 255, 0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className={styles.cardTitle}>
-              <span>🔮 Oracle & 🏛️ Council Telemetry</span>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 12, color: '#cbd5e1' }}>
-              <div>Oracle Scorecard: <strong>{oracleScorecard?.status ?? 'Ready'}</strong></div>
-              <div>•</div>
-              <div>Council: <strong>{councilState?.status ?? 'Consensus 98%'}</strong></div>
-              <div>•</div>
-              <div>Memory DB: <strong>{memoryLedger?.committedCount ?? 43} Facts</strong></div>
-            </div>
+        {/* Fleet — shared compact ModelSelect per persona */}
+        <section className={css.card}>
+          <div className={css.cardHead}>
+            <MicroIcon d="M2 13l6-10 6 10z" />
+            <span>Fleet · {TOTAL_SEATS_COUNT}</span>
           </div>
-        </div>
+          {models !== undefined && models.available ? (
+            <div className={css.fleetGroups}>
+              {FLEET_CATEGORIES.map(category => (
+                <div key={category.title} className={css.fleetGroup}>
+                  <div className={css.fleetGroupTitle}>{category.title}</div>
+                  <div className={css.fleetRows}>
+                    {category.seats.map((seat) => {
+                      const assigned = assignments[seat.id] ?? inheritCurrent
+                      const override: ModelSelectOverride = {
+                        current: assigned,
+                        select: (selection) => {
+                          setAssignments(prev => ({ ...prev, [seat.id]: selection }))
+                          return models.assign(seat.id, selection)
+                        },
+                      }
+                      return (
+                        <div key={seat.id} className={css.fleetRow} title={seat.name}>
+                          <span className={css.fleetIcon}><MicroIcon d={seat.icon} size={11} /></span>
+                          <span className={css.fleetName}>{seat.name}</span>
+                          <ModelSelect
+                            locked={false}
+                            available={models.available}
+                            directory={models.directory}
+                            load={models.load}
+                            select={() => Promise.resolve(true)}
+                            compact
+                            override={override}
+                            t={t ?? (() => '')}
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className={css.empty}>model directory unavailable</div>
+          )}
+        </section>
       </div>
     </div>
   )

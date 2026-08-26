@@ -1,72 +1,70 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { describe, it, expect, afterEach } from 'vitest'
+import { render, screen, cleanup } from '@testing-library/react'
 import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
-import { WatchtowerDock } from '../src/client/WatchtowerDock.tsx'
 import { TheMarkTaskCard } from '../src/client/TheMarkTaskCard.tsx'
-import { FleetPersonaModelPicker } from '../src/client/FleetPersonaModelPicker.tsx'
 
-describe('Enpoi Harness UI - Phase 5 Component Tests', () => {
+describe('Enpoi Harness UI — Watchtower (minimal, projected-only)', () => {
   afterEach(() => {
     cleanup()
   })
 
-  it('WatchtowerView renders reactive projection data (UI-1)', () => {
+  it('renders the keeper brief sections from live projection data only (UI-1, zero hardcoding)', () => {
     const mockProjections: Record<string, unknown> = {
       livingBrief: {
-        goal: 'Implement Phase 5 UI Experience Layer',
         asOfSeq: 42,
         freshness: 'live',
         prose: {
-          text: '🎯 ACTIVE GOAL & CORE TRAJECTORY:\n- Build Watchtower canvas and fleet model routing.\n\n📚 SPECIFICATIONS & DOCUMENTATION MAP:\n- ~/dsh-migration/39-phase5-ui-experience-plan.md — UI plan\n\n🏛️ ARCHITECTURAL INVARIANTS & CONCRETE DECISIONS:\n- Zero client-side session log parsing.\n\n🚫 REJECTED APPROACHES & EDGE CASES:\n- Banned raw child stream noise in parent.\n\n⚡ ACTIVE BLOCKERS & OPEN THREADS:\n- None.',
+          text: [
+            '🎯 ACTIVE GOAL & CORE TRAJECTORY:',
+            '- Ship the Phase 5 minimal Watchtower.',
+            '',
+            '📚 DOCUMENTATION & SPECIFICATIONS:',
+            '- ~/dsh-migration/39-phase5-ui-experience-plan.md',
+            '',
+            '🏛 ARCHITECTURAL INVARIANTS:',
+            '- Sandbox: workspace-write; approvals ask.',
+            '- Skills load explicitly.',
+            '',
+            '🚫 REJECTED APPROACHES:',
+            '- No docked headers over composer.',
+            '',
+            '⚡ BLOCKERS:',
+            '- None open.',
+          ].join('\n'),
         },
         filesTouched: ['/home/adam/plan.md'],
       },
       oracleScorecard: { status: 'approved' },
-      councilState: { status: 'consensus', consensusRatio: 0.98 },
+      councilState: { status: 'consensus' },
       memoryLedger: { committedCount: 43 },
     }
 
-    const projectionHook = <T,>(key: string): T => mockProjections[key] as T
     render(
       <WatchtowerView
         sessionId="session-test-123"
         useSession={selector => selector({ displayTitle: 'Test Session', sessionId: 'session-test-123' })}
-        useProjection={projectionHook}
+        useProjection={<T,>(key: string): T => mockProjections[key] as T}
       />,
     )
 
-    expect(screen.getByText(/The Watchtower/i)).toBeTruthy()
-    expect(screen.getByText(/● LIVE/i)).toBeTruthy()
-    expect(screen.getByText(/Build Watchtower canvas and fleet model routing/i)).toBeTruthy()
-    expect(screen.getByText(/39-phase5-ui-experience-plan/i)).toBeTruthy()
-    expect(screen.getByText(/43 Facts/i)).toBeTruthy()
+    expect(screen.getByText('Ship the Phase 5 minimal Watchtower.')).toBeTruthy()
+    expect(screen.getByText('~/dsh-migration/39-phase5-ui-experience-plan.md')).toBeTruthy()
+    expect(screen.getByText('Sandbox: workspace-write; approvals ask.')).toBeTruthy()
+    expect(screen.getByText('No docked headers over composer.')).toBeTruthy()
+    expect(screen.getByText('None open.')).toBeTruthy()
+    expect(screen.getByText('43')).toBeTruthy()
   })
 
-  it('WatchtowerDock renders ambient status and triggers emergency halt (UI-2)', () => {
-    const mockProjections: Record<string, unknown> = {
-      livingBrief: { goal: 'Active Milestone 5 Goal' },
-      oracleScorecard: { status: 'ready' },
-      councilState: { status: 'ready' },
-    }
-
-    const projectionHook = <T,>(key: string): T => mockProjections[key] as T
+  it('shows the idle keeper empty state when no brief exists — never invented copy', () => {
     render(
-      <WatchtowerDock
+      <WatchtowerView
         sessionId="session-test-123"
-        useSession={selector => selector({ displayTitle: 'Test Session', sessionId: 'session-test-123' })}
-        useProjection={projectionHook}
+        useSession={selector => selector({ displayTitle: 'Fresh', sessionId: 'session-test-123' })}
+        useProjection={<T,>(): T => undefined as T}
       />,
     )
-
-    expect(screen.getByText(/Active Milestone 5 Goal/i)).toBeTruthy()
-    expect(screen.getByText(/🛡️ Oracle Ready/i)).toBeTruthy()
-    expect(screen.getByText(/🏛️ Council Ready/i)).toBeTruthy()
-
-    const haltBtn = screen.getByRole('button', { name: /Halt/i })
-    expect(haltBtn).toBeTruthy()
-    fireEvent.click(haltBtn)
-    expect(screen.getByText(/🛑 Halting.../i)).toBeTruthy()
+    expect(screen.getByText(/keeper idle/i)).toBeTruthy()
   })
 
   it('TheMarkTaskCard freezes calligraphy on interrupt/park (UI-4)', () => {
@@ -82,7 +80,6 @@ describe('Enpoi Harness UI - Phase 5 Component Tests', () => {
 
     expect(screen.getByText(/Running: ast_grep_search/i)).toBeTruthy()
 
-    // Transition to interrupted: calligraphy must freeze the last active tool
     rerender(
       <TheMarkTaskCard
         taskId="task-1"
@@ -93,26 +90,5 @@ describe('Enpoi Harness UI - Phase 5 Component Tests', () => {
     )
 
     expect(screen.getByText(/\[Interrupted at: ast_grep_search\]/i)).toBeTruthy()
-  })
-
-  it('FleetPersonaModelPicker toggles popover and triggers selection', () => {
-    const onSelect = vi.fn()
-    render(
-      <FleetPersonaModelPicker
-        persona="The Oracle"
-        currentModel="antigravity/gemini-3.7-flash-tiered"
-        onSelectModel={onSelect}
-      />,
-    )
-
-    const trigger = screen.getByTitle(/Select model for The Oracle/i)
-    expect(trigger.textContent).toContain('Gemini 3.7 Flash')
-
-    fireEvent.click(trigger)
-    expect(screen.getByPlaceholderText(/Search models/i)).toBeTruthy()
-
-    const deepseekOption = screen.getByText('DeepSeek V4 Flash')
-    fireEvent.click(deepseekOption)
-    expect(onSelect).toHaveBeenCalledWith('deepseek', 'deepseek-v4-flash')
   })
 })

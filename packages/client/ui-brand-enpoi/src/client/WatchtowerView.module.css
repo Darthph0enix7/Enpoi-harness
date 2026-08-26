@@ -1,237 +1,253 @@
-.watchtowerContainer {
+/* The Watchtower — minimal Liquid Glass. Muted palette, micro icons,
+   one low-alpha cyan accent. Scroll container carries the elevation rebind. */
+
+.container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 24px;
+  gap: 10px;
   height: 100%;
+  padding: 14px;
   overflow-y: auto;
-  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
-  color: var(--dsw-alias-label-primary-foreground, #f8fafc);
-  font-family: inherit;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
 }
 
-.watchtowerHeader {
+/* Header */
+.head {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  padding: 18px 24px;
-  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.65));
-  backdrop-filter: blur(28px) saturate(145%);
-  -webkit-backdrop-filter: blur(28px) saturate(145%);
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.18));
-  border-radius: 16px;
-  box-shadow: 0 8px 32px rgba(0, 7, 18, 0.35);
-}
-
-.headerTitleGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.headerTitle {
-  font-size: 18px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
   gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
 }
 
-.headerSubtitle {
-  font-size: 12px;
-  color: #94a3b8;
+.headLeft {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
-.headerActions {
+.headTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.headPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.headSeq {
+  font-size: 10px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.freshnessDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #475569;
+}
+.freshnessDot[data-state='live'] { background: #34d399; }
+.freshnessDot[data-state='cooling'] { background: #fbbf24; }
+.freshnessDot[data-state='stale'] { background: #64748b; }
+
+.headRight {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
-.badge {
+.microStat {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.badgeLive {
-  background: rgba(16, 185, 129, 0.15);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.badgeCooling {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-
-.badgeStale {
-  background: rgba(148, 163, 184, 0.15);
+  gap: 4px;
+  font-size: 10px;
   color: #94a3b8;
-  border: 1px solid rgba(148, 163, 184, 0.3);
 }
 
-.gridTwoCol {
+.haltBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(244, 63, 94, 0.08);
+  border: 1px solid rgba(244, 63, 94, 0.22);
+  color: #fb7185;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.haltBtn:hover { background: rgba(244, 63, 94, 0.18); }
+
+/* Grid */
+.grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 10px;
+  align-items: start;
 }
 
 .card {
-  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.65));
-  backdrop-filter: blur(28px) saturate(145%);
-  -webkit-backdrop-filter: blur(28px) saturate(145%);
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
-  border-radius: 16px;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  box-shadow: 0 8px 32px rgba(0, 7, 18, 0.25);
-}
-
-.cardHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding-bottom: 12px;
-}
-
-.cardTitle {
-  font-size: 14px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #f1f5f9;
-}
-
-.sectionBlock {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: rgba(0, 0, 0, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+  overflow: visible;
 }
 
-.sectionTitle {
-  font-size: 12px;
-  font-weight: 700;
-  color: #38bdf8;
+.cardHead {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  color: #94a3b8;
 }
 
-.sectionContent {
-  font-size: 13px;
-  line-height: 1.6;
-  color: #cbd5e1;
-  white-space: pre-wrap;
-}
-
-.specPath {
-  display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  background: rgba(56, 189, 248, 0.12);
-  color: #38bdf8;
-  padding: 2px 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  margin-right: 6px;
-}
-
-.personaGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
-}
-
-.personaRow {
+/* Brief sections */
+.section {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 14px;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
-  transition: border-color 0.2s, background-color 0.2s;
-}
-
-.personaRow:hover {
-  background: rgba(0, 0, 0, 0.35);
-  border-color: rgba(103, 220, 231, 0.3);
-}
-
-.personaInfo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.personaIcon {
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  background: rgba(255, 255, 255, 0.06);
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: 8px;
 }
 
-.personaName {
-  font-size: 13px;
-  font-weight: 600;
-  color: #f1f5f9;
+.sectionHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #7c8aa0;
 }
 
-.personaRole {
+.sectionBody {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #cbd5e1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pathChip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 5px;
+  padding: 1px 5px;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.empty {
   font-size: 11px;
-  color: #64748b;
+  color: #475569;
+  padding: 6px 2px;
 }
 
-.haltButton {
-  display: inline-flex;
+/* Fleet groups & rows */
+.fleetGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fleetGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  overflow: visible;
+}
+
+.fleetGroupTitle {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #64748b;
+  padding: 2px 6px;
+}
+
+.fleetRows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  position: relative;
+  overflow: visible;
+}
+
+.fleetRow {
+  display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
-  background: rgba(239, 68, 68, 0.2);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  padding: 4px 6px;
+  border-radius: 8px;
+  transition: background 120ms ease;
+  position: relative;
+  overflow: visible;
+}
+.fleetRow:hover { background: rgba(255, 255, 255, 0.03); }
+
+.fleetIcon {
+  display: inline-flex;
+  color: #7c8aa0;
+  flex-shrink: 0;
 }
 
-.haltButton:hover {
-  background: rgba(239, 68, 68, 0.35);
-  border-color: #ef4444;
-  color: #ffffff;
-  box-shadow: 0 0 16px rgba(239, 68, 68, 0.3);
+.fleetName {
+  font-size: 11px;
+  font-weight: 500;
+  color: #cbd5e1;
+  width: 84px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.haltButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.fleetRow > :last-child {
+  margin-left: auto;
 }

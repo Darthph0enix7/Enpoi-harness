@@ -61,14 +61,34 @@ interface EffortChoice {
   description?: string
 }
 
+/**
+ * Override face for reusing this picker outside the composer seat (e.g. the
+ * Watchtower's per-persona assignments): the active row and label come from
+ * the caller, and submits route to the caller instead of session.selectModel.
+ * Everything else (directory data, hidden-model filter, favorites, recents,
+ * drag ordering, search) behaves identically.
+ */
+export interface ModelSelectOverride {
+  /** The caller's current selection (null = nothing selected yet). */
+  current: ModelSelection | null
+  /** Submit target for both model and effort choices. */
+  select: (selection: ModelSelection) => Promise<boolean>
+}
+
 export function ModelSelect(
-  { locked, available, directory, load, select, t }:
-  ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
+  { locked, available, directory, load, select, compact, override, t }:
+  ModelSelectInjected
+  & { locked: boolean; compact?: boolean; override?: ModelSelectOverride }
+  & PropsLocale<'model'>,
 ) {
   const state = useSyncExternalStore(
     fn => directory.subscribe(fn),
     () => directory.getSnapshot(),
   )
+
+  // The selection this instance highlights and labels: the override's when
+  // reused, otherwise the session's own current selection.
+  const activeSel = override !== undefined ? override.current : state.current
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
@@ -135,7 +155,7 @@ export function ModelSelect(
   // All enabled model choices
   const choices = useMemo(() => state.groups.flatMap(group =>
     group.models
-      .filter(model => !isHidden(group.id, model.id) || (state.current?.provider === group.id && state.current.model === model.id))
+      .filter(model => !isHidden(group.id, model.id) || (activeSel?.provider === group.id && activeSel.model === model.id))
       .map(model => ({
         group,
         model,
@@ -146,14 +166,14 @@ export function ModelSelect(
             ? {}
             : { reasoningEffort: model.reasoning.defaultEffort },
         } satisfies ModelSelection,
-      }))), [state.groups, prefsVersion, state.current])
+      }))), [state.groups, prefsVersion, activeSel])
 
-  const selectedIndex = state.current === null
+  const selectedIndex = activeSel === null
     ? -1
-    : choices.findIndex(c => c.selection.provider === state.current?.provider && c.selection.model === state.current.model)
+    : choices.findIndex(c => c.selection.provider === activeSel?.provider && c.selection.model === activeSel.model)
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
-  const effectiveEffort = state.current?.reasoningEffort ?? reasoning?.defaultEffort
+  const effectiveEffort = activeSel?.reasoningEffort ?? reasoning?.defaultEffort
   const effortLabel = reasoning === undefined
     ? undefined
     : effectiveEffort === undefined
@@ -192,28 +212,30 @@ export function ModelSelect(
 
   const choose = (selection: ModelSelection): void => {
     recordRecentModel(selection.provider, selection.model)
-    if (state.current?.provider === selection.provider && state.current.model === selection.model) {
+    if (activeSel?.provider === selection.provider && activeSel.model === selection.model) {
       setPickerOpen(false)
       setSearchQuery('')
       return
     }
     lastActionRef.current = 'select'
-    void select(selection).then(settleSelection)
+    const submit = override !== undefined ? override.select : select
+    void submit(selection).then(settleSelection)
   }
 
   const chooseEffort = (effort: string | undefined): void => {
-    if (state.current === null) return
+    if (activeSel === null) return
     if (effectiveEffort === effort) {
       setEffortOpen(false)
       return
     }
     const selection: ModelSelection = {
-      provider: state.current.provider,
-      model: state.current.model,
+      provider: activeSel.provider,
+      model: activeSel.model,
       ...effort === undefined ? {} : { reasoningEffort: effort },
     }
     lastActionRef.current = 'select'
-    void select(selection).then(settleSelection)
+    const submit = override !== undefined ? override.select : select
+    void submit(selection).then(settleSelection)
   }
 
   // Model lookup map for quick access
@@ -249,13 +271,13 @@ export function ModelSelect(
     const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
     for (const ref of favRefs) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
-      const isCur = state.current?.provider === ref.provider && state.current.model === ref.modelId
+      const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
       if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
         result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
       }
     }
     return result
-  }, [modelLookup, prefsVersion, state.current])
+  }, [modelLookup, prefsVersion, activeSel])
 
   // Recents list
   const recentItems = useMemo(() => {
@@ -263,7 +285,7 @@ export function ModelSelect(
     const result: Array<{ provider: string; model: typeof state.groups[0]['models'][0]; groupName: string }> = []
     for (const ref of recents) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
-      const isCur = state.current?.provider === ref.provider && state.current.model === ref.modelId
+      const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
       if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
         if (!isModelFavorite(ref.provider, ref.modelId)) {
           result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
@@ -271,7 +293,7 @@ export function ModelSelect(
       }
     }
     return result
-  }, [modelLookup, prefsVersion, state.current])
+  }, [modelLookup, prefsVersion, activeSel])
 
   // Filtered queries
   const q = searchQuery.toLowerCase().trim()
@@ -332,10 +354,10 @@ export function ModelSelect(
   // Enpoi Harness fallback: an old session may name a model no longer in the
   // catalog (renamed/removed route) — show its raw id instead of a blank
   // trigger so the picker never looks broken on legacy sessions.
-  const modelLabel = currentChoice?.model.name ?? state.current?.model ?? t('trigger.fallback')
+  const modelLabel = currentChoice?.model.name ?? activeSel?.model ?? t('trigger.fallback')
 
   return (
-    <div ref={rootRef} className={css.root}>
+    <div ref={rootRef} className={clsx(css.root, compact === true && css.compactRoot)}>
       {/* 1. Main Model Trigger Button */}
       <button
         ref={triggerRef}
@@ -429,7 +451,7 @@ export function ModelSelect(
                 {!isGroupCollapsed('__favorites__') && (
                   <div className={css.groupBody}>
                     {filteredFavorites.map((fav, fIdx) => {
-                      const isSelected = state.current?.provider === fav.provider && state.current.model === fav.model.id
+                      const isSelected = activeSel?.provider === fav.provider && activeSel.model === fav.model.id
                       const contextStr = resolveModelContext(fav.model)
 
                       return (
@@ -499,7 +521,7 @@ export function ModelSelect(
                 {!isGroupCollapsed('__recents__') && (
                   <div className={css.groupBody}>
                     {recentItems.map((rec) => {
-                      const isSelected = state.current?.provider === rec.provider && state.current.model === rec.model.id
+                      const isSelected = activeSel?.provider === rec.provider && activeSel.model === rec.model.id
                       const isFav = isModelFavorite(rec.provider, rec.model.id)
                       const contextStr = resolveModelContext(rec.model)
 
@@ -541,7 +563,7 @@ export function ModelSelect(
               const visibleModels = group.models.filter((m) => {
                 const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
                 if (!matchesSearch) return false
-                const isCurrent = state.current?.provider === group.id && state.current.model === m.id
+                const isCurrent = activeSel?.provider === group.id && activeSel.model === m.id
                 return isCurrent || !isHidden(group.id, m.id)
               })
 
@@ -588,7 +610,7 @@ export function ModelSelect(
                   {!isCollapsed && (
                     <div className={css.groupBody}>
                       {visibleModels.map((model) => {
-                        const isSelected = state.current?.provider === group.id && state.current.model === model.id
+                        const isSelected = activeSel?.provider === group.id && activeSel.model === model.id
                         const isFav = isModelFavorite(group.id, model.id)
                         const contextStr = resolveModelContext(model)
 

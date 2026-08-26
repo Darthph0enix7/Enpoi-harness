@@ -7,6 +7,49 @@
   box-sizing: border-box;
 }
 
+/* Compact variant (Watchtower persona rows): same materials, smaller geometry. */
+.compactRoot .modelTrigger {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  font-size: 11px;
+  max-width: 150px;
+}
+
+.compactRoot .effortTrigger {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  font-size: 10px;
+  gap: 3px;
+}
+
+.compactRoot .effortTrigger .triggerIcon svg,
+.compactRoot .modelTrigger .chevronIcon svg {
+  width: 10px;
+  height: 10px;
+}
+
+.compactRoot .effortText {
+  max-width: 64px;
+}
+
+.compactRoot .pickerPopover {
+  width: 280px;
+  top: calc(100% + 4px);
+  bottom: auto;
+  right: 0;
+  z-index: 150;
+  max-height: 280px;
+}
+
+.compactRoot .effortPopover {
+  top: calc(100% + 4px);
+  bottom: auto;
+  right: 0;
+  z-index: 150;
+}
+
 /* Model Button on the Composer Input Bar */
 .modelTrigger {
   display: inline-flex;

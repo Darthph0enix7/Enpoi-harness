@@ -31,6 +31,10 @@ export type { ModelDirectoryState } from './directory.ts'
 export { ModelDirectoryResolver } from './service.ts'
 export type { ModelSelectInjected } from './slots.ts'
 export type { ModelKey } from './locales.ts'
+// Globally shared picker surface (Enpoi: one picker everywhere — composer seat
+// and Watchtower persona rows — same directory, favorites, and visibility).
+export { ModelSelect } from './ModelSelect.tsx'
+export type { ModelSelectOverride } from './ModelSelect.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {

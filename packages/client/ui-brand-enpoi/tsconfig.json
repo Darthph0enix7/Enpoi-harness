@@ -28,6 +28,9 @@
     },
     {
       "path": "../ui-tool"
+    },
+    {
+      "path": "../ui-model-selection"
     }
   ]
 }
