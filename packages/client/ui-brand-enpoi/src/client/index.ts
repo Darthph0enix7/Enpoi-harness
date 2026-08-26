@@ -107,7 +107,6 @@ export function apply(ctx: Context): void {
   // 4. Capabilities Settings Section inside the Settings modal
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    key: 'capabilities',
     id: 'capabilities',
     order: 15,
     label: () => 'Capabilities',
