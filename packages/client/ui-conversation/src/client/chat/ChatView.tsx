@@ -116,10 +116,12 @@ function runningTurnStartTime(timeline: ConversationTimelineSnapshot): number | 
 }
 
 /** Turn-level model activity label retained across first-token, tool, and streaming phases. */
-function TurnStatus({ startTime, t }: {
+function TurnStatus({ startTime, modelName, t }: {
   /** The running turn's logged `turn/start` time; null falls back to mount
    *  time when that boundary is outside the window. */
   startTime: number | null
+  /** Optional active model and provider label (e.g. "gemini-3.7-flash-tiered · antigravity"). */
+  modelName?: string | undefined
   /** The owning view's locale seat. */
   t: ChatViewSlotProps['t']
 }) {
@@ -141,7 +143,12 @@ function TurnStatus({ startTime, t }: {
   const showClock = elapsedMs >= 15_000
   return (
     <div className={css.turnStatus} role="status" aria-live="polite">
-      Deep diving...
+      <span>Deep diving...</span>
+      {modelName !== undefined && (
+        <span className={css.turnStatusModel} aria-hidden>
+          {modelName}
+        </span>
+      )}
       {showClock && (
         <span className={css.turnStatusClock} aria-hidden>
           {formatRunDuration(elapsedMs, t)}
@@ -234,6 +241,28 @@ export function ChatView({
     [loadImage, renderSlot],
   )
   const runningTurnStart = useMemo(() => runningTurnStartTime(timeline), [timeline])
+  const runningModelConfig = useSession((snapshot) => {
+    if (!snapshot.running) return undefined
+    const views = snapshot.views as { get?: (target: string) => { requests?: readonly unknown[] } | undefined }
+    const trajectory = views?.get?.('trajectory')
+    const requests = trajectory?.requests
+    if (Array.isArray(requests)) {
+      for (let i = requests.length - 1; i >= 0; i--) {
+        const item = requests[i] as {
+          requestConfig?: { provider?: string; model?: string }
+          prompt?: { config?: { provider?: string; model?: string } }
+        }
+        const cfg = item?.requestConfig ?? item?.prompt?.config
+        if (cfg?.model !== undefined) {
+          return { provider: cfg.provider, model: cfg.model }
+        }
+      }
+    }
+    return undefined
+  })
+  const runningModelLabel = runningModelConfig
+    ? `${runningModelConfig.model}${runningModelConfig.provider ? ` · ${runningModelConfig.provider}` : ''}`
+    : undefined
 
   const listRef = useRef<HTMLDivElement | null>(null)
   const columnRef = useRef<HTMLDivElement | null>(null)
@@ -470,7 +499,7 @@ export function ChatView({
               double-render the same wait. */}
           {/* Turn-level loading signal: rides the whole running turn (first-token
               wait, tool execution, streaming) so it never flickers per step. */}
-          {running && <TurnStatus startTime={runningTurnStart} t={t} />}
+          {running && <TurnStatus startTime={runningTurnStart} modelName={runningModelLabel} t={t} />}
           {pendingSteering.map(item => (
             <PendingSteeringBubble
               key={item.id}
