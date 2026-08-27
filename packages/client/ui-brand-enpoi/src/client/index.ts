@@ -1,20 +1,54 @@
 /** Enpoi Harness brand occupants & Watchtower UI slots. */
+import { createElement } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ModelSelection, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
-import { WatchtowerView, type WatchtowerModelFace } from './WatchtowerView.tsx'
+import { WatchtowerView } from './WatchtowerView.tsx'
+import { FleetRoutingView, FleetRoutingIcon } from './FleetRoutingView.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 
 /** Required services: the UI slot registry, the shared model directory, sessions, and locale. */
 export const inject = ['slots', 'modelDirectories', 'sessions', 'locale']
 
 /**
- * Register brand marks, the Watchtower view tab, and In-Chat Task Cards.
+ * Register the Fleet Routing tab on the right activity rail (peer to
+ * Capabilities & Tools). The betterSidebar service may activate before or
+ * after this plugin — register immediately when present, otherwise wait for
+ * the `internal/service` binding event.
+ */
+function registerFleetRoutingTab(ctx: Context, betterSidebar: unknown): void {
+  const service = betterSidebar as {
+    registerTab: (descriptor: {
+      id: string
+      title: string
+      icon: (size: number) => React.ReactNode
+      order: number
+      single: boolean
+      component: (props: { ctx: Context; scope: { sessionId: string; cwd?: string }; visible: boolean }) => React.ReactNode
+    }) => () => void
+  }
+  const dispose = service.registerTab({
+    id: 'routing',
+    title: 'Agent Models',
+    icon: (size: number) => createElement(FleetRoutingIcon, { size }),
+    order: 60,
+    single: true,
+    component: (props) => createElement(FleetRoutingView, {
+      ctx: props.ctx,
+      scope: props.scope,
+      visible: props.visible,
+    }),
+  })
+  ctx.effect(() => dispose, 'enpoi: fleet routing tab')
+}
+
+/**
+ * Register brand marks, the Watchtower view tab, the Fleet Routing rail tab,
+ * and In-Chat Task Cards.
  * @param ctx - Client root context.
  */
 export function apply(ctx: Context): void {
@@ -29,73 +63,30 @@ export function apply(ctx: Context): void {
 
   // 2. Watchtower Full-Canvas View Tab (`[Chat]` `[Trajectory]` `[Watchtower]`)
   ctx.slots.inject('conversation.view', () => {
-    const models = ctx.get('modelDirectories')
     const sessions = ctx.get('sessions')
     // Waiting on the declaration: contribute nothing until the services exist.
-    if (models === undefined || sessions === undefined) return function* () {}
+    if (sessions === undefined) return function* () {}
     return ctx.slots.register({
       name: 'conversation.view',
       id: 'watchtower',
       order: 30,
       label: () => 'Watchtower',
-      inject: (sessionId: SessionId): { models: WatchtowerModelFace; t: (key: string) => string } => {
-        const directory = models.directoryFor(sessionId)
-        const available = sessions.subagentAddress(sessionId) === undefined
-        return {
-          models: {
-            available,
-            directory: directory.store as SnapshotStore<never>,
-            load: () => {
-              if (available) directory.load().catch(() => { /* surfaced on the store */ })
-            },
-            /** Persona assignment persistence: settings ns `enpoi-orchestration`, path personas/<id>. */
-            assign: (persona: string, selection: ModelSelection) =>
-              fetch('/api/settings.mutate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  type: 'client-request',
-                  method: 'settings.mutate',
-                  rpcId: `persona-assign-${persona}`,
-                  payload: {
-                    ns: 'enpoi-orchestration',
-                    ops: [{ op: 'set', path: ['personas', persona], value: selection }],
-                  },
-                }),
-              })
-                .then(res => res.ok)
-                .catch(() => false),
-            /** Read persisted persona assignments (best effort; empty when unset). */
-            readAssignments: () =>
-              fetch('/api/settings.describe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  type: 'client-request',
-                  method: 'settings.describe',
-                  rpcId: 'persona-read',
-                  payload: {},
-                }),
-              })
-                .then(async (res) => {
-                  if (!res.ok) return null
-                  const json: unknown = await res.json()
-                  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-                  const orchestration = Array.isArray(namespaces)
-                    ? (namespaces as Array<{ ns?: string; value?: { personas?: Record<string, ModelSelection> }; user?: { personas?: Record<string, ModelSelection> } }>).find(n => n.ns === 'enpoi-orchestration')
-                    : undefined
-                  const personas = orchestration?.value?.personas ?? orchestration?.user?.personas
-                  return personas ?? null
-                })
-                .catch(() => null),
-          },
-          t: (key: string) => (ctx.locale as { bind: (ns: string) => (k: string) => string }).bind('model')(key),
-        }
-      },
     }, WatchtowerView)
   })
 
-  // 3. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
+  // 3. Fleet Routing rail tab (global persona model assignment)
+  const betterSidebar = ctx.get('betterSidebar')
+  if (betterSidebar !== undefined) {
+    registerFleetRoutingTab(ctx, betterSidebar)
+  } else {
+    ctx.on('internal/service', (name: string, value: unknown) => {
+      if (name === 'betterSidebar' && value !== undefined) {
+        registerFleetRoutingTab(ctx, value)
+      }
+    })
+  }
+
+  // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {
     const sessions = ctx.get('sessions')
     const openSession = (id: SessionId) => {

@@ -2,18 +2,10 @@
  * The Watchtower: full-canvas session cockpit (`conversation.view` @30).
  * Minimal Liquid-Glass surface — icon+label micro headers, muted palette,
  * every value projected live (zero hardcoded copy): the Living Brief renders
- * only what the keeper actually wrote, personas carry the globally shared
- * compact ModelSelect (same directory, favorites, and visibility rules).
+ * only what the keeper actually wrote. Session observability ONLY — global
+ * persona model routing lives in the Fleet Routing rail tab.
  */
-import { useEffect, useMemo, useSyncExternalStore } from 'react'
-import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
-import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import {
-  getPersonaAssignments,
-  subscribePersonaAssignments,
-  setPersonaAssignment,
-  clearPersonaAssignment,
-} from './persona-store.ts'
+import { useMemo } from 'react'
 import css from './WatchtowerView.module.css'
 
 /** Structural subset of the session snapshot the view reads. */
@@ -44,73 +36,12 @@ interface OracleLike { readonly status?: string }
 interface CouncilLike { readonly status?: string }
 interface MemoryLedgerLike { readonly committedCount?: number }
 
-/** Injected model face built in apply() (directory + persona persistence). */
-export interface WatchtowerModelFace {
-  available: boolean
-  directory: Parameters<typeof ModelSelect>[0]['directory']
-  load: () => void
-  assign: (persona: string, selection: ModelSelection) => Promise<boolean>
-  readAssignments: () => Promise<Record<string, ModelSelection> | null>
-}
-
 export interface WatchtowerViewProps {
   useSession?: <S>(selector: (s: SessionLike) => S) => S
   sessionId?: string
   useProjection?: <T>(key: string, selector?: (v: unknown) => T) => T
   useWorkspaces?: <S>(selector: (w: WorkspaceLike) => S) => S
-  models?: WatchtowerModelFace
-  t?: (key: string) => string
 }
-
-interface PersonaSeat {
-  id: string
-  name: string
-  icon: string
-}
-
-interface PersonaCategory {
-  title: string
-  seats: PersonaSeat[]
-}
-
-/** Persona categories and seats for delegated fleet (Orchestrator/Sysadmin are selected on main input card). */
-const FLEET_CATEGORIES: PersonaCategory[] = [
-  {
-    title: 'Architecture & Supervision',
-    seats: [
-      { id: 'oracle', name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2' },
-    ],
-  },
-  {
-    title: 'Specialist Workers',
-    seats: [
-      { id: 'fixer', name: 'Fixer', icon: 'M10.5 2.5l3 3L6 13H3v-3z' },
-      { id: 'explorer', name: 'Explorer', icon: 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4' },
-      { id: 'librarian', name: 'Librarian', icon: 'M3 4h4v9H3zM8 4h5v9H8zM3 13h10' },
-      { id: 'designer', name: 'Designer', icon: 'M8 3l1.8 3.6L13.5 8l-3.7 1.4L8 13l-1.8-3.6L2.5 8l3.7-1.4z' },
-    ],
-  },
-  {
-    title: 'Roundtable Debaters',
-    seats: [
-      { id: 'skeptic', name: 'Skeptic', icon: 'M12 4l-8 8m0-8l8 8' },
-      { id: 'architect', name: 'Architect', icon: 'M3 13V8m3 5V5m3 8V3m3 10V7' },
-      { id: 'pragmatist', name: 'Pragmatist', icon: 'M3 8h10M10 4l3 4-3 4' },
-      { id: 'critic', name: 'Critic', icon: 'M8 2a6 6 0 100 12A6 6 0 008 2zm0 3v4l3 2' },
-    ],
-  },
-  {
-    title: 'Chorus Brainstormers',
-    seats: [
-      { id: 'visionary', name: 'Visionary', icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z' },
-      { id: 'experiencer', name: 'Experiencer', icon: 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z' },
-      { id: 'integrator', name: 'Integrator', icon: 'M4 4h4v4H4zM8 8h4v4H8z' },
-      { id: 'curator', name: 'Curator', icon: 'M8 3v10M3 8h10' },
-    ],
-  },
-]
-
-const TOTAL_SEATS_COUNT = FLEET_CATEGORIES.reduce((acc, cat) => acc + cat.seats.length, 0)
 
 /** Parsed sections of the keeper's structured prose brief (no invented data). */
 interface BriefSections {
@@ -173,12 +104,9 @@ function SectionBlock({ icon, label, lines }: { icon: string; label: string; lin
   )
 }
 
-export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, models, t }: WatchtowerViewProps) {
+export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces }: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
-
-  // Global reactive in-memory cache: 100% synchronous 0ms render across sessions, zero delay, zero reloading
-  const assignments = useSyncExternalStore(subscribePersonaAssignments, getPersonaAssignments)
 
   const hasProjection = typeof useProjection === 'function'
   const livingBrief = hasProjection ? useProjection<BriefLike>('livingBrief') : undefined
@@ -190,11 +118,6 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
     () => (livingBrief?.prose?.text !== undefined ? parseBriefSections(livingBrief.prose.text) : null),
     [livingBrief?.prose?.text],
   )
-
-  // Prime model directory once on mount if available
-  useEffect(() => {
-    if (models?.available) models.load()
-  }, [models])
 
   const handleHalt = () => {
     const target = sessionId ?? session?.sessionId ?? session?.id
@@ -294,64 +217,6 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
             </>
           ) : (
             <div className={css.empty}>keeper idle — no brief yet</div>
-          )}
-        </section>
-
-        {/* Fleet — shared compact ModelSelect per persona */}
-        <section className={css.card}>
-          <div className={css.cardHead}>
-            <MicroIcon d="M2 13l6-10 6 10z" />
-            <span>Fleet · {TOTAL_SEATS_COUNT}</span>
-          </div>
-          {models !== undefined && models.available ? (
-            <div className={css.fleetGroups}>
-              {FLEET_CATEGORIES.map(category => (
-                <div key={category.title} className={css.fleetGroup}>
-                  <div className={css.fleetGroupTitle}>{category.title}</div>
-                  <div className={css.fleetRows}>
-                    {category.seats.map((seat) => {
-                      const assigned = assignments[seat.id] ?? null
-                      const isExplicitlyAssigned = assigned !== null && Boolean(assigned.model)
-                      const override: ModelSelectOverride = {
-                        current: isExplicitlyAssigned ? assigned : null,
-                        placeholder: 'Inherit',
-                        select: selection => setPersonaAssignment(seat.id, selection),
-                      }
-                      return (
-                        <div key={seat.id} className={css.fleetRow} title={seat.name}>
-                          <span className={css.fleetIcon}><MicroIcon d={seat.icon} size={11} /></span>
-                          <span className={css.fleetName}>{seat.name}</span>
-                          <div className={css.fleetControls}>
-                            {isExplicitlyAssigned && (
-                              <button
-                                type="button"
-                                className={css.unassignBtn}
-                                onClick={() => void clearPersonaAssignment(seat.id)}
-                                title={`Reset ${seat.name} to Inherit (no explicit model)`}
-                              >
-                                <MicroIcon d="M4 8a4 4 0 118 0A4 4 0 014 8zm1 0h6" size={10} />
-                              </button>
-                            )}
-                            <ModelSelect
-                              locked={false}
-                              available={models.available}
-                              directory={models.directory}
-                              load={() => {}}
-                              select={() => Promise.resolve(true)}
-                              compact
-                              override={override}
-                              t={t ?? (() => '')}
-                            />
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className={css.empty}>model directory unavailable</div>
           )}
         </section>
       </div>
