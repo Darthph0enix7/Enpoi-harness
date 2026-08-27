@@ -147,11 +147,11 @@ export class ReactLoopAgent implements Agent {
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
-  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[] }): void {
+  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void {
     this.send(input, 'next-turn', true, options)
   }
 
-  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[] }): void {
+  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void {
     this.send(input, 'next-step', true, options)
   }
 

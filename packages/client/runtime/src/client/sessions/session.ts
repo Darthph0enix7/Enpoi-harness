@@ -839,14 +839,22 @@ function foldRevertState(events: readonly SessionEvent[]): number | null {
   return null
 }
 
-/** Fold the seqs shadowed by the latest user-origin revert-commit replacement. */
+/**
+ * Fold the seqs shadowed by EVERY user-origin revert-commit replacement in the
+ * window. A union (not latest-only): sequential revert→commit cycles each
+ * shadow their own span, and all of them must stay hidden. Window trimming is
+ * safe: every shadowed seq is smaller than its replacement's seq, so a window
+ * containing a shadowed event necessarily contains its replacement.
+ */
 function foldRevertShadowedSeqs(events: readonly SessionEvent[]): readonly number[] {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
+  const shadowed: number[] = []
+  for (const event of events) {
     if (event === undefined || event.type !== 'user/message') continue
     if (event.surfaceOp === undefined || event.surfaceOp === 'append') continue
     if (event.data.source.kind !== 'user') continue
-    return event.sourceEventSeqs ?? []
+    for (const seq of event.sourceEventSeqs ?? []) {
+      if (!shadowed.includes(seq)) shadowed.push(seq)
+    }
   }
-  return []
+  return shadowed
 }

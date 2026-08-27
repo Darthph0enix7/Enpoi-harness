@@ -13,7 +13,11 @@ import css from './RevertTray.module.css'
 export interface RevertTrayProps {
   useSession: SnapshotSelectorHook<ConversationSnapshot>
   t: ComposerBarProps['t']
-  /** Restore reverted messages: omitted restores everything; a seq restores that message and everything after. */
+  /**
+   * Restore reverted messages: omitted restores everything; a seq restores
+   * everything up to and including that message (later reverted messages stay
+   * reverted — the suffix-hide rule can only un-revert a prefix).
+   */
   revertRestore: (restoreSeq?: number) => void
   /** Fork the session at a reverted message. */
   forkAt: (seq: number) => void
@@ -87,7 +91,7 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
                 <button
                   type="button"
                   className={css.trayItemBtn}
-                  onClick={() => { revertRestore(index === 0 ? undefined : reverted[index - 1]?.seq) }}
+                  onClick={() => { revertRestore(reverted[index + 1]?.seq) }}
                 >
                   {t('revert.restore')}
                 </button>

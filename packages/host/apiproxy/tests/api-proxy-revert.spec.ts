@@ -127,6 +127,28 @@ describe('session.revert', () => {
     expect(result.result.ok).toBe(false)
     if (!result.result.ok) expect(result.result.error.code).toBe('session-not-found')
   })
+
+  it('rejects while the agent is running (in-flight guard)', async () => {
+    const ctx = await composed()
+    const proxy = api(ctx)
+    const { firstUserSeq } = liveAgent(ctx, 'revert-running')
+    const agent = ctx.agents.get(sid('revert-running'))!
+    Object.assign(agent, { status: 'running' })
+    const result = await proxy.sessions.revert(request({ sessionId: sid('revert-running'), atSeq: firstUserSeq }))
+    expect(result.result.ok).toBe(false)
+    if (!result.result.ok) expect(result.result.error.code).toBe('agent-busy')
+  })
+
+  it('rejects while the inbox has pending work', async () => {
+    const ctx = await composed()
+    const proxy = api(ctx)
+    const { firstUserSeq } = liveAgent(ctx, 'revert-pending')
+    const agent = ctx.agents.get(sid('revert-pending'))!
+    Object.assign(agent, { inbox: { hasPending: true } })
+    const result = await proxy.sessions.revert(request({ sessionId: sid('revert-pending'), atSeq: firstUserSeq }))
+    expect(result.result.ok).toBe(false)
+    if (!result.result.ok) expect(result.result.error.code).toBe('agent-busy')
+  })
 })
 
 describe('session.revertRestore', () => {
@@ -189,6 +211,37 @@ describe('session.prompt with revertFromSeq', () => {
       mode: 'steer',
       content: [{ type: 'text', text: 'goodbye' }],
       revertFromSeq: firstUserSeq,
+    }))
+    expect(result.result.ok).toBe(false)
+    if (!result.result.ok) expect(result.result.error.code).toBe('revert-invalid')
+  })
+
+  it('rejects revertFromSeq while the agent is running', async () => {
+    const ctx = await composed()
+    const proxy = api(ctx)
+    const { firstUserSeq } = liveAgent(ctx, 'commit-running')
+    const agent = ctx.agents.get(sid('commit-running'))!
+    Object.assign(agent, { status: 'running' })
+    const result = await proxy.sessions.prompt(request({
+      sessionId: sid('commit-running'),
+      mode: 'queue',
+      content: [{ type: 'text', text: 'goodbye' }],
+      revertFromSeq: firstUserSeq,
+    }))
+    expect(result.result.ok).toBe(false)
+    if (!result.result.ok) expect(result.result.error.code).toBe('agent-busy')
+  })
+
+  it('rejects a non-user revertFromSeq anchor', async () => {
+    const ctx = await composed()
+    const proxy = api(ctx)
+    const { session } = liveAgent(ctx, 'commit-anchor')
+    const assistantSeq = session.events.find(e => e.type === 'assistant/message')!.seq
+    const result = await proxy.sessions.prompt(request({
+      sessionId: sid('commit-anchor'),
+      mode: 'queue',
+      content: [{ type: 'text', text: 'goodbye' }],
+      revertFromSeq: assistantSeq,
     }))
     expect(result.result.ok).toBe(false)
     if (!result.result.ok) expect(result.result.error.code).toBe('revert-invalid')

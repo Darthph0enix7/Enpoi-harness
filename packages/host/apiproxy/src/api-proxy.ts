@@ -1976,6 +1976,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   /**
+   * Validate a revert anchor: an active surface node that is a user message.
+   * @returns the anchor's user-message event, or undefined when invalid.
+   */
+  function revertAnchorOf(session: Session, seq: number): SessionEvent<'user/message'> | undefined {
+    if (!session.surface.nodes.includes(seq)) return undefined
+    const event = session.events[seq]
+    return event !== undefined && event.type === 'user/message' ? event : undefined
+  }
+
+  /**
    * Append one durable revert-ledger entry (git-branch-like work tree). The
    * ledger documents every revert/restore/commit so nothing is ever lost even
    * after the UI tray disappears. Best-effort: a ledger failure must never
@@ -2477,10 +2487,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               }
               const nodes = agent.session.surface.nodes
               const startIdx = nodes.indexOf(revertFromSeq)
-              if (startIdx === -1) {
+              if (startIdx === -1 || revertAnchorOf(agent.session, revertFromSeq) === undefined) {
                 return err(request, {
                   code: 'revert-invalid',
-                  message: `revertFromSeq ${String(revertFromSeq)} is not an active surface node`,
+                  message: `revertFromSeq ${String(revertFromSeq)} is not an active user-message surface node`,
                   details: { sessionId, revertFromSeq },
                 })
               }
@@ -2671,8 +2681,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId, atSeq },
           }))
         }
-        const target = session.events[atSeq]
-        if (target === undefined || target.type !== 'user/message') {
+        const target = revertAnchorOf(session, atSeq)
+        if (target === undefined) {
           return Promise.resolve(err(request, {
             code: 'revert-invalid',
             message: `event ${String(atSeq)} is not a user message (revert anchors on a user message)`,
@@ -2709,13 +2719,21 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (hasSubagentOwner(agent.session, agent)) {
           return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
         }
+        // Same in-flight guard as revert: a boundary move during a running turn
+        // would race the surface growth the consuming commit depends on.
+        if (agent.status === 'running' || agent.inbox.hasPending) {
+          return Promise.resolve(err(request, {
+            code: 'agent-busy',
+            message: 'revert restore requires an idle session with no pending input',
+            details: { reason: 'session busy' },
+          }))
+        }
         const session = agent.session
         if (restoreSeq !== undefined) {
-          const nodes = session.surface.nodes
-          if (!nodes.includes(restoreSeq)) {
+          if (revertAnchorOf(session, restoreSeq) === undefined) {
             return Promise.resolve(err(request, {
               code: 'revert-invalid',
-              message: `event ${String(restoreSeq)} is not an active surface node`,
+              message: `event ${String(restoreSeq)} is not an active user-message surface node`,
               details: { sessionId, restoreSeq },
             }))
           }
