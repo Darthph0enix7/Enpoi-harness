@@ -63,6 +63,7 @@ function scriptedApi(overrides: {
       cancel: r => ok(r, { accepted: true as const }),
       revert: r => ok(r, { accepted: true as const, revertedText: '', revertedCount: 0 }),
       revertRestore: r => ok(r, { accepted: true as const }),
+      resolveFileConflict: r => ok(r, { accepted: true as const }),
       ...overrides.sessions,
     },
     subagents: {

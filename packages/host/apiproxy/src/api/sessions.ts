@@ -405,4 +405,16 @@ export interface SessionsApi {
   revertRestore(request: RpcRequest<{ sessionId: SessionId; restoreSeq?: number }>):
   Promise<RpcResponse<{ accepted: true }>>
 
+  /**
+   * Applies the operator's resolution for one pending file-revert conflict
+   * (surfaced via `revert/file-conflict` log events by the `enpoi-file-revert`
+   * plugin). The host bridges to the plugin through the `file-revert/resolve`
+   * waterfall; without the plugin mounted the call degrades to a clear error.
+   */
+  resolveFileConflict(request: RpcRequest<{
+    sessionId: SessionId
+    conflictId: string
+    resolution: 'keep' | 'restore' | 'recreate' | 'trash'
+  }>): Promise<RpcResponse<{ accepted: true }>>
+
 }

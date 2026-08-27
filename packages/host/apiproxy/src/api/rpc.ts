@@ -94,6 +94,8 @@ export interface RpcErrorDetailsMap {
   'subagent-not-resumable': { childSessionId: SessionId }
   'subagent-unauthorized': { childSessionId: SessionId }
   'subagent-delivery-unavailable': { childSessionId: SessionId }
+  /** The enpoi-file-revert plugin is not mounted or rejected a conflict resolution. */
+  'file-revert-unavailable': { sessionId: SessionId; conflictId?: string }
   'internal': {}
 }
 

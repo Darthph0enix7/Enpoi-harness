@@ -36,6 +36,7 @@ export interface RpcMethodMap {
   'session.cancel': SessionsApi['cancel']
   'session.revert': SessionsApi['revert']
   'session.revertRestore': SessionsApi['revertRestore']
+  'session.resolveFileConflict': SessionsApi['resolveFileConflict']
   'subagent.list': SubagentsApi['list']
   'subagent.history': SubagentsApi['history']
   'subagent.prompt': SubagentsApi['prompt']

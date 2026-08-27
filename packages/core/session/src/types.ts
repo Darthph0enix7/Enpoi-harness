@@ -344,6 +344,51 @@ export interface SessionEventMap {
    * host uses it to shadow the reverted span when the next prompt commits.
    */
   'revert/state': { fromSeq: number | null }
+  /**
+   * Durable intent record for a file-revert batch, appended by the
+   * `enpoi-file-revert` plugin BEFORE any disk mutation. Log-only, ignorable,
+   * never surface-eligible. Recovery replays the recorded plan verbatim when
+   * no matching `revert/file-result` seals it.
+   */
+  'revert/file-intent': {
+    revertSeq: number
+    plan: Record<string, {
+      action: string
+      targetBlobSha: string | null
+      expectedDiskSha: string | null
+    }>
+  }
+  /**
+   * Terminal marker sealing a `revert/file-intent` batch. Log-only, ignorable.
+   * The client folds it to close conflict modals; recovery treats an intent
+   * without a matching result as unsealed and re-runs it.
+   */
+  'revert/file-result': {
+    revertSeq: number
+    outcomes: Record<string, {
+      status: string
+      fromSha?: string | null
+      toSha?: string | null
+      dest?: string
+      reason?: string
+    }>
+  }
+  /**
+   * A file whose revert requires operator resolution (user edited on top,
+   * file missing, or pre-state unavailable). Log-only, ignorable. The client
+   * folds these to render the conflict modal; the operator's choice is applied
+   * via the `session.resolveFileConflict` RPC.
+   */
+  'revert/file-conflict': {
+    conflictId: string
+    targetKey: string
+    displayPath: string
+    state: 'conflict' | 'missing' | 'unavailable'
+    reason: string
+    preSha: string | null
+    postSha: string | null
+    currentSha: string | null
+  }
 }
 
 /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */

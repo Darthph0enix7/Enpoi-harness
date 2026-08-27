@@ -2741,6 +2741,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
+
+      async resolveFileConflict(request) {
+        const { sessionId, conflictId, resolution } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) {
+          return Promise.resolve(err(request, {
+            code: 'session-not-found',
+            message: `session "${sessionId}" not found (not attached)`,
+            details: { sessionId },
+          }))
+        }
+        // Bridge to the enpoi-file-revert plugin through the waterfall. Without
+        // the plugin mounted, degrade to a clear error instead of a silent no-op.
+        const waterfall = (ctx as unknown as {
+          waterfall: (name: string, ...args: unknown[]) => Promise<unknown>
+        }).waterfall
+        const outcome = await waterfall(
+          'file-revert/resolve',
+          { sessionId, conflictId, resolution },
+          () => ({ accepted: false as const, reason: 'file-revert plugin not mounted' }),
+        ) as { accepted: boolean; reason?: string }
+        if (!outcome.accepted) {
+          return Promise.resolve(err(request, {
+            code: 'file-revert-unavailable',
+            message: outcome.reason ?? 'file-revert plugin not mounted',
+            details: { sessionId, conflictId },
+          }))
+        }
+        return Promise.resolve(ok(request, { accepted: true as const }))
+      },
     },
 
     subagents: {

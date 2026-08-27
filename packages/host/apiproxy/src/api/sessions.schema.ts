@@ -380,6 +380,18 @@ export const sessionRevertRestoreValueSchema = z.object({
   accepted: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.revertRestore'>>>
 
+/** session.resolveFileConflict request payload. */
+export const sessionResolveFileConflictRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  conflictId: z.string().min(1),
+  resolution: z.enum(['keep', 'restore', 'recreate', 'trash']),
+}) satisfies z.ZodType<Wire<RequestPayload<'session.resolveFileConflict'>>>
+
+/** session.resolveFileConflict response value. */
+export const sessionResolveFileConflictValueSchema = z.object({
+  accepted: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'session.resolveFileConflict'>>>
+
 /** session.cancel response value. */
 export const sessionCancelValueSchema = z.object({
   accepted: z.literal(true),

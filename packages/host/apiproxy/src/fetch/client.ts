@@ -20,7 +20,8 @@ import {
 import {
   sessionCancelValueSchema,
   sessionRevertValueSchema,
-  sessionRevertRestoreValueSchema,
+sessionRevertRestoreValueSchema,
+  sessionResolveFileConflictValueSchema,
   sessionAttachmentValueSchema,
   sessionCreateValueSchema,
   sessionForkValueSchema,
@@ -105,6 +106,7 @@ export interface IApiClient {
     cancel(payload: RequestPayload<'session.cancel'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.cancel'>>>
     revert(payload: RequestPayload<'session.revert'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.revert'>>>
     revertRestore(payload: RequestPayload<'session.revertRestore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.revertRestore'>>>
+    resolveFileConflict(payload: RequestPayload<'session.resolveFileConflict'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.resolveFileConflict'>>>
   }
   subagents: {
     list(payload: RequestPayload<'subagent.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'subagent.list'>>>
@@ -194,6 +196,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'session.cancel': sessionCancelValueSchema,
   'session.revert': sessionRevertValueSchema,
   'session.revertRestore': sessionRevertRestoreValueSchema,
+  'session.resolveFileConflict': sessionResolveFileConflictValueSchema,
   'subagent.list': subagentListValueSchema,
   'subagent.history': subagentHistoryValueSchema,
   'subagent.prompt': subagentPromptValueSchema,
@@ -453,6 +456,7 @@ export abstract class AbstractApiClient implements IApiClient {
     cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal),
     revert: (payload, signal) => this.callUnary('session.revert', payload, signal),
     revertRestore: (payload, signal) => this.callUnary('session.revertRestore', payload, signal),
+    resolveFileConflict: (payload, signal) => this.callUnary('session.resolveFileConflict', payload, signal),
   }
 
   readonly subagents: IApiClient['subagents'] = {
