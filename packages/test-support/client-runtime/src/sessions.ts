@@ -185,7 +185,7 @@ export class TestSessions implements ISessions {
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'search' | 'fork' | 'revert' | 'revertRestore'
+      | 'clear' | 'search' | 'fork' | 'revert' | 'revertRestore' | 'resolveFileConflict'
     args: unknown[]
   }[] = []
 
@@ -498,6 +498,16 @@ export class TestSessions implements ISessions {
   /** Fixture stub: records the call. */
   revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void> {
     this.calls.push({ method: 'revertRestore', args: [opts] })
+    return Promise.resolve()
+  }
+
+  /** Fixture stub: records conflict resolution. */
+  resolveFileConflict(opts: {
+    sessionId: SessionId
+    conflictId: string
+    resolution: 'keep' | 'restore' | 'recreate' | 'trash'
+  }): Promise<void> {
+    this.calls.push({ method: 'resolveFileConflict', args: [opts] })
     return Promise.resolve()
   }
 

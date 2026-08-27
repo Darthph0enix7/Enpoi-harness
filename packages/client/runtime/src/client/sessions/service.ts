@@ -558,6 +558,20 @@ export class SessionRuntime implements ISessions {
   }
 
   /**
+   * Resolve an active file revert conflict.
+   * @param opts - session, conflictId, and the chosen resolution.
+   * @throws {Error} when the host rejects the resolution.
+   */
+  async resolveFileConflict(opts: {
+    sessionId: SessionId
+    conflictId: string
+    resolution: 'keep' | 'restore' | 'recreate' | 'trash'
+  }): Promise<void> {
+    const result = await this.manager.resolveFileConflict(opts)
+    if (!result.ok) throw new Error(`resolve file conflict failed: ${result.error.code}: ${result.error.message}`)
+  }
+
+  /**
    * Resolve an Agent-scoped context view (use-and-discard).
    * @param id - session id (the agent identity — 1:1 same axis).
    * @returns scoped ctx, or undefined for a session neither listed nor already scoped.

@@ -124,6 +124,7 @@ export class FakeApiClient implements IApiClient {
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
     revert: (payload: unknown) => this.record('session.revert', payload, Promise.resolve(ok({ accepted: true as const, revertedText: '', revertedCount: 0 }))),
     revertRestore: (payload: unknown) => this.record('session.revertRestore', payload, Promise.resolve(ok({ accepted: true as const }))),
+    resolveFileConflict: (payload: unknown) => this.record('session.resolveFileConflict', payload, Promise.resolve(ok({ accepted: true as const }))),
   }
 
   readonly subagents: IApiClient['subagents'] = {

@@ -42,7 +42,7 @@ import type {
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
-  WorkspaceId, WorkspaceView,
+  WorkspaceId, WorkspaceView, RevertFileOutcome, RevertFileConflict,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -1976,6 +1976,55 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   /**
+   * Fold active file revert outcomes from the log (scoped to active boundary cycle).
+   */
+  function foldRevertFileOutcomes(events: readonly SessionEvent[]): Record<string, RevertFileOutcome> {
+    let outcomes: Record<string, RevertFileOutcome> = {}
+    for (const event of events) {
+      if (event === undefined) continue
+      if (event.type === 'revert/state') {
+        outcomes = {}
+      } else if (event.type === 'revert/file-result') {
+        const data = event.data as { outcomes?: Record<string, RevertFileOutcome> }
+        if (data?.outcomes !== undefined) {
+          outcomes = { ...outcomes, ...data.outcomes }
+        }
+      }
+    }
+    return outcomes
+  }
+
+  /**
+   * Fold unsealed / unresolved file conflicts from the log (survives page reloads).
+   */
+  function foldRevertFileConflicts(events: readonly SessionEvent[]): RevertFileConflict[] {
+    const conflicts = new Map<string, RevertFileConflict>()
+    for (const event of events) {
+      if (event === undefined) continue
+      if (event.type === 'revert/state') {
+        conflicts.clear()
+      } else if (event.type === 'revert/file-conflict') {
+        const data = event.data as RevertFileConflict
+        if (data?.conflictId !== undefined) {
+          conflicts.set(data.conflictId, data)
+        }
+      } else if (event.type === 'revert/file-result') {
+        const data = event.data as { outcomes?: Record<string, RevertFileOutcome> }
+        if (data?.outcomes !== undefined) {
+          for (const [key, outcome] of Object.entries(data.outcomes)) {
+            if (outcome.status !== 'pending_conflict') {
+              for (const [cid, conflict] of conflicts.entries()) {
+                if (conflict.targetKey === key) conflicts.delete(cid)
+              }
+            }
+          }
+        }
+      }
+    }
+    return [...conflicts.values()]
+  }
+
+  /**
    * Validate a revert anchor: an active surface node that is a user message.
    * @returns the anchor's user-message event, or undefined when invalid.
    */
@@ -2238,6 +2287,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             // Host-authoritative revert boundary (folded over the FULL log, so
             // a trimmed client window can never lose it).
             revertFromSeq: foldRevertBoundary(cut.events),
+            revertFileOutcomes: foldRevertFileOutcomes(cut.events),
+            revertFileConflicts: foldRevertFileConflicts(cut.events),
           })
         } catch (error: unknown) {
           if (error instanceof SessionNotFound) {
@@ -2744,8 +2795,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async resolveFileConflict(request) {
         const { sessionId, conflictId, resolution } = request.payload
-        const agent = ctx.agents.get(sessionId)
-        if (agent === undefined) {
+        const session = ctx.sessions.get(sessionId)
+        if (session === undefined) {
           return Promise.resolve(err(request, {
             code: 'session-not-found',
             message: `session "${sessionId}" not found (not attached)`,
@@ -2754,10 +2805,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         // Bridge to the enpoi-file-revert plugin through the waterfall. Without
         // the plugin mounted, degrade to a clear error instead of a silent no-op.
-        const waterfall = (ctx as unknown as {
-          waterfall: (name: string, ...args: unknown[]) => Promise<unknown>
-        }).waterfall
-        const outcome = await waterfall(
+        const outcome = await (ctx as unknown as {
+          waterfall: (thisArg: unknown, name: string, ...args: unknown[]) => Promise<unknown>
+        }).waterfall(
+          ctx,
           'file-revert/resolve',
           { sessionId, conflictId, resolution },
           () => ({ accepted: false as const, reason: 'file-revert plugin not mounted' }),

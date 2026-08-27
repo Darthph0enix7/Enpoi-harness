@@ -237,6 +237,27 @@ export interface SessionSearchItem {
 }
 
 /** Session-domain unary methods (the map keys session.* of RpcMethodMap). */
+/** Revert file outcome shape. */
+export interface RevertFileOutcome {
+  status: 'restored' | 'trashed' | 'no_op' | 'pending_conflict' | 'conflict_escalated' | 'error' | 'kept' | string
+  reason?: string
+  fromSha?: string | null
+  toSha?: string | null
+  dest?: string
+}
+
+/** Revert file conflict shape. */
+export interface RevertFileConflict {
+  conflictId: string
+  targetKey: string
+  displayPath: string
+  state: string
+  reason?: string
+  preSha?: string | null
+  postSha?: string | null
+  currentSha?: string | null
+}
+
 export interface SessionsApi {
   /** Lists persisted sessions (updatedAt descending). v1 returns everything; cursor is a reserved seat, unimplemented. */
   list(request: RpcRequest<{ cursor?: string }>): Promise<RpcResponse<{ items: SessionSummary[] }>>
@@ -294,6 +315,10 @@ export interface SessionsApi {
     projections?: SessionProjectionsBlock
     /** Host-authoritative revert boundary folded over the full log (window-independent). */
     revertFromSeq?: number | null
+    /** Active file revert outcomes folded from the host log (window-independent). */
+    revertFileOutcomes?: Record<string, RevertFileOutcome>
+    /** Unresolved file revert conflicts folded from the host log (window-independent). */
+    revertFileConflicts?: RevertFileConflict[]
   }>>
 
   /**

@@ -111,6 +111,16 @@ export interface ISessions {
    */
   revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void>
   /**
+   * Resolve a file revert conflict (e.g. user manual edits detected or missing file).
+   * @param opts - session, conflictId, and the chosen resolution.
+   * @throws when the host rejects the resolution.
+   */
+  resolveFileConflict(opts: {
+    sessionId: SessionId
+    conflictId: string
+    resolution: 'keep' | 'restore' | 'recreate' | 'trash'
+  }): Promise<void>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

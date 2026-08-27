@@ -642,6 +642,24 @@ export class SessionManager {
   }
 
   /**
+   * Resolve an active file revert conflict.
+   */
+  async resolveFileConflict(
+    opts: {
+      sessionId: SessionId
+      conflictId: string
+      resolution: 'keep' | 'restore' | 'recreate' | 'trash'
+    },
+  ): Promise<RpcResult<{ accepted: true }>> {
+    try {
+      const { result } = await this.api.sessions.resolveFileConflict(opts)
+      return result
+    } catch (error) {
+      return transportError(error)
+    }
+  }
+
+  /**
    * Insert-or-enrich a locally synthesized summary: a new id prepends; an
    * existing entry only gains fields it lacks (the session-added frame and the
    * create() echo race — whichever lands second must fill the placeholder's

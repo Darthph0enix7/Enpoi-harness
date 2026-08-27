@@ -466,6 +466,11 @@ export function apply(ctx: Context): void {
     locale: NS,
     inject: (sessionId: SessionId): RevertTrayInjected => {
       return {
+        openFile: (path: string) => {
+          // Dynamic call-time cwd resolution (Oracle note)
+          const cwd = sessions.list.getSnapshot().byId[sessionId]?.cwd ?? '.'
+          return workspaces.openPath(resolveWorkspacePath(cwd, path))
+        },
         revertRestore: (restoreSeq) => {
           void sessions.revertRestore({ sessionId, ...restoreSeq === undefined ? {} : { restoreSeq } })
             .catch((error: unknown) => {
@@ -480,6 +485,20 @@ export function apply(ctx: Context): void {
                 )
               }
             })
+        },
+        resolveFileConflict: async (conflictId, resolution) => {
+          try {
+            await sessions.resolveFileConflict({ sessionId, conflictId, resolution })
+          } catch (error: unknown) {
+            const scoped = sessions.scope(sessionId)
+            if (scoped !== undefined) {
+              const conversation = scoped.get('conversation')
+              conversation?.input.for(scoped).notify(
+                'error',
+                error instanceof Error ? error.message : String(error),
+              )
+            }
+          }
         },
         forkAt: (seq) => {
           sessions.fork({ sessionId, atSeq: seq, increaseTitle: true })

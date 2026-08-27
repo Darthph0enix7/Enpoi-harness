@@ -15,7 +15,8 @@ import { ConversationNodeAssembler } from './conversation-assembler.ts'
 import type { ConversationRuntime } from './conversation-assembler.ts'
 import type { ConversationEventInput, ConversationPublication } from '../contract/conversation.ts'
 import type {
-  ChatSnapshot, ComposerPhase, ConversationSnapshot, OpenState, PromptError, RevertShadowRange,
+  ChatSnapshot, ComposerPhase, ConversationSnapshot, OpenState, PromptError, RevertFileConflict,
+  RevertFileOutcome, RevertShadowRange,
 } from './conversation.ts'
 import { EMPTY_CHAT_SNAPSHOT } from './conversation.ts'
 import type { PendingInteraction } from './pending.ts'
@@ -110,6 +111,10 @@ export class Session implements SessionFace {
 
   /** Host-authoritative revert boundary from the last history pull (full-log fold). */
   private hostRevertFromSeq: number | null = null
+  /** Host-authoritative file outcomes from the last history pull (full-log fold). */
+  private hostRevertFileOutcomes: Record<string, RevertFileOutcome> = {}
+  /** Host-authoritative file conflicts from the last history pull (full-log fold). */
+  private hostRevertFileConflicts: RevertFileConflict[] = []
 
   /**
    * Per-session projection value store (push model; see the session-projection
@@ -636,13 +641,29 @@ export class Session implements SessionFace {
         this.openError = result.error
         return
       }
-      this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
+      this.installWindow(
+        result.value.events,
+        result.value.hasMore,
+        result.value.projections,
+        result.value.revertFromSeq,
+        result.value.revertFileOutcomes,
+        result.value.revertFileConflicts,
+      )
       // Gap detection: baseline past the window tail and liveBuffer did not cover it -> pull the tail page once more.
       const tailSeq = this.windowTailSeq()
       if (this.subscribedLastSeq !== null && tailSeq !== null && this.subscribedLastSeq > tailSeq) {
         result = (await this.history({ maxMessages: PAGE_MESSAGES })).result
         if (generation !== this.openGeneration) return
-        if (result.ok) this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
+        if (result.ok) {
+          this.installWindow(
+            result.value.events,
+            result.value.hasMore,
+            result.value.projections,
+            result.value.revertFromSeq,
+            result.value.revertFileOutcomes,
+            result.value.revertFileConflicts,
+          )
+        }
       }
       this.openState = 'open'
     } catch (error) {
@@ -663,14 +684,23 @@ export class Session implements SessionFace {
    *  A carried projections block seeds the value store (higher seq wins, so a stale
    *  baseline cannot overwrite a newer push frame); the window events themselves are
    *  never folded — the host is the only computation site. */
-  private installWindow(entries: HistoryEntry[], hasMore: boolean, projections?: ProjectionsBaseline, revertFromSeq?: number | null): void {
+  private installWindow(
+    entries: HistoryEntry[],
+    hasMore: boolean,
+    projections?: ProjectionsBaseline,
+    revertFromSeq?: number | null,
+    revertFileOutcomes?: Record<string, RevertFileOutcome>,
+    revertFileConflicts?: RevertFileConflict[],
+  ): void {
     this.events = entries.map(e => e.event)
     this.views = entries.map(e => e.view)
     this.baseSeq = this.events[0]?.seq ?? 0
     this.hasMore = hasMore
-    // Host-authoritative revert boundary: survives a trimmed window whose
-    // latest revert/state event fell outside it.
+    // Host-authoritative revert boundary and file revert state: survives a
+    // trimmed window whose events fell outside the page.
     this.hostRevertFromSeq = revertFromSeq ?? null
+    this.hostRevertFileOutcomes = revertFileOutcomes ?? {}
+    this.hostRevertFileConflicts = revertFileConflicts ?? []
     if (this.events.some(event => event.type === 'turn/start')) this.firstPromptPendingTurn = false
     this.conversation.replaceWindow(entries.map(conversationInput), hasMore)
     if (projections !== undefined) this.projections.seed(projections)
@@ -689,9 +719,9 @@ export class Session implements SessionFace {
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
     const publication = this.conversation.append({ event, view })
-    // Revert state transitions must notify React immediately so the transcript
-    // truncates and the RevertTray appears without waiting for another event.
-    if (event.type === 'revert/state') return 'immediate'
+    // Revert state transitions and file outcomes/conflicts must notify React immediately
+    // so the transcript truncates and the RevertTray/conflicts appear.
+    if (event.type === 'revert/state' || event.type === 'revert/file-result' || event.type === 'revert/file-conflict') return 'immediate'
     return queueChanged ? 'immediate' : publication
   }
 
@@ -733,7 +763,14 @@ export class Session implements SessionFace {
       const { result } = await this.history({ maxMessages: PAGE_MESSAGES })
       // Failure or superseded by a full resync: drop — the resync path rebuilds and clears the buffer itself.
       if (result.ok && generation === this.openGeneration && this.openState === 'open') {
-        this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
+        this.installWindow(
+          result.value.events,
+          result.value.hasMore,
+          result.value.projections,
+          result.value.revertFromSeq,
+          result.value.revertFileOutcomes,
+          result.value.revertFileConflicts,
+        )
       }
     } catch (error) {
       console.error('[web-runtime] gap repair failed:', error)
@@ -790,6 +827,12 @@ export class Session implements SessionFace {
         ? foldRevertState(this.events)
         : this.hostRevertFromSeq,
       revertShadowRanges: foldRevertShadowRanges(this.events),
+      revertFileOutcomes: this.events.some(event => event.type === 'revert/file-result')
+        ? foldRevertFileOutcomes(this.events)
+        : this.hostRevertFileOutcomes,
+      revertFileConflicts: this.events.some(event => event.type === 'revert/file-conflict' || event.type === 'revert/file-result')
+        ? foldRevertFileConflicts(this.events)
+        : this.hostRevertFileConflicts,
     }
   }
 
@@ -799,9 +842,18 @@ export class Session implements SessionFace {
     hasMore: boolean
     projections?: ProjectionsBaseline
     revertFromSeq?: number | null
+    revertFileOutcomes?: Record<string, RevertFileOutcome>
+    revertFileConflicts?: RevertFileConflict[]
   }>> {
     return this.address === undefined
-      ? this.api.sessions.history({ sessionId: this.sessionId, ...payload })
+      ? (this.api.sessions.history({ sessionId: this.sessionId, ...payload }) as unknown as Promise<RpcResponse<{
+        events: HistoryEntry[]
+        hasMore: boolean
+        projections?: ProjectionsBaseline
+        revertFromSeq?: number | null
+        revertFileOutcomes?: Record<string, RevertFileOutcome>
+        revertFileConflicts?: RevertFileConflict[]
+      }>>)
       : this.api.subagents.history({ ...this.address, ...payload })
   }
 }
@@ -840,6 +892,51 @@ function foldRevertState(events: readonly SessionEvent[]): number | null {
     }
   }
   return null
+}
+
+/** Fold file revert outcomes from the active window. */
+function foldRevertFileOutcomes(events: readonly SessionEvent[]): Readonly<Record<string, RevertFileOutcome>> {
+  let outcomes: Record<string, RevertFileOutcome> = {}
+  for (const event of events) {
+    if (event === undefined) continue
+    if (event.type === 'revert/state') {
+      outcomes = {}
+    } else if (event.type === 'revert/file-result') {
+      const data = event.data as { outcomes?: Record<string, RevertFileOutcome> }
+      if (data?.outcomes !== undefined) {
+        outcomes = { ...outcomes, ...data.outcomes }
+      }
+    }
+  }
+  return outcomes
+}
+
+/** Fold unresolved file revert conflicts from the active window. */
+function foldRevertFileConflicts(events: readonly SessionEvent[]): readonly RevertFileConflict[] {
+  const conflicts = new Map<string, RevertFileConflict>()
+  for (const event of events) {
+    if (event === undefined) continue
+    if (event.type === 'revert/state') {
+      conflicts.clear()
+    } else if (event.type === 'revert/file-conflict') {
+      const data = event.data as RevertFileConflict
+      if (data?.conflictId !== undefined) {
+        conflicts.set(data.conflictId, data)
+      }
+    } else if (event.type === 'revert/file-result') {
+      const data = event.data as { outcomes?: Record<string, RevertFileOutcome> }
+      if (data?.outcomes !== undefined) {
+        for (const [key, outcome] of Object.entries(data.outcomes)) {
+          if (outcome.status !== 'pending_conflict') {
+            for (const [cid, conflict] of conflicts.entries()) {
+              if (conflict.targetKey === key) conflicts.delete(cid)
+            }
+          }
+        }
+      }
+    }
+  }
+  return [...conflicts.values()]
 }
 
 /**

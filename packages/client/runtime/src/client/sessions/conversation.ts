@@ -490,6 +490,37 @@ export interface ConversationSnapshot {
    * Any node with anchorSeq in [start, end) is hidden from the transcript.
    */
   revertShadowRanges: readonly RevertShadowRange[]
+  /**
+   * File revert outcomes (file path -> outcome status/details) folded from
+   * `revert/file-result` events in the active boundary window.
+   */
+  revertFileOutcomes?: Readonly<Record<string, RevertFileOutcome>>
+  /**
+   * Active file revert conflicts (e.g. user manual edits detected), folded from
+   * `revert/file-conflict` events that have not yet been resolved.
+   */
+  revertFileConflicts?: readonly RevertFileConflict[]
+}
+
+/** One file revert outcome record. */
+export interface RevertFileOutcome {
+  readonly status: 'restored' | 'trashed' | 'no_op' | 'pending_conflict' | 'conflict_escalated' | 'error' | 'kept' | string
+  readonly reason?: string
+  readonly fromSha?: string | null
+  readonly toSha?: string | null
+  readonly dest?: string
+}
+
+/** One active file revert conflict requiring operator resolution. */
+export interface RevertFileConflict {
+  readonly conflictId: string
+  readonly targetKey: string
+  readonly displayPath: string
+  readonly state: string
+  readonly reason?: string
+  readonly preSha?: string | null
+  readonly postSha?: string | null
+  readonly currentSha?: string | null
 }
 
 /** Half-open [start, end) span shadowed by a user-origin revert-commit. */

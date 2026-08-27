@@ -236,12 +236,35 @@ export const imageLimitsProjectionSchema = z.object({
   mediaTypes: z.array(z.string()),
 }) as unknown as z.ZodType<ImageAttachmentLimits>
 
+/** Revert file outcome shape. */
+export const revertFileOutcomeSchema = z.object({
+  status: z.enum(['restored', 'trashed', 'no_op', 'pending_conflict', 'conflict_escalated', 'error', 'kept']).or(z.string()),
+  reason: z.string().optional(),
+  fromSha: z.string().nullable().optional(),
+  toSha: z.string().nullable().optional(),
+  dest: z.string().optional(),
+})
+
+/** Revert file conflict shape. */
+export const revertFileConflictSchema = z.object({
+  conflictId: z.string(),
+  targetKey: z.string(),
+  displayPath: z.string(),
+  state: z.string(),
+  reason: z.string().optional(),
+  preSha: z.string().nullable().optional(),
+  postSha: z.string().nullable().optional(),
+  currentSha: z.string().nullable().optional(),
+})
+
 /** session.history response value (projections rides the tail page only). */
 export const sessionHistoryValueSchema: z.ZodType<Wire<ResponseValue<'session.history'>>> = z.object({
   events: z.array(historyEntrySchema),
   hasMore: z.boolean(),
   projections: sessionProjectionsBlockSchema.optional(),
   revertFromSeq: z.number().int().nonnegative().nullable().optional(),
+  revertFileOutcomes: z.record(z.string(), revertFileOutcomeSchema).optional(),
+  revertFileConflicts: z.array(revertFileConflictSchema).optional(),
 })
 
 /** session.models request payload. */
