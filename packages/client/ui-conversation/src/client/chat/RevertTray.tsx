@@ -50,14 +50,17 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
 
   if (revertFromSeq === null || reverted.length === 0) return null
 
-  const handleRestore = (item: { seq: number; text: string }, index: number) => {
-    if (index === 0) {
-      // Earliest reverted query -> restore entire conversation
+  const handleRestore = (_item: { seq: number; text: string }, index: number) => {
+    if (index === reverted.length - 1) {
+      // Restoring the latest reverted query -> restore the entire conversation
       revertRestore()
     } else {
-      // Restore earlier queries and move revert boundary to this query
-      revertRestore(item.seq)
-      inputActions.setDraft(item.text)
+      // Restoring up to this query -> move revert boundary to the next query
+      const nextItem = reverted[index + 1]
+      if (nextItem !== undefined) {
+        revertRestore(nextItem.seq)
+        inputActions.setDraft(nextItem.text)
+      }
     }
   }
 

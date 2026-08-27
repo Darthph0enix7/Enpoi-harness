@@ -107,7 +107,7 @@ describe('RevertTray', () => {
     cleanup()
   })
 
-  it('restore on row 0 restores all; restore on row > 0 moves boundary and populates draft', () => {
+  it('restore on row < last moves boundary and populates draft; restore on last row restores all', () => {
     const nodes = {
       get: () => undefined,
       values: () => [userNode(11, 'first query'), userNode(16, 'second query')],
@@ -122,14 +122,14 @@ describe('RevertTray', () => {
     fireEvent.click(screen.getByText('Reverted messages (2)'))
     const restores = screen.getAllByText('Restore')
     
-    // Row 0 (earliest): restore all
+    // Row 0 (first query): restore up to first query -> boundary moves to seq 16 and sets draft
     fireEvent.click(restores[0]!)
-    expect(revertRestore).toHaveBeenCalledWith()
-
-    // Row 1 (second query): boundary moves to seq 16 and sets draft
-    fireEvent.click(restores[1]!)
     expect(revertRestore).toHaveBeenCalledWith(16)
     expect(mockSetDraft).toHaveBeenCalledWith('second query')
+
+    // Row 1 (second query, last): restore all
+    fireEvent.click(restores[1]!)
+    expect(revertRestore).toHaveBeenCalledWith()
     cleanup()
   })
 
