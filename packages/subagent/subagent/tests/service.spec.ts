@@ -350,6 +350,7 @@ describe('subagent descriptors', () => {
       agentModel: 'chat',
       persona: 'reviewer',
       toolFilter: { allow: ['read'], deny: ['bash'] },
+      quiet: true,
     }
     expect(snapshotSubagentDescriptor({
       mode: 'continuable',
@@ -359,8 +360,17 @@ describe('subagent descriptors', () => {
       agentModel: complete.agentModel,
       persona: complete.persona,
       toolFilter: complete.toolFilter,
+      quiet: complete.quiet,
     })).toEqual(complete)
     expect(foldSubagentDescriptor([event(complete)])).toEqual(complete)
+    // Backward compatibility: descriptor events without a quiet key fold safely with quiet undefined.
+    const legacyWithoutQuiet = {
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'continuable' as const,
+      provider: 'spawn',
+      label: 'legacy child',
+    }
+    expect(foldSubagentDescriptor([event(legacyWithoutQuiet)])).toEqual(legacyWithoutQuiet)
     expect(foldSubagentDescriptor([
       event({
         version: SUBAGENT_DESCRIPTOR_VERSION,

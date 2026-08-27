@@ -14,16 +14,29 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetupCommit } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
+import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { SubagentError } from './error.ts'
+
+/** Spawn-time composition facts provided to continuable child setup contributions. */
+export interface ContinuableSetupInfo {
+  /** Whether settlement notices and report relays are suppressed for this child. */
+  readonly quiet: boolean
+  /** Tool filtering applied to this child. */
+  readonly toolFilter?: ToolRestriction | undefined
+}
 
 /**
  * One deployment capability installed into a continuable child's unpublished
  * creation context. It composes synchronously before publication and returns
  * the disposer for exactly that installation.
  * @param childCtx - the child's unpublished scoped context.
+ * @param info - spawn-time composition facts including quiet and toolFilter.
  * @returns the disposer revoking this installation.
  */
-export type ContinuableSetupContribution = (childCtx: Context) => () => void
+export type ContinuableSetupContribution = (
+  childCtx: Context,
+  info: ContinuableSetupInfo,
+) => () => void
 
 /** One contribution's live registration. */
 interface Registration {
@@ -85,9 +98,11 @@ export class SubagentActivationSetupRegistry {
   /**
    * Install every live contribution into one unpublished child context.
    * @param childCtx - the child's unpublished scoped context.
+   * @param info - optional spawn-time composition facts including quiet and toolFilter.
    * @returns the provisioning commit consumed at Agent publication.
    */
-  apply(childCtx: Context): AgentSetupCommit {
+  apply(childCtx: Context, info?: ContinuableSetupInfo): AgentSetupCommit {
+    const setupInfo: ContinuableSetupInfo = info ?? { quiet: false }
     const state: TransactionState = { installations: [], invalidated: false }
     try {
       for (const registration of [...this.registrations]) {
@@ -97,7 +112,7 @@ export class SubagentActivationSetupRegistry {
         const installation: Installation = {
           registration,
           childCtx,
-          dispose: registration.contribution(childCtx),
+          dispose: registration.contribution(childCtx, setupInfo),
           released: false,
           transaction: state,
         }

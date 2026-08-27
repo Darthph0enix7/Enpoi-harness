@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentReportDelivery } from '@deepseek-ai/dsh-subagent'
+import type { ContinuableSetupInfo, SubagentReportDelivery } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -44,13 +44,21 @@ export const Config: z<Config> = z.object({
  * @param childCtx - child-scoped context receiving the tool and the guidance.
  * @param ctx - service context used for delivery.
  * @param delivery - resolved deployment scheduling policy.
+ * @param info - spawn-time composition facts including quiet and toolFilter.
  * @returns disposer that attempts both child registrations before reporting cleanup failures.
  */
 export function installReportTool(
   childCtx: Context,
   ctx: Context,
   delivery: SubagentReportDelivery,
+  info?: ContinuableSetupInfo | undefined,
 ): () => void {
+  // If the continuable child was started in quiet mode or explicitly filtered,
+  // do not install the report tool or its prompt guidance.
+  if (info?.quiet === true || info?.toolFilter?.deny?.includes('report')) {
+    return () => {}
+  }
+
   const disposeSection = childCtx.systemPrompt.section({
     name: 'tool:report',
     order: REPORT_SECTION_ORDER,
@@ -137,6 +145,6 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Config() applies the schema default at runtime; the schemastery return
   // type keeps the input's optional shape, so assert the resolved one.
   const { reportDelivery } = Config(config) as { reportDelivery: SubagentReportDelivery }
-  ctx.subagents.registerContinuableSetup(childCtx =>
-    installReportTool(childCtx, ctx, reportDelivery))
+  ctx.subagents.registerContinuableSetup((childCtx, info) =>
+    installReportTool(childCtx, ctx, reportDelivery, info))
 }

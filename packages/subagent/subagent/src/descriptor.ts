@@ -80,6 +80,8 @@ export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBas
   readonly persona?: string
   /** Child tool scoping reapplied on resume. */
   readonly toolFilter?: ToolRestriction
+  /** Whether settlement notices and report relay are suppressed to keep parent context clean. */
+  readonly quiet?: boolean
 }
 
 /** The supported durable subagent identity and optional continuation composition. */
@@ -115,6 +117,8 @@ export interface ContinuableSubagentDescriptorInput extends SubagentDescriptorIn
   readonly persona?: string
   /** Requested child tool scoping. */
   readonly toolFilter?: ToolRestriction
+  /** Whether settlement notices and report relay are suppressed on resume. */
+  readonly quiet?: boolean
 }
 
 /** Inputs {@link snapshotSubagentDescriptor} validates and detaches. */
@@ -135,6 +139,7 @@ const CONTINUABLE_DESCRIPTOR_KEYS = new Set([
   'agentModel',
   'persona',
   'toolFilter',
+  'quiet',
 ])
 const TOOL_FILTER_KEYS = new Set(['allow', 'deny'])
 
@@ -235,6 +240,12 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
   const toolFilter = Object.hasOwn(value, 'toolFilter')
     ? parseToolFilter(value['toolFilter'])
     : undefined
+  const quiet = Object.hasOwn(value, 'quiet')
+    ? (typeof value['quiet'] === 'boolean' ? value['quiet'] : undefined)
+    : undefined
+  if (Object.hasOwn(value, 'quiet') && typeof value['quiet'] !== 'boolean') {
+    throw new Error('persisted subagent descriptor quiet must be a boolean')
+  }
   return {
     version: SUBAGENT_DESCRIPTOR_VERSION,
     mode,
@@ -244,6 +255,7 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
     ...agentModel !== undefined ? { agentModel } : {},
     ...persona !== undefined ? { persona } : {},
     ...toolFilter !== undefined ? { toolFilter } : {},
+    ...quiet !== undefined ? { quiet } : {},
   }
 }
 
@@ -285,6 +297,7 @@ export function snapshotSubagentDescriptor(input: SubagentDescriptorInput): Suba
       ...input.agentModel !== undefined ? { agentModel: input.agentModel } : {},
       ...input.persona !== undefined ? { persona: input.persona } : {},
       ...input.toolFilter !== undefined ? { toolFilter: input.toolFilter } : {},
+      ...input.quiet !== undefined ? { quiet: input.quiet } : {},
     }
   const snapshot = snapshotJsonValue(candidate)
   if (snapshot === undefined) {

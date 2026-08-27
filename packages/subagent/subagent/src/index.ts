@@ -121,7 +121,7 @@ export type {
   SubagentReportOptions,
   SubagentSettledMessageSource,
 } from './continuation.ts'
-export type { ContinuableSetupContribution } from './activation-setup-registry.ts'
+export type { ContinuableSetupContribution, ContinuableSetupInfo } from './activation-setup-registry.ts'
 export type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 export type { SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
 export type { SubagentIdentityProjection, SubagentTimingProjection } from './projection-types.ts'

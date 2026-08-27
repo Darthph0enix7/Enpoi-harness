@@ -97,9 +97,39 @@ export function apply(ctx: Context): void {
 
   // 3. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {
-    yield ctx.slots.register({ name: 'tool.call.toolview', key: 'dispatch_task' }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({ name: 'tool.call.toolview', key: 'oracle_review' }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({ name: 'tool.call.toolview', key: 'roundtable' }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({ name: 'tool.call.toolview', key: 'chorus' }, TheMarkTaskCardAdapter)
+    const sessions = ctx.get('sessions')
+    const openSession = (id: SessionId) => {
+      sessions?.open(id)
+    }
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'subagent',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'dispatch_task',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'task',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'oracle_review',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'roundtable',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
+    yield ctx.slots.register({
+      name: 'tool.call.toolview',
+      key: 'chorus',
+      inject: () => ({ openSession }),
+    }, TheMarkTaskCardAdapter)
   })
 }

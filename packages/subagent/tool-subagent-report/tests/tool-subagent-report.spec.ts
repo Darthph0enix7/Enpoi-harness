@@ -449,6 +449,56 @@ describe('dsh-tool-subagent-report', () => {
     expect(await sectionNames(ctx, child)).not.toContain('tool:report')
   })
 
+  it('suppresses report tool and guidance when child is started in quiet mode', async () => {
+    const { ctx, parent } = await setup()
+    const started = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'quiet child',
+      quiet: true,
+      request: {
+        prompt: [{ type: 'text', text: 'quiet child' }],
+        parent,
+      },
+      signal: testSignal,
+    })
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live as Agent
+    })
+    expect(ctx.tools.schemas(child).map(schema => schema.name)).not.toContain('report')
+    expect(await sectionNames(ctx, child)).not.toContain('tool:report')
+  })
+
+  it('suppresses report tool and guidance when child toolFilter explicitly denies report', async () => {
+    const { ctx, parent } = await setup()
+    // Register a global dummy tool so tools.restrict() has a known global tool name to validate against.
+    ctx.tools.register({
+      name: 'report',
+      description: 'global placeholder',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'object', properties: {} }, render: () => [] },
+      execute: () => Promise.resolve({}),
+    })
+    const started = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'filtered child',
+      request: {
+        prompt: [{ type: 'text', text: 'filtered child' }],
+        parent,
+        toolFilter: { deny: ['report'] },
+      },
+      signal: testSignal,
+    })
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live as Agent
+    })
+    expect(ctx.tools.schemas(child).map(schema => schema.name)).not.toContain('report')
+    expect(await sectionNames(ctx, child)).not.toContain('tool:report')
+  })
+
   it('scopes the report guidance to the child that owns it', async () => {
     const { ctx, parent } = await setup()
     const { child } = await startChild(ctx, parent, 'first child')

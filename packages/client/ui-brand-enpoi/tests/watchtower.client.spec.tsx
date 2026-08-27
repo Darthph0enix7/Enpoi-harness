@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
 import { TheMarkTaskCard } from '../src/client/TheMarkTaskCard.tsx'
+import { TheMarkTaskCardAdapter } from '../src/client/TheMarkTaskCardAdapter.tsx'
+import type { ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'
 
-describe('Enpoi Harness UI — Watchtower (minimal, projected-only)', () => {
+describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
   afterEach(() => {
     cleanup()
   })
@@ -78,7 +80,7 @@ describe('Enpoi Harness UI — Watchtower (minimal, projected-only)', () => {
       />,
     )
 
-    expect(screen.getByText(/Running: ast_grep_search/i)).toBeTruthy()
+    expect(screen.getByText(/Executing: ast_grep_search/i)).toBeTruthy()
 
     rerender(
       <TheMarkTaskCard
@@ -90,5 +92,102 @@ describe('Enpoi Harness UI — Watchtower (minimal, projected-only)', () => {
     )
 
     expect(screen.getByText(/\[Interrupted at: ast_grep_search\]/i)).toBeTruthy()
+  })
+
+  it('TheMarkTaskCard renders model pill, sub-tools activity timeline, expandable output, and calls onOpenSession', () => {
+    const onOpen = vi.fn()
+    render(
+      <TheMarkTaskCard
+        taskId="task-2"
+        persona="📚 Librarian"
+        title="Research WebSockets vs SSE"
+        model="antigravity/gemini-3.7-flash-tiered"
+        status="settled"
+        durationMs={2400}
+        childSessionId="session-child-abc-123"
+        subTools={['web_search', 'read']}
+        outputSummary="WebSockets provide full-duplex communication over a single TCP connection."
+        onOpenSession={onOpen}
+      />,
+    )
+
+    expect(screen.getByText('📚 Librarian')).toBeTruthy()
+    expect(screen.getByText('Research WebSockets vs SSE')).toBeTruthy()
+    expect(screen.getByText('gemini-3.7-flash-tiered')).toBeTruthy()
+    expect(screen.getByText('⏱️ 2.4s')).toBeTruthy()
+
+    // Click header to expand
+    fireEvent.click(screen.getByText('Research WebSockets vs SSE'))
+
+    expect(screen.getByText(/Tools Executed \(2\)/i)).toBeTruthy()
+    expect(screen.getByText('web_search')).toBeTruthy()
+    expect(screen.getByText('read')).toBeTruthy()
+
+    expect(screen.getByText('Output & Findings')).toBeTruthy()
+    expect(screen.getByText(/WebSockets provide full-duplex/i)).toBeTruthy()
+
+    const openBtn = screen.getByText(/Open Subagent Session/i)
+    fireEvent.click(openBtn)
+    expect(onOpen).toHaveBeenCalledWith('session-child-abc-123')
+  })
+
+  it('TheMarkTaskCardAdapter adapts subagent tool calls into custom in-chat card with sub-tools', () => {
+    const openSession = vi.fn()
+    const mockBlock: ToolResultNode = {
+      kind: 'tool-result',
+      callId: 'call-sub-1',
+      callTime: 1000,
+      time: 2500,
+      isError: false,
+      call: {
+        callId: 'call-sub-1',
+        name: 'subagent',
+        argsRaw: JSON.stringify({
+          description: 'Explore codebase architecture',
+          prompt: 'You are the Explorer. Map the repository directory structure.',
+        }),
+      },
+      subCalls: [
+        {
+          kind: 'tool-result',
+          callId: 'call-sub-child-1',
+          callTime: 1100,
+          time: 1500,
+          isError: false,
+          call: { name: 'grep', argsRaw: '{"pattern":"class"}' },
+          content: [],
+          callView: null,
+          resultView: null,
+          subCalls: [],
+          seq: 10,
+        },
+      ],
+      content: [{ type: 'text', text: 'Started subagent session-child-999\nRepository mapped successfully.' }],
+      callView: null,
+      resultView: null,
+      seq: 12,
+    }
+
+    render(
+      <TheMarkTaskCardAdapter
+        callId="call-sub-1"
+        toolName="subagent"
+        block={mockBlock}
+        openFile={vi.fn()}
+        openSession={openSession}
+      />,
+    )
+
+    expect(screen.getByText('🔍 Explorer')).toBeTruthy()
+    expect(screen.getByText('Explore codebase architecture')).toBeTruthy()
+
+    // Expand
+    fireEvent.click(screen.getByText('Explore codebase architecture'))
+    expect(screen.getByText('grep')).toBeTruthy()
+    expect(screen.getByText(/Repository mapped successfully/i)).toBeTruthy()
+
+    const openBtn = screen.getByText(/Open Subagent Session/i)
+    fireEvent.click(openBtn)
+    expect(openSession).toHaveBeenCalledWith('session-child-999')
   })
 })

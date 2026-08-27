@@ -1706,6 +1706,37 @@ describe('continuable settlement delivery', () => {
     )
   })
 
+  it('suppresses settlement notice when started with quiet mode', async () => {
+    const { ctx, parent } = await setup([textResponse('quiet child answer')])
+    const started = await ctx.subagents.startContinuable({
+      ...startSpec(parent),
+      quiet: true,
+    })
+    await waitNoActivation(ctx, started.childId)
+    // Quiet child finishes without injecting settlement notice into parent.
+    expect(settlementNotices(parent)).toEqual([])
+  })
+
+  it('persists quiet mode across cold resume and suppresses settlement notice after resume', async () => {
+    const { ctx, parent } = await setup([textResponse('first quiet answer'), textResponse('second quiet answer')])
+    const started = await ctx.subagents.startContinuable({
+      ...startSpec(parent),
+      quiet: true,
+    })
+    await waitNoActivation(ctx, started.childId)
+    expect(settlementNotices(parent)).toEqual([])
+
+    // Cold resume: followup creates new activation from persisted descriptor.
+    await followup(ctx, parent, started.childId, message('resume quiet child'))
+    await waitNoActivation(ctx, started.childId)
+
+    // Still 0 settlement notices after cold resume.
+    expect(settlementNotices(parent)).toEqual([])
+    const loaded = await ctx.sessionPersistence.load(started.childId)
+    const descriptorEvent = loaded.events.find(e => e.type === 'subagent/descriptor')
+    expect(descriptorEvent?.data).toMatchObject({ mode: 'continuable', quiet: true })
+  })
+
   it('delivers even when the child already reported for itself', async () => {
     const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
     const started = await ctx.subagents.startContinuable(startSpec(parent))

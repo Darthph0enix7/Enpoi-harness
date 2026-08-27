@@ -436,6 +436,9 @@ export class SubagentContinuationManager {
       ...agentModel !== undefined ? { agentModel } : {},
       ...request.persona !== undefined ? { persona: request.persona } : {},
       ...request.toolFilter !== undefined ? { toolFilter: request.toolFilter } : {},
+      ...spec.quiet !== undefined || request.quiet !== undefined
+        ? { quiet: spec.quiet ?? request.quiet ?? false }
+        : {},
     })
     // Capture before the first await: a later parent switch belongs to the
     // parent's future, not to this child.
@@ -993,6 +996,7 @@ export class SubagentContinuationManager {
           ...descriptor.agentModel !== undefined ? { model: descriptor.agentModel } : {},
         },
         composition: { persona: descriptor.persona, toolFilter: descriptor.toolFilter },
+        quiet: descriptor.quiet ?? false,
         signal: options.signal,
       })
     } catch (error: unknown) {
@@ -1073,7 +1077,10 @@ export class SubagentContinuationManager {
         appendDelegatedPolicyOverrides((childCtx.agent as Agent).session, create.delegatedPolicies)
       }
       applyChildComposition(childCtx, parent, inputs.composition)
-      return this.setupRegistry.apply(childCtx)
+      return this.setupRegistry.apply(childCtx, {
+        quiet: inputs.quiet ?? false,
+        toolFilter: inputs.composition.toolFilter,
+      })
     }
     const observer = this.host.observeActivation(provider, childId, parent)
     // Agent creation owns rollback before handle transfer. A rejection leaves
