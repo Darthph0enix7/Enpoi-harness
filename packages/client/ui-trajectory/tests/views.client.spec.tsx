@@ -109,7 +109,7 @@ function historySnapshot(
     loadingOlder: false,
     promptError: null,
     blank: nodes.length === 0,
-    lastAgentError: null,
+    lastAgentError: null, revertFromSeq: null, revertShadowedSeqs: [],
   }
 }
 
