@@ -1,7 +1,5 @@
-// RevertTray: the expandable "Reverted (N)" strip above the input card.
-// Lists each reverted user query (one line) with per-item Restore and Fork
-// actions plus a Redo (restore-all) button. Rendered only while a revert
-// boundary is active; the tray disappears once a new query commits the revert.
+// RevertTray: the compact, minimalist "Reverted messages (N)" bar above the input card.
+// Expands to display a scrollable list of reverted queries with per-item Restore and Fork actions.
 
 import { memo, useMemo, useState } from 'react'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
@@ -10,11 +8,7 @@ import css from './RevertTray.module.css'
 
 /** Injected action face for the input-dock registration. */
 export interface RevertTrayInjected {
-  /**
-   * Restore reverted messages: omitted restores everything; a seq restores
-   * everything up to and including that message (later reverted messages stay
-   * reverted — the suffix-hide rule can only un-revert a prefix).
-   */
+  /** Restore reverted messages: omitted restores everything; a seq restores from that boundary. */
   revertRestore: (restoreSeq?: number) => void
   /** Fork the session at a reverted message. */
   forkAt: (seq: number) => void
@@ -36,7 +30,7 @@ function nodeText(content: readonly ContentBlock[]): string {
   return parts.join(' ').trim()
 }
 
-export const RevertTray = memo(function RevertTray({ useSession, t, revertRestore, forkAt }: RevertTrayProps) {
+export const RevertTray = memo(function RevertTray({ useSession, t, revertRestore, forkAt, inputActions }: RevertTrayProps) {
   const [expanded, setExpanded] = useState(false)
   const revertFromSeq = useSession(s => s.revertFromSeq)
   const nodes = useSession(s => s.chat.nodes)
@@ -45,62 +39,80 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
     if (revertFromSeq === null) return []
     const list: { seq: number; text: string }[] = []
     for (const node of nodes.values()) {
-      if (node.kind !== 'user') continue
-      if (node.anchorSeq <= revertFromSeq) continue
+      if (node.kind !== 'user' && node.kind !== 'steering') continue
+      // Include all user messages at or after the revert boundary
+      if (node.anchorSeq < revertFromSeq) continue
       const text = nodeText((node.data as { content?: readonly ContentBlock[] }).content ?? [])
       if (text.length > 0) list.push({ seq: node.anchorSeq, text })
     }
-    // Render order is not guaranteed by the store; sort so the index math
-    // (restore item i → boundary = item i+1) is exact.
     return list.sort((left, right) => left.seq - right.seq)
   }, [revertFromSeq, nodes])
 
-  if (revertFromSeq === null) return null
+  if (revertFromSeq === null || reverted.length === 0) return null
+
+  const handleRestore = (item: { seq: number; text: string }, index: number) => {
+    if (index === 0) {
+      // Earliest reverted query -> restore entire conversation
+      revertRestore()
+    } else {
+      // Restore earlier queries and move revert boundary to this query
+      revertRestore(item.seq)
+      inputActions.setDraft(item.text)
+    }
+  }
 
   return (
-    <div className={css.tray} data-revert-tray>
-      <div className={css.trayHeader}>
+    <div className={css.dock} data-revert-tray>
+      <div className={css.panel}>
         <button
           type="button"
-          className={css.trayToggle}
+          className={css.header}
           onClick={() => setExpanded(!expanded)}
           aria-expanded={expanded}
         >
-          <span className={css.trayIcon}>⮌</span>
-          <span>{t('revert.trayLabel', { count: reverted.length })}</span>
-          <span className={css.trayChevron}>{expanded ? '▲' : '▼'}</span>
+          <span className={css.title}>
+            {t('revert.trayLabel', { count: reverted.length })}
+          </span>
+          <span className={css.chevron}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d={expanded ? 'M2.5 7.5L6 4L9.5 7.5' : 'M2.5 4.5L6 8L9.5 4.5'}
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
         </button>
-        <button type="button" className={css.trayRedo} onClick={() => { revertRestore() }}>
-          {t('revert.redo')}
-        </button>
+        {expanded && (
+          <ul className={css.list}>
+            {reverted.map((item, index) => (
+              <li key={item.seq} className={css.item}>
+                <span className={css.itemText} title={item.text}>
+                  {item.text}
+                </span>
+                <div className={css.itemActions}>
+                  <button
+                    type="button"
+                    className={css.actionBtn}
+                    onClick={() => handleRestore(item, index)}
+                  >
+                    {t('revert.restore')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.actionBtn}
+                    onClick={() => forkAt(item.seq)}
+                  >
+                    {t('revert.fork')}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
-      {expanded && (
-        <ul className={css.trayList}>
-          {reverted.map((item, index) => (
-            <li key={item.seq} className={css.trayItem}>
-              <span className={css.trayItemText} title={item.text}>
-                {item.text.slice(0, 80)}
-              </span>
-              <span className={css.trayItemActions}>
-                <button
-                  type="button"
-                  className={css.trayItemBtn}
-                  onClick={() => { revertRestore(reverted[index + 1]?.seq) }}
-                >
-                  {t('revert.restore')}
-                </button>
-                <button
-                  type="button"
-                  className={css.trayItemBtn}
-                  onClick={() => { forkAt(item.seq) }}
-                >
-                  {t('revert.fork')}
-                </button>
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   )
 })

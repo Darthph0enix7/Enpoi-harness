@@ -43,6 +43,8 @@ function snapshot(overrides: Partial<ConversationSnapshot> = {}): ConversationSn
   }
 }
 
+const mockSetDraft = vi.fn()
+
 const DOCK_PROPS = {
   sessionId: 's1' as never,
   session: {} as never,
@@ -51,7 +53,7 @@ const DOCK_PROPS = {
   useWorkspaces: () => ({} as never),
   useProjection: () => (undefined as never),
   useInput: () => ({} as never),
-  inputActions: {} as never,
+  inputActions: { setDraft: mockSetDraft } as never,
 }
 
 function userNode(seq: number, text: string) {
@@ -64,8 +66,7 @@ function userNode(seq: number, text: string) {
 }
 
 const t = (key: string, params?: Record<string, unknown>): string => {
-  if (key === 'revert.trayLabel') return `Reverted (${String(params?.count)})`
-  if (key === 'revert.redo') return 'Redo'
+  if (key === 'revert.trayLabel') return `Reverted messages (${String(params?.count)})`
   if (key === 'revert.restore') return 'Restore'
   if (key === 'revert.fork') return 'Fork'
   return key
@@ -79,18 +80,17 @@ describe('RevertTray', () => {
     cleanup()
   })
 
-  it('shows the tray with the reverted count and Redo even with zero reverted queries', () => {
+  it('renders null when no user nodes exist at or after boundary', () => {
     const useSession = ((selector: (s: ConversationSnapshot) => unknown) => selector(snapshot({ revertFromSeq: 11 }))) as SnapshotSelectorHook<ConversationSnapshot>
-    render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={vi.fn()} forkAt={vi.fn()} />)
-    expect(screen.getByText('Reverted (0)')).toBeTruthy()
-    expect(screen.getByText('Redo')).toBeTruthy()
+    const { container } = render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={vi.fn()} forkAt={vi.fn()} />)
+    expect(container.innerHTML).toBe('')
     cleanup()
   })
 
-  it('lists reverted user queries in seq order with Restore and Fork per item', () => {
+  it('lists all reverted user queries in seq order with Restore and Fork per item', () => {
     const nodes = {
       get: () => undefined,
-      values: () => [userNode(16, 'second query'), userNode(25, 'third query')],
+      values: () => [userNode(11, 'first query'), userNode(16, 'second query'), userNode(25, 'third query')],
     }
     const useSession = ((selector: (s: ConversationSnapshot) => unknown) => selector(snapshot({
       revertFromSeq: 11,
@@ -98,42 +98,38 @@ describe('RevertTray', () => {
     }))) as SnapshotSelectorHook<ConversationSnapshot>
     render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={vi.fn()} forkAt={vi.fn()} />)
     // Expand
-    fireEvent.click(screen.getByText('Reverted (2)'))
+    fireEvent.click(screen.getByText('Reverted messages (3)'))
+    expect(screen.getByText('first query')).toBeTruthy()
     expect(screen.getByText('second query')).toBeTruthy()
     expect(screen.getByText('third query')).toBeTruthy()
-    expect(screen.getAllByText('Restore')).toHaveLength(2)
-    expect(screen.getAllByText('Fork')).toHaveLength(2)
+    expect(screen.getAllByText('Restore')).toHaveLength(3)
+    expect(screen.getAllByText('Fork')).toHaveLength(3)
     cleanup()
   })
 
-  it('restore on row i un-reverts up to and including row i (boundary = next row seq)', () => {
+  it('restore on row 0 restores all; restore on row > 0 moves boundary and populates draft', () => {
     const nodes = {
       get: () => undefined,
-      values: () => [userNode(16, 'second query'), userNode(25, 'third query')],
+      values: () => [userNode(11, 'first query'), userNode(16, 'second query')],
     }
     const useSession = ((selector: (s: ConversationSnapshot) => unknown) => selector(snapshot({
       revertFromSeq: 11,
       chat: { order: [], nodes: nodes as never, locations: {} as never, timeline: {} as never, legacy: {} as never },
     }))) as SnapshotSelectorHook<ConversationSnapshot>
     const revertRestore = vi.fn()
+    mockSetDraft.mockClear()
     render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={revertRestore} forkAt={vi.fn()} />)
-    fireEvent.click(screen.getByText('Reverted (2)'))
+    fireEvent.click(screen.getByText('Reverted messages (2)'))
     const restores = screen.getAllByText('Restore')
-    // Row 0 (second query): boundary moves to the next row's seq (25).
+    
+    // Row 0 (earliest): restore all
     fireEvent.click(restores[0]!)
-    expect(revertRestore).toHaveBeenCalledWith(25)
-    // Row 1 (third query, last): restore everything (undefined).
-    fireEvent.click(restores[1]!)
-    expect(revertRestore).toHaveBeenCalledWith(undefined)
-    cleanup()
-  })
-
-  it('Redo restores everything', () => {
-    const useSession = ((selector: (s: ConversationSnapshot) => unknown) => selector(snapshot({ revertFromSeq: 11 }))) as SnapshotSelectorHook<ConversationSnapshot>
-    const revertRestore = vi.fn()
-    render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={revertRestore} forkAt={vi.fn()} />)
-    fireEvent.click(screen.getByText('Redo'))
     expect(revertRestore).toHaveBeenCalledWith()
+
+    // Row 1 (second query): boundary moves to seq 16 and sets draft
+    fireEvent.click(restores[1]!)
+    expect(revertRestore).toHaveBeenCalledWith(16)
+    expect(mockSetDraft).toHaveBeenCalledWith('second query')
     cleanup()
   })
 
@@ -143,12 +139,12 @@ describe('RevertTray', () => {
       values: () => [userNode(16, 'second query')],
     }
     const useSession = ((selector: (s: ConversationSnapshot) => unknown) => selector(snapshot({
-      revertFromSeq: 11,
+      revertFromSeq: 16,
       chat: { order: [], nodes: nodes as never, locations: {} as never, timeline: {} as never, legacy: {} as never },
     }))) as SnapshotSelectorHook<ConversationSnapshot>
     const forkAt = vi.fn()
     render(<RevertTray {...DOCK_PROPS} useSession={useSession} t={t} revertRestore={vi.fn()} forkAt={forkAt} />)
-    fireEvent.click(screen.getByText('Reverted (1)'))
+    fireEvent.click(screen.getByText('Reverted messages (1)'))
     fireEvent.click(screen.getByText('Fork'))
     expect(forkAt).toHaveBeenCalledWith(16)
     cleanup()
