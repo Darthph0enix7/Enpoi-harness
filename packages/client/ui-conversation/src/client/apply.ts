@@ -428,9 +428,14 @@ export function apply(ctx: Context): void {
         revertAt: (seq) => {
           void sessions.revert({ sessionId, atSeq: seq })
             .then(({ revertedText }) => {
-              // Populate the input card with the reverted query (the draft
-              // store persists it across restarts).
+              // Populate the input card with the reverted query (both the draft
+              // store and the live input instance so the textarea updates live).
               actions.setDraft(revertedText)
+              const scoped = sessions.scope(sessionId)
+              if (scoped !== undefined) {
+                const conversation = scoped.get('conversation')
+                conversation?.input.for(scoped).setDraft(revertedText)
+              }
             })
             .catch((error: unknown) => {
               // Surface the failure (e.g. the message is compaction-shadowed

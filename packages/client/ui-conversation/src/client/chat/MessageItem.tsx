@@ -294,7 +294,7 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
           time={data.time}
           clock="start"
           className={css.actions}
-          onRevert={node.kind === 'user' ? () => { revertAt(data.seq) } : undefined}
+          onRevert={node.kind === 'user' ? () => { revertAt(node.anchorSeq) } : undefined}
           t={t}
         />
       )}

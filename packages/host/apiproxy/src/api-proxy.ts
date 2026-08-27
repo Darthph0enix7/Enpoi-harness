@@ -2662,14 +2662,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (hasSubagentOwner(agent.session, agent)) {
           return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
         }
-        // An in-flight turn or pending inbox work keeps the surface growing;
-        // a revert boundary set now would shadow a moving target.
+        // If a turn is running or inbox has pending work, cancel it first so the
+        // revert takes effect immediately instead of rejecting with agent-busy.
         if (agent.status === 'running' || agent.inbox.hasPending) {
-          return Promise.resolve(err(request, {
-            code: 'agent-busy',
-            message: 'revert requires an idle session with no pending input',
-            details: { reason: 'session busy' },
-          }))
+          agent.cancel({ kind: 'user' }, { keepInbox: false })
         }
         const session = agent.session
         const nodes = session.surface.nodes
