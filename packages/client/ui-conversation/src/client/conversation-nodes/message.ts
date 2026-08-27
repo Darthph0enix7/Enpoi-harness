@@ -37,12 +37,19 @@ function isCompactionCheckpoint(event: Parameters<ConversationNodeDefinition['ma
   return source.kind === 'plugin' && source.plugin === 'compact'
 }
 
+/** A user-origin replacement event: the revert-commit message shadowing the reverted span. */
+function isRevertCommit(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
+  return event.type === 'user/message'
+    && isReplacementSurfaceEvent(event)
+    && event.data.source.kind === 'user'
+}
+
 /** User, steering, and injected-context message classification Definition. */
 export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
   kind: 'input-message',
   target: 'chat',
   match: event => event.type === 'user/message'
-    && isAppendSurfaceEvent(event)
+    && (isAppendSurfaceEvent(event) || isRevertCommit(event))
     && !isCompactionCheckpoint(event)
     ? { id: String(event.data.id), role: 'start' }
     : null,

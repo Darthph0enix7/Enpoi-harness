@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { LlmCallConfig, LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AgentCancelCause, Session, SessionId, SurfaceOp, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
 import type { InboxTarget } from './types.ts'
@@ -120,8 +120,9 @@ export interface Agent {
    * Queue an ordinary follow-up turn and wake the driver. The item becomes the
    * sole ordinary message of its own turn.
    * @param message - identified prompt content and the source that supplied it.
+   * @param options - optional surface metadata for the append (revert-commit shadowing).
    */
-  followup(message: UserMessage): void
+  followup(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void
 
   /**
    * Submit steering for the nearest step. An idle driver starts a turn;
@@ -129,8 +130,9 @@ export interface Agent {
    * A rejected step leaves steering parked in the inbox until the next
    * wake; cancellation or disposal may discard pending steering.
    * @param message - identified steering content and the source that supplied it.
+   * @param options - optional surface metadata for the append (revert-commit shadowing).
    */
-  steer(message: UserMessage): void
+  steer(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void
 
   /**
    * Queue model-facing context for the next pre-step without waking the

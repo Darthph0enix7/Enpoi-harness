@@ -4,9 +4,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -1937,6 +1938,60 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return ok(request, namespaceView(descriptor))
   }
 
+  /**
+   * Best-effort text extraction from a user/message event payload (for the
+   * reverted query text returned to the input card).
+   */
+  function messageTextOf(data: unknown): string {
+    if (!data || typeof data !== 'object') return ''
+    const content = (data as { content?: unknown }).content
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .map((part) => {
+          if (typeof part === 'string') return part
+          if (part !== null && typeof part === 'object' && 'text' in part && typeof (part as { text: unknown }).text === 'string') {
+            return (part as { text: string }).text
+          }
+          return ''
+        })
+        .filter(text => text.length > 0)
+        .join(' ')
+    }
+    return ''
+  }
+
+  /**
+   * Fold the latest `revert/state` boundary over a full event list (the
+   * host-authoritative mirror for the client's window-relative fold).
+   */
+  function foldRevertBoundary(events: readonly SessionEvent[]): number | null {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]
+      if (event !== undefined && event.type === 'revert/state') {
+        return (event.data as { fromSeq: number | null }).fromSeq
+      }
+    }
+    return null
+  }
+
+  /**
+   * Append one durable revert-ledger entry (git-branch-like work tree). The
+   * ledger documents every revert/restore/commit so nothing is ever lost even
+   * after the UI tray disappears. Best-effort: a ledger failure must never
+   * break the RPC.
+   */
+  function appendRevertLedger(sessionId: SessionId, entry: Record<string, unknown>): void {
+    try {
+      const home = process.env.DSH_HOME ?? homedir()
+      const dir = join(home.endsWith('.dsh') ? home : join(home, '.dsh'), 'revert-ledger')
+      mkdirSync(dir, { recursive: true })
+      appendFileSync(join(dir, `${sessionId}.jsonl`), `${JSON.stringify({ ts: Date.now(), ...entry })}\n`)
+    } catch {
+      // ledger is diagnostic; never fail the operation
+    }
+  }
+
   return {
     sessions: {
       // Attached sessions summarize from memory; persisted-but-unattached (cold)
@@ -2170,6 +2225,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             events: page.events,
             hasMore: page.hasMore,
             ...cut.projections === undefined ? {} : { projections: cut.projections },
+            // Host-authoritative revert boundary (folded over the FULL log, so
+            // a trimmed client window can never lose it).
+            revertFromSeq: foldRevertBoundary(cut.events),
           })
         } catch (error: unknown) {
           if (error instanceof SessionNotFound) {
@@ -2397,8 +2455,55 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
             const durable = await durablePromptContent(ctx, content)
             const message: UserMessage = createUserMessage({ content: durable, source })
-            if (mode === 'steer') agent.steer(message)
-            else agent.followup(message)
+            const revertFromSeq = request.payload.revertFromSeq
+            if (revertFromSeq !== undefined) {
+              // Commit an active revert: shadow the reverted span with this
+              // message (the compaction mechanism), then clear the boundary.
+              // Only valid on an idle session with no pending input — a
+              // running turn would grow the surface past the computed end.
+              if (mode === 'steer') {
+                return err(request, {
+                  code: 'revert-invalid',
+                  message: 'revert commit is only valid for queued prompts',
+                  details: { sessionId, revertFromSeq },
+                })
+              }
+              if (agent.status === 'running' || agent.inbox.hasPending) {
+                return err(request, {
+                  code: 'agent-busy',
+                  message: 'revert commit requires an idle session with no pending input',
+                  details: { reason: 'session busy' },
+                })
+              }
+              const nodes = agent.session.surface.nodes
+              const startIdx = nodes.indexOf(revertFromSeq)
+              if (startIdx === -1) {
+                return err(request, {
+                  code: 'revert-invalid',
+                  message: `revertFromSeq ${String(revertFromSeq)} is not an active surface node`,
+                  details: { sessionId, revertFromSeq },
+                })
+              }
+              const shadowedSeqs = nodes.slice(startIdx)
+              const end = nodes[nodes.length - 1]
+              if (end === undefined) {
+                return err(request, {
+                  code: 'revert-invalid',
+                  message: `no surface node after ${String(revertFromSeq)} to shadow`,
+                  details: { sessionId, revertFromSeq },
+                })
+              }
+              const surfaceOp = { op: 'replace' as const, start: revertFromSeq, end }
+              // The boundary clears atomically with the shadowing append at
+              // the append site (clearRevert), never before it lands.
+              agent.followup(message, { surfaceOp, sourceEventSeqs: shadowedSeqs, clearRevert: true })
+              appendRevertLedger(sessionId, {
+                action: 'commit', atSeq: revertFromSeq, shadowedSeqs,
+              })
+            } else {
+              if (mode === 'steer') agent.steer(message)
+              else agent.followup(message)
+            }
           } catch (error: unknown) {
             if (error instanceof AttachmentError) {
               return err(request, {
@@ -2531,6 +2636,95 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
+        return Promise.resolve(ok(request, { accepted: true as const }))
+      },
+
+      revert(request) {
+        const { sessionId, atSeq } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) {
+          return Promise.resolve(err(request, {
+            code: 'session-not-found',
+            message: `session "${sessionId}" not found (not attached)`,
+            details: { sessionId },
+          }))
+        }
+        if (hasSubagentOwner(agent.session, agent)) {
+          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+        }
+        // An in-flight turn or pending inbox work keeps the surface growing;
+        // a revert boundary set now would shadow a moving target.
+        if (agent.status === 'running' || agent.inbox.hasPending) {
+          return Promise.resolve(err(request, {
+            code: 'agent-busy',
+            message: 'revert requires an idle session with no pending input',
+            details: { reason: 'session busy' },
+          }))
+        }
+        const session = agent.session
+        const nodes = session.surface.nodes
+        const startIdx = nodes.indexOf(atSeq)
+        if (startIdx === -1) {
+          return Promise.resolve(err(request, {
+            code: 'revert-invalid',
+            message: `event ${String(atSeq)} is not an active surface node (revert anchors on a user message)`,
+            details: { sessionId, atSeq },
+          }))
+        }
+        const target = session.events[atSeq]
+        if (target === undefined || target.type !== 'user/message') {
+          return Promise.resolve(err(request, {
+            code: 'revert-invalid',
+            message: `event ${String(atSeq)} is not a user message (revert anchors on a user message)`,
+            details: { sessionId, atSeq },
+          }))
+        }
+        // The reverted query text: the user message at the boundary.
+        const revertedText = messageTextOf(target.data)
+        // Count reverted user queries (user messages after the boundary).
+        const revertedCount = nodes.slice(startIdx + 1)
+          .filter(seq => session.events[seq]?.type === 'user/message').length
+        session.append('revert/state', { fromSeq: atSeq }, { ignorable: true })
+        appendRevertLedger(sessionId, {
+          action: 'revert', atSeq, revertedCount,
+          revertedText: revertedText.slice(0, 500),
+        })
+        return Promise.resolve(ok(request, {
+          accepted: true as const,
+          revertedText,
+          revertedCount,
+        }))
+      },
+
+      revertRestore(request) {
+        const { sessionId, restoreSeq } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) {
+          return Promise.resolve(err(request, {
+            code: 'session-not-found',
+            message: `session "${sessionId}" not found (not attached)`,
+            details: { sessionId },
+          }))
+        }
+        if (hasSubagentOwner(agent.session, agent)) {
+          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+        }
+        const session = agent.session
+        if (restoreSeq !== undefined) {
+          const nodes = session.surface.nodes
+          if (!nodes.includes(restoreSeq)) {
+            return Promise.resolve(err(request, {
+              code: 'revert-invalid',
+              message: `event ${String(restoreSeq)} is not an active surface node`,
+              details: { sessionId, restoreSeq },
+            }))
+          }
+        }
+        session.append('revert/state', { fromSeq: restoreSeq ?? null }, { ignorable: true })
+        appendRevertLedger(sessionId, {
+          action: 'restore',
+          ...restoreSeq === undefined ? {} : { restoreSeq },
+        })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
     },

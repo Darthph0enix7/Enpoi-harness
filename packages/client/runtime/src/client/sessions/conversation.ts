@@ -478,4 +478,17 @@ export interface ConversationSnapshot {
    */
   blank: boolean
   lastAgentError: string | null
+  /**
+   * Active revert boundary: the seq of the user message the conversation was
+   * reverted from, or null when no revert is active. Folded from the latest
+   * `revert/state` log event. The chat view hides nodes after this boundary
+   * and shows the reverted tray.
+   */
+  revertFromSeq: number | null
+  /**
+   * Seqs shadowed by the latest revert-commit (a user-origin surface
+   * replacement): the reverted span stays hidden from the transcript even
+   * after the revert boundary clears. Empty when no commit has landed.
+   */
+  revertShadowedSeqs: readonly number[]
 }

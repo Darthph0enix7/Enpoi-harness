@@ -108,6 +108,9 @@ export class Session implements SessionFace {
   /** subscribed.lastSeq baseline (gap detection; null when no subscribed frame arrived — degrade to the liveBuffer dedup path). */
   private subscribedLastSeq: number | null = null
 
+  /** Host-authoritative revert boundary from the last history pull (full-log fold). */
+  private hostRevertFromSeq: number | null = null
+
   /**
    * Per-session projection value store (push model; see the session-projection
    * subsystem page, docs/subsystems/session-projection.md): finished whole
@@ -203,11 +206,17 @@ export class Session implements SessionFace {
     let result: RpcResult<{ accepted: true }>
     try {
       if (this.address === undefined) {
+        // Commit an active revert: the host shadows the reverted span with
+        // this message (surfaceOp replace) when revertFromSeq is set.
+        const revertFromSeq = this.events.some(event => event.type === 'revert/state')
+          ? foldRevertState(this.events)
+          : this.hostRevertFromSeq
         result = (await this.api.sessions.prompt({
           sessionId: this.sessionId,
           mode,
           content,
           clientTimeZone: resolvedClientTimeZone(),
+          ...revertFromSeq === null ? {} : { revertFromSeq },
         }, signal)).result
       } else if (this.address.mode === 'one-shot') {
         result = {
@@ -627,13 +636,13 @@ export class Session implements SessionFace {
         this.openError = result.error
         return
       }
-      this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+      this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
       // Gap detection: baseline past the window tail and liveBuffer did not cover it -> pull the tail page once more.
       const tailSeq = this.windowTailSeq()
       if (this.subscribedLastSeq !== null && tailSeq !== null && this.subscribedLastSeq > tailSeq) {
         result = (await this.history({ maxMessages: PAGE_MESSAGES })).result
         if (generation !== this.openGeneration) return
-        if (result.ok) this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+        if (result.ok) this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
       }
       this.openState = 'open'
     } catch (error) {
@@ -654,11 +663,14 @@ export class Session implements SessionFace {
    *  A carried projections block seeds the value store (higher seq wins, so a stale
    *  baseline cannot overwrite a newer push frame); the window events themselves are
    *  never folded — the host is the only computation site. */
-  private installWindow(entries: HistoryEntry[], hasMore: boolean, projections?: ProjectionsBaseline): void {
+  private installWindow(entries: HistoryEntry[], hasMore: boolean, projections?: ProjectionsBaseline, revertFromSeq?: number | null): void {
     this.events = entries.map(e => e.event)
     this.views = entries.map(e => e.view)
     this.baseSeq = this.events[0]?.seq ?? 0
     this.hasMore = hasMore
+    // Host-authoritative revert boundary: survives a trimmed window whose
+    // latest revert/state event fell outside it.
+    this.hostRevertFromSeq = revertFromSeq ?? null
     if (this.events.some(event => event.type === 'turn/start')) this.firstPromptPendingTurn = false
     this.conversation.replaceWindow(entries.map(conversationInput), hasMore)
     if (projections !== undefined) this.projections.seed(projections)
@@ -718,7 +730,7 @@ export class Session implements SessionFace {
       const { result } = await this.history({ maxMessages: PAGE_MESSAGES })
       // Failure or superseded by a full resync: drop — the resync path rebuilds and clears the buffer itself.
       if (result.ok && generation === this.openGeneration && this.openState === 'open') {
-        this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+        this.installWindow(result.value.events, result.value.hasMore, result.value.projections, result.value.revertFromSeq)
       }
     } catch (error) {
       console.error('[web-runtime] gap repair failed:', error)
@@ -768,6 +780,13 @@ export class Session implements SessionFace {
       promptError: this.promptError,
       blank: this.blankBit,
       lastAgentError: this.lastAgentError,
+      // Window fold is authoritative when the window carries a revert/state
+      // event (freshest); otherwise the host-mirrored full-log fold applies
+      // (a trimmed window can lose the boundary event).
+      revertFromSeq: this.events.some(event => event.type === 'revert/state')
+        ? foldRevertState(this.events)
+        : this.hostRevertFromSeq,
+      revertShadowedSeqs: foldRevertShadowedSeqs(this.events),
     }
   }
 
@@ -776,6 +795,7 @@ export class Session implements SessionFace {
     events: HistoryEntry[]
     hasMore: boolean
     projections?: ProjectionsBaseline
+    revertFromSeq?: number | null
   }>> {
     return this.address === undefined
       ? this.api.sessions.history({ sessionId: this.sessionId, ...payload })
@@ -806,4 +826,27 @@ function hasVisibleConversationContent(chat: ChatSnapshot): boolean {
 function derivePhase(hasContent: boolean, promptAttempted: boolean): ComposerPhase {
   if (hasContent) return 'active'
   return promptAttempted ? 'engaging' : 'blank'
+}
+
+/** Fold the latest `revert/state` boundary from the in-window event list. */
+function foldRevertState(events: readonly SessionEvent[]): number | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event !== undefined && event.type === 'revert/state') {
+      return (event.data as { fromSeq: number | null }).fromSeq
+    }
+  }
+  return null
+}
+
+/** Fold the seqs shadowed by the latest user-origin revert-commit replacement. */
+function foldRevertShadowedSeqs(events: readonly SessionEvent[]): readonly number[] {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event === undefined || event.type !== 'user/message') continue
+    if (event.surfaceOp === undefined || event.surfaceOp === 'append') continue
+    if (event.data.source.kind !== 'user') continue
+    return event.sourceEventSeqs ?? []
+  }
+  return []
 }

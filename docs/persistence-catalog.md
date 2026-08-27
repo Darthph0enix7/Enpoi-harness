@@ -90,7 +90,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-Sources: [`packages/core/session/src/types.ts:340`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:347`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:376`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:408`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:350`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:357`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:386`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:418`](../packages/core/session/src/types.ts)
 
 ## Events
 
@@ -562,6 +562,27 @@ Source: [`packages/core/session/src/types.ts:313`](../packages/core/session/src/
 ```
 
 Source: [`packages/core/session/src/types.ts:308`](../packages/core/session/src/types.ts)
+
+### `revert/*`
+
+<a id="revertstate--log-only"></a>
+
+#### `revert/state` — log-only
+
+```ts persistence-catalog
+/**
+ * The active revert boundary for the session: `fromSeq` is the seq of the
+ * user message the conversation was reverted from, or `null` when no revert
+ * is active. Log-only UI/state event — never surface-eligible, never reaches
+ * the model. Appended on every revert, restore, and revert-commit so the
+ * state is durable and replayable across restarts. The client folds the
+ * latest value to truncate the transcript and show the reverted tray; the
+ * host uses it to shadow the reverted span when the next prompt commits.
+ */
+'revert/state': { fromSeq: number | null }
+```
+
+Source: [`packages/core/session/src/types.ts:346`](../packages/core/session/src/types.ts)
 
 ### `sandbox/*`
 

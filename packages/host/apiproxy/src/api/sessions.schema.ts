@@ -241,6 +241,7 @@ export const sessionHistoryValueSchema: z.ZodType<Wire<ResponseValue<'session.hi
   events: z.array(historyEntrySchema),
   hasMore: z.boolean(),
   projections: sessionProjectionsBlockSchema.optional(),
+  revertFromSeq: z.number().int().nonnegative().nullable().optional(),
 })
 
 /** session.models request payload. */
@@ -292,6 +293,12 @@ export const sessionPromptRequestSchema = z.object({
   mode: z.union([z.literal('queue'), z.literal('steer')]),
   content: z.array(promptContentPartSchema),
   clientTimeZone: z.string().optional(),
+  /**
+   * When set, this prompt commits an active revert: the new user message is
+   * appended with `surfaceOp: { op: 'replace', start: revertFromSeq, end }`,
+   * permanently shadowing the reverted span from the model surface.
+   */
+  revertFromSeq: z.number().int().nonnegative().optional(),
 }) as unknown as z.ZodType<RequestPayload<'session.prompt'>>
 
 /** session.prompt response value (the command slot appears only when the prompt dispatched a slash command). */
@@ -348,6 +355,30 @@ export const sessionUpdateQueueValueSchema = z.object({
 export const sessionCancelRequestSchema = z.object({
   sessionId: sessionIdSchema,
 }) satisfies z.ZodType<Wire<RequestPayload<'session.cancel'>>>
+
+/** session.revert request payload. */
+export const sessionRevertRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  atSeq: z.number().int().nonnegative(),
+}) satisfies z.ZodType<Wire<RequestPayload<'session.revert'>>>
+
+/** session.revert response value. */
+export const sessionRevertValueSchema = z.object({
+  accepted: z.literal(true),
+  revertedText: z.string(),
+  revertedCount: z.number().int().nonnegative(),
+}) satisfies z.ZodType<Wire<ResponseValue<'session.revert'>>>
+
+/** session.revertRestore request payload. */
+export const sessionRevertRestoreRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  restoreSeq: z.number().int().nonnegative().optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'session.revertRestore'>>>
+
+/** session.revertRestore response value. */
+export const sessionRevertRestoreValueSchema = z.object({
+  accepted: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'session.revertRestore'>>>
 
 /** session.cancel response value. */
 export const sessionCancelValueSchema = z.object({

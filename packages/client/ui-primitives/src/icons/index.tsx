@@ -167,6 +167,18 @@ export const IconChevronDownOutline14 = ({ size = 14, className }: IconProps) =>
   </svg>
 )
 
+/** ic_ds_revert_outline_16 — U-shaped revert-from-here arrow. */
+export const IconRevertOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M5.70711 2.29289C5.31658 1.90237 4.68342 1.90237 4.29289 2.29289L1.29289 5.29289C0.902369 5.68342 0.902369 6.31658 1.29289 6.70711L4.29289 9.70711C4.68342 10.0976 5.31658 10.0976 5.70711 9.70711C6.09763 9.31658 6.09763 8.68342 5.70711 8.29289L4.41421 7H9.5C11.433 7 13 8.567 13 10.5C13 12.433 11.433 14 9.5 14H5C4.44772 14 4 14.4477 4 15C4 15.5523 4.44772 16 5 16H9.5C12.5376 16 15 13.5376 15 10.5C15 7.46243 12.5376 5 9.5 5H4.41421L5.70711 3.70711C6.09763 3.31658 6.09763 2.68342 5.70711 2.29289Z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
 /** ic_ds_chevron_left_outline_14 */
 export const IconChevronLeftOutline14 = ({ size = 14, className }: IconProps) => (
   <svg width={size} height={size} className={className} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">

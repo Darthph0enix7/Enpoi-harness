@@ -334,6 +334,16 @@ export interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * The active revert boundary for the session: `fromSeq` is the seq of the
+   * user message the conversation was reverted from, or `null` when no revert
+   * is active. Log-only UI/state event — never surface-eligible, never reaches
+   * the model. Appended on every revert, restore, and revert-commit so the
+   * state is durable and replayable across restarts. The client folds the
+   * latest value to truncate the transcript and show the reverted tray; the
+   * host uses it to shadow the reverted span when the next prompt commits.
+   */
+  'revert/state': { fromSeq: number | null }
 }
 
 /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */

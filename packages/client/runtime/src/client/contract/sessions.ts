@@ -96,6 +96,21 @@ export interface ISessions {
    */
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId>
   /**
+   * Revert the conversation from a user message: everything after `atSeq`
+   * becomes reverted (hidden from the transcript and the model surface on the
+   * next commit). Returns the reverted query text for the input card.
+   * @param opts - session and the user-message seq anchoring the revert.
+   * @throws when the host rejects the anchor.
+   */
+  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }>
+  /**
+   * Restore reverted messages: `restoreSeq` omitted restores everything;
+   * `restoreSeq` set restores that message and everything after it.
+   * @param opts - session and the optional restore boundary.
+   * @throws when the host rejects the restore.
+   */
+  revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

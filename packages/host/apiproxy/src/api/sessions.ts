@@ -288,7 +288,13 @@ export interface SessionsApi {
    * never resumes or publishes an Agent.
    */
   history(request: RpcRequest<{ sessionId: SessionId; beforeSeq?: number; maxMessages?: number }>):
-  Promise<RpcResponse<{ events: HistoryEntry[]; hasMore: boolean; projections?: SessionProjectionsBlock }>>
+  Promise<RpcResponse<{
+    events: HistoryEntry[]
+    hasMore: boolean
+    projections?: SessionProjectionsBlock
+    /** Host-authoritative revert boundary folded over the full log (window-independent). */
+    revertFromSeq?: number | null
+  }>>
 
   /**
    * Reads a fresh advisory model directory for an ordinary session. Provider
@@ -357,6 +363,8 @@ export interface SessionsApi {
     mode: 'queue' | 'steer'
     content: PromptContentPart[]
     clientTimeZone?: string
+    /** When set, this prompt commits an active revert: the new user message shadows the reverted span. */
+    revertFromSeq?: number
   }>):
   Promise<RpcResponse<{ accepted: true; command?: { kind: 'success'; text?: string } }>>
 
@@ -377,5 +385,24 @@ export interface SessionsApi {
    * subagents reject with `agent-busy`.
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
+
+  /**
+   * Reverts the conversation from a user message: everything after `atSeq`
+   * becomes reverted (hidden from the model surface on the next commit) and
+   * the reverted query text is returned for the input card. Appends the
+   * durable `revert/state { fromSeq }` log event. Reverting from a non-user
+   * message or an in-flight turn rejects.
+   */
+  revert(request: RpcRequest<{ sessionId: SessionId; atSeq: number }>):
+  Promise<RpcResponse<{ accepted: true; revertedText: string; revertedCount: number }>>
+
+  /**
+   * Restores reverted messages: `restoreSeq` omitted restores everything
+   * (clears the revert boundary); `restoreSeq` set restores that message and
+   * everything after it (moves the boundary back). Appends the durable
+   * `revert/state` log event. No-op when no revert is active.
+   */
+  revertRestore(request: RpcRequest<{ sessionId: SessionId; restoreSeq?: number }>):
+  Promise<RpcResponse<{ accepted: true }>>
 
 }

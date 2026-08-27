@@ -532,6 +532,32 @@ export class SessionRuntime implements ISessions {
   }
 
   /**
+   * Revert the conversation from a user message. The reverted query text is
+   * returned for the input card; the transcript truncates at the boundary.
+   * @param opts - session and the user-message seq anchoring the revert.
+   * @returns the reverted query text and the count of reverted user queries.
+   * @throws {Error} when the host rejects the anchor.
+   */
+  async revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }> {
+    const result = await this.manager.revert({ sessionId: opts.sessionId, atSeq: opts.atSeq })
+    if (!result.ok) throw new Error(`revert failed: ${result.error.code}: ${result.error.message}`)
+    return result.value
+  }
+
+  /**
+   * Restore reverted messages (all, or from a specific boundary).
+   * @param opts - session and the optional restore boundary.
+   * @throws {Error} when the host rejects the restore.
+   */
+  async revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void> {
+    const result = await this.manager.revertRestore({
+      sessionId: opts.sessionId,
+      ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
+    })
+    if (!result.ok) throw new Error(`revert restore failed: ${result.error.code}: ${result.error.message}`)
+  }
+
+  /**
    * Resolve an Agent-scoped context view (use-and-discard).
    * @param id - session id (the agent identity — 1:1 same axis).
    * @returns scoped ctx, or undefined for a session neither listed nor already scoped.

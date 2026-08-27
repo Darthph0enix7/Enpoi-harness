@@ -156,13 +156,31 @@ function TurnStatus({ startTime, t }: {
  * ordered business Node crosses the keyed renderer seat.
  */
 export function ChatView({
-  useSession, useSessions, useStore, renderSlot, sessionId, openFile, loadOlder, loadImage, inspectCall, chatScroll, forkAt,
+  useSession, useSessions, useStore, renderSlot, sessionId, openFile, loadOlder, loadImage, inspectCall, chatScroll, forkAt, revertAt,
   fileMentions, t,
 }: ChatViewSlotProps) {
   const order = useSession(s => s.chat.order)
   const nodeStore = useSession(s => s.chat.nodes)
   const timeline = useSession(s => s.chat.timeline)
   const inbox = useSession(s => s.queue)
+  const revertFromSeq = useSession(s => s.revertFromSeq)
+  const revertShadowedSeqs = useSession(s => s.revertShadowedSeqs)
+  // Revert boundary: hide nodes after the reverted-from message from the
+  // transcript (the reverted tray reads them from the store directly), plus
+  // the span shadowed by a landed revert-commit (stays hidden after commit).
+  const visibleOrder = useMemo(() => {
+    const shadowedSeqs = revertShadowedSeqs ?? []
+    if (revertFromSeq === null && shadowedSeqs.length === 0) return order
+    const shadowed = shadowedSeqs.length === 0 ? null : new Set(shadowedSeqs)
+    return order.filter((key) => {
+      const anchorSeq = nodeStore.get(key)?.anchorSeq ?? Number.POSITIVE_INFINITY
+      // Strictly less: the boundary message itself is reverted (its text went
+      // into the input card), so it hides with the span after it.
+      if (revertFromSeq !== null && anchorSeq >= revertFromSeq) return false
+      if (shadowed !== null && shadowed.has(anchorSeq)) return false
+      return true
+    })
+  }, [order, nodeStore, revertFromSeq, revertShadowedSeqs])
   // Workspace root off the session list row: path summaries display relative to it.
   const cwd = useSessions(s => s.byId[sessionId]?.cwd)
   const running = useSession(s => s.running)
@@ -234,12 +252,12 @@ export function ChatView({
    *  scrolls the rest of the way to the floor). */
   const followSigRef = useRef<string | null>(null)
 
-  const firstKey = order[0]
+  const firstKey = visibleOrder[0]
   const firstSeq = firstKey === undefined ? null : nodeStore.get(firstKey)?.anchorSeq ?? null
-  const lastKey = order.at(-1) ?? null
+  const lastKey = visibleOrder.at(-1) ?? null
   const lastNode = lastKey === null ? undefined : nodeStore.get(lastKey)
   const lastSteeringId = pendingSteering[pendingSteering.length - 1]?.id ?? null
-  const followSig = `${openState}:${firstSeq}:${lastKey}:${order.length}:${running ? 1 : 0}:${lastSteeringId ?? ''}`
+  const followSig = `${openState}:${firstSeq}:${lastKey}:${visibleOrder.length}:${running ? 1 : 0}:${lastSteeringId ?? ''}`
 
   const toBottom = (el: HTMLElement): void => {
     anchorRef.current = null
@@ -429,7 +447,7 @@ export function ChatView({
               </button>
             </div>
           )}
-          {order.map(nodeKey => (
+          {visibleOrder.map(nodeKey => (
             <ChatNodeSeat
               key={nodeKey}
               nodeKey={nodeKey}
@@ -439,6 +457,7 @@ export function ChatView({
               openFile={requestOpenFile}
               inspectCall={inspectCall}
               forkAt={forkAt}
+              revertAt={revertAt}
               renderMessageImages={renderMessageImages}
               fileMentions={fileMentions}
               renderSlot={renderSlot}

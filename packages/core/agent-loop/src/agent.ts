@@ -27,7 +27,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, Session, SessionId, SurfaceOp, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -73,6 +73,20 @@ export class ReactLoopAgent implements Agent {
   /** Fused dispatcher, built once in the constructor so hot-path dispatches never allocate. */
   private readonly dispatch: AgentEventDispatch
 
+  /**
+   * Per-message surface metadata for the next append (revert-commit shadowing).
+   * Keyed by message id (not object identity): the inbox round-trip snapshots
+   * messages through the `agent/inbox/spliced` event, so the appended object
+   * is a clone. A cold resume reconstructs messages without the entry and
+   * appends normally (the revert shadow is a one-shot commit, not a replayable
+   * property).
+   */
+  private readonly pendingSurfaceOps = new Map<string, {
+    surfaceOp: SurfaceOp
+    sourceEventSeqs?: number[]
+    clearRevert?: boolean
+  }>()
+
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
   private readonly runtimeContext: RuntimeContextProjection
@@ -110,7 +124,21 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
-  send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
+  send(message: UserMessage, target: InboxTarget, wakeup: boolean, options?: {
+    /** Surface metadata applied when the loop appends this message (revert-commit shadowing). */
+    surfaceOp?: SurfaceOp
+    /** Provenance seqs cited by a replacement surfaceOp (all shadowed surface node seqs). */
+    sourceEventSeqs?: number[]
+    /** Append `revert/state { fromSeq: null }` atomically after this message (revert-commit). */
+    clearRevert?: boolean
+  }): void {
+    if (options?.surfaceOp !== undefined) {
+      this.pendingSurfaceOps.set(message.id, {
+        surfaceOp: options.surfaceOp,
+        ...options.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: options.sourceEventSeqs },
+        ...options.clearRevert === true ? { clearRevert: true } : {},
+      })
+    }
     // Waking input cannot join an aborted activity, so it starts the next turn.
     // Captured before the insertion so a reentrant cancel from a splice observer cannot reclassify it.
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
@@ -119,12 +147,12 @@ export class ReactLoopAgent implements Agent {
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
-  followup(input: UserMessage): void {
-    this.send(input, 'next-turn', true)
+  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[] }): void {
+    this.send(input, 'next-turn', true, options)
   }
 
-  steer(input: UserMessage): void {
-    this.send(input, 'next-step', true)
+  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[] }): void {
+    this.send(input, 'next-step', true, options)
   }
 
   inject(input: UserMessage): void {
@@ -280,7 +308,14 @@ export class ReactLoopAgent implements Agent {
         phase.step = step
         try {
           for (const message of decision.messages) {
-            this.session.append('user/message', message, { surfaceOp: 'append' })
+            const pending = this.pendingSurfaceOps.get(message.id)
+            if (pending !== undefined) this.pendingSurfaceOps.delete(message.id)
+            this.session.append('user/message', message, pending ?? { surfaceOp: 'append' })
+            // Revert-commit: clear the boundary atomically with the shadowing
+            // append, so a dropped message can never leave a stale boundary.
+            if (pending?.clearRevert === true) {
+              this.session.append('revert/state', { fromSeq: null }, { ignorable: true })
+            }
           }
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.

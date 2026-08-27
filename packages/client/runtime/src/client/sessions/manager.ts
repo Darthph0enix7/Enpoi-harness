@@ -603,6 +603,45 @@ export class SessionManager {
   }
 
   /**
+   * Revert the conversation from a user message: everything after `atSeq`
+   * becomes reverted (hidden from the transcript and the model surface on the
+   * next commit). Returns the reverted query text for the input card.
+   * @param opts - session and the user-message seq anchoring the revert.
+   */
+  async revert(
+    opts: { sessionId: SessionId; atSeq: number },
+  ): Promise<RpcResult<{ revertedText: string; revertedCount: number }>> {
+    try {
+      const { result } = await this.api.sessions.revert({
+        sessionId: opts.sessionId,
+        atSeq: opts.atSeq,
+      })
+      return result
+    } catch (error) {
+      return transportError(error)
+    }
+  }
+
+  /**
+   * Restore reverted messages: `restoreSeq` omitted restores everything;
+   * `restoreSeq` set restores that message and everything after it.
+   * @param opts - session and the optional restore boundary.
+   */
+  async revertRestore(
+    opts: { sessionId: SessionId; restoreSeq?: number },
+  ): Promise<RpcResult<{ accepted: true }>> {
+    try {
+      const { result } = await this.api.sessions.revertRestore({
+        sessionId: opts.sessionId,
+        ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
+      })
+      return result
+    } catch (error) {
+      return transportError(error)
+    }
+  }
+
+  /**
    * Insert-or-enrich a locally synthesized summary: a new id prepends; an
    * existing entry only gains fields it lacks (the session-added frame and the
    * create() echo race — whichever lands second must fill the placeholder's

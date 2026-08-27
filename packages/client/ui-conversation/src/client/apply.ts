@@ -29,6 +29,7 @@ import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
 import type { EnterBehaviorRowInjected } from './settings/EnterBehaviorRow.tsx'
 import { ChatView } from './chat/ChatView.tsx'
 import { StatsLine } from './chat/StatsLine.tsx'
+import { RevertTray, type RevertTrayInjected } from './chat/RevertTray.tsx'
 import { ApprovalPanel } from './skeleton/ApprovalPanel.tsx'
 import { todoDockEntry } from './skeleton/TodoPanel.tsx'
 import { queueDockEntry } from './queue/QueueDock.tsx'
@@ -424,12 +425,58 @@ export function apply(ctx: Context): void {
               // Fork or child-rename failure keeps the source view untouched.
             })
         },
+        revertAt: (seq) => {
+          void sessions.revert({ sessionId, atSeq: seq })
+            .then(({ revertedText }) => {
+              // Populate the input card with the reverted query (the draft
+              // store persists it across restarts).
+              actions.setDraft(revertedText)
+            })
+            .catch((error: unknown) => {
+              // Surface the failure (e.g. the message is compaction-shadowed
+              // and no longer an active surface node) instead of a dead button.
+              const scoped = sessions.scope(sessionId)
+              if (scoped !== undefined) {
+                const conversation = scoped.get('conversation')
+                conversation?.input.for(scoped).notify(
+                  'error',
+                  error instanceof Error ? error.message : String(error),
+                )
+              }
+            })
+        },
       }
     },
   }, ChatView)
 
   // Session stats stick with the composer (composer.dock = stats-line family).
   slots.register({ name: 'conversation.composer.dock', id: 'stats', order: 0, locale: NS }, StatsLine)
+
+  // The revert tray rides above the stats line (order 5): visible only while a
+  // revert boundary is active, listing reverted queries with Restore/Fork/Redo.
+  slots.register({
+    name: 'conversation.composer.dock',
+    id: 'revert-tray',
+    order: 5,
+    locale: NS,
+    inject: (sessionId: SessionId): RevertTrayInjected => {
+      return {
+        revertRestore: (restoreSeq) => {
+          void sessions.revertRestore({ sessionId, ...restoreSeq === undefined ? {} : { restoreSeq } })
+            .catch(() => {
+              // Restore failure keeps the tray state; the host log is authoritative.
+            })
+        },
+        forkAt: (seq) => {
+          sessions.fork({ sessionId, atSeq: seq, increaseTitle: true })
+            .then((childId) => { sessions.open(childId) })
+            .catch(() => {
+              // Fork failure keeps the source view untouched.
+            })
+        },
+      }
+    },
+  }, RevertTray)
 
   // Class-plugin mount (packages/AGENTS.md service form): the service
   // registers itself as `conversation` and lives on its own child fiber.

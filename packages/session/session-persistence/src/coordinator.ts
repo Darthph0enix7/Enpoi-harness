@@ -541,6 +541,37 @@ function eventMessageId(event: SessionEvent): PersistedMessageId | undefined {
   return typeof message?.['id'] === 'string' ? message['id'] as PersistedMessageId : undefined
 }
 
+/**
+ * Event types retired from the source vocabulary after being written to real
+ * logs by earlier builds (the removed context-keeper and council plugins).
+ * Logs containing them must keep loading: the read path stamps them
+ * `ignorable: true` so `assertEventsSupported` accepts them and the fold
+ * treats them as log-only records. This is the envelope contract's intended
+ * use — the generator stays honest about the current vocabulary.
+ */
+const RETIRED_IGNORABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'brief/blocker',
+  'brief/decision',
+  'brief/files',
+  'brief/phase-updated',
+  'brief/prose-updated',
+  'claim/graduated',
+  'claim/intake',
+  'claim/rescinded',
+  'claim/untrusted-pending',
+  'council/finished',
+  'council/round',
+  'council/started',
+])
+
+/** Stamp a retired event type as ignorable so legacy logs keep loading. */
+function stampRetiredIgnorable<T extends SessionEvent>(event: T): T {
+  if (RETIRED_IGNORABLE_EVENT_TYPES.has(event.type) && event.ignorable !== true) {
+    return { ...event, ignorable: true as const }
+  }
+  return event
+}
+
 /** Materialize stored events as upgraded, validated snapshots with immutable messages. */
 function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): SessionEvent[] {
   assertSupportedEvents(events, id)
@@ -552,7 +583,7 @@ function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): S
     const snapshot = snapshotSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
     const messageId = eventMessageId(snapshot)
     if (messageId !== undefined) messageIds.set(snapshot.seq, messageId)
-    return snapshot
+    return stampRetiredIgnorable(snapshot)
   })
 }
 
@@ -565,7 +596,7 @@ function adoptStoredEvents(events: SessionEvent[], id: SessionId): SessionEvent[
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const adopted = adoptSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
-    events[index] = adopted
+    events[index] = stampRetiredIgnorable(adopted)
     const messageId = eventMessageId(adopted)
     if (messageId !== undefined) messageIds.set(adopted.seq, messageId)
   }

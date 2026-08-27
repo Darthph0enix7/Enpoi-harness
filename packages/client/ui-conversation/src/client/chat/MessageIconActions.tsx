@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
-  IconBranchOutline16, IconCheckOutline16, IconCopyOutline16, Tooltip, writeClipboard,
+  IconBranchOutline16, IconCheckOutline16, IconCopyOutline16, IconRevertOutline16, Tooltip, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { formatLatencySeconds, formatMessageClock, formatRunDuration, formatTokensPerSecond } from './message-chrome.ts'
@@ -33,6 +33,8 @@ export interface MessageIconActionsProps {
   onBranch?: (() => void) | undefined
   /** The message is not a completed transcript tail, so branch stays visible but unavailable. */
   branchUnavailable?: boolean | undefined
+  /** Revert the conversation from this message; omission hides the revert action. */
+  onRevert?: (() => void) | undefined
   /** Parent layout class composed onto the actions row. */
   className?: string | undefined
   /**
@@ -51,7 +53,7 @@ export interface MessageIconActionsProps {
  */
 export function MessageIconActions({
   text, time, runMs, ttftMs, tokensPerSecond, provider, model, reasoningEffort,
-  clock, onBranch, branchUnavailable = false, className, extraActions, t,
+  clock, onBranch, branchUnavailable = false, onRevert, className, extraActions, t,
 }: MessageIconActionsProps) {
   const day = useCalendarDay()
   const reasonId = useId()
@@ -153,6 +155,18 @@ export function MessageIconActions({
       )}
       {onBranch !== undefined && branchUnavailable && (
         <span id={reasonId} className={css.visuallyHidden}>{t('message.branchUnavailable')}</span>
+      )}
+      {onRevert !== undefined && (
+        <Tooltip label={t('message.revertFromHere')} side="bottom">
+          <button
+            type="button"
+            className={css.action}
+            aria-label={t('message.revertFromHere')}
+            onClick={onRevert}
+          >
+            <IconRevertOutline16 />
+          </button>
+        </Tooltip>
       )}
       {clock === 'end' ? clockEl : null}
     </div>
