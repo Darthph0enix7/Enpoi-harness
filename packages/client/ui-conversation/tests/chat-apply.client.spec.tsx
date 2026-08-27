@@ -107,8 +107,9 @@ describe('apply wiring', () => {
     // one search row registers under both grep and glob; the web rows register
     // one component under both web tool names.
     expect(b.slots.entries('conversation.chat.node').map(entry => entry.options.key)).not.toContain('tool-call')
-    // Stats stick with the composer (not inside ChatView); the revert tray rides above it.
-    expect(b.slots.entries('conversation.composer.dock').map(e => e.options.id)).toEqual(['stats', 'revert-tray'])
+    // Stats stick with the composer (not inside ChatView); the revert tray rides above the input in input.dock.
+    expect(b.slots.entries('conversation.composer.dock').map(e => e.options.id)).toEqual(['stats'])
+    expect(b.slots.entries('conversation.input.dock').map(e => e.options.id)).toContain('revert-tray')
     await b.runtime.dispose()
   })
 

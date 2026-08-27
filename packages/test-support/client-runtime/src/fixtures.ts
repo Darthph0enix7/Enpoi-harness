@@ -69,7 +69,7 @@ export function conversationSnapshot(sessionId: SessionId): ConversationSnapshot
     blank: false,
     lastAgentError: null,
     revertFromSeq: null,
-    revertShadowedSeqs: [],
+    revertShadowRanges: [],
   }
 }
 

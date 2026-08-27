@@ -457,10 +457,10 @@ export function apply(ctx: Context): void {
   // Session stats stick with the composer (composer.dock = stats-line family).
   slots.register({ name: 'conversation.composer.dock', id: 'stats', order: 0, locale: NS }, StatsLine)
 
-  // The revert tray rides above the stats line (order 5): visible only while a
-  // revert boundary is active, listing reverted queries with Restore/Fork/Redo.
+  // The revert tray rides directly above the input card in conversation.input.dock (order 5):
+  // visible only while a revert boundary is active, listing reverted queries with Restore/Fork/Redo.
   slots.register({
-    name: 'conversation.composer.dock',
+    name: 'conversation.input.dock',
     id: 'revert-tray',
     order: 5,
     locale: NS,

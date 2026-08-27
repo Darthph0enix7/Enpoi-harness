@@ -486,9 +486,16 @@ export interface ConversationSnapshot {
    */
   revertFromSeq: number | null
   /**
-   * Seqs shadowed by the latest revert-commit (a user-origin surface
-   * replacement): the reverted span stays hidden from the transcript even
-   * after the revert boundary clears. Empty when no commit has landed.
+   * Spans shadowed by landed revert-commits (user-origin surface replacements).
+   * Any node with anchorSeq in [start, end) is hidden from the transcript.
    */
-  revertShadowedSeqs: readonly number[]
+  revertShadowRanges: readonly RevertShadowRange[]
+}
+
+/** Half-open [start, end) span shadowed by a user-origin revert-commit. */
+export interface RevertShadowRange {
+  /** Inclusive lower bound: the start of the replaced span (fromSeq). */
+  readonly start: number
+  /** Exclusive upper bound: the seq of the replacement user message. */
+  readonly end: number
 }

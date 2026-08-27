@@ -15,7 +15,7 @@ import { ConversationNodeAssembler } from './conversation-assembler.ts'
 import type { ConversationRuntime } from './conversation-assembler.ts'
 import type { ConversationEventInput, ConversationPublication } from '../contract/conversation.ts'
 import type {
-  ChatSnapshot, ComposerPhase, ConversationSnapshot, OpenState, PromptError,
+  ChatSnapshot, ComposerPhase, ConversationSnapshot, OpenState, PromptError, RevertShadowRange,
 } from './conversation.ts'
 import { EMPTY_CHAT_SNAPSHOT } from './conversation.ts'
 import type { PendingInteraction } from './pending.ts'
@@ -689,6 +689,9 @@ export class Session implements SessionFace {
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
     const publication = this.conversation.append({ event, view })
+    // Revert state transitions must notify React immediately so the transcript
+    // truncates and the RevertTray appears without waiting for another event.
+    if (event.type === 'revert/state') return 'immediate'
     return queueChanged ? 'immediate' : publication
   }
 
@@ -786,7 +789,7 @@ export class Session implements SessionFace {
       revertFromSeq: this.events.some(event => event.type === 'revert/state')
         ? foldRevertState(this.events)
         : this.hostRevertFromSeq,
-      revertShadowedSeqs: foldRevertShadowedSeqs(this.events),
+      revertShadowRanges: foldRevertShadowRanges(this.events),
     }
   }
 
@@ -840,21 +843,23 @@ function foldRevertState(events: readonly SessionEvent[]): number | null {
 }
 
 /**
- * Fold the seqs shadowed by EVERY user-origin revert-commit replacement in the
- * window. A union (not latest-only): sequential revert→commit cycles each
- * shadow their own span, and all of them must stay hidden. Window trimming is
- * safe: every shadowed seq is smaller than its replacement's seq, so a window
- * containing a shadowed event necessarily contains its replacement.
+ * Fold the spans shadowed by EVERY user-origin revert-commit replacement in the
+ * window as half-open ranges [surfaceOp.start, replacementEvent.seq).
+ * Hiding anchorSeq in [start, end) cleanly covers fractional anchors (e.g.
+ * turn-tail at lastAssistant + 0.1), trailing log events (turn/end), and
+ * automatically excludes the replacement event itself (whose seq is == end).
+ * A union (not latest-only): sequential revert→commit cycles each shadow their
+ * own span, and all of them must stay hidden.
  */
-function foldRevertShadowedSeqs(events: readonly SessionEvent[]): readonly number[] {
-  const shadowed: number[] = []
+function foldRevertShadowRanges(events: readonly SessionEvent[]): readonly RevertShadowRange[] {
+  const ranges: RevertShadowRange[] = []
   for (const event of events) {
     if (event === undefined || event.type !== 'user/message') continue
     if (event.surfaceOp === undefined || event.surfaceOp === 'append') continue
     if (event.data.source.kind !== 'user') continue
-    for (const seq of event.sourceEventSeqs ?? []) {
-      if (!shadowed.includes(seq)) shadowed.push(seq)
-    }
+    const start = event.surfaceOp.start
+    const end = event.seq
+    if (start < end) ranges.push({ start, end })
   }
-  return shadowed
+  return ranges
 }

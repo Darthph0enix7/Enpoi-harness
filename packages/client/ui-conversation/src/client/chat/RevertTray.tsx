@@ -5,14 +5,11 @@
 
 import { memo, useMemo, useState } from 'react'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
-import type { ConversationSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ComposerBarProps } from '../contract/slots.ts'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './RevertTray.module.css'
 
-export interface RevertTrayProps {
-  useSession: SnapshotSelectorHook<ConversationSnapshot>
-  t: ComposerBarProps['t']
+/** Injected action face for the input-dock registration. */
+export interface RevertTrayInjected {
   /**
    * Restore reverted messages: omitted restores everything; a seq restores
    * everything up to and including that message (later reverted messages stay
@@ -23,11 +20,8 @@ export interface RevertTrayProps {
   forkAt: (seq: number) => void
 }
 
-/** Injected action face for the composer-dock registration. */
-export interface RevertTrayInjected {
-  revertRestore: (restoreSeq?: number) => void
-  forkAt: (seq: number) => void
-}
+/** Full props of the revert dock entry: InputZone owner share + session standard kit + global seat + injected actions + locale seat. */
+export type RevertTrayProps = PropsRuntime<'conversation.input.dock'> & RevertTrayInjected & PropsLocale<'conversation'>
 
 /** Best-effort text extraction from a user node's content blocks. */
 function nodeText(content: readonly ContentBlock[]): string {

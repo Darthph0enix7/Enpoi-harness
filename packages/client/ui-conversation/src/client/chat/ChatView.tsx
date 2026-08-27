@@ -164,23 +164,24 @@ export function ChatView({
   const timeline = useSession(s => s.chat.timeline)
   const inbox = useSession(s => s.queue)
   const revertFromSeq = useSession(s => s.revertFromSeq)
-  const revertShadowedSeqs = useSession(s => s.revertShadowedSeqs)
+  const revertShadowRanges = useSession(s => s.revertShadowRanges)
   // Revert boundary: hide nodes after the reverted-from message from the
   // transcript (the reverted tray reads them from the store directly), plus
-  // the span shadowed by a landed revert-commit (stays hidden after commit).
+  // the spans shadowed by landed revert-commits (stay hidden after commit).
   const visibleOrder = useMemo(() => {
-    const shadowedSeqs = revertShadowedSeqs ?? []
-    if (revertFromSeq === null && shadowedSeqs.length === 0) return order
-    const shadowed = shadowedSeqs.length === 0 ? null : new Set(shadowedSeqs)
+    const ranges = revertShadowRanges ?? []
+    if (revertFromSeq === null && ranges.length === 0) return order
     return order.filter((key) => {
       const anchorSeq = nodeStore.get(key)?.anchorSeq ?? Number.POSITIVE_INFINITY
       // Strictly less: the boundary message itself is reverted (its text went
       // into the input card), so it hides with the span after it.
       if (revertFromSeq !== null && anchorSeq >= revertFromSeq) return false
-      if (shadowed !== null && shadowed.has(anchorSeq)) return false
+      for (const range of ranges) {
+        if (anchorSeq >= range.start && anchorSeq < range.end) return false
+      }
       return true
     })
-  }, [order, nodeStore, revertFromSeq, revertShadowedSeqs])
+  }, [order, nodeStore, revertFromSeq, revertShadowRanges])
   // Workspace root off the session list row: path summaries display relative to it.
   const cwd = useSessions(s => s.byId[sessionId]?.cwd)
   const running = useSession(s => s.running)

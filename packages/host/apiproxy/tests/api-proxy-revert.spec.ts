@@ -58,7 +58,7 @@ async function composed(): Promise<Context> {
 }
 
 /** Two completed turns with real user messages; returns the first user-message seq. */
-function liveAgent(ctx: Context, id: string): { session: Session; firstUserSeq: number } {
+function liveAgent(ctx: Context, id: string): { session: Session; firstUserSeq: number; agent: Agent } {
   const session = ctx.sessions.create(sid(id), { meta: { cwd: '/proj' } })
   let firstUserSeq = -1
   for (let turn = 1; turn <= 2; turn++) {
@@ -79,8 +79,18 @@ function liveAgent(ctx: Context, id: string): { session: Session; firstUserSeq: 
     }, { surfaceOp: 'append' })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
   }
-  ctx.agents.register({ id: session.id, session, status: 'idle', ctx, inbox: { hasPending: false }, followup: () => {}, steer: () => {} } as unknown as Agent)
-  return { session, firstUserSeq }
+  const agent = {
+    id: session.id,
+    session,
+    status: 'idle',
+    ctx,
+    inbox: { hasPending: false },
+    followup: () => {},
+    steer: () => {},
+    cancel: () => {},
+  } as unknown as Agent
+  ctx.agents.register(agent)
+  return { session, firstUserSeq, agent }
 }
 
 describe('session.revert', () => {
@@ -128,26 +138,28 @@ describe('session.revert', () => {
     if (!result.result.ok) expect(result.result.error.code).toBe('session-not-found')
   })
 
-  it('rejects while the agent is running (in-flight guard)', async () => {
+  it('cancels the running turn when reverting while the agent is running', async () => {
     const ctx = await composed()
     const proxy = api(ctx)
-    const { firstUserSeq } = liveAgent(ctx, 'revert-running')
-    const agent = ctx.agents.get(sid('revert-running'))!
+    const { firstUserSeq, agent } = liveAgent(ctx, 'revert-running')
+    let cancelled = false
+    agent.cancel = () => { cancelled = true }
     Object.assign(agent, { status: 'running' })
     const result = await proxy.sessions.revert(request({ sessionId: sid('revert-running'), atSeq: firstUserSeq }))
-    expect(result.result.ok).toBe(false)
-    if (!result.result.ok) expect(result.result.error.code).toBe('agent-busy')
+    expect(result.result.ok).toBe(true)
+    expect(cancelled).toBe(true)
   })
 
-  it('rejects while the inbox has pending work', async () => {
+  it('cancels pending inbox work when reverting with a populated inbox', async () => {
     const ctx = await composed()
     const proxy = api(ctx)
-    const { firstUserSeq } = liveAgent(ctx, 'revert-pending')
-    const agent = ctx.agents.get(sid('revert-pending'))!
+    const { firstUserSeq, agent } = liveAgent(ctx, 'revert-pending')
+    let cancelled = false
+    agent.cancel = () => { cancelled = true }
     Object.assign(agent, { inbox: { hasPending: true } })
     const result = await proxy.sessions.revert(request({ sessionId: sid('revert-pending'), atSeq: firstUserSeq }))
-    expect(result.result.ok).toBe(false)
-    if (!result.result.ok) expect(result.result.error.code).toBe('agent-busy')
+    expect(result.result.ok).toBe(true)
+    expect(cancelled).toBe(true)
   })
 })
 
