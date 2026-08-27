@@ -156,6 +156,8 @@ export class FakeApiClient implements IApiClient {
     attachment: (payload: unknown) => this.record('session.attachment', payload, this.onAttachment(payload)),
     updateQueue: (payload: unknown) => this.record('session.updateQueue', payload, this.onUpdateQueue(payload)),
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
+    revert: (payload: unknown) => this.record('session.revert', payload, Promise.resolve({ accepted: true, revertedText: '', revertedCount: 0 })),
+    revertRestore: (payload: unknown) => this.record('session.revertRestore', payload, Promise.resolve({ accepted: true })),
   }
 
   onSubagentList: (payload: unknown) => Promise<RpcResponse<{ entries: never[]; parentAvailable: boolean }>>

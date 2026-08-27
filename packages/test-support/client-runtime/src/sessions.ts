@@ -489,6 +489,18 @@ export class TestSessions implements ISessions {
     return Promise.resolve(opts.sessionId)
   }
 
+  /** Fixture stub: records the call and returns the reverted query text. */
+  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }> {
+    this.calls.push({ method: 'revert', args: [opts] })
+    return Promise.resolve({ revertedText: '', revertedCount: 0 })
+  }
+
+  /** Fixture stub: records the call. */
+  revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void> {
+    this.calls.push({ method: 'revertRestore', args: [opts] })
+    return Promise.resolve()
+  }
+
   /**
    * The session face of a fixture (typed view for assertions; fixture
    * behavior methods are grafted onto it).

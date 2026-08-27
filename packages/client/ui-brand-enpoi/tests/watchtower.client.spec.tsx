@@ -140,7 +140,6 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
       time: 2500,
       isError: false,
       call: {
-        callId: 'call-sub-1',
         name: 'subagent',
         argsRaw: JSON.stringify({
           description: 'Explore codebase architecture',
