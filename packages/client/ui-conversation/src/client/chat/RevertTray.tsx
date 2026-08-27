@@ -57,7 +57,7 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
       if (text.length > 0) list.push({ seq: node.anchorSeq, text })
     }
     // Render order is not guaranteed by the store; sort so the index math
-    // (restore item i → boundary = item i-1) is exact.
+    // (restore item i → boundary = item i+1) is exact.
     return list.sort((left, right) => left.seq - right.seq)
   }, [revertFromSeq, nodes])
 

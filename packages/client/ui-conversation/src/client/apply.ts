@@ -463,8 +463,17 @@ export function apply(ctx: Context): void {
       return {
         revertRestore: (restoreSeq) => {
           void sessions.revertRestore({ sessionId, ...restoreSeq === undefined ? {} : { restoreSeq } })
-            .catch(() => {
-              // Restore failure keeps the tray state; the host log is authoritative.
+            .catch((error: unknown) => {
+              // Surface the failure (e.g. agent-busy while a background turn
+              // runs) instead of a silent dead button.
+              const scoped = sessions.scope(sessionId)
+              if (scoped !== undefined) {
+                const conversation = scoped.get('conversation')
+                conversation?.input.for(scoped).notify(
+                  'error',
+                  error instanceof Error ? error.message : String(error),
+                )
+              }
             })
         },
         forkAt: (seq) => {
