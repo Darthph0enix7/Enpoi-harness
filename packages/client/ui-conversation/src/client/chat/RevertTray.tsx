@@ -1,7 +1,8 @@
 // RevertTray: the compact, minimalist "Reverted messages (N)" bar above the input card.
 // Expands to display a scrollable list of reverted queries with per-item Restore and Fork actions.
+// Ordered chronologically (latest query at the bottom, closest to the input field; scroll up for older).
 
-import { memo, useMemo, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './RevertTray.module.css'
@@ -32,6 +33,7 @@ function nodeText(content: readonly ContentBlock[]): string {
 
 export const RevertTray = memo(function RevertTray({ useSession, t, revertRestore, forkAt, inputActions }: RevertTrayProps) {
   const [expanded, setExpanded] = useState(false)
+  const listRef = useRef<HTMLUListElement>(null)
   const revertFromSeq = useSession(s => s.revertFromSeq)
   const nodes = useSession(s => s.chat.nodes)
 
@@ -47,6 +49,14 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
     }
     return list.sort((left, right) => left.seq - right.seq)
   }, [revertFromSeq, nodes])
+
+  // When expanding or when the item count updates, scroll to the bottom so the
+  // latest reverted query (closest to the input field) is visible by default.
+  useLayoutEffect(() => {
+    if (expanded && listRef.current !== null) {
+      listRef.current.scrollTop = listRef.current.scrollHeight
+    }
+  }, [expanded, reverted.length])
 
   if (revertFromSeq === null || reverted.length === 0) return null
 
@@ -89,7 +99,7 @@ export const RevertTray = memo(function RevertTray({ useSession, t, revertRestor
           </span>
         </button>
         {expanded && (
-          <ul className={css.list}>
+          <ul ref={listRef} className={css.list}>
             {reverted.map((item, index) => (
               <li key={item.seq} className={css.item}>
                 <span className={css.itemText} title={item.text}>
