@@ -181,7 +181,7 @@ export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps)
                           select={() => Promise.resolve(true)}
                           compact
                           override={override}
-                          t={(key: string) => key}
+                          t={(key: string) => (key === 'effort.providerDefault' ? 'Default' : key)}
                         />
                       ) : (
                         <span className={css.noDir}>no session</span>

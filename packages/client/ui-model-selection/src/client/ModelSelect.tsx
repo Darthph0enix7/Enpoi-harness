@@ -176,17 +176,21 @@ export function ModelSelect(
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
   const effectiveEffort = activeSel?.reasoningEffort ?? reasoning?.defaultEffort
+  const rawDefaultEffort = t('effort.providerDefault')
+  const defaultEffortLabel = (rawDefaultEffort && rawDefaultEffort !== 'effort.providerDefault' && !rawDefaultEffort.startsWith('effort.'))
+    ? rawDefaultEffort
+    : 'Default'
   const effortLabel = reasoning === undefined
     ? undefined
     : effectiveEffort === undefined
-      ? t('effort.providerDefault')
+      ? defaultEffortLabel
       : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
 
   const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
     ? []
     : [
       ...reasoning.defaultEffort === undefined
-        ? [{ key: 'provider-default', effort: undefined, label: t('effort.providerDefault') }]
+        ? [{ key: 'provider-default', effort: undefined, label: defaultEffortLabel }]
         : [],
       ...reasoning.efforts.map((effort: ModelReasoningEffort) => ({
         key: `effort:${effort.id}`,
@@ -194,7 +198,7 @@ export function ModelSelect(
         label: effort.name,
         ...effort.description === undefined ? {} : { description: effort.description },
       })),
-    ], [reasoning, t])
+    ], [reasoning, defaultEffortLabel])
 
   if (!available) return null
 

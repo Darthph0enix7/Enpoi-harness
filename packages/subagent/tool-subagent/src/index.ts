@@ -252,6 +252,30 @@ interface DelegationRunSpec {
   readonly runInBackground: boolean
 }
 
+/**
+ * Resolve persona model from Settings > enpoi-orchestration.personas by matching
+ * role names in the description or prompt (e.g. "fixer", "librarian", "explorer").
+ */
+function resolveSubagentPersonaModel(ctx: Context, description?: string, prompt?: string): AgentOptions | undefined {
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string }> } } | undefined
+    const doc = settings?.get?.('enpoi-orchestration')
+    const personas = doc?.personas
+    if (!personas) return undefined
+    const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
+    for (const role of ['fixer', 'explorer', 'librarian', 'designer', 'oracle', 'critic', 'visionary', 'curator', 'skeptic', 'architect', 'pragmatist', 'experiencer', 'integrator']) {
+      const re = new RegExp(`\\b${role}\\b`, 'i')
+      if (re.test(text)) {
+        const entry = personas[role]
+        if (entry && entry.provider && entry.model) {
+          return { provider: entry.provider, model: entry.model }
+        }
+      }
+    }
+  } catch {}
+  return undefined
+}
+
 /** Resolve the model's optional scheduling request into one execution route. */
 function resolveDelegationRun(
   request: DelegationRunRequest,
@@ -383,11 +407,13 @@ export function apply(ctx: Context, config: Config): void {
         }
 
         const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
+        const resolvedPersonaModel = resolveSubagentPersonaModel(ctx, args.description, args.prompt)
+        const agentOptions = config.agentOptions ?? resolvedPersonaModel
         const request = {
           label: args.description,
           prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
           parent,
-          ...config.agentOptions !== undefined ? { agentOptions: config.agentOptions } : {},
+          ...agentOptions !== undefined ? { agentOptions } : {},
           ...config.persona !== undefined ? { persona: config.persona } : {},
           ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
           ...maxDepth !== undefined ? { maxDepth } : {},

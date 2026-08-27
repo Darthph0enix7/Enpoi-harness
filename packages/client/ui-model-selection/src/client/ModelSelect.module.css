@@ -108,6 +108,7 @@
   gap: 5px;
   height: 28px;
   padding: 0 9px;
+  max-width: 140px;
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
   border-radius: 14px;
   outline: none;
@@ -121,6 +122,7 @@
   cursor: pointer;
   transition: all 120ms ease;
   user-select: none;
+  box-sizing: border-box;
 }
 
 .effortTrigger:hover:not(:disabled) {
@@ -142,6 +144,9 @@
 
 .effortText {
   white-space: nowrap;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chevronIcon {
