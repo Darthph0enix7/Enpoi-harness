@@ -137,6 +137,12 @@ function tailData(context: ConversationNodeContext<TurnTailState>): TurnTailChat
     }
   }
   const metrics = deriveTurnMetrics(finalized.map(candidate => candidate.finalNode)).get(end.event.data.turn)
+  const finalAssistantNode = closing?.finalNode ?? finalized.at(-1)?.finalNode
+  const requestConfig = finalAssistantNode?.requestConfig
+  const provenance = finalAssistantNode?.provenance
+  const provider = requestConfig?.provider ?? provenance?.provider
+  const model = requestConfig?.model ?? provenance?.model
+  const reasoningEffort = requestConfig?.reasoningEffort
   return {
     turn: end.event.data.turn,
     seq: end.event.seq,
@@ -145,6 +151,9 @@ function tailData(context: ConversationNodeContext<TurnTailState>): TurnTailChat
     branchUnavailable: closing === null || latestTranscriptSeq !== closing.finalNode.seq,
     ...metrics?.ttftMs === undefined ? {} : { ttftMs: metrics.ttftMs },
     ...metrics?.tokensPerSecond === undefined ? {} : { tokensPerSecond: metrics.tokensPerSecond },
+    ...provider !== undefined ? { provider } : {},
+    ...model !== undefined ? { model } : {},
+    ...reasoningEffort !== undefined ? { reasoningEffort } : {},
   }
 }
 

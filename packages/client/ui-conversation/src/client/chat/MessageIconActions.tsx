@@ -21,6 +21,12 @@ export interface MessageIconActionsProps {
   ttftMs?: number | undefined
   /** Turn decode throughput, appended as `· 34 tok/s`; omitted when unrecorded. */
   tokensPerSecond?: number | undefined
+  /** Provider key for the generating model. */
+  provider?: string | undefined
+  /** Model ID for the generating model. */
+  model?: string | undefined
+  /** Reasoning effort in force for this generation. */
+  reasoningEffort?: string | undefined
   /** Clock before icons (user) or after (assistant). */
   clock: 'start' | 'end'
   /** Fork the session at this message; omission hides the branch action. */
@@ -44,8 +50,8 @@ export interface MessageIconActionsProps {
  * @returns The actions row element.
  */
 export function MessageIconActions({
-  text, time, runMs, ttftMs, tokensPerSecond, clock, onBranch, branchUnavailable = false, className,
-  extraActions, t,
+  text, time, runMs, ttftMs, tokensPerSecond, provider, model, reasoningEffort,
+  clock, onBranch, branchUnavailable = false, className, extraActions, t,
 }: MessageIconActionsProps) {
   const day = useCalendarDay()
   const reasonId = useId()
@@ -103,6 +109,19 @@ export function MessageIconActions({
           <span className={css.runTimeDot} aria-hidden>·</span>
           {' '}
           {t('message.tokensPerSecond', { tps: formatTokensPerSecond(tokensPerSecond) })}
+        </>
+      )}
+      {model !== undefined && (
+        <>
+          {' '}
+          <span className={css.runTimeDot} aria-hidden>·</span>
+          {' '}
+          <span
+            className={css.modelBadge}
+            title={`${provider !== undefined ? `${provider}/` : ''}${model}${reasoningEffort !== undefined ? ` (${reasoningEffort})` : ''}`}
+          >
+            {model}
+          </span>
         </>
       )}
     </span>

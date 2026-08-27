@@ -15,6 +15,28 @@ export const TurnTailNodeView = memo(function TurnTailNodeView({
   const data = node.data
   const hasLaterChatNode = useSession(snapshot =>
     snapshot.chat.locations.getTurn(data.turn).at(-1) !== node.key)
+  const fallbackModelConfig = useSession((snapshot) => {
+    if (data.model !== undefined) return undefined
+    const views = snapshot.views as { get?: (target: string) => { requests?: readonly unknown[] } | undefined }
+    const trajectory = views.get?.('trajectory')
+    const requests = trajectory?.requests
+    if (!Array.isArray(requests)) return undefined
+    for (let i = requests.length - 1; i >= 0; i--) {
+      const item = requests[i] as {
+        turn?: number
+        purpose?: string
+        requestConfig?: { provider?: string; model?: string; reasoningEffort?: string }
+        prompt?: { config?: { provider?: string; model?: string; reasoningEffort?: string } }
+      }
+      if (item.turn === data.turn) {
+        const cfg = item.requestConfig ?? (item.purpose === 'assistant' ? item.prompt?.config : undefined)
+        if (cfg?.model !== undefined) {
+          return { provider: cfg.provider, model: cfg.model, reasoningEffort: cfg.reasoningEffort }
+        }
+      }
+    }
+    return undefined
+  })
   const turn = node.location.kind === 'turn' || node.location.kind === 'step'
     ? node.location.turn
     : undefined
@@ -32,6 +54,9 @@ export const TurnTailNodeView = memo(function TurnTailNodeView({
   const assistantActions = messageId === undefined
     ? null
     : renderSlot('conversation.chat.assistant-actions', { messageId })
+  const provider = data.provider ?? fallbackModelConfig?.provider
+  const model = data.model ?? fallbackModelConfig?.model
+  const reasoningEffort = data.reasoningEffort ?? fallbackModelConfig?.reasoningEffort
   return (
     <div className={css.root} data-turn-tail={data.turn} data-time-hover-root>
       {tail}
@@ -41,6 +66,9 @@ export const TurnTailNodeView = memo(function TurnTailNodeView({
         runMs={runMs}
         ttftMs={data.ttftMs}
         tokensPerSecond={data.tokensPerSecond}
+        provider={provider}
+        model={model}
+        reasoningEffort={reasoningEffort}
         clock="end"
         onBranch={() => { forkAt(closing.finalNode.seq) }}
         branchUnavailable={data.branchUnavailable || hasLaterChatNode}

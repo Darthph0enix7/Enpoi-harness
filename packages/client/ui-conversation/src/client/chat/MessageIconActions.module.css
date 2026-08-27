@@ -82,5 +82,26 @@
   height: 1px;
   overflow: hidden;
   clip: rect(0 0 0 0);
-  white-space: nowrap;
+}
+
+.modelBadge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary, #94a3b8);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  padding: 1px 6px;
+  letter-spacing: -0.01em;
+  vertical-align: middle;
+  transition: all 0.15s ease;
+}
+
+.modelBadge:hover {
+  color: var(--dsw-alias-label-base, #e2e8f0);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
 }

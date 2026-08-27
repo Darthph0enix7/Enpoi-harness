@@ -146,6 +146,12 @@ export interface SubagentStartRequest {
    * persona (strict `{{…}}` interpolation against the registered variables).
    */
   readonly persona?: string
+  /**
+   * Whether settlement notifications and intermediate child reports are suppressed from the parent inbox.
+   * Used for internal multi-round deliberation fibers (Council/Roundtable/Chorus/Oracle) whose final
+   * synthesis is returned directly by the orchestrating tool.
+   */
+  readonly quiet?: boolean
 }
 
 /**

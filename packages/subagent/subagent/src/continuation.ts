@@ -127,6 +127,12 @@ export interface ContinuableStartSpec {
   readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
   /** Caller cancellation, owning the operation only until inbox acceptance. */
   readonly signal: AbortSignal
+  /**
+   * Whether settlement notifications and intermediate child reports are suppressed from the parent inbox.
+   * Used for internal multi-round deliberation fibers (Council/Roundtable/Chorus/Oracle) whose final
+   * synthesis is returned directly by the orchestrating tool.
+   */
+  readonly quiet?: boolean
 }
 
 /** Identities returned once a continuable child accepted its initial prompt. */
@@ -241,6 +247,8 @@ interface Activation {
    * not exist, so its teardown owes the parent no settlement account.
    */
   announced: boolean
+  /** Whether settlement notices and report relay are suppressed to keep parent context clean. */
+  readonly quiet?: boolean
   /** Renewed whenever a settlement watcher must re-observe quiescence. */
   poke: PromiseWithResolvers<void>
 }
@@ -263,6 +271,7 @@ interface MaterializeInputs {
   }
   agentOptions: AgentOptions
   composition: { persona?: string | undefined; toolFilter?: ToolRestriction | undefined }
+  quiet?: boolean
   signal: AbortSignal
 }
 
@@ -462,6 +471,7 @@ export class SubagentContinuationManager {
         create: { seed, meta: childSessionMeta(parent, childDepth, lineageSeedLength), delegatedPolicies },
         agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
         composition: { persona: request.persona, toolFilter: request.toolFilter },
+        quiet: spec.quiet ?? request.quiet ?? false,
         signal: spec.signal,
       })
       return this.submitMaterialized(
@@ -605,7 +615,6 @@ export class SubagentContinuationManager {
    * @throws {SubagentError} when the sender is unauthorized, the parent is not
    *   live, or continuation admission is closing.
    */
-  // oxlint-disable-next-line typescript/require-await -- keep rejection semantics without yielding during admission
   async reportFrom(
     child: Agent,
     content: ContentBlock[],
@@ -670,6 +679,7 @@ export class SubagentContinuationManager {
         senderSessionId: activation.childId,
       },
     })
+    if (activation.quiet) return message.id
     if (delivery === 'next-step') {
       this.sendWaking(parent, message, () => { this.sendReport(parent, message, delivery) })
     } else {
@@ -1098,6 +1108,7 @@ export class SubagentContinuationManager {
       disposal: undefined,
       accepted: new Set(),
       announced: false,
+      quiet: inputs.quiet ?? false,
       poke: Promise.withResolvers<void>(),
     }
     // After transfer, any failure must dispose the created handle, remove the
@@ -1460,7 +1471,7 @@ export class SubagentContinuationManager {
    * @param terminal - how this epoch ended, as the terminal edge will report it.
    */
   private notifySettlement(activation: Activation, terminal: ActivationTerminal): void {
-    if (!activation.announced) return
+    if (!activation.announced || activation.quiet) return
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return

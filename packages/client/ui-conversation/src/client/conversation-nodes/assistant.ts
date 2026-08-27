@@ -32,6 +32,7 @@ interface AssistantState {
   readonly firstVisibleTime: number | undefined
   readonly firstTokenTime: number | undefined
   readonly hidden: boolean
+  readonly finishChunk?: ConversationMatch | undefined
   readonly final: ConversationMatch | undefined
   readonly usage: unknown
 }
@@ -45,6 +46,7 @@ function initialState(turn: number, step: number): AssistantState {
     firstVisibleTime: undefined,
     firstTokenTime: undefined,
     hidden: false,
+    finishChunk: undefined,
     final: undefined,
     usage: undefined,
   }
@@ -111,6 +113,8 @@ function updateChunk(state: AssistantState, match: ConversationMatch): Assistant
     case 'block-end':
       blocks[chunk.index] = toAssistantBlock(chunk.block)
       break
+    case 'finish':
+      return { ...state, finishChunk: match }
     case 'usage':
       return { ...state, usage: chunk.usage }
     default:
@@ -149,6 +153,21 @@ function finalNode(
   const final = state.final
   if (final?.event.type === 'assistant/message') {
     const event = final.event
+    const finishMatch = state.finishChunk
+    const finishChunk = finishMatch?.event.type === 'assistant/chunk' ? finishMatch.event.data.chunk : undefined
+    const response = finishChunk?.type === 'finish'
+      ? (finishChunk.replayState?.response as { provider?: string; model?: string; reasoningEffort?: string } | null | undefined)
+      : undefined
+    const provider = response?.provider
+    const model = response?.model
+    const reasoningEffort = response?.reasoningEffort
+    const requestConfig = typeof provider === 'string' && typeof model === 'string'
+      ? {
+        provider,
+        model,
+        ...typeof reasoningEffort === 'string' ? { reasoningEffort } : {},
+      }
+      : undefined
     return {
       kind: 'assistant',
       seq: event.seq,
@@ -164,6 +183,7 @@ function finalNode(
         completedTime: event.time,
       },
       ...event.data.interrupted === true ? { interrupted: true } : {},
+      ...requestConfig !== undefined ? { requestConfig } : {},
     }
   }
   const location = context.start?.location ?? context.matches.at(-1)?.location
