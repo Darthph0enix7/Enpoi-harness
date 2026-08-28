@@ -293,6 +293,17 @@ export class WorkspaceRuntime implements IWorkspaces {
   }
 
   /**
+   * Display-only move: claim a session for display under another workspace
+   * without touching its cwd accounting.
+   * @param sessionId - session to display under another workspace.
+   * @param targetWorkspaceId - workspace that displays the session.
+   */
+  async moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void> {
+    const result = await this.manager.moveSession(sessionId, targetWorkspaceId)
+    if (!result.ok) throw new Error(`session move failed: ${result.error.code}: ${result.error.message}`)
+  }
+
+  /**
    * Move a session within its Workspace's manual order (DOM-insertBefore-like).
    * @param workspaceId - owning workspace.
    * @param sessionId - accounted session to move.

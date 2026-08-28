@@ -235,6 +235,16 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * The display-move overlay: sessions claimed for display under a workspace
+   * other than their cwd workspace. Wire projections compose display lists
+   * from this overlay plus the cwd accounting.
+   * @returns the overlay entries in claim order.
+   */
+  get movedSessions(): readonly { sessionId: SessionId; workspaceId: WorkspaceId }[] {
+    return this.requireState().movedSessions
+  }
+
+  /**
    * Archive one session durably. The session must exist (live or in session
    * persistence); its workspace accounting — or lack of one — is irrelevant.
    * An already archived id resolves without writing.
@@ -251,6 +261,52 @@ export class WorkspaceRegistry extends Service {
       }
       const state = this.requireState()
       await this.setState({ ...state, archivedSessionIds: [...state.archivedSessionIds, sessionId] })
+    })
+  }
+
+  /**
+   * Display-only move: claim a session for display under another workspace
+   * without touching its cwd accounting. One atomic setState (the same crash
+   * story as archive — no two-write window). The session's cwd workspace
+   * record is untouched; the wire projection excludes overlay-claimed ids
+   * from their cwd workspace's list and includes them under the target.
+   * Moving to the session's own cwd workspace (or an already-claimed target)
+   * resolves without writing.
+   * @param sessionId - The session to display under another workspace.
+   * @param targetWorkspaceId - The workspace that displays the session.
+   * @returns resolution after durability.
+   */
+  moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      if (!this.requireState().workspaceIds.includes(targetWorkspaceId)) {
+        throw new WorkspaceOrderInvalidError(targetWorkspaceId)
+      }
+      if (!(await this.sessionKnown(sessionId))) {
+        throw new WorkspaceUnknownSessionError(sessionId)
+      }
+      const state = this.requireState()
+      const without = state.movedSessions.filter(move => move.sessionId !== sessionId)
+      if (without.some(move => move.workspaceId === targetWorkspaceId)) return
+      await this.setState({
+        ...state,
+        movedSessions: [...without, { sessionId, workspaceId: targetWorkspaceId }],
+      })
+    })
+  }
+
+  /**
+   * Remove a session's display-move overlay claim: the session returns to
+   * its cwd workspace's list. A session without a claim resolves without
+   * writing.
+   * @param sessionId - The session to un-claim.
+   * @returns resolution after durability.
+   */
+  unmoveSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      const state = this.requireState()
+      const without = state.movedSessions.filter(move => move.sessionId !== sessionId)
+      if (without.length === state.movedSessions.length) return
+      await this.setState({ ...state, movedSessions: without })
     })
   }
 
@@ -331,6 +387,7 @@ export class WorkspaceRegistry extends Service {
         initialized: true,
         workspaceIds: [id, ...state.workspaceIds],
         archivedSessionIds: state.archivedSessionIds,
+        movedSessions: state.movedSessions,
       })
     } catch (error) {
       this.entities.delete(id)
@@ -359,10 +416,16 @@ export class WorkspaceRegistry extends Service {
     const entity = this.entities.get(id)
     if (entity === undefined) return false
     const state = this.requireState()
+    // Purge display-move overlay claims for the deleted workspace: a dangling
+    // claim would hide the session from its cwd list (the projection excludes
+    // overlay-claimed ids) while the target no longer exists — the session
+    // would vanish from every list forever.
+    const movedSessions = state.movedSessions.filter(move => move.workspaceId !== id)
     const nextState = {
       initialized: true,
       workspaceIds: state.workspaceIds.filter(workspaceId => workspaceId !== id),
       archivedSessionIds: state.archivedSessionIds,
+      movedSessions,
     }
     await this.setState({
       ...nextState,
@@ -420,6 +483,7 @@ export class WorkspaceRegistry extends Service {
       initialized: state.initialized,
       workspaceIds: state.workspaceIds,
       archivedSessionIds: state.archivedSessionIds,
+      movedSessions: state.movedSessions,
     })
   }
 
@@ -447,6 +511,9 @@ export class WorkspaceRegistry extends Service {
       byPath.set(record.path, id)
       for (const sessionId of record.sessionIds) accounted.set(sessionId, id)
     }
+    // Display-move overlay insurance: a moved session is accounted to its
+    // display workspace so a re-bootstrap never re-adds it to its cwd group.
+    for (const move of state.movedSessions) accounted.set(move.sessionId, move.workspaceId)
 
     for (const group of groups) {
       let id = byPath.get(group.path)
@@ -502,9 +569,9 @@ export class WorkspaceRegistry extends Service {
       .map(([id]) => id)
 
     if (!sameIds(state.workspaceIds, workspaceIds)) {
-      await this.setState({ initialized: false, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+      await this.setState({ initialized: false, workspaceIds, archivedSessionIds: state.archivedSessionIds, movedSessions: state.movedSessions })
     }
-    await this.setState({ initialized: true, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+    await this.setState({ initialized: true, workspaceIds, archivedSessionIds: state.archivedSessionIds, movedSessions: state.movedSessions })
   }
 
   private validateStoredState(state: WorkspaceDomainState): void {

@@ -166,6 +166,11 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return [...this.store.values()].map(e => structuredClone(e.meta))
   }
 
+  async delete(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    this.store.delete(id)
+  }
+
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     signal?.throwIfAborted()
     return [...this.store.values()].map(entry => ({
@@ -179,6 +184,11 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
 class ControlledBackend implements PersistenceBackend<never> {
   readonly name = 'session-persistence-controlled'
   readonly store: MemoryStore = new Map()
+
+  async delete(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    this.store.delete(id)
+  }
   readonly lifecycle: string[] = []
   lastAppendedBatch: readonly SessionEvent[] | undefined
   appendAttempts = 0

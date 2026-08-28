@@ -29,6 +29,10 @@ class TestPersistence extends SessionPersistence {
   }
   list(): Promise<SessionHeader[]> { return Promise.resolve([]) }
   listSnapshots(): Promise<never[]> { return Promise.resolve([]) }
+  delete(_id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    return Promise.resolve()
+  }
 }
 
 class RecordingAdapter extends LlmAdapter {

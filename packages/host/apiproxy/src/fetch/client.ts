@@ -20,7 +20,7 @@ import {
 import {
   sessionCancelValueSchema,
   sessionRevertValueSchema,
-sessionRevertRestoreValueSchema,
+  sessionRevertRestoreValueSchema,
   sessionResolveFileConflictValueSchema,
   sessionAttachmentValueSchema,
   sessionCreateValueSchema,
@@ -31,12 +31,14 @@ sessionRevertRestoreValueSchema,
   sessionPromptValueSchema,
   sessionRenameValueSchema,
   sessionSearchValueSchema,
+  sessionDeleteValueSchema,
   sessionSelectModelValueSchema,
   sessionUpdateQueueValueSchema,
 } from '../api/sessions.schema.ts'
 import {
   workspaceArchiveSessionValueSchema,
   workspaceCreateValueSchema,
+  workspaceMoveSessionValueSchema,
   workspaceDeleteValueSchema,
   workspaceInsertBeforeValueSchema,
   workspaceInsertSessionBeforeValueSchema,
@@ -107,6 +109,7 @@ export interface IApiClient {
     revert(payload: RequestPayload<'session.revert'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.revert'>>>
     revertRestore(payload: RequestPayload<'session.revertRestore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.revertRestore'>>>
     resolveFileConflict(payload: RequestPayload<'session.resolveFileConflict'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.resolveFileConflict'>>>
+    delete(payload: RequestPayload<'session.delete'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.delete'>>>
   }
   subagents: {
     list(payload: RequestPayload<'subagent.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'subagent.list'>>>
@@ -129,6 +132,7 @@ export interface IApiClient {
     insertBefore(payload: RequestPayload<'workspace.insertBefore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.insertBefore'>>>
     insertSessionBefore(payload: RequestPayload<'workspace.insertSessionBefore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.insertSessionBefore'>>>
     archiveSession(payload: RequestPayload<'workspace.archiveSession'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.archiveSession'>>>
+    moveSession(payload: RequestPayload<'workspace.moveSession'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.moveSession'>>>
   }
   skills: {
     list(payload: RequestPayload<'skill.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.list'>>>
@@ -197,6 +201,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'session.revert': sessionRevertValueSchema,
   'session.revertRestore': sessionRevertRestoreValueSchema,
   'session.resolveFileConflict': sessionResolveFileConflictValueSchema,
+  'session.delete': sessionDeleteValueSchema,
   'subagent.list': subagentListValueSchema,
   'subagent.history': subagentHistoryValueSchema,
   'subagent.prompt': subagentPromptValueSchema,
@@ -213,6 +218,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'workspace.insertBefore': workspaceInsertBeforeValueSchema,
   'workspace.insertSessionBefore': workspaceInsertSessionBeforeValueSchema,
   'workspace.archiveSession': workspaceArchiveSessionValueSchema,
+  'workspace.moveSession': workspaceMoveSessionValueSchema,
   'skill.list': skillListValueSchema,
   'agentPreset.list': agentPresetListValueSchema,
   'agentPreset.select': agentPresetSelectValueSchema,
@@ -457,6 +463,7 @@ export abstract class AbstractApiClient implements IApiClient {
     revert: (payload, signal) => this.callUnary('session.revert', payload, signal),
     revertRestore: (payload, signal) => this.callUnary('session.revertRestore', payload, signal),
     resolveFileConflict: (payload, signal) => this.callUnary('session.resolveFileConflict', payload, signal),
+    delete: (payload, signal) => this.callUnary('session.delete', payload, signal),
   }
 
   readonly subagents: IApiClient['subagents'] = {
@@ -486,6 +493,7 @@ export abstract class AbstractApiClient implements IApiClient {
     insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal),
     insertSessionBefore: (payload, signal) => this.callUnary('workspace.insertSessionBefore', payload, signal),
     archiveSession: (payload, signal) => this.callUnary('workspace.archiveSession', payload, signal),
+    moveSession: (payload, signal) => this.callUnary('workspace.moveSession', payload, signal),
   }
 
   readonly skills: IApiClient['skills'] = {

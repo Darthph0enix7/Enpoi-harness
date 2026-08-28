@@ -8,8 +8,8 @@
 import { useState } from 'react'
 import clsx from 'clsx'
 import {
-  HoverCard, IconArchiveOutline20, IconBranchOutline16, IconDownloadOutline16, IconEditOutline16,
-  IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16, IconPlusOutline16,
+  HoverCard, IconArchiveOutline20, IconBranchOutline16, IconCopyOutline16, IconDownloadOutline16, IconEditOutline16,
+  IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16, IconPinOutline16, IconPlusOutline16,
   IconTrashOutline16, IconTriangleRightFill14, Menu, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -359,7 +359,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onDownload, onArchive, drag, flat = false, t }: {
+export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onDownload, onArchive, onCopyId, onTogglePin, pinned, onExportMarkdown, onMoveToFolder, onDelete, drag, flat = false, t }: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -372,6 +372,18 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   onDownload?: ((id: SessionNode['id']) => void) | undefined
   /** Archive this session (row menu action; commits without a dialog). */
   onArchive: (id: SessionNode['id']) => void
+  /** Copy this session's id to the clipboard (row menu action). */
+  onCopyId?: ((id: SessionNode['id']) => void) | undefined
+  /** Pin or unpin this session (row menu action). */
+  onTogglePin?: ((id: SessionNode['id']) => void) | undefined
+  /** Whether this session is pinned (row menu label + pin indicator). */
+  pinned?: boolean | undefined
+  /** Export this session's conversation as Markdown (row menu action). */
+  onExportMarkdown?: ((id: SessionNode['id']) => void) | undefined
+  /** Open the move-to-folder dialog for this session (row menu action). */
+  onMoveToFolder?: ((id: SessionNode['id']) => void) | undefined
+  /** Open the delete-confirmation dialog for this session (row menu action). */
+  onDelete?: ((id: SessionNode['id']) => void) | undefined
   /** Present only on draggable rows (workspace-group sessions outside search). */
   drag?: RowDragProps | undefined
   /** The row is rendered without a parent Workspace header. */
@@ -385,16 +397,42 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const primaryStatus = statuses[0]
   const showStatus = primaryStatus.state !== 'done' || row.completed
   const [menuOpen, setMenuOpen] = useState(false)
+  // Right-click opens the same menu at the cursor (browser context menu
+  // suppressed); the 3-dots button opens it anchored to the button.
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null)
   // Archive hides the row through the registry-global archive set and never
   // touches the session log, so it is not styled as destructive and needs no
-  // confirmation dialog.
+  // confirmation dialog. Delete is destructive and opens a confirmation.
   const sessionMenuItems = [
     { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
+    ...(onCopyId !== undefined
+      ? [{ id: 'copy-id', label: t('menu.copyId'), icon: <IconCopyOutline16 /> }]
+      : []),
+    ...(onTogglePin !== undefined
+      ? [{ id: 'pin', label: pinned === true ? t('menu.unpin') : t('menu.pin'), icon: <IconPinOutline16 /> }]
+      : []),
+    ...(onExportMarkdown !== undefined
+      ? [{ id: 'export-markdown', label: t('menu.exportMarkdown'), icon: <IconDownloadOutline16 /> }]
+      : []),
+    ...(onMoveToFolder !== undefined
+      ? [{ id: 'move-to-folder', label: t('menu.moveToFolder'), icon: <IconFolderOpen16 /> }]
+      : []),
     { id: 'fork', label: t('menu.fork'), icon: <IconBranchOutline16 /> },
     { id: 'download', label: t('menu.downloadLog'), icon: <IconDownloadOutline16 /> },
     // 20-native glyph in the menu's 16px icon slot (Menu.module.css .itemIcon).
     { id: 'archive', label: t('menu.archiveSession'), icon: <IconArchiveOutline20 size={16} /> },
+    ...(onDelete !== undefined
+      ? [{ id: 'delete', label: t('menu.deleteSession'), icon: <IconTrashOutline16 />, danger: true }]
+      : []),
   ]
+  const openMenuAt = (x: number, y: number): void => {
+    setMenuAnchor({ x, y })
+    setMenuOpen(true)
+  }
+  const closeMenu = (): void => {
+    setMenuOpen(false)
+    setMenuAnchor(null)
+  }
   // Figma session cell: pad 8, status slot 16, then a 4px title gap.
   const ownRow = (
     <div
@@ -406,6 +444,11 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
       role="treeitem"
       aria-selected={selected}
       onClick={() => { onOpen(node.id) }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        openMenuAt(event.clientX, event.clientY)
+      }}
       draggable={drag !== undefined}
       onDragStart={drag === undefined
         ? undefined
@@ -441,6 +484,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
         </span>
       )}
       <span className={css.title}>{title}</span>
+      {pinned === true && <IconPinOutline16 size={12} className={css.pinIndicator} />}
       {/* A blank New Session row is a provisional placeholder: nothing has
           happened in it yet, so a "now" timestamp and the row verbs
           (rename/fork/archive) would all act on content that does not
@@ -450,23 +494,31 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
         <span className={css.rowActions}>
           <Menu
             open={menuOpen}
-            onClose={() => { setMenuOpen(false) }}
+            onClose={closeMenu}
             items={sessionMenuItems}
             onSelect={(id) => {
-              setMenuOpen(false)
+              closeMenu()
               if (id === 'rename') onRename(node.id, row.title)
+              if (id === 'copy-id') onCopyId?.(node.id)
+              if (id === 'pin') onTogglePin?.(node.id)
+              if (id === 'export-markdown') onExportMarkdown?.(node.id)
+              if (id === 'move-to-folder') onMoveToFolder?.(node.id)
               if (id === 'fork') onFork(node.id)
               if (id === 'download') onDownload?.(node.id)
               if (id === 'archive') onArchive(node.id)
+              if (id === 'delete') onDelete?.(node.id)
             }}
             portal
             closeOnPointerLeave
+            getAnchorRect={() => menuAnchor === null
+              ? null
+              : new DOMRect(menuAnchor.x, menuAnchor.y, 0, 0)}
             anchor={(
               <button
                 type="button"
                 className={css.iconButton}
                 aria-label={t('actions.session.aria', { name: title })}
-                onClick={(e) => { e.stopPropagation(); setMenuOpen(v => !v) }}
+                onClick={(e) => { e.stopPropagation(); openMenuAt(e.currentTarget.getBoundingClientRect().left, e.currentTarget.getBoundingClientRect().bottom + 4) }}
               >
                 <IconEllipsisOutline16 />
               </button>

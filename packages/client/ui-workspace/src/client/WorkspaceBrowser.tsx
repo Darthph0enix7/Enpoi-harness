@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   Button, IconCloseFill14, IconPersonalizationOutline16,
-  IconProjectAddOutline16, IconSearchOutline16, Menu, Modal, Tooltip,
+  IconProjectAddOutline16, IconSearchOutline16, Menu, Modal, Tooltip, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   SessionId, SessionListState, SessionSearchResultItem, WorkspaceId, WorkspaceView,
@@ -245,6 +245,18 @@ type SessionTreeProps = Pick<
   onSessionRename: (sessionId: SessionNode['id'], currentTitle: string) => void
   /** Archive a session (row menu action; the row disappears on the state echo). */
   onSessionArchive: (sessionId: SessionNode['id']) => void
+  /** Copy a session's id to the clipboard (row menu action). */
+  onCopyId?: ((sessionId: SessionNode['id']) => void) | undefined
+  /** Pin or unpin a session (row menu action). */
+  onTogglePin?: ((sessionId: SessionNode['id']) => void) | undefined
+  /** Pinned session ids (pin indicator + pinned-first ordering). */
+  pinnedSessionIds: readonly string[]
+  /** Export a session's conversation as Markdown (row menu action). */
+  onExportMarkdown?: ((sessionId: SessionNode['id']) => void) | undefined
+  /** Open the move-to-folder dialog for a session (row menu action). */
+  onMoveToFolder?: ((sessionId: SessionNode['id']) => void) | undefined
+  /** Open the delete-confirmation dialog for a session (row menu action). */
+  onDelete?: ((sessionId: SessionNode['id']) => void) | undefined
   /** Session order behavior: fixed after edits, or additionally promoted by user activity. */
   orderBy: SessionOrderBy
 }
@@ -253,6 +265,7 @@ type SessionTreeProps = Pick<
 function SessionTree({
   useSessions, startSession, open, forkSession, downloadSession, workspaces, archivedSessionIds,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
+  onCopyId, onTogglePin, pinnedSessionIds, onExportMarkdown, onMoveToFolder, onDelete,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
@@ -325,11 +338,12 @@ function SessionTree({
   const groups = useMemo(
     () => deriveGroups(list, orderedWorkspaces, archivedSessionIds, {
       expandedGroups,
+      pinnedSessionIds,
       ...(sessionOrderByAccount[UNGROUPED_KEY] === undefined
         ? {}
         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
     }),
-    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount],
+    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, pinnedSessionIds],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -522,6 +536,12 @@ function SessionTree({
                     onFork={forkSession}
                     onDownload={downloadSession}
                     onArchive={onSessionArchive}
+                    onCopyId={onCopyId}
+                    onTogglePin={onTogglePin}
+                    pinned={pinnedSessionIds.includes(node.id)}
+                    onExportMarkdown={onExportMarkdown}
+                    onMoveToFolder={onMoveToFolder}
+                    onDelete={onDelete}
                     drag={dragProps}
                     t={t}
                   />
@@ -551,6 +571,7 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   useSessions, open, forkSession, downloadSession, onSessionRename, onSessionArchive, archivedSessionIds,
+  onCopyId, onTogglePin, pinnedSessionIds, onExportMarkdown, onMoveToFolder, onDelete,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
@@ -560,6 +581,12 @@ function FlatList({
   | 'onSessionRename'
   | 'onSessionArchive'
   | 'archivedSessionIds'
+  | 'onCopyId'
+  | 'onTogglePin'
+  | 'pinnedSessionIds'
+  | 'onExportMarkdown'
+  | 'onMoveToFolder'
+  | 'onDelete'
   | 'orderBy'
   | 'sessionOrderByAccount'
   | 'sessionUpdatedAtByAccount'
@@ -571,8 +598,8 @@ function FlatList({
 }) {
   const list = useSessions(s => s)
   const baseRows = useMemo(
-    () => deriveFlat(list, archivedSessionIds),
-    [list, archivedSessionIds],
+    () => deriveFlat(list, archivedSessionIds, pinnedSessionIds),
+    [list, archivedSessionIds, pinnedSessionIds],
   )
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)
@@ -641,6 +668,12 @@ function FlatList({
               onFork={forkSession}
               onDownload={downloadSession}
               onArchive={onSessionArchive}
+              onCopyId={onCopyId}
+              onTogglePin={onTogglePin}
+              pinned={pinnedSessionIds.includes(node.id)}
+              onExportMarkdown={onExportMarkdown}
+              onMoveToFolder={onMoveToFolder}
+              onDelete={onDelete}
               flat
               drag={{
                 start: () => {
@@ -765,6 +798,8 @@ export function WorkspaceBrowser({
   archiveSession,
   insertSessionBefore,
   createWorkspace,
+  moveSession,
+  deleteSession,
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
@@ -773,6 +808,7 @@ export function WorkspaceBrowser({
   t,
 }: WorkspaceBrowserProps) {
   const home = useHostDescription(description => description?.home)
+  const list = useSessions(s => s)
   const workspaces = useWorkspaces(state => state.items)
   const workspacePhase = useWorkspaces(state => state.phase)
   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
@@ -784,6 +820,7 @@ export function WorkspaceBrowser({
   const groupExpansion = useStore(s => s.groupExpansion)
   const sessionOrderByAccount = useStore(s => s.sessionOrderByAccount)
   const sessionUpdatedAtByAccount = useStore(s => s.sessionUpdatedAtByAccount)
+  const pinnedSessionIds = useStore(s => s.pinnedSessionIds ?? [])
   const currentBlankSessionId = useSessions((state) => {
     const current = state.current
     return current !== undefined && state.byId[current]?.blank === true ? current : undefined
@@ -979,6 +1016,76 @@ export function WorkspaceBrowser({
     })
   }
 
+  // Copy session id: write to the clipboard (the row shows no transient
+  // label today; the HoverCard copy affordance already covers feedback).
+  const onCopySessionId = (sessionId: SessionNode['id']) => {
+    void writeClipboard(sessionId)
+  }
+
+  // Pin/unpin: the viewing store persists the set; pinned rows sort first.
+  const onToggleSessionPin = (sessionId: SessionNode['id']) => {
+    actions.togglePinned(sessionId)
+  }
+
+  // Export Markdown: trigger the host GET download route.
+  const onExportSessionMarkdown = (sessionId: SessionNode['id']) => {
+    const url = `/api/session.exportMarkdown?sessionId=${encodeURIComponent(sessionId)}`
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  }
+
+  // Move to folder: dialog listing every workspace; the current one is marked.
+  const [moveTarget, setMoveTarget] = useState<SessionNode['id'] | null>(null)
+  const [moving, setMoving] = useState(false)
+  const [moveError, setMoveError] = useState<string | null>(null)
+  const [moveWorkspaceId, setMoveWorkspaceId] = useState<WorkspaceId | null>(null)
+  const onMoveSessionToFolder = (sessionId: SessionNode['id']) => {
+    setMoveTarget(sessionId)
+    setMoveWorkspaceId(null)
+    setMoveError(null)
+  }
+  const confirmMove = () => {
+    if (moving || moveTarget === null || moveWorkspaceId === null) return
+    setMoving(true)
+    setMoveError(null)
+    moveSession(moveTarget, moveWorkspaceId).then(() => {
+      setMoving(false)
+      setMoveTarget(null)
+    }).catch((reason: unknown) => {
+      setMoving(false)
+      setMoveError(reason instanceof Error ? reason.message : String(reason))
+    })
+  }
+
+  // Session delete: destructive confirmation; the row disappears when the
+  // session-removed frame lands (or the local list prunes on the response).
+  const [sessionDeleteTarget, setSessionDeleteTarget] = useState<{ sessionId: SessionNode['id']; title: string } | null>(null)
+  const [sessionDeleting, setSessionDeleting] = useState(false)
+  const [sessionDeleteError, setSessionDeleteError] = useState<string | null>(null)
+  const onDeleteSessionRequest = (sessionId: SessionNode['id']) => {
+    const summary = list.byId[sessionId]
+    setSessionDeleteTarget({ sessionId, title: summary?.displayTitle ?? sessionId })
+    setSessionDeleteError(null)
+  }
+  const confirmSessionDelete = () => {
+    if (sessionDeleting || sessionDeleteTarget === null) return
+    setSessionDeleting(true)
+    setSessionDeleteError(null)
+    deleteSession(sessionDeleteTarget.sessionId).then(() => {
+      setSessionDeleting(false)
+      setSessionDeleteTarget(null)
+      // Prune dead ids from the viewing store (pins + order accounts).
+      actions.retainSessionIds(list.ids)
+    }).catch((reason: unknown) => {
+      setSessionDeleting(false)
+      setSessionDeleteError(reason instanceof Error ? reason.message : String(reason))
+    })
+  }
+
   // Delete dialog is separate from the row so a successful removal can
   // unmount that row without tearing down the in-flight confirmation state.
   const [deleteTarget, setDeleteTarget] = useState<{ workspaceId: WorkspaceId; title: string } | null>(null)
@@ -1166,6 +1273,12 @@ export function WorkspaceBrowser({
               <FlatList
                 useSessions={useSessions} open={open} forkSession={forkSession} downloadSession={downloadSession}
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+                onCopyId={onCopySessionId}
+                onTogglePin={onToggleSessionPin}
+                pinnedSessionIds={pinnedSessionIds}
+                onExportMarkdown={onExportSessionMarkdown}
+                onMoveToFolder={onMoveSessionToFolder}
+                onDelete={onDeleteSessionRequest}
                 archivedSessionIds={archivedSessionIds}
                 orderBy={orderBy}
                 sessionOrderByAccount={sessionOrderByAccount}
@@ -1180,6 +1293,12 @@ export function WorkspaceBrowser({
                 useSessions={useSessions}
                 onSessionRename={onSessionRename}
                 onSessionArchive={onSessionArchive}
+                onCopyId={onCopySessionId}
+                onTogglePin={onToggleSessionPin}
+                pinnedSessionIds={pinnedSessionIds}
+                onExportMarkdown={onExportSessionMarkdown}
+                onMoveToFolder={onMoveSessionToFolder}
+                onDelete={onDeleteSessionRequest}
                 forkSession={forkSession}
                 downloadSession={downloadSession}
                 workspaces={workspaces}
@@ -1300,6 +1419,65 @@ export function WorkspaceBrowser({
       >
         {deleting && <div className={css.deleteStatus} role="status">{t('delete.pending')}</div>}
         {deleteError !== null && <div className={css.renameError} role="alert">{deleteError}</div>}
+      </Modal>
+
+      <Modal
+        open={moveTarget !== null}
+        onClose={() => { if (!moving) setMoveTarget(null) }}
+        closeLabel={t('close')}
+        title={t('move.title')}
+        footer={(
+          <>
+            <Button variant="outline" disabled={moving} onClick={() => { setMoveTarget(null) }}>{t('cancel')}</Button>
+            <Button variant="primary" disabled={moving || moveWorkspaceId === null} onClick={confirmMove}>{t('move.confirm')}</Button>
+          </>
+        )}
+      >
+        <div className={css.moveList} role="listbox" aria-label={t('move.title')}>
+          {workspaces.map((workspace) => {
+            const isCurrent = moveTarget !== null && workspace.sessionIds.includes(moveTarget)
+            return (
+              <button
+                key={workspace.workspaceId}
+                type="button"
+                role="option"
+                aria-selected={moveWorkspaceId === workspace.workspaceId}
+                className={css.moveRow}
+                onClick={() => { setMoveWorkspaceId(workspace.workspaceId) }}
+              >
+                <span className={css.moveTitle}>{workspace.title}</span>
+                {isCurrent && <span className={css.moveCurrent}>{t('move.current')}</span>}
+              </button>
+            )
+          })}
+        </div>
+        {moveError !== null && <div className={css.renameError} role="alert">{moveError}</div>}
+      </Modal>
+
+      <Modal
+        open={sessionDeleteTarget !== null}
+        onClose={() => { if (!sessionDeleting) setSessionDeleteTarget(null) }}
+        closeLabel={t('close')}
+        title={t('deleteSession.title')}
+        {...sessionDeleteTarget === null
+          ? {}
+          : { description: t('deleteSession.desc', { name: sessionDeleteTarget.title }) }}
+        footer={(
+          <>
+            <Button variant="outline" disabled={sessionDeleting} onClick={() => { setSessionDeleteTarget(null) }}>{t('cancel')}</Button>
+            <Button
+              variant="outline"
+              className={css.deleteAction}
+              disabled={sessionDeleting}
+              onClick={confirmSessionDelete}
+            >
+              {t('deleteSession.confirm')}
+            </Button>
+          </>
+        )}
+      >
+        {sessionDeleting && <div className={css.deleteStatus} role="status">{t('deleteSession.pending')}</div>}
+        {sessionDeleteError !== null && <div className={css.renameError} role="alert">{sessionDeleteError}</div>}
       </Modal>
     </div>
   )

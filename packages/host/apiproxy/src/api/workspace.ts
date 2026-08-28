@@ -106,4 +106,16 @@ export interface WorkspaceApi {
    */
   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
+
+  /**
+   * Display-only move: claims a session for display under another workspace
+   * without touching its cwd accounting (the session keeps working in its
+   * original directory). The wire projection excludes overlay-claimed ids
+   * from their cwd workspace's list and includes them under the target.
+   * Idempotent for an already-claimed target. An unknown target fails with
+   * `workspace-not-found`; a session neither live nor in session persistence
+   * fails with `session-not-found`.
+   */
+  moveSession(request: RpcRequest<{ sessionId: SessionId; targetWorkspaceId: WorkspaceId }>):
+  Promise<RpcResponse<{ accepted: true }>>
 }

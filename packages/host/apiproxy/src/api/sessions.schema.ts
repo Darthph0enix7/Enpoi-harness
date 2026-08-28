@@ -415,6 +415,16 @@ export const sessionResolveFileConflictValueSchema = z.object({
   accepted: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.resolveFileConflict'>>>
 
+/** session.delete request payload. */
+export const sessionDeleteRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'session.delete'>>>
+
+/** session.delete response value. */
+export const sessionDeleteValueSchema = z.object({
+  deleted: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'session.delete'>>>
+
 /** session.cancel response value. */
 export const sessionCancelValueSchema = z.object({
   accepted: z.literal(true),

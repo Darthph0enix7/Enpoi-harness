@@ -82,6 +82,7 @@ describe('sessions.list cold merge', () => {
     })
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve(metas),
+      delete: () => Promise.resolve(),
       locate: (meta: SessionHeader) => {
         if (meta.id === sid('large-unknown')) return { kind: 'jsonl', path: largePath }
         if (meta.id === sid('locationless')) return undefined
@@ -140,6 +141,7 @@ describe('sessions.list cold merge', () => {
     const readFrom = vi.fn()
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       locate: () => ({ kind: 'jsonl', path: '/not-read' }),
       readFrom,
     } as never)
@@ -170,6 +172,7 @@ describe('sessions.list cold merge', () => {
     const release = Promise.withResolvers<undefined>()
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       locate: () => ({ kind: 'jsonl', path }),
       readFrom: async () => {
         started.resolve(undefined)
@@ -285,6 +288,7 @@ describe('cold history recovery view', () => {
       appendBatch: () => Promise.resolve(),
       commitRepair: () => Promise.resolve(),
       list: () => Promise.resolve([structuredClone(meta)]),
+      delete: () => Promise.resolve(),
     }
     const coordinator = new PersistenceCoordinator(ctx, backend)
     ctx.provide('sessionPersistence', {
@@ -336,6 +340,7 @@ describe('Remote Agent and Session lookup policy', () => {
     const inspect = vi.fn(() => Promise.resolve({ meta, events: [] as SessionEvent[] }))
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       inspect,
       locate: () => undefined,
     } as never)
@@ -450,6 +455,7 @@ describe('subagent ownership fence', () => {
     const inspect = vi.fn(() => Promise.resolve({ meta, events }))
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       inspect,
       locate: () => undefined,
     } as never)
@@ -504,6 +510,7 @@ describe('subagent ownership fence', () => {
     ] as SessionEvent[]
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       inspect: () => Promise.resolve({ meta, events }),
       locate: () => undefined,
     } as never)
@@ -715,6 +722,7 @@ describe('degenerate composition (no persistence, no factory)', () => {
     const inspect = vi.fn()
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([]),
+      delete: () => Promise.resolve(),
       inspect,
     } as never)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
@@ -769,6 +777,7 @@ describe('sessions.prompt synchronous rejection', () => {
     const meta: SessionHeader = header('race-resume', 1000)
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve([meta]),
+      delete: () => Promise.resolve(),
       inspect: () => Promise.resolve({ meta, events: [] as SessionEvent[] }),
       locate: () => undefined,
     } as never)

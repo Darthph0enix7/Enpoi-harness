@@ -562,6 +562,11 @@ export class SessionRuntime implements ISessions {
    * @param opts - session, conflictId, and the chosen resolution.
    * @throws {Error} when the host rejects the resolution.
    */
+  async delete(sessionId: SessionId): Promise<void> {
+    const result = await this.manager.delete(sessionId)
+    if (!result.ok) throw new Error(`session delete failed: ${result.error.code}: ${result.error.message}`)
+  }
+
   async resolveFileConflict(opts: {
     sessionId: SessionId
     conflictId: string

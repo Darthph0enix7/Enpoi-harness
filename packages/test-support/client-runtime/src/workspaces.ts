@@ -201,6 +201,18 @@ export class TestWorkspaces implements IWorkspaces {
    * observable effect: the id joins the list state's archive set.
    * @param sessionId - session to archive.
    */
+  async moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void> {
+    // Display-only move: re-account the session under the target workspace.
+    const items = this.list.getSnapshot().items
+    const workspace = items.find((w: WorkspaceView) => w.workspaceId === targetWorkspaceId)
+    if (workspace === undefined) throw new Error(`workspace.moveSession: unknown workspace ${targetWorkspaceId}`)
+    const source = items.find((w: WorkspaceView) => w.sessionIds.includes(sessionId))
+    if (source !== undefined) {
+      source.sessionIds = source.sessionIds.filter((id: SessionId) => id !== sessionId)
+    }
+    if (!workspace.sessionIds.includes(sessionId)) workspace.sessionIds.push(sessionId)
+  }
+
   async archiveSession(sessionId: SessionId): Promise<void> {
     this.calls.push({ method: 'archiveSession', args: [sessionId] })
     const stub = this.stubs.get('archiveSession')

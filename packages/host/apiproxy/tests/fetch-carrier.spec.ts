@@ -117,6 +117,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async resolveFileConflict(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { accepted: true as const } } }
       },
+      async delete(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { deleted: true as const } } }
+      },
     },
     subagents: {
       async list(request) {
@@ -199,6 +202,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       },
       async archiveSession(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { archivedSessionIds: [request.payload.sessionId] } } }
+      },
+      async moveSession(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { accepted: true as const } } }
       },
     },
     agentPresets: {
@@ -309,6 +315,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
     },
     downloads: {
       async sessionLog() {
+        return new Response('stub', { status: 404 })
+      },
+      async sessionMarkdown() {
         return new Response('stub', { status: 404 })
       },
     },

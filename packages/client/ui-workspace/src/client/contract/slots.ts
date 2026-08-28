@@ -139,6 +139,16 @@ export type WorkspaceBrowserInjected = {
   insertSessionBefore: (workspaceId: WorkspaceId, sessionId: SessionId, beforeSessionId?: SessionId) => Promise<void>
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /**
+   * Display-only move: claim a session for display under another workspace
+   * without touching its cwd accounting.
+   */
+  moveSession: (sessionId: SessionId, targetWorkspaceId: WorkspaceId) => Promise<void>
+  /**
+   * Permanently delete a session (log, revert history, file history; memory
+   * summaries kept). Destructive — the UI confirms before calling.
+   */
+  deleteSession: (sessionId: SessionId) => Promise<void>
 }
 
 /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */

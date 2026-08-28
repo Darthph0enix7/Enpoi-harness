@@ -577,6 +577,11 @@ export class SessionManager {
    * @param opts - source session and the optional seq anchoring the cut.
    * @returns the fork result (the child session id).
    */
+  async delete(sessionId: SessionId): Promise<RpcResult<{ deleted: true }>> {
+    const { result } = await this.api.sessions.delete({ sessionId })
+    return result
+  }
+
   async fork(
     opts: { sessionId: SessionId; atSeq?: number },
   ): Promise<RpcResult<{ sessionId: SessionId }>> {

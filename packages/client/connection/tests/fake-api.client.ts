@@ -124,6 +124,8 @@ export class FakeApiClient implements IApiClient {
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
     revert: (payload: unknown) => this.record('session.revert', payload, Promise.resolve(ok({ accepted: true as const, revertedText: '', revertedCount: 0 }))),
     revertRestore: (payload: unknown) => this.record('session.revertRestore', payload, Promise.resolve(ok({ accepted: true as const }))),
+    delete: (payload: unknown) =>
+      this.record('session.delete', payload, Promise.resolve(ok({ deleted: true as const }))),
     resolveFileConflict: (payload: unknown) => this.record('session.resolveFileConflict', payload, Promise.resolve(ok({ accepted: true as const }))),
   }
 
@@ -168,6 +170,8 @@ export class FakeApiClient implements IApiClient {
     insertSessionBefore: (payload: unknown) => this.record('workspace.insertSessionBefore', payload, Promise.resolve(ok({
       workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
     }))),
+    moveSession: (payload: unknown) =>
+      this.record('workspace.moveSession', payload, Promise.resolve(ok({ accepted: true as const }))),
     archiveSession: (payload: unknown) => this.record('workspace.archiveSession', payload, Promise.resolve(ok({
       archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
     }))),

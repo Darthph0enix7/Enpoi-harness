@@ -448,6 +448,27 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return (await this.listArtifacts(signal)).map(artifact => artifact.header)
   }
 
+  /**
+   * Permanently delete one session's artifacts: the per-session directory
+   * (log + any sidecar) under every project scope that holds it. An absent
+   * session is a no-op success.
+   * @param id - persisted session id to delete.
+   * @param signal - optional cancellation for backend delete work.
+   */
+  async delete(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    for (const project of await this.listProjectDirs(signal)) {
+      signal?.throwIfAborted()
+      const dir = join(project, id)
+      try {
+        await rm(dir, { recursive: true, force: true })
+      } catch (error: unknown) {
+        signal?.throwIfAborted()
+        if (!isENOENT(error)) throw error
+      }
+    }
+  }
+
   /** List metadata plus a stat-derived identity for each append-only log. */
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     const snapshots: SessionPersistenceSnapshot[] = []

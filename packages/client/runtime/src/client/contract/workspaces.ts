@@ -91,4 +91,14 @@ export interface IWorkspaces {
    * @param sessionId - session to archive.
    */
   archiveSession(sessionId: SessionId): Promise<void>
+
+  /**
+   * Display-only move: claim a session for display under another workspace
+   * without touching its cwd accounting (the session keeps working in its
+   * original directory). The wire projection excludes overlay-claimed ids
+   * from their cwd workspace's list and includes them under the target.
+   * @param sessionId - session to display under another workspace.
+   * @param targetWorkspaceId - workspace that displays the session.
+   */
+  moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void>
 }

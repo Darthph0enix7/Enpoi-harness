@@ -212,6 +212,13 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* Pinned-session indicator: a small pin glyph between the title and the time. */
+.pinIndicator {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  opacity: 0.8;
+}
+
 .dot {
   flex: none;
 }

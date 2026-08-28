@@ -5,7 +5,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z as zod } from 'zod'
@@ -18,7 +18,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
+import { deriveEventMessage, isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
@@ -84,7 +84,7 @@ import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-setti
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // Value edge: the rename impl narrows the title service's validation failure; the import also resolves `ctx.get('sessionTitle')`.
-import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
+import { SessionTitleInvalidError, foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { CallId } from '@deepseek-ai/dsh-llm/brand'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import type { ApprovalOutcome, ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
@@ -1016,26 +1016,53 @@ function workspaceNotFound<T>(request: RpcRequest<unknown>, workspaceId: string)
   })
 }
 
+/**
+ * Compose the display sessionIds for one workspace: cwd-accounted ids NOT
+ * claimed by the display-move overlay, plus overlay claims for this
+ * workspace. The single shared rule behind every projection site
+ * (workspace.list, domain/changed frames, and the global-put diff) so
+ * connected clients never see views that disagree.
+ */
+function displaySessionIds(
+  workspaceId: WorkspaceId,
+  cwdSessionIds: readonly SessionId[],
+  movedSessions: readonly { sessionId: SessionId; workspaceId: WorkspaceId }[],
+): SessionId[] {
+  const claimed = new Set(movedSessions.map(move => move.sessionId))
+  const cwdIds = cwdSessionIds.filter(id => !claimed.has(id))
+  const movedIds = movedSessions
+    .filter(move => move.workspaceId === workspaceId)
+    .map(move => move.sessionId)
+  return [...cwdIds, ...movedIds]
+}
+
 /** Wire projection of one workspace entity (the workspace.* value row). */
-function workspaceView(workspace: Workspace): WorkspaceView {
+function workspaceView(workspace: Workspace, movedSessions: readonly { sessionId: SessionId; workspaceId: WorkspaceId }[]): WorkspaceView {
   return {
     workspaceId: workspace.id,
     path: workspace.path,
     title: workspace.title,
-    sessionIds: [...workspace.sessionIds],
+    sessionIds: displaySessionIds(workspace.id, workspace.sessionIds, movedSessions),
     createdAt: workspace.createdAt,
     updatedAt: workspace.updatedAt,
   }
 }
 
-/** Wire projection of the durable record carried by `domain/changed`. */
-function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceView {
+/** Wire projection of the durable record carried by `domain/changed`. The
+ * stored record's sessionIds are already cwd-pruned by the entity's mutate
+ * write path, so the raw record is the correct cwd-filtered source here (the
+ * entity snapshot may lag the frame by one mutation). */
+function changedWorkspaceView(
+  workspaceId: string,
+  value: unknown,
+  movedSessions: readonly { sessionId: SessionId; workspaceId: WorkspaceId }[],
+): WorkspaceView {
   const record: WorkspaceRecord = workspaceRecord.parse(value)
   return {
     workspaceId: workspaceId as WorkspaceId,
     path: record.path,
     title: record.title,
-    sessionIds: [...record.sessionIds],
+    sessionIds: displaySessionIds(workspaceId as WorkspaceId, record.sessionIds, movedSessions),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   }
@@ -1450,6 +1477,57 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     }
     const inspected = await inspectServable(sessionId)
     return { id: inspected.meta.id, header: inspected.meta, events: inspected.events }
+  }
+
+  /** Strip characters that would break a download filename. */
+  function sanitizeFilename(title: string): string {
+    const cleaned = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim()
+    return cleaned === '' ? 'session' : cleaned.slice(0, 120)
+  }
+
+  /** Render one content block to markdown text. */
+  function renderBlock(block: ContentBlock): string {
+    switch (block.type) {
+      case 'text':
+        return block.text
+      case 'reasoning':
+        return `\n<details>\n<summary>Reasoning</summary>\n\n\`\`\`text\n${block.text}\n\`\`\`\n</details>\n`
+      case 'image':
+        return `\n![image](attachment:${block.attachment.attachmentId})\n`
+      case 'tool-call':
+        return `\n\`\`\`tool-call\n${block.name}(${block.arguments})\n\`\`\`\n`
+      case 'tool-result':
+        return `\n\`\`\`tool-result\n${block.content.map(renderBlock).join('\n')}\n\`\`\`\n`
+      default:
+        // Merge-extensible block types render as their JSON payload.
+        return `\n\`\`\`json\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`
+    }
+  }
+
+  /**
+   * Render a session's conversation as a Markdown document. Folds the same
+   * per-event projection the client surface uses (append-origin surface
+   * events only — replacement copies stay model-only), so the export matches
+   * the transcript the user saw.
+   */
+  function renderSessionMarkdown(events: readonly SessionEvent[]): string {
+    const title = foldSessionTitle(events)?.title ?? 'Session'
+    const lines: string[] = [`# ${title}`, '']
+    for (const event of events) {
+      if (!isAppendSurfaceEvent(event)) continue
+      const message = deriveEventMessage(event)
+      if (message === null) continue
+      if (message.role === 'user') {
+        lines.push('## User', '')
+      } else {
+        lines.push('## Assistant', '')
+      }
+      for (const block of message.content) {
+        const rendered = renderBlock(block)
+        if (rendered !== '') lines.push(rendered, '')
+      }
+    }
+    return lines.join('\n')
   }
 
   /** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */
@@ -2822,6 +2900,72 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
+
+      async delete(request) {
+        const { sessionId } = request.payload
+        // 1. Cancel live subagent children first so nothing keeps running
+        // against a parent that is about to be disposed.
+        try {
+          const children = await ctx.subagents.listChildren(sessionId)
+          for (const entry of children) {
+            if (entry.kind !== 'child') continue
+            try {
+              ctx.subagents.interrupt(entry.id, { kind: 'user', parentSessionId: sessionId })
+            } catch {
+              // best-effort: a child that already settled is a no-op
+            }
+          }
+        } catch {
+          // subagents service absent or listing failed — proceed; the parent
+          // disposal below still stops the parent's own loop.
+        }
+        // 2. If live: cancel the running turn, await quiescence, then dispose.
+        const agent = ctx.agents.get(sessionId)
+        if (agent !== undefined) {
+          agent.cancel({ kind: 'user' }, { keepInbox: false })
+          try {
+            await agent.whenIdle()
+          } catch {
+            // quiescence wait is best-effort; disposal below is guarded
+          }
+          ctx.sessions.dispose(sessionId)
+        }
+        // 3. Registry cleanup: archive set, display-move overlay, and every
+        // workspace's accounting slot.
+        try {
+          await ctx.workspaceRegistry.archiveSession(sessionId)
+        } catch {
+          // absent session is fine — the registry treats it as unknown
+        }
+        try {
+          await ctx.workspaceRegistry.unmoveSession(sessionId)
+        } catch {
+          // overlay cleanup is best-effort; the delete proceeds
+        }
+        for (const workspace of ctx.workspaceRegistry.list()) {
+          try {
+            await workspace.detachSession(sessionId)
+          } catch {
+            // best-effort per workspace
+          }
+        }
+        // 4. Durable persistence delete (absent artifact = no-op).
+        const persistence = ctx.get('sessionPersistence')
+        if (persistence !== undefined) {
+          await persistence.delete(sessionId)
+        }
+        // 5. Side files, best-effort (never fail the RPC): revert ledger and
+        // file-history session records. The shared blob store is NOT touched.
+        try {
+          const home = process.env.DSH_HOME ?? homedir()
+          const dshRoot = home.endsWith('.dsh') ? home : join(home, '.dsh')
+          await rm(join(dshRoot, 'revert-ledger', `${sessionId}.jsonl`), { force: true })
+          await rm(join(dshRoot, 'file-history', 'sessions', sessionId), { recursive: true, force: true })
+        } catch (error: unknown) {
+          ctx.logger.warn(`session delete side-file cleanup failed for "${sessionId}": ${String(error)}`)
+        }
+        return Promise.resolve(ok(request, { deleted: true as const }))
+      },
     },
 
     subagents: {
@@ -2993,7 +3137,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     workspace: {
       list(request) {
         return Promise.resolve(ok(request, {
-          items: ctx.workspaceRegistry.list().map(workspaceView),
+          items: ctx.workspaceRegistry.list().map(workspace => workspaceView(workspace, ctx.workspaceRegistry.movedSessions)),
           archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds],
         }))
       },
@@ -3002,7 +3146,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const { path } = request.payload
         try {
           const { workspace, created } = await ensureWorkspace(path)
-          return ok(request, { workspace: workspaceView(workspace), created })
+          return ok(request, { workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions), created })
         } catch (error: unknown) {
           // The registry rejects a path that does not resolve to an existing
           // directory (realpath ENOENT / not-a-directory) — the business
@@ -3044,7 +3188,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           throw error
         }
-        return ok(request, { workspace: workspaceView(workspace) })
+        return ok(request, { workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions) })
       },
 
       async delete(request) {
@@ -3090,7 +3234,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             },
           })
         }
-        return ok(request, { workspace: workspaceView(workspace) })
+        return ok(request, { workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions) })
       },
 
       async archiveSession(request) {
@@ -3108,6 +3252,30 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+      },
+
+      async moveSession(request) {
+        const { sessionId, targetWorkspaceId } = request.payload
+        try {
+          await ctx.workspaceRegistry.moveSession(sessionId, brandWorkspaceId(targetWorkspaceId))
+        } catch (error: unknown) {
+          if (error instanceof WorkspaceOrderInvalidError) {
+            return err(request, {
+              code: 'workspace-not-found',
+              message: error.message,
+              details: { targetWorkspaceId },
+            })
+          }
+          if (error instanceof WorkspaceUnknownSessionError) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId },
+            })
+          }
+          throw error
+        }
+        return ok(request, { accepted: true as const })
       },
     },
 
@@ -3758,6 +3926,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // stream opens against the current set; workspace.list re-baselines
         // reconnecting clients, so only later changes need frames.
         let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
+        // Display-move overlay baseline for the global-put diff below.
+        let committedMovedSessions = ctx.workspaceRegistry.movedSessions
         const disposers = [
           ctx.on('session/created', (session: Session) => {
             queue.push(frame({
@@ -3794,7 +3964,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                   throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
                 }
                 committedWorkspaceIds.add(workspaceId)
-                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
+                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions) }))
               }
               committedWorkspaceOrder = [...state.workspaceIds]
               if (orderChanged) {
@@ -3810,6 +3980,38 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                   type: 'host/archived-sessions-changed',
                   archivedSessionIds: [...state.archivedSessionIds],
                 }))
+              }
+              // Display-move overlay diff: recompose the affected workspaces
+              // (previous targets, new targets, and the cwd workspace of each
+              // changed session) so every connected client sees the move.
+              if (state.movedSessions.length !== committedMovedSessions.length
+                || state.movedSessions.some((move, index) => {
+                  const prior = committedMovedSessions[index]
+                  return prior === undefined
+                    || move.sessionId !== prior.sessionId
+                    || move.workspaceId !== prior.workspaceId
+                })) {
+                const affected = new Set<WorkspaceId>()
+                for (const move of committedMovedSessions) affected.add(move.workspaceId)
+                for (const move of state.movedSessions) affected.add(move.workspaceId)
+                const changedIds = new Set<SessionId>()
+                for (const move of committedMovedSessions) changedIds.add(move.sessionId)
+                for (const move of state.movedSessions) changedIds.add(move.sessionId)
+                for (const id of changedIds) {
+                  const cwdWorkspace = ctx.workspaceRegistry.list()
+                    .find(workspace => workspace.sessionIds.includes(id))
+                  if (cwdWorkspace !== undefined) affected.add(cwdWorkspace.id)
+                }
+                committedMovedSessions = state.movedSessions
+                for (const workspaceId of affected) {
+                  const workspace = ctx.workspaceRegistry.get(workspaceId)
+                  if (workspace !== undefined) {
+                    queue.push(frame({
+                      type: 'host/workspace-changed',
+                      workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions),
+                    }))
+                  }
+                }
               }
               return
             }
@@ -3827,7 +4029,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             // A new entity's first put waits for the global registry write above.
             queue.push(frame({
               type: 'host/workspace-changed',
-              workspace: changedWorkspaceView(change.key, change.value),
+              workspace: changedWorkspaceView(change.key, change.value, ctx.workspaceRegistry.movedSessions),
             }))
           }),
           // Allowlisted host events ride one verbatim wrapper frame each. The
@@ -3906,6 +4108,28 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             },
           },
         )
+      },
+
+      async sessionMarkdown(request, signal) {
+        // Read the session state through the same attached-or-inspected path
+        // the history RPC uses, so the export matches what the client renders
+        // (compaction-replaced history included).
+        let state: SessionReadState
+        try {
+          state = await readSessionState(request.sessionId)
+        } catch {
+          signal.throwIfAborted()
+          return new Response('session not found', { status: 404 })
+        }
+        signal.throwIfAborted()
+        const markdown = renderSessionMarkdown(state.events)
+        const title = sanitizeFilename(foldSessionTitle(state.events)?.title ?? 'session')
+        return new Response(markdown, {
+          headers: {
+            'content-type': 'text/markdown; charset=utf-8',
+            'content-disposition': `attachment; filename="${title}.md"`,
+          },
+        })
       },
     },
 

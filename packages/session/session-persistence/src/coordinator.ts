@@ -199,6 +199,14 @@ export interface PersistenceBackend<TornMarker = unknown> {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
 
   /**
+   * Permanently delete one session's durable artifacts. An absent session is
+   * a no-op success (backends create lazily). Storage faults propagate.
+   * @param id - persisted session id to delete.
+   * @param signal - optional cancellation for backend delete work.
+   */
+  delete(id: SessionId, signal?: AbortSignal): Promise<void>
+
+  /**
    * Optional side-effect-free artifact locator, used to point refusal
    * diagnostics ({@link SessionFormatUnsupportedError}) at the raw log.
    * Backends without one artifact per session omit it or return `undefined`.
@@ -867,6 +875,26 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     const retired = Promise.resolve(this.retirements.get(id))
     const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
     return waited.then(() => this.serialize(id, () => this.readFromCore(id, fromSeq, signal), signal))
+  }
+
+  /**
+   * Permanently delete a session's durable artifacts. Serialized on the
+   * per-id chain after any in-flight retirement settles; invalidates the
+   * preparation cache so a later prepare surfaces "not found" instead of a
+   * stale reservation. An absent artifact is a no-op success.
+   * @param id - the persisted session to delete.
+   * @param signal - optional cancellation for backend delete work.
+   */
+  delete(id: SessionId, signal?: AbortSignal): Promise<void> {
+    const retired = Promise.resolve(this.retirements.get(id))
+    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
+    return waited.then(() => this.serialize(id, () => this.deleteCore(id, signal), signal))
+  }
+
+  private async deleteCore(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    this.preparations.invalidate(id)
+    await this.backend.delete(id, signal)
   }
 
   private async readFromCore(

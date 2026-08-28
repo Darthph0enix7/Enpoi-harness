@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto'
 import type { z } from 'zod'
 import type { ApiProxy, MuxFrame, HostFrame } from '../api/index.ts'
-import { sessionLogQuerySchema } from '../api/downloads.schema.ts'
+import { sessionLogQuerySchema, sessionMarkdownQuerySchema } from '../api/downloads.schema.ts'
 import type { RequestPayload, ResponseValue, RpcMethodMap } from '../api/rpc-map.ts'
 import type { ClientRequest, RpcError, RpcRequest, RpcResponse, ServerRequest, ServerResponse } from '../api/rpc.ts'
 import { RpcId } from '../api/rpc.ts'
@@ -17,6 +17,7 @@ import type { Wire } from '../api/rpc.schema.ts'
 import { clientRequestSchema, clientResponseSchema } from '../api/rpc.schema.ts'
 import {
   sessionCancelRequestSchema,
+  sessionDeleteRequestSchema,
   sessionRevertRequestSchema,
   sessionRevertRestoreRequestSchema,
   sessionResolveFileConflictRequestSchema,
@@ -44,6 +45,7 @@ import {
   workspaceInsertBeforeRequestSchema,
   workspaceInsertSessionBeforeRequestSchema,
   workspaceListRequestSchema,
+  workspaceMoveSessionRequestSchema,
   workspaceRenameRequestSchema,
 } from '../api/workspace.schema.ts'
 import { skillListRequestSchema } from '../api/skills.schema.ts'
@@ -109,6 +111,7 @@ const UNARY_ROUTES: UnaryRoutes = {
   'session.revert': { schema: sessionRevertRequestSchema, invoke: (api, r) => api.sessions.revert(r) },
   'session.revertRestore': { schema: sessionRevertRestoreRequestSchema, invoke: (api, r) => api.sessions.revertRestore(r) },
   'session.resolveFileConflict': { schema: sessionResolveFileConflictRequestSchema, invoke: (api, r) => api.sessions.resolveFileConflict(r) },
+  'session.delete': { schema: sessionDeleteRequestSchema, invoke: (api, r) => api.sessions.delete(r) },
   'subagent.list': { schema: subagentListRequestSchema, invoke: (api, r, signal) => api.subagents.list(r, signal) },
   'subagent.history': { schema: subagentHistoryRequestSchema, invoke: (api, r, signal) => api.subagents.history(r, signal) },
   'subagent.prompt': { schema: subagentPromptRequestSchema, invoke: (api, r, signal) => api.subagents.prompt(r, signal) },
@@ -125,6 +128,7 @@ const UNARY_ROUTES: UnaryRoutes = {
   'workspace.insertBefore': { schema: workspaceInsertBeforeRequestSchema, invoke: (api, r) => api.workspace.insertBefore(r) },
   'workspace.insertSessionBefore': { schema: workspaceInsertSessionBeforeRequestSchema, invoke: (api, r) => api.workspace.insertSessionBefore(r) },
   'workspace.archiveSession': { schema: workspaceArchiveSessionRequestSchema, invoke: (api, r) => api.workspace.archiveSession(r) },
+  'workspace.moveSession': { schema: workspaceMoveSessionRequestSchema, invoke: (api, r) => api.workspace.moveSession(r) },
   'skill.list': { schema: skillListRequestSchema, invoke: (api, r) => api.skills.list(r) },
   'agentPreset.list': { schema: agentPresetListRequestSchema, invoke: (api, r) => api.agentPresets.list(r) },
   'agentPreset.select': { schema: agentPresetSelectRequestSchema, invoke: (api, r) => api.agentPresets.select(r) },
@@ -276,6 +280,16 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
           return new Response('missing or invalid sessionId query parameter', { status: 400 })
         }
         const response = await api.downloads.sessionLog(parsed.data, req.signal)
+        if (req.method === 'GET') return response
+        await response.body?.cancel()
+        return new Response(null, { status: response.status, headers: response.headers })
+      }
+      if (path === '/api/session.exportMarkdown' && (req.method === 'GET' || req.method === 'HEAD')) {
+        const parsed = sessionMarkdownQuerySchema.safeParse(Object.fromEntries(url.searchParams))
+        if (!parsed.success) {
+          return new Response('missing or invalid sessionId query parameter', { status: 400 })
+        }
+        const response = await api.downloads.sessionMarkdown(parsed.data, req.signal)
         if (req.method === 'GET') return response
         await response.body?.cancel()
         return new Response(null, { status: response.status, headers: response.headers })

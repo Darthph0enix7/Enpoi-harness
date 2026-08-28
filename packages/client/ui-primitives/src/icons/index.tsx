@@ -882,3 +882,11 @@ export const IconArchiveOutline20 = ({ size = 20, className }: IconProps) => (
     <path d="M12.7962 12.5661V11.0832H7.20548V12.5661L12.7962 12.5661Z" fill="currentColor" />
   </svg>
 )
+
+/** ic_ds_pin_outline_16: a push-pin in the app's outline style (1.5px stroke, currentColor). */
+export const IconPinOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M9.5 2.5 13.5 6.5 11.75 7.25 9.5 9.5 8.5 13.5 2.5 7.5 6.5 6.5 8.75 4.25Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <path d="M2.5 13.5 5.5 10.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+  </svg>
+)

@@ -260,6 +260,25 @@ export class SqliteStore implements PersistenceBackend<number> {
     }))
   }
 
+  /**
+   * Permanently delete one session: the sessions row cascades to its event
+   * rows (schema `ON DELETE CASCADE`). An absent session is a no-op success.
+   * @param id - persisted session id to delete.
+   * @param signal - optional cancellation before the delete.
+   */
+  async delete(id: SessionId, signal?: AbortSignal): Promise<void> {
+    await this.observe(signal)
+    signal?.throwIfAborted()
+    this.db.exec(sql('begin-immediate'))
+    try {
+      this.db.prepare(sql('delete-session')).run(id)
+      this.db.exec(sql('commit'))
+    } catch (error) {
+      this.db.exec(sql('rollback'))
+      throw error
+    }
+  }
+
   async close(): Promise<void> {
     if (this.ready === undefined) {
       if (this.pathReady !== undefined) await Promise.allSettled([this.pathReady])

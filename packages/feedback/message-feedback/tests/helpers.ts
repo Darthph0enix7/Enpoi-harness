@@ -166,6 +166,11 @@ class TestPersistence extends SessionPersistence {
     }))
   }
 
+  delete(_id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    return Promise.resolve()
+  }
+
   persist(session: Session): void {
     this.durable.set(session.id, { meta: session.header, events: session.events })
   }

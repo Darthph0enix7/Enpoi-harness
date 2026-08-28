@@ -121,6 +121,13 @@ export interface ISessions {
     resolution: 'keep' | 'restore' | 'recreate' | 'trash'
   }): Promise<void>
   /**
+   * Permanently delete a session (log, revert history, file history; memory
+   * summaries kept). Destructive — the UI confirms before calling.
+   * @param sessionId - session to delete.
+   * @throws when the host rejects the delete.
+   */
+  delete(sessionId: SessionId): Promise<void>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

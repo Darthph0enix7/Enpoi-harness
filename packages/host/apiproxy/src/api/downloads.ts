@@ -22,4 +22,17 @@ export interface DownloadsApi {
     request: { sessionId: SessionId; includeDescendants?: boolean },
     signal: AbortSignal,
   ): Promise<Response>
+
+  /**
+   * Stream one session's conversation as a Markdown document (title, user and
+   * assistant turns, tool calls as code blocks) as an attachment response.
+   * The carrier's GET route answers this directly; the browser never calls it.
+   * @param request - the session id to export.
+   * @param signal - cancellation for the underlying reads.
+   * @returns the Markdown attachment response; a missing session answers 404.
+   */
+  sessionMarkdown(
+    request: { sessionId: SessionId },
+    signal: AbortSignal,
+  ): Promise<Response>
 }

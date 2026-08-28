@@ -232,6 +232,17 @@ export class WorkspaceManager {
   }
 
   /**
+   * Display-only move: claim a session for display under another workspace.
+   * @param sessionId - session to display under another workspace.
+   * @param targetWorkspaceId - workspace that displays the session.
+   * @returns the wire result.
+   */
+  async moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<RpcResult<{ accepted: true }>> {
+    const { result } = await this.api.workspace.moveSession({ sessionId, targetWorkspaceId })
+    return result
+  }
+
+  /**
    * Host-frame entry. Non-workspace frames are ignored so the runtime can
    * fan one host stream out to both object managers.
    * @param envelope - host stream envelope.

@@ -64,6 +64,7 @@ function scriptedApi(overrides: {
       revert: r => ok(r, { accepted: true as const, revertedText: '', revertedCount: 0 }),
       revertRestore: r => ok(r, { accepted: true as const }),
       resolveFileConflict: r => ok(r, { accepted: true as const }),
+      delete: r => ok(r, { deleted: true as const }),
       ...overrides.sessions,
     },
     subagents: {
@@ -91,6 +92,7 @@ function scriptedApi(overrides: {
       insertBefore: r => ok(r, { workspaceIds: [r.payload.workspaceId] }),
       insertSessionBefore: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' } }),
       archiveSession: r => ok(r, { archivedSessionIds: [r.payload.sessionId] }),
+      moveSession: r => ok(r, { accepted: true as const }),
     },
     skills: { list: r => ok(r, { skills: [] }), ...overrides.skills },
     agentPresets: {
@@ -136,7 +138,10 @@ function scriptedApi(overrides: {
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),
-    downloads: { sessionLog: async () => new Response('stub', { status: 404 }) },
+    downloads: {
+      sessionLog: async () => new Response('stub', { status: 404 }),
+      sessionMarkdown: async () => new Response('stub', { status: 404 }),
+    },
   }
 }
 

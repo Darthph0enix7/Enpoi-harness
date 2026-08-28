@@ -37,7 +37,7 @@ export interface RpcErrorDetailsMap {
   'session-conflict': { sessionId: SessionId; requestedCwd: string; existingCwd?: string }
   'invalid-time-zone': { value: string }
   'workspace-attach-failed': { sessionId: SessionId; workspaceId: string }
-  'workspace-not-found': { workspaceId: string }
+  'workspace-not-found': { workspaceId: string } | { targetWorkspaceId: string }
   'workspace-invalid-path': { path: string }
   'workspace-name-conflict': { name: string }
   'workspace-move-invalid': { workspaceId: string; sessionId: SessionId; beforeSessionId?: SessionId }

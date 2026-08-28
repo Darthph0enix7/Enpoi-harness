@@ -158,6 +158,8 @@ export class FakeApiClient implements IApiClient {
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
     revert: (payload: unknown) => this.record('session.revert', payload, Promise.resolve(ok({ accepted: true as const, revertedText: '', revertedCount: 0 }))),
     revertRestore: (payload: unknown) => this.record('session.revertRestore', payload, Promise.resolve(ok({ accepted: true as const }))),
+    delete: (payload: unknown) =>
+      this.record('session.delete', payload, Promise.resolve(ok({ deleted: true as const }))),
     resolveFileConflict: (payload: unknown) => this.record('session.resolveFileConflict', payload, Promise.resolve(ok({ accepted: true as const }))),
   }
 
@@ -223,6 +225,8 @@ export class FakeApiClient implements IApiClient {
       this.record('workspace.insertSessionBefore', payload, this.onWorkspaceInsertSessionBefore(payload)),
     archiveSession: (payload: unknown) =>
       this.record('workspace.archiveSession', payload, this.onWorkspaceArchiveSession(payload)),
+    moveSession: (payload: unknown) =>
+      this.record('workspace.moveSession', payload, Promise.resolve(ok({ accepted: true as const }))),
   }
 
   // Payloads stay `unknown` (lint-lane note above); response rows are the real

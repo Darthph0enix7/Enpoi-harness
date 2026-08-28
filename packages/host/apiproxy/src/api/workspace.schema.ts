@@ -98,3 +98,14 @@ export const workspaceArchiveSessionRequestSchema = z.object({
 export const workspaceArchiveSessionValueSchema = z.object({
   archivedSessionIds: z.array(sessionIdSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.archiveSession'>>>
+
+/** workspace.moveSession request payload (display-only move to another workspace). */
+export const workspaceMoveSessionRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  targetWorkspaceId: workspaceIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.moveSession'>>>
+
+/** workspace.moveSession response value. */
+export const workspaceMoveSessionValueSchema = z.object({
+  accepted: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.moveSession'>>>

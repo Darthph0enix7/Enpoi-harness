@@ -98,6 +98,12 @@ export function apply(ctx: ClientContext): void {
       await ctx.workspaces.insertBefore(workspaceId, beforeWorkspaceId)
     },
     archiveSession: async (sessionId) => { await ctx.workspaces.archiveSession(sessionId) },
+    moveSession: async (sessionId, targetWorkspaceId) => {
+      await ctx.workspaces.moveSession(sessionId, targetWorkspaceId)
+    },
+    deleteSession: async (sessionId) => {
+      await ctx.sessions.delete(sessionId)
+    },
     downloadSession: (sessionId) => {
       void (ctx.get('sessionLogDownload') as { download?: (id: SessionId) => Promise<void> } | undefined)?.download?.(sessionId)
     },

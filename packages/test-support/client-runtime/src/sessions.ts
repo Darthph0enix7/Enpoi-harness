@@ -185,7 +185,7 @@ export class TestSessions implements ISessions {
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'search' | 'fork' | 'revert' | 'revertRestore' | 'resolveFileConflict'
+      | 'clear' | 'search' | 'fork' | 'revert' | 'revertRestore' | 'resolveFileConflict' | 'delete'
     args: unknown[]
   }[] = []
 
@@ -509,6 +509,17 @@ export class TestSessions implements ISessions {
   }): Promise<void> {
     this.calls.push({ method: 'resolveFileConflict', args: [opts] })
     return Promise.resolve()
+  }
+
+  /** Fixture stub: records the delete and removes the session row. */
+  async delete(sessionId: SessionId): Promise<void> {
+    this.calls.push({ method: 'delete', args: [sessionId] })
+    this.list.update((draft) => {
+      draft.byId = Object.fromEntries(
+        Object.entries(draft.byId).filter(([id]) => id !== sessionId),
+      )
+      draft.ids = draft.ids.filter((id: SessionId) => id !== sessionId)
+    })
   }
 
   /**

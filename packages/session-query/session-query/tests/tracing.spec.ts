@@ -59,6 +59,12 @@ class TracePersistence extends SessionPersistence {
     return Promise.resolve()
   }
 
+  delete(id: SessionIdType, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    TracePersistence.entries.delete(id)
+    return Promise.resolve()
+  }
+
   append(id: SessionIdType, events: readonly SessionEvent[]): Promise<void> {
     const entry = TracePersistence.entries.get(id)
     if (entry === undefined) return Promise.reject(new Error('missing test session'))

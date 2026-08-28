@@ -24,3 +24,12 @@ export const sessionLogQuerySchema = z
     sessionId: query.sessionId,
     ...(query.includeDescendants === 'true' ? { includeDescendants: true } : {}),
   })) satisfies z.ZodType<Parameters<DownloadsApi['sessionLog']>[0]>
+
+/**
+ * session.exportMarkdown query params → the sessionMarkdown request.
+ */
+export const sessionMarkdownQuerySchema = z
+  .object({
+    sessionId: sessionIdSchema,
+  })
+  .transform(query => ({ sessionId: query.sessionId })) satisfies z.ZodType<Parameters<DownloadsApi['sessionMarkdown']>[0]>

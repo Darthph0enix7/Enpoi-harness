@@ -46,12 +46,21 @@ const workspacePendingMutation = z.discriminatedUnion('operation', [
  * the registry-global archive set layered over workspace accounting: an
  * archived session keeps its `sessionIds` slot (unarchiving must restore the
  * position), so the set never participates in the one-owner accounting
- * invariant. Defaulted so records written before the field parse unchanged.
+ * invariant. `movedSessions` is the display-only move overlay: a session
+ * whose cwd belongs to one workspace can be displayed under another
+ * workspace without touching the cwd accounting — the overlay entry claims
+ * the session for display, and the wire projection excludes overlay-claimed
+ * ids from their cwd workspace's list. Defaulted so records written before
+ * the field parse unchanged.
  */
 export const workspaceDomainState = z.object({
   initialized: z.boolean(),
   workspaceIds: z.array(workspaceId),
   archivedSessionIds: z.array(z.string().transform(SessionId)).default([]),
+  movedSessions: z.array(z.object({
+    sessionId: z.string().transform(SessionId),
+    workspaceId,
+  })).default([]),
   pendingMutation: workspacePendingMutation.optional(),
 })
 
@@ -69,7 +78,7 @@ export const workspaceDomainSpec = defineDomain({
   version: 2,
   global: {
     schema: workspaceDomainState,
-    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [] },
+    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [], movedSessions: [] },
   },
   tables: { workspaces: domainTable<WorkspaceId, WorkspaceRecord>(workspaceRecord) },
 })

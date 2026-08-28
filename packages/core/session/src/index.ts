@@ -1060,6 +1060,22 @@ export class SessionStore extends Service {
   }
 
   /**
+   * Dispose a live session by id: detach it from the store and emit its
+   * paired disposal edge. Safe to call from host RPCs (e.g. permanent
+   * session delete); the single-shot `entered` guard makes a later detach by
+   * the session's own lifecycle owner a no-op. Does NOT stop a running
+   * agent loop — callers must cancel and await quiescence first.
+   * @param id - the live session to dispose.
+   * @returns whether a live session was detached.
+   */
+  dispose(id: SessionId): boolean {
+    const entry = this.store.get(id)
+    if (entry === undefined) return false
+    entry.detach()
+    return true
+  }
+
+  /**
    * All live sessions, in creation order.
    * @returns a fresh array; mutating it does not affect the store.
    */

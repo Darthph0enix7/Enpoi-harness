@@ -442,4 +442,15 @@ export interface SessionsApi {
     resolution: 'keep' | 'restore' | 'recreate' | 'trash'
   }>): Promise<RpcResponse<{ accepted: true }>>
 
+  /**
+   * Permanently deletes a session: cancels and disposes a live session,
+   * removes its workspace accounting (archive set, display-move overlay,
+   * and every workspace slot), deletes the durable log, and best-effort
+   * removes per-session side files (revert ledger, file-history records;
+   * the shared blob store is untouched). An absent session is a no-op
+   * success. Destructive — the client must confirm before calling.
+   */
+  delete(request: RpcRequest<{ sessionId: SessionId }>):
+  Promise<RpcResponse<{ deleted: true }>>
+
 }

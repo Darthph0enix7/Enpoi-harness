@@ -238,6 +238,16 @@ export abstract class SessionPersistence extends Service {
    * @returns one header and opaque revision per materialized session without loading full logs.
    */
   abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
+
+  /**
+   * Permanently delete a session's durable artifacts. An absent session is a
+   * no-op success (blank sessions may be deleted before ever materializing —
+   * backends create lazily). Implementations must not reject on a missing
+   * artifact; storage faults propagate.
+   * @param id - the persisted session to delete.
+   * @param signal - optional cancellation for backend delete work.
+   */
+  abstract delete(id: SessionId, signal?: AbortSignal): Promise<void>
 }
 
 export default SessionPersistence

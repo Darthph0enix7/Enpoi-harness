@@ -2266,6 +2266,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   const api: ApiProxy = {
     sessions: {
       list: request => ok(request, { items: [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) }),
+      delete: request => ok(request, { deleted: true as const }),
       search: (request, signal) => {
         if (signal.aborted) {
           return err(request, {
@@ -2665,6 +2666,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         items: workspaces.map(w => ({ ...w })),
         archivedSessionIds: [...archivedSessionIds],
       }),
+      moveSession: request => ok(request, { accepted: true as const }),
       create: (request) => {
         const { path } = request.payload
         const existing = workspaces.find(w => w.path === path)
@@ -3092,6 +3094,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     // stub is never reached through the fixture's dispatch.
     downloads: {
       sessionLog: () => Promise.resolve(new Response('fixture mode does not serve session export', { status: 404 })),
+      sessionMarkdown: () => Promise.resolve(new Response('fixture mode does not serve session export', { status: 404 })),
     },
   }
 
@@ -3196,6 +3199,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'session.revert': return this.api.sessions.revert(request)
       case 'session.revertRestore': return this.api.sessions.revertRestore(request)
       case 'session.resolveFileConflict': return this.api.sessions.resolveFileConflict(request)
+      case 'session.delete': return this.api.sessions.delete(request)
       case 'subagent.list': return this.api.subagents.list(request)
       case 'subagent.history': return this.api.subagents.history(request)
       case 'subagent.prompt': return this.api.subagents.prompt(request, signal)
@@ -3212,6 +3216,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
+      case 'workspace.moveSession': return this.api.workspace.moveSession(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)
