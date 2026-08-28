@@ -216,7 +216,10 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
               )}
             </>
           ) : (
-            <div className={css.empty}>keeper idle — no brief yet</div>
+            <div className={css.empty}>
+              <span>keeper idle — no brief yet</span>
+              <span className={css.emptyHint}>Prose materializes on first Oracle or Council use (demand-driven)</span>
+            </div>
           )}
         </section>
       </div>

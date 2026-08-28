@@ -1,0 +1,203 @@
+/* Orchestration settings section — liquid-glass theme, minimal, responsive. */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 2px 16px;
+  max-width: 640px;
+}
+
+.intro {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  padding: 2px 2px 0;
+}
+
+.introIcon {
+  display: inline-flex;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+}
+
+.group {
+  background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.72));
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  backdrop-filter: blur(28px) saturate(145%);
+  overflow: hidden;
+}
+
+.groupHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.06));
+}
+
+.groupIcon {
+  display: inline-flex;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+}
+
+.groupTitle {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  flex: 1;
+}
+
+.resetBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.resetBtn:hover {
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 12px;
+  min-height: 40px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.04));
+}
+
+.rowLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rowName {
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+}
+
+.rowHint {
+  font-size: 10px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  opacity: 0.8;
+}
+
+/* Number input */
+.numWrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.numInput {
+  width: 84px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.1));
+  border-radius: 7px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.numInput:focus {
+  border-color: rgba(148, 163, 184, 0.5);
+}
+
+.numInput::-webkit-inner-spin-button {
+  opacity: 0.35;
+}
+
+.numFmt {
+  font-size: 10px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toggle (hideLimit) */
+.toggle {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.14));
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 120ms ease, border-color 120ms ease;
+  padding: 0;
+}
+
+.toggleOn {
+  background: rgba(94, 234, 212, 0.22);
+  border-color: rgba(94, 234, 212, 0.4);
+}
+
+.toggleKnob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-caption, #94a3b8);
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.toggleOn .toggleKnob {
+  transform: translateX(15px);
+  background: #5eead4;
+}
+
+/* Mobile: stack rows, full-width inputs */
+@media (max-width: 560px) {
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 9px 12px;
+  }
+
+  .numWrap {
+    justify-content: flex-end;
+  }
+
+  .numInput {
+    width: 110px;
+    height: 32px;
+    font-size: 13px;
+  }
+
+  .toggle {
+    align-self: flex-end;
+  }
+}

@@ -232,6 +232,15 @@
   font-size: 11px;
   color: #475569;
   padding: 6px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.emptyHint {
+  font-size: 10px;
+  color: #64748b;
+  opacity: 0.75;
 }
 
 /* Fleet groups & rows */

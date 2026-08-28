@@ -10,6 +10,7 @@ import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { WatchtowerView } from './WatchtowerView.tsx'
 import { FleetRoutingView, FleetRoutingIcon } from './FleetRoutingView.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
+import { OrchestrationSettings } from './OrchestrationSettings.tsx'
 
 /** Required services: the UI slot registry, the shared model directory, sessions, and locale. */
 export const inject = ['slots', 'modelDirectories', 'sessions', 'locale']
@@ -73,6 +74,14 @@ export function apply(ctx: Context): void {
       label: () => 'Watchtower',
     }, WatchtowerView)
   })
+
+  // 2b. Orchestration parameters settings section (doc 38)
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'orchestration',
+    order: 20,
+    label: () => 'Orchestration',
+  }, OrchestrationSettings))
 
   // 3. Fleet Routing rail tab (global persona model assignment)
   const betterSidebar = ctx.get('betterSidebar')
