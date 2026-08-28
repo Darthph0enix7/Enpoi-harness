@@ -311,6 +311,12 @@
   border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
+.badgeSavedBeside {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
 .badgeNoOp {
   background: rgba(148, 163, 184, 0.12);
   color: #94a3b8;

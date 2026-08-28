@@ -119,6 +119,8 @@ export const RevertTray = memo(function RevertTray({
         return <span className={`${css.statusBadge} ${css.badgeRestored}`}>{t('revert.statusRestored')}</span>
       case 'trashed':
         return <span className={`${css.statusBadge} ${css.badgeTrashed}`}>{t('revert.statusTrashed')}</span>
+      case 'saved_beside':
+        return <span className={`${css.statusBadge} ${css.badgeSavedBeside}`}>{t('revert.statusSavedBeside')}</span>
       case 'no_op':
         return <span className={`${css.statusBadge} ${css.badgeNoOp}`}>{t('revert.statusNoChange')}</span>
       case 'pending_conflict':
