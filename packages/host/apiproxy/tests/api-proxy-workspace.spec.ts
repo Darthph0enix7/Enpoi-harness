@@ -75,7 +75,7 @@ async function harness(
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.provide('storageDomain', storageDomain)
-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]), delete: () => Promise.resolve() } as never)
   await ctx.plugin(WorkspaceRegistry)
 
   const factory: AgentFactory = {
@@ -567,5 +567,51 @@ describe('Host Workspace increments', () => {
       error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
     })
     abort.abort()
+  })
+
+  it('streams move frames projected from the payload overlay (not the lagging getter)', async () => {
+    const { api, root } = await harness()
+    const a = expectOk(await api.workspace.create(request({ path: stageDir(root, 'move-a') }))).workspace
+    const b = expectOk(await api.workspace.create(request({ path: stageDir(root, 'move-b') }))).workspace
+    const sessionId = SessionId('session-move-frame')
+    expectOk(await api.sessions.create(request({ workspaceId: a.workspaceId, sessionId })))
+
+    const abort = new AbortController()
+    const stream: AsyncIterator<RpcRequest<HostFrame>> =
+      api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
+    const changed = nextHostFrame(stream)
+    expectOk(await api.workspace.moveSession(request({ sessionId, targetWorkspaceId: b.workspaceId })))
+    const frame = await changed
+    expect(frame.payload.type).toBe('host/workspace-changed')
+    if (frame.payload.type !== 'host/workspace-changed') throw new Error('unreachable')
+    // The frame must carry the NEW overlay: the session under B, gone from A.
+    // (The registry getter lags the inline domain/changed emission by one
+    // mutation; the frame projects from the parsed payload state.)
+    expect(frame.payload.workspace.sessionIds).toEqual([sessionId])
+    expect(frame.payload.workspace.workspaceId).toBe(b.workspaceId)
+
+    // The cwd workspace frame also reflects the move (session removed).
+    const cwdFrame = await nextHostFrame(stream)
+    expect(cwdFrame.payload.type).toBe('host/workspace-changed')
+    if (cwdFrame.payload.type !== 'host/workspace-changed') throw new Error('unreachable')
+    expect(cwdFrame.payload.workspace.workspaceId).toBe(a.workspaceId)
+    expect(cwdFrame.payload.workspace.sessionIds).toEqual([])
+    abort.abort()
+  })
+
+  it('purges the archive set after a permanent session delete', async () => {
+    const { api, root } = await harness()
+    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-home') }))).workspace
+    const sessionId = SessionId('session-delete-purge')
+    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
+    expectOk(await api.workspace.archiveSession(request({ sessionId })))
+    expect(expectOk(await api.workspace.list(request({}))).archivedSessionIds).toEqual([sessionId])
+
+    expectOk(await api.sessions.delete(request({ sessionId })))
+    const listed = expectOk(await api.workspace.list(request({})))
+    expect(listed.archivedSessionIds).toEqual([])
+    expect(listed.items[0]?.sessionIds).toEqual([])
+    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .not.toContain(sessionId)
   })
 })

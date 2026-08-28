@@ -415,9 +415,18 @@ export const sessionResolveFileConflictValueSchema = z.object({
   accepted: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.resolveFileConflict'>>>
 
-/** session.delete request payload. */
+/**
+ * session.delete request payload. The session id is interpolated into
+ * filesystem paths (revert ledger, file-history, JSONL artifact removal), so
+ * the wire shape is constrained to the `session-` prefix plus alphanumerics
+ * and hyphens — the store mints `session-<n>` and callers supply UUIDs —
+ * which rejects path separators, traversal segments, and control characters
+ * before any rm.
+ */
 export const sessionDeleteRequestSchema = z.object({
-  sessionId: sessionIdSchema,
+  sessionId: z
+    .string()
+    .regex(/^session-[A-Za-z0-9-]+$/, 'invalid session id shape') as unknown as z.ZodType<SessionId>,
 }) satisfies z.ZodType<Wire<RequestPayload<'session.delete'>>>
 
 /** session.delete response value. */

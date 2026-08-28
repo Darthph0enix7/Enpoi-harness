@@ -10,7 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
 import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
 import { randomBytes } from 'node:crypto'
@@ -459,7 +459,14 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     for (const project of await this.listProjectDirs(signal)) {
       signal?.throwIfAborted()
+      // Containment: the id is a wire value interpolated into a filesystem
+      // path; refuse anything that would resolve outside the project scope
+      // (traversal segments, absolute ids). The delete RPC schema already
+      // constrains the shape — this is defense in depth for direct callers.
       const dir = join(project, id)
+      if (!dir.startsWith(project + sep)) {
+        throw new Error(`refusing to delete session artifact outside project scope: "${id}"`)
+      }
       try {
         await rm(dir, { recursive: true, force: true })
       } catch (error: unknown) {

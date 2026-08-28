@@ -265,6 +265,22 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Remove one session from the registry-global archive set (used after a
+   * permanent session delete so deleted ids do not ride the archive set
+   * forever). A session without an archive entry resolves without writing.
+   * @param sessionId - The session to un-archive.
+   * @returns resolution after durability.
+   */
+  unarchiveSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      const state = this.requireState()
+      const without = state.archivedSessionIds.filter(id => id !== sessionId)
+      if (without.length === state.archivedSessionIds.length) return
+      await this.setState({ ...state, archivedSessionIds: without })
+    })
+  }
+
+  /**
    * Display-only move: claim a session for display under another workspace
    * without touching its cwd accounting. One atomic setState (the same crash
    * story as archive — no two-write window). The session's cwd workspace

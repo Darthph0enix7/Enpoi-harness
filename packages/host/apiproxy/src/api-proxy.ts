@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { mkdir, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -2920,6 +2920,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // disposal below still stops the parent's own loop.
         }
         // 2. If live: cancel the running turn, await quiescence, then dispose.
+        // Dispose is gated on the SESSION store (not the agent registry) so a
+        // sessions-entry-without-agent divergence cannot leak a live zombie
+        // whose log is already deleted; SessionStore.dispose self-guards.
         const agent = ctx.agents.get(sessionId)
         if (agent !== undefined) {
           agent.cancel({ kind: 'user' }, { keepInbox: false })
@@ -2928,14 +2931,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           } catch {
             // quiescence wait is best-effort; disposal below is guarded
           }
+        }
+        if (ctx.sessions.get(sessionId) !== undefined) {
           ctx.sessions.dispose(sessionId)
         }
         // 3. Registry cleanup: archive set, display-move overlay, and every
-        // workspace's accounting slot.
+        // workspace's accounting slot. Only the registry's unknown-session
+        // rejection is swallowed — storage/durability faults propagate.
         try {
           await ctx.workspaceRegistry.archiveSession(sessionId)
-        } catch {
-          // absent session is fine — the registry treats it as unknown
+        } catch (error: unknown) {
+          if (!(error instanceof WorkspaceUnknownSessionError)) throw error
         }
         try {
           await ctx.workspaceRegistry.unmoveSession(sessionId)
@@ -2954,13 +2960,31 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (persistence !== undefined) {
           await persistence.delete(sessionId)
         }
+        // 4b. Purge the id from the durable archive set: nothing else ever
+        // prunes deleted ids, and they would ride every archived-sessions
+        // frame forever. The unhide frame is harmless — the id exists in no
+        // list anymore.
+        try {
+          await ctx.workspaceRegistry.unarchiveSession(sessionId)
+        } catch {
+          // best-effort; the archive set is display-only
+        }
         // 5. Side files, best-effort (never fail the RPC): revert ledger and
         // file-history session records. The shared blob store is NOT touched.
+        // The delete payload schema constrains the id shape; containment is
+        // re-checked here as defense in depth before any rm.
         try {
           const home = process.env.DSH_HOME ?? homedir()
           const dshRoot = home.endsWith('.dsh') ? home : join(home, '.dsh')
-          await rm(join(dshRoot, 'revert-ledger', `${sessionId}.jsonl`), { force: true })
-          await rm(join(dshRoot, 'file-history', 'sessions', sessionId), { recursive: true, force: true })
+          const ledgerPath = join(dshRoot, 'revert-ledger', `${sessionId}.jsonl`)
+          const historyPath = join(dshRoot, 'file-history', 'sessions', sessionId)
+          for (const path of [ledgerPath, historyPath]) {
+            if (!path.startsWith(dshRoot + sep)) {
+              throw new Error(`refusing to delete side file outside dsh root: "${sessionId}"`)
+            }
+          }
+          await rm(ledgerPath, { force: true })
+          await rm(historyPath, { recursive: true, force: true })
         } catch (error: unknown) {
           ctx.logger.warn(`session delete side-file cleanup failed for "${sessionId}": ${String(error)}`)
         }
@@ -3964,7 +3988,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                   throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
                 }
                 committedWorkspaceIds.add(workspaceId)
-                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions) }))
+                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace, state.movedSessions) }))
               }
               committedWorkspaceOrder = [...state.workspaceIds]
               if (orderChanged) {
@@ -4006,9 +4030,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 for (const workspaceId of affected) {
                   const workspace = ctx.workspaceRegistry.get(workspaceId)
                   if (workspace !== undefined) {
+                    // Payload-first: the registry's live getter lags the
+                    // inline domain/changed emission by one mutation (setState
+                    // awaits global.set before swapping this.state), so the
+                    // frame must project from the parsed payload state.
                     queue.push(frame({
                       type: 'host/workspace-changed',
-                      workspace: workspaceView(workspace, ctx.workspaceRegistry.movedSessions),
+                      workspace: workspaceView(workspace, state.movedSessions),
                     }))
                   }
                 }
@@ -4117,9 +4145,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         let state: SessionReadState
         try {
           state = await readSessionState(request.sessionId)
-        } catch {
+        } catch (error: unknown) {
           signal.throwIfAborted()
-          return new Response('session not found', { status: 404 })
+          if (error instanceof SessionNotFound) {
+            return new Response('session not found', { status: 404 })
+          }
+          // Storage faults are server faults, not missing sessions.
+          return new Response(`session export failed: ${String(error)}`, { status: 500 })
         }
         signal.throwIfAborted()
         const markdown = renderSessionMarkdown(state.events)
