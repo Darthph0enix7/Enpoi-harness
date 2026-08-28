@@ -337,13 +337,17 @@ export interface SessionEventMap {
   /**
    * The active revert boundary for the session: `fromSeq` is the seq of the
    * user message the conversation was reverted from, or `null` when no revert
-   * is active. Log-only UI/state event — never surface-eligible, never reaches
+   * is active. `cause` identifies the trigger ('revert' | 'restore' | 'commit').
+   * Log-only UI/state event — never surface-eligible, never reaches
    * the model. Appended on every revert, restore, and revert-commit so the
    * state is durable and replayable across restarts. The client folds the
    * latest value to truncate the transcript and show the reverted tray; the
    * host uses it to shadow the reverted span when the next prompt commits.
    */
-  'revert/state': { fromSeq: number | null }
+  'revert/state': {
+    fromSeq: number | null
+    cause?: 'revert' | 'restore' | 'commit'
+  }
   /**
    * Durable intent record for a file-revert batch, appended by the
    * `enpoi-file-revert` plugin BEFORE any disk mutation. Log-only, ignorable,
@@ -385,6 +389,13 @@ export interface SessionEventMap {
     displayPath: string
     state: 'conflict' | 'missing' | 'unavailable'
     reason: string
+    mode?: 'revert' | 'restore'
+    boundarySeq?: number | null
+    spanStartSeq?: number
+    targetBlobSha?: string | null
+    targetAbsent?: boolean
+    spanPreExisted?: boolean
+    sessionCreated?: boolean
     preSha: string | null
     postSha: string | null
     currentSha: string | null

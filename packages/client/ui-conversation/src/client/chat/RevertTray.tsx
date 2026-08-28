@@ -197,7 +197,7 @@ export const RevertTray = memo(function RevertTray({
                             disabled={isBusy}
                             onClick={() => { void handleResolve(c.conflictId, 'restore') }}
                           >
-                            {t('revert.btnRestore')}
+                            {c.mode === 'restore' ? t('revert.btnForceRestore') : t('revert.btnRestore')}
                           </button>
                           <button
                             type="button"

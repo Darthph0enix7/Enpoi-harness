@@ -2741,7 +2741,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // Count reverted user queries (user messages after the boundary).
         const revertedCount = nodes.slice(startIdx + 1)
           .filter(seq => session.events[seq]?.type === 'user/message').length
-        session.append('revert/state', { fromSeq: atSeq }, { ignorable: true })
+        session.append('revert/state', { fromSeq: atSeq, cause: 'revert' }, { ignorable: true })
         appendRevertLedger(sessionId, {
           action: 'revert', atSeq, revertedCount,
           revertedText: revertedText.slice(0, 500),
@@ -2785,7 +2785,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }
         }
-        session.append('revert/state', { fromSeq: restoreSeq ?? null }, { ignorable: true })
+        session.append('revert/state', { fromSeq: restoreSeq ?? null, cause: 'restore' }, { ignorable: true })
         appendRevertLedger(sessionId, {
           action: 'restore',
           ...restoreSeq === undefined ? {} : { restoreSeq },

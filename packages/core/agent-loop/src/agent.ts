@@ -314,7 +314,7 @@ export class ReactLoopAgent implements Agent {
             // Revert-commit: clear the boundary atomically with the shadowing
             // append, so a dropped message can never leave a stale boundary.
             if (pending?.clearRevert === true) {
-              this.session.append('revert/state', { fromSeq: null }, { ignorable: true })
+              this.session.append('revert/state', { fromSeq: null, cause: 'commit' }, { ignorable: true })
             }
           }
           // max-tokens is sticky: once any step hits the ceiling, later steps

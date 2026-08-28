@@ -518,6 +518,13 @@ export interface RevertFileConflict {
   readonly displayPath: string
   readonly state: string
   readonly reason?: string
+  readonly mode?: 'revert' | 'restore'
+  readonly boundarySeq?: number | null
+  readonly spanStartSeq?: number
+  readonly targetBlobSha?: string | null
+  readonly targetAbsent?: boolean
+  readonly spanPreExisted?: boolean
+  readonly sessionCreated?: boolean
   readonly preSha?: string | null
   readonly postSha?: string | null
   readonly currentSha?: string | null
