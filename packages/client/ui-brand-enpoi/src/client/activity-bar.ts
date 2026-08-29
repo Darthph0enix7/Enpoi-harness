@@ -1,4 +1,4 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import css from './ActivityBar.module.css'
 
 /** CSS-module index access is `string | undefined` under noUncheckedIndexedAccess; module keys are static. */

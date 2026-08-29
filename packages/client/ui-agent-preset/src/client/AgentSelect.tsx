@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -30,13 +30,16 @@ export interface AgentSelectInjected {
   select: (id: string) => Promise<void>
 }
 
+/** The slot-declared inject face (store typed structurally). */
+export type AgentSelectSlotInjected = import('@deepseek-ai/dsh-client-ui-conversation/client').AgentPresetSeatInjected
+
 /**
  * Render the input-card agent picker.
  * @param props - composed slot props.
  * @returns the picker, or null when the deployment composes no presets.
  */
 export function AgentSelect({ load, select, useAgentPresetSeat, t }: AgentSelectProps) {
-  const state = useAgentPresetSeat(snapshot => snapshot)
+  const state = useAgentPresetSeat(snapshot => snapshot) as AgentPresetSeatState
   const [open, setOpen] = useState(false)
 
   useEffect(() => {

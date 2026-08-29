@@ -21,6 +21,17 @@ import SubagentRuntime, {
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+
+class TestSessionQuery extends SessionQueryEngine {
+  override searchSessions(): Promise<never> {
+    return Promise.reject(new Error('session search is not configured in this test'))
+  }
+
+  override searchEvents(): Promise<never> {
+    return Promise.reject(new Error('event search is not configured in this test'))
+  }
+}
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
@@ -45,6 +56,7 @@ async function setup(script: Script) {
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
   await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(TestSessionQuery)
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   ctx.llm.registerAdapter(['mock'], adapter)

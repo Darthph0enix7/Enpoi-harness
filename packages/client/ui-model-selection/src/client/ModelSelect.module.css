@@ -327,6 +327,53 @@
   letter-spacing: 0.04em;
   cursor: pointer;
   user-select: none;
+}
+
+.option:hover:not(:disabled),
+.option:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* Selection marker is the trailing check, not a fill — matches the Menu
+ * primitive's selected treatment. */
+.selected {
+  background: transparent;
+}
+
+.option:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+
+.optionCopy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.modelName {
+  overflow: hidden;
+  color: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check {
+  display: grid;
+  place-items: center;
+  flex: 0 0 18px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Two-level root cells (figma 496:26454 .Menu_cell): 40px row, 10px side
+   padding, 8px gap, 10px radius; 14/22 label in primary, value in the
+   #81858C tertiary tone, right chevron drilling into the sub-list. */
+.cell {
+
   box-sizing: border-box;
   transition: background 100ms ease;
 }

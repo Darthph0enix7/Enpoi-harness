@@ -12,7 +12,7 @@
       "path": "../../runtime-diagnostics/invariants"
     },
     {
-      "path": "../runtime"
+      "path": "../store"
     },
     {
       "path": "../ui-conversation"

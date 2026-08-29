@@ -4,7 +4,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
 import { TheMarkTaskCard } from '../src/client/TheMarkTaskCard.tsx'
 import { TheMarkTaskCardAdapter } from '../src/client/TheMarkTaskCardAdapter.tsx'
-import type { ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 
 describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
   afterEach(() => {
@@ -155,15 +155,11 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
           isError: false,
           call: { name: 'grep', argsRaw: '{"pattern":"class"}' },
           content: [],
-          callView: null,
-          resultView: null,
           subCalls: [],
           seq: 10,
         },
       ],
       content: [{ type: 'text', text: 'Started subagent session-child-999\nRepository mapped successfully.' }],
-      callView: null,
-      resultView: null,
       seq: 12,
     }
 

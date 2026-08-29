@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { SlotTestRuntime, usePinnedBrowserLanguages, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-conversation/client'
 
 // The service reads its initial locale from the browser; these specs assert
@@ -21,16 +21,17 @@ const CHILD = 'child-1' as SessionId
 
 async function bench() {
   const runtime = await SlotTestRuntime.create()
-  runtime.provide('connection', { api: { settings: {} }, isLoopback: false })
+  runtime.ctx.provide('connection', { api: { settings: {} }, isLoopback: false })
   // The plugin injects both; these specs exercise no settings path.
-  runtime.provide('remote', { $on: () => () => {} })
-  runtime.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
+  runtime.ctx.provide('remote', { $on: () => () => {} })
+  runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
+  runtime.ctx.provide('uiWorkspace', { connectWorkspace: vi.fn(async () => ROOT) } as never)
   await runtime.sessions.add({ id: ROOT, summary: { title: 'R', displayTitle: 'R' } }, { current: false })
   await runtime.sessions.add(
     { id: CHILD, summary: { title: 'C', displayTitle: 'C', parentId: ROOT } }, { current: false })
-  runtime.provide('layout', { openDetails: vi.fn(), closeDetails: vi.fn() })
+  runtime.ctx.provide('layout', { openDetails: vi.fn(), closeDetails: vi.fn() })
   const locale = new LocaleRuntime(runtime.ctx)
-  runtime.provide('locale', locale)
+  runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)
 
   // Declared by ui-layout's root entry in production; the test root declares
@@ -59,16 +60,11 @@ describe('apply wiring', () => {
 
   it('registers the chat view and its keyed business-node seat', async () => {
     const b = await bench()
+    // Chat view now lives in ui-chat; conversation alone leaves the ring empty.
     const entries = b.slots.entries('conversation.view')
-    expect(entries.map(e => e.options.id)).toEqual(['chat'])
-    // Label is a locale thunk resolving through the zh dictionary.
-    expect(resolveSlotLabel(entries[0]?.options.label)).toBe('对话')
-    expect(entries[0]?.options.order).toBe(0)
-    // Declaring is claiming: the chat entry's registration put the hole on
-    // the ledger with the contract's kind/scope.
+    expect(entries).toHaveLength(0)
     const nodeSlot = b.slots.spec('conversation.chat.node')
-    expect(nodeSlot).toMatchObject({ kind: 'keyed', scope: 'session' })
-    expect(nodeSlot?.inject?.hooks?.turnData).toBeTypeOf('function')
+    expect(nodeSlot).toBeUndefined()
     await b.runtime.dispose()
   })
 
@@ -80,14 +76,13 @@ describe('apply wiring', () => {
     const chatView = renderEntryOf(b.slots, 'conversation.view')
     const details = renderEntryOf(b.slots, 'details')
     expect(conversation?.inject).toBeTypeOf('function')
-    expect(chatView?.inject).toBeTypeOf('function')
-    expect(details?.inject).toBeTypeOf('function')
+    // Chat and Details now live in ui-chat; conversation alone leaves them empty.
+    expect(chatView).toBeUndefined()
+    expect(details).toBeUndefined()
     // The shared handle: one apply-built store value on ALL session entries
     // (the session-maybe 'conversation' shell carries no store by design).
     expect(conversationSession?.store).toBeDefined()
     expect(conversationHeader?.store).toBe(conversationSession?.store)
-    expect(details?.store).toBe(conversationSession?.store)
-    expect(chatView?.store).toBe(conversationSession?.store)
     // The hero holes ride the conversation entry's children declaration (the
     // empty-state occupant is gone). Both are root-scoped: the new-session
     // screen precedes the session either would belong to.
@@ -107,9 +102,10 @@ describe('apply wiring', () => {
     // one search row registers under both grep and glob; the web rows register
     // one component under both web tool names.
     expect(b.slots.entries('conversation.chat.node').map(entry => entry.options.key)).not.toContain('tool-call')
-    // Stats stick with the composer (not inside ChatView); the revert tray rides above the input in input.dock.
-    expect(b.slots.entries('conversation.composer.dock').map(e => e.options.id)).toEqual(['stats'])
-    expect(b.slots.entries('conversation.input.dock').map(e => e.options.id)).toContain('revert-tray')
+    // Composer stats and revert tray now live in ui-chat; conversation alone
+    // leaves its docks to Todo and Queue.
+    expect(b.slots.entries('conversation.composer.dock')).toHaveLength(0)
+    expect(b.slots.entries('conversation.input.dock').map(e => e.options.id).sort()).toEqual(['queue', 'todo'])
     await b.runtime.dispose()
   })
 

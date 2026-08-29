@@ -2,7 +2,7 @@
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useSyncExternalStore } from 'react'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { SessionLogDownloadController } from '../src/client/controller.ts'
 import { SessionLogGlobalOverlay } from '../src/client/Dialog.tsx'
 import type { SessionLogGlobalOverlayProps } from '../src/client/Dialog.tsx'
@@ -40,7 +40,7 @@ describe('Session export Global Overlay', () => {
     expect(b.view.container).toBeDefined()
     b.controller.download(SID)
     await vi.waitFor(() => {
-      expect(b.controller.store.getSnapshot().bySession[SID]?.status).toBe('done')
+      expect(b.controller.store.getSnapshot().bySession[SID]?.status).toBe('success')
     })
   })
 })

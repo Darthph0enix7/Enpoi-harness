@@ -1,7 +1,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { ToolCallOwnerProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { TheMarkTaskCard } from './TheMarkTaskCard.tsx'
 import { getPersonaAssignments } from './persona-store.ts'
 

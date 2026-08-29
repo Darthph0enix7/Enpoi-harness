@@ -94,12 +94,11 @@ describe('/permission command', () => {
     const execution = await ctx.commands.execute(agent, '/permission danger-full-access', [], new AbortController().signal)
     expect(execution?.result).toEqual({ kind: 'success', text: 'preset danger-full-access' })
     expect(ctx.permissionPresets.current(session.events)).toBe('danger-full-access')
-    expect(inject.mock.calls[0]?.[0]).toMatchObject({
-      content: [{
-        type: 'text',
-        text: 'The approval policy changed from "ask" to "never" (changed by the user).',
-      }],
-    })
+    // Enpoi Harness: approval policy now surfaces via runtime-context snapshot, not an injected user message
+    expect(inject).not.toHaveBeenCalled()
+    expect(session.events.filter(event => event.type === 'permission/preset').at(-1)?.data).toEqual({ preset: 'danger-full-access' })
+    expect(session.events.filter(event => event.type === 'sandbox/mode').at(-1)?.data).toEqual({ mode: 'danger-full-access' })
+    expect(session.events.filter(event => event.type === 'approval/policy').at(-1)?.data).toEqual({ policy: 'never' })
     const run = session.events.find(event => event.type === 'command/run')
     expect(run?.data).toMatchObject({ name: 'permission', args: ' danger-full-access' })
   })

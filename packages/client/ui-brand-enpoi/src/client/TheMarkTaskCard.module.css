@@ -10,6 +10,13 @@
   font-size: 12px;
   color: #f1f5f9;
   transition: border-color 0.2s, box-shadow 0.2s;
+  /* Elevated surface: `--dsw-specific-input-major` is the same dark rung as the menu
+     surface, and `.outputScroll` scrolls inside this card, so the thumb takes the l2
+     elevation tokens. Declared here because the elevation belongs to the
+     surface, and the custom properties inherit down to `.outputScroll` (see ui-theme
+     styles/scrollbar.css for the rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .markTaskCard:hover {
