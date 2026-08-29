@@ -4,9 +4,12 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow: hidden;
+  overflow: visible;
   padding: 10px 8px;
   gap: 10px;
+  /* Visible so the compact ModelSelect picker (position:absolute) escapes
+     without being clipped at the rail edge. Inner .groups still scrolls. */
+  min-height: 0;
 }
 
 .head {
@@ -32,9 +35,14 @@
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  overflow-x: visible;
   flex: 1;
   min-height: 0;
   padding-right: 2px;
+  /* Stable gutter so its own bar doesn't overlay row chrome. */
+  scrollbar-gutter: stable;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .group {
@@ -93,6 +101,8 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
+  overflow: visible;
+  position: relative;
 }
 
 .unassignBtn {

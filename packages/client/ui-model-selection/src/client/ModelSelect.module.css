@@ -5,6 +5,8 @@
   position: relative;
   min-width: 0;
   box-sizing: border-box;
+  /* Popover escapes without being clipped by an ancestor that reuses overflow. */
+  overflow: visible;
 }
 
 /* Compact variant (Watchtower persona rows): same materials, smaller geometry. */
@@ -35,10 +37,12 @@
 }
 
 .compactRoot .pickerPopover {
-  width: 280px;
+  width: min(280px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
   top: calc(100% + 4px);
   bottom: auto;
   right: 0;
+  left: auto;
   z-index: 150;
   max-height: 280px;
 }
@@ -163,11 +167,12 @@
 .pickerPopover {
   position: absolute;
   right: 0;
+  left: auto;
   bottom: calc(100% + 8px);
   z-index: 60;
   display: flex;
   flex-direction: column;
-  width: 380px;
+  width: min(380px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
   max-height: min(470px, calc(100vh - 110px));
   overflow-x: hidden;
@@ -293,14 +298,17 @@
   color: #f8fafc;
 }
 
-/* Scrollable Container */
+/* Scrollable Container — stable gutter so the 8px bar never overlays the rows. */
 .pickerScrollable {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 4px 6px 4px;
   max-height: 380px;
   box-sizing: border-box;
+  padding: 4px 8px 6px 4px;
+  /* Reserve the track so content never sits under the thumb (overlay polish). */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
@@ -475,7 +483,8 @@
   box-sizing: border-box;
   transition: all 100ms ease;
   content-visibility: auto;
-  contain-intrinsic-size: 0 34px;
+  /* auto preserves intrinsic width so the right edge never clips to 0. */
+  contain-intrinsic-size: auto 34px;
 }
 
 .modelRow:hover {
