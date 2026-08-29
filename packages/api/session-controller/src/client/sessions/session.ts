@@ -244,6 +244,7 @@ export class Session implements SessionFace {
           mode,
           content,
           clientTimeZone,
+          ...(this.revertFromSeq === null ? {} : { revertFromSeq: this.revertFromSeq }),
         }, signal))
       } else if (this.address.mode === 'one-shot') {
         result = {
