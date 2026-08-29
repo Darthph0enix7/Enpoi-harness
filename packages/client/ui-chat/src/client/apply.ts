@@ -127,8 +127,13 @@ export function apply(ctx: Context): void {
               window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
               return
             }
-            const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
-            if (!result.ok) throw new Error(`path open failed: ${result.error.message}`)
+            try {
+              const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
+              if (!result.ok) throw new Error(result.error.message)
+              return
+            } catch {
+              window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
+            }
           },
           loadOlder: () => { void session.loadOlder() },
           loadImage: Object.assign(
@@ -199,8 +204,13 @@ export function apply(ctx: Context): void {
             window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
             return
           }
-          const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
-          if (!result.ok) throw new Error(`path open failed: ${result.error.message}`)
+          try {
+            const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
+            if (!result.ok) throw new Error(result.error.message)
+            return
+          } catch {
+            window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
+          }
         },
         resolveFileConflict: async (conflictId, resolution) => {
           await ctx.sessions.resolveFileConflict({ sessionId, conflictId, resolution })
