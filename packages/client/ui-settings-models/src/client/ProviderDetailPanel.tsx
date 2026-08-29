@@ -10,7 +10,7 @@ import {
   IconPlus, IconRefresh, IconArrowUp, IconArrowDown, IconLayers,
 } from './capability-icons.tsx'
 import {
-  toggleModelHidden, hideAllModels, showAllModels, subscribeHiddenModels,
+  toggleModelHidden, hideAllModels, showAllModels,
 } from './hidden-models.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
@@ -188,6 +188,26 @@ function formatTokens(count?: number): string {
   return String(count)
 }
 
+// 0ms pool: weak-cache caps per model object so 500× detectCapabilities is O(1) on re-switch
+const capsWeakCache = new WeakMap<ModelItem, ReturnType<typeof detectCapabilities>>()
+function getCapsCached(model: ModelItem): ReturnType<typeof detectCapabilities> {
+  let c = capsWeakCache.get(model)
+  if (!c) {
+    c = detectCapabilities(model)
+    capsWeakCache.set(model, c)
+  }
+  return c
+}
+
+/** 0ms hidden-map reader: parse once per prefsVersion like ModelSelect */
+function readHiddenMap(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem('dsh_hidden_models_v1')
+    if (!raw) return {}
+    return JSON.parse(raw) as Record<string, string[]>
+  } catch { return {} }
+}
+
 export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode {
   const { row, namespace, schema, api, t: _t, readOnly, onDelete, onSaved } = props
   const providerId = row.entry.provider
@@ -214,7 +234,26 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const [showKey, setShowKey] = useState(false)
   const [keyState, setKeyState] = useState<CredentialInfo | undefined>(row.credential)
   const [modelSearch, setModelSearch] = useState('')
-  const [hiddenSet, setHiddenSet] = useState<Set<string>>(() => new Set())
+  // 0ms hidden cache: like ModelSelect, parse once per prefsVersion, not per click
+  const [prefsVersion, setPrefsVersion] = useState(0)
+  useEffect(() => {
+    const bump = () => setPrefsVersion(v => v + 1)
+    window.addEventListener('dsh:hidden-models-changed', bump)
+    window.addEventListener('dsh:model-picker-prefs-changed', bump)
+    window.addEventListener('storage', bump)
+    return () => {
+      window.removeEventListener('dsh:hidden-models-changed', bump)
+      window.removeEventListener('dsh:model-picker-prefs-changed', bump)
+      window.removeEventListener('storage', bump)
+    }
+  }, [])
+  const hiddenMap = useMemo(() => readHiddenMap(), [prefsVersion])
+  const hiddenSets = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [k, v] of Object.entries(hiddenMap)) if (Array.isArray(v)) m.set(k, new Set(v))
+    return m
+  }, [hiddenMap])
+  const hiddenSet = useMemo(() => hiddenSets.get(providerId) ?? new Set<string>(), [hiddenSets, providerId])
   const [testStatus, setTestStatus] = useState<{
     state: 'idle' | 'testing' | 'success' | 'error'
     message?: string
@@ -253,10 +292,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const [newKeyPriority, setNewKeyPriority] = useState<number>(1)
   const [newKeyShow, setNewKeyShow] = useState(false)
 
-  // Fetch live pool status from host
+  // Fetch live pool status from host — fire-and-forget, never blocks provider switch (0ms optimistic)
   const fetchPoolStatus = useCallback(async () => {
     try {
-      setIsPoolLoading(true)
       const pool = (api.llm as unknown as { poolStatus?: (ns: string, p: string) => Promise<unknown> }).poolStatus
       if (typeof pool !== 'function') return
       const res: unknown = await pool.call(api.llm, namespace.ns, providerId)
@@ -277,8 +315,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }, [api.llm, namespace.ns, providerId])
 
   useEffect(() => {
-    fetchPoolStatus()
-    const timer = setInterval(fetchPoolStatus, 15000)
+    void fetchPoolStatus()
+    const timer = setInterval(() => { void fetchPoolStatus() }, 15000)
     return () => clearInterval(timer)
   }, [fetchPoolStatus])
 
@@ -292,29 +330,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       : deriveKeyRef(providerId)
   }, [providerId, rawProfile.apiKeyEnv])
 
-  // Subscribe to hidden models
-  useEffect(() => {
-    const updateHidden = () => {
-      // Query localStorage
-      try {
-        const raw = localStorage.getItem('dsh_hidden_models_v1')
-        if (raw) {
-          const map = JSON.parse(raw)
-          setHiddenSet(new Set(map[providerId] || []))
-        } else {
-          setHiddenSet(new Set())
-        }
-      } catch {
-        setHiddenSet(new Set())
-      }
-    }
-    updateHidden()
-    return subscribeHiddenModels((p) => {
-      if (!p || p === providerId) updateHidden()
-    })
-  }, [providerId])
-
-  // Sync profile when row changes
+  // Sync profile when row changes (synchronous reset for 0ms switch via effect, but kept lightweight)
   useEffect(() => {
     setDisplayName(typeof rawProfile.displayName === 'string' ? rawProfile.displayName : row.entry.displayName)
     setBaseURL(typeof rawProfile.baseURL === 'string' ? rawProfile.baseURL : '')
@@ -322,6 +338,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setKeyInput('')
     setTestStatus({ state: 'idle' })
     setSaveSuccess(false)
+    setModelSearch('')
   }, [providerId, rawProfile, row.entry.displayName])
 
   // Models list
@@ -344,27 +361,34 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     })
   }, [modelSearch, modelsList])
 
+  // 0ms: enrich once per filtered list; caps cached via WeakMap so 500× string scans O(1) on re-switch
+  const enrichedFilteredModels = useMemo(() => {
+    return filteredModels.map(m => ({
+      model: m,
+      hidden: hiddenSet.has(m.id),
+      caps: getCapsCached(m),
+      contextStr: formatTokens(m.contextWindow),
+      maxTokStr: formatTokens(m.maxTokens),
+    }))
+  }, [filteredModels, hiddenSet])
+
   // Toggle model hidden
+  // 0ms optimistic hide toggles: write store + bump prefsVersion so hiddenMap memo updates synchronously
   const handleToggleHide = (modelId: string) => {
-    const nextHidden = toggleModelHidden(providerId, modelId)
-    setHiddenSet((prev) => {
-      const next = new Set(prev)
-      if (nextHidden) next.add(modelId)
-      else next.delete(modelId)
-      return next
-    })
+    toggleModelHidden(providerId, modelId)
+    setPrefsVersion(v => v + 1)
   }
 
   // Bulk hide/show
   const handleHideAll = () => {
     const allIds = modelsList.map(m => m.id)
     hideAllModels(providerId, allIds)
-    setHiddenSet(new Set(allIds))
+    setPrefsVersion(v => v + 1)
   }
 
   const handleShowAll = () => {
     showAllModels(providerId)
-    setHiddenSet(new Set())
+    setPrefsVersion(v => v + 1)
   }
 
   // Test Connection
@@ -610,7 +634,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         },
       }))
     }
-    fetchPoolStatus()
+    void fetchPoolStatus()
   }
 
   const handleResetCooldown = async (identityId?: string) => {
@@ -628,7 +652,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         if (identityId) await poolReset.call(api.llm, namespace.ns, providerId, identityId)
         else await poolReset.call(api.llm, namespace.ns, providerId)
       }
-      await fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       alert(`Reset cooldown failed: ${messageOf(err)}`)
     }
@@ -656,7 +680,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       )
       if (!res.ok) throw new Error(res.error.message)
       onSaved()
-      fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
       alert(`Update failed: ${messageOf(err)}`)
@@ -710,7 +734,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       )
       if (!res.ok) throw new Error(res.error.message)
       onSaved()
-      fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
       alert(`Reorder failed: ${messageOf(err)}`)
@@ -741,7 +765,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       )
       if (!res.ok) throw new Error(res.error.message)
       onSaved()
-      fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
       alert(`Delete failed: ${messageOf(err)}`)
@@ -797,7 +821,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       if (!res.ok) throw new Error(res.error.message)
 
       onSaved()
-      fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
       alert(`Failed to add identity: ${messageOf(err)}`)
@@ -838,7 +862,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       )
       if (!res.ok) throw new Error(res.error.message)
       onSaved()
-      fetchPoolStatus()
+      void fetchPoolStatus()
     } catch (err) {
       setLocalPool(undefined)
       alert(`Convert to pool failed: ${messageOf(err)}`)
@@ -906,7 +930,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
               <button
                 type="button"
                 className={styles['iconMiniBtn']}
-                onClick={() => fetchPoolStatus()}
+                onClick={() => void fetchPoolStatus()}
                 disabled={isPoolLoading}
                 title="Refresh pool status"
               >
@@ -1359,18 +1383,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           )}
         </div>
 
-        {/* Models List / Grid */}
+        {/* Models List / Grid — 0ms enriched (caps/tokens/hidden precomputed) */}
         <div className={styles['modelsGrid']}>
-          {filteredModels.length === 0 ? (
+          {enrichedFilteredModels.length === 0 ? (
             <div className={styles['emptyModels']}>
               {modelSearch ? `No models matching "${modelSearch}"` : 'No models found.'}
             </div>
           ) : (
-            filteredModels.map((m) => {
-              const hidden = hiddenSet.has(m.id)
-              const caps = detectCapabilities(m)
-              const contextStr = formatTokens(m.contextWindow)
-              const maxTokStr = formatTokens(m.maxTokens)
+            enrichedFilteredModels.map(({ model: m, hidden, caps, contextStr, maxTokStr }) => {
 
               return (
                 <div

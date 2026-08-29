@@ -97,6 +97,17 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
     return state.namespaces.get(selectedRow.entry.settingsNs)
   }, [selectedRow, state.namespaces])
 
+  // 0ms pool: cache per-provider model counts so left list does not walk schema.getPath 20× per switch
+  const modelCountByProvider = useMemo(() => {
+    const m = new Map<string, number | undefined>()
+    for (const row of configuredRows) {
+      const ns = state.namespaces.get(row.entry.settingsNs)
+      const profile = ns ? (schema.getPath(ns.value, row.entry.settingsPath) as Record<string, unknown> | undefined) : undefined
+      m.set(row.entry.provider, Array.isArray(profile?.models) ? (profile.models as unknown[]).length : undefined)
+    }
+    return m
+  }, [configuredRows, state.namespaces, schema])
+
   // Protocols for Custom Add
   const protocols = useMemo(() => {
     return protocolChoices(state.namespaces.get('llm-pi-ai'), schema)
@@ -189,9 +200,7 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
             filteredRows.map((row) => {
               const isSelected = row.entry.provider === selectedProviderId
               const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
-              const ns = state.namespaces.get(row.entry.settingsNs)
-              const profile = ns ? (schema.getPath(ns.value, row.entry.settingsPath) as Record<string, unknown> | undefined) : undefined
-              const modelCount = Array.isArray(profile?.models) ? profile.models.length : undefined
+              const modelCount = modelCountByProvider.get(row.entry.provider)
 
               return (
                 <div
@@ -199,6 +208,7 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
                   className={`${styles['providerListItem']} ${isSelected ? styles['providerListItemActive'] : ''}`}
                   role="button"
                   tabIndex={0}
+                  // 0ms optimistic: synchronous state switch, no await before DOM update
                   onClick={() => setSelectedProviderId(row.entry.provider)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
@@ -245,7 +255,6 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
       <main className={styles['providerDetailMain']}>
         {selectedRow && selectedNamespace ? (
           <ProviderDetailPanel
-            key={selectedRow.entry.provider}
             row={selectedRow}
             namespace={selectedNamespace}
             schema={schema}
