@@ -329,8 +329,8 @@ export class SessionCommandController {
         }
         const content = await durablePromptContent(this.ctx, request.content)
         const message: UserMessage = createUserMessage({ content, source })
-        const revertFromSeq = (request as { revertFromSeq?: number }).revertFromSeq
-        if (revertFromSeq !== undefined) {
+        const revertFromSeq = (request as { revertFromSeq?: number | null }).revertFromSeq
+        if (typeof revertFromSeq === 'number') {
           const session = agent.session
           const nodes = session.surface.nodes
           if ((request.mode as string) === 'steer') {
