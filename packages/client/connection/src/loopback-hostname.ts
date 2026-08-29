@@ -16,3 +16,33 @@ export function isLoopbackHostname(hostname: string): boolean {
     && parts[0] === '127'
     && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
+
+/**
+ * Whether a hostname is a Tailscale-bypass authority (WireGuard is the auth).
+ * Mirrors the Host's `isTailscaleBypass` in `browser-auth.ts` so the browser
+ * mirror's privileged-surface check stays in sync with the Host fence.
+ * @param hostname - WHATWG URL hostname (IPv6 literals retain brackets).
+ * @returns true for .ts.net, serverlocal*, or 100.64/10 CGNAT.
+ */
+export function isTailscaleHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[/, '').replace(/]$/, '').toLowerCase()
+  if (host.endsWith('.ts.net')) return true
+  if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
+  if (host.startsWith('100.')) {
+    const octets = host.split('.').map(Number)
+    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+  }
+  return false
+}
+
+/**
+ * Whether the privileged settings surface is reachable without a browser cookie:
+ * loopback or Tailscale. The Host's `BrowserAuth` bypasses the same set, so the
+ * mirror must treat it as `host` persistence or it never calls `settings.describe`
+ * over Tailscale (the tailnet regression).
+ * @param hostname - WHATWG URL hostname.
+ * @returns true when the Host will serve `settings.describe` without a cookie.
+ */
+export function isPrivilegedHostname(hostname: string): boolean {
+  return isLoopbackHostname(hostname) || isTailscaleHostname(hostname)
+}

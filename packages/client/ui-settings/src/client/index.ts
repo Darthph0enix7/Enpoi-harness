@@ -24,6 +24,19 @@ import { SettingsSchemaService } from './schema.ts'
 import { SettingsScopeBinder } from './settings-scope.ts'
 import { SettingsDescribeMirror } from './settings-mirror.ts'
 
+function isPrivilegedHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[/, '').replace(/]$/, '').toLowerCase()
+  if (host === 'localhost' || host === '[::1]') return true
+  if (host.endsWith('.ts.net')) return true
+  if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
+  if (host.startsWith('100.')) {
+    const octets = host.split('.').map(Number)
+    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+  }
+  const parts = host.split('.')
+  return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
 export type {
   SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsOnboardingOwnerProps,
   SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
@@ -57,7 +70,8 @@ export function apply(ctx: Context): void {
   // Captured once here, where `remote.settings` is declared in this plugin's
   // own `inject`; the binder hands the same face to every scope it binds.
   const wire = { settings: ctx.remote.settings }
-  const mirror = new SettingsDescribeMirror(wire, connection.isLoopback ? 'host' : 'memory')
+  const privileged = typeof location === 'undefined' ? connection.isLoopback : (connection.isLoopback || isPrivilegedHostname(location.hostname))
+  const mirror = new SettingsDescribeMirror(wire, privileged ? 'host' : 'memory')
   ctx.effect(() => {
     const disposers = [
       ctx.remote.$on('settings/document-updated', () => { void mirror.load() }),

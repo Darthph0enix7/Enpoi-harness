@@ -29,6 +29,19 @@ import type {} from '@deepseek-ai/dsh-api-remotes/types'
 // cordis `Events` entry (and with it the branded `SettingsNamespace`).
 import type {} from '@deepseek-ai/dsh-settings/types'
 import type { SettingsSchemaService } from './schema.ts'
+
+function isPrivilegedHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[/, '').replace(/]$/, '').toLowerCase()
+  if (host === 'localhost' || host === '[::1]') return true
+  if (host.endsWith('.ts.net')) return true
+  if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
+  if (host.startsWith('100.')) {
+    const octets = host.split('.').map(Number)
+    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+  }
+  const parts = host.split('.')
+  return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
 import type { SettingsScope, SettingsScopeSnapshot, SettingsScopeSpec } from './settings-contract.ts'
 import { SettingsDescribeMirror, type SettingsDescribeFace, type SettingsWireFace } from './settings-mirror.ts'
 
@@ -288,7 +301,7 @@ export class SettingsScopeBinder extends Service {
       this.wire,
       spec,
       this.mirror,
-      connection.isLoopback ? 'host' : 'memory',
+      (typeof location === 'undefined' ? connection.isLoopback : (connection.isLoopback || isPrivilegedHostname(location.hostname))) ? 'host' : 'memory',
       this.schema,
     )
     ctx.effect(() => {
