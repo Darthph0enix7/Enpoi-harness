@@ -640,6 +640,7 @@ export class LlmRuntime extends TypertRemoteService {
    * @param provider - provider route id.
    * @returns per-identity pool status rows.
    */
+  @Remote
   async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]> {
     const ops = this.poolOperations.get(settingsNs)
     if (ops === undefined) return []
@@ -652,6 +653,7 @@ export class LlmRuntime extends TypertRemoteService {
    * @param provider - provider route id.
    * @param identityId - optional identity to reset; omitted resets all.
    */
+  @Remote
   async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void> {
     const ops = this.poolOperations.get(settingsNs)
     if (ops === undefined) return
@@ -666,6 +668,7 @@ export class LlmRuntime extends TypertRemoteService {
    * @param apiKey - optional override credential for the probe.
    * @returns probe outcome with status, latency, and error detail.
    */
+  @Remote
   async poolTestIdentity(
     settingsNs: string,
     provider: string,

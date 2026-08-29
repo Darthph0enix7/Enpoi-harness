@@ -12,8 +12,8 @@
   justify-content: space-between !important;
   padding: 10px 0 !important;
   background: rgba(10, 18, 31, 0.88) !important;
-  -webkit-backdrop-filter: blur(28px) saturate(145%) !important;
-  backdrop-filter: blur(28px) saturate(145%) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(140%) !important;
+  backdrop-filter: blur(8px) saturate(140%) !important;
   border-left: 1px solid rgba(103, 220, 231, 0.18) !important;
   user-select: none !important;
   box-shadow: -4px 0 20px rgba(0, 0, 0, 0.4) !important;

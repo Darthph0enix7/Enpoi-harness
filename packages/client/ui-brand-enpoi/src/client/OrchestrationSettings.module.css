@@ -26,7 +26,7 @@
   background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.72));
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
   border-radius: 10px;
-  backdrop-filter: blur(28px) saturate(145%);
+  backdrop-filter: blur(8px) saturate(140%);
   overflow: hidden;
 }
 

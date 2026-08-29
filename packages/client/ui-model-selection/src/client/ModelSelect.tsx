@@ -26,7 +26,7 @@ import type { ModelSelectInjected } from './slots.ts'
 import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
-  isGroupCollapsed, toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
+  toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
   type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
@@ -34,17 +34,13 @@ import {
 } from './icons.tsx'
 import css from './ModelSelect.module.css'
 
-/** Check if a model has been hidden via Settings > Providers. */
-function isHidden(provider: string, modelId: string): boolean {
+/** Cached hidden-map reader for hot render paths: parse once per prefsVersion. */
+function readHiddenMap(): Record<string, string[]> {
   try {
     const raw = localStorage.getItem('dsh_hidden_models_v1')
-    if (!raw) return false
-    const map = JSON.parse(raw) as Record<string, string[]>
-    const list = map[provider]
-    return Array.isArray(list) && list.includes(modelId)
-  } catch {
-    return false
-  }
+    if (!raw) return {}
+    return JSON.parse(raw) as Record<string, string[]>
+  } catch { return {} }
 }
 
 /** Format the model context window compactly (guaranteed display). */
@@ -130,6 +126,25 @@ export function ModelSelect(
     }
   }, [available, load])
 
+  // 0ms hot-path caches: parse hidden/collapsed maps once per prefsVersion, not per model
+  const hiddenMap = useMemo(() => readHiddenMap(), [prefsVersion])
+  const hiddenSets = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [k, v] of Object.entries(hiddenMap)) if (Array.isArray(v)) m.set(k, new Set(v))
+    return m
+  }, [hiddenMap])
+  const isHiddenCached = useMemo(() => {
+    return (provider: string, modelId: string) => hiddenSets.get(provider)?.has(modelId) ?? false
+  }, [hiddenSets])
+  const collapsedSet = useMemo(() => {
+    try {
+      const raw = localStorage.getItem('dsh_collapsed_groups_v2')
+      if (!raw) return new Set<string>()
+      const arr = JSON.parse(raw) as string[]
+      return new Set(Array.isArray(arr) ? arr : [])
+    } catch { return new Set<string>() }
+  }, [prefsVersion])
+
   // Close outside
   useEffect(() => {
     if (!pickerOpen && !effortOpen) return
@@ -154,10 +169,10 @@ export function ModelSelect(
     }
   }, [pickerOpen])
 
-  // All enabled model choices
+  // All enabled model choices (uses 0ms cached hidden check)
   const choices = useMemo(() => state.groups.flatMap(group =>
     group.models
-      .filter(model => !isHidden(group.id, model.id) || (activeSel?.provider === group.id && activeSel.model === model.id))
+      .filter(model => !isHiddenCached(group.id, model.id) || (activeSel?.provider === group.id && activeSel.model === model.id))
       .map(model => ({
         group,
         model,
@@ -277,7 +292,7 @@ export function ModelSelect(
     return groupsCopy
   }, [state.groups, prefsVersion, pickerOpen])
 
-  // Favorites list (computed on-demand when popover opens)
+  // Favorites list (computed on-demand when popover opens) - uses cached hidden check
   const favoriteItems = useMemo(() => {
     if (!pickerOpen) return []
     const favRefs = getFavoriteModels()
@@ -285,14 +300,14 @@ export function ModelSelect(
     for (const ref of favRefs) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
       const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
-      if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
+      if (hit && (!isHiddenCached(ref.provider, ref.modelId) || isCur)) {
         result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel, pickerOpen])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isHiddenCached])
 
-  // Recents list (computed on-demand when popover opens)
+  // Recents list (computed on-demand when popover opens) - uses cached hidden check
   const recentItems = useMemo(() => {
     if (!pickerOpen) return []
     const recents = getRecentModels()
@@ -300,14 +315,14 @@ export function ModelSelect(
     for (const ref of recents) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
       const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
-      if (hit && (!isHidden(ref.provider, ref.modelId) || isCur)) {
+      if (hit && (!isHiddenCached(ref.provider, ref.modelId) || isCur)) {
         if (!isModelFavorite(ref.provider, ref.modelId)) {
           result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
         }
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel, pickerOpen])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isHiddenCached])
 
   // Filtered queries
   const q = searchQuery.toLowerCase().trim()
@@ -459,12 +474,12 @@ export function ModelSelect(
                     <span className={css.groupTitleText}>Favorites</span>
                     <span className={css.groupBadge}>{filteredFavorites.length}</span>
                   </div>
-                  <span className={clsx(css.groupChevron, !isGroupCollapsed('__favorites__') && css.groupChevronExpanded)}>
+                  <span className={clsx(css.groupChevron, !collapsedSet.has('__favorites__') && css.groupChevronExpanded)}>
                     <IconChevron />
                   </span>
                 </div>
 
-                {!isGroupCollapsed('__favorites__') && (
+                {!collapsedSet.has('__favorites__') && (
                   <div className={css.groupBody}>
                     {filteredFavorites.map((fav, fIdx) => {
                       const isSelected = activeSel?.provider === fav.provider && activeSel.model === fav.model.id
@@ -529,12 +544,12 @@ export function ModelSelect(
                     <span className={css.groupTitleText}>Recent</span>
                     <span className={css.groupBadge}>{recentItems.length}</span>
                   </div>
-                  <span className={clsx(css.groupChevron, !isGroupCollapsed('__recents__') && css.groupChevronExpanded)}>
+                  <span className={clsx(css.groupChevron, !collapsedSet.has('__recents__') && css.groupChevronExpanded)}>
                     <IconChevron />
                   </span>
                 </div>
 
-                {!isGroupCollapsed('__recents__') && (
+                {!collapsedSet.has('__recents__') && (
                   <div className={css.groupBody}>
                     {recentItems.map((rec) => {
                       const isSelected = activeSel?.provider === rec.provider && activeSel.model === rec.model.id
@@ -574,18 +589,18 @@ export function ModelSelect(
               </div>
             )}
 
-            {/* PROVIDER GROUPS */}
+            {/* PROVIDER GROUPS - uses 0ms cached hidden/collapsed checks */}
             {orderedGroups.map((group) => {
               const visibleModels = group.models.filter((m) => {
                 const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
                 if (!matchesSearch) return false
                 const isCurrent = activeSel?.provider === group.id && activeSel.model === m.id
-                return isCurrent || !isHidden(group.id, m.id)
+                return isCurrent || !isHiddenCached(group.id, m.id)
               })
 
               if (visibleModels.length === 0) return null
 
-              const isCollapsed = !q && isGroupCollapsed(group.id)
+              const isCollapsed = !q && collapsedSet.has(group.id)
 
               return (
                 <div

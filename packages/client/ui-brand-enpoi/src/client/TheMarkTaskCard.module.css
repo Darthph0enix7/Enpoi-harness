@@ -1,7 +1,7 @@
 .markTaskCard {
   background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.7));
-  backdrop-filter: blur(28px) saturate(145%);
-  -webkit-backdrop-filter: blur(28px) saturate(145%);
+  backdrop-filter: blur(8px) saturate(140%);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.2));
   border-radius: 12px;
   margin: 6px 0;

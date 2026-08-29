@@ -25,8 +25,8 @@
   width: 100%;
   border-radius: 10px;
   background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.72));
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(8px) saturate(140%);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.18));
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
