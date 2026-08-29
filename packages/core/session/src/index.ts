@@ -223,6 +223,10 @@ function assertSessionEventEnvelope(value: Record<string, unknown>, index: numbe
       case 'data':
       case 'surfaceOp':
       case 'sourceEventSeqs':
+      // Legacy envelope flag: pre-merge logs stamped ignorable:true on
+      // log-only events (revert/state commits). The merged engine dropped
+      // the flag from new appends but must still load old logs.
+      case 'ignorable':
         break
       default:
         throw new Error(`seed event at index ${index} has an invalid event envelope`)

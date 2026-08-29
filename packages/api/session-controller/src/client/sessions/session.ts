@@ -654,6 +654,18 @@ export class Session implements SessionFace {
     this.baseSeq = entries[0]?.event.seq ?? this.baseSeq
     this.hasMore = hasMore
     this.eventSource.prepend(entries, hasMore)
+    // Re-fold revert state over the COMPLETE loaded window: prepended pages
+    // carry older revert/file-* events the incremental fold never saw (the
+    // opening window is only the seed prefix). Reset then replay in order so
+    // the latest boundary/outcomes win.
+    this.revertFromSeq = null
+    this.revertShadowRanges = []
+    this.revertFileOutcomes = {}
+    this.revertFileConflicts = []
+    for (const entry of this.eventSource.getSnapshot().entries) {
+      this.foldRevertState(entry.event)
+    }
+    this.notifier.markDirty()
   }
 
   /** Append one stream-validated live event. */
@@ -704,8 +716,12 @@ export class Session implements SessionFace {
       const data = event.data as RevertFileConflict | undefined
       if (data !== undefined) {
         const index = this.revertFileConflicts.findIndex(c => c.conflictId === data.conflictId)
-        if (index < 0) this.revertFileConflicts.push(data)
-        else this.revertFileConflicts[index] = data
+        // Immutable update: the snapshot reference must change so selectors
+        // (RevertTray useMemo) re-run — in-place mutation keeps the same
+        // reference and the tray never sees the new conflict.
+        this.revertFileConflicts = index < 0
+          ? [...this.revertFileConflicts, data]
+          : this.revertFileConflicts.map((c, i) => i === index ? data : c)
         return true
       }
       return false
@@ -713,9 +729,10 @@ export class Session implements SessionFace {
     if (event.type === 'revert/file-result') {
       const data = event.data as { readonly revertSeq?: number; readonly outcomes?: Record<string, RevertFileOutcome> } | undefined
       if (data?.outcomes !== undefined) {
-        for (const [path, outcome] of Object.entries(data.outcomes)) {
-          this.revertFileOutcomes[path] = outcome
-        }
+        // Immutable update (same reason as above): a fresh object so the
+        // snapshot reference changes and the tray's affected-files list
+        // re-renders.
+        this.revertFileOutcomes = { ...this.revertFileOutcomes, ...data.outcomes }
         const resolved = new Set(Object.keys(data.outcomes))
         this.revertFileConflicts = this.revertFileConflicts.filter(c => !resolved.has(c.targetKey))
         return true

@@ -320,8 +320,11 @@ export class ReactLoopAgent implements Agent {
             this.session.append('user/message', message, pending ?? { surfaceOp: 'append' })
             // Revert-commit: clear the boundary atomically with the shadowing
             // append, so a dropped message can never leave a stale boundary.
+            // (No ignorable flag: the merged engine dropped per-event ignorable
+            // — revert/state is log-only by type registration, so it never
+            // reaches the surface, and the envelope validator rejects the flag.)
             if (pending?.clearRevert === true) {
-              this.session.append('revert/state', { fromSeq: null, cause: 'commit' }, { ignorable: true })
+              this.session.append('revert/state', { fromSeq: null, cause: 'commit' })
             }
           }
           // max-tokens is sticky: once any step hits the ceiling, later steps
