@@ -60,10 +60,8 @@ export const RevertTray = memo(function RevertTray({
   }, [revertFromSeq, nodes])
 
   const outcomeEntries = useMemo(() => {
-    // Debug: log conflicts when they change
-    if (conflicts.length > 0) console.log('[revert-debug] conflicts', JSON.stringify(conflicts).slice(0, 500))
     return Object.entries(outcomes).filter(([_, out]) => out && typeof out.status === 'string')
-  }, [outcomes, conflicts])
+  }, [outcomes])
 
   // Auto-scroll to bottom of query list when expanded
   useLayoutEffect(() => {
