@@ -298,20 +298,20 @@
   color: #f8fafc;
 }
 
-/* Scrollable Container — stable gutter so the 8px bar never overlays the rows. */
+/* Scrollable Container — themed glass scrollbar (matches old liquid-glass). */
 .pickerScrollable {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   max-height: 380px;
   box-sizing: border-box;
-  padding: 4px 8px 6px 4px;
-  /* Reserve the track so content never sits under the thumb (overlay polish). */
+  padding: 4px 4px 6px 4px;
+  /* Glass theme scrollbars: reserve gutter so rows don't shift, but keep themed thumb. */
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  /* Themed thin scrollbar — ui-theme rebind, no browser default grey. */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  --dsh-scrollbar-width: 6px;
 }
 
 /* Section / Group Header */
