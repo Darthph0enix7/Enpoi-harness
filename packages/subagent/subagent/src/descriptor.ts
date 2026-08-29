@@ -212,7 +212,7 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
   if (typeof version !== 'number') {
     throw new Error('persisted subagent descriptor version must be a number')
   }
-  if (version !== SUBAGENT_DESCRIPTOR_VERSION) return undefined
+  if (version !== SUBAGENT_DESCRIPTOR_VERSION && version !== 2) return undefined
 
   const mode = value['mode']
   if (mode !== 'one-shot' && mode !== 'continuable') {
