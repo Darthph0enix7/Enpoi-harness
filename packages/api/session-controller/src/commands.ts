@@ -329,8 +329,35 @@ export class SessionCommandController {
         }
         const content = await durablePromptContent(this.ctx, request.content)
         const message: UserMessage = createUserMessage({ content, source })
-        if (request.mode === 'steer') agent.steer(message)
-        else agent.followup(message)
+        const revertFromSeq = (request as { revertFromSeq?: number }).revertFromSeq
+        if (revertFromSeq !== undefined) {
+          const session = agent.session
+          const nodes = session.surface.nodes
+          if ((request.mode as string) === 'steer') {
+            reject('revert-invalid', 'revert commit is only valid for queued prompts', { sessionId: request.sessionId })
+          }
+          if (agent.status === 'running' || (agent.inbox as unknown as { hasPending?: boolean })?.hasPending === true) {
+            reject('revert-invalid', 'revert commit requires idle session with no pending input', { sessionId: request.sessionId })
+          }
+          const startIdx = nodes.indexOf(revertFromSeq)
+          if (startIdx === -1 || revertAnchorOf(session, revertFromSeq) === undefined) {
+            reject('revert-invalid', `revert anchor ${String(revertFromSeq)} is not an active user message`, { sessionId: request.sessionId, atSeq: revertFromSeq })
+          }
+          const lastSurfaceSeq = nodes[nodes.length - 1]
+          if (lastSurfaceSeq === undefined || lastSurfaceSeq <= revertFromSeq) {
+            reject('revert-invalid', 'revert anchor has no following surface node to shadow', { sessionId: request.sessionId })
+          }
+          const end = lastSurfaceSeq as number
+          const shadowedSeqs = nodes.filter(seq => seq >= revertFromSeq && seq <= end)
+          if ((request.mode as string) === 'steer') {
+            agent.steer(message, { surfaceOp: { op: 'replace', start: revertFromSeq, end }, sourceEventSeqs: shadowedSeqs, clearRevert: true })
+          } else {
+            agent.followup(message, { surfaceOp: { op: 'replace', start: revertFromSeq, end }, sourceEventSeqs: shadowedSeqs, clearRevert: true })
+          }
+        } else {
+          if ((request.mode as string) === 'steer') agent.steer(message)
+          else agent.followup(message)
+        }
       } catch (error) {
         if (error instanceof TypertRemoteFailure) throw error
         if (error instanceof AttachmentError) {
@@ -506,7 +533,13 @@ export class SessionCommandController {
       // No active revert — no-op success.
       return { accepted: true }
     }
-    const fromSeq = request.restoreSeq ?? 0
+    if (request.restoreSeq !== undefined) {
+      const target = revertAnchorOf(session, request.restoreSeq)
+      if (target === undefined) {
+        reject('revert-invalid', `event ${String(request.restoreSeq)} is not a user message (restore target)`, { sessionId: request.sessionId, atSeq: request.restoreSeq })
+      }
+    }
+    const fromSeq = request.restoreSeq ?? null
     session.append('revert/state', { fromSeq, cause: 'restore' })
     return { accepted: true }
   }
@@ -655,8 +688,9 @@ function latestRevertBoundary(session: Session): number | undefined {
   let boundary: number | undefined
   for (const event of session.events) {
     if (event.type === 'revert/state') {
-      const data = event.data as { fromSeq?: number }
-      if (typeof data.fromSeq === 'number') boundary = data.fromSeq
+      const data = event.data as { fromSeq?: number | null }
+      if (data.fromSeq === null) boundary = undefined
+      else if (typeof data.fromSeq === 'number') boundary = data.fromSeq
     }
   }
   return boundary

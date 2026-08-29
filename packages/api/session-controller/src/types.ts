@@ -354,6 +354,8 @@ export interface SessionPromptRequest {
   readonly mode: 'queue' | 'steer'
   readonly content: readonly PromptContentPart[]
   readonly clientTimeZone?: string
+  /** When set, this prompt commits an active revert: the new user message shadows the reverted span via surfaceOp replace. */
+  readonly revertFromSeq?: number
 }
 
 /** Receipt after one prompt enters the target Agent inbox. */
