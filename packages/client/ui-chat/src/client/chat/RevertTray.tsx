@@ -60,7 +60,14 @@ export const RevertTray = memo(function RevertTray({
   }, [revertFromSeq, nodes])
 
   const outcomeEntries = useMemo(() => {
-    return Object.entries(outcomes).filter(([_, out]) => out && typeof out.status === 'string')
+    // Only files the revert/restore actually touched are relevant: restored,
+    // trashed, saved_beside, kept, conflicts, errors. A no_op file (disk
+    // already at the target) is not affected — with hundreds of edited files
+    // in a session the tray must not list every untouched one.
+    return Object.entries(outcomes).filter(([_, out]) => {
+      if (!out || typeof out.status !== 'string') return false
+      return out.status !== 'no_op' && out.status !== 'already_clean'
+    })
   }, [outcomes])
 
   // Auto-scroll to bottom of query list when expanded
