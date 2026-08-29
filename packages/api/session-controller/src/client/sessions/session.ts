@@ -733,7 +733,13 @@ export class Session implements SessionFace {
         // snapshot reference changes and the tray's affected-files list
         // re-renders.
         this.revertFileOutcomes = { ...this.revertFileOutcomes, ...data.outcomes }
-        const resolved = new Set(Object.keys(data.outcomes))
+        // Only resolve conflicts whose outcome is NOT pending_conflict —
+        // a pending conflict stays actionable (Keep/Force/Save Beside).
+        const resolved = new Set(
+          Object.entries(data.outcomes)
+            .filter(([, out]) => out.status !== 'pending_conflict')
+            .map(([path]) => path),
+        )
         this.revertFileConflicts = this.revertFileConflicts.filter(c => !resolved.has(c.targetKey))
         return true
       }
