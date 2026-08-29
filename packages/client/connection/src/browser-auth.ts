@@ -77,6 +77,18 @@ function requestAuthority(headers: ConnectionTrustRequest['headers']): string | 
   }
 }
 
+/** Tailscale/WireGuard authorities are already private (ACL) — no browser cookie needed. */
+function isTailscaleBypass(authority: string): boolean {
+  const host = authority.split(':')[0]!.toLowerCase()
+  if (host.endsWith('.ts.net')) return true
+  if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
+  if (host.startsWith('100.')) {
+    const octets = host.split('.').map(Number)
+    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+  }
+  return false
+}
+
 function canonicalSecret(value: unknown): Buffer | undefined {
   if (typeof value !== 'string') return undefined
   const decoded = decodeBase64Url(value)
@@ -238,6 +250,8 @@ export class BrowserAuth {
    * @returns true only when the caller may serve index.html.
    */
   authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse): boolean {
+    const maybeAuthority = requestAuthority(req.headers)
+    if (maybeAuthority !== undefined && isTailscaleBypass(maybeAuthority)) return true
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
@@ -288,6 +302,7 @@ export class BrowserAuth {
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
     const authority = requestAuthority(request.headers)
+    if (authority !== undefined && isTailscaleBypass(authority)) return true
     const rawCookie = header(request.headers, 'cookie')
     if (authority === undefined || rawCookie === undefined) return false
     const value = cookieValue(rawCookie, cookieName(authority))
