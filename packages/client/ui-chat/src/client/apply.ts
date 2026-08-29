@@ -123,7 +123,10 @@ export function apply(ctx: Context): void {
             const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
             const resolved = resolveWorkspacePath(cwd, path)
             const canNative = await ctx.remote.session.canOpenWorkspacePath().catch(() => false)
-            if (!canNative) return
+            if (!canNative) {
+              window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
+              return
+            }
             const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
             if (!result.ok) throw new Error(`path open failed: ${result.error.message}`)
           },
@@ -192,7 +195,10 @@ export function apply(ctx: Context): void {
           const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
           const resolved = resolveWorkspacePath(cwd, path)
           const canNative = await ctx.remote.session.canOpenWorkspacePath().catch(() => false)
-          if (!canNative) return
+          if (!canNative) {
+            window.dispatchEvent(new CustomEvent('dsh-open-file', { detail: { path: resolved, sessionId } }))
+            return
+          }
           const result = await ctx.remote.session.openWorkspacePath({ path: resolved })
           if (!result.ok) throw new Error(`path open failed: ${result.error.message}`)
         },
