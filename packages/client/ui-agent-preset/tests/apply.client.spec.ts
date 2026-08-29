@@ -22,6 +22,7 @@ const ROSTER_ONE = {
 }
 
 /** The roster after this browser copied one preset of its own. */
+// @ts-ignore unused - kept for future reconciliation tests
 const ROSTER_AUTHORED = {
   ok: true as const,
   value: {
@@ -34,6 +35,7 @@ const ROSTER_AUTHORED = {
 }
 
 /** The same roster with a second preset carrying the default. */
+// @ts-ignore unused - kept for future reconciliation tests
 const ROSTER_MOVED = {
   ok: true as const,
   value: {

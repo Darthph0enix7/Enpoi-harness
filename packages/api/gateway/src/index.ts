@@ -268,12 +268,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
   }
 
   private claimsEndpoint(endpoint: string): boolean {
-    if (endpoint === REMOTE_EVENT_RESULT_ENDPOINT) return true
-    const segments = endpoint.split('/')
+    const normalized = normalizeEndpoint(endpoint)
+    if (normalized === REMOTE_EVENT_RESULT_ENDPOINT) return true
+    const segments = normalized.split('/')
     if (segments.length !== 2 || segments[0] === '' || segments[1] === '') return false
-    if (this.ctx.typert.local.get(endpoint) !== undefined || this.ctx.typert.local.hasSeen(endpoint)) return true
+    if (this.ctx.typert.local.get(normalized) !== undefined || this.ctx.typert.local.hasSeen(normalized)) return true
     this.srcClaims ??= this.collectSrcClaims()
-    return this.srcClaims.has(endpoint)
+    return this.srcClaims.has(normalized)
   }
 
   private collectSrcClaims(): ReadonlySet<string> {
@@ -942,8 +943,19 @@ function parseRemoteEventResultPayload(payload: unknown): ReturnType<typeof pars
   return parseRemoteEventResult(payload.args)
 }
 
+function normalizeEndpoint(endpoint: string): string {
+  if (!endpoint.includes('/') && endpoint.includes('.')) {
+    const parts = endpoint.split('.')
+    if (parts.length === 2 && parts[0] !== '' && parts[1] !== '' && parts[0] !== '.' && parts[1] !== '..') {
+      return `${parts[0]}/${parts[1]}`
+    }
+  }
+  return endpoint
+}
+
 function remoteRequest(endpoint: string, payload: unknown, signal: AbortSignal): InvokeRemoteRequest {
-  const segments = endpoint.split('/')
+  const normalized = normalizeEndpoint(endpoint)
+  const segments = normalized.split('/')
   if (segments.length !== 2 || segments[0] === '' || segments[1] === '') {
     throw new Error(`invalid Remote endpoint ${JSON.stringify(endpoint)}`)
   }

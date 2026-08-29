@@ -40,10 +40,10 @@ const sessionState: SessionState = {
   lastAgentError: null,
   promptAttempted: false,
   awaitingFirstTurn: false,
-    revertFromSeq: null,
-    revertShadowRanges: [],
-    revertFileConflicts: [],
-    revertFileOutcomes: {},
+  revertFromSeq: null,
+  revertShadowRanges: [],
+  revertFileConflicts: [],
+  revertFileOutcomes: {},
 }
 const sessionList = {
   ids: [SID],

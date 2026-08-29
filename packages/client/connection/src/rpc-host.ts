@@ -228,7 +228,8 @@ function rpcFetchHandler(
         return invalidEnvelopeResponse(body, envelope.error.issues)
       }
       const message: ClientRequest = envelope.data
-      if (message.method !== endpoint) {
+      const normalizedMethod = normalizeEndpoint(message.method)
+      if (normalizedMethod !== endpoint) {
         return errorResponse(message.rpcId, {
           code: 'bad-request',
           message: `method ${JSON.stringify(message.method)} does not match endpoint ${JSON.stringify(endpoint)}`,
@@ -256,9 +257,22 @@ function invalidEnvelopeResponse(body: unknown, issues: readonly object[]): Resp
   })
 }
 
+function normalizeEndpoint(endpoint: string): string {
+  // Legacy dot notation: "namespace.method" -> "namespace/method" (curl tests use dot)
+  if (!endpoint.includes('/') && endpoint.includes('.')) {
+    const dotSegments = endpoint.split('.')
+    if (dotSegments.length === 2
+      && dotSegments.every(segment => segment !== '' && segment !== '.' && segment !== '..' && ENDPOINT_SEGMENT_PATTERN.test(segment))) {
+      return dotSegments.join('/')
+    }
+  }
+  return endpoint
+}
+
 function endpointFromPath(channel: string, pathname: string): string | undefined {
   if (!pathname.startsWith(`${channel}/`)) return undefined
-  const endpoint = pathname.slice(channel.length + 1)
+  let endpoint = pathname.slice(channel.length + 1)
+  endpoint = normalizeEndpoint(endpoint)
   const segments = endpoint.split('/')
   if (segments.some(segment =>
     segment === '' || segment === '.' || segment === '..' || !ENDPOINT_SEGMENT_PATTERN.test(segment))) {

@@ -39,7 +39,7 @@ function registerFleetRoutingTab(ctx: Context, betterSidebar: unknown): void {
     icon: (size: number) => createElement(FleetRoutingIcon, { size }),
     order: 60,
     single: true,
-    component: (props) => createElement(FleetRoutingView, {
+    component: props => createElement(FleetRoutingView, {
       ctx: props.ctx,
       scope: props.scope,
       visible: props.visible,
