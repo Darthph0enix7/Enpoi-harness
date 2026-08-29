@@ -15,19 +15,47 @@ export interface TheMarkTaskCardProps {
   onOpenSession?: ((sessionId: string) => void) | undefined
 }
 
-/** Get a clean emoji icon for a tool name */
-function toolIcon(name: string): string {
+/** Minimalist monochrome icon — thin stroke, currentColor, matches FleetRouting. */
+function MicroIcon({ d, size = 11 }: { d: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={d} />
+    </svg>
+  )
+}
+
+function personaIconD(persona: string): string {
+  const p = persona.toLowerCase()
+  if (p.includes('librarian')) return 'M3 4h4v9H3zM8 4h5v9H8zM3 13h10'
+  if (p.includes('fixer')) return 'M10.5 2.5l3 3L6 13H3v-3z'
+  if (p.includes('explorer')) return 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4'
+  if (p.includes('designer')) return 'M8 3l1.8 3.6L13.5 8l-3.7 1.4L8 13l-1.8-3.6L2.5 8l3.7-1.4z'
+  if (p.includes('oracle')) return 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2'
+  if (p.includes('roundtable')) return 'M3 3h10v2H3zM3 7h10v2H3zM3 11h10v2H3z'
+  if (p.includes('chorus')) return 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z'
+  if (p.includes('visionary')) return 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z'
+  if (p.includes('experiencer')) return 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z'
+  if (p.includes('integrator')) return 'M4 4h4v4H4zM8 8h4v4H8z'
+  if (p.includes('curator')) return 'M8 3v10M3 8h10'
+  if (p.includes('skeptic')) return 'M12 4l-8 8m0-8l8 8'
+  if (p.includes('architect')) return 'M3 13V8m3 5V5m3 8V3m3 10V7'
+  if (p.includes('pragmatist')) return 'M3 8h10M10 4l3 4-3 4'
+  if (p.includes('critic')) return 'M8 2a6 6 0 100 12A6 6 0 008 2zm0 3v4l3 2'
+  return 'M8 3l3 3-3 3M5 8h6'
+}
+
+function toolIconD(name: string): string {
   const n = name.toLowerCase()
-  if (n.includes('web') || n.includes('fetch') || n.includes('search_exa')) return '🌐'
-  if (n.includes('read')) return '📖'
-  if (n.includes('edit') || n.includes('write')) return '📝'
-  if (n.includes('bash') || n.includes('terminal')) return '⚙️'
-  if (n.includes('grep') || n.includes('glob') || n.includes('search')) return '🔍'
-  if (n.includes('ast_grep')) return '🧩'
-  if (n.includes('todo') || n.includes('plan')) return '📋'
-  if (n.includes('oracle')) return '🔮'
-  if (n.includes('subagent')) return '⚡'
-  return '🛠️'
+  if (n.includes('web') || n.includes('fetch') || n.includes('search_exa')) return 'M8 2a6 6 0 100 12A6 6 0 008 2zM8 5v3l2 2'
+  if (n.includes('read')) return 'M3 4h10v9H3zM3 7h10'
+  if (n.includes('edit') || n.includes('write')) return 'M10.5 2.5l3 3L6 13H3v-3z'
+  if (n.includes('bash') || n.includes('terminal')) return 'M3 5l3 3-3 3M9 11h4'
+  if (n.includes('grep') || n.includes('glob') || n.includes('search')) return 'M11 11l2 2M9.5 5a4.5 4.5 0 100 9A4.5 4.5 0 009.5 5z'
+  if (n.includes('ast_grep')) return 'M4 4h4v4H4zM8 8h4v4H8z'
+  if (n.includes('todo') || n.includes('plan')) return 'M3 4h10M3 8h10M3 12h10M3 4v8'
+  if (n.includes('oracle')) return 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2'
+  if (n.includes('subagent')) return 'M8 3l3 3-3 3M5 8h6'
+  return 'M8 3v10M3 8h10'
 }
 
 export function TheMarkTaskCard({
@@ -74,13 +102,16 @@ export function TheMarkTaskCard({
   const durationStr = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : ''
   const displayModel = model ? model.split('/').pop() : undefined
 
+  // Strip emoji prefix from legacy persona labels — icon now rendered separately as SVG
+  const personaLabel = persona.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\s]+/u, '').trim() || persona
+
   return (
     <div className={styles.markTaskCard}>
       {/* Zoom 1: Collapsed Header Badge Row */}
       <div className={styles.markBadgeRow} onClick={() => setExpanded(!expanded)}>
         <div className={styles.markBadgeLeft}>
           <span className={`${styles.statusIndicator} ${statusClass}`} title={statusLabel} />
-          <span className={styles.personaBadge}>{persona}</span>
+          <span className={styles.personaBadge}><span className={styles.personaIcon}><MicroIcon d={personaIconD(persona)} size={11} /></span>{personaLabel}</span>
           <span className={styles.taskTitle} title={title}>
             {title}
           </span>
@@ -117,7 +148,7 @@ export function TheMarkTaskCard({
               <div className={styles.toolsActivityPills}>
                 {subTools.map((t, idx) => (
                   <span key={`${t}-${idx}`} className={styles.toolActivityPill}>
-                    <span className={styles.toolActivityIcon}>{toolIcon(t)}</span>
+                    <span className={styles.toolActivityIcon}><MicroIcon d={toolIconD(t)} size={10} /></span>
                     <span>{t}</span>
                   </span>
                 ))}

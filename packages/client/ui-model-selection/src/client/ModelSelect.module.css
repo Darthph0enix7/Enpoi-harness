@@ -142,7 +142,11 @@
 }
 
 .triggerIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  line-height: 0;
   opacity: 0.8;
 }
 
@@ -154,7 +158,11 @@
 }
 
 .chevronIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  line-height: 0;
   opacity: 0.6;
   transition: transform 120ms ease;
 }
