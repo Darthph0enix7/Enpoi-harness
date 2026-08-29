@@ -146,7 +146,15 @@ async function openNativePathWithIntent(
       await openWslPath(path, signal, run)
       return
     }
-    await run('xdg-open', [path], signal)
+    try {
+      await run('xdg-open', [path], signal)
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('ENOENT') || msg.includes('not found')) {
+        throw new Error('native open unavailable on this host (xdg-open not found — headless/server); the file will open in the workspace editor instead')
+      }
+      throw error
+    }
     return
   }
 
