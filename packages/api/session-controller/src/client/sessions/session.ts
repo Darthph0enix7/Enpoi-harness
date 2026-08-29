@@ -690,17 +690,21 @@ export class Session implements SessionFace {
    * append path and the reload window so the transcript filter stays correct
    * across restarts.
    */
-  private foldRevertState(event: { readonly type: string; readonly seq: number; readonly data?: unknown; readonly surfaceOp?: unknown }): boolean {
+private foldRevertState(event: { readonly type: string; readonly seq: number; readonly data?: unknown; readonly surfaceOp?: unknown }): boolean {
     if (event.type === 'revert/state') {
-      const data = event.data as { readonly fromSeq?: number | null; readonly cause?: string } | undefined
-      if (data?.fromSeq === null || data?.fromSeq === undefined) {
+      const data = event.data as { readonly fromSeq?: number | null } | undefined
+      // Every revert/state (revert, restore, commit) opens a fresh boundary
+      // window: prior conflicts/outcomes no longer apply (the working-branch
+      // fold cleared them here too).
+      if (this.revertFileConflicts.length > 0) this.revertFileConflicts = []
+      if (Object.keys(this.revertFileOutcomes).length > 0) this.revertFileOutcomes = {}
+      if (data?.fromSeq === null) {
         if (this.revertFromSeq === null && this.revertShadowRanges.length === 0) return false
         this.revertFromSeq = null
-        if (data?.cause === 'restore') this.revertShadowRanges = []
-      } else {
-        if (this.revertFromSeq === data.fromSeq) return false
-        this.revertFromSeq = data.fromSeq
+        return true
       }
+      if (data === undefined || this.revertFromSeq === data.fromSeq) return false
+      this.revertFromSeq = data.fromSeq ?? null
       return true
     }
     if (event.type === 'user/message') {

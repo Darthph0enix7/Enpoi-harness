@@ -555,7 +555,7 @@ export class SessionCommandController {
     if (agent === undefined) {
       reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
     }
-    const waterfall = (this.ctx as unknown as { waterfall?: (name: string, payload: unknown) => Promise<unknown> }).waterfall
+    const waterfall = (this.ctx as unknown as { waterfall?: (name: string, payload: unknown, next: () => unknown) => Promise<unknown> }).waterfall
     if (waterfall === undefined) {
       reject('file-revert-unavailable', 'file-revert plugin is not mounted; cannot resolve conflicts', { sessionId: request.sessionId })
     }
@@ -563,7 +563,7 @@ export class SessionCommandController {
       sessionId: request.sessionId,
       conflictId: request.conflictId,
       resolution: request.resolution,
-    })
+    }, () => ({ accepted: false as const, reason: 'file-revert plugin not mounted' }))
     if (outcome === undefined) {
       reject('file-revert-unavailable', 'file-revert plugin is not mounted; cannot resolve conflicts', { sessionId: request.sessionId })
     }
