@@ -552,18 +552,22 @@ export class PiAiAdapter extends LlmAdapter {
             }
           }
         }
-        // Enriched exhausted error with per-identity reset times and soonest reset
+        // Enriched exhausted error with per-identity reset times, last error,
+        // and soonest reset — so the operator can see WHY each key failed
+        // (e.g. prio-1 got a 500, not a quota error).
         {
           const snap = engine.snapshot(options.provider)
-          const perIdentity = profile.pool.identities.map(ident => {
+          const perIdentity = profile.pool.identities.map((ident) => {
             const remaining = engine.cooldownRemaining(options.provider, ident.id, options.model)
             const until = snap[ident.id]?.[options.model]?.cooldownUntil
+            const lastError = snap[ident.id]?.[options.model]?.lastError
+            const errSuffix = lastError !== undefined ? `, last: ${lastError.slice(0, 120)}` : ''
             if (remaining > 0 && until) {
-              return `${ident.id} reset at ${new Date(until).toISOString()} (in ${Math.ceil(remaining / 1000)}s)`
+              return `${ident.id} reset at ${new Date(until).toISOString()} (in ${Math.ceil(remaining / 1000)}s${errSuffix})`
             } else if (remaining > 0) {
-              return `${ident.id} cooling ${Math.ceil(remaining / 1000)}s`
+              return `${ident.id} cooling ${Math.ceil(remaining / 1000)}s${errSuffix}`
             } else {
-              return `${ident.id} ready`
+              return `${ident.id} ready${errSuffix}`
             }
           }).join(', ')
           let soonestMs: number | undefined
