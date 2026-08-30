@@ -88,7 +88,7 @@ export function primeOrchestrationParams(): void {
       type: 'client-request',
       method: 'settings.describe',
       rpcId: 'prime-orchestration-params',
-      payload: {},
+      payload: { args: {} },
     }),
   })
     .then(async (res) => {
@@ -151,8 +151,10 @@ export function setOrchestrationParam(
       method: 'settings.mutate',
       rpcId: `param-${group}-${key}`,
       payload: {
-        ns: 'enpoi-orchestration',
-        ops: [{ op: 'set', path: ['parameters', group, key], value }],
+        args: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['parameters', group, key], value }],
+        },
       },
     }),
   })
@@ -184,8 +186,10 @@ export function resetOrchestrationGroup(group: keyof OrchestrationParams): void 
       method: 'settings.mutate',
       rpcId: `param-reset-${group}`,
       payload: {
-        ns: 'enpoi-orchestration',
-        ops: [{ op: 'set', path: ['parameters', group], value: PARAM_DEFAULTS[group] }],
+        args: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['parameters', group], value: PARAM_DEFAULTS[group] }],
+        },
       },
     }),
   }).catch(() => {})

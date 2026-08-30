@@ -30,7 +30,7 @@ export function primePersonaAssignments(): void {
       type: 'client-request',
       method: 'settings.describe',
       rpcId: 'prime-personas',
-      payload: {},
+      payload: { args: {} },
     }),
   })
     .then(async (res) => {
@@ -81,8 +81,10 @@ export function setPersonaAssignment(personaId: string, selection: ModelSelectio
       method: 'settings.mutate',
       rpcId: `persona-set-${key}`,
       payload: {
-        ns: 'enpoi-orchestration',
-        ops: [{ op: 'set', path: ['personas', key], value: selection }],
+        args: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['personas', key], value: selection }],
+        },
       },
     }),
   })
@@ -110,8 +112,10 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
       method: 'settings.mutate',
       rpcId: `persona-clear-${key}`,
       payload: {
-        ns: 'enpoi-orchestration',
-        ops: [{ op: 'set', path: ['personas', key], value: null }],
+        args: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['personas', key], value: null }],
+        },
       },
     }),
   })

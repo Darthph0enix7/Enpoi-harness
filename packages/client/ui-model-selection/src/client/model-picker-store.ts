@@ -42,8 +42,10 @@ function safeSetJson(key: string, value: unknown): void {
         method: 'settings.mutate',
         rpcId: `sync-${prefField}`,
         payload: {
-          ns: 'enpoi-orchestration',
-          ops: [{ op: 'set', path: ['uiPreferences', prefField], value }],
+          args: {
+            ns: 'enpoi-orchestration',
+            ops: [{ op: 'set', path: ['uiPreferences', prefField], value }],
+          },
         },
       }),
     }).catch(() => {})
@@ -59,7 +61,7 @@ if (typeof window !== 'undefined') {
       type: 'client-request',
       method: 'settings.describe',
       rpcId: 'prime-picker-prefs',
-      payload: {},
+      payload: { args: {} },
     }),
   })
     .then(async (res) => {

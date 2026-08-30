@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { ModelCatalogFailure, ModelProviderGroup, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
   getPersonaAssignments,
@@ -114,22 +115,53 @@ export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps)
   // sessions, zero delay, zero reloading.
   const assignments = useSyncExternalStore(subscribePersonaAssignments, getPersonaAssignments)
 
-  // Model directory of the ACTIVE session (Oracle: a global tab has no
-  // session of its own — derive from the scope; disabled when none open).
+  // Model directory of the ACTIVE session when one exists; otherwise a
+  // catalog-backed fallback so the GLOBAL assignments stay editable on
+  // sub-sessions and when no session is open (Oracle: a global tab has no
+  // session of its own — the assignments are server config, not session state).
   const face = useMemo(() => {
     const modelDirectories = ctx.get('modelDirectories') as
-      | { directoryFor: (sessionId: string) => { store: SnapshotStore<ModelDirectoryState>; load: () => Promise<unknown> } }
+      | {
+          directoryFor: (sessionId: string) => { store: SnapshotStore<ModelDirectoryState>; load: () => Promise<unknown> }
+          catalog: { store: SnapshotStore<{ value: { default: ModelSelection | null; groups: readonly ModelProviderGroup[]; failures: readonly ModelCatalogFailure[] } | null; status: string; error: string | null }>; load: () => Promise<unknown> }
+        }
       | undefined
     const sessions = ctx.get('sessions') as { subagentAddress?: (sessionId: string) => unknown } | undefined
-    if (modelDirectories === undefined || sessions === undefined || scope.sessionId === '') {
+    if (modelDirectories === undefined) {
       return { available: false, directory: null, load: () => {} }
     }
-    const directory = modelDirectories.directoryFor(scope.sessionId)
-    const available = sessions.subagentAddress?.(scope.sessionId) === undefined
+    // Prefer the live session directory; fall back to the global catalog.
+    if (scope.sessionId !== '' && sessions !== undefined && sessions.subagentAddress?.(scope.sessionId) === undefined) {
+      const directory = modelDirectories.directoryFor(scope.sessionId)
+      return {
+        available: true,
+        directory: directory.store,
+        load: () => { directory.load().catch(() => { /* surfaced on the store */ }) },
+      }
+    }
+    // Catalog-backed fallback: map the global catalog store into the
+    // ModelDirectoryState shape so the picker renders without a session.
+    // Read-only derived store — ModelSelect only subscribes/reads; update/set
+    // are never invoked on a derived face.
+    const catalog = modelDirectories.catalog
+    const fallbackStore = {
+      subscribe: (fn: () => void) => catalog.store.subscribe(fn),
+      getSnapshot: () => {
+        const c = catalog.store.getSnapshot()
+        return {
+          current: c.value?.default ?? null,
+          routable: null,
+          groups: c.value?.groups ?? [],
+          failures: c.value?.failures ?? [],
+          status: c.status === 'ready' ? 'ready' : c.status === 'error' ? 'error' : 'idle',
+          error: c.error,
+        }
+      },
+    } as unknown as SnapshotStore<ModelDirectoryState>
     return {
-      available,
-      directory: directory.store,
-      load: () => { if (available) directory.load().catch(() => { /* surfaced on the store */ }) },
+      available: true,
+      directory: fallbackStore,
+      load: () => { catalog.load().catch(() => { /* surfaced on the store */ }) },
     }
   }, [ctx, scope.sessionId])
 
@@ -172,7 +204,7 @@ export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps)
                           <MicroIcon d="M4 8a4 4 0 118 0A4 4 0 014 8zm1 0h6" size={10} />
                         </button>
                       )}
-                      {face.available && face.directory !== null ? (
+                      {face.directory !== null ? (
                         <ModelSelect
                           locked={false}
                           available={face.available}

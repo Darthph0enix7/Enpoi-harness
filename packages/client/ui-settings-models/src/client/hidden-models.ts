@@ -28,8 +28,10 @@ function persistToServer(map: HiddenMap): void {
       method: 'settings.mutate',
       rpcId: 'sync-hidden-models',
       payload: {
-        ns: 'enpoi-orchestration',
-        ops: [{ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: map }],
+        args: {
+          ns: 'enpoi-orchestration',
+          ops: [{ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: map }],
+        },
       },
     }),
   }).catch(() => {})
@@ -54,7 +56,7 @@ if (typeof window !== 'undefined') {
       type: 'client-request',
       method: 'settings.describe',
       rpcId: 'prime-hidden-models',
-      payload: {},
+      payload: { args: {} },
     }),
   })
     .then(async (res) => {

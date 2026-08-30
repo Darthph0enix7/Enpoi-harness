@@ -36,7 +36,9 @@ export class ModelDirectoryResolver extends Service {
   static inject = ['sessions', 'remote', 'remote.session']
 
   private readonly live: LiveState = { directories: new Map() }
-  private readonly catalog: ModelCatalogDirectory
+  /** The shared Host-generation catalog; global surfaces (e.g. Fleet Routing)
+   * read it directly when no session directory exists. */
+  readonly catalog: ModelCatalogDirectory
 
   /** Localized composer-block copy; this plugin owns the string it raises. */
   private readonly blockReason: () => string
