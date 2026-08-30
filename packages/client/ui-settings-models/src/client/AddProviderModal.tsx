@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { PROVIDER_TEMPLATES, type ProviderTemplate } from './provider-templates.ts'
+import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, KEYLESS_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
@@ -18,10 +18,20 @@ export interface AddProviderModalProps {
   onClose: (created?: boolean) => void
 }
 
+/** Unique route id: base, then base-1, base-2... until free. */
+function uniqueId(base: string, taken: readonly string[]): string {
+  let candidate = base
+  let counter = 1
+  while (taken.includes(candidate)) {
+    candidate = `${base}-${counter++}`
+  }
+  return candidate
+}
+
 export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const { open, taken, protocols, api, t, readOnly, onClose } = props
   const [search, setSearch] = useState('')
-  const [selectedTemplate, setSelectedTemplate] = useState<ProviderTemplate | 'custom' | null>(null)
+  const [selected, setSelected] = useState<ProviderTemplate | 'empty' | null>(null)
 
   // Form fields
   const [providerId, setProviderId] = useState('')
@@ -32,47 +42,41 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim()
+    if (!q) return PROVIDER_TEMPLATES
+    return PROVIDER_TEMPLATES.filter(
+      p => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
+    )
+  }, [search])
+
+  const popular = useMemo(() => {
+    const byId = new Map(PROVIDER_TEMPLATES.map(p => [p.id, p]))
+    return POPULAR_PROVIDERS.map(id => byId.get(id)).filter((p): p is ProviderTemplate => p !== undefined)
+  }, [])
+
   if (!open) return null
 
-  const filteredTemplates = PROVIDER_TEMPLATES.filter((tpl) => {
-    const q = search.toLowerCase().trim()
-    if (!q) return true
-    return tpl.name.toLowerCase().includes(q) || tpl.description.toLowerCase().includes(q) || tpl.id.toLowerCase().includes(q)
-  })
-
-  const handleSelectTemplate = (tpl: ProviderTemplate) => {
-    setSelectedTemplate(tpl)
-    // Find unique ID
-    let candidateId = tpl.id
-    let counter = 1
-    while (taken.includes(candidateId)) {
-      candidateId = `${tpl.id}-${counter++}`
+  const handleSelect = (tpl: ProviderTemplate | 'empty') => {
+    setSelected(tpl)
+    setError(null)
+    if (tpl === 'empty') {
+      setProviderId(uniqueId('provider', taken))
+      setDisplayName('New Provider')
+      setProtocol(protocols.includes('openai-completions') ? 'openai-completions' : protocols[0] || 'openai-completions')
+      setBaseURL('')
+      setApiKey('')
+      return
     }
-    setProviderId(candidateId)
+    setProviderId(uniqueId(tpl.id, taken))
     setDisplayName(tpl.name)
-    setProtocol(tpl.api)
-    setBaseURL(tpl.defaultBaseURL ?? '')
+    setProtocol(protocols.includes(tpl.protocol) ? tpl.protocol : protocols[0] || tpl.protocol)
+    setBaseURL(tpl.baseURL)
     setApiKey('')
-    setError(null)
-  }
-
-  const handleSelectCustom = () => {
-    setSelectedTemplate('custom')
-    let candidateId = 'custom'
-    let counter = 1
-    while (taken.includes(candidateId)) {
-      candidateId = `custom-${counter++}`
-    }
-    setProviderId(candidateId)
-    setDisplayName('Custom Provider')
-    setProtocol(protocols.includes('openai-completions') ? 'openai-completions' : protocols[0] || 'openai-completions')
-    setBaseURL('')
-    setApiKey('')
-    setError(null)
   }
 
   const handleBack = () => {
-    setSelectedTemplate(null)
+    setSelected(null)
     setError(null)
   }
 
@@ -140,11 +144,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     <Modal
       open={open}
       onClose={() => onClose(false)}
-      title={selectedTemplate === null ? t('add') : `Add ${displayName || 'Provider'}`}
+      title={selected === null ? t('add') : `Add ${displayName || 'Provider'}`}
       closeLabel={t('close')}
       className={styles['addProviderDialog'] ?? ''}
       footer={
-        selectedTemplate === null ? (
+        selected === null ? (
           <Button variant="outline" onClick={() => onClose(false)}>
             {t('cancel')}
           </Button>
@@ -160,7 +164,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         )
       }
     >
-      {selectedTemplate === null ? (
+      {selected === null ? (
         <div className={styles['templatePickerContainer']}>
           <div className={styles['templateSearchRow']}>
             <div className={styles['searchWrap']}>
@@ -168,45 +172,33 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               <input
                 className={styles['searchInput']}
                 type="text"
-                placeholder="Search provider templates (OpenAI, Anthropic, Gemini, Ollama...)"
+                placeholder="Search 212 providers (OpenAI, Anthropic, Gemini, Ollama...)"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 autoFocus
               />
             </div>
-            <Button variant="outline" className={styles['customBtn']} onClick={handleSelectCustom}>
-              Custom Provider
+            <Button variant="outline" className={styles['customBtn']} onClick={() => handleSelect('empty')}>
+              Empty Provider
             </Button>
           </div>
 
           <div className={styles['templateGrid']}>
-            {filteredTemplates.map(tpl => (
-              <div
-                key={tpl.id}
-                className={styles['templateCard']}
-                role="button"
-                tabIndex={0}
-                onClick={() => handleSelectTemplate(tpl)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') handleSelectTemplate(tpl)
-                }}
-              >
-                <div className={styles['templateCardHead']}>
-                  <div className={styles['templateIcon']}>
-                    <IconServer size={18} />
-                  </div>
-                  <div className={styles['templateInfo']}>
-                    <span className={styles['templateName']}>{tpl.name}</span>
-                    <span className={styles['templateCategory']}>{tpl.category}</span>
-                  </div>
-                </div>
-                <p className={styles['templateDesc']}>{tpl.description}</p>
-                <div className={styles['templateFoot']}>
-                  <span className={styles['templateProtocol']}>{tpl.api}</span>
-                  <span className={styles['templateAddAction']}>Add +</span>
-                </div>
-              </div>
+            {search.trim() === '' && (
+              <>
+                <div className={styles['templateGroupLabel']}>Popular</div>
+                {popular.map(tpl => (
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} />
+                ))}
+                <div className={styles['templateGroupLabel']}>All Providers</div>
+              </>
+            )}
+            {filtered.map(tpl => (
+              <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} />
             ))}
+            {filtered.length === 0 && (
+              <div className={styles['emptySidebar']}>No providers match "{search}".</div>
+            )}
           </div>
         </div>
       ) : (
@@ -273,13 +265,57 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               className={styles['input']}
               type="password"
               value={apiKey}
-              placeholder="Enter API Key (optional for local/proxy endpoints)"
+              placeholder={selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
               onChange={e => setApiKey(e.target.value)}
               disabled={busy || readOnly}
             />
           </div>
+
+          {selected !== 'empty' && (
+            <div className={styles['presetMeta']}>
+              <span className={styles['presetMetaItem']}>
+                Env: {selected.env.length > 0 ? selected.env.join(', ') : 'none'}
+              </span>
+              {selected.doc && (
+                <a className={styles['presetMetaItem']} href={selected.doc} target="_blank" rel="noreferrer">
+                  Docs ↗
+                </a>
+              )}
+            </div>
+          )}
         </div>
       )}
     </Modal>
+  )
+}
+
+function TemplateCard({ tpl, onSelect }: { tpl: ProviderTemplate; onSelect: (t: ProviderTemplate) => void }): ReactNode {
+  return (
+    <div
+      className={styles['templateCard']}
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect(tpl)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onSelect(tpl)
+      }}
+    >
+      <div className={styles['templateCardHead']}>
+        <div className={styles['templateIcon']}>
+          <IconServer size={18} />
+        </div>
+        <div className={styles['templateInfo']}>
+          <span className={styles['templateName']}>{tpl.name}</span>
+          <span className={styles['templateCategory']}>{tpl.id}</span>
+        </div>
+      </div>
+      <div className={styles['templateFoot']}>
+        <span className={styles['templateProtocol']}>{tpl.protocol}</span>
+        <span className={styles['templateEnv']}>
+          {KEYLESS_PROVIDERS.has(tpl.id) ? 'no key' : tpl.env[0] ?? 'no key'}
+        </span>
+        <span className={styles['templateAddAction']}>Add +</span>
+      </div>
+    </div>
   )
 }

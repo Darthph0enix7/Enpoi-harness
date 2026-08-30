@@ -45,7 +45,13 @@ interface ModelItem {
   files?: boolean
 }
 
-/** Detect capabilities based on model ID, name, modalities, or provider metadata. */
+/** Detect capabilities based on model ID, name, modalities, or provider metadata.
+ *
+ * Data-first: when the model carries structured modality data (`input` /
+ * `architecture.input_modalities`), it is AUTHORITATIVE — id heuristics are
+ * never OR-ed on top (that produced false vision/audio/files claims). Id
+ * heuristics run only when no structured data exists (custom/alias models).
+ */
 function detectCapabilities(model: ModelItem) {
   const id = (model.id || '').toLowerCase()
   const inputs: string[] = Array.isArray(model.input)
@@ -53,8 +59,9 @@ function detectCapabilities(model: ModelItem) {
     : Array.isArray(model.architecture?.input_modalities)
       ? model.architecture.input_modalities
       : []
+  const hasStructured = inputs.length > 0
 
-  // 1. REASONING / THINKING
+  // 1. REASONING / THINKING — structured flags win; heuristics only when absent.
   const hasReasoning = Boolean(
     model.reasoningEfforts ||
     (typeof model.reasoning === 'boolean' && model.reasoning) ||
@@ -62,114 +69,121 @@ function detectCapabilities(model: ModelItem) {
     model.supported_parameters?.includes('reasoning') ||
     model.supported_parameters?.includes('reasoning_effort') ||
     model.supported_parameters?.includes('include_reasoning') ||
-    id.includes('think') ||
-    id.includes('reason') ||
-    id.includes('luna') ||
-    id.includes('sol') ||
-    id.includes('terra') ||
-    id.includes('deepseek-v4') ||
-    id.includes('deepseek-r') ||
-    id.includes('r1') ||
-    id.includes('o1') ||
-    id.includes('o3') ||
-    id.includes('o4') ||
-    id.includes('flash-tiered') ||
-    id.includes('pro-agent') ||
-    id.includes('pro-high') ||
-    id.includes('k3') ||
-    id.includes('m3') ||
-    id.includes('glm-5') ||
-    id.includes('fable-5') ||
-    id.includes('opus-5') ||
-    id.includes('opus-4-8') ||
-    id.includes('opus-4-7') ||
-    id.includes('opus-4-6'),
+    (!hasStructured && (
+      id.includes('think') ||
+      id.includes('reason') ||
+      id.includes('luna') ||
+      id.includes('sol') ||
+      id.includes('terra') ||
+      id.includes('deepseek-v4') ||
+      id.includes('deepseek-r') ||
+      id.includes('r1') ||
+      id.includes('o1') ||
+      id.includes('o3') ||
+      id.includes('o4') ||
+      id.includes('flash-tiered') ||
+      id.includes('pro-agent') ||
+      id.includes('pro-high') ||
+      id.includes('k3') ||
+      id.includes('m3') ||
+      id.includes('glm-5') ||
+      id.includes('fable-5') ||
+      id.includes('opus-5') ||
+      id.includes('opus-4-8') ||
+      id.includes('opus-4-7') ||
+      id.includes('opus-4-6')
+    )),
   )
 
   // 2. VISION / IMAGE INPUT
   const hasVision = Boolean(
-    model.vision ?? (
-      inputs.includes('image') ||
-      inputs.includes('vision') ||
-      id.includes('vision') ||
-      id.includes('vl') ||
-      id.includes('minimax') ||
-      id.includes('gemini') ||
-      id.includes('claude') ||
-      id.includes('gpt-4') ||
-      id.includes('gpt-5') ||
-      id.includes('luna') ||
-      id.includes('k3') ||
-      id.includes('qwen-vl') ||
-      id.includes('qwen2.5-vl') ||
-      id.includes('qwen3-vl') ||
-      id.includes('qwen3.8-vl') ||
-      id.includes('pixtral') ||
-      id.includes('grok-2') ||
-      id.includes('internvl') ||
-      id.includes('llava') ||
-      id.includes('glm-4v') ||
-      id.includes('glm-5v') ||
-      id.includes('mimo')
-    ),
+    model.vision ??
+    (hasStructured
+      ? inputs.includes('image') || inputs.includes('vision')
+      : (
+        id.includes('vision') ||
+        id.includes('vl') ||
+        id.includes('minimax') ||
+        id.includes('gemini') ||
+        id.includes('claude') ||
+        id.includes('gpt-4') ||
+        id.includes('gpt-5') ||
+        id.includes('luna') ||
+        id.includes('k3') ||
+        id.includes('qwen-vl') ||
+        id.includes('qwen2.5-vl') ||
+        id.includes('qwen3-vl') ||
+        id.includes('qwen3.8-vl') ||
+        id.includes('pixtral') ||
+        id.includes('grok-2') ||
+        id.includes('internvl') ||
+        id.includes('llava') ||
+        id.includes('glm-4v') ||
+        id.includes('glm-5v') ||
+        id.includes('mimo')
+      )),
   )
 
   // 3. AUDIO INPUT
   const hasAudio = Boolean(
-    model.audio ?? (
-      inputs.includes('audio') ||
-      inputs.includes('voice') ||
-      id.includes('audio') ||
-      id.includes('voice') ||
-      id.includes('whisper') ||
-      id.includes('gemini-3.7') ||
-      id.includes('gemini-3.6') ||
-      id.includes('gemini-2.5') ||
-      id.includes('gemini-1.5') ||
-      id.includes('minimax-m3') ||
-      id.includes('minimax-m2.7') ||
-      id.includes('minimax-m2.5') ||
-      id.includes('gpt-4o-audio') ||
-      id.includes('gpt-4o-realtime')
-    ),
+    model.audio ??
+    (hasStructured
+      ? inputs.includes('audio') || inputs.includes('voice')
+      : (
+        id.includes('audio') ||
+        id.includes('voice') ||
+        id.includes('whisper') ||
+        id.includes('gemini-3.7') ||
+        id.includes('gemini-3.6') ||
+        id.includes('gemini-2.5') ||
+        id.includes('gemini-1.5') ||
+        id.includes('minimax-m3') ||
+        id.includes('minimax-m2.7') ||
+        id.includes('minimax-m2.5') ||
+        id.includes('gpt-4o-audio') ||
+        id.includes('gpt-4o-realtime')
+      )),
   )
 
   // 4. VIDEO INPUT
   const hasVideo = Boolean(
-    model.video ?? (
-      inputs.includes('video') ||
-      id.includes('gemini-3.7') ||
-      id.includes('gemini-3.6') ||
-      id.includes('gemini-3.1') ||
-      id.includes('gemini-2.5') ||
-      id.includes('gemini-1.5') ||
-      id.includes('minimax-m3') ||
-      id.includes('minimax-m2.7') ||
-      id.includes('qwen-vl') ||
-      id.includes('qwen2.5-vl')
-    ),
+    model.video ??
+    (hasStructured
+      ? inputs.includes('video')
+      : (
+        id.includes('gemini-3.7') ||
+        id.includes('gemini-3.6') ||
+        id.includes('gemini-3.1') ||
+        id.includes('gemini-2.5') ||
+        id.includes('gemini-1.5') ||
+        id.includes('minimax-m3') ||
+        id.includes('minimax-m2.7') ||
+        id.includes('qwen-vl') ||
+        id.includes('qwen2.5-vl')
+      )),
   )
 
   // 5. TOOL CALLING
   const hasTools = Boolean(
-    model.tools ?? (
-      model.supported_parameters?.includes('tools') ||
-      (!id.includes('embed') && !id.includes('reward') && !id.includes('rerank') && !id.includes('flux') && !id.includes('dall-e') && !id.includes('text-01'))
-    ),
+    model.tools ??
+    (model.supported_parameters?.includes('tools') ||
+      (!id.includes('embed') && !id.includes('reward') && !id.includes('rerank') && !id.includes('flux') && !id.includes('dall-e') && !id.includes('text-01'))),
   )
 
   // 6. DOCUMENTS & FILES (Genuine native document parsing, NOT just general text context)
   const hasFiles = Boolean(
-    model.files ?? (
-      inputs.includes('file') ||
-      id.includes('claude') ||
-      id.includes('gemini') ||
-      id.includes('gpt-4') ||
-      id.includes('gpt-5') ||
-      id.includes('luna') ||
-      id.includes('pdf') ||
-      id.includes('document')
-    ),
+    model.files ??
+    (hasStructured
+      ? inputs.includes('file') || inputs.includes('pdf') || inputs.includes('document')
+      : (
+        id.includes('claude') ||
+        id.includes('gemini') ||
+        id.includes('gpt-4') ||
+        id.includes('gpt-5') ||
+        id.includes('luna') ||
+        id.includes('pdf') ||
+        id.includes('document')
+      )),
   )
 
   return { hasReasoning, hasVision, hasAudio, hasVideo, hasTools, hasFiles }

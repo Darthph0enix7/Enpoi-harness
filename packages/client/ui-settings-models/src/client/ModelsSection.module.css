@@ -195,10 +195,19 @@
 .sidebarFooter {
   padding: 6px 8px;
   border-top: 1px solid var(--dsw-alias-border-l2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebarFooterRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .addProviderBtn {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -207,6 +216,25 @@
   border-radius: 7px;
   font-size: 12px;
   font-weight: 500;
+}
+
+.browseCatalogBtn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.addError {
+  font-size: 10px;
+  color: #ef4444;
+  padding: 0 4px;
 }
 
 /* ========================================================================= */
@@ -930,9 +958,49 @@
   font-family: var(--ds-font-family-code, monospace);
 }
 
+.templateEnv {
+  color: var(--dsw-alias-label-caption);
+  font-family: var(--ds-font-family-code, monospace);
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.templateGroupLabel {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 2px 0;
+}
+
 .templateAddAction {
   color: var(--dsw-alias-brand-primary);
   font-weight: 600;
+}
+
+.presetMeta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.presetMetaItem {
+  font-family: var(--ds-font-family-code, monospace);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.presetMetaItem a {
+  color: var(--dsw-alias-brand-primary);
 }
 
 .addForm {

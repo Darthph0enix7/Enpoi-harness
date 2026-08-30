@@ -1,147 +1,50 @@
 /**
- * Provider catalog templates for the Add Provider workflow.
+ * Provider catalog for the Add Provider workflow.
+ *
+ * Generated from the models.dev mirror (~/.cache/opencode/models.json) by
+ * /tmp/opencode/gen-provider-presets.mjs — 212 presets, each carrying the
+ * provider's canonical settings (env vars, wire protocol, base URL, docs).
+ * Regenerate with: node /tmp/opencode/gen-provider-presets.mjs
  */
+
+import presets from './provider-presets.ts'
 
 export interface ProviderTemplate {
   id: string
   name: string
-  description: string
-  category: 'popular' | 'fast' | 'open-source' | 'custom'
-  api: 'openai-completions' | 'anthropic-messages'
-  defaultBaseURL?: string
-  defaultKeyEnv?: string
-  helpUrl?: string
-  icon?: string
+  /** Env vars the provider needs (first = API key ref). */
+  env: string[]
+  /** DSH wire protocol: openai-completions | openai-responses | anthropic-messages. */
+  protocol: string
+  /** Base URL; may contain {env:VAR} placeholders substituted at runtime. */
+  baseURL: string
+  /** Docs URL for the provider. */
+  doc?: string
 }
 
-export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
-  {
-    id: 'openai',
-    name: 'OpenAI',
-    description: 'GPT-4o, o1, o3, o4 and GPT-4.5 official endpoints',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.openai.com/v1',
-    defaultKeyEnv: 'OPENAI_API_KEY',
-    helpUrl: 'https://platform.openai.com/api-keys',
-  },
-  {
-    id: 'anthropic',
-    name: 'Anthropic',
-    description: 'Claude 3.5 Sonnet, Claude 3.7 Sonnet, Claude 3.5 Haiku, Opus',
-    category: 'popular',
-    api: 'anthropic-messages',
-    defaultBaseURL: 'https://api.anthropic.com/v1',
-    defaultKeyEnv: 'ANTHROPIC_API_KEY',
-    helpUrl: 'https://console.anthropic.com/settings/keys',
-  },
-  {
-    id: 'google',
-    name: 'Google Gemini',
-    description: 'Gemini 2.5 Pro, 2.5 Flash, 3.1 Pro, 3.7 Flash Thinking',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-    defaultKeyEnv: 'GEMINI_API_KEY',
-    helpUrl: 'https://aistudio.google.com/app/apikey',
-  },
-  {
-    id: 'openrouter',
-    name: 'OpenRouter',
-    description: 'Universal gateway to over 400+ frontier and open-source models',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://openrouter.ai/api/v1',
-    defaultKeyEnv: 'OPENROUTER_API_KEY',
-    helpUrl: 'https://openrouter.ai/keys',
-  },
-  {
-    id: 'deepseek',
-    name: 'DeepSeek Official',
-    description: 'DeepSeek-V3, DeepSeek-R1 official fast API',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.deepseek.com/v1',
-    defaultKeyEnv: 'DEEPSEEK_API_KEY',
-    helpUrl: 'https://platform.deepseek.com/api_keys',
-  },
-  {
-    id: 'minimax',
-    name: 'MiniMax Coding Plan',
-    description: 'MiniMax M3, M2.7 with high-speed coding optimization',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.minimaxi.chat/v1',
-    defaultKeyEnv: 'MINIMAX_API_KEY',
-    helpUrl: 'https://platform.minimaxi.com/',
-  },
-  {
-    id: 'huggingface',
-    name: 'Hugging Face',
-    description: 'Inference Providers & Serverless Endpoints router',
-    category: 'open-source',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://router.huggingface.co/v1',
-    defaultKeyEnv: 'HF_TOKEN',
-    helpUrl: 'https://huggingface.co/settings/tokens',
-  },
-  {
-    id: 'ollama',
-    name: 'Ollama (Local)',
-    description: 'Run open LLMs locally (Llama 3.3, Qwen 2.5, DeepSeek R1)',
-    category: 'open-source',
-    api: 'openai-completions',
-    defaultBaseURL: 'http://127.0.0.1:11434/v1',
-    defaultKeyEnv: 'OLLAMA_API_KEY',
-    helpUrl: 'https://ollama.com',
-  },
-  {
-    id: 'groq',
-    name: 'Groq',
-    description: 'Ultra-low latency LPU inference for Llama 3.3 and DeepSeek',
-    category: 'fast',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.groq.com/openai/v1',
-    defaultKeyEnv: 'GROQ_API_KEY',
-    helpUrl: 'https://console.groq.com/keys',
-  },
-  {
-    id: 'cerebras',
-    name: 'Cerebras',
-    description: 'Wafer-scale engine with 2000+ tokens/sec throughput',
-    category: 'fast',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.cerebras.ai/v1',
-    defaultKeyEnv: 'CEREBRAS_API_KEY',
-    helpUrl: 'https://cloud.cerebras.ai',
-  },
-  {
-    id: 'mistral',
-    name: 'Mistral AI',
-    description: 'Mistral Large, Codestral, Pixtral, Devral',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.mistral.ai/v1',
-    defaultKeyEnv: 'MISTRAL_API_KEY',
-    helpUrl: 'https://console.mistral.ai/api-keys',
-  },
-  {
-    id: 'xai',
-    name: 'xAI (Grok)',
-    description: 'Grok-2, Grok-2 Vision, Grok Beta endpoints',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://api.x.ai/v1',
-    defaultKeyEnv: 'XAI_API_KEY',
-    helpUrl: 'https://console.x.ai',
-  },
-  {
-    id: 'opencode-zen',
-    name: 'OpenCode Zen Direct',
-    description: 'OpenCode Zen unified model gateway',
-    category: 'popular',
-    api: 'openai-completions',
-    defaultBaseURL: 'https://opencode.ai/zen/v1',
-    defaultKeyEnv: 'OPENCODE_ZEN_KEY',
-  },
+export const PROVIDER_TEMPLATES: ProviderTemplate[] = presets as unknown as ProviderTemplate[]
+
+/** OpenCode's popular-provider ordering (use-providers.ts popularProviders). */
+export const POPULAR_PROVIDERS = [
+  'opencode',
+  'opencode-go',
+  'anthropic',
+  'github-copilot',
+  'openai',
+  'google',
+  'openrouter',
+  'vercel',
 ]
+
+/** Providers that need no API key (local / free endpoints). */
+export const KEYLESS_PROVIDERS = new Set(['ollama', 'lmstudio', 'llama-cpp', 'vllm', 'localai'])
+
+/** Resolve a preset by id. */
+export function providerPreset(id: string): ProviderTemplate | undefined {
+  return PROVIDER_TEMPLATES.find(p => p.id === id)
+}
+
+/** Default API-key env ref for a provider id (deriveKeyRef convention). */
+export function deriveKeyRef(provider: string): string {
+  return `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+}
