@@ -309,6 +309,60 @@ function resolveSubagentPersonaModel(ctx: Context, description?: string, prompt?
   return undefined
 }
 
+/**
+ * Role-specific personas for delegated subagents. When the delegating agent
+ * names a specialist role in the description or prompt (librarian, fixer,
+ * explorer, designer, oracle), the child receives this persona instead of
+ * inheriting the parent's — so a librarian knows it is a librarian, not the
+ * Master Orchestrator. Compact by design: the delegation prompt carries the
+ * task detail; the persona only fixes identity, scope, and reporting style.
+ */
+const ROLE_PERSONAS: Record<string, string> = {
+  librarian:
+    'You are the Librarian — a research specialist delegated by the orchestrator. '
+    + 'You gather, verify, and synthesize information from external sources (web, docs, APIs). '
+    + 'You report findings clearly, cite your sources, and do not implement code or edit files.',
+  fixer:
+    'You are the Fixer — a focused implementation specialist delegated by the orchestrator. '
+    + 'You make precise, bounded code changes for a clearly-scoped task. '
+    + 'You verify your work (build/test where applicable) and report exactly what changed.',
+  explorer:
+    'You are the Explorer — a codebase mapper delegated by the orchestrator. '
+    + 'You search, read, and map unfamiliar code to answer questions about structure and behavior. '
+    + 'You report findings with concrete file paths and line references; you do not implement.',
+  designer:
+    'You are the Designer — a UI/UX specialist delegated by the orchestrator. '
+    + 'You craft interfaces, styling, and design systems with visual polish and responsive care. '
+    + 'You implement frontend changes and report what you changed and why.',
+  oracle:
+    'You are the Oracle — a senior reviewer delegated by the orchestrator. '
+    + 'You evaluate architecture, concepts, trade-offs, and code independently and deeply. '
+    + 'You are an advisor, not a dictator: say plainly when something is flawed. '
+    + 'You never write or edit files; you summarize, explain, and cite.',
+}
+
+/** Detect the specialist role named in a delegation description or prompt. */
+function detectSubagentRole(description?: string, prompt?: string): string | undefined {
+  const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
+  // 1. Explicit role name wins.
+  for (const role of Object.keys(ROLE_PERSONAS)) {
+    const re = new RegExp(`\\b${role}\\b`, 'i')
+    if (re.test(text)) return role
+  }
+  // 2. Task-type heuristics as a fallback — the delegating model often strips
+  // the role name from the prompt, so infer the specialist from the work.
+  const signals: Array<[string, RegExp]> = [
+    ['librarian', /\b(research|investigate|gather|sources?|api docs?|documentation|web search|external)\b/],
+    ['explorer', /\b(map|explore|codebase|structure|locate|find where|understand the code)\b/],
+    ['designer', /\b(ui|ux|design|style|interface|responsive|visual|layout)\b/],
+    ['fixer', /\b(implement|fix|add|patch|refactor|write code|bug|change the code)\b/],
+  ]
+  for (const [role, re] of signals) {
+    if (re.test(text)) return role
+  }
+  return undefined
+}
+
 /** Resolve the model's optional scheduling request into one execution route. */
 
 function resolveDelegationRun(
@@ -532,12 +586,19 @@ export function apply(ctx: Context, config: Config): void {
           }
           exec.signal.throwIfAborted()
           const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
+          // Role-specific persona: an explicit config persona wins; otherwise a
+          // specialist role named in the delegation (librarian/fixer/explorer/
+          // designer/oracle) gives the child its own identity instead of
+          // inheriting the parent's (e.g. the Master Orchestrator).
+          const rolePersona = config.persona !== undefined
+            ? config.persona
+            : ROLE_PERSONAS[detectSubagentRole(args.description, args.prompt) ?? '']
           const request = {
             label: args.description,
             prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
             parent,
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
-            ...config.persona !== undefined ? { persona: config.persona } : {},
+            ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
             ...maxDepth !== undefined ? { maxDepth } : {},
           }
