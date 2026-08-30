@@ -214,12 +214,19 @@ async function settleForegroundRun(run: SubagentRun): Promise<ForegroundToolResu
         // success, but the preserved partial answer still reaches the parent.
         throw new Error(withDiagnosticAndPartialText(error, result))
       }
+      const report = result.output.filter(
+        (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
+          block.type === 'text' || block.type === 'image',
+      )
       return {
         kind: 'foreground',
         runId: run.id,
-        // Content blocks already cross durable JSON boundaries elsewhere;
-        // the registry performs the authoritative lossless snapshot here.
-        output: result.output as unknown as JsonValue[],
+        // Only the child's final REPORT reaches the parent — reasoning and
+        // tool-call blocks (the child's thinking and its intermediate
+        // actions) are stripped so the parent receives the targeted result,
+        // not the exploration that produced it. Text and image blocks pass
+        // through; the registry performs the authoritative lossless snapshot.
+        output: report as unknown as JsonValue[],
       }
     }),
   ])
