@@ -118,6 +118,10 @@ export interface ModelCatalogModel {
   readonly id: string
   readonly name: string
   readonly description?: string
+  /** Provider-owned input context capacity in tokens, when known. */
+  readonly contextWindow?: number
+  /** Adapter-configured per-request output cap in tokens, when known. */
+  readonly maxTokens?: number
   readonly reasoning?: ModelReasoning
 }
 

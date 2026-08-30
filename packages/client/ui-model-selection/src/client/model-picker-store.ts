@@ -166,6 +166,7 @@ export interface ModelContextTarget {
   id: string
   contextWindow?: number | undefined
   context?: { contextWindow?: number | undefined } | undefined
+  maxTokens?: number | undefined
 }
 
 /** Resolve context window size in tokens, checking model properties and canonical fallbacks. */
@@ -187,6 +188,14 @@ export function resolveContextTokens(model: ModelContextTarget): number {
   }
   if (id.includes('qwen') || id.includes('deepseek') || id.includes('gpt-4') || id.includes('mistral') || id.includes('llama')) {
     return 128_000
+  }
+  return 0
+}
+
+/** Resolve the per-request output cap in tokens (0 when unknown). */
+export function resolveOutputTokens(model: ModelContextTarget): number {
+  if (typeof model.maxTokens === 'number' && model.maxTokens > 0) {
+    return model.maxTokens
   }
   return 0
 }

@@ -26,7 +26,7 @@ import type { ModelSelectInjected } from './slots.ts'
 import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
-  toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
+  toggleGroupCollapsed, formatCompactContext, resolveContextTokens, resolveOutputTokens,
   type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
@@ -46,6 +46,10 @@ function readHiddenMap(): Record<string, string[]> {
 /** Format the model context window compactly (guaranteed display). */
 function resolveModelContext(model: ModelContextTarget): string {
   const tokens = resolveContextTokens(model)
+  const output = resolveOutputTokens(model)
+  if (tokens > 0 && output > 0) {
+    return `${formatCompactContext(tokens)} in • ${formatCompactContext(output)} out`
+  }
   return formatCompactContext(tokens)
 }
 
