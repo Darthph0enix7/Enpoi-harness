@@ -593,13 +593,26 @@ export function apply(ctx: Context, config: Config): void {
           const rolePersona = config.persona !== undefined
             ? config.persona
             : ROLE_PERSONAS[detectSubagentRole(args.description, args.prompt) ?? '']
+          // The `report` tool is ALWAYS denied for subagent-tool children: the
+          // tool's own result path (foreground) or the settlement notice
+          // (continuable background) already delivers the child's final output
+          // to the parent exactly once. If the child could also call `report`,
+          // the parent would receive the same content twice — once via the
+          // report relay, once via the settlement notice's closing message.
+          // Denying it in the toolFilter also prevents `tool-subagent-report`
+          // from installing the tool and its prompt guidance at all.
+          const baseFilter = config.toolFilter
+          const toolFilter = {
+            ...baseFilter,
+            deny: [...(baseFilter?.deny ?? []), 'report'],
+          }
           const request = {
             label: args.description,
             prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
             parent,
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
-            ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
+            ...toolFilter.deny.length > 0 ? { toolFilter } : {},
             ...maxDepth !== undefined ? { maxDepth } : {},
           }
 
