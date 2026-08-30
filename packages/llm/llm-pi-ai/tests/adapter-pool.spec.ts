@@ -126,7 +126,7 @@ describe('PiAiAdapter credential pools', () => {
     const adapter = pooledAdapter(POOLED_PROVIDERS(server.url), engine, {})
 
     await expect(collect(adapter, server.url)).rejects.toMatchObject({
-      code: 'PROVIDER_POOL_EXHAUSTED',
+      code: 'MISSING_CREDENTIAL',
     })
     expect(server.requests).toHaveLength(0)
   })

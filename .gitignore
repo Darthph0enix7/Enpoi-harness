@@ -40,3 +40,5 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 .slim/
+.slim/tier_state/
+.slim/

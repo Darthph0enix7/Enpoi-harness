@@ -103,6 +103,13 @@ export interface PiAiAdapterOptions {
   /** Diagnostic sink for pool decisions (skips, rotations). */
   log?: (message: string) => void
   /**
+   * Pool attempt wall-clock budget in milliseconds; defaults to 30_000.
+   * Tests inject a smaller budget to exercise deadline paths.
+   */
+  poolDeadlineMs?: number
+  /** Injectable clock for pool deadline and snapshot calculations; defaults to Date.now. */
+  now?: () => number
+  /**
    * How every collection this adapter builds resolves auth the request-level
    * `apiKey` override does not cover. Required rather than optional: a
    * collection built without them gets pi-ai's in-memory default store, which
@@ -426,25 +433,40 @@ export class PiAiAdapter extends LlmAdapter {
           throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no enabled identities`, 'MISSING_CREDENTIAL')
         }
         const identityById = new Map(profile.pool.identities.map(identity => [identity.id, identity]))
-        const maxAttempts = Math.min(order.length, 5)
-        const deadline = Date.now() + 30_000
+        // Fix maxAttempts counting: pre-resolve credentials to count only resolvable identities.
+        const now = this.config.now ?? Date.now
+        const resolvedKeys = new Map<string, string>()
+        for (const candidate of order) {
+          const identity = identityById.get(candidate.id)
+          if (identity === undefined) continue
+          const key = await resolveCredential(identity.credentialRef)
+          if (key !== undefined && key.length > 0) {
+            resolvedKeys.set(candidate.id, key)
+          } else {
+            this.config.log?.(
+              `llm-pi-ai: provider "${options.provider}" pool identity "${identity.id}"`
+              + ` names ${identity.credentialRef}, which resolves to nothing; skipping it`,
+            )
+          }
+        }
+        const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id))
+        if (resolvableOrder.length === 0) {
+          throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no resolvable identities`, 'MISSING_CREDENTIAL')
+        }
+        const maxAttempts = Math.min(resolvableOrder.length, 5)
+        const deadlineMs = this.config.poolDeadlineMs ?? 30_000
+        const deadline = now() + deadlineMs
         let attempts = 0
         let lastFailure = 'no identity was attempted'
-        for (const candidate of order) {
-          if (attempts >= maxAttempts || Date.now() > deadline) break
+        for (const candidate of resolvableOrder) {
+          if (attempts >= maxAttempts || now() > deadline) break
           if (upstream.aborted) {
             throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
           }
           const identity = identityById.get(candidate.id)
           if (identity === undefined) continue
-          const key = await resolveCredential(identity.credentialRef)
-          if (key === undefined || key.length === 0) {
-            this.config.log?.(
-              `llm-pi-ai: provider "${options.provider}" pool identity "${identity.id}"`
-              + ` names ${identity.credentialRef}, which resolves to nothing; skipping it`,
-            )
-            continue
-          }
+          const key = resolvedKeys.get(candidate.id)
+          if (key === undefined) continue
           attempts += 1
           // Per-attempt teardown: a rotated-away request must not keep its
           // upstream connection open alongside the next attempt's.
@@ -473,6 +495,7 @@ export class PiAiAdapter extends LlmAdapter {
                 committed = true
                 for (const held of buffered) yield held
                 buffered.length = 0
+                engine.recordSuccess(options.provider, identity.id, options.model)
               }
               if (chunk.type === 'finish') {
                 if (chunk.reason.kind === 'error') {
@@ -485,8 +508,6 @@ export class PiAiAdapter extends LlmAdapter {
                     classifyFailure(chunk.reason.failure.message),
                     chunk.reason.failure.message,
                   )
-                } else {
-                  engine.recordSuccess(options.provider, identity.id, options.model)
                 }
               }
               yield chunk
@@ -518,22 +539,62 @@ export class PiAiAdapter extends LlmAdapter {
             + `${attempts < maxAttempts ? ' rotating' : ' no attempts left'}`,
           )
           if (failureClass === 'CAPACITY' && attempts < maxAttempts) {
-            const othersHealthy = engine
-              .orderFor(options.provider, profile.pool.identities, options.model)
-              .some(candidate2 => candidate2.id !== identity.id
-                && engine.cooldownRemaining(options.provider, candidate2.id, options.model) === 0)
-            // Progressive same-identity backoff only helps when rotation
-            // cannot; otherwise move on immediately.
+            const peekOrder = engine.orderFor(options.provider, profile.pool.identities, options.model, profile.pool.strategy, true)
+            const othersHealthy = peekOrder.some(candidate2 => candidate2.id !== identity.id
+              && engine.cooldownRemaining(options.provider, candidate2.id, options.model) === 0)
             if (!othersHealthy) {
-              await engine.backoff(CAPACITY_BACKOFF_TIERS_MS[0] ?? 5000, upstream)
+              const snap = engine.snapshot(options.provider)
+              const state = snap[identity.id]?.[options.model]
+              const consecutive = state?.consecutiveFailures ?? 1
+              const tierIdx = Math.min(Math.max(0, consecutive - 1), CAPACITY_BACKOFF_TIERS_MS.length - 1)
+              const backoffMs = CAPACITY_BACKOFF_TIERS_MS[tierIdx] ?? CAPACITY_BACKOFF_TIERS_MS[0] ?? 5000
+              await engine.backoff(backoffMs, upstream)
             }
           }
         }
-        throw new LlmError(
-          `llm-pi-ai: provider "${options.provider}" exhausted its credential pool`
-          + ` after ${attempts} attempt(s): ${lastFailure}`,
-          'PROVIDER_POOL_EXHAUSTED',
-        )
+        // Enriched exhausted error with per-identity reset times and soonest reset
+        {
+          const snap = engine.snapshot(options.provider)
+          const perIdentity = profile.pool.identities.map(ident => {
+            const remaining = engine.cooldownRemaining(options.provider, ident.id, options.model)
+            const until = snap[ident.id]?.[options.model]?.cooldownUntil
+            if (remaining > 0 && until) {
+              return `${ident.id} reset at ${new Date(until).toISOString()} (in ${Math.ceil(remaining / 1000)}s)`
+            } else if (remaining > 0) {
+              return `${ident.id} cooling ${Math.ceil(remaining / 1000)}s`
+            } else {
+              return `${ident.id} ready`
+            }
+          }).join(', ')
+          let soonestMs: number | undefined
+          for (const ident of profile.pool.identities) {
+            const rem = engine.cooldownRemaining(options.provider, ident.id, options.model)
+            if (rem > 0 && (soonestMs === undefined || rem < soonestMs)) soonestMs = rem
+          }
+          const sortedByPriority = [...profile.pool.identities]
+            .filter(i => i.enabled !== false)
+            .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
+          const prio1 = sortedByPriority[0]
+          const prio1Until = prio1 ? snap[prio1.id]?.[options.model]?.cooldownUntil : undefined
+          const prio1Remaining = prio1 ? engine.cooldownRemaining(options.provider, prio1.id, options.model) : 0
+          let enriched = `llm-pi-ai: provider "${options.provider}" exhausted its credential pool after ${attempts} attempt(s): ${lastFailure}`
+          if (soonestMs !== undefined) {
+            enriched += ` (soonest reset in ${Math.ceil(soonestMs / 1000)}s`
+            if (prio1) {
+              if (prio1Until) {
+                enriched += `, prio-1 ${prio1.id} reset at ${new Date(prio1Until).toISOString()}`
+              } else if (prio1Remaining > 0) {
+                enriched += `, prio-1 ${prio1.id} reset in ${Math.ceil(prio1Remaining / 1000)}s`
+              } else {
+                enriched += `, prio-1 ${prio1.id} ready`
+              }
+            }
+            enriched += `; ${perIdentity})`
+          } else {
+            enriched += ` (${perIdentity})`
+          }
+          throw new LlmError(enriched, 'PROVIDER_POOL_EXHAUSTED')
+        }
       }
 
       const events = snapshot.models.streamSimple(model, context, {

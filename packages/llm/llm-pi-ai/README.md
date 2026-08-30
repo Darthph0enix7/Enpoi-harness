@@ -218,6 +218,7 @@ These limits define where the adapter stops and future work begins. They are cur
 - **`GenerateOptions.stop` is unsupported** — pi-ai's common stream options cannot guarantee stop-sequence behavior across providers.
 - **In-history `system` messages use pi-ai's common context conversion** — provider-specific placement follows pi-ai rather than a harness-owned wire override.
 - **Provider HTTP status is unavailable** — pi-ai error events do not expose a stable HTTP status across providers.
+- **QUOTA cooldown floor lowered from 60m to 30s** — `CLASS_COOLDOWN_MS.QUOTA` changed from `60*60_000` to `30_000` and `parseResetMs` now clamps to `[30s,24h]` with replacement not `Math.max`; a monthly-exhausted key without a `Resets in` hint is re-probed every 30s, burning one `429` attempt per request cycle until a hint or `recordSuccess` clears it. This is intentional for rolling windows but hammers monthly quotas — the rolling-vs-monthly window distinction is deferred.
 - **Retry policy is provider-owned, not an SDK retry** — pi-ai SDK retries stay disabled so durable agent steps and `llm/retry` events own every visible attempt, and direct `ctx.llm.stream()` calls remain single-attempt.
 
 <a id="dev-note"></a>

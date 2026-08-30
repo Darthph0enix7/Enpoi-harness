@@ -40,7 +40,7 @@ export const CAPACITY_BACKOFF_TIERS_MS: readonly number[] = [5000, 10_000, 20_00
 /** Cooldown applied per failure class when no reset hint refines it (ms). */
 export const CLASS_COOLDOWN_MS: Readonly<Record<PoolFailureClass, number>> = {
   AUTH: 15 * 60_000,
-  QUOTA: 60 * 60_000,
+  QUOTA: 30_000,
   CAPACITY: 60_000,
   GATEWAY_OUTAGE: 0,
   INVALID_REQUEST: 0,
@@ -71,16 +71,19 @@ const TRANSPORT_RE = /terminated|premature close|network|econn|socket|fetch fail
 
 /**
  * Parse an upstream reset hint ("Resets in 46min", "Resets in 4hr 53min",
- * "Resets in 14 days") into milliseconds. Every number+unit pair is summed —
- * the gateways abbreviate units, and a naive first-match parser would turn a
- * short rolling limit into the long quota fallback.
+ * "Resets in 14 days") into milliseconds. Only the first duration phrase
+ * directly after "resets in" is taken — the longest contiguous run of
+ * number+unit pairs immediately following the anchor (e.g. "4hr 53min" →
+ * 4h+53m is one phrase, but "Resets in 46min. ... 5 per hour" → only
+ * 46min). Never sums distant numbers. Clamped to [30s, 24h].
  * @param message - the flattened upstream error text.
- * @returns the parsed duration (≥ 1 minute), or undefined when absent.
+ * @returns the parsed duration clamped to [30_000, 24h], or undefined when
+ *   no hint follows the phrase.
  */
 export function parseResetMs(message: string): number | undefined {
-  const idx = message.search(/resets?\s+in\s+/i)
-  if (idx === -1) return undefined
-  const tail = message.slice(idx)
+  const anchor = message.match(/resets?\s+in\s+/i)
+  if (anchor === null || anchor.index === undefined) return undefined
+  const tail = message.slice(anchor.index + anchor[0].length)
   const UNIT: Record<string, number> = {
     days: 86_400_000, day: 86_400_000,
     hours: 3_600_000, hour: 3_600_000, hr: 3_600_000,
@@ -89,29 +92,44 @@ export function parseResetMs(message: string): number | undefined {
     months: 2_592_000_000, month: 2_592_000_000,
     seconds: 1000, second: 1000, sec: 1000,
   }
+  const trimmed = tail.trimStart()
+  if (trimmed.length === 0) return undefined
   const re = /(\d+)\s*(days|day|hours|hour|hr|minutes|minute|min|weeks|week|months|month|seconds|second|sec)\b/gi
   let total = 0
-  let match: RegExpExecArray | null
-  while ((match = re.exec(tail)) !== null) {
+  let count = 0
+  let pos = 0
+  while (true) {
+    re.lastIndex = pos
+    const match = re.exec(trimmed)
+    if (match === null || match.index === undefined) break
+    const gap = trimmed.slice(pos, match.index)
+    if (gap.length > 0 && !/^\s*$/.test(gap)) break
     const unit = UNIT[match[2]?.toLowerCase() ?? '']
     const amount = Number.parseInt(match[1] ?? '0', 10)
-    if (unit !== undefined && Number.isFinite(amount)) total += amount * unit
+    if (unit !== undefined && Number.isFinite(amount)) {
+      total += amount * unit
+      count += 1
+    }
+    pos = match.index + match[0].length
   }
-  return total > 0 ? Math.max(total, 60_000) : undefined
+  if (count === 0 || total <= 0) return undefined
+  return Math.min(Math.max(total, 30_000), 24 * 3600_000)
 }
 
 /**
  * Classify a flattened upstream failure. Order matters: the transient-model
- * check wins over everything (its messages embed 400s), payload errors win
- * over transport wording, and bare status-code words are checked last because
- * pi-ai's flattened messages interleave them with body text.
+ * check wins over everything (its messages embed 400s), 503/529 status codes
+ * win over quota vocabulary, and bare status-code words are checked before
+ * vocabulary. This ensures 429 → QUOTA wins over "capacity" vocabulary and
+ * 503/529 → CAPACITY wins over quota.
  * @param message - the failure text (pi-ai flattens status + body into it).
  * @returns the failure class driving rotation/cooldown decisions.
  */
 export function classifyFailure(message: string): PoolFailureClass {
   if (TRANSIENT_MODEL_RE.test(message)) return 'GATEWAY_OUTAGE'
-  if (CAPACITY_RE.test(message)) return 'CAPACITY'
+  if (/\b503\b|\b529\b/i.test(message)) return 'CAPACITY'
   if (QUOTA_RE.test(message)) return 'QUOTA'
+  if (CAPACITY_RE.test(message)) return 'CAPACITY'
   // Auth before payload errors: real 401 bodies often embed an
   // `invalid_request_error` code field (DeepSeek does exactly that).
   if (AUTH_RE.test(message)) return 'AUTH'
@@ -253,16 +271,23 @@ export class PoolEngine {
 
   /** Attempt order for one request: enabled identities, healthy ones first —
    *  in priority order (`priority-sticky`) or rotated per model (`balanced`);
-   *  when none are healthy, ALL enabled identities ordered by soonest cooldown
-   *  expiry (optimistic probing — a cached cooldown is a guess, a live attempt
-   *  is the only truth). Only the healthy path advances the rotation cursor,
-   *  so introspection call sites can order without perturbing rotation. */
+   *  when none are healthy, ALL enabled identities ordered by priority first,
+   *  cooldown as tiebreak (optimistic probing — a cached cooldown is a guess,
+   *  a live attempt is the only truth). Only the healthy path advances the
+   *  rotation cursor, and only when not peeking, so introspection call sites
+   *  (e.g. CAPACITY backoff check) can order without perturbing rotation.
+   *  For the all-cooling path, never advance the cursor.
+   * @param peek - when true, do not advance the balanced rotation cursor
+   *   (introspection must not perturb ordering). */
   orderFor(
     provider: string,
     identities: ReadonlyArray<{ id: string; priority?: number; enabled?: boolean }>,
     modelId: string,
-    strategy: PoolStrategy = 'priority-sticky',
+    strategy?: PoolStrategy,
+    peek?: boolean,
   ): Array<{ id: string; priority?: number }> {
+    const effectiveStrategy = strategy ?? 'priority-sticky'
+    const effectivePeek = peek ?? false
     const enabled = identities
       .filter(identity => identity.enabled !== false)
       .map(identity => ({ id: identity.id, ...identity.priority === undefined ? {} : { priority: identity.priority } }))
@@ -273,13 +298,19 @@ export class PoolEngine {
     if (healthy.length > 0) {
       const byPriority = healthy.sort((a, b) =>
         (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
-      if (strategy !== 'balanced') return byPriority
+      if (effectiveStrategy !== 'balanced') return byPriority
       const key = `${provider}:${modelId}`
       const offset = (this.#rotation.get(key) ?? 0) % byPriority.length
-      this.#rotation.set(key, offset + 1)
+      if (!effectivePeek) this.#rotation.set(key, offset + 1)
       return [...byPriority.slice(offset), ...byPriority.slice(0, offset)]
     }
-    return [...enabled].sort((a, b) => cooldownOf(a.id) - cooldownOf(b.id))
+    // All-cooling: priority first, cooldown as tiebreak. Never advance rotation.
+    return [...enabled].sort((a, b) => {
+      const pa = a.priority ?? Number.MAX_SAFE_INTEGER
+      const pb = b.priority ?? Number.MAX_SAFE_INTEGER
+      if (pa !== pb) return pa - pb
+      return cooldownOf(a.id) - cooldownOf(b.id)
+    })
   }
 
   /** Remaining cooldown for one identity × model (0 when ready). */
@@ -393,9 +424,14 @@ export class PoolEngine {
     if (failureClass === 'QUOTA') {
       // A parsed reset hint is authoritative — the gateway told us exactly
       // when its window rolls over, so cooling longer would idle a working
-      // key. Clamped to [1min, 24h] against absurd hints.
+      // key. Replacement, not Math.max: use parsed when present, otherwise
+      // 30s floor. Clamped to [30s, 24h] against absurd hints.
       const parsed = parseResetMs(message)
-      if (parsed !== undefined) cooldownMs = Math.min(Math.max(parsed, 60_000), 24 * 3_600_000)
+      if (parsed !== undefined) {
+        cooldownMs = Math.min(Math.max(parsed, 30_000), 24 * 3600_000)
+      } else {
+        cooldownMs = 30_000
+      }
     }
     entry.cooldownUntil = cooldownMs > 0 ? this.#now() + cooldownMs : 0
     this.#scheduleSave(provider)
@@ -474,8 +510,13 @@ export class PoolEngine {
         }
       }
       const existing = this.#providers.get(provider)
-      if (existing !== undefined) existing.identities = identities
-      else this.#providers.set(provider, { version: 1, identities })
+      if (existing !== undefined) {
+        if (this.#dirty.has(provider)) return
+        existing.identities = identities
+      } else {
+        if (this.#dirty.has(provider)) return
+        this.#providers.set(provider, { version: 1, identities })
+      }
     } catch (error) {
       this.#log(`pool state for "${provider}" is unreadable (${String(error)}); starting clean`)
     }

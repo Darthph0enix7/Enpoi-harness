@@ -27,17 +27,21 @@ function engine(options: Partial<ConstructorParameters<typeof PoolEngine>[0]> = 
 }
 
 describe('parseResetMs', () => {
-  it('sums every number+unit pair the gateway abbreviates', () => {
+  it('parses the first resets-in phrase anchored, clamped to [30s,24h]', () => {
+    // One contiguous phrase after "resets in" → summed within phrase (4hr 53min = one phrase)
     expect(parseResetMs('Monthly usage limit reached. Resets in 4hr 53min.')).toBe(
       (4 * 3600 + 53 * 60) * 1000,
     )
-    expect(parseResetMs('Resets in 14 days.')).toBe(14 * 86_400_000)
+    // Long windows clamped to 24h
+    expect(parseResetMs('Resets in 14 days.')).toBe(24 * 3600_000)
+    expect(parseResetMs('resets in 1 week 2 days')).toBe(24 * 3600_000)
+    // Single hint, distant numbers ignored (no sum across periods)
+    expect(parseResetMs('Resets in 46min. You can make 5 requests per hour.')).toBe(46 * 60_000)
     expect(parseResetMs('Resets in 46min.')).toBe(46 * 60_000)
-    expect(parseResetMs('resets in 1 week 2 days')).toBe((7 + 2) * 86_400_000)
   })
 
-  it('floors sub-minute resets to one minute and rejects absent/zero hints', () => {
-    expect(parseResetMs('Resets in 30sec.')).toBe(60_000)
+  it('floors sub-minute resets to 30s and rejects absent/zero hints', () => {
+    expect(parseResetMs('Resets in 30sec.')).toBe(30_000)
     expect(parseResetMs('quota exhausted')).toBeUndefined()
     expect(parseResetMs('Resets in 0min.')).toBeUndefined()
   })
