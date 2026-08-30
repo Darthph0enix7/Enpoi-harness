@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, KEYLESS_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
+import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
@@ -102,11 +102,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       const keyRef = deriveKeyRef(id)
       const cleanKey = apiKey.trim()
 
+      const needsPlaceholderModel = selected === 'empty'
       const profileData: Record<string, unknown> = {
         displayName: displayName.trim() || id,
         api: protocol,
         baseURL: baseURL.trim(),
         ...cleanKey.length > 0 ? { apiKeyEnv: keyRef } : {},
+        ...needsPlaceholderModel ? { models: [{ id: 'auto' }] } : {},
       }
 
       // Save credential if entered
@@ -302,19 +304,12 @@ function TemplateCard({ tpl, onSelect }: { tpl: ProviderTemplate; onSelect: (t: 
     >
       <div className={styles['templateCardHead']}>
         <div className={styles['templateIcon']}>
-          <IconServer size={18} />
+          <IconServer size={16} />
         </div>
         <div className={styles['templateInfo']}>
           <span className={styles['templateName']}>{tpl.name}</span>
           <span className={styles['templateCategory']}>{tpl.id}</span>
         </div>
-      </div>
-      <div className={styles['templateFoot']}>
-        <span className={styles['templateProtocol']}>{tpl.protocol}</span>
-        <span className={styles['templateEnv']}>
-          {KEYLESS_PROVIDERS.has(tpl.id) ? 'no key' : tpl.env[0] ?? 'no key'}
-        </span>
-        <span className={styles['templateAddAction']}>Add +</span>
       </div>
     </div>
   )

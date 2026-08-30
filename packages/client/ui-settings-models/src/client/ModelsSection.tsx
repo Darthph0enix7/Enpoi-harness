@@ -52,8 +52,6 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
   const [deleteTarget, setDeleteTarget] = useState<ProviderRow | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [addBusy, setAddBusy] = useState(false)
-  const [addError, setAddError] = useState<string | null>(null)
 
   // Ensure store is loaded
   useEffect(() => {
@@ -153,46 +151,6 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
     }
   }
 
-  // Add an EMPTY provider entry directly (classic flow): the user fills
-  // displayName/baseURL/key in the detail panel. baseURL needs a non-empty
-  // placeholder because llm-pi-ai's schema refuses empty strings.
-  const handleAddEmpty = async () => {
-    if (addBusy || !state.writable) return
-    setAddBusy(true)
-    setAddError(null)
-    try {
-      let id = 'provider'
-      let counter = 1
-      while (takenProviderIds.includes(id)) {
-        id = `provider-${counter++}`
-      }
-      const profileData: Record<string, unknown> = {
-        displayName: 'New Provider',
-        api: protocols.includes('openai-completions') ? 'openai-completions' : protocols[0] || 'openai-completions',
-        baseURL: 'http://localhost:8080/v1',
-        // Placeholder model: llm-pi-ai refuses a route the catalog does not
-        // describe without a models list. The user replaces it via
-        // "Refresh Models" in the detail panel (live discovery).
-        models: [{ id: 'auto' }],
-      }
-      const res = await api.settings.mutate(
-        'llm-pi-ai',
-        [{ op: 'set', path: ['providers', id], value: profileData as import('@deepseek-ai/dsh-api-remotes/client').JsonValue }],
-        undefined,
-      )
-      if (!res.ok) {
-        setAddError(res.error.message)
-        return
-      }
-      await controller.load()
-      setSelectedProviderId(id)
-    } catch (err) {
-      setAddError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setAddBusy(false)
-    }
-  }
-
   if (state.status === 'loading' && state.rows.length === 0) {
     return (
       <div className={styles['loadingState']}>
@@ -281,29 +239,15 @@ function Loaded({ injected, renderSlot, useSnapshot }: { injected: ModelsSection
         </div>
 
         <div className={styles['sidebarFooter']}>
-          {addError && <span className={styles['addError']}>{addError}</span>}
-          <div className={styles['sidebarFooterRow']}>
-            <Button
-              variant="outline"
-              className={styles['addProviderBtn']}
-              onClick={() => void handleAddEmpty()}
-              disabled={!state.writable || addBusy}
-              title="Add an empty provider entry"
-            >
-              <IconPlusOutline16 size={14} />
-              {addBusy ? 'Adding...' : 'Add Provider'}
-            </Button>
-            <Button
-              variant="ghost"
-              className={styles['browseCatalogBtn']}
-              onClick={() => setAddModalOpen(true)}
-              disabled={!state.writable}
-              title="Browse the 212-provider catalog"
-            >
-              <IconServer size={14} />
-              Catalog
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            className={styles['addProviderBtn']}
+            onClick={() => setAddModalOpen(true)}
+            disabled={!state.writable}
+          >
+            <IconPlusOutline16 size={14} />
+            Add Provider
+          </Button>
         </div>
       </aside>
 
