@@ -1077,17 +1077,23 @@ export class ToolRuntime extends Service {
     if (allow === undefined && deny === undefined) {
       throw new Error('tools.restrict({}) is a no-op: pass `allow` and/or `deny` (an empty filter is almost always a materialized-empty-config bug)')
     }
-    const compiled: CompiledToolRestriction = {
-      ...allow !== undefined ? { allow: new Set(allow) } : {},
-      ...deny !== undefined ? { deny: new Set(deny) } : {},
-    }
     if ([...allow ?? [], ...deny ?? []].includes(RUN_CODE_NAME)) {
       throw new Error(`tools.restrict() cannot name reserved PTC mode presentation transport "${RUN_CODE_NAME}"; restrict end-capability tools instead`)
     }
     const known = this.view(scope).restrictableNames
-    const unknown = [...allow ?? [], ...deny ?? []].filter(name => !known.has(name))
-    if (unknown.length > 0) {
-      throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} ${unknown.map(n => `"${n}"`).join(', ')}; known global tools: ${[...known].sort().join(', ') || '(none)'}`)
+    // Unknown ALLOW names are a real error (the caller wants to keep a tool
+    // that does not exist). Unknown DENY names are a harmless no-op — the
+    // tool does not exist to deny — and are skipped so a deny list may name
+    // per-child tools (e.g. `report`, installed by tool-subagent-report in
+    // the child's scope, not the global registry) without breaking restrict.
+    const unknownAllow = [...allow ?? []].filter(name => !known.has(name))
+    if (unknownAllow.length > 0) {
+      throw new Error(`tools.restrict() names unknown global tool${unknownAllow.length > 1 ? 's' : ''} ${unknownAllow.map(n => `"${n}"`).join(', ')}; known global tools: ${[...known].sort().join(', ') || '(none)'}`)
+    }
+    const denySet = new Set([...deny ?? []].filter(name => known.has(name)))
+    const compiled: CompiledToolRestriction = {
+      ...allow !== undefined ? { allow: new Set(allow) } : {},
+      ...denySet.size > 0 ? { deny: denySet } : {},
     }
     return this.layers.effect(
       this.ctx,
