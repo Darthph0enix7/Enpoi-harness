@@ -1494,12 +1494,19 @@ export class SubagentContinuationManager {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
       const summary = settlementSummary(activation.childId, terminal.stopReason)
+      // Only the child's final REPORT reaches the parent — reasoning blocks
+      // (the child's thinking) are stripped so the parent receives the
+      // targeted result, not the exploration that produced it. Text and image
+      // blocks pass through; reasoning and tool-call blocks are dropped.
+      const closing = (terminal.output ?? []).filter(
+        block => block.type === 'text' || block.type === 'image',
+      )
       const message = createUserMessage({
         content: [
           { type: 'text' as const, text: summary },
-          ...terminal.output === undefined
+          ...closing.length === 0
             ? [{ type: 'text' as const, text: 'It left no closing message.' }]
-            : [{ type: 'text' as const, text: 'Its closing message:' }, ...terminal.output],
+            : [{ type: 'text' as const, text: 'Its closing message:' }, ...closing],
         ],
         source: {
           kind: 'subagent-settled' as const,
