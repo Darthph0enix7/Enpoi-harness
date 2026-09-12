@@ -21,7 +21,7 @@ async function composed(): Promise<{ ctx: Context; controller: SessionController
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   const sessionId = SessionId('revert-session')
-  const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, cwd: '/workspace' }
+  const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, isSeeded: false, cwd: '/workspace' }
   const events: SessionEvent[] = []
   ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
     list: () => Promise.resolve([header]),
@@ -29,7 +29,15 @@ async function composed(): Promise<{ ctx: Context; controller: SessionController
   }) as never)
   const controller = createSessionTestController(ctx, defaults)
   const session = ctx.sessions.create(sessionId, { meta: header })
-  const agent = { id: sessionId, session, status: 'idle', ctx } as Agent
+  // The controller only reads id/session/status/inbox; the rest of the Agent
+  // face is unreachable from the revert RPCs.
+  const agent = {
+    id: sessionId,
+    session,
+    status: 'idle',
+    ctx,
+    inbox: { nextTurn: [], nextStep: [] },
+  } as unknown as Agent
   ctx.agents.register(agent)
   // Two user turns + one assistant turn.
   session.append('user/message', createUserMessage({
@@ -71,13 +79,13 @@ describe('SessionController revert RPC', () => {
     const session = ctx.sessions.get(sessionId)!
     const assistantSeq = session.snapshotEvents().find(e => e.type === 'assistant/message')!.seq
     await expect(controller.revert({ sessionId, atSeq: assistantSeq }))
-      .rejects.toMatchObject({ failure: { code: 'revert-invalid' } })
+      .rejects.toMatchObject({ code: 'revert-invalid' })
   })
 
   it('rejects an unknown seq', async () => {
     const { controller, sessionId } = await composed()
     await expect(controller.revert({ sessionId, atSeq: 999 }))
-      .rejects.toMatchObject({ failure: { code: 'revert-invalid' } })
+      .rejects.toMatchObject({ code: 'revert-invalid' })
   })
 
   it('restores everything when restoreSeq is omitted', async () => {
@@ -89,7 +97,8 @@ describe('SessionController revert RPC', () => {
     const result = await controller.revertRestore({ sessionId })
     expect(result.accepted).toBe(true)
     const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
-    expect((lastRevert.data as { fromSeq: number; cause: string }).fromSeq).toBe(0)
+    // Restoring everything clears the boundary (null), not a 0 sentinel.
+    expect((lastRevert.data as { fromSeq: number | null; cause: string }).fromSeq).toBeNull()
     expect((lastRevert.data as { cause: string }).cause).toBe('restore')
   })
 
@@ -114,6 +123,6 @@ describe('SessionController revert RPC', () => {
   it('rejects for an unknown session', async () => {
     const { controller } = await composed()
     await expect(controller.revert({ sessionId: SessionId('missing'), atSeq: 1 }))
-      .rejects.toMatchObject({ failure: { code: 'session-not-found' } })
+      .rejects.toMatchObject({ code: 'session-not-found' })
   })
 })

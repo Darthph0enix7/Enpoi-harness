@@ -88,15 +88,13 @@ function sessionUserMessages(agent: Agent) {
     .flatMap(event => event.type === 'user/message' ? [event.data] : [])
 }
 
-/** Source kinds queued but not yet claimed by this agent's inbox. */
-function pendingInboxKinds(agent: Agent): string[] {
-  return [...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.source.kind)
-}
-
 /** Source kinds this agent has either logged or still holds unclaimed. */
 function receivedKinds(agent: Agent): string[] {
-  return [...sessionUserSources(agent), ...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-    .map(source => source.kind)
+  return [
+    ...sessionUserSources(agent).map(source => source.kind),
+    ...agent.inbox.nextStep.map(message => message.source.kind),
+    ...agent.inbox.nextTurn.map(message => message.source.kind),
+  ]
 }
 
 function waitFor(pred: () => boolean, ms = 5000): Promise<void> {
@@ -104,9 +102,15 @@ function waitFor(pred: () => boolean, ms = 5000): Promise<void> {
     const start = Date.now()
     const tick = () => {
       try {
-        if (pred()) return resolve()
+        if (pred()) {
+          resolve()
+          return
+        }
       } catch { /* keep polling */ }
-      if (Date.now() - start > ms) return reject(new Error('waitFor timeout'))
+      if (Date.now() - start > ms) {
+        reject(new Error('waitFor timeout'))
+        return
+      }
       setTimeout(tick, 20)
     }
     tick()
@@ -182,8 +186,8 @@ describe('quiet continuable fibers', () => {
     expect(JSON.stringify(relayed[0]?.content)).not.toContain('quiet report')
 
     await parent.whenIdle()
-    await ctx.subagents.interrupt(quiet.childId, { kind: 'ancestor', agent: parent })
-    await ctx.subagents.interrupt(loud.childId, { kind: 'ancestor', agent: parent })
+    ctx.subagents.interrupt(quiet.childId, { kind: 'ancestor', agent: parent })
+    ctx.subagents.interrupt(loud.childId, { kind: 'ancestor', agent: parent })
     await ctx.subagents.drainContinuableDescendants([parent])
   })
 })

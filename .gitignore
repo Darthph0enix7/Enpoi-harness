@@ -46,3 +46,11 @@ worktrees/
 .slim/
 .slim/tier_state/
 native/system/test/bin/
+
+# Vendor packages compile in place on some builds; never commit the output
+# (Vite resolves extensionless src imports to .js before .ts and stale
+# compiled JS poisons the runtime import graph).
+vendor/*/src/**/*.js
+vendor/*/src/**/*.js.map
+vendor/*/src/**/*.d.ts
+vendor/*/src/**/*.d.ts.map
