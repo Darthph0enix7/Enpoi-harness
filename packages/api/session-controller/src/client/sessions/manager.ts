@@ -593,12 +593,8 @@ export class SessionManager {
    * @param opts - source session and the optional seq anchoring the cut.
    * @returns the fork result (the child session id).
    */
-  async delete(sessionId: SessionId): Promise<ClientResult<{ deleted: true }>> {
-    try {
-      return toSessionResult(await this.remote.session.delete({ sessionId }))
-    } catch (error) {
-      return transportResult(error)
-    }
+  async delete(sessionId: SessionId): Promise<RemoteResult<{ deleted: true }>> {
+    return await this.remote.session.delete({ sessionId })
   }
 
   async fork(
@@ -629,17 +625,13 @@ export class SessionManager {
    */
   async selectModel(
     opts: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string },
-  ): Promise<ClientResult<{ selected: { provider: string; model: string; reasoningEffort?: string } }>> {
-    try {
-      return toSessionResult(await this.remote.session.selectModel({
-        sessionId: opts.sessionId,
-        provider: opts.provider,
-        model: opts.model,
-        ...opts.reasoningEffort === undefined ? {} : { reasoningEffort: opts.reasoningEffort },
-      }))
-    } catch (error) {
-      return transportResult(error)
-    }
+  ): Promise<RemoteResult<{ selected: { provider: string; model: string; reasoningEffort?: string } }>> {
+    return await this.remote.session.selectModel({
+      sessionId: opts.sessionId,
+      provider: opts.provider,
+      model: opts.model,
+      ...opts.reasoningEffort === undefined ? {} : { reasoningEffort: opts.reasoningEffort },
+    })
   }
 
   /**
@@ -650,15 +642,11 @@ export class SessionManager {
    */
   async revert(
     opts: { sessionId: SessionId; atSeq: number },
-  ): Promise<ClientResult<{ revertedText: string; revertedCount: number }>> {
-    try {
-      return toSessionResult(await this.remote.session.revert({
-        sessionId: opts.sessionId,
-        atSeq: opts.atSeq,
-      }))
-    } catch (error) {
-      return transportResult(error)
-    }
+  ): Promise<RemoteResult<{ revertedText: string; revertedCount: number }>> {
+    return await this.remote.session.revert({
+      sessionId: opts.sessionId,
+      atSeq: opts.atSeq,
+    })
   }
 
   /**
@@ -668,15 +656,11 @@ export class SessionManager {
    */
   async revertRestore(
     opts: { sessionId: SessionId; restoreSeq?: number },
-  ): Promise<ClientResult<{ accepted: true }>> {
-    try {
-      return toSessionResult(await this.remote.session.revertRestore({
-        sessionId: opts.sessionId,
-        ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
-      }))
-    } catch (error) {
-      return transportResult(error)
-    }
+  ): Promise<RemoteResult<{ accepted: true }>> {
+    return await this.remote.session.revertRestore({
+      sessionId: opts.sessionId,
+      ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
+    })
   }
 
   /**
@@ -688,12 +672,8 @@ export class SessionManager {
       conflictId: string
       resolution: 'keep' | 'restore' | 'recreate' | 'trash'
     },
-  ): Promise<ClientResult<{ accepted: true }>> {
-    try {
-      return toSessionResult(await this.remote.session.resolveFileConflict(opts))
-    } catch (error) {
-      return transportResult(error)
-    }
+  ): Promise<RemoteResult<{ accepted: true }>> {
+    return await this.remote.session.resolveFileConflict(opts)
   }
 
   /**

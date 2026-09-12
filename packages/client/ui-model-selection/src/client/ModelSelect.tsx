@@ -74,6 +74,9 @@ export interface ModelSelectOverride {
   placeholder?: string
 }
 
+/** Unplaced portal panel: hidden but laid out so `offsetWidth` is real for the clamp. */
+const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
+
 export function ModelSelect(
   { locked, available, directory, load, select, compact, override, t }:
   ModelSelectInjected

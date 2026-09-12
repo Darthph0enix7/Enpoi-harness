@@ -390,11 +390,12 @@ export class SessionCommandController {
           const shadowedSeqs = nodes.filter(seq => (seq as number) >= revertFromSeq)
           const intent = {
             surfaceOp: { op: 'replace' as const, startSeq: anchor, endSeq: lastSurfaceSeq },
-            sourceEventSeqs: [...shadowedSeqs] as number[],
+            sourceEventSeqs: [...shadowedSeqs],
             clearRevert: true,
           }
-          if (request.mode === 'steer') agent.steer(message, intent)
-          else agent.followup(message, intent)
+          // Revert commits are queue-only (steer was rejected above by the
+          // flow-narrowing guard), so the shadowed append always queues.
+          agent.followup(message, intent)
         } else {
           if (request.mode === 'steer') agent.steer(message)
           else agent.followup(message)

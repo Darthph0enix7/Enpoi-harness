@@ -96,6 +96,7 @@ function updateChunk(
   chunk: StreamChunk,
   seq: number,
   time: number,
+  match: ConversationMatch,
 ): AssistantState {
   const blocks = [...state.blocks]
   let changedIndex = -1
@@ -141,6 +142,8 @@ function updateChunk(
       blocks[chunk.index] = toAssistantBlock(chunk.block)
       break
     case 'finish':
+      // Retained for the model-attribution badge: the finish chunk's
+      // replay-state response names the provider/model that served the turn.
       return { ...state, finishChunk: match }
     case 'usage':
       return { ...state, usage: chunk.usage }
@@ -200,7 +203,7 @@ function finalNode(
   if (final?.event.type === 'assistant/message') {
     const event = final.event
     const finishMatch = state.finishChunk
-    const finishChunk = finishMatch?.event.type === 'assistant/chunk' ? finishMatch.event.data.chunk : undefined
+    const finishChunk = finishMatch?.event.type === 'assistant/live-chunk' ? finishMatch.event.data.chunk : undefined
     const response = finishChunk?.type === 'finish'
       ? (finishChunk.replayState?.response as { provider?: string; model?: string; reasoningEffort?: string } | null | undefined)
       : undefined
@@ -253,7 +256,7 @@ function fallbackState(context: ConversationNodeContext<AssistantState>): Assist
   for (const match of context.matches) {
     if (match.event.type === 'assistant/live-chunk') {
       state ??= initialState(match.event.data.turn, match.event.data.step)
-      state = updateChunk(state, match.event.data.chunk, match.event.seq, match.event.time)
+      state = updateChunk(state, match.event.data.chunk, match.event.seq, match.event.time, match)
       continue
     }
     if (match.event.type === 'assistant/message') {
@@ -330,7 +333,7 @@ export const assistantDefinition: ConversationNodeDefinition<AssistantState> = {
   },
   update: (context, match) => {
     if (match.event.type === 'assistant/live-chunk') {
-      return updateChunk(context.state, match.event.data.chunk, match.event.seq, match.event.time)
+      return updateChunk(context.state, match.event.data.chunk, match.event.seq, match.event.time, match)
     }
     if (match.event.type === 'assistant/message') return settleMessage(context.state, match, match.event)
     if (match.event.type === 'llm/retry') {

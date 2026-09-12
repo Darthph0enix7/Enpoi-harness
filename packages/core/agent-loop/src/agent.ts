@@ -26,7 +26,7 @@ import {
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, SurfaceOp, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, SurfaceIntent, SurfaceOp, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -91,7 +91,7 @@ export class ReactLoopAgent implements Agent {
    */
   private readonly pendingSurfaceOps = new Map<string, {
     surfaceOp: SurfaceOp
-    sourceEventSeqs?: number[]
+    sourceEventSeqs?: SessionSeq[]
     clearRevert?: boolean
   }>()
 
@@ -143,7 +143,7 @@ export class ReactLoopAgent implements Agent {
     /** Surface metadata applied when the loop appends this message (revert-commit shadowing). */
     surfaceOp?: SurfaceOp
     /** Provenance seqs cited by a replacement surfaceOp (all shadowed surface node seqs). */
-    sourceEventSeqs?: number[]
+    sourceEventSeqs?: SessionSeq[]
     /** Append `revert/state { fromSeq: null }` atomically after this message (revert-commit). */
     clearRevert?: boolean
   }): void {
@@ -162,11 +162,11 @@ export class ReactLoopAgent implements Agent {
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
-  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void {
+  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void {
     this.send(input, 'next-turn', true, options)
   }
 
-  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void {
+  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void {
     this.send(input, 'next-step', true, options)
   }
 
@@ -402,7 +402,13 @@ export class ReactLoopAgent implements Agent {
         for (const message of decision.messages) {
           const pending = this.pendingSurfaceOps.get(message.id)
           if (pending !== undefined) this.pendingSurfaceOps.delete(message.id)
-          this.session.append('user/message', message, pending ?? { surfaceOp: 'append' })
+          const intent: SurfaceIntent<'user/message'> = pending === undefined
+            ? { surfaceOp: 'append' }
+            : {
+              surfaceOp: pending.surfaceOp,
+              ...pending.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: pending.sourceEventSeqs },
+            }
+          this.session.append('user/message', message, intent)
           // Revert-commit: clear the boundary atomically with the shadowing
           // append, so a dropped message can never leave a stale boundary.
           // revert/state is log-only by type registration (never reaches the

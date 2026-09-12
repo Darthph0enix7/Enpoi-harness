@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import type { SettingsNamespaceView, JsonValue } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { CredentialInfo } from '@deepseek-ai/dsh-credentials/types'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm/types'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'

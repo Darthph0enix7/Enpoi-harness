@@ -169,6 +169,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
         toolName="subagent"
         block={mockBlock}
         openFile={vi.fn()}
+        loadImage={vi.fn()}
         openSession={openSession}
       />,
     )

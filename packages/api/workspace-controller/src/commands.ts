@@ -171,7 +171,7 @@ export class WorkspaceCommands {
       await this.ctx.workspaceRegistry.moveSession(request.sessionId, WorkspaceId(request.targetWorkspaceId))
     } catch (error) {
       if (!(error instanceof WorkspaceUnknownSessionError)) throw error
-      throw failure('session-not-found', error.message, { sessionId: request.sessionId })
+      throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId }, { cause: error })
     }
   }
 

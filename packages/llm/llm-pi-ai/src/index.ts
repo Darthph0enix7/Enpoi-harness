@@ -308,7 +308,7 @@ export function apply(ctx: Context, config: Config): void {
           ...profile.baseURL !== undefined ? { baseURL: profile.baseURL } : {},
           ...profile.api !== undefined ? { api: profile.api } : {},
           ...key !== undefined ? { apiKey: key } : {},
-        }, () => Promise.resolve(key))
+        }, () => ({ headers: profile.headers, resolveApiKey: () => Promise.resolve(key) }))
         const latencyMs = Math.round(performance.now() - startTime)
         return { ok: true, latencyMs, modelsCount: models.length }
       } catch (err: unknown) {

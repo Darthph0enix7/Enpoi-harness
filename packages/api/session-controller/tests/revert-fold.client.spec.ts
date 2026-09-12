@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '../src/client/sessions/session.ts'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
 import { FakeApiClient, fakeRemote, ok } from './fake-api.client.ts'
 import { entries, ev } from './event-script.client.ts'
 
@@ -18,8 +18,8 @@ function revertCommit(seq: number, text: string, shadowed: number[]): Record<str
       role: 'user',
       id: `msg-${seq}`,
     },
-    surfaceOp: { op: 'replace', start: shadowed[0]!, end: seq - 1 },
-    sourceEventSeqs: shadowed,
+    surfaceOp: { op: 'replace', startSeq: SessionSeq(shadowed[0]!), endSeq: SessionSeq(seq - 1) },
+    sourceEventSeqs: shadowed.map(seqShadows => SessionSeq(seqShadows)),
   }
 }
 
@@ -42,16 +42,15 @@ function revertState(seq: number, fromSeq: number | null): Record<string, unknow
   return { type: 'revert/state', seq, time: Date.now(), data: { fromSeq } }
 }
 
-/** Fill a contiguous assistant turn between two user messages (seqs start..start+5). */
+/** Fill a contiguous assistant turn between two user messages (seqs start..start+4). */
 function assistantTurn(start: number, turn: number): Record<string, unknown>[] {
   return [
-    ev.turnStart(start, turn),
-    ev.stepStart(start + 1, turn),
-    ev.chunkStart(start + 2, turn),
-    ev.chunkText(start + 3, turn, 'answer'),
-    ev.stepEnd(start + 4, turn),
-    ev.turnEnd(start + 5, turn),
-  ]
+    ev.turnStart(SessionSeq(start), turn),
+    ev.stepStart(SessionSeq(start + 1), turn),
+    ev.assistant(SessionSeq(start + 2), turn, 'answer'),
+    ev.stepEnd(SessionSeq(start + 3), turn),
+    ev.turnEnd(SessionSeq(start + 4), turn),
+  ] as unknown as Record<string, unknown>[]
 }
 
 describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)', () => {
@@ -59,22 +58,22 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
     const api = new FakeApiClient()
     const session = new Session(SID, fakeRemote(api))
     // Two revert→commit cycles over a CONTIGUOUS log (the journal stream
-    // rejects discontinuous pages): first shadows 7..21 (start 7, replacement
-    // seq 21), second shadows 25..41 (start 25, replacement seq 41).
+    // rejects discontinuous pages): first shadows 7..19 (start 7, replacement
+    // seq 19), second shadows 21..33 (start 21, replacement seq 33).
     api.onHistory = () => Promise.resolve(ok({
       records: entries([
         userMessage(7, 'hello'),
         revertState(8, 7),
         ...assistantTurn(9, 1),
-        ...assistantTurn(15, 2),
-        revertCommit(21, 'goodbye', [7, 8, 9, 10, 20]),
-        revertState(22, null),
-        userMessage(23, 'second round'),
-        revertState(24, 23),
-        ...assistantTurn(25, 3),
-        ...assistantTurn(31, 4),
-        revertCommit(37, 'final', [23, 24, 25, 30, 36]),
-        revertState(38, null),
+        ...assistantTurn(14, 2),
+        revertCommit(19, 'goodbye', [7, 8, 9, 10, 18]),
+        revertState(20, null),
+        userMessage(21, 'second round'),
+        revertState(22, 21),
+        ...assistantTurn(23, 3),
+        ...assistantTurn(28, 4),
+        revertCommit(33, 'final', [21, 22, 23, 27, 32]),
+        revertState(34, null),
       ] as never[]) as never[],
       hasMore: false,
     } as never))
@@ -83,8 +82,8 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
     // Both spans must be recorded as half-open ranges [start, replacement.seq).
     // A fractional anchor (e.g. turn-tail at 20.1) or trailing turn/end at 20 is inside [7, 21).
     expect(snapshot.revertShadowRanges).toEqual([
-      { start: 7, end: 21 },
-      { start: 23, end: 37 },
+      { start: 7, end: 19 },
+      { start: 21, end: 33 },
     ])
   })
 

@@ -220,7 +220,7 @@ declare module './types.ts' {
    * @param message - identified prompt content and the source that supplied it.
    * @param options - optional surface metadata for the append (revert-commit shadowing).
    */
-    followup(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void
+    followup(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void
 
     /**
    * Submit steering for the nearest step. An idle driver starts a turn;
@@ -230,7 +230,7 @@ declare module './types.ts' {
    * @param message - identified steering content and the source that supplied it.
    * @param options - optional surface metadata for the append (revert-commit shadowing).
    */
-    steer(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: number[]; clearRevert?: boolean }): void
+    steer(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void
 
     /**
    * Queue model-facing context for the next pre-step without waking the

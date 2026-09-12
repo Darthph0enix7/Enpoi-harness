@@ -3,7 +3,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
@@ -21,7 +21,7 @@ async function composed(): Promise<{ ctx: Context; controller: SessionController
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   const sessionId = SessionId('revert-session')
-  const header: SessionHeader = { version: 0, id: sessionId, createdAt: 1, cwd: '/workspace' }
+  const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, cwd: '/workspace' }
   const events: SessionEvent[] = []
   ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
     list: () => Promise.resolve([header]),
@@ -37,14 +37,14 @@ async function composed(): Promise<{ ctx: Context; controller: SessionController
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('turn/start', { turn: 1 })
-  session.append('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a-1'), role: 'assistant', source: { kind: 'model', provider: 'fixture', model: 'fixture-model' }, content: [{ type: 'text', text: 'first answer' }] } }, { surfaceOp: 'append' })
+  session.append('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a-1'), role: 'assistant', source: { kind: 'model', provider: 'fixture', model: 'fixture-model' }, content: [{ type: 'text', text: 'first answer' }] }, stream: [] }, { surfaceOp: 'append' })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'second query' }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('turn/start', { turn: 2 })
-  session.append('assistant/message', { turn: 2, step: 1, message: { id: MessageId('a-2'), role: 'assistant', source: { kind: 'model', provider: 'fixture', model: 'fixture-model' }, content: [{ type: 'text', text: 'second answer' }] } }, { surfaceOp: 'append' })
+  session.append('assistant/message', { turn: 2, step: 1, message: { id: MessageId('a-2'), role: 'assistant', source: { kind: 'model', provider: 'fixture', model: 'fixture-model' }, content: [{ type: 'text', text: 'second answer' }] }, stream: [] }, { surfaceOp: 'append' })
   session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
   return { ctx, controller, sessionId }
 }
@@ -53,22 +53,23 @@ describe('SessionController revert RPC', () => {
   it('reverts from a user message and appends revert/state', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!
-    const firstUserSeq = session.events.find(e => e.type === 'user/message')!.seq
+    const firstUserSeq = session.snapshotEvents().find(e => e.type === 'user/message')!.seq
 
     const result = await controller.revert({ sessionId, atSeq: firstUserSeq })
 
     expect(result.accepted).toBe(true)
     expect(result.revertedText).toBe('first query')
     expect(result.revertedCount).toBe(1) // the second user query
-    const revertEvent = session.events.find(e => e.type === 'revert/state')
+    const revertEvent = session.snapshotEvents().find(e => e.type === 'revert/state')
     expect(revertEvent).toBeDefined()
     expect((revertEvent!.data as { fromSeq: number; cause: string }).fromSeq).toBe(firstUserSeq)
     expect((revertEvent!.data as { cause: string }).cause).toBe('revert')
   })
 
   it('rejects a non-user anchor', async () => {
-    const { controller, sessionId } = await composed()
-    const assistantSeq = 3 // assistant/message seq
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const assistantSeq = session.snapshotEvents().find(e => e.type === 'assistant/message')!.seq
     await expect(controller.revert({ sessionId, atSeq: assistantSeq }))
       .rejects.toMatchObject({ failure: { code: 'revert-invalid' } })
   })
@@ -82,12 +83,12 @@ describe('SessionController revert RPC', () => {
   it('restores everything when restoreSeq is omitted', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!
-    const firstUserSeq = session.events.find(e => e.type === 'user/message')!.seq
+    const firstUserSeq = session.snapshotEvents().find(e => e.type === 'user/message')!.seq
     await controller.revert({ sessionId, atSeq: firstUserSeq })
 
     const result = await controller.revertRestore({ sessionId })
     expect(result.accepted).toBe(true)
-    const lastRevert = session.events.filter(e => e.type === 'revert/state').at(-1)!
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
     expect((lastRevert.data as { fromSeq: number; cause: string }).fromSeq).toBe(0)
     expect((lastRevert.data as { cause: string }).cause).toBe('restore')
   })
@@ -95,12 +96,12 @@ describe('SessionController revert RPC', () => {
   it('restores to a boundary when restoreSeq is set', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!
-    const firstUserSeq = session.events.find(e => e.type === 'user/message')!.seq
+    const firstUserSeq = session.snapshotEvents().find(e => e.type === 'user/message')!.seq
     await controller.revert({ sessionId, atSeq: firstUserSeq })
 
     const result = await controller.revertRestore({ sessionId, restoreSeq: firstUserSeq })
     expect(result.accepted).toBe(true)
-    const lastRevert = session.events.filter(e => e.type === 'revert/state').at(-1)!
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
     expect((lastRevert.data as { fromSeq: number }).fromSeq).toBe(firstUserSeq)
   })
 

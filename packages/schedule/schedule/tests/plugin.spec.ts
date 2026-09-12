@@ -48,6 +48,10 @@ class PersistenceProbe extends SessionPersistence {
     return [...this.stored.values()].map(entry => this.snapshot(entry))
   }
 
+  override delete(): Promise<void> {
+    return Promise.resolve()
+  }
+
   private snapshot(entry: StoredProbeSession): SessionPersistenceSnapshot {
     return {
       header: entry.header,

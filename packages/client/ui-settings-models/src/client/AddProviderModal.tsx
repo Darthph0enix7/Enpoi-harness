@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { JsonValue } from '@deepseek-ai/dsh-api-remotes/client'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'

@@ -1,27 +1,24 @@
 /**
- * Enpoi Harness — Spike A: live validation of the continuable spawn lifecycle.
- * Verifies the substrate the Oracle fiber + background dispatcher build on:
- * fresh-child isolation, persona/toolFilter overrides, multi-turn followups,
- * interrupt, and descendant drain.
+ * Enpoi Harness — quiet continuable fibers. A `startContinuable({ quiet: true })`
+ * child must leave no trace in its parent's inbox: neither the runtime's
+ * settlement notice nor an intermediate child→parent `sendMessage` delivery.
+ * The non-quiet control cases prove both deliveries exist in this harness, so
+ * the quiet assertions cannot pass vacuously.
  */
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import SubagentRuntime, {
-  type ContinuableStartSpec,
-  type SubagentStartRequest,
-} from '@deepseek-ai/dsh-subagent'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 
 class TestSessionQuery extends SessionQueryEngine {
   override searchSessions(): Promise<never> {
@@ -34,6 +31,8 @@ class TestSessionQuery extends SessionQueryEngine {
 }
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
+
+const testSignal = new AbortController().signal
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -49,7 +48,7 @@ async function setup(script: Script) {
   const ctx = new Context()
   const adapter = new MockAdapter(script)
   await mountAgentLoopTestDependencies(ctx)
-  const root = mkdtempSync(join(tmpdir(), 'dsh-spike-a-'))
+  const root = mkdtempSync(join(tmpdir(), 'dsh-quiet-fiber-'))
   const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
   cleanups.push(async () => {
     await persistenceFiber.dispose()
@@ -60,42 +59,45 @@ async function setup(script: Script) {
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   ctx.llm.registerAdapter(['mock'], adapter)
-  ctx.tools.register(defineTool({
-    name: 'read',
-    description: 'read a file',
-    parameters: {},
-    output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [{ type: 'text', text: 'read' }] },
-    execute: () => Promise.resolve({}),
-  }))
-  const parent = ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock' })
-  ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
-    if (subject !== parent) return next()
-    return { kind: 'reject' as const }
-  })
+  const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock' })
   return { ctx, parent, adapter }
 }
 
-function continuableSpec(
-  parent: SubagentStartRequest['parent'],
-  overrides?: {
-    provider?: 'spawn' | 'fork' | 'codex' | 'claude_code'
-    label?: string
-    signal?: AbortSignal
-    request?: Partial<SubagentStartRequest>
-  },
-): ContinuableStartSpec {
+function startSpec(parent: Agent, options: { quiet?: boolean } = {}) {
   return {
-    provider: overrides?.provider ?? 'spawn',
-    label: overrides?.label ?? 'spike-a child',
-    signal: overrides?.signal ?? new AbortController().signal,
+    provider: 'spawn',
+    label: options.quiet === true ? 'quiet child' : 'loud child',
+    ...options.quiet === undefined ? {} : { quiet: options.quiet },
+    signal: testSignal,
     request: {
-      prompt: [{ type: 'text', text: 'initial prompt' }],
+      prompt: [{ type: 'text' as const, text: 'child task' }],
       parent,
-      ...overrides?.request,
     },
   }
 }
 
+/** Every `user/message` source this agent has in its session log, in log order. */
+function sessionUserSources(agent: Agent) {
+  return agent.session.snapshotEvents()
+    .flatMap(event => event.type === 'user/message' ? [event.data.source] : [])
+}
+
+/** Every `user/message` this agent has received, in log order. */
+function sessionUserMessages(agent: Agent) {
+  return agent.session.snapshotEvents()
+    .flatMap(event => event.type === 'user/message' ? [event.data] : [])
+}
+
+/** Source kinds queued but not yet claimed by this agent's inbox. */
+function pendingInboxKinds(agent: Agent): string[] {
+  return [...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.source.kind)
+}
+
+/** Source kinds this agent has either logged or still holds unclaimed. */
+function receivedKinds(agent: Agent): string[] {
+  return [...sessionUserSources(agent), ...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+    .map(source => source.kind)
+}
 
 function waitFor(pred: () => boolean, ms = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -111,100 +113,77 @@ function waitFor(pred: () => boolean, ms = 5000): Promise<void> {
   })
 }
 
-describe('Spike A — continuable spawn lifecycle', () => {
-  it('A1: fresh child with NO parent context + persona/toolFilter overrides applied', async () => {
-    const { ctx, parent, adapter } = await setup([
-      textResponse('child answer'),
-    ])
-    const start = await ctx.subagents.startContinuable(continuableSpec(parent, {
-      request: {
-        persona: 'You are the Oracle — a senior reviewer.',
-        toolFilter: { allow: ['read'] },
-      } as Partial<SubagentStartRequest>,
-    }))
-    expect(start.childId).toBeTruthy()
-    expect(start.messageId).toBeTruthy()
+describe('quiet continuable fibers', () => {
+  it('settles a quiet child without delivering a settlement notice to the parent', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('quiet answer')])
+    const start = await ctx.subagents.startContinuable(startSpec(parent, { quiet: true }))
 
-    // Wait for the child's turn to reach the adapter.
-    await waitFor(() => adapter.requests.length >= 1)
-
-    const childRequest = adapter.requests.at(-1)!
-    // Persona override applied (replaces the deployment persona).
-    expect(childRequest.system ?? '').toContain('You are the Oracle')
-    // Tool filter: only `read` allowed.
-    const names = (childRequest.tools ?? []).map(t => t.name)
-    expect(names).toEqual(['read'])
-    // Fresh session: no parent conversation leaked.
-    expect(childRequest.messages.filter(m => m.role === 'user').length).toBeLessThanOrEqual(2)
-    await ctx.subagents.interrupt(start.childId, { kind: 'ancestor', agent: parent })
-  })
-
-  it('A2: multi-turn continuity — followup delivers a next turn with history', async () => {
-    const { ctx, parent, adapter } = await setup([
-      textResponse('first answer'),
-      textResponse('second answer'),
-    ])
-    const start = await ctx.subagents.startContinuable(continuableSpec(parent))
-    await waitFor(() => adapter.requests.length >= 1)
-    // Wait for the child to PARK (cold-resume model) before following up.
+    // The child runs exactly one turn, then the parked activation settles.
+    await waitFor(() => adapter.requests.filter(request => request.sessionId === start.childId).length >= 1)
     await waitFor(() => ctx.agents.get(start.childId) === undefined)
-    const req1 = adapter.requests.at(-1)!
+    // Flush the settlement continuation so a delivery would be observable.
+    await new Promise(resolve => setTimeout(resolve, 0))
 
-    // Follow up — a second child turn (fork's continuation tests use kind:'user').
-    await ctx.subagents.followup(parent, start.childId, [
-      { type: 'text', text: 'follow-up question' },
-    ], { source: { kind: 'user' }, signal: new AbortController().signal })
-    await waitFor(() => adapter.requests.length >= 2)
-
-    const req2 = adapter.requests.at(-1)!
-    if (req2 === req1) {
-      console.log('DEBUG A2: requests=', adapter.requests.length)
-      for (let i = 0; i < adapter.requests.length; i++) {
-        const texts = (adapter.requests[i]?.messages ?? []).map(m => JSON.stringify(m).slice(0, 60)).join(' | ')
-        console.log(`  req[${i}]: ${texts}`)
-      }
-    }
-    expect(req2).not.toBe(req1)
-    // The child sees its own first answer (history continuity).
-    const allText = req2.messages.map(m => JSON.stringify(m)).join(' ')
-    expect(allText).toContain('first answer')
-    // And the follow-up content arrived.
-    expect(allText).toContain('follow-up question')
-    await ctx.subagents.interrupt(start.childId, { kind: 'ancestor', agent: parent })
+    expect(adapter.requests.filter(request => request.sessionId === start.childId)).toHaveLength(1)
+    // The quiet child also never woke the parent, so no parent model request exists.
+    expect(adapter.requests.filter(request => request.sessionId === parent.id)).toHaveLength(0)
+    expect(receivedKinds(parent)).not.toContain('subagent-settled')
+    expect(receivedKinds(parent)).not.toContain('agent-message')
   })
 
-  it('A3: interrupt + drainContinuableDescendants release the child cleanly', async () => {
-    const { ctx, parent, adapter } = await setup([
-      textResponse('answer'),
-      textResponse('answer 2'),
-    ])
-    const start = await ctx.subagents.startContinuable(continuableSpec(parent))
-    await waitFor(() => adapter.requests.length >= 1)
-    // Cold-resume model: after the turn the child PARKS (no live activation) —
-    // `ctx.agents.get` is expectedly undefined until a followup re-activates.
-    expect(ctx.agents.get(start.childId)).toBeUndefined()
+  it('delivers a settlement notice for a non-quiet child (control)', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('loud answer'), textResponse('parent ack')])
+    const start = await ctx.subagents.startContinuable(startSpec(parent))
 
-    // Followup re-activates the child, then interrupt mid-life.
-    await ctx.subagents.followup(parent, start.childId, [
-      { type: 'text', text: 'continue' },
-    ], { source: { kind: 'user' }, signal: new AbortController().signal })
-    await waitFor(() => adapter.requests.length >= 2)
-    await ctx.subagents.interrupt(start.childId, { kind: 'ancestor', agent: parent })
-
-    // Descendant drain: manager-wide teardown releases everything cleanly.
-    await ctx.subagents.drainContinuableDescendants([parent])
-    expect(adapter.requests.length).toBeGreaterThanOrEqual(2)
-  })
-
-  it('A4: start rejects on aborted signal (pre-publication abort path)', async () => {
-    const { ctx, parent } = await setup([textResponse('never')])
-    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'seed' }], source: { kind: 'user' } }))
+    await waitFor(() => receivedKinds(parent).includes('subagent-settled'))
     await parent.whenIdle()
 
-    const aborted = new AbortController()
-    aborted.abort()
-    await expect(ctx.subagents.startContinuable(continuableSpec(parent, {
-      signal: aborted.signal,
-    }))).rejects.toThrow()
+    const notice = sessionUserSources(parent).find(source => source.kind === 'subagent-settled')
+    expect(notice).toMatchObject({ kind: 'subagent-settled', senderSessionId: start.childId })
+    // The notice woke the parent, so the parent's own turn consumed the next response.
+    expect(adapter.requests.filter(request => request.sessionId === parent.id)).toHaveLength(1)
+  })
+
+  it('accepts a quiet child sendMessage without delivering it to the parent', async () => {
+    const { ctx, parent, adapter } = await setup(['hang', 'hang', textResponse('parent ack')])
+    const quiet = await ctx.subagents.startContinuable(startSpec(parent, { quiet: true }))
+    const loud = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitFor(() => adapter.requests.length >= 2)
+
+    const quietChild = ctx.agents.get(quiet.childId)
+    const loudChild = ctx.agents.get(loud.childId)
+    expect(quietChild).toBeDefined()
+    expect(loudChild).toBeDefined()
+
+    const quietId = await ctx.subagents.sendMessage(
+      quietChild!,
+      parent.id,
+      [{ type: 'text', text: 'quiet report' }],
+      { signal: testSignal },
+    )
+    const loudId = await ctx.subagents.sendMessage(
+      loudChild!,
+      parent.id,
+      [{ type: 'text', text: 'loud report' }],
+      { signal: testSignal },
+    )
+    // Both sends were accepted; only the loud one is allowed through to the parent.
+    expect(quietId).toBeTruthy()
+    expect(loudId).toBeTruthy()
+
+    await waitFor(() => sessionUserMessages(parent).some(message => message.id === loudId))
+    const relayed = sessionUserMessages(parent).filter(message => message.source.kind === 'agent-message')
+    expect(relayed).toHaveLength(1)
+    expect(relayed[0]?.source).toMatchObject({
+      kind: 'agent-message',
+      form: 'relay',
+      senderSessionId: loud.childId,
+    })
+    expect(JSON.stringify(relayed[0]?.content)).not.toContain('quiet report')
+
+    await parent.whenIdle()
+    await ctx.subagents.interrupt(quiet.childId, { kind: 'ancestor', agent: parent })
+    await ctx.subagents.interrupt(loud.childId, { kind: 'ancestor', agent: parent })
+    await ctx.subagents.drainContinuableDescendants([parent])
   })
 })
