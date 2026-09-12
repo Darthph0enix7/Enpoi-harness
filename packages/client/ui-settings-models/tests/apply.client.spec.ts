@@ -167,15 +167,18 @@ describe('ui-settings-models apply', () => {
     // A keyed card extension and a footer entry register through the ordinary
     // ledger once the section's registration declared the seats.
     const disposeCard = b.slots.register(
-      { name: 'settings.models.provider-card', key: 'llm-pi-ai' } as never,
+      // Priority 1 shadows the shipped priority-0 Key Pool entry for this key.
+      { name: 'settings.models.provider-card', key: 'llm-pi-ai', priority: 1 } as never,
       () => null,
     )
     b.slots.register({ name: 'settings.models.footer', id: 'extra', order: 0 } as never, () => null)
-    expect(b.slots.entries('settings.models.provider-card')).toHaveLength(1)
-    expect(b.slots.entries('settings.models.footer')).toHaveLength(1)
+    // The shipped Key Pool extension also occupies both seats under this key.
+    expect(b.slots.entries('settings.models.provider-card')).toHaveLength(2)
+    expect(b.slots.entries('settings.models.footer')).toHaveLength(2)
     // Extension-side HMR safety: its own disposer removes the entry.
     disposeCard()
-    expect(b.slots.entries('settings.models.provider-card')).toHaveLength(0)
+    expect(b.slots.entries('settings.models.provider-card')).toHaveLength(1)
+    expect(b.slots.entries('settings.models.provider-card')[0]!.options).toMatchObject({ key: 'llm-pi-ai' })
     // Declarer unload cascades whatever extension entries remain.
     await fiber.dispose()
     expect(b.slots.entries('settings.models.footer')).toHaveLength(0)

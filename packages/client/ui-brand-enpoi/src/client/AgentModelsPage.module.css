@@ -1,15 +1,15 @@
-/* Fleet Routing — right activity rail tab (global persona model assignment). */
+/* Agent Models — global main page (per-persona model assignment). */
 
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow: visible;
-  padding: 10px 8px;
-  gap: 10px;
-  /* Visible so the compact ModelSelect picker (position:absolute) escapes
-     without being clipped at the rail edge. Inner .groups still scrolls. */
-  min-height: 0;
+  overflow: hidden;
+  padding: 14px 16px 10px;
+  gap: 12px;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .head {
@@ -17,32 +17,33 @@
   align-items: baseline;
   gap: 8px;
   padding: 0 4px;
+  flex-wrap: wrap;
 }
 
 .headTitle {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
-  color: #e2e8f0;
+  color: var(--dsw-alias-label-primary, #f1f5f9);
 }
 
 .headCount {
-  font-size: 10px;
-  color: #64748b;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-caption, #64748b);
 }
 
 .groups {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   overflow-y: auto;
   overflow-x: visible;
   flex: 1;
   min-height: 0;
-  padding-right: 2px;
+  padding: 2px 2px 8px;
+  width: 100%;
+  max-width: 760px;
   /* Stable gutter so its own bar doesn't overlay row chrome. */
   scrollbar-gutter: stable;
-  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
-  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .group {
@@ -52,11 +53,11 @@
 }
 
 .groupTitle {
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  color: #64748b;
+  color: var(--dsw-alias-label-caption, #64748b);
   padding: 2px 6px;
 }
 
@@ -70,8 +71,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px;
+  padding: 5px 8px;
+  min-height: 34px;
   border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.06));
+  background: var(--dsw-specific-input-major, rgba(13, 20, 35, 0.65));
   transition: background 120ms ease;
   position: relative;
   overflow: visible;
@@ -80,15 +84,15 @@
 
 .icon {
   display: inline-flex;
-  color: #7c8aa0;
+  color: var(--dsw-alias-label-dimmed, #7c8aa0);
   flex-shrink: 0;
 }
 
 .name {
   font-size: 12.5px;
   font-weight: 550;
-  color: #cbd5e1;
-  width: 96px;
+  color: var(--dsw-alias-label-secondary, #cbd5e1);
+  width: 108px;
   flex-shrink: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -109,12 +113,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #94a3b8;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  color: var(--dsw-alias-label-tertiary, #94a3b8);
   cursor: pointer;
   padding: 0;
   transition: all 120ms ease;
@@ -129,14 +133,23 @@
 
 .noDir {
   font-size: 10px;
-  color: #475569;
+  color: var(--dsw-alias-label-caption, #475569);
   white-space: nowrap;
 }
 
 .foot {
   font-size: 9.5px;
-  color: #475569;
+  color: var(--dsw-alias-label-caption, #475569);
   padding: 4px 6px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.05));
   line-height: 1.4;
+}
+
+@media (max-width: 560px) {
+  .name {
+    width: 78px;
+  }
+  .container {
+    padding: 10px 8px;
+  }
 }

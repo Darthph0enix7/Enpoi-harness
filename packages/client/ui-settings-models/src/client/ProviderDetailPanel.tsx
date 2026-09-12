@@ -933,7 +933,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
             <div className={styles['poolHeaderActions']}>
               <select
-                className={styles['strategySelect']}
+                className={styles['selectInput']}
                 value={poolConfig.strategy ?? 'priority-sticky'}
                 onChange={(e) => { void handleStrategyChange(e.target.value) }}
                 disabled={readOnly || busy}

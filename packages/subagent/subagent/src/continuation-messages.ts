@@ -142,7 +142,16 @@ export function createSettlementMessage(
       { type: 'text' as const, text: summary },
       ...terminal.output === undefined
         ? [{ type: 'text' as const, text: 'It left no closing message.' }]
-        : [{ type: 'text' as const, text: 'Its closing message:' }, ...terminal.output],
+        : [
+          { type: 'text' as const, text: 'Its closing message:' },
+          // Only the child's final REPORT reaches the parent: reasoning and
+          // tool-call blocks (its thinking and intermediate actions) are
+          // stripped, mirroring the foreground path.
+          ...terminal.output.filter(
+            (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
+              block.type === 'text' || block.type === 'image',
+          ),
+        ],
     ],
     source: {
       kind: 'subagent-settled' as const,

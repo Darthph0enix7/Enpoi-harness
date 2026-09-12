@@ -1,29 +1,28 @@
 /**
- * Fleet Routing — global per-persona model assignment surface.
+ * Agent Models — the global per-persona model assignment page (main key
+ * `agent-models`, ordered 56 in the sidebar rail).
  *
- * Lives in the right activity rail (peer to Capabilities & Tools) because it
- * is GLOBAL server configuration, not session observability (Oracle verdict:
- * the Watchtower stays session-scoped). Reuses the shared compact ModelSelect
- * and the 0ms reactive persona-store; assignments persist to
- * `enpoi-orchestration.personas` in settings.yaml and apply to every session.
+ * Restored from the retired better-sidebar Fleet Routing tab as a native
+ * `main` page: global server configuration, not session observability
+ * (Oracle verdict: the Watchtower stays session-scoped). Persona assignments
+ * persist to `enpoi-orchestration.personas` in settings.yaml and apply to
+ * every session. Seats: Background & Supervision (Context Keeper, Oracle),
+ * Specialist Workers, Roundtable Debaters, Chorus Brainstormers. The keeper
+ * seat shows "Default" (its plugin Config route) instead of "Inherit" — the
+ * keeper has no parent turn to inherit from.
  *
- * Seats: Background & Supervision (Context Keeper, Oracle), Specialist
- * Workers, Roundtable Debaters, Chorus Brainstormers. The keeper seat shows
- * "Default" (its plugin Config route) instead of "Inherit" — the keeper has
- * no parent turn to inherit from.
+ * All live data arrives through the standard root hooks and the injected
+ * face (persona assignments as a bound hook, directory resolution and the
+ * assignment callbacks); the component never reaches for ctx.
  */
-import { useEffect, useMemo, useSyncExternalStore } from 'react'
-import type { Context } from '@deepseek-ai/cordis'
+import { useEffect, useMemo } from 'react'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { ModelCatalogFailure, ModelProviderGroup, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import {
-  getPersonaAssignments,
-  subscribePersonaAssignments,
-  setPersonaAssignment,
-  clearPersonaAssignment,
-} from './persona-store.ts'
-import css from './FleetRoutingView.module.css'
+import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type { PersonaMap } from './persona-store.ts'
+import css from './AgentModelsPage.module.css'
 
 /** The keeper's plugin Config route — shown as the "Default" sublabel. */
 const KEEPER_DEFAULT_ROUTE = 'freellmapi/auto'
@@ -90,8 +89,8 @@ function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
   )
 }
 
-/** Monochrome rail icon for the Fleet Routing tab (thin stroke, currentColor). */
-export function FleetRoutingIcon({ size = 18 }: { size?: number }) {
+/** Monochrome rail icon for the Agent Models page (thin stroke, currentColor). */
+export function FleetRoutingIcon({ size = 18 }: { size?: number; active?: boolean }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
       <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -102,73 +101,54 @@ export function FleetRoutingIcon({ size = 18 }: { size?: number }) {
   )
 }
 
-export interface FleetRoutingViewProps {
-  ctx: Context
-  /** The sidebar session scope — the model directory is derived from it. */
-  scope: { sessionId: string; cwd?: string }
-  /** Whether this tab is the active one AND the panel is open. */
-  visible: boolean
+/** One resolved model picker face: a live directory plus its load trigger. */
+export interface AgentModelsDirectoryFace {
+  available: boolean
+  directory: SnapshotStore<ModelDirectoryState>
+  load: () => void
 }
 
-export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps) {
-  // Global reactive in-memory cache: 100% synchronous 0ms render across
-  // sessions, zero delay, zero reloading.
-  const assignments = useSyncExternalStore(subscribePersonaAssignments, getPersonaAssignments)
+/** Injected business face of the Agent Models page (built in apply from ctx). */
+export interface AgentModelsInjected {
+  /** The persona assignment cache as a bound `usePersonaAssignments` hook. */
+  hooks: { personaAssignments: HostObservable<PersonaMap> }
+  /**
+   * Resolve the model directory for the page's session (catalog fallback
+   * when none is selected or the session is an addressed subagent).
+   * @param sessionId - most recent root session id, or undefined.
+   * @returns the stable directory face, or null when model data is unavailable.
+   */
+  resolveDirectory: (sessionId: string | undefined) => AgentModelsDirectoryFace | null
+  /** Assign an explicit model to a persona globally. */
+  assignPersona: (personaId: string, selection: ModelSelection) => void
+  /** Clear an explicit assignment, reverting the persona to its fallback route. */
+  clearPersona: (personaId: string) => void
+}
 
-  // Model directory of the ACTIVE session when one exists; otherwise a
-  // catalog-backed fallback so the GLOBAL assignments stay editable on
-  // sub-sessions and when no session is open (Oracle: a global tab has no
-  // session of its own — the assignments are server config, not session state).
-  const face = useMemo(() => {
-    const modelDirectories = ctx.get('modelDirectories') as
-      | {
-          directoryFor: (sessionId: string) => { store: SnapshotStore<ModelDirectoryState>; load: () => Promise<unknown> }
-          catalog: { store: SnapshotStore<{ value: { default: ModelSelection | null; groups: readonly ModelProviderGroup[]; failures: readonly ModelCatalogFailure[] } | null; status: string; error: string | null }>; load: () => Promise<unknown> }
-        }
-      | undefined
-    const sessions = ctx.get('sessions') as { subagentAddress?: (sessionId: string) => unknown } | undefined
-    if (modelDirectories === undefined) {
-      return { available: false, directory: null, load: () => {} }
-    }
-    // Prefer the live session directory; fall back to the global catalog.
-    if (scope.sessionId !== '' && sessions !== undefined && sessions.subagentAddress?.(scope.sessionId) === undefined) {
-      const directory = modelDirectories.directoryFor(scope.sessionId)
-      return {
-        available: true,
-        directory: directory.store,
-        load: () => { directory.load().catch(() => { /* surfaced on the store */ }) },
-      }
-    }
-    // Catalog-backed fallback: map the global catalog store into the
-    // ModelDirectoryState shape so the picker renders without a session.
-    // Read-only derived store — ModelSelect only subscribes/reads; update/set
-    // are never invoked on a derived face.
-    const catalog = modelDirectories.catalog
-    const fallbackStore = {
-      subscribe: (fn: () => void) => catalog.store.subscribe(fn),
-      getSnapshot: () => {
-        const c = catalog.store.getSnapshot()
-        return {
-          current: c.value?.default ?? null,
-          routable: null,
-          groups: c.value?.groups ?? [],
-          failures: c.value?.failures ?? [],
-          status: c.status === 'ready' ? 'ready' : c.status === 'error' ? 'error' : 'idle',
-          error: c.error,
-        }
-      },
-    } as unknown as SnapshotStore<ModelDirectoryState>
-    return {
-      available: true,
-      directory: fallbackStore,
-      load: () => { catalog.load().catch(() => { /* surfaced on the store */ }) },
-    }
-  }, [ctx, scope.sessionId])
+export type AgentModelsPageProps = PropsRuntime<'main'> & InjectFace<AgentModelsInjected>
 
-  // Prime the model directory once when the tab becomes visible.
+export function AgentModelsPage({
+  useSessions,
+  usePersonaAssignments,
+  resolveDirectory,
+  assignPersona,
+  clearPersona,
+}: AgentModelsPageProps) {
+  // The global page has no session scope; the live catalog is addressed by the
+  // most recent root session (loaded skills/cwd), falling back to the
+  // session-less catalog-backed directory when none is open.
+  const sessionId = useSessions(state => state.current ?? state.ids[0])
+  const assignments = usePersonaAssignments(snapshot => snapshot)
+
+  const face = useMemo(
+    () => resolveDirectory(typeof sessionId === 'string' ? sessionId : undefined),
+    [resolveDirectory, sessionId],
+  )
+
+  // Prime the model directory once per resolved face.
   useEffect(() => {
-    if (visible && face.available) face.load()
-  }, [visible, face])
+    if (face !== null && face.available) face.load()
+  }, [face])
 
   return (
     <div className={css.container}>
@@ -187,7 +167,10 @@ export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps)
                 const override: ModelSelectOverride = {
                   current: isExplicitlyAssigned ? assigned : null,
                   placeholder: seat.defaultLabel ?? 'Inherit',
-                  select: selection => setPersonaAssignment(seat.id, selection),
+                  select: selection => {
+                    assignPersona(seat.id, selection)
+                    return Promise.resolve(true)
+                  },
                 }
                 return (
                   <div key={seat.id} className={css.row} title={seat.defaultHint !== undefined && !isExplicitlyAssigned ? `${seat.name} — Default: ${seat.defaultHint}` : seat.name}>
@@ -198,13 +181,13 @@ export function FleetRoutingView({ ctx, scope, visible }: FleetRoutingViewProps)
                         <button
                           type="button"
                           className={css.unassignBtn}
-                          onClick={() => void clearPersonaAssignment(seat.id)}
+                          onClick={() => { clearPersona(seat.id) }}
                           title={`Reset ${seat.name} to ${seat.defaultLabel ?? 'Inherit'} (no explicit model)`}
                         >
                           <MicroIcon d="M4 8a4 4 0 118 0A4 4 0 014 8zm1 0h6" size={10} />
                         </button>
                       )}
-                      {face.directory !== null ? (
+                      {face !== null ? (
                         <ModelSelect
                           locked={false}
                           available={face.available}

@@ -1,7 +1,9 @@
-/** Enpoi Harness brand occupants & Watchtower UI slots. */
-import { createElement } from 'react'
+/** Enpoi Harness brand occupants, Watchtower UI slots, and operator pages. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -9,48 +11,93 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { WatchtowerView } from './WatchtowerView.tsx'
-import { FleetRoutingView, FleetRoutingIcon } from './FleetRoutingView.tsx'
+import {
+  AgentModelsPage,
+  FleetRoutingIcon,
+  type AgentModelsDirectoryFace,
+  type AgentModelsInjected,
+} from './AgentModelsPage.tsx'
+import { CapabilitiesPage, CapabilitiesIcon } from './CapabilitiesPage.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
+import {
+  getPersonaAssignments,
+  subscribePersonaAssignments,
+  setPersonaAssignment,
+  clearPersonaAssignment,
+  type PersonaMap,
+} from './persona-store.ts'
 
 /** Required services: the UI slot registry, the shared model directory, sessions, and locale. */
 export const inject = ['slots', 'modelDirectories', 'sessions', 'locale']
 
+/** Session-less model directory: the global catalog mapped to the directory state shape. */
+type CatalogDirectoryFace = Omit<AgentModelsDirectoryFace, 'available'> & { available: true }
+
 /**
- * Register the Fleet Routing tab on the right activity rail (peer to
- * Capabilities & Tools). The betterSidebar service may activate before or
- * after this plugin — register immediately when present, otherwise wait for
- * the `internal/service` binding event.
+ * Build the catalog-backed model-directory face used when no root session is
+ * selected. The derived store is read-only: ModelSelect subscribes and reads
+ * it, while updates always route to an explicit persona assignment.
  */
-function registerFleetRoutingTab(ctx: Context, betterSidebar: unknown): void {
-  const service = betterSidebar as {
-    registerTab: (descriptor: {
-      id: string
-      title: string
-      icon: (size: number) => React.ReactNode
-      order: number
-      single: boolean
-      component: (props: { ctx: Context; scope: { sessionId: string; cwd?: string }; visible: boolean }) => React.ReactNode
-    }) => () => void
+function createCatalogDirectoryFace(ctx: Context): CatalogDirectoryFace | null {
+  const modelDirectories = ctx.get('modelDirectories')
+  if (modelDirectories === undefined) return null
+  const catalog = modelDirectories.catalog
+  const directory = {
+    subscribe: (fn: () => void) => catalog.store.subscribe(fn),
+    getSnapshot: () => {
+      const current = catalog.store.getSnapshot()
+      return {
+        current: current.value?.default ?? null,
+        routable: null,
+        groups: current.value?.groups ?? [],
+        failures: current.value?.failures ?? [],
+        status: current.status === 'ready' ? 'ready' as const : current.status === 'error' ? 'error' as const : 'idle' as const,
+        error: current.error,
+      }
+    },
+  } as unknown as SnapshotStore<ModelDirectoryState>
+  return {
+    available: true,
+    directory,
+    load: () => { catalog.load().catch(() => { /* surfaced on the catalog store */ }) },
   }
-  const dispose = service.registerTab({
-    id: 'routing',
-    title: 'Agent Models',
-    icon: (size: number) => createElement(FleetRoutingIcon, { size }),
-    order: 60,
-    single: true,
-    component: props => createElement(FleetRoutingView, {
-      ctx: props.ctx,
-      scope: props.scope,
-      visible: props.visible,
-    }),
-  })
-  ctx.effect(() => dispose, 'enpoi: fleet routing tab')
 }
 
 /**
- * Register brand marks, the Watchtower view tab, the Fleet Routing rail tab,
- * and In-Chat Task Cards.
+ * Resolve the Agent Models directory for the addressed session, falling back
+ * to the global catalog when the id is empty, unknown, or an addressed
+ * subagent (Agent-bound model RPCs stay out of that path).
+ */
+function resolveAgentModelsDirectory(
+  ctx: Context,
+  fallback: CatalogDirectoryFace | null,
+  sessionId: string | undefined,
+): AgentModelsDirectoryFace | null {
+  const modelDirectories = ctx.get('modelDirectories')
+  if (modelDirectories === undefined) return fallback
+  const sessions = ctx.get('sessions')
+  if (sessionId !== undefined && sessionId !== '' && sessions !== undefined
+    && sessions.subagentAddress(sessionId as SessionId) === undefined) {
+    try {
+      const directory = modelDirectories.directoryFor(sessionId as SessionId)
+      return {
+        available: true,
+        directory: directory.store,
+        load: () => { directory.load().catch(() => { /* surfaced on the store */ }) },
+      }
+    } catch {
+      // Unknown sessions (closed between list and render) use the catalog.
+      return fallback
+    }
+  }
+  return fallback
+}
+
+/**
+ * Register brand marks, the Watchtower view tab, the two global operator
+ * pages (Capabilities, Agent Models) with their sidebar rail rows, the
+ * Orchestration settings section, and In-Chat Task Cards.
  * @param ctx - Client root context.
  */
 export function apply(ctx: Context): void {
@@ -84,17 +131,44 @@ export function apply(ctx: Context): void {
     label: () => 'Orchestration',
   }, OrchestrationSettings))
 
-  // 3. Fleet Routing rail tab (global persona model assignment)
-  const betterSidebar = ctx.get('betterSidebar')
-  if (betterSidebar !== undefined) {
-    registerFleetRoutingTab(ctx, betterSidebar)
-  } else {
-    ctx.on('internal/service', (name: string, value: unknown) => {
-      if (name === 'betterSidebar' && value !== undefined) {
-        registerFleetRoutingTab(ctx, value)
-      }
-    })
-  }
+  // 3. Global operator pages: `main` keys + matching `sidebar.panellist` rail
+  // rows (the rail id must equal the registered main key or selection throws).
+  const fallbackDirectory = createCatalogDirectoryFace(ctx)
+  ctx.slots.inject('main', function* () {
+    yield ctx.slots.register({
+      name: 'main',
+      key: 'capabilities',
+    }, CapabilitiesPage)
+    yield ctx.slots.register({
+      name: 'main',
+      key: 'agent-models',
+      inject: (): AgentModelsInjected => ({
+        hooks: {
+          personaAssignments: {
+            getSnapshot: getPersonaAssignments,
+            subscribe: subscribePersonaAssignments,
+          } satisfies HostObservable<PersonaMap>,
+        },
+        resolveDirectory: sessionId => resolveAgentModelsDirectory(ctx, fallbackDirectory, sessionId),
+        assignPersona: (personaId, selection) => { void setPersonaAssignment(personaId, selection) },
+        clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
+      }),
+    }, AgentModelsPage)
+  })
+  ctx.slots.inject('sidebar.panellist', function* () {
+    yield ctx.slots.register({
+      name: 'sidebar.panellist',
+      id: 'capabilities',
+      order: 55,
+      label: () => 'Capabilities',
+    }, CapabilitiesIcon)
+    yield ctx.slots.register({
+      name: 'sidebar.panellist',
+      id: 'agent-models',
+      order: 56,
+      label: () => 'Agent Models',
+    }, FleetRoutingIcon)
+  })
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {

@@ -7,7 +7,8 @@
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 
-type PersonaMap = Record<string, ModelSelection | null>
+/** Persona id → explicit model selection (null = inherit); the page's snapshot value. */
+export type PersonaMap = Record<string, ModelSelection | null>
 
 let currentPersonas: PersonaMap = {}
 let primed = false

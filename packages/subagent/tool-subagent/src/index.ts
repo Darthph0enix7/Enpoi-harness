@@ -348,6 +348,23 @@ const ROLE_PERSONAS: Record<string, string> = {
 }
 
 /** Detect the specialist role named in a delegation description or prompt. */
+/**
+ * One-delivery rule for children spawned by this tool: deny the child-scoped
+ * `send_message` relay so the settlement notice (background) or this call's
+ * result (foreground) is the ONLY delivery. The tool's presence also disarms
+ * the continuable return-guidance injection (continuation.ts), which would
+ * otherwise instruct the child to send a duplicate. Deny wins over
+ * allow-lists; unknown deny names are no-ops (tools.restrict), and providers
+ * without the toolFilter capability keep their configured filter untouched.
+ */
+function childToolFilter(
+  provider: SubagentProvider,
+  configured: Config['toolFilter'],
+): Config['toolFilter'] {
+  if (!provider.capabilities.toolFilter) return configured
+  return { ...configured, deny: [...configured?.deny ?? [], 'send_message'] }
+}
+
 function detectSubagentRole(description?: string, prompt?: string): string | undefined {
   const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
   // 1. Explicit role name wins.
@@ -612,7 +629,10 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             parent,
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
-            ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
+            ...(() => {
+              const delegated = childToolFilter(subagentProvider, config.toolFilter)
+              return delegated === undefined ? {} : { toolFilter: delegated }
+            })(),
             ...maxDepth !== undefined ? { maxDepth } : {},
           }
 
