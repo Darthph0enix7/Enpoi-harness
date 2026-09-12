@@ -83,7 +83,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-Sources: [`packages/core/session/src/types.ts:404`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:412`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:434`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:465`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:470`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:478`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:500`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:531`](../packages/core/session/src/types.ts)
 
 ## Events
 
@@ -625,6 +625,110 @@ Source: [`packages/core/session/src/types.ts:377`](../packages/core/session/src/
 ```
 
 Source: [`packages/core/session/src/types.ts:365`](../packages/core/session/src/types.ts)
+
+### `revert/*`
+
+<a id="revertfile-conflict--log-only"></a>
+
+#### `revert/file-conflict` — log-only
+
+```ts persistence-catalog
+/**
+ * A file whose revert requires operator resolution (user edited on top,
+ * file missing, or pre-state unavailable). Log-only, ignorable. The client
+ * folds these to render the conflict modal; the operator's choice is applied
+ * via the `session.resolveFileConflict` RPC.
+ */
+'revert/file-conflict': {
+  conflictId: string
+  targetKey: string
+  displayPath: string
+  state: 'conflict' | 'missing' | 'unavailable'
+  reason: string
+  mode?: 'revert' | 'restore'
+  boundarySeq?: number | null
+  spanStartSeq?: number
+  targetBlobSha?: string | null
+  targetAbsent?: boolean
+  spanPreExisted?: boolean
+  sessionCreated?: boolean
+  preSha: string | null
+  postSha: string | null
+  currentSha: string | null
+}
+```
+
+Source: [`packages/core/session/src/types.ts:450`](../packages/core/session/src/types.ts)
+
+<a id="revertfile-intent--log-only"></a>
+
+#### `revert/file-intent` — log-only
+
+```ts persistence-catalog
+/**
+ * Durable intent record for a file-revert batch, appended by the
+ * `enpoi-file-revert` plugin BEFORE any disk mutation. Log-only, ignorable,
+ * never surface-eligible. Recovery replays the recorded plan verbatim when
+ * no matching `revert/file-result` seals it.
+ */
+'revert/file-intent': {
+  revertSeq: number
+  plan: Record<string, {
+    action: string
+    targetBlobSha: string | null
+    expectedDiskSha: string | null
+  }>
+}
+```
+
+Source: [`packages/core/session/src/types.ts:421`](../packages/core/session/src/types.ts)
+
+<a id="revertfile-result--log-only"></a>
+
+#### `revert/file-result` — log-only
+
+```ts persistence-catalog
+/**
+ * Terminal marker sealing a `revert/file-intent` batch. Log-only, ignorable.
+ * The client folds it to close conflict modals; recovery treats an intent
+ * without a matching result as unsealed and re-runs it.
+ */
+'revert/file-result': {
+  revertSeq: number
+  outcomes: Record<string, {
+    status: string
+    fromSha?: string | null
+    toSha?: string | null
+    dest?: string
+    reason?: string
+  }>
+}
+```
+
+Source: [`packages/core/session/src/types.ts:434`](../packages/core/session/src/types.ts)
+
+<a id="revertstate--log-only"></a>
+
+#### `revert/state` — log-only
+
+```ts persistence-catalog
+/**
+ * The active revert boundary for the session: `fromSeq` is the seq of the
+ * user message the conversation was reverted from, or `null` when no revert
+ * is active. `cause` identifies the trigger ('revert' | 'restore' | 'commit').
+ * Log-only UI/state event — never surface-eligible, never reaches
+ * the model. Appended on every revert, restore, and revert-commit so the
+ * state is durable and replayable across restarts. The client folds the
+ * latest value to truncate the transcript and show the reverted tray; the
+ * host uses it to shadow the reverted span when the next prompt commits.
+ */
+'revert/state': {
+  fromSeq: number | null
+  cause?: 'revert' | 'restore' | 'commit'
+}
+```
+
+Source: [`packages/core/session/src/types.ts:411`](../packages/core/session/src/types.ts)
 
 ### `sandbox/*`
 

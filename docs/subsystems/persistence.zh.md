@@ -408,6 +408,16 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+/**
+ * Permanently delete a session's durable artifacts. An absent session is a
+ * no-op success (blank sessions may be deleted before ever materializing —
+ * backends create lazily). Implementations must not reject on a missing
+ * artifact; storage faults propagate.
+ * @param id - the persisted session to delete.
+ * @param signal - optional cancellation for backend delete work.
+ */
+abstract delete(id: SessionId, signal?: AbortSignal): Promise<void>
 ```
 
 Types: [SessionId](core.zh.md)

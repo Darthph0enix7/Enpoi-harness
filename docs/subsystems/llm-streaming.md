@@ -958,7 +958,7 @@ registerPoolOperations( settingsNs: string, ops: LlmPoolOperations, ): () => voi
  * @param provider - provider route id.
  * @returns per-identity pool status rows.
  */
-async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>
+@Remote async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>
 
 /**
  * Reset cooldowns for one identity or all identities under a provider route.
@@ -966,7 +966,7 @@ async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityS
  * @param provider - provider route id.
  * @param identityId - optional identity to reset; omitted resets all.
  */
-async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>
+@Remote async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>
 
 /**
  * Test an individual identity in a provider route pool.
@@ -976,7 +976,7 @@ async poolResetCooldown(settingsNs: string, provider: string, identityId?: strin
  * @param apiKey - optional override credential for the probe.
  * @returns probe outcome with status, latency, and error detail.
  */
-async poolTestIdentity( settingsNs: string, provider: string, identityId: string, apiKey?: string, ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>
+@Remote async poolTestIdentity( settingsNs: string, provider: string, identityId: string, apiKey?: string, ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>
 
 /**
  * Remote adapter for one draft provider interrogation.

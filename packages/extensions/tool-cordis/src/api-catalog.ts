@@ -442,7 +442,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'setPolicy(agent: Agent, policy: ApprovalPolicy): void',
-        description: 'Switch one live agent\'s policy and queue the transition for its next model step. Session initialization uses setApprovalPolicy directly because there is no previously visible policy to change.',
+        description: 'Switch one live agent\'s policy and queue the transition for its next model step. Session initialization uses setApprovalPolicy directly because there is no previously visible policy to change.\n\nThe new value surfaces to the model through the runtime-context snapshot (`approval:policy` context described above): the snapshot updates in place on the next step\'s assembly. No synthetic user message is appended — an injected notice would persist as history and reach the model on every subsequent turn (Enpoi Harness: fixed a cache-hostile, context-polluting append; the runtime-context snapshot is the only channel).',
         parameters: [{ name: 'agent', description: 'the live agent whose policy is changing.' }, { name: 'policy', description: 'the new effective policy.' }],
       },
       {
@@ -1241,6 +1241,29 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the advertised models, deduplicated in endpoint order.',
       },
       {
+        signature: 'registerPoolOperations( settingsNs: string, ops: LlmPoolOperations, ): () => void',
+        description: 'Register provider pool management operations on behalf of a settings namespace.',
+        parameters: [{ name: 'settingsNs', description: 'namespace whose pool this operations set manages.' }, { name: 'ops', description: 'pool operations implementation.' }],
+        returns: 'disposer.',
+      },
+      {
+        signature: '@Remote async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>',
+        description: 'Get pool identities status for a provider route.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }],
+        returns: 'per-identity pool status rows.',
+      },
+      {
+        signature: '@Remote async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>',
+        description: 'Reset cooldowns for one identity or all identities under a provider route.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }, { name: 'identityId', description: 'optional identity to reset; omitted resets all.' }],
+      },
+      {
+        signature: '@Remote async poolTestIdentity( settingsNs: string, provider: string, identityId: string, apiKey?: string, ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>',
+        description: 'Test an individual identity in a provider route pool.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }, { name: 'identityId', description: 'identity to probe.' }, { name: 'apiKey', description: 'optional override credential for the probe.' }],
+        returns: 'probe outcome with status, latency, and error detail.',
+      },
+      {
         signature: '@Remote(\'discoverModels\') async remoteDiscoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal, ): Promise<LlmDiscoveredModel[]>',
         description: 'Remote adapter for one draft provider interrogation.',
         parameters: [{ name: 'settingsNs', description: 'namespace whose registered discovery serves this draft.' }, { name: 'request', description: 'endpoint, protocol, and one-shot credential to use.' }, { name: 'signal', description: 'caller cancellation supplied by the Remote carrier.' }],
@@ -1519,6 +1542,30 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the new Session identity.',
       },
       {
+        signature: '@Remote(\'revert\') revert(request: SessionRevertRequest): Promise<SessionRevertValue>',
+        description: 'Revert the conversation from a user message (revert-from-here).',
+        parameters: [{ name: 'request', description: 'session and the user-message seq anchoring the revert.' }],
+        returns: 'the reverted query text and count for the input card.',
+      },
+      {
+        signature: '@Remote(\'revertRestore\') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>',
+        description: 'Restore reverted messages (restoreSeq omitted restores everything).',
+        parameters: [{ name: 'request', description: 'session and the optional restore boundary.' }],
+        returns: 'acknowledgement that the restore was accepted.',
+      },
+      {
+        signature: '@Remote(\'resolveFileConflict\') resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue>',
+        description: 'Resolve a file revert conflict (bridged to the enpoi-file-revert plugin).',
+        parameters: [{ name: 'request', description: 'session, conflictId, and the chosen resolution.' }],
+        returns: 'acknowledgement that the resolution was accepted.',
+      },
+      {
+        signature: '@Remote(\'delete\') delete(request: SessionDeleteRequest): Promise<SessionDeleteValue>',
+        description: 'Permanently delete a session (log, revert history, file history).',
+        parameters: [{ name: 'request', description: 'session to delete.' }],
+        returns: 'acknowledgement that the session was deleted.',
+      },
+      {
         signature: '@Remote(\'prompt\') prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue>',
         description: 'Admit one prompt after explicitly resuming its Session.',
         parameters: [{ name: 'request', description: 'Session identity, prompt content, source metadata, and delivery mode.' }, { name: 'signal', description: 'caller cancellation before prompt admission begins.' }],
@@ -1625,6 +1672,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'List every stored session visible to this process, in no promised order.',
         parameters: [{ name: 'options', description: 'optional cancellation.' }],
         returns: 'one snapshot per stored session.',
+      },
+      {
+        signature: 'abstract delete(id: SessionId, signal?: AbortSignal): Promise<void>',
+        description: 'Permanently delete a session\'s durable artifacts. An absent session is a no-op success (blank sessions may be deleted before ever materializing — backends create lazily). Implementations must not reject on a missing artifact; storage faults propagate.',
+        parameters: [{ name: 'id', description: 'the persisted session to delete.' }, { name: 'signal', description: 'optional cancellation for backend delete work.' }],
       },
     ],
   },
@@ -1908,6 +1960,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Look up a live session.',
         parameters: [{ name: 'id', description: 'the session id to look up.' }],
         returns: 'the session, or undefined when no live session has that id.',
+      },
+      {
+        signature: 'dispose(id: SessionId): boolean',
+        description: 'Dispose a live session by id: detach it from the store and emit its paired disposal edge. Safe to call from host RPCs (e.g. permanent session delete); the single-shot `entered` guard makes a later detach by the session\'s own lifecycle owner a no-op. Does NOT stop a running agent loop — callers must cancel and await quiescence first.',
+        parameters: [{ name: 'id', description: 'the live session to dispose.' }],
+        returns: 'whether a live session was detached.',
       },
       {
         signature: 'list(): Session[]',
@@ -2909,6 +2967,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the complete resulting archive set.',
       },
       {
+        signature: '@Remote(\'moveSession\') moveSession(request: WorkspaceMoveSessionRequest): Promise<void>',
+        description: 'Move one known Session to a target Workspace (display-only overlay).',
+        parameters: [{ name: 'request', description: 'Session identity plus the target Workspace.' }],
+      },
+      {
         signature: '@Remote({ mode: \'stream\' }) follow(signal: AbortSignal): AsyncIterable<WorkspaceFollowFrame>',
         description: 'Stream a complete Workspace baseline followed by ordered increments.',
         parameters: [{ name: 'signal', description: 'generation cancellation.' }],
@@ -3004,6 +3067,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'archiveSession(sessionId: SessionId): Promise<void>',
         description: 'Archive one session durably. The session must exist (live or in session persistence); its workspace accounting — or lack of one — is irrelevant. An already archived id resolves without writing.',
         parameters: [{ name: 'sessionId', description: 'The session to archive.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'unarchiveSession(sessionId: SessionId): Promise<void>',
+        description: 'Remove one session from the registry-global archive set (used after a permanent session delete so deleted ids do not ride the archive set forever). A session without an archive entry resolves without writing.',
+        parameters: [{ name: 'sessionId', description: 'The session to un-archive.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void>',
+        description: 'Display-only move: claim a session for display under another workspace without touching its cwd accounting. One atomic setState (the same crash story as archive — no two-write window). The session\'s cwd workspace record is untouched; the wire projection excludes overlay-claimed ids from their cwd workspace\'s list and includes them under the target. Moving to the session\'s own cwd workspace (or an already-claimed target) resolves without writing.',
+        parameters: [{ name: 'sessionId', description: 'The session to display under another workspace.' }, { name: 'targetWorkspaceId', description: 'The workspace that displays the session.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'unmoveSession(sessionId: SessionId): Promise<void>',
+        description: 'Remove a session\'s display-move overlay claim: the session returns to its cwd workspace\'s list. A session without a claim resolves without writing.',
+        parameters: [{ name: 'sessionId', description: 'The session to un-claim.' }],
         returns: 'resolution after durability.',
       },
       {
@@ -3944,11 +4025,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContinuableStartSpec',
-    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n}',
+    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'ContinuableSubagentDescriptorData',
-    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly agentReasoningEffort?: ReasoningEffortId;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
+    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly agentReasoningEffort?: ReasoningEffortId;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'CordisDynamicPackageId',
@@ -4551,6 +4632,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmModelReasoningInfo {\n    efforts: readonly LlmReasoningEffortInfo[];\n    defaultEffort?: ReasoningEffortId;\n}',
   },
   {
+    name: 'LlmPoolIdentityStatus',
+    declaration: 'export interface LlmPoolIdentityStatus {\n    id: string;\n    credentialRef: string;\n    priority?: number;\n    enabled?: boolean;\n    cooldownUntil: number;\n    consecutiveFailures: number;\n    lastStatus?: number;\n    lastError?: string;\n    quota?: {\n        remainingFraction?: number | null;\n        resetTime?: string | number | null;\n        source?: string;\n    };\n}',
+  },
+  {
+    name: 'LlmPoolOperations',
+    declaration: 'export interface LlmPoolOperations {\n    status(provider: string): Promise<LlmPoolIdentityStatus[]>;\n    resetCooldown(provider: string, identityId?: string): Promise<void>;\n    testIdentity(provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n}',
+  },
+  {
     name: 'LlmProviderInfo',
     declaration: 'export interface LlmProviderInfo {\n    id: string;\n    name: string;\n}',
   },
@@ -4564,7 +4653,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions) /* …truncated — full shape in source */',
+    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    registerPoolOperations(settingsNs: string, ops: LlmPoolOperations): () => void;\n    @Remote\n    async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>;\n    @Remote\n    async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>;\n    @Remote\n    async poolTestIdentity(settingsNs: string, provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedR /* …truncated — full shape in source */',
   },
   {
     name: 'LspHover',
@@ -4712,7 +4801,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ModelCatalogModel',
-    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly reasoning?: ModelReasoning;\n}',
+    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly contextWindow?: number;\n    readonly maxTokens?: number;\n    readonly reasoning?: ModelReasoning;\n}',
   },
   {
     name: 'ModelMessageSource',
@@ -5040,7 +5129,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Session',
-    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    deriveMessages(): Message[];\n    deriveEventMessage(event: SessionEvent): Message | null;\n}',
+    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    deriveMessages(): Message[];\n    deriveEventMessage(event: SessionEvent): Message | null;\n}',
   },
   {
     name: 'SessionAccess',
@@ -5099,6 +5188,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
   },
   {
+    name: 'SessionDeleteRequest',
+    declaration: 'export interface SessionDeleteRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionDeleteValue',
+    declaration: 'export interface SessionDeleteValue {\n    readonly deleted: true;\n}',
+  },
+  {
     name: 'SessionEvent',
     declaration: 'export type SessionEvent<T extends SessionEventType = SessionEventType> = {\n    [K in SessionEventType]: {\n        type: K;\n        seq: SessionSeq;\n        time: number;\n        data: SessionEventMap[K];\n        ignorable?: true;\n    } & (K extends SurfaceEventType ? SurfaceIntent<K> : {\n        surfaceOp?: never;\n        sourceEventSeqs?: never;\n    });\n}[T];',
   },
@@ -5108,7 +5205,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionEventMap',
-    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'system/message\': {\n        turn: number;\n        step: number;\n        message: SystemMessage;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        stream: AssistantStreamRecord[];\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'assistant/attempt\': {\n        turn: number;\n        step: number;\n        stream: AssistantStreamRecord[];\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': {\n        inherited?: true;\n    };\n}',
+    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'system/message\': {\n        turn: number;\n        step: number;\n        message: SystemMessage;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        stream: AssistantStreamRecord[];\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'assistant/attempt\': {\n        turn: number;\n        step: number;\n        stream: AssistantStreamRecord[];\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': {\n        inherited?: true;\n    };\n    \'revert/state\': {\n        fromSeq: number | null;\n        cause?: \'revert\' | \'restore\' | \'commit\';\n    };\n    \'revert/file-intent\': {\n      /* …truncated — full shape in source */',
   },
   {
     name: 'SessionEventMetadataFilter',
@@ -5344,7 +5441,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionPromptRequest',
-    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n}',
+    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n    readonly revertFromSeq?: number;\n}',
   },
   {
     name: 'SessionPromptValue',
@@ -5383,12 +5480,36 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SessionRequestId = Branded<\'session-request-id\'>;',
   },
   {
+    name: 'SessionResolveFileConflictRequest',
+    declaration: 'export interface SessionResolveFileConflictRequest {\n    readonly sessionId: SessionId;\n    readonly conflictId: string;\n    readonly resolution: \'keep\' | \'restore\' | \'recreate\' | \'trash\';\n}',
+  },
+  {
+    name: 'SessionResolveFileConflictValue',
+    declaration: 'export interface SessionResolveFileConflictValue {\n    readonly accepted: true;\n}',
+  },
+  {
     name: 'SessionResultFilter',
     declaration: 'export type SessionResultFilter = {\n    kind: \'id\';\n    values: readonly SessionId[];\n} | {\n    kind: \'cwd\';\n    values: readonly (string | null)[];\n} | ({\n    kind: \'created-at\';\n} & SessionResultRange) | {\n    kind: \'parent\';\n    values: readonly (SessionId | null)[];\n} | {\n    kind: \'availability\';\n    values: readonly SessionAvailability[];\n};',
   },
   {
     name: 'SessionResultRange',
     declaration: 'export interface SessionResultRange {\n    from?: number;\n    to?: number;\n}',
+  },
+  {
+    name: 'SessionRevertRequest',
+    declaration: 'export interface SessionRevertRequest {\n    readonly sessionId: SessionId;\n    readonly atSeq: number;\n}',
+  },
+  {
+    name: 'SessionRevertRestoreRequest',
+    declaration: 'export interface SessionRevertRestoreRequest {\n    readonly sessionId: SessionId;\n    readonly restoreSeq?: number;\n}',
+  },
+  {
+    name: 'SessionRevertRestoreValue',
+    declaration: 'export interface SessionRevertRestoreValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionRevertValue',
+    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedCount: number;\n}',
   },
   {
     name: 'SessionSearchCursor',
@@ -5444,7 +5565,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSummary',
-    declaration: 'export interface SessionSummary {\n    readonly sessionId: SessionId;\n    readonly updatedAt: number;\n    readonly running: boolean;\n    readonly blank: boolean;\n    readonly parentSessionId?: SessionId;\n    readonly origin?: \'subagent\';\n    readonly cwd?: string;\n    readonly projections?: SessionProjectionHints;\n}',
+    declaration: 'export interface SessionSummary {\n    readonly sessionId: SessionId;\n    readonly updatedAt: number;\n    readonly running: boolean;\n    readonly blank: boolean;\n    readonly parentSessionId?: SessionId;\n    readonly origin?: \'subagent\';\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly projections?: SessionProjectionHints;\n}',
   },
   {
     name: 'SessionSurface',
@@ -5784,7 +5905,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'SubagentStopReason',
@@ -6497,6 +6618,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkspaceInsertSessionBeforeRequest',
     declaration: 'export interface WorkspaceInsertSessionBeforeRequest {\n    readonly workspaceId: WorkspaceId;\n    readonly sessionId: SessionId;\n    readonly beforeSessionId?: SessionId;\n}',
+  },
+  {
+    name: 'WorkspaceMoveSessionRequest',
+    declaration: 'export interface WorkspaceMoveSessionRequest {\n    readonly sessionId: SessionId;\n    readonly targetWorkspaceId: WorkspaceId;\n}',
   },
   {
     name: 'WorkspaceOrderValue',
