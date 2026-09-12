@@ -43,18 +43,26 @@ function createCatalogDirectoryFace(ctx: Context): CatalogDirectoryFace | null {
   const modelDirectories = ctx.get('modelDirectories')
   if (modelDirectories === undefined) return null
   const catalog = modelDirectories.catalog
+  // uSES contract: getSnapshot must return the SAME reference until the fact
+  // moves; derive once per catalog snapshot identity instead of per call.
+  let derivedFrom: unknown
+  let derived: ModelDirectoryState | undefined
   const directory = {
     subscribe: (fn: () => void) => catalog.store.subscribe(fn),
-    getSnapshot: () => {
+    getSnapshot: (): ModelDirectoryState => {
       const current = catalog.store.getSnapshot()
-      return {
-        current: current.value?.default ?? null,
-        routable: null,
-        groups: current.value?.groups ?? [],
-        failures: current.value?.failures ?? [],
-        status: current.status === 'ready' ? 'ready' as const : current.status === 'error' ? 'error' as const : 'idle' as const,
-        error: current.error,
+      if (derived === undefined || derivedFrom !== current) {
+        derivedFrom = current
+        derived = {
+          current: current.value?.default ?? null,
+          routable: null,
+          groups: current.value?.groups ?? [],
+          failures: current.value?.failures ?? [],
+          status: current.status === 'ready' ? 'ready' as const : current.status === 'error' ? 'error' as const : 'idle' as const,
+          error: current.error,
+        }
       }
+      return derived
     },
   } as unknown as SnapshotStore<ModelDirectoryState>
   return {
