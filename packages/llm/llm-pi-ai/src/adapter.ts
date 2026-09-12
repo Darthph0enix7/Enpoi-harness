@@ -403,13 +403,17 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade)
+      // Routing-affinity routes (opencode Zen Go) require the conversation's
+      // session identity on a dedicated header; static deployment headers stay
+      // deployment-owned and the Harness attribution still wins collisions.
+      const sessionHeader = profile.sessionHeader === undefined || options.sessionId === undefined
+        ? {}
+        : { [profile.sessionHeader]: String(options.sessionId) }
       const commonOptions = {
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
-        // Profile headers are deployment-owned; attribution names are
-        // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: requestHeaders({ ...sessionHeader, ...profile.headers }),
       }
       const makeAttempt = (apiKeyOverride: string | undefined, signal: AbortSignal): AsyncGenerator<StreamChunk> =>
         toStreamChunks(snapshot.models.streamSimple(model, context, {
