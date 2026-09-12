@@ -88,6 +88,7 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
         d.sessionOrderByAccount[accountKey] = order
       },
       togglePinned: (d, sessionId: string) => {
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- persisted state may predate the pin field.
         const pinned = d.pinnedSessionIds ?? []
         d.pinnedSessionIds = pinned.includes(sessionId)
           ? pinned.filter(id => id !== sessionId)
@@ -95,6 +96,7 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       },
       retainSessionIds: (d, sessionIds: readonly string[]) => {
         const retained = new Set(sessionIds)
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- persisted state may predate the pin field.
         d.pinnedSessionIds = (d.pinnedSessionIds ?? []).filter(id => retained.has(id))
       },
     },

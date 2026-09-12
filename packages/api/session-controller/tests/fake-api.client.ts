@@ -3,12 +3,13 @@
 // deferred-controlled timing). Session streams are hand pumps: pushFollow/pushControl.
 import type {
   MessageId,
-  RpcError, RpcResponse, SessionId, SessionSearchItem,
+  SessionId, SessionSearchItem,
   SubagentCatalog, SubagentInterruptReceipt, SubagentPromptReceipt,
   WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
   SessionAddress,
+  SessionAssistantStreamBaseline,
   SessionControlBaseline,
   SessionControlFrame,
   SessionFollowFrame,
@@ -25,12 +26,10 @@ import type { WorkspaceFollowFrame } from '@deepseek-ai/dsh-api-workspace-contro
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import {
   RemoteStream,
-  RemoteStreamError,
   type RemoteStreamOptions,
 } from '@deepseek-ai/dsh-api-gateway/client'
-import { RpcId } from '@deepseek-ai/dsh-client-connection/client'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
-import { historyRecordLastSeq } from '../src/client/sessions/history-records.ts'
+import { followSnapshot, pageThrough } from './remote/history.client.ts'
 
 const AVAILABLE_STREAM_CONNECTION = {
   generation: {
@@ -73,28 +72,21 @@ export function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-let nextRpc = 0
-
-export function ok<T>(value: T): RpcResponse<T> {
-  return { rpcId: RpcId(`fake-${nextRpc++}`), result: { ok: true, value } }
-}
-
-export function err<T>(error: RpcError): RpcResponse<T> {
-  return { rpcId: RpcId(`fake-${nextRpc++}`), result: { ok: false, error } }
-}
-
-/** Successful generated Remote result for programmable domain fakes. */
-export function remoteOk<T>(value: T): RemoteResult<T> {
+/**
+ * Successful generated Remote result for programmable domain fakes.
+ * @param value - the value the Host answers with.
+ * @returns the success branch of a Remote result.
+ */
+export function ok<T>(value: T): RemoteResult<T> {
   return { ok: true, value }
 }
 
 /**
- * Failed generated Remote result carrying an owner's own failure vocabulary,
- * which the carrier's closed RPC code set does not contain.
+ * Failed generated Remote result carrying the owner's declared failure.
  * @param error - the owner-declared failure.
  * @returns the failure branch of a Remote result.
  */
-export function remoteErr<T>(error: RemoteFailure): RemoteResult<T> {
+export function err<T>(error: RemoteFailure): RemoteResult<T> {
   return { ok: false, error }
 }
 
@@ -130,11 +122,11 @@ export class FakeApiClient {
   readonly followStarts: SessionId[] = []
 
   // Programmable slots (defaults answer OK-empty); reassign per case.
-  onList: (payload: unknown) => Promise<RpcResponse<{ items: never[] }>> = () => Promise.resolve(ok({ items: [] }))
-  onSearch: (payload: unknown) => Promise<RpcResponse<{ items: SessionSearchItem[]; hasMore: boolean }>> =
+  onList: (payload: unknown) => Promise<RemoteResult<{ items: never[] }>> = () => Promise.resolve(ok({ items: [] }))
+  onSearch: (payload: unknown) => Promise<RemoteResult<{ items: SessionSearchItem[]; hasMore: boolean }>> =
     () => Promise.resolve(ok({ items: [], hasMore: false }))
-  onCreate: (payload: unknown) => Promise<RpcResponse<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-new' as SessionId }))
-  onSelectModel: (payload: SessionSelectModelRequest) => Promise<RpcResponse<SessionSelectModelValue>> =
+  onCreate: (payload: unknown) => Promise<RemoteResult<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-new' as SessionId }))
+  onSelectModel: (payload: SessionSelectModelRequest) => Promise<RemoteResult<SessionSelectModelValue>> =
     payload => Promise.resolve(ok({
       selected: {
         provider: payload.provider,
@@ -144,23 +136,23 @@ export class FakeApiClient {
           : { reasoningEffort: payload.reasoningEffort }),
       },
     }))
-  onRename: (payload: unknown) => Promise<RpcResponse<{ title: string; seq: number }>> = () => Promise.resolve(ok({ title: 'fk-renamed', seq: 0 }))
-  onFork: (payload: unknown) => Promise<RpcResponse<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-fork' as SessionId }))
-  onRevert: (payload: unknown) => Promise<RpcResponse<SessionRevertValue>> = () => Promise.resolve(ok({ accepted: true, revertedText: 'fk-reverted', revertedCount: 1 }))
-  onRevertRestore: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
-  onResolveFileConflict: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
-  onDelete: (payload: unknown) => Promise<RpcResponse<{ deleted: true }>> = () => Promise.resolve(ok({ deleted: true }))
+  onRename: (payload: unknown) => Promise<RemoteResult<{ title: string; seq: number }>> = () => Promise.resolve(ok({ title: 'fk-renamed', seq: 0 }))
+  onFork: (payload: unknown) => Promise<RemoteResult<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-fork' as SessionId }))
+  onRevert: (payload: unknown) => Promise<RemoteResult<SessionRevertValue>> = () => Promise.resolve(ok({ accepted: true, revertedText: 'fk-reverted', revertedCount: 1 }))
+  onRevertRestore: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
+  onResolveFileConflict: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
+  onDelete: (payload: unknown) => Promise<RemoteResult<{ deleted: true }>> = () => Promise.resolve(ok({ deleted: true }))
   onHistory: (payload: { sessionId: SessionId; throughSeq?: number; beforeSeq?: number; maxMessages?: number })
-  => Promise<RpcResponse<SessionPage & { readonly projections?: SessionProjectionBaseline }>> =
+  => Promise<RemoteResult<SessionPage & { readonly projections?: SessionProjectionBaseline }>> =
     () => Promise.resolve(ok({ records: [], hasMore: false }))
 
-  onPrompt: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
-  onAttachment: (payload: unknown) => Promise<RpcResponse<{ attachment: { attachmentId: never; mediaType: 'image/png'; bytes: number; width: number; height: number }; data: string }>> =
+  onPrompt: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
+  onAttachment: (payload: unknown) => Promise<RemoteResult<{ attachment: { attachmentId: never; mediaType: 'image/png'; bytes: number; width: number; height: number }; data: string }>> =
     () => Promise.resolve(ok({ attachment: { attachmentId: 'a' as never, mediaType: 'image/png', bytes: 1, width: 1, height: 1 }, data: 'AA==' }))
-  onUpdateQueue: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
-  onCancel: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
+  onUpdateQueue: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
+  onCancel: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
   onOpenWorkspacePath: (payload: unknown) => Promise<RemoteResult<{ opened: true }>> =
-    () => Promise.resolve(remoteOk({ opened: true as const }))
+    () => Promise.resolve(ok({ opened: true as const }))
 
   private readonly followConns = new Map<SessionId, ValueStreamConn<SessionFollowFrame>[]>()
   private readonly controlConns: ValueStreamConn<SessionControlFrame>[] = []
@@ -172,6 +164,9 @@ export class FakeApiClient {
     jobs: {},
     projections: {},
   }
+  assistantStreamBaseline: SessionAssistantStreamBaseline = {
+    revision: 0,
+  }
   workspaceBaseline: Extract<WorkspaceFollowFrame, { type: 'baseline' }>['value'] = {
     items: [],
     archivedSessionIds: [],
@@ -179,32 +174,32 @@ export class FakeApiClient {
   lastSearchSignal: AbortSignal | undefined
 
   onSubagentList: (payload: unknown) => Promise<RemoteResult<SubagentCatalog>>
-    = () => Promise.resolve(remoteOk({ entries: [], parentAvailable: true }))
+    = () => Promise.resolve(ok({ entries: [], parentAvailable: true }))
   onSubagentPrompt: (payload: unknown) => Promise<RemoteResult<SubagentPromptReceipt>>
-    = () => Promise.resolve(remoteOk({ messageId: 'fake-message' as MessageId }))
+    = () => Promise.resolve(ok({ messageId: 'fake-message' as MessageId }))
 
   onSubagentInterrupt: (payload: unknown) => Promise<RemoteResult<SubagentInterruptReceipt>>
-    = () => Promise.resolve(remoteOk({ accepted: true as const }))
+    = () => Promise.resolve(ok({ accepted: true as const }))
 
   onWorkspaceCreate: (payload: unknown) => Promise<RemoteResult<{ workspace: WorkspaceView; created: boolean }>> =
-    () => Promise.resolve(remoteOk({ workspace: fakeWorkspace('fk-ws'), created: true }))
+    () => Promise.resolve(ok({ workspace: fakeWorkspace('fk-ws'), created: true }))
 
   onWorkspaceRename: (payload: unknown) => Promise<RemoteResult<{ workspace: WorkspaceView }>> =
-    () => Promise.resolve(remoteOk({ workspace: fakeWorkspace('fk-ws') }))
+    () => Promise.resolve(ok({ workspace: fakeWorkspace('fk-ws') }))
 
   onWorkspaceDelete: (payload: unknown) => Promise<RemoteResult<{ deleted: true }>> =
-    () => Promise.resolve(remoteOk({ deleted: true }))
+    () => Promise.resolve(ok({ deleted: true }))
 
   onWorkspaceInsertBefore: (payload: unknown) => Promise<RemoteResult<{ workspaceIds: WorkspaceId[] }>> =
-    () => Promise.resolve(remoteOk({ workspaceIds: [] }))
+    () => Promise.resolve(ok({ workspaceIds: [] }))
 
   onWorkspaceInsertSessionBefore: (payload: unknown) => Promise<RemoteResult<{ workspace: WorkspaceView }>> =
-    () => Promise.resolve(remoteOk({ workspace: fakeWorkspace('fk-ws') }))
+    () => Promise.resolve(ok({ workspace: fakeWorkspace('fk-ws') }))
 
   onWorkspaceArchiveSession: (payload: unknown) => Promise<RemoteResult<{ archivedSessionIds: SessionId[] }>> =
-    payload => Promise.resolve(remoteOk({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
+    payload => Promise.resolve(ok({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
   onWorkspaceMoveSession: (payload: unknown) => Promise<RemoteResult<void>> =
-    () => Promise.resolve(remoteOk(undefined))
+    () => Promise.resolve(ok(undefined))
 
   /** Remote namespaces bound to this fake's programmable unary slots and stream pumps. */
   sessionRemotes(): RuntimeRemotes {
@@ -216,8 +211,8 @@ export class FakeApiClient {
         execute: () => Promise.resolve({ ok: true, value: undefined }),
       },
       session: {
-        canOpenWorkspacePath: () => Promise.resolve(remoteOk(true)),
-        list: payload => this.remoteResult('session.list', payload, this.onList(payload)),
+        canOpenWorkspacePath: () => Promise.resolve(ok(true)),
+        list: payload => this.record('session.list', payload, this.onList(payload)),
         modelCatalog: () => Promise.resolve({
           ok: true,
           value: {
@@ -229,20 +224,20 @@ export class FakeApiClient {
         }),
         search: (payload, signal) => {
           this.lastSearchSignal = signal
-          return this.remoteResult('session.search', payload, this.onSearch(payload))
+          return this.record('session.search', payload, this.onSearch(payload))
         },
-        create: payload => this.remoteResult('session.create', payload, this.onCreate(payload)),
-        selectModel: payload => this.remoteResult(
+        create: payload => this.record('session.create', payload, this.onCreate(payload)),
+        selectModel: payload => this.record(
           'session.selectModel',
           payload,
           this.onSelectModel(payload),
         ),
-        rename: payload => this.remoteResult('session.rename', payload, this.onRename(payload)),
-        fork: payload => this.remoteResult('session.fork', payload, this.onFork(payload)),
-        prompt: payload => this.remoteResult('session.prompt', payload, this.onPrompt(payload)),
-        attachment: payload => this.remoteResult('session.attachment', payload, this.onAttachment(payload)),
-        updateQueue: payload => this.remoteResult('session.updateQueue', payload, this.onUpdateQueue(payload)),
-        cancel: payload => this.remoteResult('session.cancel', payload, this.onCancel(payload)),
+        rename: payload => this.record('session.rename', payload, this.onRename(payload)),
+        fork: payload => this.record('session.fork', payload, this.onFork(payload)),
+        prompt: payload => this.record('session.prompt', payload, this.onPrompt(payload)),
+        attachment: payload => this.record('session.attachment', payload, this.onAttachment(payload)),
+        updateQueue: payload => this.record('session.updateQueue', payload, this.onUpdateQueue(payload)),
+        cancel: payload => this.record('session.cancel', payload, this.onCancel(payload)),
         openWorkspacePath: payload => this.record(
           'session.openWorkspacePath',
           payload,
@@ -251,10 +246,10 @@ export class FakeApiClient {
         page: request => this.page(request),
         follow: (request, signal) => this.openFollow(request, signal),
         control: signal => this.openControl(signal),
-        revert: payload => this.remoteResult('session.revert', payload, this.onRevert(payload)),
-        revertRestore: payload => this.remoteResult('session.revertRestore', payload, this.onRevertRestore(payload)),
-        resolveFileConflict: payload => this.remoteResult('session.resolveFileConflict', payload, this.onResolveFileConflict(payload)),
-        delete: payload => this.remoteResult('session.delete', payload, this.onDelete(payload)),
+        revert: payload => this.record('session.revert', payload, this.onRevert(payload)),
+        revertRestore: payload => this.record('session.revertRestore', payload, this.onRevertRestore(payload)),
+        resolveFileConflict: payload => this.record('session.resolveFileConflict', payload, this.onResolveFileConflict(payload)),
+        delete: payload => this.record('session.delete', payload, this.onDelete(payload)),
       },
       subagents: {
         list: parentSessionId => this.record(
@@ -301,7 +296,7 @@ export class FakeApiClient {
   /** Push one live Session event to every follower of that Session. */
   async pushFollow(
     sessionId: SessionId,
-    frame: Extract<SessionFollowFrame, { type: 'event' }>,
+    frame: Exclude<SessionFollowFrame, { type: 'snapshot' }>,
   ): Promise<void> {
     await Promise.all([...(this.followConns.get(sessionId) ?? [])].map(conn => new Promise<void>((resolve) => {
       conn.feed({ kind: 'frame', value: frame, delivered: resolve })
@@ -349,21 +344,13 @@ export class FakeApiClient {
     return response
   }
 
-  private async remoteResult<T>(
-    method: string,
-    payload: unknown,
-    response: Promise<RpcResponse<T>>,
-  ): Promise<RemoteResult<T>> {
-    return (await this.record(method, payload, response)).result
-  }
-
   private page(request: SessionPageRequest): Promise<RemoteResult<SessionPage>> {
     return this.fetchPage(request)
   }
 
   private async fetchPage(
     request: SessionPageRequest,
-    response?: Promise<RpcResponse<SessionPage>>,
+    response?: Promise<RemoteResult<SessionPage>>,
   ): Promise<RemoteResult<SessionPage>> {
     const sessionId = addressSessionId(request.address)
     const payload = request.address.kind === 'session'
@@ -382,7 +369,7 @@ export class FakeApiClient {
         ...request.maxMessages === undefined ? {} : { maxMessages: request.maxMessages },
       }
     const method = request.address.kind === 'session' ? 'session.history' : 'subagent.history'
-    const result = await this.remoteResult(method, payload, response ?? this.onHistory({
+    const result = await this.record(method, payload, response ?? this.onHistory({
       sessionId,
       throughSeq: request.throughSeq,
       ...request.beforeSeq === undefined ? {} : { beforeSeq: request.beforeSeq },
@@ -391,11 +378,7 @@ export class FakeApiClient {
     if (!result.ok) return result
     return {
       ok: true,
-      value: {
-        ...result.value,
-        records: result.value.records
-          .filter(record => historyRecordLastSeq(record) <= request.throughSeq),
-      },
+      value: pageThrough(result.value, request.throughSeq),
     }
   }
 
@@ -414,31 +397,9 @@ export class FakeApiClient {
         sessionId,
         maxMessages: request.maxMessages ?? 50,
       })
-      if (!response.result.ok) {
-        throw new RemoteStreamError(
-          response.result.error.code,
-          response.result.error.message,
-          response.result.error.details,
-        )
-      }
-      const page = response.result.value
-      const tail = page.records.at(-1)
-      const cursor = this.followCursor ?? (tail === undefined ? -1 : historyRecordLastSeq(tail))
-      yield {
-        type: 'snapshot',
-        header: {
-          version: 0,
-          id: sessionId,
-          createdAt: 0,
-          ...(request.address.kind === 'subagent'
-            ? { origin: 'subagent' as const, parentSession: request.address.parentSessionId }
-            : {}),
-        },
-        cursor,
-        records: page.records.filter(record => historyRecordLastSeq(record) <= cursor),
-        hasMore: page.hasMore,
-        projections: page.projections ?? { asOfSeq: cursor, values: {} },
-      }
+      if (!response.ok) throw response.error
+      const page = response.value
+      yield followSnapshot(page, request, this.followCursor, this.assistantStreamBaseline)
       yield* stream.values
     } finally {
       stream.dispose()

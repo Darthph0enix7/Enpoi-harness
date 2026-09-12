@@ -38,7 +38,7 @@ describe('Session export Global Overlay', () => {
   it('mounts clean and responds to download state changes', async () => {
     const b = bench()
     expect(b.view.container).toBeDefined()
-    b.controller.download(SID)
+    void b.controller.download(SID)
     await vi.waitFor(() => {
       expect(b.controller.store.getSnapshot().bySession[SID]?.status).toBe('success')
     })

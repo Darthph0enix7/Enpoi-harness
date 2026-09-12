@@ -39,11 +39,6 @@
 .compactRoot .pickerPopover {
   width: min(280px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
-  top: calc(100% + 4px);
-  bottom: auto;
-  right: 0;
-  left: auto;
-  z-index: 150;
   max-height: 280px;
 }
 
@@ -171,11 +166,11 @@
 
 /* Main Model Picker Pop-Up Window (Matching Liquid Glass Input Card Material) */
 .pickerPopover {
-  position: absolute;
-  right: 0;
-  left: auto;
-  bottom: calc(100% + 8px);
-  z-index: 60;
+  /* Portaled to body: fixed viewport coordinates come from the component's
+     measured placement (see ModelSelect.tsx); z matches the Menu primitive's
+     portal layer. */
+  position: fixed;
+  z-index: 1100;
   display: flex;
   flex-direction: column;
   width: min(380px, calc(100vw - 32px));

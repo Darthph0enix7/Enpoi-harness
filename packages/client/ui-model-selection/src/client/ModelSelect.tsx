@@ -15,9 +15,10 @@
  */
 
 import {
-  useEffect, useMemo, useRef, useState, useSyncExternalStore,
-  type DragEvent,
+  useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+  type CSSProperties, type DragEvent,
 } from 'react'
+import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import type { ModelReasoningEffort, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -104,6 +105,7 @@ export function ModelSelect(
   const effortRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const [menuPos, setMenuPos] = useState<CSSProperties | null>(null)
 
   // Listen to preference changes across tabs / components
   useEffect(() => {
@@ -168,6 +170,40 @@ export function ModelSelect(
       setTimeout(() => searchInputRef.current?.focus(), 50)
     }
   }, [pickerOpen])
+
+  // Portaled placement (the Menu primitive's portal rules: fixed from the
+  // anchor rect, measured before paint, clamped inside the viewport): above
+  // the trigger, right edges aligned. Depends on the directory state because
+  // async catalog loads resize the card.
+  /* jscpd:ignore-start -- deliberate mirror of ui-primitives useAnchoredPosition:
+     that hook only places from the anchor's LEFT edge, while this card aligns
+     right edges (x = rect.right - width), so the measure-and-clamp plumbing repeats. */
+  useLayoutEffect(() => {
+    if (!pickerOpen) { setMenuPos(null); return }
+    const place = (): void => {
+      /* v8 ignore next 2 -- the trigger ref is attached whenever the picker is open. */
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (rect === undefined) return
+      const MARGIN = 12
+      const lw = pickerRef.current?.offsetWidth ?? 0
+      const lh = pickerRef.current?.offsetHeight ?? 0
+      let x = rect.right - lw
+      let y = rect.top - 8 - lh
+      if (lw > 0) x = Math.min(Math.max(x, MARGIN), window.innerWidth - lw - MARGIN)
+      if (lh > 0) y = Math.min(Math.max(y, MARGIN), window.innerHeight - lh - MARGIN)
+      setMenuPos({ left: x, top: y })
+    }
+    // First run measures the hidden pre-render (same commit as the open), so
+    // the card lands placed before anything paints.
+    place()
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [pickerOpen, state])
+  /* jscpd:ignore-end */
 
   // All enabled model choices (uses 0ms cached hidden check)
   const choices = useMemo(() => state.groups.flatMap(group =>
@@ -429,9 +465,19 @@ export function ModelSelect(
         </button>
       )}
 
-      {/* 3. Main Model Picker Popover Window (OpenChamber UX) */}
-      {pickerOpen && (
-        <div ref={pickerRef} className={css.pickerPopover}>
+      {/* 3. Main Model Picker Popover Window (OpenChamber UX). Portaled to
+          body (Menu primitive's portal mode) so the sidebar and column
+          overflow clips cannot crop the card; synthetic events still bubble
+          through this React subtree. */}
+      {pickerOpen && createPortal(
+        <div
+          ref={pickerRef}
+          className={css.pickerPopover}
+          style={menuPos ?? MEASURE_STYLE}
+          role="menu"
+          aria-label={t('menu.aria')}
+          aria-busy={state.status === 'loading' || state.status === 'selecting'}
+        >
           {/* Search Header */}
           <div className={css.searchHeader}>
             <span className={css.searchIcon}>
@@ -684,7 +730,8 @@ export function ModelSelect(
               <div className={css.emptyState}>No models matching "{searchQuery}"</div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* 4. Compact Effort Level Popover */}

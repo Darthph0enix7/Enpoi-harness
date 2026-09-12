@@ -95,17 +95,14 @@ export const RevertTray = memo(function RevertTray({
   }
 
   const handleResolve = async (conflictId: string, resolution: 'keep' | 'restore' | 'recreate' | 'trash') => {
-    console.log('[RevertTray] handleResolve clicked:', conflictId, resolution, 'resolveFileConflict:', typeof resolveFileConflict)
     if (inFlightConflictId !== null) return
     setInFlightConflictId(conflictId)
     try {
       if (typeof resolveFileConflict === 'function') {
         await resolveFileConflict(conflictId, resolution)
       } else {
-        console.error('[RevertTray] resolveFileConflict is not a function!')
       }
     } catch (err) {
-      console.error('[RevertTray] resolveFileConflict error:', err)
     } finally {
       setInFlightConflictId(null)
     }
