@@ -1,11 +1,11 @@
-/* Agent Models — global main page (per-persona model assignment). */
+/* Agent Models — right Sidebar tab body (per-persona model assignment). */
 
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  padding: 14px 16px 10px;
+  padding: 10px 12px 8px;
   gap: 12px;
   color: var(--dsw-alias-label-primary, #e2e8f0);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
@@ -41,7 +41,7 @@
   min-height: 0;
   padding: 2px 2px 8px;
   width: 100%;
-  max-width: 760px;
+  max-width: 100%;
   /* Stable gutter so its own bar doesn't overlay row chrome. */
   scrollbar-gutter: stable;
 }
@@ -138,11 +138,36 @@
 }
 
 .foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: 9.5px;
   color: var(--dsw-alias-label-caption, #475569);
   padding: 4px 6px 0;
   border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.05));
   line-height: 1.4;
+}
+
+.footLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  color: var(--dsw-alias-label-tertiary, #94a3b8);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.footLink:hover {
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  border-color: rgba(103, 220, 231, 0.35);
 }
 
 @media (max-width: 560px) {

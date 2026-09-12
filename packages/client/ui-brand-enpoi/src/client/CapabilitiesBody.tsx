@@ -1,32 +1,42 @@
 /**
- * Capabilities Control Center — the global capabilities page (main key
- * `capabilities`, ordered 55 in the sidebar rail).
+ * Capabilities Control Center — the global capabilities tab body
+ * (`sidebar.right.pane.tab` key `enpoi-capabilities`, kind `capabilities`).
  *
- * Ported from the retired better-sidebar Liquid Glass drawer to the merged
- * client's native `main` page API. Raw gateway envelopes are the CURRENT
+ * Restored to where the original Enpoi sidebar hosted it: a first-class right
+ * Sidebar tab beside Files/Terminal. Raw gateway envelopes are the CURRENT
  * ones: `skills.list` takes `args.request.sessionId` (the addressed session
  * resolves cwd host-side) and `settings.describe` / `settings.mutate` address
  * the `enpoi-orchestration` namespace. MCP rows show the host heartbeat
  * (`enpoi-orchestration.mcpStatus`) instead of the enable dot; the heartbeat
- * and server catalog re-poll every 15s while the page is mounted. Toggles
+ * and server catalog re-poll every 15s while the tab is visible. Toggles
  * persist to `enpoi-orchestration.capabilities.{tools,skills,mcp}` and are
  * staged — they apply from the next query onward.
+ *
+ * Skill catalog addressing: the tab's own `sessionId` is the first candidate;
+ * when the host refuses to inspect it (legacy v0/v1 session logs), the newest
+ * session ids follow, up to five, before the page reports an explicit
+ * "skill catalog unavailable" error with a Retry instead of pretending the
+ * catalog is empty. The catalog re-reads when the tab becomes visible and
+ * after a successful skill toggle.
  *
  * The module-level cache is the page's state channel (same discipline as the
  * persona/params stores): synchronous 0ms snapshot on mount, optimistic local
  * toggles with rollback, background persistence.
  */
-import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-session/client'
-import css from './CapabilitiesPage.module.css'
+import { AGENT_MODELS_KIND } from './kinds.ts'
+import css from './CapabilitiesBody.module.css'
+
+/** How many session ids the skill catalog tries before reporting unavailable. */
+const MAX_SKILL_SESSION_CANDIDATES = 5
 
 /** CSS-module reads are `string | undefined` under noUncheckedIndexedAccess; keys are static. */
 function c(name: string): string {
   return css[name] ?? ''
 }
 
-/** Monochrome plug glyph shared by the rail icon and the MCP section header. */
+/** Monochrome plug glyph shared by the guide capsule and the MCP section header. */
 function iconPlug(size: number, strokeWidth = 1.3): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -63,9 +73,13 @@ function iconTerminal(size = 12): ReactNode {
   )
 }
 
-/** Monochrome rail icon for the Capabilities page (thin stroke, currentColor). */
-export function CapabilitiesIcon({ size = 18 }: { size?: number; active?: boolean }) {
-  return iconPlug(size, 1.3)
+/** Monochrome tab glyph for Capabilities (thin stroke, currentColor), also the guide capsule icon. */
+export function CapabilitiesIcon({ size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+      <path d="M5.5 1.5v3M10.5 1.5v3M3.5 7h9v1.5a4.5 4.5 0 0 1-9 0V7ZM8 13v1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
 }
 
 export interface CapabilitiesState {
@@ -148,6 +162,8 @@ export interface DynamicSkillEntry {
 }
 
 let globalSkills: DynamicSkillEntry[] = []
+let globalSkillsError: string | null = null
+let globalSkillsLoading = false
 
 /** Host-side MCP reachability heartbeat (enpoi-capabilities writes enpoi-orchestration.mcpStatus). */
 export interface McpStatusEntry {
@@ -169,11 +185,15 @@ let globalMcpServers: Record<string, McpServerEntry> = {}
 let snapshotCache: {
   caps: CapabilitiesState
   skills: DynamicSkillEntry[]
+  skillsError: string | null
+  skillsLoading: boolean
   mcpStatus: Record<string, McpStatusEntry>
   mcpServers: Record<string, McpServerEntry>
 } = {
   caps: globalCapsState,
   skills: globalSkills,
+  skillsError: globalSkillsError,
+  skillsLoading: globalSkillsLoading,
   mcpStatus: globalMcpStatus,
   mcpServers: globalMcpServers,
 }
@@ -184,7 +204,14 @@ function subscribe(fn: () => void): () => void {
 }
 
 function notify(): void {
-  snapshotCache = { caps: globalCapsState, skills: globalSkills, mcpStatus: globalMcpStatus, mcpServers: globalMcpServers }
+  snapshotCache = {
+    caps: globalCapsState,
+    skills: globalSkills,
+    skillsError: globalSkillsError,
+    skillsLoading: globalSkillsLoading,
+    mcpStatus: globalMcpStatus,
+    mcpServers: globalMcpServers,
+  }
   for (const fn of listeners) fn()
 }
 
@@ -224,9 +251,10 @@ async function describeOrchestration(): Promise<OrchestrationNamespaceView | und
   return Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
 }
 
-/** Fetch the real skill catalog for the session's project root. */
-export async function refreshSkills(sessionId: string): Promise<void> {
-  if (sessionId === '') return
+/** One skills.list attempt; success carries the catalog, failure the reason to show. */
+async function fetchSkillCatalog(sessionId: string): Promise<
+  { ok: true; skills: DynamicSkillEntry[] } | { ok: false; reason: string }
+> {
   try {
     const res = await fetch('/api/skills.list', {
       method: 'POST',
@@ -238,11 +266,21 @@ export async function refreshSkills(sessionId: string): Promise<void> {
         payload: { args: { request: { sessionId } } },
       }),
     })
-    if (!res.ok) return
-    const json = await res.json() as { result?: { ok?: boolean; value?: { skills?: Array<{ name?: unknown; description?: unknown; modelInvocable?: unknown }> } } }
-    if (json?.result?.ok !== true) return
-    const rows = json.result.value?.skills
-    if (!Array.isArray(rows)) return
+    if (!res.ok) return { ok: false, reason: `gateway responded ${res.status}` }
+    const json = await res.json() as {
+      result?: {
+        ok?: boolean
+        value?: { skills?: Array<{ name?: unknown; description?: unknown; modelInvocable?: unknown }> }
+        error?: { message?: unknown }
+      }
+    }
+    const result = json?.result
+    if (result?.ok !== true) {
+      const message = result?.error?.message
+      return { ok: false, reason: typeof message === 'string' && message !== '' ? message : 'skill catalog request was rejected' }
+    }
+    const rows = result.value?.skills
+    if (!Array.isArray(rows)) return { ok: false, reason: 'skill catalog response was malformed' }
     const skills: DynamicSkillEntry[] = []
     for (const row of rows) {
       if (typeof row.name !== 'string' || row.name === '') continue
@@ -252,14 +290,52 @@ export async function refreshSkills(sessionId: string): Promise<void> {
         modelInvocable: row.modelInvocable === true,
       })
     }
-    globalSkills = skills
-    notify()
-  } catch {
-    // keep last known catalog on transient failures
+    return { ok: true, skills }
+  } catch (err: unknown) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
 }
 
-/** Re-read MCP heartbeat + server catalog from settings.describe (cheap, periodic while mounted). */
+/**
+ * Read the skill catalog, trying the tab's session first and then the newest
+ * session ids (newest first, up to {@link MAX_SKILL_SESSION_CANDIDATES}) until
+ * one resolves. Failure publishes an explicit reason instead of an empty list.
+ * @param sessionIds - candidate session ids, most relevant first.
+ */
+export async function refreshSkills(sessionIds: readonly string[]): Promise<void> {
+  const candidates: string[] = []
+  for (const id of sessionIds) {
+    if (id === '' || candidates.includes(id)) continue
+    candidates.push(id)
+    if (candidates.length >= MAX_SKILL_SESSION_CANDIDATES) break
+  }
+  if (candidates.length === 0) {
+    globalSkillsError = 'no session available to resolve the skill catalog'
+    globalSkillsLoading = false
+    notify()
+    return
+  }
+  globalSkillsLoading = true
+  globalSkillsError = null
+  notify()
+  let reason = 'skill catalog request failed'
+  for (const sessionId of candidates) {
+    const attempt = await fetchSkillCatalog(sessionId)
+    if (attempt.ok) {
+      globalSkills = attempt.skills
+      globalSkillsError = null
+      globalSkillsLoading = false
+      notify()
+      return
+    }
+    reason = attempt.reason
+  }
+  globalSkillsError = reason
+  globalSkillsLoading = false
+  notify()
+}
+
+/** Re-read MCP heartbeat + server catalog from settings.describe (cheap, periodic while visible). */
 export async function refreshMcpStatus(): Promise<void> {
   try {
     const orch = await describeOrchestration()
@@ -278,8 +354,12 @@ export async function refreshMcpStatus(): Promise<void> {
   }
 }
 
-/** Prime the capability map + MCP state once when the page mounts. */
+let capabilitiesPrimed = false
+
+/** Prime the capability map + MCP state once when the first tab mounts. */
 export async function primeCapabilities(): Promise<void> {
+  if (capabilitiesPrimed) return
+  capabilitiesPrimed = true
   try {
     const orch = await describeOrchestration()
     const serverCaps = orch?.value?.capabilities
@@ -343,6 +423,14 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
       notify()
       return false
     }
+    // The gateway answers HTTP 200 for business failures too; only an explicit
+    // `ok: true` result counts as persisted.
+    const json = await res.json() as { result?: { ok?: boolean } }
+    if (json?.result?.ok !== true) {
+      globalCapsState = previous
+      notify()
+      return false
+    }
     return true
   } catch {
     globalCapsState = previous
@@ -351,27 +439,44 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
   }
 }
 
-export type CapabilitiesPageProps = PropsRuntime<'main'>
+export type CapabilitiesBodyProps = PropsRuntime<'sidebar.right.pane.tab'>
 
-export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
+export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: CapabilitiesBodyProps) {
+  const { tab } = useTabInfo()
   const view = useSyncExternalStore(subscribe, () => snapshotCache)
   const caps = view.caps
-  const sessionId = useSessions(state => state.current ?? state.ids[0])
+  const visible = tab.visible
+  const sessionIds = useSessions(state => state.ids)
 
-  // Prime the persisted capability map once; refresh the live skill catalog
-  // whenever the addressed (most recent) session changes.
+  // Candidate chain: the tab's own session first, then the newest sessions the
+  // list carries. Bounded so an old session never costs a long retry walk.
+  const candidates = useMemo(() => {
+    const list: string[] = []
+    if (typeof sessionId === 'string' && sessionId !== '') list.push(sessionId)
+    for (const id of sessionIds) {
+      if (list.length >= MAX_SKILL_SESSION_CANDIDATES) break
+      const value = String(id)
+      if (!list.includes(value)) list.push(value)
+    }
+    return list
+  }, [sessionId, sessionIds])
+
+  // Prime the persisted capability map once.
   useEffect(() => {
     void primeCapabilities()
   }, [])
+  // Catalog refreshes when the tab becomes visible and when its address chain changes.
   useEffect(() => {
-    if (typeof sessionId === 'string' && sessionId !== '') void refreshSkills(sessionId)
-  }, [sessionId])
-  // MCP heartbeat + server catalog re-poll every 15s while the page is mounted.
+    if (!visible || candidates.length === 0) return
+    void refreshSkills(candidates)
+  }, [visible, candidates])
+  // MCP heartbeat + server catalog re-poll every 15s while the tab is visible.
   useEffect(() => {
+    if (!visible) return
     void refreshMcpStatus()
     const iv = window.setInterval(() => { void refreshMcpStatus() }, 15_000)
     return () => { window.clearInterval(iv) }
-  }, [])
+  }, [visible])
 
   const mcpList: CapabilityDescriptor[] = (() => {
     const rows = new Map<string, CapabilityDescriptor>()
@@ -399,7 +504,20 @@ export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
   const subagentList = KNOWN_CAPABILITIES.filter(k => k.kind === 'tool' && (k.category === 'supervision' || k.category === 'council' || k.category === 'workers'))
   const coreToolList = KNOWN_CAPABILITIES.filter(k => k.kind === 'tool' && k.category === 'core-tools')
 
-  const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp') => {
+  const errorBanner = view.skillsError !== null
+    ? (
+      <div className={c('skillError')}>
+        <span className={c('errorLine')} title={view.skillsError}>
+          skill catalog unavailable: {view.skillsError}
+        </span>
+        <button type="button" className={c('retryBtn')} onClick={() => { void refreshSkills(candidates) }}>
+          Retry
+        </button>
+      </div>
+    )
+    : undefined
+
+  const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', banner?: ReactNode) => {
     const activeCount = items.filter(item => {
       if (kind === 'tool') return caps.tools[item.id] !== false
       if (kind === 'skill') return caps.skills[item.id] !== false
@@ -416,6 +534,7 @@ export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
           </div>
           <span className={c('countBadge')}>{activeCount} / {items.length}</span>
         </div>
+        {banner}
         <div className={c('list')}>
           {items.map(item => {
             const isProtected = PROTECTED_CAPABILITIES.has(item.id)
@@ -476,7 +595,13 @@ export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
                     type="checkbox"
                     checked={isEnabled}
                     disabled={isProtected}
-                    onChange={(e) => { void toggleCapability(kind, item.id, e.target.checked) }}
+                    onChange={(e) => {
+                      const nextEnabled = e.target.checked
+                      void toggleCapability(kind, item.id, nextEnabled).then((accepted) => {
+                        // Re-read the host catalog after a persisted skill change.
+                        if (accepted && kind === 'skill') void refreshSkills(candidates)
+                      })
+                    }}
                   />
                   <span className={`${c('switchTrack')}${isEnabled ? ` ${c('switchOn')}` : ''}`}>
                     <span className={`${c('switchKnob')}${isEnabled ? ` ${c('switchKnobOn')}` : ''}`} />
@@ -490,6 +615,27 @@ export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
     )
   }
 
+  const skillsSection = skillList.length > 0
+    ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill', errorBanner)
+    : (
+      <section className={c('group')} key="skills-fallback">
+        <div className={c('groupHead')}>
+          <div className={c('groupHeadLeft')}>
+            <span className={c('groupIcon')}>{iconSparkle()}</span>
+            <span className={c('groupTitle')}>Specialist Skills</span>
+          </div>
+          <span className={c('countBadge')}>0 / 0</span>
+        </div>
+        {view.skillsLoading
+          ? <div className={c('empty')}>Loading skill catalog…</div>
+          : errorBanner ?? (
+            <div className={c('empty')}>
+              No skills discovered yet. Drop a folder with a SKILL.md into ~/.dsh/skills/ to add one.
+            </div>
+          )}
+      </section>
+    )
+
   return (
     <div className={c('container')}>
       <header className={c('head')}>
@@ -499,28 +645,20 @@ export function CapabilitiesPage({ useSessions }: CapabilitiesPageProps) {
 
       <div className={c('groups')}>
         {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpList, 'mcp')}
-        {skillList.length > 0
-          ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill')
-          : (
-            <section className={c('group')} key="skills-empty">
-              <div className={c('groupHead')}>
-                <div className={c('groupHeadLeft')}>
-                  <span className={c('groupIcon')}>{iconSparkle()}</span>
-                  <span className={c('groupTitle')}>Specialist Skills</span>
-                </div>
-                <span className={c('countBadge')}>0 / 0</span>
-              </div>
-              <div className={c('empty')}>
-                No skills discovered yet — open a session to load the live catalog. Drop a folder with a SKILL.md into ~/.dsh/skills/ to add one.
-              </div>
-            </section>
-          )}
+        {skillsSection}
         {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}
         {renderGroup('Core System Tools', iconTerminal(), coreToolList, 'tool')}
       </div>
 
       <footer className={c('foot')}>
-        Toggles persist to <code>enpoi-orchestration</code> settings and are staged until the next query.
+        <span>Toggles persist to <code>enpoi-orchestration</code> settings and are staged until the next query.</span>
+        <button
+          type="button"
+          className={c('footLink')}
+          onClick={() => { tab.actions.openTab(AGENT_MODELS_KIND) }}
+        >
+          Agent Models
+        </button>
       </footer>
     </div>
   )

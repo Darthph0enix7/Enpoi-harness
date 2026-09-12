@@ -1,11 +1,11 @@
-/* Capabilities Control Center — global main page (Liquid Glass surface). */
+/* Capabilities Control Center — right Sidebar tab body (Liquid Glass surface). */
 
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding: 14px 16px 10px;
+  padding: 10px 12px 8px;
   gap: 12px;
   overflow-y: auto;
   color: var(--dsw-alias-label-primary, #e2e8f0);
@@ -217,11 +217,75 @@
 }
 
 .foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: 9.5px;
   color: var(--dsw-alias-label-caption, #64748b);
   padding-top: 4px;
   border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.05));
   line-height: 1.4;
+}
+
+.footLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  color: var(--dsw-alias-label-tertiary, #94a3b8);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.footLink:hover {
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  border-color: rgba(103, 220, 231, 0.35);
+}
+
+.skillError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 2px;
+}
+
+.errorLine {
+  font-size: 10px;
+  color: var(--dsw-alias-label-caption, #e5716f);
+  line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+
+.retryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(103, 220, 231, 0.08);
+  border: 1px solid rgba(103, 220, 231, 0.25);
+  color: #67dce7;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.retryBtn:hover {
+  background: rgba(103, 220, 231, 0.16);
+  border-color: rgba(103, 220, 231, 0.45);
 }
 
 .foot code {

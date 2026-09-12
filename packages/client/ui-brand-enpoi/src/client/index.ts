@@ -1,4 +1,4 @@
-/** Enpoi Harness brand occupants, Watchtower UI slots, and operator pages. */
+/** Enpoi Harness brand occupants, Watchtower UI slots, and operator tabs. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -7,19 +7,26 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { WatchtowerView } from './WatchtowerView.tsx'
 import {
-  AgentModelsPage,
+  AgentModelsBody,
   FleetRoutingIcon,
   type AgentModelsDirectoryFace,
   type AgentModelsInjected,
-} from './AgentModelsPage.tsx'
-import { CapabilitiesPage, CapabilitiesIcon } from './CapabilitiesPage.tsx'
+} from './AgentModelsBody.tsx'
+import { CapabilitiesBody, CapabilitiesIcon } from './CapabilitiesBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
+import {
+  AGENT_MODELS_ID,
+  AGENT_MODELS_KIND,
+  CAPABILITIES_ID,
+  CAPABILITIES_KIND,
+} from './kinds.ts'
 import {
   getPersonaAssignments,
   subscribePersonaAssignments,
@@ -28,16 +35,17 @@ import {
   type PersonaMap,
 } from './persona-store.ts'
 
-/** Required services: the UI slot registry, the shared model directory, sessions, and locale. */
-export const inject = ['slots', 'modelDirectories', 'sessions', 'locale']
+/** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, and locale. */
+export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale']
 
 /** Session-less model directory: the global catalog mapped to the directory state shape. */
 type CatalogDirectoryFace = Omit<AgentModelsDirectoryFace, 'available'> & { available: true }
 
 /**
- * Build the catalog-backed model-directory face used when no root session is
- * selected. The derived store is read-only: ModelSelect subscribes and reads
- * it, while updates always route to an explicit persona assignment.
+ * Build the catalog-backed model-directory face used when the tab's session
+ * cannot supply one (addressed subagent). The derived store is read-only:
+ * ModelSelect subscribes and reads it, while updates always route to an
+ * explicit persona assignment.
  */
 function createCatalogDirectoryFace(ctx: Context): CatalogDirectoryFace | null {
   const modelDirectories = ctx.get('modelDirectories')
@@ -73,9 +81,9 @@ function createCatalogDirectoryFace(ctx: Context): CatalogDirectoryFace | null {
 }
 
 /**
- * Resolve the Agent Models directory for the addressed session, falling back
- * to the global catalog when the id is empty, unknown, or an addressed
- * subagent (Agent-bound model RPCs stay out of that path).
+ * Resolve the Agent Models directory for the tab's session, falling back to
+ * the global catalog when the id is empty, unknown, or an addressed subagent
+ * (Agent-bound model RPCs stay out of that path).
  */
 function resolveAgentModelsDirectory(
   ctx: Context,
@@ -139,17 +147,42 @@ export function apply(ctx: Context): void {
     label: () => 'Orchestration',
   }, OrchestrationSettings))
 
-  // 3. Global operator pages: `main` keys + matching `sidebar.panellist` rail
-  // rows (the rail id must equal the registered main key or selection throws).
+  // 3. Global operator tabs: right-Sidebar tab types (guide-discoverable) with
+  // their bodies under the same implementation id.
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: CAPABILITIES_ID,
+    kind: CAPABILITIES_KIND,
+    priority: 'extension',
+    title: () => 'Capabilities',
+    guide: [{
+      order: 55,
+      title: () => 'Capabilities',
+      description: () => 'Toggle MCP servers, skills, and subagents',
+      icon: CapabilitiesIcon,
+    }],
+  }), 'enpoi: capabilities tab type')
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: AGENT_MODELS_ID,
+    kind: AGENT_MODELS_KIND,
+    priority: 'extension',
+    title: () => 'Agent Models',
+    guide: [{
+      order: 56,
+      title: () => 'Agent Models',
+      description: () => 'Assign a model to each fleet persona',
+      icon: FleetRoutingIcon,
+    }],
+  }), 'enpoi: agent-models tab type')
+
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
-  ctx.slots.inject('main', function* () {
+  ctx.slots.inject('sidebar.right.pane.tab', function* () {
     yield ctx.slots.register({
-      name: 'main',
-      key: 'capabilities',
-    }, CapabilitiesPage)
+      name: 'sidebar.right.pane.tab',
+      key: CAPABILITIES_ID,
+    }, CapabilitiesBody)
     yield ctx.slots.register({
-      name: 'main',
-      key: 'agent-models',
+      name: 'sidebar.right.pane.tab',
+      key: AGENT_MODELS_ID,
       inject: (): AgentModelsInjected => ({
         hooks: {
           personaAssignments: {
@@ -161,21 +194,7 @@ export function apply(ctx: Context): void {
         assignPersona: (personaId, selection) => { void setPersonaAssignment(personaId, selection) },
         clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
       }),
-    }, AgentModelsPage)
-  })
-  ctx.slots.inject('sidebar.panellist', function* () {
-    yield ctx.slots.register({
-      name: 'sidebar.panellist',
-      id: 'capabilities',
-      order: 55,
-      label: () => 'Capabilities',
-    }, CapabilitiesIcon)
-    yield ctx.slots.register({
-      name: 'sidebar.panellist',
-      id: 'agent-models',
-      order: 56,
-      label: () => 'Agent Models',
-    }, FleetRoutingIcon)
+    }, AgentModelsBody)
   })
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates

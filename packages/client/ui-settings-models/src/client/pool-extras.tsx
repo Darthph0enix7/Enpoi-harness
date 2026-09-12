@@ -398,7 +398,7 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
             className={styles['poolIconButton']}
             title={t('poolRefresh')}
             aria-label={t('poolRefresh')}
-            onClick={() => { void refreshStatus() }}
+            onClick={() => { void reloadView(); void refreshStatus() }}
           >
             <IconRefresh size={13} />
           </button>

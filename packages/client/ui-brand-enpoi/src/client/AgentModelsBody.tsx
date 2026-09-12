@@ -1,28 +1,27 @@
 /**
- * Agent Models — the global per-persona model assignment page (main key
- * `agent-models`, ordered 56 in the sidebar rail).
+ * Agent Models — the global per-persona model assignment tab body
+ * (`sidebar.right.pane.tab` key `enpoi-agent-models`, kind `agent-models`).
  *
- * Restored from the retired better-sidebar Fleet Routing tab as a native
- * `main` page: global server configuration, not session observability
- * (Oracle verdict: the Watchtower stays session-scoped). Persona assignments
- * persist to `enpoi-orchestration.personas` in settings.yaml and apply to
- * every session. Seats: Background & Supervision (Context Keeper, Oracle),
- * Specialist Workers, Roundtable Debaters, Chorus Brainstormers. The keeper
- * seat shows "Default" (its plugin Config route) instead of "Inherit" — the
- * keeper has no parent turn to inherit from.
+ * Restored to where the original Enpoi sidebar hosted it: a first-class right
+ * Sidebar tab beside Files/Terminal, not a main-column page. Persona
+ * assignments persist to `enpoi-orchestration.personas` in settings.yaml and
+ * apply to every session. Seats: Background & Supervision (Context Keeper,
+ * Oracle), Specialist Workers, Roundtable Debaters, Chorus Brainstormers. The
+ * keeper seat shows "Default" (its plugin Config route) instead of "Inherit" —
+ * the keeper has no parent turn to inherit from.
  *
- * All live data arrives through the standard root hooks and the injected
- * face (persona assignments as a bound hook, directory resolution and the
- * assignment callbacks); the component never reaches for ctx.
+ * The tab's own `sessionId` addresses the model directory; the injected face
+ * carries the persona assignment hook plus the assignment callbacks, and the
+ * footer links to the Capabilities tab through the tab's own `openTab` action.
  */
 import { useEffect, useMemo } from 'react'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type { PersonaMap } from './persona-store.ts'
-import css from './AgentModelsPage.module.css'
+import { CAPABILITIES_KIND } from './kinds.ts'
+import css from './AgentModelsBody.module.css'
 
 /** The keeper's plugin Config route — shown as the "Default" sublabel. */
 const KEEPER_DEFAULT_ROUTE = 'freellmapi/auto'
@@ -89,10 +88,10 @@ function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
   )
 }
 
-/** Monochrome rail icon for the Agent Models page (thin stroke, currentColor). */
-export function FleetRoutingIcon({ size = 18 }: { size?: number; active?: boolean }) {
+/** Monochrome tab glyph for Agent Models (thin stroke, currentColor), also the guide capsule icon. */
+export function FleetRoutingIcon({ size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
       <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
       <circle cx="5.5" cy="4.5" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
       <circle cx="10.5" cy="8" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
@@ -108,14 +107,14 @@ export interface AgentModelsDirectoryFace {
   load: () => void
 }
 
-/** Injected business face of the Agent Models page (built in apply from ctx). */
+/** Injected business face of the Agent Models tab (built in apply from ctx). */
 export interface AgentModelsInjected {
   /** The persona assignment cache as a bound `usePersonaAssignments` hook. */
   hooks: { personaAssignments: HostObservable<PersonaMap> }
   /**
-   * Resolve the model directory for the page's session (catalog fallback
-   * when none is selected or the session is an addressed subagent).
-   * @param sessionId - most recent root session id, or undefined.
+   * Resolve the model directory for the tab's session (catalog fallback when
+   * the session is an addressed subagent).
+   * @param sessionId - the tab's session id.
    * @returns the stable directory face, or null when model data is unavailable.
    */
   resolveDirectory: (sessionId: string | undefined) => AgentModelsDirectoryFace | null
@@ -125,19 +124,17 @@ export interface AgentModelsInjected {
   clearPersona: (personaId: string) => void
 }
 
-export type AgentModelsPageProps = PropsRuntime<'main'> & InjectFace<AgentModelsInjected>
+export type AgentModelsBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & InjectFace<AgentModelsInjected>
 
-export function AgentModelsPage({
-  useSessions,
+export function AgentModelsBody({
+  sessionId,
+  useTabInfo,
   usePersonaAssignments,
   resolveDirectory,
   assignPersona,
   clearPersona,
-}: AgentModelsPageProps) {
-  // The global page has no session scope; the live catalog is addressed by the
-  // most recent root session (loaded skills/cwd), falling back to the
-  // session-less catalog-backed directory when none is open.
-  const sessionId = useSessions(state => state.current ?? state.ids[0])
+}: AgentModelsBodyProps) {
+  const { tab } = useTabInfo()
   const assignments = usePersonaAssignments(snapshot => snapshot)
 
   const face = useMemo(
@@ -211,6 +208,13 @@ export function AgentModelsPage({
       </div>
       <footer className={css.foot}>
         <span>Unassigned seats use the dispatching agent's model · Keeper uses its config route</span>
+        <button
+          type="button"
+          className={css.footLink}
+          onClick={() => { tab.actions.openTab(CAPABILITIES_KIND) }}
+        >
+          Capabilities
+        </button>
       </footer>
     </div>
   )
