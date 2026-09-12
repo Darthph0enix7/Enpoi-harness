@@ -12,7 +12,7 @@ import type {
   SessionFormatHeader,
   SessionFormatJsonValue,
 } from '@deepseek-ai/dsh-session-format'
-import { RELEASED_V0_EVENT_DISPOSITIONS } from './dispositions.ts'
+import { OPAQUE_FORK_V0_EVENT_TYPES, RELEASED_V0_EVENT_DISPOSITIONS } from './dispositions.ts'
 import { assertReleasedPayloadSemantics } from './payload-validation.ts'
 import { assertReleasedV0Keys, releasedV0Record } from './validation-helpers.ts'
 
@@ -188,6 +188,9 @@ export function assertReleasedSurfaceMetadata(
  */
 export function assertReleasedEventPayload(event: SessionFormatEvent, version: 0 | 1): void {
   const disposition = RELEASED_V0_EVENT_DISPOSITIONS[event.type]
+  // Enpoi fork: installed orchestration vocabulary from the v0 era carries
+  // owner-opaque payloads (pattern preserved verbatim by the identity edge).
+  if (disposition === undefined && OPAQUE_FORK_V0_EVENT_TYPES.has(event.type)) return
   /* v8 ignore next -- artifact coordinate validation admits only the frozen inventory before payload validation. */
   if (disposition === undefined) {
     throw new SessionFormatUnsupportedMigrationError(

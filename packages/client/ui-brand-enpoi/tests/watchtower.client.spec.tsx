@@ -169,7 +169,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
         toolName="subagent"
         block={mockBlock}
         openFile={vi.fn()}
-        loadImage={vi.fn()}
+        loadImage={vi.fn(() => Promise.resolve('blob:test')) as unknown as Parameters<typeof TheMarkTaskCardAdapter>[0]['loadImage']}
         openSession={openSession}
       />,
     )

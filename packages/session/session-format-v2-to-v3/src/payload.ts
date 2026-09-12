@@ -4,6 +4,7 @@ import { SessionFormatError, SessionFormatUnsupportedMigrationError, isSessionFo
 import type { SessionFormatEvent, SessionFormatJsonObject, SessionFormatJsonValue } from '@deepseek-ai/dsh-session-format'
 import { assertReleasedPayloadSemantics, assertReleasedSurfaceMetadata } from '@deepseek-ai/dsh-session-format-v0-to-v1'
 import { RELEASED_V2_EVENT_DISPOSITIONS } from '@deepseek-ai/dsh-session-format-v1-to-v2'
+import { OPAQUE_FORK_V0_EVENT_TYPES } from '@deepseek-ai/dsh-session-format-v0-to-v1'
 
 /** Audited surface event names; all other admitted events are log-only. */
 export const SURFACE_TYPES: ReadonlySet<string> = new Set(['system/message', 'user/message', 'assistant/message', 'tool/result'])
@@ -46,8 +47,19 @@ export function assertEvent(event: SessionFormatEvent, version: 2 | 3): void {
   }
   const disposition = RELEASED_V2_EVENT_DISPOSITIONS[event.type]
   const feedback = event.type === 'feedback/message-put' || event.type === 'feedback/message-delete'
-  if (disposition === undefined && !feedback) {
+  if (disposition === undefined && !feedback && !OPAQUE_FORK_V0_EVENT_TYPES.has(event.type)) {
     throw new SessionFormatUnsupportedMigrationError('format v2 to v3 cannot safely transform unclassified event ' + event.type)
+  }
+  if (disposition === undefined && !feedback) {
+    // Opaque Enpoi-fork vocabulary: envelope-only admission. The identity edge
+    // preserves every payload member verbatim under the installed vocabulary.
+    keys(event, ['type', 'seq', 'time', 'data'], ['ignorable', 'sourceEventSeqs', 'surfaceOp'], event.type)
+    sessionFormatCount(event.seq, 'event seq')
+    sessionFormatSafeInteger(event.time, 'event time')
+    if (event['ignorable'] !== undefined && event['ignorable'] !== true) {
+      throw new SessionFormatError('ignorable must be true')
+    }
+    return
   }
   const surface = SURFACE_TYPES.has(event.type)
   keys(event, ['type', 'seq', 'time', 'data'], surface ? ['ignorable', 'sourceEventSeqs', 'surfaceOp'] : ['ignorable'], event.type)

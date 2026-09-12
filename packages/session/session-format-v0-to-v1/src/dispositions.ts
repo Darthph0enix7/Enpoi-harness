@@ -34,6 +34,32 @@ const disposition = defineReleasedPayloadDisposition
  * merge-extensible discriminants validate known variants and preserve
  * unknown variants as owner-opaque JSON.
  */
+/**
+ * Installed Enpoi-fork event vocabulary that was written during the released-v0
+ * era. These types are outside the upstream frozen inventory, so no released-v0
+ * payload disposition governs them: every member is preserved verbatim by the
+ * identity edge and treated as owner-opaque by each migration's payload
+ * validator. Genuinely unknown types still refuse.
+ */
+export const OPAQUE_FORK_V0_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'brief/prose-updated',
+  'brief/blocker',
+  'brief/decision',
+  'brief/files',
+  'brief/phase-updated',
+  'claim/intake',
+  'claim/graduated',
+  'claim/rescinded',
+  'claim/untrusted-pending',
+  'council/started',
+  'council/round',
+  'council/finished',
+  'revert/state',
+  'revert/file-intent',
+  'revert/file-result',
+  'revert/file-conflict',
+])
+
 export const RELEASED_V0_EVENT_DISPOSITIONS: Readonly<Record<string, ReleasedV0PayloadDisposition>> = Object.freeze({
   'agent-preset/selected': disposition(['agentPreset']),
   'agent/inbox/spliced': disposition(

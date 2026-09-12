@@ -16,6 +16,7 @@ import type {
   SessionFormatMigrationStageInput,
 } from '@deepseek-ai/dsh-session-format'
 import {
+  OPAQUE_FORK_V0_EVENT_TYPES,
   RELEASED_V0_EVENT_DISPOSITIONS,
   assertReleasedEventPayload,
   assertReleasedV1Header,
@@ -127,7 +128,8 @@ function transformReleasedEvent(
   context: SessionFormatMigrationContext,
 ): void {
   if (event.type === 'assistant/chunk') assertChunkEnvelope(event)
-  if (RELEASED_V0_EVENT_DISPOSITIONS[event.type] === undefined) {
+  if (RELEASED_V0_EVENT_DISPOSITIONS[event.type] === undefined
+    && !OPAQUE_FORK_V0_EVENT_TYPES.has(event.type)) {
     throw refusal(`format v1 contains unknown event type ${JSON.stringify(event.type)} at seq ${event.seq}`)
   }
   const interrupted = legacyInterruptedTurn(state.legacyTurns, event)
