@@ -107,7 +107,9 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
   const subject = `Background subagent ${childId}`
   switch (stopReason) {
     case 'completed':
-      return `${subject} finished and will do no further work unless you send it more.`
+      // enpoi: no send_message in this deployment — the notice states the
+      // outcome and the closing report; the next task is a fresh dispatch.
+      return `${subject} finished.`
     case 'aborted':
       return `${subject} was stopped before it finished.`
     case 'max-tokens':
