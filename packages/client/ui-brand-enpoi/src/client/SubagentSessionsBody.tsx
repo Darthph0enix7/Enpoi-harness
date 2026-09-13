@@ -24,6 +24,8 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './SubagentSessionsBody.module.css'
 
@@ -67,9 +69,20 @@ export interface SubagentSessionsInjected {
    * @param id - session identity from the list projection.
    */
   openSession: (id: SessionId) => void
+  /**
+   * Open one subagent child through its durable direct-parent address. The host
+   * refuses history for a subagent-origin Session addressed as an ordinary
+   * session ("subagent Sessions require their durable parent address"), so the
+   * catalog-derived address is the only usable path for a child.
+   * @param address - parent, child, and delegation mode from the catalog.
+   */
+  openChild: (address: SubagentAddress) => void
   /** Re-pull the host session-list baseline. */
   refreshSessions: () => Promise<void>
 }
+
+/** How long a deferred child open waits for the parent catalog before giving up, in ms. */
+const CATALOG_WAIT_MS = 2_500
 
 export type SubagentSessionsBodyProps =
   & PropsRuntime<'sidebar.right.pane.tab'>
@@ -275,9 +288,10 @@ export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsI
   )
 }
 
-export function SubagentSessionsBody({ sessionId, useSessions, openSession, refreshSessions }: SubagentSessionsBodyProps) {
+export function SubagentSessionsBody({ sessionId, useSessions, openSession, openChild, refreshSessions }: SubagentSessionsBodyProps) {
   const byId = useSessions(state => state.byId)
   const phase = useSessions(state => state.phase)
+  const catalogs = useSessions(state => (state as SessionListState).subagentsByParent)
   const [refreshing, setRefreshing] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -286,6 +300,50 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
     const timer = window.setInterval(() => { setNow(Date.now()) }, 30_000)
     return () => { window.clearInterval(timer) }
   }, [])
+
+  // Catalog-derived child addresses: the host accepts a subagent child only
+  // through its durable direct-parent address, so every open resolves the
+  // address first and falls back to the ordinary path for real sessions.
+  const addresses = useMemo(() => {
+    const map = new Map<SessionId, SubagentAddress>()
+    for (const [parentSessionId, catalog] of Object.entries(catalogs ?? {})) {
+      for (const entry of catalog.entries) {
+        if (entry.kind !== 'child') continue
+        map.set(entry.id, { parentSessionId: parentSessionId as SessionId, childSessionId: entry.id, mode: entry.mode })
+      }
+    }
+    return map
+  }, [catalogs])
+
+  /** A child whose parent catalog is still loading: select the parent, then open the child. */
+  const [deferred, setDeferred] = useState<{ childId: SessionId; parentId: SessionId; deadline: number } | null>(null)
+
+  const openRow = (id: SessionId, parentId?: SessionId): void => {
+    const address = addresses.get(id)
+    if (address !== undefined) { openChild(address); return }
+    if (parentId !== undefined && parentId !== id) {
+      // Selecting the parent loads its subagent catalog; the effect below opens
+      // the child the moment its address appears.
+      openSession(parentId)
+      setDeferred({ childId: id, parentId, deadline: Date.now() + CATALOG_WAIT_MS })
+      return
+    }
+    openSession(id)
+  }
+
+  useEffect(() => {
+    if (deferred === null) return
+    const address = addresses.get(deferred.childId)
+    if (address !== undefined) {
+      openChild(address)
+      setDeferred(null)
+      return
+    }
+    // The parent is already selected; if the catalog never answers, stay there
+    // rather than triggering the host's plain-session refusal for a child.
+    const timer = window.setTimeout(() => { setDeferred(null) }, Math.max(0, deferred.deadline - Date.now()))
+    return () => { window.clearTimeout(timer) }
+  }, [deferred, addresses, openChild])
 
   const currentId = sessionId === '' ? undefined : sessionId
   const lineage = useMemo(() => {
@@ -357,7 +415,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
                 className={css.row}
                 data-current={row.current ? 'true' : undefined}
                 style={row.depth > 0 ? { paddingLeft: 9 + row.depth * INDENT_STEP } : undefined}
-                onClick={() => { openSession(row.id) }}
+                onClick={() => { openRow(row.id, row.parentId) }}
                 title={`Open ${row.title}`}
                 aria-current={row.current ? 'true' : undefined}
               >

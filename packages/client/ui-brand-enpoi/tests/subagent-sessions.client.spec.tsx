@@ -29,11 +29,22 @@ function byIdOf(rows: readonly Row[]): Record<string, Row> {
   return Object.fromEntries(rows.map(entry => [entry.id, entry]))
 }
 
-function mount(rows: Row[], sessionId = 'child', phase: Phase = 'ready') {
+/** One catalog child entry, as the host's subagent catalog projects it. */
+function childEntry(id: string, mode: 'one-shot' | 'continuable' = 'continuable', label = 'child') {
+  return { kind: 'child' as const, id, mode, label, activity: 'inactive' as const, hasChildren: false }
+}
+
+function mount(
+  rows: Row[],
+  sessionId = 'child',
+  phase: Phase = 'ready',
+  catalogs: Record<string, unknown> = {},
+) {
   const openSession = vi.fn()
+  const openChild = vi.fn()
   const refreshSessions = vi.fn(async () => {})
-  const useSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase }) => unknown) =>
-    selector({ byId: byIdOf(rows), phase })
+  const useSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; subagentsByParent: unknown }) => unknown) =>
+    selector({ byId: byIdOf(rows), phase, subagentsByParent: catalogs })
   // Presentation props only: the component never reads the standard seats the
   // renderer would bind (session lifecycle, projections, tab info).
   const props = {
@@ -41,14 +52,15 @@ function mount(rows: Row[], sessionId = 'child', phase: Phase = 'ready') {
     useSessions,
     useTabInfo: () => ({}),
     openSession,
+    openChild,
     refreshSessions,
   } as unknown as Parameters<typeof SubagentSessionsBody>[0]
   const view = render(<SubagentSessionsBody {...props} />)
 
   /** Re-render the same instance with new props, as a session switch does. */
   const rerender = (next: { sessionId?: string; rows?: Row[]; phase?: Phase } = {}): void => {
-    const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase }) => unknown) =>
-      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase })
+    const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; subagentsByParent: unknown }) => unknown) =>
+      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase, subagentsByParent: catalogs })
     const nextProps = {
       ...props,
       sessionId: next.sessionId ?? sessionId,
@@ -59,6 +71,7 @@ function mount(rows: Row[], sessionId = 'child', phase: Phase = 'ready') {
 
   return {
     openSession,
+    openChild,
     refreshSessions,
     rerender,
     view,
@@ -104,17 +117,33 @@ describe('SubagentSessionsBody — lineage tree', () => {
     expect(openSession).toHaveBeenCalledWith('main')
   })
 
-  it('navigates straight from a grandchild row without an ancestor strip', () => {
+  it('opens a catalog child through its durable parent address', () => {
+    const catalogs = {
+      main: { state: 'ready', error: null, entries: [childEntry('child')] },
+    }
+    const { openChild, openSession, list } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Fixer child', { parentId: 'main', origin: 'subagent' }),
+      row('grand', 'Grandchild', { parentId: 'child', origin: 'subagent' }),
+    ], 'grand', 'ready', catalogs)
+
+    expect(screen.queryByRole('navigation', { name: 'Session ancestry' })).toBeNull()
+
+    fireEvent.click(list().getByText('Fixer child'))
+    expect(openChild).toHaveBeenCalledWith({ parentSessionId: 'main', childSessionId: 'child', mode: 'continuable' })
+    expect(openSession).not.toHaveBeenCalled()
+  })
+
+  it('selects the parent when a child has no catalog address yet', () => {
     const { openSession, list } = mount([
       row('main', 'Main Session'),
       row('child', 'Fixer child', { parentId: 'main', origin: 'subagent' }),
       row('grand', 'Grandchild', { parentId: 'child', origin: 'subagent' }),
     ], 'grand')
 
-    expect(screen.queryByRole('navigation', { name: 'Session ancestry' })).toBeNull()
-
     fireEvent.click(list().getByText('Fixer child'))
-    expect(openSession).toHaveBeenCalledWith('child')
+    // The parent selection loads its catalog; the child opens when the address arrives.
+    expect(openSession).toHaveBeenCalledWith('main')
   })
 
   it('caps rows at 50 and reports the full total', () => {

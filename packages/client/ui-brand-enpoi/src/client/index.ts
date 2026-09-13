@@ -289,6 +289,10 @@ export function apply(ctx: Context): void {
         const sessions = ctx.get('sessions')
         return {
           openSession: (id) => { sessions?.open(id) },
+          // Children carry a durable parent address: a plain session address is
+          // refused by the host for subagent-origin Sessions, so the panel opens
+          // them through the catalog-derived subagent address instead.
+          openChild: (address) => { sessions?.openSubagent(address) },
           refreshSessions: async () => { await sessions?.refresh() },
         }
       },
