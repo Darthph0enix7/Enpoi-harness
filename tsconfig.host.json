@@ -347,6 +347,8 @@
     { "path": "./packages/host/directory-picker-auto" },
     { "path": "./packages/host/directory-picker-browse" },
     { "path": "./packages/host/directory-picker-native" },
+    // enpoi: the browser terminal host half (fenced PTY routes + WebSocket).
+    { "path": "./packages/host/enpoi-terminal" },
     { "path": "./packages/host/frontend-static" },
     { "path": "./packages/host/open-in-app" },
     { "path": "./packages/host/plugin-inventory" },

@@ -1,0 +1,17 @@
+/*
+ * enpoi: the xterm.js host fills whatever surface renders it; the terminal
+ * itself paints transparent so the surface's own fill (and both themes) show
+ * through.
+ */
+.host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 6px 8px 4px;
+  background: var(--dsw-alias-bg-base);
+  overflow: hidden;
+}
+
+.host :global(.xterm) {
+  height: 100%;
+}

@@ -1,0 +1,315 @@
+/*
+ * enpoi: the terminal page and the bottom dock's terminal chrome. Tab chips
+ * follow the sidebar's own tab vocabulary (capsule active state, quiet
+ * closes) using the shared tokens; no literal colors.
+ */
+.root {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The tab row: chips shrink and scroll; the controls keep their width. */
+.tabBar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  padding: 0 6px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-base);
+  user-select: none;
+}
+
+.tabList {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabList::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  max-width: 180px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tab:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.tabActive {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.tabPick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 8px;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.tabTitle {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.dot[data-status='running'] {
+  background: var(--dsw-specific-sidebar-nav-item-active-accent);
+}
+
+.dot[data-status='connecting'] {
+  background: var(--dsw-alias-label-secondary);
+  animation: terminal-pulse 1s ease-in-out infinite;
+}
+
+.dot[data-status='exited'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.dot[data-status='error'] {
+  background: var(--dsw-alias-label-caption, #e5716f);
+}
+
+@keyframes terminal-pulse {
+  50% { opacity: 0.3; }
+}
+
+.tabClose {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 3px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.tab:hover .tabClose,
+.tabActive .tabClose {
+  opacity: 1;
+}
+
+.tabClose:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.iconButton {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.banner {
+  flex: none;
+  padding: 5px 10px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.banner[data-enpoi-terminal-banner='error'] {
+  color: var(--dsw-alias-label-caption, #e5716f);
+}
+
+.empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+}
+
+.empty p {
+  margin: 0;
+}
+
+.newButton {
+  padding: 5px 12px;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.newButton:hover {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+/* enpoi: the bottom dock's own shell, rendered in the frame overlay layer. */
+.dock {
+  position: fixed;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--dsw-alias-bg-base);
+  border-top: 0.5px solid var(--dsw-alias-border-l4);
+  box-shadow: 0 -8px 24px rgb(0 0 0 / 18%);
+  pointer-events: auto;
+}
+
+.dockHandle {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.dockHandle::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 0.5px;
+  background: transparent;
+  transition: background 120ms ease-out;
+}
+
+.dockHandle:hover::after,
+.dockHandle[data-dragging]::after {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+}
+
+.dockBar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l4);
+}
+
+.dockBarTitle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.dockBar .tabBar {
+  flex: 1 1 auto;
+  height: 100%;
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+}
+
+.dockBody {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* enpoi: the header action that opens and closes the dock. */
+.headerToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 6px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 28px;
+  cursor: pointer;
+}
+
+.headerToggle:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerToggle[aria-pressed='true'] {
+  color: var(--dsw-specific-sidebar-nav-item-active-accent);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+/*
+ * enpoi: while the dock is open, the conversation column gives up the dock's
+ * height (margin, so the transcript squeezes rather than being covered). The
+ * marker and the variable come from the dock component itself.
+ */
+:global(body[data-enpoi-bottom-dock-open] div:has(+ [data-rightbar-col])) {
+  margin-bottom: var(--enpoi-bottom-dock-height, 0px);
+  transition: margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}

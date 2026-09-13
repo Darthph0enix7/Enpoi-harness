@@ -27,6 +27,13 @@ import {
 import { GitBody, GitIcon } from './GitBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
+import { TerminalRegistry } from './terminal/registry.ts'
+import type { TerminalInjected } from './terminal/contract.ts'
+import type { TerminalRegistryState } from './terminal/registry.ts'
+import { TerminalPanel } from './terminal/TerminalPanel.tsx'
+import { BottomDockToggle, BottomTerminalDock } from './terminal/BottomTerminalDock.tsx'
+import { TerminalIcon } from './terminal/icons.tsx'
+import { installTerminalStyles } from './terminal/styles.ts'
 import {
   AGENT_MODELS_ID,
   AGENT_MODELS_KIND,
@@ -36,6 +43,8 @@ import {
   GIT_KIND,
   SUBAGENT_SESSIONS_ID,
   SUBAGENT_SESSIONS_KIND,
+  TERMINAL_ID,
+  TERMINAL_KIND,
 } from './kinds.ts'
 import {
   getPersonaAssignments,
@@ -208,6 +217,42 @@ export function apply(ctx: Context): void {
       icon: GitIcon,
     }],
   }), 'enpoi: git tab type')
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: TERMINAL_ID,
+    kind: TERMINAL_KIND,
+    priority: 'extension',
+    title: () => 'Terminal',
+    guide: [{
+      order: 59,
+      title: () => 'Terminal',
+      description: () => 'Interactive shells in the sidebar and the bottom panel',
+      icon: TerminalIcon,
+    }],
+  }), 'enpoi: terminal tab type')
+
+  // enpoi: the browser terminal registry — one PTY per terminal, shared by the
+  // right sidebar's terminal page and the bottom dock (each surface keeps its
+  // own tabs; the same registry and transport back both).
+  installTerminalStyles(ctx)
+  const terminals = new TerminalRegistry()
+  ctx.effect(() => () => { terminals.dispose() }, 'enpoi: terminal teardown')
+  const terminalInjected = (): TerminalInjected => ({
+    hooks: {
+      terminals: {
+        getSnapshot: (): TerminalRegistryState => terminals.state.getSnapshot(),
+        subscribe: (listener: () => void) => terminals.state.subscribe(listener),
+      } satisfies HostObservable<TerminalRegistryState>,
+    },
+    openTerminal: (sessionId, place, cwd) => { terminals.open(sessionId, place, cwd) },
+    closeTerminal: (sessionId, id) => { terminals.close(sessionId, id) },
+    activateTerminal: (sessionId, place, id) => { terminals.activate(sessionId, place, id) },
+    writeTerminal: (sessionId, id, data) => { terminals.write(sessionId, id, data) },
+    resizeTerminal: (sessionId, id, cols, rows) => { terminals.resize(sessionId, id, cols, rows) },
+    subscribeTerminal: (sessionId, id, listener) => terminals.subscribe(sessionId, id, listener),
+    readTerminal: (sessionId, id) => terminals.read(sessionId, id),
+    toggleTerminalDock: () => { terminals.toggleDock() },
+    setTerminalDockHeight: (px) => { terminals.setDockHeight(px) },
+  })
 
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
   ctx.slots.inject('sidebar.right.pane.tab', function* () {
@@ -245,7 +290,27 @@ export function apply(ctx: Context): void {
       name: 'sidebar.right.pane.tab',
       key: GIT_ID,
     }, GitBody)
+    yield ctx.slots.register({
+      name: 'sidebar.right.pane.tab',
+      key: TERMINAL_ID,
+      inject: terminalInjected,
+    }, TerminalPanel)
   })
+
+  // enpoi: the bottom terminal dock (frame overlay) and the header toggle that
+  // opens it. The dock hosts only terminals; its tabs are its own terminals.
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'enpoi-bottom-terminal',
+    order: 10,
+    inject: terminalInjected,
+  }, BottomTerminalDock))
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'enpoi-bottom-terminal',
+    order: 60,
+    inject: terminalInjected,
+  }, BottomDockToggle))
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {

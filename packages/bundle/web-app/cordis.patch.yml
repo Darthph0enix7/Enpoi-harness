@@ -72,6 +72,12 @@
     - id: ui-open-in-app
       name: '@deepseek-ai/dsh-client-ui-open-in-app'
 
+    # enpoi: browser terminal PTYs (fenced JSON API + one WebSocket upgrade).
+    # The browser surfaces register into the right sidebar and shell.overlay
+    # from @deepseek-ai/dsh-client-ui-brand-enpoi.
+    - id: enpoi-terminal
+      name: '@deepseek-ai/dsh-host-enpoi-terminal'
+
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 

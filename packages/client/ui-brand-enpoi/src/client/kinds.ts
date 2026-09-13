@@ -23,3 +23,9 @@ export const GIT_KIND = 'git'
 
 /** The Git body's implementation id and `sidebar.right.pane.tab` key. */
 export const GIT_ID = 'enpoi-git'
+
+/** The Terminal page kind (what `openTab` names). */
+export const TERMINAL_KIND = 'terminal'
+
+/** The Terminal body's implementation id and `sidebar.right.pane.tab` key. */
+export const TERMINAL_ID = 'enpoi-terminal'
