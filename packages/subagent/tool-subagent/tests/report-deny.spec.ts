@@ -1,25 +1,24 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import { callSubagent, setup } from './harness.ts'
 
-// Mirror of the tool source's toolFilter construction (the source is bundled;
-// these replicate the exact logic to verify the contract).
-function buildToolFilter(baseFilter: { deny?: string[] } | undefined): { deny: string[] } {
-  return {
-    ...baseFilter,
-    deny: [...(baseFilter?.deny ?? []), 'report'],
-  }
-}
+describe('subagent tool one-delivery deny', () => {
+  it('denies the child-scoped send_message relay on every spawned child', async () => {
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup({ provider: 'mock' }, {
+      onStart: (request) => { seen = request },
+    })
+    await callSubagent(ctx, { description: 'Do the thing', prompt: 'work' })
+    expect(seen?.toolFilter?.deny).toContain('send_message')
+  })
 
-describe('subagent tool report-deny', () => {
-  it('always denies the report tool', () => {
-    expect(buildToolFilter(undefined).deny).toContain('report')
-  })
-  it('merges report into a configured deny list', () => {
-    const f = buildToolFilter({ deny: ['bash'] })
-    expect(f.deny).toContain('report')
-    expect(f.deny).toContain('bash')
-  })
-  it('preserves the allow list', () => {
-    const f = buildToolFilter({ deny: ['bash'] })
-    expect(f.deny).toEqual(['bash', 'report'])
+  it('keeps the denial when a configured filter already exists', async () => {
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup({ provider: 'mock', toolFilter: { deny: ['bash'] } }, {
+      onStart: (request) => { seen = request },
+    })
+    await callSubagent(ctx, { description: 'Do the thing', prompt: 'work' })
+    expect(seen?.toolFilter?.deny).toContain('send_message')
+    expect(seen?.toolFilter?.deny).toContain('bash')
   })
 })

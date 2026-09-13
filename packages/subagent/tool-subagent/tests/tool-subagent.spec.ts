@@ -699,7 +699,7 @@ describe('dsh-tool-subagent', () => {
 
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
     expect(seen?.persona).toBe('You are the child.')
-    expect(seen?.toolFilter).toMatchObject({ deny: ['subagent'] })
+    expect(seen?.toolFilter).toMatchObject({ deny: expect.arrayContaining(['subagent']) })
     expect(seen?.maxDepth).toBe(2)
   })
 
@@ -749,7 +749,7 @@ describe('dsh-tool-subagent', () => {
     })
     await ctx.plugin(tool, { provider: 'capture3', toolFilter: { deny: ['subagent'] }, maxDepth: 'provider-managed' })
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
-    expect(seen?.toolFilter).toEqual({ deny: ['subagent'] })
+    expect(seen?.toolFilter?.deny).toContain('subagent')
     expect(seen?.toolFilter).not.toHaveProperty('allow')
   })
 
@@ -1216,9 +1216,11 @@ describe('dsh-tool-subagent continuable background mode', () => {
     // Continuable delegation has no Task, so the schema promises no collection.
     expect(schema.description).not.toContain('job_output')
     expect(schema.description).not.toContain('job_kill')
-    expect(schema.description).toContain('send_message')
-    expect(schema.description).toContain('steers the child\'s nearest step while it is running')
-    expect(schema.description).not.toContain('send_message` starts a later turn')
+    // Enpoi: send_message is disabled in this deployment, so the continuable
+    // description promises only the settlement notice delivery.
+    expect(schema.description).not.toContain('send_message')
+    expect(schema.description).toContain('injects a notice into this session')
+    expect(schema.description).toContain('wakes to process it')
     expect(schema.description).toContain('runs in the background by default')
     expect(schema.description).not.toContain('never poll or wait on it')
     const properties = (schema.parameters as {
@@ -1418,14 +1420,16 @@ describe('depth budget configuration', () => {
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
     expect(requests[0]?.label).toBe('d')
     expect(requests[0]?.maxDepth).toBe(3)
-    expect(requests[0]?.toolFilter).toBeUndefined()
+    expect(requests[0]?.toolFilter).toMatchObject({ deny: expect.arrayContaining(['subagent']) })
   })
 
-  it('forwards an explicit tool filter unchanged instead of encoding the depth policy into it', async () => {
+  it('merges an explicit tool filter with the always-on worker deny policy', async () => {
     const { ctx, requests } = await captureSetup({ toolFilter: { deny: ['dangerous'] }, maxDepth: 0 })
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
     expect(requests[0]?.maxDepth).toBe(0)
-    expect(requests[0]?.toolFilter).toEqual({ deny: ['dangerous'] })
+    expect(requests[0]?.toolFilter).toMatchObject({
+      deny: expect.arrayContaining(['dangerous', 'subagent']),
+    })
   })
 
   it('rejects a numeric maxDepth on a provider without the depthLimit capability at mount', async () => {

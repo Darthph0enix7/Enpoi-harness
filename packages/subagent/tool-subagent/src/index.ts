@@ -347,24 +347,93 @@ const ROLE_PERSONAS: Record<string, string> = {
     + 'You never write or edit files; you summarize, explain, and cite.',
 }
 
-/** Detect the specialist role named in a delegation description or prompt. */
 /**
- * One-delivery rule for children spawned by this tool: deny the child-scoped
- * `send_message` relay so the settlement notice (background) or this call's
- * result (foreground) is the ONLY delivery. The tool's presence also disarms
- * the continuable return-guidance injection (continuation.ts), which would
- * otherwise instruct the child to send a duplicate. Deny wins over
- * allow-lists; unknown deny names are no-ops (tools.restrict), and providers
- * without the toolFilter capability keep their configured filter untouched.
+ * Tools denied to EVERY child this tool spawns. A worker is a one-shot
+ * specialist that reports to the orchestrator: it never delegates, convenes a
+ * council or oracle review, curates memory, drives harness-level plan
+ * mode/goals/jobs/workflows, or asks the user. Deny-only by design —
+ * `tools.restrict()` skips deny names it does not know, so a tool added
+ * upstream stays available unless this list names it.
+ *
+ * The list also carries the one-delivery rule: denying the child-scoped
+ * `send_message` relay makes the settlement notice (background) or this call's
+ * result (foreground) the ONLY delivery, and the deny disarms the continuable
+ * return-guidance injection (continuation.ts), which would otherwise instruct
+ * the child to send a duplicate. Deny wins over allow-lists.
+ */
+const SHARED_CHILD_DENY: readonly string[] = [
+  'subagent',
+  'subagent_fork',
+  'subagent_codex',
+  'subagent_claude_code',
+  'roundtable',
+  'chorus',
+  'oracle_review',
+  'create_goal',
+  'get_goal',
+  'update_goal',
+  'exit_plan_mode',
+  'plan_mode',
+  'goal',
+  'ralph',
+  'workflow',
+  'job_output',
+  'job_list',
+  'job_kill',
+  'ask_user_question',
+  'todo_write',
+  'memory_save',
+  'memory_rescind',
+  'memory_confirm',
+  'send_message',
+  'interrupt_agent',
+  'list_agents',
+]
+
+/**
+ * Extra tools denied per inferred specialist role, unioned with
+ * {@link SHARED_CHILD_DENY}. Each role keeps only the surface its work needs:
+ * explorers and librarians read and search but never mutate; fixers and
+ * designers implement but never run code or reach the web. A role outside
+ * this map (e.g. `oracle`) receives the shared set only.
+ */
+const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
+  // `run_code` is deliberately absent everywhere: the PTC presentation
+  // transport is reserved, and `tools.restrict()` throws when a filter names
+  // it. A child holding it can only orchestrate the tools it can already see,
+  // which these lists bound.
+  explorer: ['bash', 'edit', 'write', 'skill', 'web_search', 'web_fetch', 'memory_search'],
+  librarian: ['bash', 'edit', 'write', 'skill', 'memory_search'],
+  fixer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
+  designer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
+}
+
+/**
+ * Compose the per-child tool filter: the configured filter merged with the
+ * shared worker deny list and the inferred role's extras. Configured deny
+ * entries survive (first, de-duplicated), the configured `allow` list passes
+ * through untouched, and `deny` wins over `allow` in `tools.restrict()`.
+ * Unknown deny names are no-ops there. Providers without the `toolFilter`
+ * capability keep the configured filter unchanged.
+ * @param provider - the provider that will start the child.
+ * @param configured - the tool instance's configured filter, if any.
+ * @param role - the inferred specialist role, if any.
+ * @returns the composed filter, or the configured filter for a provider that cannot apply one.
  */
 function childToolFilter(
   provider: SubagentProvider,
   configured: Config['toolFilter'],
+  role: string | undefined,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
-  return { ...configured, deny: [...configured?.deny ?? [], 'send_message'] }
+  const roleDeny = role === undefined ? [] : ROLE_CHILD_DENY[role] ?? []
+  return {
+    ...configured,
+    deny: [...new Set([...configured?.deny ?? [], ...SHARED_CHILD_DENY, ...roleDeny])],
+  }
 }
 
+/** Detect the specialist role named in a delegation description or prompt. */
 function detectSubagentRole(description?: string, prompt?: string): string | undefined {
   const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
   // 1. Explicit role name wins.
@@ -634,7 +703,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...(() => {
-              const delegated = childToolFilter(subagentProvider, config.toolFilter)
+              const delegated = childToolFilter(subagentProvider, config.toolFilter, role)
               return delegated === undefined ? {} : { toolFilter: delegated }
             })(),
             ...maxDepth !== undefined ? { maxDepth } : {},
