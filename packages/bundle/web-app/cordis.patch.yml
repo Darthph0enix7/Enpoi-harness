@@ -258,6 +258,12 @@
     # Enpoi occupants for the generic sidebar and conversation brand slots.
     - id: ui-brand-enpoi
       name: '@deepseek-ai/dsh-client-ui-brand-enpoi'
+
+    # The editable workbench for right-Sidebar session files: CodeMirror editing
+    # with optimistic saves and external-change protection, at the extension
+    # band over the read-only text preview.
+    - id: ui-enpoi-editor
+      name: '@deepseek-ai/dsh-client-ui-enpoi-editor'
     - id: ui-approval
       name: '@deepseek-ai/dsh-client-ui-approval'
 

@@ -2311,6 +2311,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
       'client-ui-brand-enpoi SubagentSessionsBody',
       'client-ui-brand-enpoi GitBody',
       'client-ui-brand-enpoi TerminalPanel',
+      'client-ui-enpoi-editor EditorBody',
       'client-ui-sidebar-documentpreview TextPreview',
       'client-ui-sidebar-files FilesBody',
       'client-ui-sidebar-right GuideBody',

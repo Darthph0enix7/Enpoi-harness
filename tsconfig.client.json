@@ -73,6 +73,7 @@
     { "path": "./packages/client/ui-sidebar" },
     { "path": "./packages/client/ui-brand-official" },
     { "path": "./packages/client/ui-brand-enpoi" },
+    { "path": "./packages/client/ui-enpoi-editor" },
     { "path": "./packages/client/ui-approval" },
     { "path": "./packages/client/ui-chat" },
     { "path": "./packages/client/ui-conversation" },

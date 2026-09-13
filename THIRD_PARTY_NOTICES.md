@@ -35,6 +35,14 @@ External packages installed for runtime use or distributed inside the prebuilt b
 | [`@anthropic-ai/claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-typescript) | SEE LICENSE IN README.md |
 | [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) | MIT |
 | [`@babel/code-frame`](https://github.com/babel/babel) | MIT |
+| [`@codemirror/commands`](https://code.haverbeke.berlin/codemirror/commands) | MIT |
+| [`@codemirror/lang-javascript`](https://github.com/codemirror/lang-javascript) | MIT |
+| [`@codemirror/lang-json`](https://github.com/codemirror/lang-json) | MIT |
+| [`@codemirror/lang-markdown`](https://code.haverbeke.berlin/codemirror/lang-markdown) | MIT |
+| [`@codemirror/lang-python`](https://github.com/codemirror/lang-python) | MIT |
+| [`@codemirror/language`](https://code.haverbeke.berlin/codemirror/language) | MIT |
+| [`@codemirror/state`](https://code.haverbeke.berlin/codemirror/state) | MIT |
+| [`@codemirror/view`](https://code.haverbeke.berlin/codemirror/view) | MIT |
 | [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi) | MIT |
 | [`@joplin/turndown-plugin-gfm`](https://github.com/laurent22/joplin-turndown-plugin-gfm) | MIT |
 | [`@jridgewell/gen-mapping`](https://github.com/jridgewell/sourcemaps) | MIT |
@@ -42,6 +50,7 @@ External packages installed for runtime use or distributed inside the prebuilt b
 | [`@lexical/plain-text`](https://github.com/facebook/lexical) | MIT |
 | [`@lexical/text`](https://github.com/facebook/lexical) | MIT |
 | [`@lexical/utils`](https://github.com/facebook/lexical) | MIT |
+| [`@lezer/highlight`](https://github.com/lezer-parser/highlight) | MIT |
 | [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) | MIT |
 | [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) | MIT |
 | [`@octokit/webhooks`](https://github.com/octokit/webhooks.js) | MIT |
