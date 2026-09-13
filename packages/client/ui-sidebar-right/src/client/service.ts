@@ -37,6 +37,7 @@ import type { SidebarRightTabClaim, SidebarRightTabRegistry } from './tab-regist
 import { SidebarRightRail } from './rail.ts'
 import type { SidebarRightState, SurfaceState } from './stores.ts'
 import type { createSidebarRightStore } from './stores.ts'
+import type { SurfacePersistence } from './surface-storage.ts'
 import { TabDomain, type PinResource } from './tab-domain.ts'
 
 /** The seat's bound action set. */
@@ -57,14 +58,20 @@ interface Adoption {
 
 /**
  * Create the public controller and the plugin-private store adoption callback.
- * Adoption subscribes without reconciling; the first store commit creates occurrences.
+ *
+ * Adoption seeds the occurrence table from what a reload stored, then
+ * subscribes and reconciles immediately: a restored surface is already
+ * committed when the store is minted and may need no further action, so waiting
+ * for a commit that never comes would leave its tabs without occurrences.
  * @param tabs - registered tab types.
  * @param pin - resource retention for an occurrence's lifetime.
  * @param rail - the global rail preferences shared with the panel seat.
+ * @param persistence - the stored navigation records a reload restores.
  * @returns the controller and a callback releasing exactly its own adoption.
  */
 export function createSidebarRightController(
   tabs: SidebarRightTabRegistry, pin: PinResource, rail: SidebarRightRail = new SidebarRightRail(),
+  persistence?: SurfacePersistence,
 ): {
   controller: SidebarRightController
   adopt: (sessionId: SessionId, store: SidebarRightSurfaceStore) => () => void
@@ -75,12 +82,15 @@ export function createSidebarRightController(
     controller,
     adopt(sessionId, store) {
       adopted.get(sessionId)?.unsubscribe()
+      const restored = persistence?.read(sessionId)
+      if (restored !== undefined) controller.tabDomain.restore(sessionId, restored.navigation)
       const sync = (): void => {
         const surface = store.getSnapshot().bySession[sessionId]
         if (surface !== undefined) controller.tabDomain.sync(sessionId, surface.layout)
       }
       const adoption: Adoption = { store, unsubscribe: store.subscribe(sync) }
       adopted.set(sessionId, adoption)
+      sync()
       return () => {
         adoption.unsubscribe()
         if (adopted.get(sessionId) === adoption) adopted.delete(sessionId)

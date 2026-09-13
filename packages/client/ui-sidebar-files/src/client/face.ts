@@ -71,6 +71,22 @@ export function childPath(parent: string, name: string): string {
   return `${parent.replace(/[/\\]+$/, '')}/${name}`
 }
 
+/**
+ * The absolute path of one entry's parent directory.
+ *
+ * Both separators cut, so a Windows path's segments end where its own do. A
+ * path with no separator has no parent to name and comes back unchanged.
+ * @param path - absolute path of an entry.
+ * @returns the directory holding it.
+ */
+export function parentPath(path: string): string {
+  const trimmed = path.replace(/[/\\]+$/, '')
+  const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  if (at < 0) return path
+  if (at === 0) return trimmed.slice(0, 1)
+  return trimmed.slice(0, at)
+}
+
 /** The tree's injected business face, as the body receives it. */
 export interface FilesInjected {
   /**

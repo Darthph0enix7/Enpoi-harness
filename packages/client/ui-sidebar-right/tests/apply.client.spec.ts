@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply, inject } from '../src/client/index.ts'
 import type { GuideInjected, SidebarRightInjected } from '../src/client/index.ts'
@@ -143,6 +144,45 @@ describe('ui-sidebar-right apply', () => {
     expect(resources.pin).toHaveBeenCalledWith('sidebar://guide', expect.any(AbortSignal))
     release()
     expect(() => { ctx.sidebarRight.toggleExpanded() }).toThrow('no session surface is mounted')
+  })
+
+  it('restores a session\'s stored column and pins it when its store is minted', async () => {
+    const entries = new Map<string, string>()
+    const storage: Storage = {
+      get length() { return entries.size },
+      clear: () => { entries.clear() },
+      getItem: key => entries.get(key) ?? null,
+      key: index => [...entries.keys()][index] ?? null,
+      removeItem: (key) => { entries.delete(key) },
+      setItem: (key, value) => { entries.set(key, value) },
+    }
+    entries.set('dsh.sidebar-right.surfaces.v1', JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: { pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1'], activeTabId: 'tab1' } },
+            tabs: { tab1: { id: 'tab1', kind: 'guide', contentId: 'sidebar://guide', title: 'Start' } },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: true, mode: 'push',
+          },
+          minted: 1,
+        },
+      },
+    }))
+    vi.stubGlobal('localStorage', storage)
+    try {
+      const { ctx, resources, seat } = await boot()
+      const handle = seat('rightbar.session').store as ReturnType<typeof createSidebarRightStore>
+      const instance = handle.create(SESSION)
+      const surface = instance.getSnapshot().bySession[SESSION]
+      expect(surface?.layout.expanded).toBe(true)
+      expect(Object.values(surface?.layout.tabs ?? {}).map(tab => tab.kind)).toEqual(['guide'])
+      // Adoption reconciles the restored column immediately, without a seat and without a commit.
+      expect(resources.pin).toHaveBeenCalledWith('sidebar://guide', expect.any(AbortSignal))
+      expect(ctx.sidebarRight.tabDomain.occurrence(SESSION, { id: 'tab1' as TabId })).toBeDefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('adopts each session\'s store instance as the runtime mints it, so a tab\'s own actions land with no seat bound', async () => {

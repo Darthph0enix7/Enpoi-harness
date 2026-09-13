@@ -130,6 +130,38 @@ export class TabDomain {
     existing.navigation.set({ ...target, revision: existing.navigation.getSnapshot().revision + 1 })
   }
 
+  /**
+   * Seed occurrences from the navigation records a reload restored.
+   *
+   * Called before the first sync, so a restored resource tab re-renders with the
+   * params its opener gave. A record whose tab is gone is dropped by that sync,
+   * and an occurrence the domain already holds keeps its live navigation.
+   * @param sessionId - the session being restored.
+   * @param records - tab id to the navigation the previous page recorded.
+   */
+  restore(sessionId: SessionId, records: Readonly<Record<string, SidebarRightTabNavigation>>): void {
+    const held = this.session(sessionId)
+    for (const [tabId, navigation] of Object.entries(records)) {
+      if (held.has(tabId as TabId)) continue
+      this.hold(sessionId, tabId as TabId, navigation)
+    }
+  }
+
+  /**
+   * The session's live navigation records, for persistence at write time.
+   * @param sessionId - the session to read.
+   * @returns tab id to its latest navigation; an aborted occurrence has none.
+   */
+  records(sessionId: SessionId): Readonly<Record<string, SidebarRightTabNavigation>> {
+    const held = this.bySession.get(sessionId)
+    if (held === undefined) return {}
+    const records: Record<string, SidebarRightTabNavigation> = {}
+    for (const [tabId, occurrence] of held) {
+      if (!occurrence.signal.aborted) records[tabId] = occurrence.navigation.getSnapshot()
+    }
+    return records
+  }
+
   /** Abort every occurrence of every session; the package is unloading. */
   dispose(): void {
     for (const held of this.bySession.values()) {

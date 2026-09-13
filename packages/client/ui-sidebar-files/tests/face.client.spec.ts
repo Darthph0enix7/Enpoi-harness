@@ -14,7 +14,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceDirectoryListing } from '@deepseek-ai/dsh-api-workspace-files/types'
-import { childPath, createList, filesFace } from '../src/client/face.ts'
+import { childPath, createList, filesFace, parentPath } from '../src/client/face.ts'
 import type { WorkspaceFilesListRemote } from '../src/client/face.ts'
 import { createFilesStore } from '../src/client/store.ts'
 import type { DirLevel } from '../src/client/store.ts'
@@ -139,5 +139,18 @@ describe('childPath', () => {
     expect(childPath('/work/app/', 'src')).toBe('/work/app/src')
     expect(childPath('/', 'etc')).toBe('/etc')
     expect(childPath('C:\\work\\', 'src')).toBe('C:\\work/src')
+  })
+})
+
+describe('parentPath', () => {
+  it('cuts the final segment, both separators, trailing separators included', () => {
+    expect(parentPath('/work/app/src')).toBe('/work/app')
+    expect(parentPath('C:\\work\\app\\src')).toBe('C:\\work\\app')
+    expect(parentPath('/work/app/src/')).toBe('/work/app')
+  })
+
+  it('keeps the root as the parent of a root-level entry, and leaves a nameless path alone', () => {
+    expect(parentPath('/README.md')).toBe('/')
+    expect(parentPath('README.md')).toBe('README.md')
   })
 })

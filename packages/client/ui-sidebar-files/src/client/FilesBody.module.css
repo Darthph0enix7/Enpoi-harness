@@ -98,6 +98,7 @@
 }
 
 .item {
+  position: relative;
   margin: 0;
   padding: 0;
 }
@@ -109,8 +110,9 @@
   width: 100%;
   min-width: 0;
   /* Rows abut, so the hover fill is the whole row; the tree's air is this
-     inset, not a gap between rows. */
-  padding: 5px 10px;
+     inset, not a gap between rows. The extra right inset leaves the row's
+     3-dots trigger clear of the name when it appears on hover. */
+  padding: 5px 26px 5px 10px;
   color: inherit;
   font: inherit;
   text-align: left;
@@ -205,4 +207,131 @@
    on the text's line and spaces it. */
 .titleIcon {
   flex: none;
+}
+
+/* The row's 3-dots trigger: the row keeps its own hit area, and the trigger
+   appears only for a hovered or keyboard-focused row. */
+.rowAction {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  color: var(--dsw-alias-label-secondary);
+  line-height: 1;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  opacity: 0;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.item:hover .rowAction,
+.item:focus-within .rowAction {
+  opacity: 1;
+}
+
+.rowAction:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowAction svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The inline rename/new-entry row replaces the button while editing, so the
+   input is not interactive content nested in a button. */
+.rowEditing {
+  cursor: default;
+}
+
+.editInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 5px;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 6px;
+  outline: none;
+}
+
+.editInput:focus {
+  border-color: var(--dsw-alias-border-l1);
+}
+
+.editError {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The portaled row menu: a fixed card hung from the gesture's coordinates. */
+.menu {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: calc(100vh - 24px);
+  padding: 4px;
+  overflow-y: auto;
+  border-radius: 14px;
+  background: var(--dsw-specific-menu);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+/* The 3-dots path hangs the card from the button's right edge. */
+.menuEnd {
+  transform: translateX(-100%);
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 10px;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* Destructive rows: Delete and its confirmation. */
+.menuDanger {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* A failed menu action that has no inline home: download, delete, copy. */
+.notice {
+  margin: 0 8px 6px 2px;
+  padding: 4px 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
 }

@@ -67,7 +67,7 @@ After every action the kit's settle planner keeps the expanded surface populated
 
 The docked surface's last tab carries one more rule, decided in the store's `closeTab` and mirrored to the kit through `canCloseTab`: the guide standing as the only docked tab draws no close control and no menu close item — its chip sits quiet, and with no extension item contributed a secondary press opens no menu — and a programmatic close of it records nothing; any other tab standing alone closes together with the column in one entry — the layout stays empty until the next expansion seeds its current default page. Floating panels take no part in the rule: they render whether or not the column is expanded, and their tabs close freely.
 
-State is memory-only. A reload returns every session to the collapsed default; switching sessions keeps each surface where it was.
+Each session's surface is persisted: the layout, the editor pane's record, and each tab's navigation record are written to one versioned `localStorage` key (`dsh.sidebar-right.surfaces.v1`), debounced after commits and skipped while unchanged. A reload restores every session's column as the operator left it; a stored payload that is foreign, malformed, or names a tab kind with no current registration is dropped rather than drawn. The recorded sequence is not persisted, so undo starts empty after a reload. Switching sessions keeps each surface where it was, on screen or not.
 
 <a id="extension-seats"></a>
 ## Extension seats
@@ -118,7 +118,7 @@ None; this package neither assembles nor sends a provider request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **Memory-only.** Nothing is persisted; a reload starts every session collapsed.
+- **Undo does not survive a reload.** The stored surface carries the layout, the editor's file, and the navigation records, not the recorded sequence.
 - **No surface without a session.** State is keyed by session id, so the hero screen shows nothing on the right.
 - **Hard-coded stacking.** The panel and the float host use fixed z-index values because the client has no z-index token layer yet.
 - **Undo is not exposed.** The recorded sequence is stepped only through the `@internal` service methods; product controls are deliberately absent.

@@ -26,7 +26,7 @@
  * into the pane's own — the arriving tab closes and the pane's own is focused.
  * The kit plans none of this; it is decided here before its planners run.
  */
-import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
+import { defineStore, type EngineStoreHandle, type EngineStoreInstance } from '@deepseek-ai/dsh-client-store'
 import type {
   DockMode, DockZone, FloatRect, History, LayoutOp, LayoutState, Mint, PaneId, SplitId, TabId, TabRecord,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
@@ -35,7 +35,9 @@ import {
   getPane, planDropTab, planDuplicateTab, planFloatTab, planOpenContent, planPlaceTab, planResizeSplit, planSetExpanded,
   planSetMode, planSettle, planSplitPane, planUnfloatPane, record, replay, stepBack, stepForward,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
+import type { SidebarRightTabNavigation } from './contract/slots.ts'
 import { GUIDE_KIND, pageAddress, type SidebarRightSeed } from './contract/seed.ts'
+import type { SurfacePersistence } from './surface-storage.ts'
 
 /** One session's docking surface: the layout, its sequence, and the id counter. */
 export interface SurfaceState {
@@ -234,7 +236,7 @@ function seat(
 }
 
 /** Declared write set; each entry is one settled intent. */
-type SidebarRightActions = {
+export type SidebarRightActions = {
   open: (draft: SidebarRightState, sessionId: string) => void
   setExpanded: (draft: SidebarRightState, sessionId: string, expanded: boolean) => void
   toggleExpanded: (draft: SidebarRightState, sessionId: string) => void
@@ -456,4 +458,63 @@ export function createSidebarRightStore(
       },
     },
   })
+}
+
+// enpoi: the fork persists each session's column; upstream keeps it in memory only.
+/** How long a commit waits before its surface is stored; a drag or tab churn collapses into one write. */
+const PERSIST_DELAY_MS = 400
+
+/**
+ * Restore one session's surface and keep it stored.
+ *
+ * The restore only fills a session the store has no state for, so a fresh page
+ * load seeds the column and a live in-memory surface is never overwritten. The
+ * restore runs before the subscription, so reading a stored surface never echoes
+ * it straight back to storage.
+ *
+ * @param instance - the session's store instance, fresh from the engine.
+ * @param sessionId - the session whose surface this instance holds.
+ * @param persistence - the versioned storage.
+ * @param navigation - reads the session's live tab navigation records at write time.
+ * @returns a stop that cancels the pending write and detaches the subscription.
+ */
+export function bindSurfacePersistence(
+  instance: EngineStoreInstance<SidebarRightState, SidebarRightActions>,
+  sessionId: string,
+  persistence: SurfacePersistence,
+  navigation?: (sessionId: string) => Readonly<Record<string, SidebarRightTabNavigation>>,
+): () => void {
+  const restored = persistence.read(sessionId)
+  if (restored !== undefined) {
+    instance.store.update((draft) => {
+      if (draft.bySession[sessionId] === undefined) draft.bySession[sessionId] = restored.surface
+    })
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stopped = false
+  const unsubscribe = instance.subscribe(() => {
+    if (stopped) return
+    if (timer !== undefined) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = undefined
+      const surface = instance.getSnapshot().bySession[sessionId]
+      if (surface !== undefined) persistence.write(sessionId, surface, navigation?.(sessionId) ?? {})
+    }, PERSIST_DELAY_MS)
+  })
+  const stop = (): void => {
+    if (stopped) return
+    stopped = true
+    if (timer !== undefined) clearTimeout(timer)
+    timer = undefined
+    unsubscribe()
+  }
+  // A pruned session must not leave its surface behind: the framework clears a
+  // dead scope's persisted state, so this session's stored entry goes with it.
+  const engineClear = instance.clearPersisted
+  instance.clearPersisted = () => {
+    stop()
+    persistence.clear(sessionId)
+    engineClear()
+  }
+  return stop
 }

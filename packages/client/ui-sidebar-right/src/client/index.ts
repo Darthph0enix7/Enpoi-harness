@@ -34,7 +34,8 @@ import { RightbarRoot } from './shell/RightbarRoot.tsx'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
 import { SidebarRightRail } from './rail.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
-import { createSidebarRightStore } from './stores.ts'
+import { bindSurfacePersistence, createSidebarRightStore } from './stores.ts'
+import { SurfaceStorage } from './surface-storage.ts'
 import { en, zh } from './locales.ts'
 import { GUIDE_ID, guideDefinition } from './tabs/guide/definition.ts'
 import { guideTabInfoFactory, tabInfoFactory } from './tab-info.ts'
@@ -101,10 +102,13 @@ export function apply(ctx: ClientContext): void {
   const tabs = new SidebarRightTabRegistry(ctx)
   // enpoi: one global rail per browser, restored from localStorage.
   const rail = new SidebarRightRail()
+  // enpoi: per-session column surfaces, restored from localStorage on reload.
+  const surfaces = new SurfaceStorage(kind => tabs.get(kind) !== undefined)
   const { controller, adopt } = createSidebarRightController(
     tabs,
     (address, signal) => { ctx.resources.pin(address, signal) },
     rail,
+    surfaces,
   )
   const disposeRegistry = ctx.reflect.provide('sidebarRightTabs', tabs)
   const disposeService = ctx.reflect.provide('sidebarRight', controller)
@@ -126,12 +130,24 @@ export function apply(ctx: ClientContext): void {
     // is the session id) and caches it per key. Each is adopted as it is minted,
     // so a tab's own action reaches its session's store while another session
     // is on screen, and that store's commits sync the Tab domain themselves.
+    // The same key restores the session's stored column and starts its debounced
+    // persistence; the stops run when this plugin unloads, so a pending write
+    // never outlives the seats it belongs to.
     const adoptions: Array<() => void> = []
+    const persistences: Array<() => void> = []
     const store: typeof handle = {
       ...handle,
       create: (scopeKey) => {
         const instance = handle.create(scopeKey)
-        if (scopeKey !== undefined) adoptions.push(adopt(scopeKey as SessionId, instance))
+        if (scopeKey !== undefined) {
+          persistences.push(bindSurfacePersistence(
+            instance,
+            scopeKey,
+            surfaces,
+            sessionId => controller.tabDomain.records(sessionId as SessionId),
+          ))
+          adoptions.push(adopt(scopeKey as SessionId, instance))
+        }
         return instance
       },
     }
@@ -200,6 +216,7 @@ export function apply(ctx: ClientContext): void {
       disposeGuide()
       disposeSeat()
       for (const dispose of disposeTypes.reverse()) dispose()
+      for (const stop of persistences) stop()
       for (const release of adoptions) release()
     }
   }, 'ui-sidebar-right: seats and shipped tab type')

@@ -28,6 +28,9 @@ const runtimes: SlotTestRuntime[] = []
 let getAnimationsDescriptor: PropertyDescriptor | undefined
 
 beforeEach(() => {
+  // The seat's stores restore their session's column from localStorage; a
+  // previous test's column must not seed the next test's seat.
+  localStorage.clear()
   getAnimationsDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getAnimations')
   Object.defineProperty(Element.prototype, 'getAnimations', { configurable: true, writable: true, value: () => [] })
 })
