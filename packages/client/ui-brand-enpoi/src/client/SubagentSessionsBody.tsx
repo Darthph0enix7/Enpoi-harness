@@ -14,8 +14,15 @@
  * 50-row cap keep the branch nearest the current session visible; refresh
  * re-pulls the host list baseline through `ctx.sessions.refresh`, and the
  * store remains the live data channel.
+ *
+ * Rows lead with the agent identity, never the query: the persona is parsed
+ * from the host's subagent identity projection (`council debater: Critic` →
+ * `Critic`), then from the title's role pattern, then from the row metadata;
+ * the session title stays as the secondary line and the hover tooltip. A
+ * pending list snapshot (reconnect, first load) keeps the last rendered tree
+ * on screen instead of flashing the empty state.
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './SubagentSessionsBody.module.css'
@@ -24,6 +31,8 @@ import css from './SubagentSessionsBody.module.css'
 interface LineageNode {
   id: SessionId
   title: string
+  /** Durable subagent identity label from the list projection, e.g. `council debater: Critic`. */
+  subagentLabel: string | undefined
   parentId: SessionId | undefined
   origin: 'subagent' | undefined
   running: boolean
@@ -76,24 +85,50 @@ function ageLabel(updatedAt: number, now: number): string {
   return `${Math.floor(hours / 24)}d ago`
 }
 
-/** Role/origin label and display title parsed from title or metadata. */
-function nodeDisplay(node: TreeRow): { cleanTitle: string; role: string } {
+/** Generic role prefixes the host puts before a persona name in an identity label. */
+const LABEL_PREFIX = /^\s*(?:council\s+debater|subagent|agent|child|persona|worker)\s*:\s*/i
+
+/** Title-case an all-lowercase persona name; a name already carrying case stays verbatim. */
+function titleCasePersona(name: string): string {
+  return name === name.toLowerCase()
+    ? name.replace(/(^|[\s-])([a-z])/g, (_all, prefix: string, letter: string) => prefix + letter.toUpperCase())
+    : name
+}
+
+/**
+ * Persona name carried by a subagent identity label, or `undefined` when the
+ * label holds nothing after its generic prefix.
+ * @param label - projection label such as `council debater: Critic`.
+ * @returns the title-cased persona, e.g. `Critic`.
+ */
+function personaFromLabel(label: string): string | undefined {
+  const name = label.replace(LABEL_PREFIX, '').trim()
+  return name === '' ? undefined : titleCasePersona(name)
+}
+
+/**
+ * Primary identity label and secondary session title for one row. The subagent
+ * identity projection wins, then the title's role pattern, then the row
+ * metadata, so a row is always identifiable by its agent rather than its query.
+ */
+function nodeDisplay(node: TreeRow): { label: string; cleanTitle: string } {
+  const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
   const rolePattern =
     /^(fixer|explorer|librarian|designer|oracle|critic|visionary|curator|skeptic|architect|pragmatist|experiencer|integrator)\s*:\s*(.+)$/i
   const match = rolePattern.exec(node.title)
   if (match && match[1] && match[2]) {
     return {
-      role: match[1].toLowerCase(),
+      label: persona ?? titleCasePersona(match[1]),
       cleanTitle: match[2].trim(),
     }
   }
-  for (const r of ['fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
-    if (new RegExp(`\\b${r}\\b`, 'i').test(node.title)) {
-      return { role: r, cleanTitle: node.title }
+  for (const role of ['fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
+    if (new RegExp(`\\b${role}\\b`, 'i').test(node.title)) {
+      return { label: persona ?? titleCasePersona(role), cleanTitle: node.title }
     }
   }
   return {
-    role: node.depth === 0 ? 'main' : (node.origin === 'subagent' ? 'subagent' : 'session'),
+    label: persona ?? (node.depth === 0 ? 'Main' : (node.origin === 'subagent' ? 'Subagent' : 'Session')),
     cleanTitle: node.title,
   }
 }
@@ -242,6 +277,7 @@ export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsI
 
 export function SubagentSessionsBody({ sessionId, useSessions, openSession, refreshSessions }: SubagentSessionsBodyProps) {
   const byId = useSessions(state => state.byId)
+  const phase = useSessions(state => state.phase)
   const [refreshing, setRefreshing] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -258,6 +294,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
       nodes.push({
         id: summary.id,
         title: summary.displayTitle,
+        subagentLabel: summary.projectionValues?.subagent?.label,
         parentId: summary.parentId,
         origin: summary.origin,
         running: summary.running,
@@ -268,7 +305,18 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
     return buildLineage(nodes, currentId)
   }, [byId, currentId])
 
-  const visibleRows = lineage.rows.slice(0, MAX_ROWS)
+  // A pending list snapshot (reconnect, the first pull after a switch) can
+  // arrive with no rows for a moment. The last non-empty tree stays drawn
+  // until the snapshot lands, so the panel never flashes its empty state.
+  const retained = useRef<readonly TreeRow[] | undefined>(undefined)
+  useEffect(() => {
+    if (lineage.rows.length > 0) retained.current = lineage.rows
+  }, [lineage])
+  const rows = lineage.rows.length > 0 || phase !== 'pending'
+    ? lineage.rows
+    : retained.current ?? lineage.rows
+
+  const visibleRows = rows.slice(0, MAX_ROWS)
 
   const onRefresh = (): void => {
     if (refreshing) return
@@ -280,7 +328,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
     <div className={css.container}>
       <header className={css.head}>
         <span className={css.headTitle}>Subagent Sessions</span>
-        <span className={css.headCount}>{lineage.total} {lineage.total === 1 ? 'session' : 'sessions'}</span>
+        <span className={css.headCount}>{rows.length} {rows.length === 1 ? 'session' : 'sessions'}</span>
         <button
           type="button"
           className={`${css.refreshBtn}${refreshing ? ` ${css.refreshing}` : ''}`}
@@ -292,7 +340,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
         </button>
       </header>
 
-      {lineage.rows.length === 0 ? (
+      {rows.length === 0 ? (
         <div className={css.empty}>
           <span className={css.emptyIcon}><SubagentSessionsIcon size={18} /></span>
           <span>No subagent sessions yet</span>
@@ -301,7 +349,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
         <div className={css.list} aria-label="Session lineage">
           {visibleRows.map((row) => {
             const state = statusOf(row)
-            const { cleanTitle, role } = nodeDisplay(row)
+            const { label, cleanTitle } = nodeDisplay(row)
             return (
               <button
                 key={row.id}
@@ -316,8 +364,8 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
                 {row.depth > 0 && <span className={css.branch} aria-hidden="true" />}
                 <span className={css.dot} data-state={state} />
                 <span className={css.rowMain}>
-                  <span className={css.rowTitle}>{cleanTitle}</span>
-                  <span className={css.rowSub}>{role}</span>
+                  <span className={css.rowTitle}>{label}</span>
+                  {cleanTitle !== label && <span className={css.rowSub}>{cleanTitle}</span>}
                 </span>
                 <span className={css.status} data-state={state}>
                   {state}
@@ -326,9 +374,9 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
               </button>
             )
           })}
-          {lineage.rows.length > visibleRows.length && (
+          {rows.length > visibleRows.length && (
             <div className={css.more}>
-              Showing {visibleRows.length} of {lineage.rows.length} — nearest first
+              Showing {visibleRows.length} of {rows.length} — nearest first
             </div>
           )}
         </div>

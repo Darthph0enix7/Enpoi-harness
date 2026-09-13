@@ -114,6 +114,9 @@ export class SubagentContinuationManager {
     const agentProvider = agentOptions.provider
     const agentModel = agentOptions.model
     const agentReasoningEffort = agentOptions.reasoningEffort
+    // One effective quiet flag from both accepted carriers: the persisted
+    // descriptor must keep it so a cold-resumed Activation stays quiet.
+    const quiet = spec.quiet ?? request.quiet
     const descriptor = snapshotSubagentDescriptor({
       mode: 'continuable',
       provider: spec.provider,
@@ -123,7 +126,7 @@ export class SubagentContinuationManager {
       ...agentReasoningEffort !== undefined ? { agentReasoningEffort } : {},
       ...request.persona !== undefined ? { persona: request.persona } : {},
       ...request.toolFilter !== undefined ? { toolFilter: request.toolFilter } : {},
-      ...request.quiet !== undefined ? { quiet: request.quiet } : {},
+      ...quiet !== undefined ? { quiet } : {},
     })
     // Capture before the first await: a later parent switch belongs to the
     // parent's future, not to this child.
@@ -170,7 +173,7 @@ export class SubagentContinuationManager {
           },
           agentOptions,
           composition: { persona: request.persona, toolFilter: request.toolFilter },
-          quiet: spec.quiet ?? request.quiet ?? false,
+          quiet: quiet ?? false,
           signal: spec.signal,
         })
         const childHeader = activation.handle.agent.session.header

@@ -575,6 +575,29 @@ describe('SubagentRuntime.startContinuable', () => {
     await drainManager(ctx)
   })
 
+  it('persists a spec-level quiet flag and keeps quiet across cold resume', async () => {
+    const { ctx, parent } = await setup([textResponse('first'), textResponse('after resume')])
+    // Quiet arrives at the spec top level, exactly as the council/oracle spawn it.
+    const started = await ctx.subagents.startContinuable({ ...startSpec(parent), quiet: true })
+    const child = await vi.waitFor(() => {
+      const found = ctx.agents.get(started.childId)
+      expect(found).toBeDefined()
+      return found!
+    })
+    expect(child.session.snapshotEvents().find(event => event.type === 'subagent/descriptor')?.data)
+      .toMatchObject({ quiet: true })
+
+    // First Activation settles, then a follow-up cold-resumes from the descriptor.
+    await waitNoActivation(ctx, started.childId)
+    await queuePrompt(ctx, parent, started.childId, message('continue please'))
+    await waitNoActivation(ctx, started.childId)
+
+    // Neither settlement may reach the parent: a quiet fiber stays quiet after resume.
+    const settlements = parent.session.snapshotEvents().filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')
+    expect(settlements).toEqual([])
+  })
+
   it('cold-resumes without inventing a model route the descriptor never declared', async () => {
     const { ctx, root } = await setup([textResponse('first')])
     const routeless = await ctx.agentLoop.create(SessionId('routeless-resume'), {})
