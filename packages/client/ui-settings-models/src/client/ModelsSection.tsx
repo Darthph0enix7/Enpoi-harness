@@ -199,7 +199,8 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   }
 
   return (
-    <div className={styles['masterDetailLayout']}>
+    <>
+      <div className={styles['masterDetailLayout']}>
       {/* LEFT SIDEBAR: Provider List */}
       <aside className={styles['providersSidebar']}>
         <div className={styles['sidebarHeader']}>
@@ -349,8 +350,13 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       >
         {deleteError && <p className={styles['error']}>{deleteError}</p>}
       </Modal>
+      </div>
+      {/* Extensions (pool usage & quota, catalog helpers). Rendered FULL-WIDTH
+          below the master-detail row: inside the flex row it became a third
+          column that compressed the provider list and detail into unusable
+          widths. */}
       {renderSlot('settings.models.footer', {})}
-    </div>
+    </>
   )
 }
 
