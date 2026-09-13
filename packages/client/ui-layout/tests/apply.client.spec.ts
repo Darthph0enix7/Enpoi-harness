@@ -19,6 +19,7 @@ let originalDarkTheme: string | null
 let originalThemeMetadata: Element[]
 
 beforeEach(() => {
+  localStorage.clear()
   originalRootStyle = document.documentElement.getAttribute('style')
   originalBodyStyle = document.body.getAttribute('style')
   originalDarkTheme = document.body.getAttribute('data-ds-dark-theme')

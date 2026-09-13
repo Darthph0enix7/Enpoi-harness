@@ -70,7 +70,6 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
   runtime.slots.installLocale(locale)
   await runtime.declare({
     'rightbar': { kind: 'single', scope: 'root' },
-    'conversation.session.header.corner': { kind: 'single', scope: 'session' },
   })
   await runtime.sessions.add({ id: SESSION })
   const feature = await runtime.mount({ inject: [...inject], apply })
@@ -224,7 +223,7 @@ describe('RightbarSeat presentation', () => {
 
   it('mounts the editor pane at zero width for its close and lights it on the files page', async () => {
     const h = await mountSeat()
-    // No editor tab: there is nothing to grow from or shrink to yet.
+    // No editor tab: the pane is not mounted on a page that never shows it.
     expect(h.view.container.querySelector('[data-sidebar-right-editor]')).toBeNull()
     h.open()
     // The pane exists while closed, so opening and collapsing can transition
@@ -233,34 +232,87 @@ describe('RightbarSeat presentation', () => {
     expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
     expect(parseFloat(editor.style.width)).toBe(0)
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
-    const wide = parseFloat(panel.style.width)
+    // The panel box is the column's whole share; the pane and the tree split
+    // it, so the box width is the same whether or not the preview is open.
+    expect(parseFloat(panel.style.width)).toBe(420 - 44)
     act(() => { h.actions.setExpanded(SESSION, false) })
     expect(element(h.view.container, '[data-sidebar-right-editor]')).toBe(editor)
-    // The files page lights the pane: the open marker flips and the panel
-    // gives up the editor's share of the column.
+    // The files page lights the pane: the open marker flips and the pane takes
+    // its share while the tree keeps the remainder.
     act(() => { h.actions.setExpanded(SESSION, true) })
     act(() => { h.controller.selectKind(GUIDE_KIND) })
     expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
     expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
-    expect(parseFloat(panel.style.width)).toBeLessThan(wide)
+    expect(parseFloat(panel.style.width)).toBe(420 - 44)
   })
 
-  it('keeps the editor divider interactive only while the pane is open', async () => {
+  it('keeps the preview drawn through a collapse, slid out with the panel', async () => {
+    const h = await mountSeat()
+    h.open()
+    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    // Collapsing leaves the pane open inside the off-edge box: the slide
+    // carries the preview instead of unmounting it or shrinking it into a gap.
+    act(() => { h.controller.toggleExpanded() })
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    act(() => { h.controller.toggleExpanded() })
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+  })
+
+  it('keeps the editor divider interactive only while the pane is open and on screen', async () => {
     const h = await mountSeat()
     expect(h.view.container.querySelector('[data-sidebar-right-editor-divider]')).toBeNull()
     h.open()
     const divider = element(h.view.container, '[data-sidebar-right-editor-divider]')
     expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+    expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(false)
     act(() => { h.controller.selectKind(GUIDE_KIND) })
     expect(element(h.view.container, '[data-sidebar-right-editor-divider]')).toBe(divider)
     expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(true)
+    // The pane stays drawn while the panel collapses, but its seam is not a
+    // drag target on a moving off-edge box.
+    act(() => { h.controller.toggleExpanded() })
+    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(false)
+    act(() => { h.controller.toggleExpanded() })
+    expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(true)
+  })
+
+  it('reopens the lit page while the rail records an open intent, and folds when it records a close', async () => {
+    const h = await mountSeat(1440, true, 1)
+    // The rail is the open/close control: a surface collapsed behind its back
+    // is reopened on the next commit, because the intent still says open.
+    act(() => { h.actions.setExpanded(SESSION, false) })
+    expect(h.layout().expanded).toBe(true)
+    act(() => { h.controller.rail.setOpen(false) })
+    expect(h.layout().expanded).toBe(false)
+  })
+
+  it('opens a session the seat has never drawn without reporting a collapse first', async () => {
+    const h = await mountSeat(1440, true, 1)
+    h.open('kept.txt')
+    await h.runtime.sessions.add({ id: OTHER })
+    h.frame.closeRightbar.mockClear()
+    await h.runtime.sessions.setCurrent(OTHER)
+    const other = h.runtime.storeOf('rightbar.session', OTHER) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
+    // The target materializes expanded with the lit page in the same frame, so
+    // the frame never learns a collapse it would have to take back.
+    expect(other.getSnapshot().bySession[OTHER]?.layout.expanded).toBe(true)
+    expect(h.frame.closeRightbar).not.toHaveBeenCalled()
+    expect(element(h.view.container, '[data-sidebar-right-panel]').hasAttribute('data-sidebar-right-open')).toBe(true)
   })
 
   it('fills the viewport without replacing the content tree or releasing the wide track', async () => {
     const h = await mountSeat()
     const tab = h.open()
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
-    const body = element(h.view.container, '[data-tab-body]')
+    const body = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
     // The editor shares the column, so the panel takes what the rail and editor leave.
     const wideWidth = panel.style.width
     expect(parseFloat(wideWidth)).toBeGreaterThan(0)
@@ -268,14 +320,14 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout().mode).toBe('fullscreen')
     expect(panel.style.width).toBe('100%')
     expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
-    expect(element(h.view.container, '[data-tab-body]')).toBe(body)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
     expect(h.bodies.get(tab.id)?.sidebar).toEqual({ expanded: true, fullscreen: true })
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(panel.style.width).toBe(wideWidth)
-    expect(element(h.view.container, '[data-tab-body]')).toBe(body)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
-    fireEvent.click(element(h.view.container, '[data-sidebar-right-toggle]'))
+    act(() => { h.controller.toggleExpanded() })
     expect(h.layout().expanded).toBe(false)
     expect(h.frame.closeRightbar).toHaveBeenCalled()
   })
@@ -286,10 +338,10 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout().mode).toBe('push')
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
     const stored = h.instance.getSnapshot()
-    const body = element(h.view.container, '[data-tab-body]')
+    const body = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
     h.view.update({ width: 420, viewportWidth: 768, canShow: true })
     expect(h.instance.getSnapshot()).toBe(stored)
-    expect(element(h.view.container, '[data-tab-body]')).toBe(body)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
   })
 
@@ -400,7 +452,7 @@ describe('RightbarSeat fullscreen entry', () => {
     vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations').mockReturnValue([slide.animation])
     h.open()
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
-    if (change === 'close') fireEvent.click(element(h.view.container, '[data-sidebar-right-toggle]'))
+    if (change === 'close') act(() => { h.controller.toggleExpanded() })
     else if (change === 'push') fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     else if (change === 'session') {
       await h.runtime.sessions.add({ id: OTHER })
@@ -459,7 +511,7 @@ describe('slot-owned useTabInfo', () => {
     // The editor's newest open does not steal the panel's active tab.
     h.open('b.txt')
     const b = Object.values(h.layout().tabs).find(tab => tab.title === 'b.txt')!
-    const bodyA = element(h.view.container, '[data-sidebar-right-panel] [data-tab-body]')
+    const bodyA = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
     const bodyB = element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')
     expect(bodyA.dataset['tabBody']).toBe(a.id)
     expect(bodyB.dataset['tabBody']).toBe(b.id)
@@ -471,7 +523,7 @@ describe('slot-owned useTabInfo', () => {
     act(() => { h.actions.setExpanded(SESSION, false) })
     expect(h.bodies.get(a.id)?.tab.visible).toBe(false)
     expect(h.titles.get(a.id)?.tab.visible).toBe(false)
-    expect(element(h.view.container, '[data-tab-body]')).toBe(bodyA)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(bodyA)
     expect(signal.aborted).toBe(false)
     act(() => { h.controller.float(a.id) })
     expect(h.bodies.get(a.id)?.tab.visible).toBe(true)

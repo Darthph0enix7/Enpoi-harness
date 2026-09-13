@@ -1,8 +1,8 @@
 /**
- * Registration: the General row, the settings section, the new-session chip,
- * and the header label all come from one apply, and each defers until the slot
- * it fills has been declared. A pushed settings change refreshes the surfaces
- * that are already showing, so a default set from one converges the other.
+ * Registration: the settings section, the new-session chip, and the input-card
+ * picker all come from one apply, and each defers until the slot it fills has
+ * been declared. A pushed settings change refreshes the surfaces that are
+ * already showing, so a default set from one converges the other.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -15,8 +15,6 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { apply as settingsApply, inject as settingsInject } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-agent-preset/client'
 import { AgentSelect } from '../src/client/AgentSelect.tsx'
-import { AgentPresetLabel } from '../src/client/AgentPresetLabel.tsx'
-import type { AgentPresetLabelInjected } from '../src/client/AgentPresetLabel.tsx'
 import { AgentPresetSection } from '../src/client/AgentPresetSection.tsx'
 import type { AgentPresetSectionInjected } from '../src/client/AgentPresetSection.tsx'
 import { AgentPresetSeat } from '../src/client/AgentPresetSeat.tsx'
@@ -162,13 +160,12 @@ function declareRoot(slots: SlotRegistry): () => void {
   } as never, () => null)
 }
 
-/** The conversation's own declarations, which the chip and label wait for. */
+/** The conversation's own declarations, which the chip and the picker wait for. */
 function declareConversation(slots: SlotRegistry): () => void {
   return slots.register({
     name: 'conversation',
     children: {
       'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },
-      'conversation.session.header.actions': { kind: 'list', scope: 'session' },
       // Enpoi Harness: the input-card agent picker this fork registers.
       'conversation.input.agent': { kind: 'single', scope: 'session' },
     },
@@ -330,12 +327,12 @@ describe('ui-agent-preset apply', () => {
     remote.emit('settings/document-updated', ['agent-presets', 1])
     await vi.waitFor(() => { expect(calls.length).toBeGreaterThan(before) })
 
-    // Only the header label's roster reloads: a section nobody opened has
-    // nothing to converge, and reading the roster for it would be wasted.
+    // Only the display roster store reloads: a section nobody opened has
+    // nothing to converge, and reading its own roster for it would be wasted.
     expect(calls.length - before).toBe(1)
   })
 
-  it('registers the new-session chip, the input-card agent picker, and the header label, and drops all on disposal', async () => {
+  it('registers the new-session chip and the input-card agent picker, and drops both on disposal', async () => {
     const { ctx, slots } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
@@ -349,13 +346,9 @@ describe('ui-agent-preset apply', () => {
     expect(chip.component).toBe(AgentPresetSeat)
     const agentSeat = slots.entries('conversation.input.agent')[0]!
     expect(agentSeat.component).toBe(AgentSelect)
-    const label = slots.entries('conversation.session.header.actions')[0]!
-    expect(label.component).toBe(AgentPresetLabel)
-    expect(label.options).toMatchObject({ id: 'agent-preset', order: -10 })
     await fiber.dispose()
     expect(slots.entries('conversation.hero.agentPreset')).toHaveLength(0)
     expect(slots.entries('conversation.input.agent')).toHaveLength(0)
-    expect(slots.entries('conversation.session.header.actions')).toHaveLength(0)
     expect(slots.entries('settings.section')).toHaveLength(0)
     conversation()
   })
@@ -604,22 +597,6 @@ describe('ui-agent-preset apply', () => {
     // switching sessions the user never picked for.
     await Promise.resolve()
     expect(calls.filter(call => call === 'select:minimal')).toHaveLength(spent)
-  })
-
-  it('loads the header label from the shared roster store', async () => {
-    const { ctx, slots } = await bench()
-    declareRoot(slots)
-    declareConversation(slots)
-    ctx.provide('conversation', {} as never)
-    ctx.provide('sessions', sessionsDouble({ byId: {} }) as never)
-    ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
-    await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply }).await()
-    const label = (slots.entries('conversation.session.header.actions')[0]!
-      .inject as unknown as () => AgentPresetLabelInjected)()
-
-    await label.load()
-
-    expect(label.hooks.agentPresets.getSnapshot().options).toEqual([{ id: 'standard', trust: 'system' }])
   })
 
   it('stages the creator preset and starts a session from the section', async () => {

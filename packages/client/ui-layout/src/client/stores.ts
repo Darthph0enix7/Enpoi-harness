@@ -9,6 +9,58 @@ import {
   SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN,
 } from './columns.ts'
 
+/** Device-local storage key for the two column width preferences. */
+const WIDTHS_KEY = 'dsh.client.layout.widths'
+
+/** The column width preferences as they survive a reload. */
+interface StoredWidths {
+  sidebar: number
+  rightbar: number | null
+}
+
+/**
+ * Read the device's stored column widths, clamped to the same ranges a drag
+ * applies. The right panel is bounded by the current frame, so a window that
+ * shrank since the drag reopens at the widest width it can still hold.
+ * @param viewport - current frame width in px.
+ * @returns the validated preferences, or the contract defaults.
+ */
+function readStoredWidths(viewport: number): StoredWidths {
+  const defaults: StoredWidths = { sidebar: SIDEBAR_DEFAULT, rightbar: null }
+  if (typeof localStorage === 'undefined') return defaults
+  try {
+    const raw = localStorage.getItem(WIDTHS_KEY)
+    if (raw === null) return defaults
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return defaults
+    const stored = parsed as { sidebar?: unknown; rightbar?: unknown }
+    const sidebar = typeof stored.sidebar === 'number' && Number.isFinite(stored.sidebar)
+      ? stored.sidebar === 0 ? 0 : clampWidth(stored.sidebar, SIDEBAR_MIN, SIDEBAR_MAX)
+      : SIDEBAR_DEFAULT
+    const rightbar = typeof stored.rightbar === 'number' && Number.isFinite(stored.rightbar)
+      ? clampWidth(stored.rightbar, RIGHTBAR_MIN, Math.max(RIGHTBAR_MIN, viewport * RIGHTBAR_MAX_RATIO))
+      : null
+    return { sidebar, rightbar }
+  } catch {
+    // A truncated or foreign entry is not a width: fall back to the defaults.
+    return defaults
+  }
+}
+
+/**
+ * Write the width preferences to this device's storage. A storage failure
+ * (quota, private mode) only disables persistence, never the layout.
+ * @param info - the committed layout facts.
+ */
+function persistWidths(info: LayoutInfo): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: info.sidebar, rightbar: info.rightbar }))
+  } catch {
+    // Storage failures leave the in-memory layout as the only record.
+  }
+}
+
 /**
  * Transient layout preferences. Responsive concessions never rewrite widths;
  * the right panel's expanded state belongs to its occupant.
@@ -77,19 +129,23 @@ type LayoutActions = {
  */
 export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutActions>  {
   const handle = defineStore({
-    init: (): LayoutState => ({
-      panelInfo: { activePanelId: null },
-      layoutInfo: {
-        sidebar: SIDEBAR_DEFAULT,
-        viewportWidth: window.innerWidth,
-        narrowExpanded: false,
-        rightbar: null,
-        rightbarShown: false,
-        rightbarTrack: false,
-        rightbarFullscreen: false,
-        rightbarInstant: false,
-      },
-    }),
+    init: (): LayoutState => {
+      const viewport = window.innerWidth
+      const widths = readStoredWidths(viewport)
+      return {
+        panelInfo: { activePanelId: null },
+        layoutInfo: {
+          sidebar: widths.sidebar,
+          viewportWidth: viewport,
+          narrowExpanded: false,
+          rightbar: widths.rightbar,
+          rightbarShown: false,
+          rightbarTrack: false,
+          rightbarFullscreen: false,
+          rightbarInstant: false,
+        },
+      }
+    },
     actions: {
       selectPanel: (d, panelId: MainPanelId | null) => {
         d.panelInfo.activePanelId = panelId
@@ -102,6 +158,7 @@ export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutAction
       setSidebar: (d, px: number) => {
         d.layoutInfo.rightbarInstant = false
         d.layoutInfo.sidebar = clampWidth(px, SIDEBAR_MIN, SIDEBAR_MAX)
+        persistWidths(d.layoutInfo)
       },
       // Narrow toggles flip only the override: the width preference survives
       // untouched, so re-widening restores the pre-squeeze layout.
@@ -109,6 +166,7 @@ export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutAction
         d.layoutInfo.rightbarInstant = false
         if (d.layoutInfo.viewportWidth < SIDEBAR_AUTO_COLLAPSE) d.layoutInfo.narrowExpanded = !d.layoutInfo.narrowExpanded
         else d.layoutInfo.sidebar = d.layoutInfo.sidebar === 0 ? SIDEBAR_DEFAULT : 0
+        persistWidths(d.layoutInfo)
       },
       // Crossing the breakpoint in either direction drops the override: the
       // narrow default is auto-collapsed, the wide state is the preference.
@@ -123,13 +181,18 @@ export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutAction
       setRightbar: (d, px: number) => {
         d.layoutInfo.rightbarInstant = false
         d.layoutInfo.rightbar = clampWidth(px, RIGHTBAR_MIN, Math.max(RIGHTBAR_MIN, d.layoutInfo.viewportWidth * RIGHTBAR_MAX_RATIO))
+        persistWidths(d.layoutInfo)
       },
       openRightbar: (d, track: boolean, fullscreen: boolean) => {
         if (!d.layoutInfo.rightbarShown || d.layoutInfo.rightbarTrack !== track || d.layoutInfo.rightbarFullscreen !== fullscreen) {
           d.layoutInfo.rightbarInstant = d.layoutInfo.rightbarFullscreen && !fullscreen
         }
         if (!d.layoutInfo.rightbarShown && d.layoutInfo.viewportWidth < SIDEBAR_AUTO_COLLAPSE) d.layoutInfo.narrowExpanded = false
-        d.layoutInfo.rightbar ??= Math.max(RIGHTBAR_MIN, Math.round(d.layoutInfo.viewportWidth * RIGHTBAR_DEFAULT_RATIO))
+        if (d.layoutInfo.rightbar === null) {
+          // The first opening records the default as this device's preference.
+          d.layoutInfo.rightbar = Math.max(RIGHTBAR_MIN, Math.round(d.layoutInfo.viewportWidth * RIGHTBAR_DEFAULT_RATIO))
+          persistWidths(d.layoutInfo)
+        }
         d.layoutInfo.rightbarShown = true
         d.layoutInfo.rightbarTrack = track
         d.layoutInfo.rightbarFullscreen = fullscreen

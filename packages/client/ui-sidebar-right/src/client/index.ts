@@ -1,15 +1,13 @@
 /**
- * Browser half: fill the frame's right column with the panel, put the expand
- * button in the conversation header, and own the seats a tab type registers
- * into.
+ * Browser half: fill the frame's right column with the panel and own the seats
+ * a tab type registers into.
  *
- * Two seats share one session-scoped store, which the slot runtime allows
- * because both are session-scoped (a handle may not span scopes). The panel seat
- * in the frame draws the surface normally or fullscreen, retaining the track
- * on wide viewports; the header's corner seat draws the way back in
- * while the panel is hidden. The store is the layout's only source of truth; the docking
- * kit's pure planners compute every change and the store records them, one
- * history entry per intent.
+ * One session-scoped store feeds the panel seat, which the slot runtime mints
+ * per session. The seat draws the surface normally or fullscreen, retaining
+ * the track on wide viewports; the always-visible icon rail is the only
+ * open/close control, so no header button is registered anywhere. The store is
+ * the layout's only source of truth; the docking kit's pure planners compute
+ * every change and the store records them, one history entry per intent.
  *
  * The frame is a base package and never injects this one. What it needs —
  * whether the panel is shown and whether it wants a track — arrives through its
@@ -31,7 +29,6 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from './contract/slots.ts'
 import { GuideBody, type GuideInjected } from './tabs/guide/GuideBody.tsx'
 import { GuideTitle } from './tabs/guide/GuideTitle.tsx'
-import { ExpandButton, type ExpandButtonInjected } from './shell/ExpandButton.tsx'
 import { RightbarSeat, type SidebarRightInjected } from './shell/SidebarRight.tsx'
 import { RightbarRoot } from './shell/RightbarRoot.tsx'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
@@ -46,7 +43,6 @@ import { defaultSeed } from './contract/seed.ts'
 
 export type { RightbarSeatProps, SidebarRightInjected, SidebarRightPresentation } from './shell/SidebarRight.tsx'
 export type { GuideBodyProps, GuideInjected } from './tabs/guide/GuideBody.tsx'
-export type { ExpandButtonProps, ExpandButtonInjected } from './shell/ExpandButton.tsx'
 export type { SidebarRightRailState } from './rail.ts'
 export type { SidebarRightState, SurfaceState } from './stores.ts'
 export type {
@@ -149,7 +145,6 @@ export function apply(ctx: ClientContext): void {
       openTab: (kind, options) => { controller.openTab(kind, options) },
       // enpoi: the rail's gestures and its two hook sources (icons, state).
       selectKind: (kind) => { controller.selectKind(kind) },
-      setOpen: (open) => { rail.setOpen(open) },
       setEditorWidth: (px) => { rail.setEditorWidth(px) },
       setRightbarWidth: (px) => { layout.setRightbar(px) },
       hooks: {
@@ -181,16 +176,6 @@ export function apply(ctx: ClientContext): void {
         }),
       }, RightbarSeat)
     })
-    // The expand button shares the panel's store: it only needs to know whether
-    // the panel is expanded, and to ask for it to be. The header's corner seat
-    // is its own place, past the utilities, so showing and hiding it moves
-    // nothing else in the row.
-    const disposeExpand = ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
-      name: 'conversation.session.header.corner',
-      locale: NS,
-      store,
-      inject: (): ExpandButtonInjected => ({ openPanel: () => { controller.openPanel() } }),
-    }, ExpandButton))
     // Stage two for the guide: it declares the chain child it hosts and reads
     // the registry's entry boxes, which an ordinary type has no reason to do.
     const guideInjected: GuideInjected = {
@@ -213,7 +198,6 @@ export function apply(ctx: ClientContext): void {
     return () => {
       disposeGuideTitle()
       disposeGuide()
-      disposeExpand()
       disposeSeat()
       for (const dispose of disposeTypes.reverse()) dispose()
       for (const release of adoptions) release()

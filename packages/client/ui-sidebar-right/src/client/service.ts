@@ -63,7 +63,9 @@ interface Adoption {
  * @param rail - the global rail preferences shared with the panel seat.
  * @returns the controller and a callback releasing exactly its own adoption.
  */
-export function createSidebarRightController(tabs: SidebarRightTabRegistry, pin: PinResource, rail: SidebarRightRail = new SidebarRightRail()): {
+export function createSidebarRightController(
+  tabs: SidebarRightTabRegistry, pin: PinResource, rail: SidebarRightRail = new SidebarRightRail(),
+): {
   controller: SidebarRightController
   adopt: (sessionId: SessionId, store: SidebarRightSurfaceStore) => () => void
 } {
@@ -376,21 +378,6 @@ export class SidebarRightController implements ISidebarRight {
     }
     const definition = this.tabs.get(kind)
     if (definition === undefined) throw new Error(`sidebarRight: no tab type is registered as "${kind}"`)
-    const address = pageAddress(kind)
-    this.rail.setKind(kind)
-    actions.openContent(sessionId, { kind, contentId: address, title: definition.title(address) }, (tabId) => {
-      this.tabDomain.navigate(sessionId, tabId, { address, params: undefined })
-    })
-  }
-
-  // enpoi: the conversation header's expand control opens the lit kind.
-  /** Open the panel on the lit kind, for the conversation header's expand control. */
-  openPanel(): void {
-    const { sessionId, actions } = this.require()
-    const kind = this.rail.state.getSnapshot().kind ?? this.tabs.rail()[0]?.kind
-    if (kind === undefined) return
-    const definition = this.tabs.get(kind)
-    if (definition === undefined) return
     const address = pageAddress(kind)
     this.rail.setKind(kind)
     actions.openContent(sessionId, { kind, contentId: address, title: definition.title(address) }, (tabId) => {

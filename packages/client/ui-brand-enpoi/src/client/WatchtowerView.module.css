@@ -6,6 +6,8 @@
   flex-direction: column;
   gap: 10px;
   height: 100%;
+  /* Border-box: height includes the padding, so the shell never scrolls alongside the body. */
+  box-sizing: border-box;
   padding: 14px;
   overflow-y: auto;
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);

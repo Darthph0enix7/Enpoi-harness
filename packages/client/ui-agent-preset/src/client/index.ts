@@ -1,15 +1,13 @@
 /**
- * Agent-preset surface plugin, browser half — three surfaces over one roster:
- * a chip on the new-session screen for the session about to start, a
- * read-only label in the session header, and a settings section that manages
- * the roster (copy, delete, default, and the way into a preset's own files).
+ * Agent-preset surface plugin, browser half — the roster surfaces: a chip on
+ * the new-session screen for the session about to start, the input-card picker
+ * that shows and switches a session's preset, and a settings section that
+ * manages the roster (copy, delete, default, and the way into a preset's own
+ * files).
  *
- * A running session keeps the composition it began with (the host refuses to
- * adopt an existing session under a different preset). That is what splits
- * the choice from the display: the hero chip is before-the-fact, while the
- * header only reports what a session already runs. The default preset is
- * edited where the roster is visible — the settings section's "make default"
- * — so General settings carries no duplicate control for the same field.
+ * The default preset is edited where the roster is visible — the settings
+ * section's "make default" — so General settings carries no duplicate control
+ * for the same field.
  */
 
 // Type-only: pulls the Session Controller service merge (ctx.sessions).
@@ -25,8 +23,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: pulls the Workspace UI navigation service merge (ctx.uiWorkspace).
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import { AgentPresetLabel } from './AgentPresetLabel.tsx'
-import type { AgentPresetLabelInjected } from './AgentPresetLabel.tsx'
 import { AgentPresetSeat } from './AgentPresetSeat.tsx'
 import type { AgentPresetSeatInjected } from './AgentPresetSeat.tsx'
 import { AgentSelect } from './AgentSelect.tsx'
@@ -61,7 +57,7 @@ export const inject = [
 ]
 
 /**
- * Mount the roster surfaces: hero chip, session-header label, settings section.
+ * Mount the roster surfaces: hero chip, input-card picker, settings section.
  * @param ctx - the browser plugin context.
  */
 export function apply(ctx: ClientContext): void {
@@ -106,8 +102,9 @@ export function apply(ctx: ClientContext): void {
   let creatorDraft: (() => void) | undefined
   let activeSeat: AgentPresetSeatController | undefined
 
-  // The new-session chip and the header label: one controller, because the
-  // staged choice belongs to the flow rather than to any one session.
+  // The new-session chip and the input-card agent picker: one controller,
+  // because the staged choice belongs to the flow rather than to any one
+  // session.
   ctx.inject(['slots', 'conversation', 'sessions', 'uiWorkspace'], (scope: ClientContext) => {
     const seat = new AgentPresetSeatController(scope, () => {
       const state = scope.sessions.list.getSnapshot()
@@ -119,11 +116,6 @@ export function apply(ctx: ClientContext): void {
       load: () => seat.load(),
       select: (id: string) => seat.select(id),
       introduced: () => { seat.introduced() },
-    })
-
-    const labelInjected = (): AgentPresetLabelInjected => ({
-      hooks: { agentPresets: controller.store },
-      load: () => controller.load(),
     })
 
     scope.effect(() => {
@@ -172,14 +164,6 @@ export function apply(ctx: ClientContext): void {
         locale: 'settings.agentPreset',
         inject: seatInjected,
       }, AgentSelect)
-      const label = scope.slots.register({
-        name: 'conversation.session.header.actions',
-        id: 'agent-preset',
-        // Static session context occupies the header's leading negative-order band.
-        order: -10,
-        locale: 'settings.agentPreset',
-        inject: labelInjected,
-      }, AgentPresetLabel)
       return () => {
         stop()
         settingsMoved()
@@ -188,9 +172,8 @@ export function apply(ctx: ClientContext): void {
         activeSeat = undefined
         chip()
         agentSelect()
-        label()
       }
-    }, 'ui-agent-preset: new-session chip and header label')
+    }, 'ui-agent-preset: new-session chip and input picker')
   })
 
   /** Capture the exact blank Session one Settings action may update. */

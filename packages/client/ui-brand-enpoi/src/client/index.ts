@@ -31,7 +31,7 @@ import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
 import type { TerminalRegistryState } from './terminal/registry.ts'
 import { TerminalPanel } from './terminal/TerminalPanel.tsx'
-import { BottomDockToggle, BottomTerminalDock } from './terminal/BottomTerminalDock.tsx'
+import { BottomTerminalDock } from './terminal/BottomTerminalDock.tsx'
 import { TerminalIcon } from './terminal/icons.tsx'
 import { installTerminalStyles } from './terminal/styles.ts'
 import {
@@ -304,20 +304,15 @@ export function apply(ctx: Context): void {
     }, TerminalPanel)
   })
 
-  // enpoi: the bottom terminal dock (frame overlay) and the header toggle that
-  // opens it. The dock hosts only terminals; its tabs are its own terminals.
+  // enpoi: the bottom terminal dock (frame overlay). The dock hosts only
+  // terminals; its tabs are its own terminals. The rail's bottom-panel control
+  // in ui-sidebar-right is the one toggle; the conversation header carries none.
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'enpoi-bottom-terminal',
     order: 10,
     inject: terminalInjected,
   }, BottomTerminalDock))
-  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-    name: 'conversation.session.header.actions',
-    id: 'enpoi-bottom-terminal',
-    order: 60,
-    inject: terminalInjected,
-  }, BottomDockToggle))
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {

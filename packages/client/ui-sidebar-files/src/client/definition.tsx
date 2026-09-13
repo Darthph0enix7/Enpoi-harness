@@ -8,7 +8,7 @@
 import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import type {} from './locales.ts'
-import { FileTypeIcon, type IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** The tab kind this package owns. */
 export const FILES_KIND = 'files'
@@ -16,9 +16,30 @@ export const FILES_KIND = 'files'
 /** This implementation's identity in the tab system, and the key its body registers under. */
 export const FILES_ID = '@deepseek-ai/dsh-client-ui-sidebar-files'
 
-/** The type's coloured folder sheet at the guide capsule's glyph size, as the chip title draws it. */
-function FolderSheetGlyph({ size, className }: IconProps) {
-  return <FileTypeIcon kind="folder" size={size} className={className} />
+/**
+ * The type's folder glyph: one monochrome outline sharing the rail's line-art
+ * weight, on `currentColor` so the guide capsule, the icon rail, and the chip
+ * title ink it.
+ * @param props - glyph size and class from the drawing surface.
+ * @returns the folder outline as inline SVG.
+ */
+export function FolderSheetGlyph({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M14.4 12a1.2 1.2 0 0 1-1.2 1.2H2.8a1.2 1.2 0 0 1-1.2-1.2V3.6a1.2 1.2 0 0 1 1.2-1.2h3l1.5 2h5.9a1.2 1.2 0 0 1 1.2 1.2z" />
+    </svg>
+  )
 }
 
 /**
