@@ -31,8 +31,8 @@ import type {
   DockMode, DockZone, FloatRect, History, LayoutOp, LayoutState, Mint, PaneId, SplitId, TabId, TabRecord,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
 import {
-  activeDockPaneId, createInitialState, dockPaneIds, EMPTY_HISTORY, findPaneContentTab, findTabPane, getPane,
-  planDropTab, planDuplicateTab, planFloatTab, planOpenContent, planPlaceTab, planResizeSplit, planSetExpanded,
+  activeDockPaneId, createInitialState, dockPaneIds, EMPTY_HISTORY, findContentTab, findPaneContentTab, findTabPane,
+  getPane, planDropTab, planDuplicateTab, planFloatTab, planOpenContent, planPlaceTab, planResizeSplit, planSetExpanded,
   planSetMode, planSettle, planSplitPane, planUnfloatPane, record, replay, stepBack, stepForward,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { GUIDE_KIND, pageAddress, type SidebarRightSeed } from './contract/seed.ts'
@@ -43,6 +43,12 @@ export interface SurfaceState {
   readonly history: History
   /** How many ids this surface has minted; carried so replay stays reproducible. */
   readonly minted: number
+  // enpoi: the editor pane left of the sidebar draws this resource tab.
+  /**
+   * The resource tab the editor pane beside the panel shows, if any. Dropped
+   * with the tab itself, so a record that left the layout can never be drawn.
+   */
+  readonly editorTabId: TabId | undefined
 }
 
 /**
@@ -90,6 +96,13 @@ export interface OpenContentIntent {
   readonly replaceTab?: TabId
   /** Resource tabs reveal an existing identity by default; `false` permits duplicates. Pages always deduplicate within the target pane. */
   readonly revealIfOpened?: boolean
+  // enpoi: resource opens land in the editor pane, not the panel's page.
+  /**
+   * Land the tab as the editor pane's tab instead of the panel's page: the
+   * pane keeps its active page, and the settled tab is recorded as the editor's.
+   * Resource opens beside the panel use this; page opens do not.
+   */
+  readonly editor?: boolean
 }
 
 /** A mint that counts, so the surface can carry its position forward. */
@@ -117,6 +130,7 @@ export function createSurface(): SurfaceState {
     layout: createInitialState({ next: counter.mint }),
     history: EMPTY_HISTORY,
     minted: counter.used(),
+    editorTabId: undefined,
   }
 }
 
@@ -195,7 +209,12 @@ function advance(surface: SurfaceState, plan: SurfacePlan, seed: () => SidebarRi
   const after = replay(surface.layout, planned)
   const settled = planSettle(after, counter.mint, after.expanded ? makeTab : undefined)
   const stepped = record(surface.history, surface.layout, [...planned, ...settled])
-  return { layout: stepped.state, history: stepped.history, minted: counter.used() }
+  // enpoi: the editor record follows its tab: a commit that closed the editor
+  // tab leaves no id behind for the pane to draw.
+  const editorTabId = surface.editorTabId !== undefined && stepped.state.tabs[surface.editorTabId] !== undefined
+    ? surface.editorTabId
+    : undefined
+  return { layout: stepped.state, history: stepped.history, minted: counter.used(), editorTabId }
 }
 
 /**
@@ -246,10 +265,15 @@ type SidebarRightActions = {
 type HistoryStepper =
   (history: History, state: LayoutState) => { history: History; state: LayoutState } | undefined
 
+// enpoi: the editor record follows the history too.
 /** Step a surface through the history in one direction. */
 function stepped(surface: SurfaceState, step: HistoryStepper): SurfaceState {
   const moved = step(surface.history, surface.layout)
-  return moved === undefined ? surface : { ...surface, layout: moved.state, history: moved.history }
+  if (moved === undefined) return surface
+  const editorTabId = surface.editorTabId !== undefined && moved.state.tabs[surface.editorTabId] !== undefined
+    ? surface.editorTabId
+    : undefined
+  return { ...surface, layout: moved.state, history: moved.history, editorTabId }
 }
 
 /**
@@ -303,38 +327,61 @@ export function createSidebarRightStore(
       // closing the tab it replaces. `settled` reports the tab the planner
       // landed on, synchronously, because actions return nothing.
       openContent: (d, sessionId: string, intent, settled) => {
-        d.bySession = seat(d, sessionId, s => advance(s, (state, mint) => {
-          const { kind, contentId, title, replaceTab: replace } = intent
-          const ops: LayoutOp[] = [...planSetExpanded(state, true)]
-          // A replaced tab lends its pane and slot; one that floats cannot (a
-          // floating pane holds one tab), so the new tab lands as if unplaced.
-          const replaced = replace === undefined ? undefined : findTabPane(state, replace)
-          const lent = replace !== undefined && replaced !== undefined && replaced.host === 'dock' ? replaced : undefined
-          const paneId = lent?.id ?? intent.paneId
-          const index = lent === undefined || replace === undefined ? undefined : lent.tabs.indexOf(replace)
-          // A page is unique per pane, not per surface: the pane it would land
-          // in may already show it, which is then the tab this open settles on.
-          // The same page in another pane never draws the open away — the kit's
-          // cross-pane reveal is for resources only.
-          const page = contentId === pageAddress(kind)
-          const held = page ? panePage(state, paneId ?? activeDockPaneId(state), kind) : undefined
-          const planned = held !== undefined
-            ? { ops: [{ type: 'focusTab' as const, tabId: held }], tabId: held }
-            : planOpenContent(state, mint, {
-              kind,
-              contentId,
-              title,
-              ...paneId === undefined ? {} : { paneId },
-              ...index === undefined ? {} : { index },
-              ...page
-                ? { revealIfOpened: false }
-                : intent.revealIfOpened === undefined ? {} : { revealIfOpened: intent.revealIfOpened },
-            })
-          ops.push(...planned.ops)
-          if (replace !== undefined && replace !== planned.tabId) ops.push({ type: 'closeTab', tabId: replace })
-          settled(planned.tabId)
-          return ops
-        }, seed))
+        let editorTabId: TabId | undefined
+        d.bySession = seat(d, sessionId, (s) => {
+          const next = advance(s, (state, mint) => {
+            const { kind, contentId, title, replaceTab: replace } = intent
+            const ops: LayoutOp[] = [...planSetExpanded(state, true)]
+            // A replaced tab lends its pane and slot; one that floats cannot (a
+            // floating pane holds one tab), so the new tab lands as if unplaced.
+            const replaced = replace === undefined ? undefined : findTabPane(state, replace)
+            const lent = replace !== undefined && replaced !== undefined && replaced.host === 'dock' ? replaced : undefined
+            const paneId = lent?.id ?? intent.paneId
+            const index = lent === undefined || replace === undefined ? undefined : lent.tabs.indexOf(replace)
+            // A page is unique per pane, not per surface: the pane it would land
+            // in may already show it, which is then the tab this open settles on.
+            // The same page in another pane never draws the open away — the kit's
+            // cross-pane reveal is for resources only.
+            const page = contentId === pageAddress(kind)
+            // enpoi: the editor pane's open reveals the same record wherever it sits —
+            // it draws a resource tab, not a pane — and never focuses it, so the
+            // panel keeps showing its page beside the editor. An explicit
+            // `revealIfOpened: false` still permits a second copy.
+            const editor = intent.editor === true && !page
+            const activeBefore = editor ? getPane(state, paneId ?? activeDockPaneId(state)).activeTabId : undefined
+            const held = page
+              ? panePage(state, paneId ?? activeDockPaneId(state), kind)
+              : editor
+                ? intent.revealIfOpened === false ? undefined : findContentTab(state, contentId, kind)
+                : undefined
+            const planned = held !== undefined
+              ? {
+                ops: editor ? [] : [{ type: 'focusTab' as const, tabId: held }],
+                tabId: held,
+              }
+              : planOpenContent(state, mint, {
+                kind,
+                contentId,
+                title,
+                ...paneId === undefined ? {} : { paneId },
+                ...index === undefined ? {} : { index },
+                ...page || editor
+                  ? { revealIfOpened: false }
+                  : intent.revealIfOpened === undefined ? {} : { revealIfOpened: intent.revealIfOpened },
+              })
+            ops.push(...planned.ops)
+            // enpoi: opening seats the new tab active; the editor puts the page back.
+            if (editor && held === undefined && activeBefore !== undefined && activeBefore !== planned.tabId) {
+              ops.push({ type: 'focusTab', tabId: activeBefore })
+            }
+            if (replace !== undefined && replace !== planned.tabId) ops.push({ type: 'closeTab', tabId: replace })
+            if (editor) editorTabId = planned.tabId
+            settled(planned.tabId)
+            return ops
+          }, seed)
+          // enpoi: record the editor's tab in the same commit as its open.
+          return editorTabId === undefined ? next : { ...next, editorTabId }
+        })
       },
       // A page is never copied: the copy would sit beside it in the same pane.
       duplicateTab: (d, sessionId: string, tabId: TabId) => {

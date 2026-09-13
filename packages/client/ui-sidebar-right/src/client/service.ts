@@ -34,6 +34,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightTabParamsFor } from './contract/params.ts'
 import { pageAddress } from './contract/seed.ts'
 import type { SidebarRightTabClaim, SidebarRightTabRegistry } from './tab-registry.ts'
+import { SidebarRightRail } from './rail.ts'
 import type { SidebarRightState, SurfaceState } from './stores.ts'
 import type { createSidebarRightStore } from './stores.ts'
 import { TabDomain, type PinResource } from './tab-domain.ts'
@@ -59,14 +60,15 @@ interface Adoption {
  * Adoption subscribes without reconciling; the first store commit creates occurrences.
  * @param tabs - registered tab types.
  * @param pin - resource retention for an occurrence's lifetime.
+ * @param rail - the global rail preferences shared with the panel seat.
  * @returns the controller and a callback releasing exactly its own adoption.
  */
-export function createSidebarRightController(tabs: SidebarRightTabRegistry, pin: PinResource): {
+export function createSidebarRightController(tabs: SidebarRightTabRegistry, pin: PinResource, rail: SidebarRightRail = new SidebarRightRail()): {
   controller: SidebarRightController
   adopt: (sessionId: SessionId, store: SidebarRightSurfaceStore) => () => void
 } {
   const adopted = new Map<SessionId, Adoption>()
-  const controller = new SidebarRightController(tabs, pin, adopted)
+  const controller = new SidebarRightController(tabs, pin, rail, adopted)
   return {
     controller,
     adopt(sessionId, store) {
@@ -211,13 +213,16 @@ export class SidebarRightController implements ISidebarRight {
   readonly tabDomain: TabDomain
 
   /**
+   * The rail preferences are global (enpoi), so they survive session switches.
    * @param tabs - the tab-type registry consulted to claim an address.
    * @param pin - `ctx.resources.pin`, which the Tab domain holds addresses with.
+   * @param rail - the global rail preferences: the lit kind, the open intent, and the editor width.
    * @param adopted - plugin-owned session stores used by occurrence actions.
    */
   constructor(
     private readonly tabs: SidebarRightTabRegistry,
     pin: PinResource,
+    readonly rail: SidebarRightRail,
     private readonly adopted = new Map<SessionId, Adoption>(),
   ) {
     this.tabDomain = new TabDomain(this, pin)
@@ -297,6 +302,7 @@ export class SidebarRightController implements ISidebarRight {
     if (actions !== undefined) actions.closeTab(sessionId, tabId)
   }
 
+  // enpoi: resources open in the editor pane beside the panel, never as the panel's page.
   /** Claim a resource and place it in one session; an address outside the scheme or one no type claims throws. */
   private placeResource(
     sessionId: SessionId,
@@ -307,7 +313,7 @@ export class SidebarRightController implements ISidebarRight {
     if (!address.startsWith(RESOURCE_SCHEME)) {
       throw new Error(`sidebarRight: no registered tab type claims "${address}"`)
     }
-    this.place(sessionId, actions, this.tabs.claim(address, options.kind), address, options, options.params)
+    this.place(sessionId, actions, this.tabs.claim(address, options.kind), address, options, options.params, true)
   }
 
   /** Place a page type in one session at the address pages are recorded under; an unregistered kind throws. */
@@ -331,6 +337,7 @@ export class SidebarRightController implements ISidebarRight {
     address: string,
     placement: SidebarRightPlacement,
     params: SidebarRightNavigationParams,
+    editor = false,
   ): void {
     actions.openContent(sessionId, {
       kind: claim.kind,
@@ -339,7 +346,56 @@ export class SidebarRightController implements ISidebarRight {
       ...placement.paneId === undefined ? {} : { paneId: placement.paneId },
       ...placement.replaceTab === undefined ? {} : { replaceTab: placement.replaceTab },
       ...placement.revealIfOpened === undefined ? {} : { revealIfOpened: placement.revealIfOpened },
-    }, (tabId) => { this.tabDomain.navigate(sessionId, tabId, { address, params }) })
+      ...editor ? { editor: true } : {},
+    }, (tabId) => {
+      this.tabDomain.navigate(sessionId, tabId, { address, params })
+      // enpoi: the rail is global state: a resource opening in the editor pane
+      // is an open of the column, and a page open is the rail's new lit kind.
+      if (editor) this.rail.setOpen(true)
+      else this.rail.setKind(claim.kind)
+    })
+  }
+
+  // enpoi: the icon rail's open/collapse gesture.
+  /**
+   * Open or collapse the page a rail icon stands for.
+   *
+   * The icon of the already-shown kind collapses the panel; any other icon
+   * opens the panel on its kind, focusing the page where the session already
+   * holds one. The rail itself never hides.
+   * @param kind - the kind whose rail icon was clicked.
+   */
+  selectKind(kind: string): void {
+    const { sessionId, actions } = this.require()
+    const rail = this.rail.state.getSnapshot()
+    const shown = rail.kind ?? this.tabs.rail()[0]?.kind ?? null
+    if (shown === kind && this.mounted()?.layout.expanded === true) {
+      this.rail.setOpen(false)
+      actions.setExpanded(sessionId, false)
+      return
+    }
+    const definition = this.tabs.get(kind)
+    if (definition === undefined) throw new Error(`sidebarRight: no tab type is registered as "${kind}"`)
+    const address = pageAddress(kind)
+    this.rail.setKind(kind)
+    actions.openContent(sessionId, { kind, contentId: address, title: definition.title(address) }, (tabId) => {
+      this.tabDomain.navigate(sessionId, tabId, { address, params: undefined })
+    })
+  }
+
+  // enpoi: the conversation header's expand control opens the lit kind.
+  /** Open the panel on the lit kind, for the conversation header's expand control. */
+  openPanel(): void {
+    const { sessionId, actions } = this.require()
+    const kind = this.rail.state.getSnapshot().kind ?? this.tabs.rail()[0]?.kind
+    if (kind === undefined) return
+    const definition = this.tabs.get(kind)
+    if (definition === undefined) return
+    const address = pageAddress(kind)
+    this.rail.setKind(kind)
+    actions.openContent(sessionId, { kind, contentId: address, title: definition.title(address) }, (tabId) => {
+      this.tabDomain.navigate(sessionId, tabId, { address, params: undefined })
+    })
   }
 
   /**
@@ -370,9 +426,11 @@ export class SidebarRightController implements ISidebarRight {
     return this.mounted()?.layout.expanded ?? false
   }
 
+  // enpoi: an explicit toggle is the operator's open intent, kept globally.
   /** Collapse an expanded column, or expand a collapsed one. */
   toggleExpanded(): void {
     const { sessionId, actions } = this.require()
+    this.rail.setOpen(this.mounted()?.layout.expanded !== true)
     actions.toggleExpanded(sessionId)
   }
 

@@ -27,7 +27,7 @@
  * signal, actions — is read through the slot-owned useTabInfo hook. The Tab
  * domain follows each session's store commits, including sessions off screen.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { IconPanelLeftOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -36,13 +36,15 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '../contract/slots.ts'
 import type { DockIntents, DockMode, FloatRect, TabId, TabRecord, TabRenderer } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { canSplit, dockPaneIds, DockSurface, findPaneContentTab, FloatLayer } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { canSplit, dockPaneIds, DockSurface, findContentTab, findPaneContentTab, FloatLayer, activeDockPaneId, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { HalvesFit, LayoutState, PaneId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { GUIDE_KIND, pageAddress } from '../contract/seed.ts'
 import { dockLabels } from '../labels.ts'
+import { EDITOR_WIDTH_MIN } from '../rail.ts'
+import type { SidebarRightRailState } from '../rail.ts'
 import type { SidebarRightOpenTabOptions } from '../service.ts'
-import type { SidebarRightTabDefinition } from '../tab-registry.ts'
+import type { SidebarRightRailItem, SidebarRightTabDefinition } from '../tab-registry.ts'
 import type { createSidebarRightStore, SurfaceState } from '../stores.ts'
 import { canCloseTab } from '../stores.ts'
 import type { TabOccurrence } from '../tab-domain.ts'
@@ -97,8 +99,25 @@ export interface SidebarRightInjected {
    * the guide opened by kind, through the same path as every other open.
    */
   readonly openTab: (kind: string, options?: SidebarRightOpenTabOptions) => void
+  // enpoi: the icon rail's extension points.
+  /**
+   * Open the page a rail icon stands for, or collapse the panel when it is
+   * already the shown kind. The rail's one gesture.
+   */
+  readonly selectKind: (kind: string) => void
+  /**
+   * Record the panel's open intent; the seat applies it to the mounted surface
+   * in the same commit. The collapse control's one gesture.
+   */
+  readonly setOpen: (open: boolean) => void
+  /** Record the editor pane's width after a drag. */
+  readonly setEditorWidth: (px: number) => void
   readonly hooks: {
     readonly tabTypes: HostObservable<readonly SidebarRightTabDefinition[]>
+    /** One entry per page kind offering a guide box; what the rail draws. */
+    readonly railItems: HostObservable<readonly SidebarRightRailItem[]>
+    /** The global rail state: open intent, lit kind, and editor width. */
+    readonly rail: HostObservable<SidebarRightRailState>
   }
   readonly keyedHooks: {
     readonly tabNavigation: (key: string) => HostObservable<SidebarRightTabNavigation>
@@ -248,10 +267,29 @@ function ExitFullscreenGlyph(): ReactNode {
   )
 }
 
-/** The panel's two controls, placed by the kit at the top-right pane's strip end. */
-function PanelChrome({ sessionId, fullscreen, autoFullscreen, actions, t }: Pick<PanelProps, 'sessionId' | 'actions' | 't' | 'fullscreen' | 'autoFullscreen'>): ReactNode {
+/** Neutral glyph for a rail item whose type contributed no guide icon. */
+function RailNeutralGlyph(): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+
+/** The panel's two controls, placed by the rail; the collapse control records the closed intent. */
+function PanelChrome({
+  fullscreen, autoFullscreen, actions, sessionId, setOpen, t,
+}: {
+  readonly fullscreen: boolean
+  readonly autoFullscreen: boolean
+  readonly actions: Store['actions']
+  readonly sessionId: SessionId
+  readonly setOpen: (open: boolean) => void
+  readonly t: RightbarSeatProps['t']
+}): ReactNode {
   const next: DockMode = fullscreen ? 'push' : 'fullscreen'
   const modeLabel = fullscreen ? t('chrome.exitFullscreen') : t('chrome.toFullscreen')
+  const collapseLabel = t('chrome.collapse')
   return (
     <>
       <Tooltip label={modeLabel} side="bottom" delayMs={500}>
@@ -268,13 +306,13 @@ function PanelChrome({ sessionId, fullscreen, autoFullscreen, actions, t }: Pick
           {fullscreen ? <ExitFullscreenGlyph /> : <FullscreenGlyph />}
         </button>
       </Tooltip>
-      <Tooltip label={t('chrome.collapse')} side="bottom" delayMs={500}>
+      <Tooltip label={collapseLabel} side="bottom" delayMs={500}>
         <button
           type="button"
           className={css.iconButton}
           aria-label={t('chrome.collapseAria')}
           data-sidebar-right-toggle
-          onClick={() => { actions.toggleExpanded(sessionId) }}
+          onClick={() => { setOpen(false) }}
         >
           <IconPanelLeftOutline16 className={css.collapseGlyph} />
         </button>
@@ -283,18 +321,87 @@ function PanelChrome({ sessionId, fullscreen, autoFullscreen, actions, t }: Pick
   )
 }
 
+// enpoi: the always-visible icon rail (replaces the tab-strip presentation).
 /**
- * The panel: the docked surface with the two controls in its top-right strip,
- * anchored to the frame's right edge and slid off it while collapsed.
+ * The always-visible icon rail: one button per page kind in the live registry,
+ * the surface-wide controls below them. Clicking an icon opens its page (and
+ * focuses the panel on it); clicking the lit icon collapses the panel. The rail
+ * never hides, with or without the panel.
+ */
+function Rail({
+  items, active, fullscreen, autoFullscreen, actions, sessionId, onSelect, setOpen, t,
+}: {
+  readonly items: readonly SidebarRightRailItem[]
+  readonly active: string | undefined
+  readonly fullscreen: boolean
+  readonly autoFullscreen: boolean
+  readonly actions: Store['actions']
+  readonly sessionId: SessionId
+  readonly onSelect: (kind: string) => void
+  readonly setOpen: (open: boolean) => void
+  readonly t: RightbarSeatProps['t']
+}): ReactNode {
+  // enpoi: the rail's stylesheet reserves its 44px strip on the centre column
+  // while the panel is collapsed; the marker lets that rule require a mounted
+  // rail, since a global panel unmounts this seat entirely.
+  useEffect(() => {
+    document.body.setAttribute(RAIL_MARKER, '')
+    return () => { document.body.removeAttribute(RAIL_MARKER) }
+  }, [])
+  return (
+    <nav className={css.rail} aria-label={t('rail.aria')} data-sidebar-right-rail>
+      <div className={css.railItems}>
+        {items.map((item) => {
+          const Icon = item.icon
+          const label = item.title()
+          const selected = active === item.kind
+          return (
+            <Tooltip key={item.kind} label={label} side="bottom" delayMs={400}>
+              <button
+                type="button"
+                className={css.railButton}
+                aria-label={label}
+                aria-pressed={selected}
+                data-sidebar-right-rail-item={item.kind}
+                data-sidebar-right-rail-active={selected || undefined}
+                onClick={() => { onSelect(item.kind) }}
+              >
+                {Icon === undefined
+                  ? <RailNeutralGlyph />
+                  : <Icon size={18} />}
+              </button>
+            </Tooltip>
+          )
+        })}
+      </div>
+      <div className={css.railControls}>
+        <PanelChrome
+          fullscreen={fullscreen}
+          autoFullscreen={autoFullscreen}
+          actions={actions}
+          sessionId={sessionId}
+          setOpen={setOpen}
+          t={t}
+        />
+      </div>
+    </nav>
+  )
+}
+
+/**
+ * The panel: the docked surface with its strip presentation hidden — the rail
+ * replaced it — anchored beside the rail and slid off the frame's right edge
+ * while collapsed. The surface still owns the page's body, the room rule, and
+ * the floating layer.
  */
 function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<HTMLDivElement> }): ReactNode {
-  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, autoFullscreen, panelRef } = panel
+  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, panelRef } = panel
   const { expanded } = surface.layout
   return (
     <div
       ref={panelRef}
       className={css.panel}
-      style={{ width: fullscreen ? '100%' : width }}
+      style={{ right: fullscreen ? 0 : RAIL_WIDTH, width: fullscreen ? '100%' : width }}
       data-sidebar-right-panel={fullscreen ? 'fullscreen' : 'push'}
       data-sidebar-right-open={expanded || undefined}
       // Off-edge is out of reach: the stylesheet's visibility flip takes the
@@ -317,11 +424,78 @@ function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<H
           renderTabTitle={titlesFor(panel)}
           renderTabMenuItems={(tab, dismiss) =>
             renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
-          chrome={<PanelChrome sessionId={sessionId} fullscreen={fullscreen} autoFullscreen={autoFullscreen} actions={actions} t={t} />}
           onRoom={reportRoom}
         />
       </div>
     </div>
+  )
+}
+
+// enpoi: the editor pane left of the sidebar (old EditorHost split).
+/**
+ * The editor pane beside the panel: the resource tab the rail's file opens
+ * landed, drawn left of the sidebar so the tree stays visible. It is the
+ * panel's sibling, so both keep their own width.
+ */
+function EditorPane(panel: PanelProps & { tab: TabRecord; width: number; right: number }): ReactNode {
+  const { tab, width, right } = panel
+  return (
+    <div
+      className={css.editor}
+      style={{ right, width }}
+      data-sidebar-right-editor
+    >
+      {bodiesFor(panel)(tab)}
+    </div>
+  )
+}
+
+/**
+ * The editor pane's drag divider: dragging it left widens the editor and
+ * narrows the panel, because the two share the frame's right column.
+ */
+function EditorDivider({ right, width, onPreview, onCommit }: {
+  readonly right: number
+  /** The editor's current rendered width; a drag starts from it. */
+  readonly width: number
+  readonly onPreview: (width: number | undefined) => void
+  readonly onCommit: (width: number) => void
+}): ReactNode {
+  const drag = useRef<{ pointerId: number; originX: number; startWidth: number; width: number } | undefined>(undefined)
+  const [dragging, setDragging] = useState(false)
+  return (
+    <div
+      className={css.editorDivider}
+      style={{ right }}
+      data-sidebar-right-editor-divider
+      data-dragging={dragging || undefined}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        event.preventDefault()
+        event.currentTarget.setPointerCapture(event.pointerId)
+        drag.current = { pointerId: event.pointerId, originX: event.clientX, startWidth: width, width }
+        setDragging(true)
+      }}
+      onPointerMove={(event) => {
+        const held = drag.current
+        if (held === undefined || held.pointerId !== event.pointerId) return
+        // The editor sits left of the divider: dragging left grows it.
+        held.width = held.startWidth - (event.clientX - held.originX)
+        onPreview(held.width)
+      }}
+      onPointerUp={(event) => {
+        const held = drag.current
+        if (held === undefined || held.pointerId !== event.pointerId) return
+        drag.current = undefined
+        setDragging(false)
+        onCommit(held.width)
+      }}
+      onPointerCancel={() => {
+        drag.current = undefined
+        setDragging(false)
+        onPreview(undefined)
+      }}
+    />
   )
 }
 
@@ -344,15 +518,25 @@ function Floats(panel: PanelProps): ReactNode {
   )
 }
 
+// enpoi: geometry of the rail and the editor pane beside the panel.
+/** Width of the always-visible rail, in px; mirrors the stylesheet. */
+const RAIL_WIDTH = 44
+/** Body marker the rail sets while mounted; the stylesheet keys the collapsed strip reservation on it. */
+const RAIL_MARKER = 'data-sidebar-right-rail-mounted'
+/** Width of the editor pane's drag divider, in px; mirrors the stylesheet. */
+const EDITOR_DIVIDER = 5
+/** Narrowest panel the right column leaves once the editor takes its share. */
+const PANEL_MIN = 160
+
 /**
- * The right column's occupant: the panel, anchored to the column's edge and
- * shown or hidden by sliding, plus the floating layer. It is also where the
+ * The right column's occupant: the rail (always), the panel it opens, the
+ * editor pane beside the panel, and the floating layer. It is also where the
  * frame learns the panel's presentation, and where `ctx.sidebarRight` learns
  * which session it is acting on, because this is the seat that knows both.
  */
 export function RightbarSeat({
   sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab,
-  useTabTypes, useTabNavigation, occurrence,
+  selectKind, setOpen, setEditorWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
   // The binding published below serves the public face's commands on the
@@ -360,6 +544,8 @@ export function RightbarSeat({
   // adopted stores instead.
   const surfaces = useStore(state => state.bySession)
   const surface = surfaces[sessionId]
+  const railState = useRail(state => state)
+  const railItems = useRailItems(items => items)
   const shown = surface !== undefined && surface.layout.expanded
   const autoFullscreen = viewportWidth < 768
   const fullscreen = autoFullscreen || surface?.layout.mode === 'fullscreen'
@@ -370,9 +556,32 @@ export function RightbarSeat({
   const reportRoom = useCallback((fits: ReadonlyMap<PaneId, HalvesFit>): void => { room.current = fits }, [])
   const track = shown && !autoFullscreen
 
+  // enpoi: the rail's lit kind is global: the operator's last choice, else the
+  // first registered page. It stays lit whether or not the panel is drawn.
+  const litKind = railState.kind ?? railItems[0]?.kind
+  const litDefinition = useTabTypes(list => list.find(definition => definition.kind === litKind))
+
+  // enpoi: apply the global intent to whichever session this seat now draws: a switch
+  // from a session into a subagent session (and back) must not close the panel
+  // or drop its page. The narrow frame's own collapse is a responsive fact, not
+  // an operator choice, so `canShow` guards re-opening there.
   useEffect(() => {
-    if (surface === undefined) actions.open(sessionId)
-  }, [actions, sessionId, surface])
+    if (surface === undefined) {
+      actions.open(sessionId)
+      return
+    }
+    if (railState.open) {
+      if (litKind === undefined || !canShow) return
+      const address = pageAddress(litKind)
+      if (!surface.layout.expanded || findContentTab(surface.layout, address, litKind) === undefined) {
+        actions.openContent(sessionId, {
+          kind: litKind, contentId: address, title: litDefinition?.title(address) ?? litKind,
+        }, () => { /* the page open records no navigation parameters */ })
+      }
+    } else if (surface.layout.expanded) {
+      actions.setExpanded(sessionId, false)
+    }
+  }, [actions, canShow, litDefinition, litKind, railState.open, sessionId, surface])
 
   useLayoutEffect(() => {
     if (shown && !fullscreen && !canShow) actions.setExpanded(sessionId, false)
@@ -414,14 +623,55 @@ export function RightbarSeat({
   // store as the runtime minted it and reconciles on the store's own commits,
   // on screen or not.
 
+  // enpoi: the editor pane's live width while its divider drags; the committed
+  // value is the rail's persisted preference.
+  const [previewWidth, setPreviewWidth] = useState<number | undefined>(undefined)
   if (surface === undefined) return null
+  const editorTab = surface.editorTabId === undefined ? undefined : surface.layout.tabs[surface.editorTabId]
+  // enpoi: the kit already draws the pane's active tab: rendering the same
+  // record in the editor would mount its body twice. The editor pane exists beside the
+  // panel's page, so it simply waits until a page is back in front.
+  const activeDockTab = getPane(surface.layout, activeDockPaneId(surface.layout)).activeTabId
+  const editorOpen = editorTab !== undefined && surface.layout.expanded && editorTab.id !== activeDockTab
+  const available = Math.max(0, width - RAIL_WIDTH - (editorOpen ? EDITOR_DIVIDER : 0))
+  const editorWidth = editorOpen
+    ? Math.min(previewWidth ?? railState.editorWidth, Math.max(EDITOR_WIDTH_MIN, available - PANEL_MIN))
+    : 0
+  const panelWidth = Math.max(0, available - editorWidth)
   const panel: PanelProps = {
     sessionId, actions, t, renderSlot, surface, openTab, useTabTypes, useTabNavigation, useStore, occurrence,
     fullscreen, autoFullscreen, reportRoom,
   }
   return (
     <>
-      <SidebarPanel {...panel} width={width} panelRef={panelRef} />
+      <Rail
+        items={railItems}
+        active={shown ? litKind : undefined}
+        fullscreen={fullscreen}
+        autoFullscreen={autoFullscreen}
+        actions={actions}
+        sessionId={sessionId}
+        onSelect={selectKind}
+        setOpen={setOpen}
+        t={t}
+      />
+      <SidebarPanel {...panel} width={panelWidth} panelRef={panelRef} />
+      {editorOpen && !fullscreen && editorTab !== undefined && (
+        <>
+          <EditorPane
+            {...panel}
+            tab={editorTab}
+            width={editorWidth}
+            right={RAIL_WIDTH + panelWidth + EDITOR_DIVIDER}
+          />
+          <EditorDivider
+            right={RAIL_WIDTH + panelWidth}
+            width={editorWidth}
+            onPreview={setPreviewWidth}
+            onCommit={(px) => { setPreviewWidth(undefined); setEditorWidth(px) }}
+          />
+        </>
+      )}
       <Floats {...panel} />
     </>
   )

@@ -31,10 +31,11 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from './contract/slots.ts'
 import { GuideBody, type GuideInjected } from './tabs/guide/GuideBody.tsx'
 import { GuideTitle } from './tabs/guide/GuideTitle.tsx'
-import { ExpandButton } from './shell/ExpandButton.tsx'
+import { ExpandButton, type ExpandButtonInjected } from './shell/ExpandButton.tsx'
 import { RightbarSeat, type SidebarRightInjected } from './shell/SidebarRight.tsx'
 import { RightbarRoot } from './shell/RightbarRoot.tsx'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
+import { SidebarRightRail } from './rail.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
 import { createSidebarRightStore } from './stores.ts'
 import { en, zh } from './locales.ts'
@@ -45,15 +46,16 @@ import { defaultSeed } from './contract/seed.ts'
 
 export type { RightbarSeatProps, SidebarRightInjected, SidebarRightPresentation } from './shell/SidebarRight.tsx'
 export type { GuideBodyProps, GuideInjected } from './tabs/guide/GuideBody.tsx'
-export type { ExpandButtonProps } from './shell/ExpandButton.tsx'
+export type { ExpandButtonProps, ExpandButtonInjected } from './shell/ExpandButton.tsx'
+export type { SidebarRightRailState } from './rail.ts'
 export type { SidebarRightState, SurfaceState } from './stores.ts'
 export type {
   ISidebarRight, SidebarRightBinding, SidebarRightOpenResourceOptions, SidebarRightOpenTabOptions,
   SidebarRightPlacement, SurfaceActions,
 } from './service.ts'
 export type {
-  SidebarRightGuideBox, SidebarRightGuideEntry, SidebarRightTabClaim, SidebarRightTabDefinition,
-  SidebarRightTabPriority,
+  SidebarRightGuideBox, SidebarRightGuideEntry, SidebarRightRailItem, SidebarRightTabClaim,
+  SidebarRightTabDefinition, SidebarRightTabPriority,
 } from './tab-registry.ts'
 export type {
   SidebarRightTabInfo, SidebarRightTabInjected, UseSidebarRightTabInfo, SidebarRightTabActions,
@@ -101,9 +103,12 @@ export function apply(ctx: ClientContext): void {
   // its own apply top level for the same reason.
   const t = ctx.locale.bind(NS)
   const tabs = new SidebarRightTabRegistry(ctx)
+  // enpoi: one global rail per browser, restored from localStorage.
+  const rail = new SidebarRightRail()
   const { controller, adopt } = createSidebarRightController(
     tabs,
     (address, signal) => { ctx.resources.pin(address, signal) },
+    rail,
   )
   const disposeRegistry = ctx.reflect.provide('sidebarRightTabs', tabs)
   const disposeService = ctx.reflect.provide('sidebarRight', controller)
@@ -142,7 +147,15 @@ export function apply(ctx: ClientContext): void {
       },
       bindService: binding => controller.bind(binding),
       openTab: (kind, options) => { controller.openTab(kind, options) },
-      hooks: { tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() } },
+      // enpoi: the rail's gestures and its two hook sources (icons, state).
+      selectKind: kind => { controller.selectKind(kind) },
+      setOpen: open => { rail.setOpen(open) },
+      setEditorWidth: px => { rail.setEditorWidth(px) },
+      hooks: {
+        tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() },
+        railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
+        rail: rail.state,
+      },
     }
 
     const disposeTypes = [tabs.register(guideDefinition(t))]
@@ -175,6 +188,7 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.session.header.corner',
       locale: NS,
       store,
+      inject: (): ExpandButtonInjected => ({ openPanel: () => { controller.openPanel() } }),
     }, ExpandButton))
     // Stage two for the guide: it declares the chain child it hosts and reads
     // the registry's entry boxes, which an ordinary type has no reason to do.

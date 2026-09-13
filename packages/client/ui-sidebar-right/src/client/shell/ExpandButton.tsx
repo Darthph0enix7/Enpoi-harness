@@ -15,19 +15,27 @@
  */
 import type { ReactNode } from 'react'
 import { IconPanelLeftOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { createSidebarRightStore } from '../stores.ts'
 import css from './ExpandButton.module.css'
 
-/** The button's props: the header corner seat, the shared store, and copy. */
+// enpoi: the corner control opens the rail's lit kind through the controller.
+/** What the corner control needs from its host: the root controller's open, on the lit rail kind. */
+export interface ExpandButtonInjected {
+  /** Open the panel on the rail's lit kind (the first rail item before any choice). */
+  readonly openPanel: () => void
+}
+
+/** The button's props: the header corner seat, the shared store, the open action, and copy. */
 export type ExpandButtonProps =
   & PropsRuntime<'conversation.session.header.corner'>
   & PropsStore<ReturnType<typeof createSidebarRightStore>>
+  & InjectFace<ExpandButtonInjected>
   & PropsLocale<'sidebarRight'>
 
 /** The expand control while the panel is collapsed; nothing while it is shown. */
-export function ExpandButton({ sessionId, useStore, actions, t }: ExpandButtonProps): ReactNode {
+export function ExpandButton({ sessionId, useStore, openPanel, t }: ExpandButtonProps): ReactNode {
   // A session with no surface yet is collapsed: the panel seat materializes the
   // surface on its own mount, and until then there is nothing expanded.
   const expanded = useStore(state => state.bySession[sessionId]?.layout.expanded ?? false)
@@ -39,7 +47,7 @@ export function ExpandButton({ sessionId, useStore, actions, t }: ExpandButtonPr
         className={css.button}
         aria-label={t('chrome.expandAria')}
         data-sidebar-right-expand
-        onClick={() => { actions.setExpanded(sessionId, true) }}
+        onClick={() => { openPanel() }}
       >
         <IconPanelLeftOutline16 className={css.icon} />
       </button>

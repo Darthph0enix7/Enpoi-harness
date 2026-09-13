@@ -114,7 +114,7 @@ describe('SidebarRightController — opening', () => {
   })
 
   it('focuses the tab already showing the same (kind, contentId) instead of opening a second one', () => {
-    const { controller, publish, titles, layout, tabOf } = harness()
+    const { controller, publish, titles, layout, tabOf, instance } = harness()
     publish()
     controller.openResource('dsh-resource://file/session/s-test/notes/readme.txt')
     publish()
@@ -122,7 +122,9 @@ describe('SidebarRightController — opening', () => {
     publish()
     controller.openResource('dsh-resource://file/session/s-test/notes/readme.txt')
     expect(titles().filter(title => title === 'readme.txt')).toHaveLength(1)
-    expect(getPane(layout(), layout().activePaneId).activeTabId).toBe(tabOf('readme.txt'))
+    // The editor open reveals its record without stealing the panel's page.
+    expect(instance.getSnapshot().bySession[SESSION]?.editorTabId).toBe(tabOf('readme.txt'))
+    expect(getPane(layout(), layout().activePaneId).activeTabId).not.toBe(tabOf('readme.txt'))
   })
 
   it('opens another tab for the same address when told not to reveal, and when another kind is named', () => {
@@ -356,6 +358,9 @@ describe('SidebarRightController — layout operations', () => {
     publish()
     controller.openResource('dsh-resource://file/session/s-test/a.txt')
     publish()
+    // The editor open leaves the expanded column's page in front.
+    expect(getPane(layout(), layout().activePaneId).activeTabId).toBe(tabOf('seed'))
+    controller.focus(tabOf('a.txt'))
     expect(getPane(layout(), layout().activePaneId).activeTabId).toBe(tabOf('a.txt'))
     const before = entries()
     controller.focus(tabOf('seed'))
@@ -552,7 +557,7 @@ describe('SidebarRightController — the readable slice', () => {
   })
 
   it('reports the last committed surface', () => {
-    const { controller, publish, layout } = harness()
+    const { controller, publish, layout, tabOf, instance } = harness()
     publish()
     controller.toggleExpanded()
     publish()
@@ -560,7 +565,8 @@ describe('SidebarRightController — the readable slice', () => {
     controller.openResource('dsh-resource://file/session/s-test/a.txt')
     publish()
     expect(Object.values(layout().tabs).filter(tab => tab.contentId === 'dsh-resource://file/session/s-test/a.txt')).toHaveLength(1)
-    expect(controller.active()?.contentId).toBe('dsh-resource://file/session/s-test/a.txt')
+    // The editor records its tab; the active page stays the panel's.
+    expect(instance.getSnapshot().bySession[SESSION]?.editorTabId).toBe(tabOf('a.txt'))
   })
 })
 

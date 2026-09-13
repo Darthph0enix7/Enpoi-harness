@@ -82,6 +82,23 @@ export interface SidebarRightGuideBox extends SidebarRightGuideEntry {
   readonly kind: string
 }
 
+// enpoi: the icon rail's model, derived from guide boxes so it never hardcodes kinds.
+/**
+ * One icon of the always-visible rail: a page kind that offers a guide box, so
+ * the rail grows with the registry instead of naming kinds here.
+ */
+export interface SidebarRightRailItem {
+  /** The page kind the icon opens. */
+  readonly kind: string
+  /**
+   * The icon's accessible name; the first guide box's title.
+   * @returns the title in the current language.
+   */
+  readonly title: () => string
+  /** The first guide box's glyph, or `undefined` for the rail's neutral one. */
+  readonly icon?: ComponentType<IconProps>
+}
+
 
 /** One registered tab type: its static face, and nothing else. */
 export interface SidebarRightTabDefinition {
@@ -222,6 +239,7 @@ export class SidebarRightTabRegistry {
   private registrations = 0
   private cached: readonly SidebarRightTabDefinition[] = []
   private guideEntries: readonly SidebarRightGuideBox[] = []
+  private railItems: readonly SidebarRightRailItem[] = []
 
   /** @param ctx - Context whose effects own the contributed types. */
   constructor(private readonly ctx: Context) {}
@@ -317,6 +335,17 @@ export class SidebarRightTabRegistry {
     return this.guideEntries
   }
 
+  // enpoi: the rail's icon list.
+  /**
+   * One rail icon per page kind that offers a guide box, in the same order as
+   * the boxes. The first box wins a kind's icon and title; a kind with no box
+   * is a viewer, not a page the rail stands for.
+   * @returns reference-stable items.
+   */
+  rail(): readonly SidebarRightRailItem[] {
+    return this.railItems
+  }
+
   /**
    * The type in force for a kind.
    * @param kind - the type discriminator.
@@ -396,6 +425,17 @@ export class SidebarRightTabRegistry {
     this.guideEntries = this.cached
       .flatMap(definition => (definition.guide ?? []).map(entry => ({ ...entry, kind: definition.kind })))
       .sort((left, right) => left.order - right.order)
+    // enpoi: one rail item per kind, first guide box wins.
+    const byKind = new Map<string, SidebarRightRailItem>()
+    for (const entry of this.guideEntries) {
+      if (byKind.has(entry.kind)) continue
+      byKind.set(entry.kind, {
+        kind: entry.kind,
+        title: entry.title,
+        ...entry.icon === undefined ? {} : { icon: entry.icon },
+      })
+    }
+    this.railItems = [...byKind.values()]
     notifySubscribers(this.listeners, '[ui-sidebar-right] tab registry')
   }
 }

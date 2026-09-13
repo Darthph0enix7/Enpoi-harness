@@ -1,8 +1,8 @@
 /*
- * The Sidebar's own chrome only: the panel box, its two strip-end controls, and
- * the placeholder tab bodies. Everything inside the split tree is styled by the
- * docking kit; the expand button in the conversation header has its own sheet.
- * Tokens only.
+ * The Sidebar's own chrome: the always-visible icon rail, the panel box, its
+ * editor pane and divider, and the placeholder tab bodies. Everything inside
+ * the split tree is styled by the docking kit; the expand button in the
+ * conversation header has its own sheet. Tokens only.
  */
 
 /*
@@ -17,20 +17,22 @@
  * is out of reach once off-edge, and flips back before the slide starts.
  *
  * The normal panel is below frame overlays (20); fullscreen (40) covers the
- * frame and remains below independently floating panels (60).
+ * frame and remains below independently floating panels (60). The rail (46)
+ * stays above both so the way back in never disappears.
  */
 .panel {
   position: absolute;
   top: 0;
-  right: 0;
+  /* enpoi: the rail owns the far-right strip; the seat writes the offset. */
+  right: 44px;
   bottom: 0;
   z-index: 10;
   display: flex;
   flex-direction: column;
   min-width: 0;
   /* The same ground as the conversation: this is a column of the page, not a
-     raised surface. The edge is the weight of the kit's split dividers inside
-     (ui-dockkit `.divider`), so the panel's outline and its inner rules match. */
+   raised surface. The edge is the weight of the kit's split dividers inside
+   (ui-dockkit `.divider`), so the panel's outline and its inner rules match. */
   background: var(--dsw-alias-bg-base);
   border-left: 0.5px solid var(--dsw-alias-border-l4);
   transform: translateX(100%);
@@ -60,6 +62,71 @@
   }
 }
 
+/*
+ * enpoi: the rail replaced the tab-strip presentation. The docking kit still
+ * renders the strip (chips, add, split, chrome), but the product no longer
+ * shows tabs: the rail chooses the page. Hiding it here, inside the panel,
+ * keeps the kit's own behavior and DOM intact for floats and tests.
+ */
+.panel :global([data-dockkit-strip]) {
+  display: none;
+}
+
+/*
+ * enpoi: the always-visible icon rail — the operator's "one line vertical line
+ * of icons". It owns the far-right 44px strip, above the panel (10) and the
+ * fullscreen panel (40), so both its controls and the way into any page stay
+ * reachable with the panel collapsed.
+ */
+.rail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 46;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  background: var(--dsw-alias-bg-base);
+  border-left: 0.5px solid var(--dsw-alias-border-l4);
+  user-select: none;
+}
+
+.railItems,
+.railControls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.railButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.railButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.railButton[data-sidebar-right-rail-active] {
+  color: var(--dsw-specific-sidebar-nav-item-active-accent);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
 /* The geometry of a message's action row button (ui-chat MessageIconActions),
    shared with the kit's split control beside it: a 28px circle around a 15px glyph. */
 .iconButton {
@@ -87,6 +154,15 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+.iconButton:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.iconButton:disabled:hover {
+  background: transparent;
+}
+
 /* The expand button's glyph, so collapse and expand share one affordance. */
 .collapseGlyph {
   transform: scaleX(-1);
@@ -98,11 +174,65 @@
   min-height: 0;
 }
 
+/*
+ * enpoi: the file editor opens to the LEFT of the sidebar, like the old
+ * EditorHost (conversation | editor | file tree). It shares the frame's right
+ * column with the panel: the divider sets how much of the column each takes,
+ * and the frame handle still sizes the column itself.
+ */
+.editor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--dsw-alias-bg-base);
+  border-left: 0.5px solid var(--dsw-alias-border-l4);
+}
+
+.editorDivider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 12;
+  width: 5px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.editorDivider::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 0.5px;
+  background: var(--dsw-alias-border-l4);
+}
+
+.editorDivider:hover::after,
+.editorDivider[data-dragging]::after {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+}
+
 .unavailable {
   margin: 0;
   padding: 12px;
   color: var(--dsw-alias-label-tertiary);
   font-size: var(--dsh-content-font-size-secondary, 13px);
+}
+
+/*
+ * enpoi: with the panel collapsed the frame drops its right track, and the
+ * rail hangs over the conversation's last 44px. Reserve that strip on the
+ * centre column for exactly as long as the rail is mounted: the body marker
+ * comes from the rail itself, so a global panel (which unmounts the seat)
+ * keeps the full width.
+ */
+:global(body[data-sidebar-right-rail-mounted] [data-rightbar-collapsed] > div:has(+ [data-rightbar-col])) {
+  padding-right: 44px;
 }
 
 /*

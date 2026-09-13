@@ -4,7 +4,7 @@
  * while the panel is collapsed, asks for it to expand, and renders nothing
  * while the panel is shown.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -28,27 +28,31 @@ function hookOf<T>(inst: { subscribe: (fn: () => void) => () => void; getSnapsho
  */
 function mountButton() {
   const instance = createSidebarRightStore(() => ({ kind: 'guide', title: 'Start' })).create()
+  const openPanel = vi.fn()
   const props = {
     sessionId: SESSION,
     useStore: hookOf(instance),
     actions: instance.actions,
+    openPanel,
     // Copy is the dictionary's contract; the key stands in for the translation.
     t: (key: string) => key,
   } as unknown as ExpandButtonProps
   const view = render(<ExpandButton {...props} />)
   const control = (): HTMLElement | null => view.container.querySelector('[data-sidebar-right-expand]')
-  return { instance, view, control }
+  return { instance, view, control, openPanel }
 }
 
 describe('ExpandButton', () => {
-  it('offers the way in while the session has no surface yet, and asks the panel to expand', () => {
-    const { instance, view, control } = mountButton()
+  it('offers the way in while the session has no surface yet, and asks the rail to open its page', () => {
+    const { instance, openPanel, view, control } = mountButton()
     const button = control()
     if (button === null) throw new Error('expected the expand control')
     expect(button.getAttribute('aria-label')).toBe('chrome.expandAria')
     fireEvent.click(button)
-    expect(instance.getSnapshot().bySession[SESSION]?.layout.expanded).toBe(true)
-    // Shown: the seat is empty, so the header lays out without it.
+    expect(openPanel).toHaveBeenCalledTimes(1)
+    // The rail owns the outcome: once the surface is open, the header lays out
+    // without this control.
+    act(() => { instance.actions.setExpanded(SESSION, true) })
     expect(view.container.childElementCount).toBe(0)
     cleanup()
   })

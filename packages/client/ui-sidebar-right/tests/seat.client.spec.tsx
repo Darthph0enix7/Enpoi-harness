@@ -130,46 +130,66 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout()).toBe(retained)
   })
 
-  it.each([0, 1, 2])('selects the default from %i guide entries and protects only a sole guide', async (entryCount) => {
-    const h = await mountSeat(1440, true, entryCount)
+  it('opens the first rail item at mount and keeps the tab strip controls reachable', async () => {
+    const h = await mountSeat(1440, true, 2)
+    // The rail is global state, open by default: the panel shows the first
+    // registered page kind without a click.
+    const rail = element(h.view.container, '[data-sidebar-right-rail]')
+    expect(rail.querySelectorAll('[data-sidebar-right-rail-item]')).toHaveLength(1)
+    expect(h.layout().expanded).toBe(true)
+    const initial = Object.values(h.layout().tabs)[0]!
+    expect(initial.kind).toBe('text')
+    expect(h.view.container.querySelector(`[data-dockkit-tab-close="${initial.id}"]`)).not.toBeNull()
+
+    // A rail icon click collapses the panel; the rail stays.
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-rail-item="text"]'))
+    expect(h.layout().expanded).toBe(false)
+    expect(element(h.view.container, '[data-sidebar-right-rail]')).not.toBeNull()
+
+    // Clicking it again reopens the same page, once.
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-rail-item="text"]'))
+    expect(h.layout().expanded).toBe(true)
+    expect(Object.values(h.layout().tabs).filter(tab => tab.kind === 'text')).toHaveLength(1)
+  })
+
+  it('seeds the guide when no page kind offers a rail icon, protecting only a sole guide', async () => {
+    const h = await mountSeat(1440, true, 0)
+    expect(h.view.container.querySelectorAll('[data-sidebar-right-rail-item]')).toHaveLength(0)
+    expect(h.layout().expanded).toBe(false)
     act(() => { h.controller.toggleExpanded() })
     const initial = Object.values(h.layout().tabs)[0]!
-    expect(initial.kind).toBe(entryCount === 1 ? 'text' : 'guide')
-    if (entryCount !== 1) {
-      expect(h.view.container.querySelectorAll('[data-dockkit-tab-close]')).toHaveLength(0)
-      const before = h.layout()
-      act(() => { h.controller.close(initial.id) })
-      expect(h.layout()).toBe(before)
-      fireEvent.contextMenu(element(h.view.container, '[data-dockkit-tab]'))
-      expect(document.querySelector('[data-dockkit-tab-menu] [role^="menuitem"]')).toBeNull()
-      expect(h.view.container.querySelector('[data-dockkit-add-tab]')).toBeNull()
-      return
-    }
+    expect(initial.kind).toBe('guide')
+    expect(h.view.container.querySelectorAll('[data-dockkit-tab-close]')).toHaveLength(0)
+    const before = h.layout()
+    act(() => { h.controller.close(initial.id) })
+    expect(h.layout()).toBe(before)
+    fireEvent.contextMenu(element(h.view.container, '[data-dockkit-tab]'))
+    expect(document.querySelector('[data-dockkit-tab-menu] [role^="menuitem"]')).toBeNull()
+    expect(h.view.container.querySelector('[data-dockkit-add-tab]')).toBeNull()
+  })
+
+  it('draws the lit rail page, and brings it back as a fresh record after its tab closes', async () => {
+    const h = await mountSeat(1440, true, 1)
+    // One guide entry makes the store's default seed that entry's page; the
+    // rail opens it at mount.
+    expect(h.layout().expanded).toBe(true)
+    const initial = Object.values(h.layout().tabs)[0]!
+    expect(initial.kind).toBe('text')
     expect(h.view.container.querySelector(`[data-dockkit-tab-close="${initial.id}"]`)).not.toBeNull()
     act(() => { h.controller.close(initial.id) })
-    expect(h.layout().expanded).toBe(false)
-    // The close leaves the layout empty; the next expansion reseeds.
-    expect(Object.keys(h.layout().tabs)).toHaveLength(0)
-    act(() => { h.controller.toggleExpanded() })
-    const reseeded = Object.values(h.layout().tabs)[0]!
-    expect(reseeded.kind).toBe('text')
-    expect(reseeded.id).not.toBe(initial.id)
+    // The rail's kind stays lit, so the panel draws that page again rather than
+    // staying empty; the record is fresh.
+    const reopened = Object.values(h.layout().tabs).find(tab => tab.kind === 'text')!
+    expect(reopened.id).not.toBe(initial.id)
+    expect(h.layout().expanded).toBe(true)
+    // The guide stays available as the pane's second page.
     fireEvent.click(element(h.view.container, '[data-dockkit-add-tab]'))
-    const guide = Object.values(h.layout().tabs).find(tab => tab.kind === 'guide')!
+    expect(Object.values(h.layout().tabs).some(tab => tab.kind === 'guide')).toBe(true)
     expect(h.view.container.querySelector('[data-dockkit-add-tab]')).toBeNull()
-    expect(h.view.container.querySelector(`[data-dockkit-tab-close="${reseeded.id}"]`)).not.toBeNull()
-    expect(h.view.container.querySelector(`[data-dockkit-tab-close="${guide.id}"]`)).not.toBeNull()
-    act(() => { h.controller.close(reseeded.id) })
-    expect(h.layout().tabs[reseeded.id]).toBeUndefined()
-    expect(h.view.container.querySelector(`[data-dockkit-tab-close="${guide.id}"]`)).toBeNull()
     const preview = h.open('ordinary.txt')
     expect(h.view.container.querySelector(`[data-dockkit-tab-close="${preview.id}"]`)).not.toBeNull()
     act(() => { h.controller.close(preview.id) })
     expect(h.layout().tabs[preview.id]).toBeUndefined()
-    expect(Object.keys(h.layout().tabs)).toEqual([guide.id])
-    expect(h.view.container.querySelectorAll('[data-dockkit-tab-close]')).toHaveLength(0)
-    act(() => { h.controller.split() })
-    expect(Object.values(h.layout().tabs).map(tab => tab.kind)).toEqual(['guide', 'text'])
   })
 
   it('offers close for a floating tab while the docked pane keeps its sole tab', async () => {
@@ -206,7 +226,9 @@ describe('RightbarSeat presentation', () => {
     const tab = h.open()
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
     const body = element(h.view.container, '[data-tab-body]')
-    expect(panel.style.width).toBe('420px')
+    // The editor shares the column, so the panel takes what the rail and editor leave.
+    const wideWidth = panel.style.width
+    expect(parseFloat(wideWidth)).toBeGreaterThan(0)
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(h.layout().mode).toBe('fullscreen')
     expect(panel.style.width).toBe('100%')
@@ -215,7 +237,7 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
     expect(h.bodies.get(tab.id)?.sidebar).toEqual({ expanded: true, fullscreen: true })
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
-    expect(panel.style.width).toBe('420px')
+    expect(panel.style.width).toBe(wideWidth)
     expect(element(h.view.container, '[data-tab-body]')).toBe(body)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
     fireEvent.click(element(h.view.container, '[data-sidebar-right-toggle]'))
@@ -399,18 +421,21 @@ describe('slot-owned useTabInfo', () => {
   it('isolates same-kind record state and reports inactive titles, hiding, floating and docking', async () => {
     const h = await mountSeat()
     const a = h.open('a.txt')
-    const b = h.open('b.txt')
-    const bodyB = element(h.view.container, '[data-tab-body]')
-    expect(h.titles.get(a.id)?.tab.visible).toBe(true)
-    act(() => { h.actions.focusTab(SESSION, a.id) })
-    const bodyA = element(h.view.container, '[data-tab-body]')
-    expect(bodyA.dataset['instance']).not.toBe(bodyB.dataset['instance'])
+    // The editor's newest open does not steal the panel's active tab.
+    h.open('b.txt')
+    const b = Object.values(h.layout().tabs).find(tab => tab.title === 'b.txt')!
+    const bodyA = element(h.view.container, '[data-sidebar-right-panel] [data-tab-body]')
+    const bodyB = element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')
     expect(bodyA.dataset['tabBody']).toBe(a.id)
+    expect(bodyB.dataset['tabBody']).toBe(b.id)
+    expect(bodyA.dataset['instance']).not.toBe(bodyB.dataset['instance'])
+    expect(h.bodies.get(a.id)?.tab.visible).toBe(true)
+    expect(h.bodies.get(b.id)?.tab.visible).toBe(false)
+    expect(h.titles.get(b.id)?.tab.visible).toBe(true)
     const signal = h.bodies.get(a.id)!.tab.signal
     act(() => { h.actions.setExpanded(SESSION, false) })
     expect(h.bodies.get(a.id)?.tab.visible).toBe(false)
     expect(h.titles.get(a.id)?.tab.visible).toBe(false)
-    expect(h.titles.get(b.id)?.tab.visible).toBe(false)
     expect(element(h.view.container, '[data-tab-body]')).toBe(bodyA)
     expect(signal.aborted).toBe(false)
     act(() => { h.controller.float(a.id) })
@@ -451,18 +476,16 @@ describe('slot-owned useTabInfo', () => {
     expect(h.runtime.ctx.get('sidebarRight')).toBeUndefined()
   })
 
-  it('updates guide replacements through the same hook and guide boxes through framework injection', async () => {
+  it('updates guide replacements through the same hook and lists guide boxes as rail icons', async () => {
     const h = await mountSeat()
     // The first expansion seeds the guide the replacement renders over.
     act(() => { h.controller.toggleExpanded() })
     let captured: SidebarRightTabInfo | undefined
     await act(async () => {
       h.runtime.ctx.sidebarRightTabs.register({
-        id: 'test/files', kind: 'files', title: () => 'Files',
-        guide: [{ order: 1, title: () => 'Files' }],
+        id: 'test/plain', kind: 'plain', title: () => 'Plain',
       })
     })
-    expect(h.view.container.querySelector('[data-sidebar-right-guide-entry="files"]')).not.toBeNull()
     await act(async () => {
       h.runtime.slots.register({ name: 'sidebar.right.tab.guide', select: () => true },
         ({ useTabInfo }: PropsRuntime<'sidebar.right.tab.guide'>) => {
@@ -480,6 +503,15 @@ describe('slot-owned useTabInfo', () => {
     expect(captured?.tab.navigation.revision).toBe(2)
     expect(element(h.view.container, '[data-guide-replacement]').dataset['guideReplacement']).toBe('2')
     expect(captured?.sidebar.expanded).toBe(true)
+    // A guide-bearing type is a page the rail stands for: its icon appears and
+    // the rail opens that page.
+    await act(async () => {
+      h.runtime.ctx.sidebarRightTabs.register({
+        id: 'test/files', kind: 'files', title: () => 'Files',
+        guide: [{ order: 1, title: () => 'Files' }],
+      })
+    })
+    expect(h.view.container.querySelector('[data-sidebar-right-rail-item="files"]')).not.toBeNull()
   })
 
   it('follows type replacement and returns to the builtin when it leaves', async () => {
