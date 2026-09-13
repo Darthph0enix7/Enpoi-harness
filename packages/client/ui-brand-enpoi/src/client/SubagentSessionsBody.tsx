@@ -15,7 +15,7 @@
  * re-pulls the host list baseline through `ctx.sessions.refresh`, and the
  * store remains the live data channel.
  */
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './SubagentSessionsBody.module.css'
@@ -76,15 +76,26 @@ function ageLabel(updatedAt: number, now: number): string {
   return `${Math.floor(hours / 24)}d ago`
 }
 
-/**
- * Role/origin line label: the subagent mark when the host projects it, `main`
- * for a root the current branch starts from, and the neutral row role otherwise.
- * @param node - rendered tree row.
- * @returns one copy token already used on this surface.
- */
-function roleLabel(node: TreeRow): string {
-  if (node.origin === 'subagent') return 'subagent'
-  return node.depth === 0 ? 'main' : 'session'
+/** Role/origin label and display title parsed from title or metadata. */
+function nodeDisplay(node: TreeRow): { cleanTitle: string; role: string } {
+  const rolePattern =
+    /^(fixer|explorer|librarian|designer|oracle|critic|visionary|curator|skeptic|architect|pragmatist|experiencer|integrator)\s*:\s*(.+)$/i
+  const match = rolePattern.exec(node.title)
+  if (match && match[1] && match[2]) {
+    return {
+      role: match[1].toLowerCase(),
+      cleanTitle: match[2].trim(),
+    }
+  }
+  for (const r of ['fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
+    if (new RegExp(`\\b${r}\\b`, 'i').test(node.title)) {
+      return { role: r, cleanTitle: node.title }
+    }
+  }
+  return {
+    role: node.depth === 0 ? 'main' : (node.origin === 'subagent' ? 'subagent' : 'session'),
+    cleanTitle: node.title,
+  }
 }
 
 /** Running/idle/done discriminant shared by the dot and the status column. */
@@ -159,14 +170,9 @@ function buildLineage(nodes: readonly LineageNode[], currentId: SessionId | unde
   }
   for (const node of nodes) subtreeDistance.set(node.id, measure(node.id, new Set()))
 
-  /** Sibling order: current session first, then its own children, nearest branch, newest activity. */
-  const rank = (node: LineageNode): number =>
-    node.id === currentId ? 2 : currentId !== undefined && node.parentId === currentId ? 1 : 0
+  /** Sibling order: stable chronological order; never jump the active row to the top! */
   const order = (siblings: readonly LineageNode[]): LineageNode[] =>
-    [...siblings].sort((left, right) =>
-      rank(right) - rank(left)
-      || (subtreeDistance.get(left.id) ?? Number.POSITIVE_INFINITY) - (subtreeDistance.get(right.id) ?? Number.POSITIVE_INFINITY)
-      || right.updatedAt - left.updatedAt)
+    [...siblings].sort((left, right) => left.updatedAt - right.updatedAt)
 
   // Walk the current session's parent chain to the top-most listed ancestor.
   let rootId: SessionId | undefined
@@ -200,7 +206,7 @@ function buildLineage(nodes: readonly LineageNode[], currentId: SessionId | unde
     const root = byId.get(rootId)
     if (root !== undefined) walk(root, 0)
   } else {
-    for (const root of order(roots)) walk(root, 0)
+    for (const root of [...roots].sort((left, right) => right.updatedAt - left.updatedAt)) walk(root, 0)
   }
 
   return { rows, total: rows.length, path, titles }
@@ -286,31 +292,6 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
         </button>
       </header>
 
-      {lineage.path.length > 1 && (
-        <nav className={css.crumbs} aria-label="Session ancestry">
-          {lineage.path.map((id, index) => {
-            const title = lineage.titles.get(id) ?? id
-            return (
-              <Fragment key={id}>
-                {index > 0 && <span className={css.crumbSep} aria-hidden="true">›</span>}
-                {index === lineage.path.length - 1 ? (
-                  <span className={css.crumbCurrent} title={title} aria-current="page">{title}</span>
-                ) : (
-                  <button
-                    type="button"
-                    className={css.crumb}
-                    onClick={() => { openSession(id) }}
-                    title={`Open ${title}`}
-                  >
-                    {title}
-                  </button>
-                )}
-              </Fragment>
-            )
-          })}
-        </nav>
-      )}
-
       {lineage.rows.length === 0 ? (
         <div className={css.empty}>
           <span className={css.emptyIcon}><SubagentSessionsIcon size={18} /></span>
@@ -320,6 +301,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
         <div className={css.list} aria-label="Session lineage">
           {visibleRows.map((row) => {
             const state = statusOf(row)
+            const { cleanTitle, role } = nodeDisplay(row)
             return (
               <button
                 key={row.id}
@@ -334,8 +316,8 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, refr
                 {row.depth > 0 && <span className={css.branch} aria-hidden="true" />}
                 <span className={css.dot} data-state={state} />
                 <span className={css.rowMain}>
-                  <span className={css.rowTitle}>{row.title}</span>
-                  <span className={css.rowSub}>{roleLabel(row)}</span>
+                  <span className={css.rowTitle}>{cleanTitle}</span>
+                  <span className={css.rowSub}>{role}</span>
                 </span>
                 <span className={css.status} data-state={state}>
                   {state}

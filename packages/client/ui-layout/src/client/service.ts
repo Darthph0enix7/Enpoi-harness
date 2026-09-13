@@ -49,6 +49,8 @@ export interface ILayout {
   openRightbar(track: boolean, fullscreen: boolean): void
   /** Report the right panel as hidden: no track, no handle. */
   closeRightbar(): void
+  /** Set the right panel's width preference in px. */
+  setRightbar(px: number): void
 }
 
 /** Cross-plugin panel-action face (ctx.layout). */
@@ -63,6 +65,11 @@ export class LayoutController implements ILayout {
     private readonly panels: PanelActions,
     private readonly hasMainPanel: (id: MainPanelId) => boolean,
   ) {}
+
+  /** Set the right panel's width preference in px. */
+  setRightbar(px: number): void {
+    this.panels.setRightbar(px)
+  }
 
   /** Select a global panel or return to the Conversation. */
   selectPanel(panelId: MainPanelId | null): void {

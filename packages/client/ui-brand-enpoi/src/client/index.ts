@@ -254,6 +254,13 @@ export function apply(ctx: Context): void {
     setTerminalDockHeight: (px) => { terminals.setDockHeight(px) },
   })
 
+  // enpoi: global toggle listener so the rail button and shortcuts work from anywhere on boot
+  if (typeof window !== 'undefined') {
+    window.addEventListener('enpoi-toggle-terminal-dock', () => {
+      terminals.toggleDock()
+    })
+  }
+
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
   ctx.slots.inject('sidebar.right.pane.tab', function* () {
     yield ctx.slots.register({
@@ -281,7 +288,7 @@ export function apply(ctx: Context): void {
       inject: (): SubagentSessionsInjected => {
         const sessions = ctx.get('sessions')
         return {
-          openSession: id => { sessions?.open(id) },
+          openSession: (id) => { sessions?.open(id) },
           refreshSessions: async () => { await sessions?.refresh() },
         }
       },

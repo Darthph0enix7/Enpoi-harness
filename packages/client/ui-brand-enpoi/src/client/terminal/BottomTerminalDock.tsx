@@ -77,8 +77,10 @@ export function BottomTerminalDock({
   writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock, setTerminalDockHeight,
 }: BottomTerminalDockProps): ReactNode {
   const dock = useTerminals(state => state.dock)
-  const sessionId = useSessions(state => state.current)
-  const cwd = useSessions(state => (state.current === undefined ? undefined : state.byId[state.current]?.cwd))
+  const currentSessionId = useSessions(state => state?.current)
+  const fallbackSessionId = useSessions(state => state?.ids?.[0] ?? Object.keys(state?.byId ?? {})[0])
+  const sessionId = currentSessionId ?? fallbackSessionId ?? 'global'
+  const cwd = useSessions(state => (sessionId === undefined ? undefined : state?.byId?.[sessionId as never]?.cwd))
   const session = useTerminals(state => (sessionId === undefined ? undefined : state.bySession[sessionId]))
   const tabs = useMemo(() => session?.tabs.filter(tab => tab.place === 'bottom') ?? EMPTY_TABS, [session])
   const active = tabs.find(tab => tab.id === session?.active.bottom) ?? tabs[0]
@@ -117,6 +119,7 @@ export function BottomTerminalDock({
       className={css.dock}
       style={{ left: box.left, width: box.width === 0 ? undefined : box.width, height }}
       data-enpoi-bottom-dock
+      data-enpoi-terminal-dock
       data-session={sessionId}
     >
       <div

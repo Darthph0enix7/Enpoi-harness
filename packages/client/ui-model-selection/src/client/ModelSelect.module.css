@@ -75,6 +75,7 @@
 .modelTrigger:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08));
   border-color: var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.18));
+  color: var(--dsw-alias-label-primary, #ffffff);
 }
 
 .modelTriggerActive {
@@ -339,6 +340,7 @@
 .option:hover:not(:disabled),
 .option:focus-visible {
   background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary, #ffffff);
 }
 
 /* Selection marker is the trailing check, not a fill — matches the Menu

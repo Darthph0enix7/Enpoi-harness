@@ -17,7 +17,7 @@
 .trigger:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, rgba(103, 220, 231, 0.08));
   border-color: var(--dsw-alias-border-l2-darkmode, rgba(103, 220, 231, 0.35));
-  color: var(--dsw-alias-label-primary-foreground, #e2e8f0);
+  color: var(--dsw-alias-label-primary, #ffffff);
 }
 
 .trigger:focus-visible {

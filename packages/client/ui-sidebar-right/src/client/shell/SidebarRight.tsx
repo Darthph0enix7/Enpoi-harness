@@ -41,7 +41,7 @@ import type { HalvesFit, LayoutState, PaneId } from '@deepseek-ai/dsh-client-ui-
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { GUIDE_KIND, pageAddress } from '../contract/seed.ts'
 import { dockLabels } from '../labels.ts'
-import { EDITOR_WIDTH_MIN } from '../rail.ts'
+import { clampEditorWidth, EDITOR_WIDTH_MIN } from '../rail.ts'
 import type { SidebarRightRailState } from '../rail.ts'
 import type { SidebarRightOpenTabOptions } from '../service.ts'
 import type { SidebarRightRailItem, SidebarRightTabDefinition } from '../tab-registry.ts'
@@ -112,6 +112,8 @@ export interface SidebarRightInjected {
   readonly setOpen: (open: boolean) => void
   /** Record the editor pane's width after a drag. */
   readonly setEditorWidth: (px: number) => void
+  /** Set the rightbar column width preference in the frame layout. */
+  readonly setRightbarWidth?: (px: number) => void
   readonly hooks: {
     readonly tabTypes: HostObservable<readonly SidebarRightTabDefinition[]>
     /** One entry per page kind offering a guide box; what the rail draws. */
@@ -276,6 +278,16 @@ function RailNeutralGlyph(): ReactNode {
   )
 }
 
+/** Glyph for the bottom terminal panel toggle. */
+function BottomTerminalGlyph(): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.4" y="2.4" width="13.2" height="11.2" rx="1.8" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M1.4 9.6h13.2v2.2a1.8 1.8 0 0 1-1.8 1.8H3.2a1.8 1.8 0 0 1-1.8-1.8z" fill="currentColor" />
+    </svg>
+  )
+}
+
 /** The panel's two controls, placed by the rail; the collapse control records the closed intent. */
 function PanelChrome({
   fullscreen, autoFullscreen, actions, sessionId, setOpen, t,
@@ -375,6 +387,20 @@ function Rail({
         })}
       </div>
       <div className={css.railControls}>
+        <Tooltip label="Bottom terminal dock" side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={css.iconButton}
+            aria-label="Toggle bottom terminal dock"
+            data-sidebar-right-bottom-toggle
+            data-enpoi-terminal-bottom-toggle
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('enpoi-toggle-terminal-dock'))
+            }}
+          >
+            <BottomTerminalGlyph />
+          </button>
+        </Tooltip>
         <PanelChrome
           fullscreen={fullscreen}
           autoFullscreen={autoFullscreen}
@@ -479,8 +505,9 @@ function EditorDivider({ right, width, onPreview, onCommit }: {
       onPointerMove={(event) => {
         const held = drag.current
         if (held === undefined || held.pointerId !== event.pointerId) return
-        // The editor sits left of the divider: dragging left grows it.
-        held.width = held.startWidth - (event.clientX - held.originX)
+        // Moving left (clientX < originX) shrinks the editor and grows the sidebar panel.
+        // Moving right (clientX > originX) grows the editor and shrinks the sidebar panel.
+        held.width = clampEditorWidth(held.startWidth + (event.clientX - held.originX))
         onPreview(held.width)
       }}
       onPointerUp={(event) => {
@@ -536,7 +563,7 @@ const PANEL_MIN = 160
  */
 export function RightbarSeat({
   sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab,
-  selectKind, setOpen, setEditorWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
+  selectKind, setOpen, setEditorWidth, setRightbarWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
   // The binding published below serves the public face's commands on the
@@ -626,19 +653,36 @@ export function RightbarSeat({
   // enpoi: the editor pane's live width while its divider drags; the committed
   // value is the rail's persisted preference.
   const [previewWidth, setPreviewWidth] = useState<number | undefined>(undefined)
-  if (surface === undefined) return null
-  const editorTab = surface.editorTabId === undefined ? undefined : surface.layout.tabs[surface.editorTabId]
+  const isFilesActive = litKind === 'files' || litKind === GUIDE_KIND
+  const editorTab = surface?.editorTabId === undefined ? undefined : surface.layout.tabs[surface.editorTabId]
   // enpoi: the kit already draws the pane's active tab: rendering the same
   // record in the editor would mount its body twice. The editor pane exists beside the
   // panel's page, so it simply waits until a page is back in front.
-  const activeDockTab = getPane(surface.layout, activeDockPaneId(surface.layout)).activeTabId
-  const editorOpen = editorTab !== undefined && surface.layout.expanded && editorTab.id !== activeDockTab
+  const activeDockTab = surface === undefined
+    ? undefined
+    : getPane(surface.layout, activeDockPaneId(surface.layout)).activeTabId
+  const editorOpen = surface !== undefined
+    && isFilesActive
+    && editorTab !== undefined
+    && surface.layout.expanded
+    && editorTab.id !== activeDockTab
+
+  // enpoi: auto-widen rightbar column on file open so preview and tree both fit comfortably!
+  const widenedSession = useRef<string | null>(null)
+  useEffect(() => {
+    if (!editorOpen || width >= 720 || fullscreen || setRightbarWidth === undefined) return
+    if (widenedSession.current === sessionId) return
+    widenedSession.current = sessionId
+    const target = Math.min(Math.max(760, width + railState.editorWidth), Math.round(viewportWidth * 0.75))
+    setRightbarWidth(target)
+  }, [editorOpen, width, fullscreen, sessionId, setRightbarWidth, railState.editorWidth, viewportWidth])
+
   const available = Math.max(0, width - RAIL_WIDTH - (editorOpen ? EDITOR_DIVIDER : 0))
   const editorWidth = editorOpen
     ? Math.min(previewWidth ?? railState.editorWidth, Math.max(EDITOR_WIDTH_MIN, available - PANEL_MIN))
     : 0
   const panelWidth = Math.max(0, available - editorWidth)
-  const panel: PanelProps = {
+  const panel: PanelProps | undefined = surface === undefined ? undefined : {
     sessionId, actions, t, renderSlot, surface, openTab, useTabTypes, useTabNavigation, useStore, occurrence,
     fullscreen, autoFullscreen, reportRoom,
   }
@@ -655,8 +699,8 @@ export function RightbarSeat({
         setOpen={setOpen}
         t={t}
       />
-      <SidebarPanel {...panel} width={panelWidth} panelRef={panelRef} />
-      {editorOpen && !fullscreen && editorTab !== undefined && (
+      {panel !== undefined && <SidebarPanel {...panel} width={panelWidth} panelRef={panelRef} />}
+      {panel !== undefined && editorOpen && !fullscreen && editorTab !== undefined && (
         <>
           <EditorPane
             {...panel}
@@ -672,7 +716,7 @@ export function RightbarSeat({
           />
         </>
       )}
-      <Floats {...panel} />
+      {panel !== undefined && <Floats {...panel} />}
     </>
   )
 }

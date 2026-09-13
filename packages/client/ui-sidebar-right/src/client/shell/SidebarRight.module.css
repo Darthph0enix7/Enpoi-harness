@@ -190,6 +190,18 @@
   min-width: 0;
   background: var(--dsw-alias-bg-base);
   border-left: 0.5px solid var(--dsw-alias-border-l4);
+  animation: editorFadeIn var(--ds-transition-duration-normal) var(--ds-ease-in-out);
+}
+
+@keyframes editorFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .editorDivider {

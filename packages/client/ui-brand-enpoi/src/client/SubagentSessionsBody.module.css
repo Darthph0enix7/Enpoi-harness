@@ -61,57 +61,6 @@
   to { transform: rotate(360deg); }
 }
 
-.crumbs {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  min-height: 32px;
-  padding: 0 2px;
-  scrollbar-width: thin;
-}
-
-.crumb,
-.crumbCurrent {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  max-width: 112px;
-  padding: 4px 7px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-tertiary, #94a3b8);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 0;
-}
-
-.crumb {
-  cursor: pointer;
-  transition: color 120ms ease, background 120ms ease;
-}
-
-.crumb:hover {
-  color: var(--dsw-alias-label-primary, #e2e8f0);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.crumbCurrent {
-  color: var(--dsw-alias-label-secondary, #cbd5e1);
-}
-
-.crumbSep {
-  flex-shrink: 0;
-  font-size: 10px;
-  color: var(--dsw-alias-label-caption, #475569);
-}
-
 .list {
   display: flex;
   flex-direction: column;

@@ -620,11 +620,15 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           // specialist role named in the delegation (librarian/fixer/explorer/
           // designer/oracle) gives the child its own identity instead of
           // inheriting the parent's (e.g. the Master Orchestrator).
+          const role = detectSubagentRole(args.description, args.prompt)
           const rolePersona = config.persona !== undefined
             ? config.persona
-            : ROLE_PERSONAS[detectSubagentRole(args.description, args.prompt) ?? '']
+            : ROLE_PERSONAS[role ?? '']
+          const formattedLabel = role && !new RegExp(`\\b${role}\\b`, 'i').test(args.description)
+            ? `${role.charAt(0).toUpperCase() + role.slice(1)}: ${args.description}`
+            : args.description
           const request = {
-            label: args.description,
+            label: formattedLabel,
             prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
             parent,
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
@@ -643,7 +647,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
               // there, so this call neither waits for nor collects a result.
               const started = await runtimeCtx.subagents.startContinuable({
                 provider: config.provider,
-                label: args.description,
+                label: formattedLabel,
                 request,
                 signal: exec.signal,
               })
@@ -733,7 +737,6 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
   }
   const selectForSession = (target: Session): ModelSelectionPolicy | undefined => {
     const freshSession = target.firstLiveSeq === 0
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       && target.eventAt(SessionSeq(0))?.type !== 'session/end-seed'
     let allowedModels = subagentModelSelectionPolicy(ctx.sessionProjections, target)
     if (allowedModels === undefined) {

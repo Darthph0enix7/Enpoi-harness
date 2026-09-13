@@ -148,9 +148,10 @@ export function apply(ctx: ClientContext): void {
       bindService: binding => controller.bind(binding),
       openTab: (kind, options) => { controller.openTab(kind, options) },
       // enpoi: the rail's gestures and its two hook sources (icons, state).
-      selectKind: kind => { controller.selectKind(kind) },
-      setOpen: open => { rail.setOpen(open) },
-      setEditorWidth: px => { rail.setEditorWidth(px) },
+      selectKind: (kind) => { controller.selectKind(kind) },
+      setOpen: (open) => { rail.setOpen(open) },
+      setEditorWidth: (px) => { rail.setEditorWidth(px) },
+      setRightbarWidth: (px) => { layout.setRightbar(px) },
       hooks: {
         tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() },
         railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },

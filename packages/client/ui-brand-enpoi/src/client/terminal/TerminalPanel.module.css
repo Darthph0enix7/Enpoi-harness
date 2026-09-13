@@ -9,6 +9,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  height: 100%;
 }
 
 /* The tab row: chips shrink and scroll; the controls keep their width. */
@@ -160,6 +161,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  height: 100%;
 }
 
 .banner {
