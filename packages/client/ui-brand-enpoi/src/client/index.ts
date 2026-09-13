@@ -19,6 +19,12 @@ import {
   type AgentModelsInjected,
 } from './AgentModelsBody.tsx'
 import { CapabilitiesBody, CapabilitiesIcon } from './CapabilitiesBody.tsx'
+import {
+  SubagentSessionsBody,
+  SubagentSessionsIcon,
+  type SubagentSessionsInjected,
+} from './SubagentSessionsBody.tsx'
+import { GitBody, GitIcon } from './GitBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
 import {
@@ -26,6 +32,10 @@ import {
   AGENT_MODELS_KIND,
   CAPABILITIES_ID,
   CAPABILITIES_KIND,
+  GIT_ID,
+  GIT_KIND,
+  SUBAGENT_SESSIONS_ID,
+  SUBAGENT_SESSIONS_KIND,
 } from './kinds.ts'
 import {
   getPersonaAssignments,
@@ -111,9 +121,10 @@ function resolveAgentModelsDirectory(
 }
 
 /**
- * Register brand marks, the Watchtower view tab, the two global operator
- * pages (Capabilities, Agent Models) with their sidebar rail rows, the
- * Orchestration settings section, and In-Chat Task Cards.
+ * Register brand marks, the Watchtower view tab, the four global operator
+ * pages (Capabilities, Agent Models, Subagent Sessions, Git) with their
+ * sidebar rail rows, the Orchestration settings section, and In-Chat Task
+ * Cards.
  * @param ctx - Client root context.
  */
 export function apply(ctx: Context): void {
@@ -173,6 +184,30 @@ export function apply(ctx: Context): void {
       icon: FleetRoutingIcon,
     }],
   }), 'enpoi: agent-models tab type')
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: SUBAGENT_SESSIONS_ID,
+    kind: SUBAGENT_SESSIONS_KIND,
+    priority: 'extension',
+    title: () => 'Subagent Sessions',
+    guide: [{
+      order: 57,
+      title: () => 'Subagent Sessions',
+      description: () => 'Watch and open dispatched subagent sessions',
+      icon: SubagentSessionsIcon,
+    }],
+  }), 'enpoi: subagent-sessions tab type')
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: GIT_ID,
+    kind: GIT_KIND,
+    priority: 'extension',
+    title: () => 'Git',
+    guide: [{
+      order: 58,
+      title: () => 'Git',
+      description: () => 'Branches, changes, and diffs for the session workspace',
+      icon: GitIcon,
+    }],
+  }), 'enpoi: git tab type')
 
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
   ctx.slots.inject('sidebar.right.pane.tab', function* () {
@@ -195,6 +230,21 @@ export function apply(ctx: Context): void {
         clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
       }),
     }, AgentModelsBody)
+    yield ctx.slots.register({
+      name: 'sidebar.right.pane.tab',
+      key: SUBAGENT_SESSIONS_ID,
+      inject: (): SubagentSessionsInjected => {
+        const sessions = ctx.get('sessions')
+        return {
+          openSession: id => { sessions?.open(id) },
+          refreshSessions: async () => { await sessions?.refresh() },
+        }
+      },
+    }, SubagentSessionsBody)
+    yield ctx.slots.register({
+      name: 'sidebar.right.pane.tab',
+      key: GIT_ID,
+    }, GitBody)
   })
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
