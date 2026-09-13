@@ -12,6 +12,7 @@ import { dockPaneIds, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply, inject } from '../src/client/index.ts'
 import { intentsFor } from '../src/client/shell/SidebarRight.tsx'
+import { GUIDE_KIND } from '../src/client/contract/seed.ts'
 import type { SidebarRightTabInfo, SidebarRightTabMenuOwnerProps } from '../src/client/contract/slots.ts'
 import type { createSidebarRightStore } from '../src/client/stores.ts'
 
@@ -60,7 +61,7 @@ function transition(property = 'transform') {
 async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
   const runtime = await SlotTestRuntime.create()
   runtimes.push(runtime)
-  const frame = { openRightbar: vi.fn(), closeRightbar: vi.fn() }
+  const frame = { openRightbar: vi.fn(), closeRightbar: vi.fn(), setRightbar: vi.fn() }
   const pin = vi.fn<(address: string, signal: AbortSignal) => void>()
   runtime.ctx.provide('layout', frame as never)
   runtime.ctx.provide('resources', { pin } as never)
@@ -219,6 +220,40 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
     await h.runtime.dispose()
     expect(h.frame.closeRightbar).toHaveBeenCalled()
+  })
+
+  it('mounts the editor pane at zero width for its close and lights it on the files page', async () => {
+    const h = await mountSeat()
+    // No editor tab: there is nothing to grow from or shrink to yet.
+    expect(h.view.container.querySelector('[data-sidebar-right-editor]')).toBeNull()
+    h.open()
+    // The pane exists while closed, so opening and collapsing can transition
+    // its width instead of mounting and unmounting in one frame.
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+    expect(parseFloat(editor.style.width)).toBe(0)
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    const wide = parseFloat(panel.style.width)
+    act(() => { h.actions.setExpanded(SESSION, false) })
+    expect(element(h.view.container, '[data-sidebar-right-editor]')).toBe(editor)
+    // The files page lights the pane: the open marker flips and the panel
+    // gives up the editor's share of the column.
+    act(() => { h.actions.setExpanded(SESSION, true) })
+    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
+    expect(parseFloat(panel.style.width)).toBeLessThan(wide)
+  })
+
+  it('keeps the editor divider interactive only while the pane is open', async () => {
+    const h = await mountSeat()
+    expect(h.view.container.querySelector('[data-sidebar-right-editor-divider]')).toBeNull()
+    h.open()
+    const divider = element(h.view.container, '[data-sidebar-right-editor-divider]')
+    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    expect(element(h.view.container, '[data-sidebar-right-editor-divider]')).toBe(divider)
+    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
   })
 
   it('fills the viewport without replacing the content tree or releasing the wide track', async () => {

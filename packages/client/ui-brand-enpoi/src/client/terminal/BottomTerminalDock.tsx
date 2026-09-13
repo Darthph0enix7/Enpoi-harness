@@ -20,15 +20,43 @@ import css from './TerminalPanel.module.css'
 /** Empty selection kept reference-stable so a selector never re-renders the dock. */
 const EMPTY_TABS: readonly TerminalTabState[] = []
 
+/** Horizontal box of the conversation column's content, in viewport px. */
+export interface DockBox {
+  /** Left content edge in px. */
+  readonly left: number
+  /** Content width in px; 0 until the first successful measure. */
+  readonly width: number
+}
+
 /**
- * Measure the conversation column's viewport box so the fixed dock can sit
+ * Derive the dock's fixed box from the conversation column's border-box rect
+ * and its horizontal padding: the dock spans the column's content box, so it
+ * stops before any padding that reserves the collapsed sidebar rail.
+ * @param rect - the column's border-box `left` and `width` in px.
+ * @param paddingLeft - the column's computed left padding in px.
+ * @param paddingRight - the column's computed right padding in px.
+ * @returns the content-box left edge and width, width clamped at zero.
+ */
+export function dockBoxFromRect(
+  rect: { readonly left: number; readonly width: number },
+  paddingLeft: number,
+  paddingRight: number,
+): DockBox {
+  return {
+    left: rect.left + paddingLeft,
+    width: Math.max(0, rect.width - paddingLeft - paddingRight),
+  }
+}
+
+/**
+ * Measure the conversation column's content box so the fixed dock can sit
  * exactly over it; observed through column resizes (panel drags, sidebar
  * collapse, viewport changes).
  * @param active - whether the dock is open.
- * @returns the column's left edge and width in px.
+ * @returns the column's content left edge and width in px.
  */
-function useCenterColumnBox(active: boolean): { readonly left: number; readonly width: number } {
-  const [box, setBox] = useState({ left: 0, width: 0 })
+function useCenterColumnBox(active: boolean): DockBox {
+  const [box, setBox] = useState<DockBox>({ left: 0, width: 0 })
   useEffect(() => {
     if (!active) return undefined
     let frame: number | null = null
@@ -40,9 +68,15 @@ function useCenterColumnBox(active: boolean): { readonly left: number; readonly 
       const element = column()
       if (element === null) return
       const rect = element.getBoundingClientRect()
-      setBox(prev => Math.abs(prev.left - rect.left) < 0.5 && Math.abs(prev.width - rect.width) < 0.5
+      const style = getComputedStyle(element)
+      const next = dockBoxFromRect(
+        rect,
+        Number.parseFloat(style.paddingLeft) || 0,
+        Number.parseFloat(style.paddingRight) || 0,
+      )
+      setBox(prev => Math.abs(prev.left - next.left) < 0.5 && Math.abs(prev.width - next.width) < 0.5
         ? prev
-        : { left: rect.left, width: rect.width })
+        : next)
     }
     const schedule = (): void => {
       if (frame !== null) return

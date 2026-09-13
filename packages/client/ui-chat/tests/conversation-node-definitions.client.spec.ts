@@ -2461,4 +2461,81 @@ describe('built-in conversation node Definitions', () => {
       compaction: { summary: 'manual summary', summaryEventSeq: 20 },
     })
   })
+
+  it('derives model attribution from a reloaded Assistant stream finish chunk', () => {
+    // A reloaded session has no assistant/live-chunk events: the recorded
+    // stream inside assistant/message is the only attribution carrier.
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          ...assistantMessage('reloaded-model', 'settled answer'),
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
+        },
+        stream: [
+          {
+            type: 'chunk',
+            time: 1_700_000_000_103,
+            chunk: { type: 'text-delta', index: 0, text: 'settled answer' },
+          },
+          {
+            type: 'chunk',
+            time: 1_700_000_000_104,
+            chunk: {
+              type: 'finish',
+              reason: { kind: 'stop' },
+              replayState: {
+                response: {
+                  provider: 'antigravity',
+                  model: 'gemini-3.8-flash-tiered',
+                  reasoningEffort: 'high',
+                },
+              },
+            },
+          },
+        ],
+      }, { surfaceOp: 'append' }),
+      at(4, 'step/end', { turn: 1, step: 1 }),
+      at(5, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+
+    const finalNode = (node(snapshot(value), 'assistant-step')?.data as AssistantChatData).finalNode
+    expect(finalNode?.requestConfig).toEqual({
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash-tiered',
+      reasoningEffort: 'high',
+    })
+    expect(node(snapshot(value), 'turn-tail')?.data).toMatchObject({
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash-tiered',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('projects model provenance from the durable Assistant message source', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          ...assistantMessage('source-only-model', 'settled answer'),
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
+        },
+      }, { surfaceOp: 'append' }),
+      at(4, 'step/end', { turn: 1, step: 1 }),
+      at(5, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+
+    expect((node(snapshot(value), 'assistant-step')?.data as AssistantChatData).finalNode?.provenance)
+      .toEqual({ provider: 'antigravity', model: 'gemini-3.8-flash-tiered' })
+    expect(node(snapshot(value), 'turn-tail')?.data).toMatchObject({
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash-tiered',
+    })
+  })
 })

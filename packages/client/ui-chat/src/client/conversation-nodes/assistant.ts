@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  AssistantBlock, AssistantMessageNode, ConversationLocation, ConversationMatch,
+  AssistantBlock, AssistantMessageNode, AssistantProvenanceView, ConversationLocation, ConversationMatch,
   ConversationNodeContext, ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { AssistantStreamRecord, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { AssistantChatData } from '../contract/chat-nodes.ts'
@@ -195,6 +195,30 @@ function closedBoundary(location: ConversationLocation): { seq: number; time: nu
   return undefined
 }
 
+/** Last terminal `finish` chunk of a settled Assistant stream, or undefined when it carries none. */
+function durableFinishChunk(stream: readonly AssistantStreamRecord[]): Extract<StreamChunk, { type: 'finish' }> | undefined {
+  for (let index = stream.length - 1; index >= 0; index -= 1) {
+    const record = stream[index]
+    if (record?.type === 'chunk' && record.chunk.type === 'finish') return record.chunk
+  }
+  return undefined
+}
+
+/**
+ * Provider/model identity recorded on a durable Assistant message source.
+ * The transport replays `assistant/message` without the live stream, so this
+ * source is the attribution that survives a reload; an unrecognized producer
+ * yields nothing.
+ * @param source - Durable `assistant/message` source.
+ * @returns The recorded provider/model, or undefined when absent.
+ */
+function sourceProvenance(source: unknown): AssistantProvenanceView | undefined {
+  if (typeof source !== 'object' || source === null) return undefined
+  const { kind, provider, model } = source as Record<string, unknown>
+  if (kind !== 'model' || typeof provider !== 'string' || typeof model !== 'string') return undefined
+  return { provider, model }
+}
+
 function finalNode(
   state: AssistantState,
   context: ConversationNodeContext<AssistantState>,
@@ -203,10 +227,15 @@ function finalNode(
   if (final?.event.type === 'assistant/message') {
     const event = final.event
     const finishMatch = state.finishChunk
-    const finishChunk = finishMatch?.event.type === 'assistant/live-chunk' ? finishMatch.event.data.chunk : undefined
-    const response = finishChunk?.type === 'finish'
-      ? (finishChunk.replayState?.response as { provider?: string; model?: string; reasoningEffort?: string } | null | undefined)
-      : undefined
+    const liveChunk = finishMatch?.event.type === 'assistant/live-chunk' ? finishMatch.event.data.chunk : undefined
+    // Live streaming names the model in its finish chunk; a reloaded session
+    // carries the same chunk inside the settled event's recorded stream.
+    const finishChunk = liveChunk?.type === 'finish' ? liveChunk : durableFinishChunk(event.data.stream)
+    const response = finishChunk?.replayState?.response as {
+      provider?: string
+      model?: string
+      reasoningEffort?: string
+    } | null | undefined
     const provider = response?.provider
     const model = response?.model
     const reasoningEffort = response?.reasoningEffort
@@ -217,6 +246,7 @@ function finalNode(
         ...typeof reasoningEffort === 'string' ? { reasoningEffort } : {},
       }
       : undefined
+    const provenance = sourceProvenance(event.data.message.source)
     return {
       kind: 'assistant',
       seq: event.seq,
@@ -233,6 +263,7 @@ function finalNode(
       },
       ...event.data.interrupted === true ? { interrupted: true } : {},
       ...requestConfig !== undefined ? { requestConfig } : {},
+      ...provenance !== undefined ? { provenance } : {},
     }
   }
   const location = context.start?.location ?? context.matches.at(-1)?.location

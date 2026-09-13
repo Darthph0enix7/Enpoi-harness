@@ -12,6 +12,13 @@
  * the panel. A fullscreen opening reserves its underlying track only after
  * the panel covers the frame, without animating those hidden columns.
  *
+ * The editor pane beside the panel also keeps a zero-width state to land on:
+ * it is mounted while the files page is lit (its first open has a pane to grow
+ * from) or an editor tab exists (its close has one to shrink to), and its
+ * width, seam and opacity ride the same slow curve as the panel's share of the
+ * column. A drag marks the body so the stylesheet can pause those eased
+ * widths while the pointer writes them.
+ *
  * The panel has no header of its own: its two controls — presentation switch
  * and collapse — ride the docking kit's chrome seat at the end of the top-right
  * pane's tab strip, so the strip is the panel's whole top edge. The way back in
@@ -462,16 +469,29 @@ function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<H
  * The editor pane beside the panel: the resource tab the rail's file opens
  * landed, drawn left of the sidebar so the tree stays visible. It is the
  * panel's sibling, so both keep their own width.
+ *
+ * The pane draws even before there is a tab to put in it, at width zero, and
+ * after the tab is gone its body is replaced by nothing while the pane
+ * transitions away; `open` drives both. That is what gives the first open a
+ * state to grow from and the close a state to shrink to instead of a mount and
+ * an unmount in one frame.
  */
-function EditorPane(panel: PanelProps & { tab: TabRecord; width: number; right: number }): ReactNode {
-  const { tab, width, right } = panel
+function EditorPane({ panel, tab, width, right, open }: {
+  readonly panel: PanelProps
+  readonly tab: TabRecord | undefined
+  readonly width: number
+  readonly right: number
+  readonly open: boolean
+}): ReactNode {
   return (
     <div
       className={css.editor}
       style={{ right, width }}
       data-sidebar-right-editor
+      data-sidebar-right-editor-open={open || undefined}
+      aria-hidden={!open || undefined}
     >
-      {bodiesFor(panel)(tab)}
+      {tab !== undefined && bodiesFor(panel)(tab)}
     </div>
   )
 }
@@ -479,26 +499,47 @@ function EditorPane(panel: PanelProps & { tab: TabRecord; width: number; right: 
 /**
  * The editor pane's drag divider: dragging it left widens the editor and
  * narrows the panel, because the two share the frame's right column.
+ *
+ * The handle stays mounted with its pane, riding the seam while the pane opens
+ * and closes; it is interactive and visible only while the pane is open, so a
+ * drag can never start on a moving edge.
  */
-function EditorDivider({ right, width, onPreview, onCommit }: {
+function EditorDivider({ right, width, open, onPreview, onCommit }: {
   readonly right: number
-  /** The editor's current rendered width; a drag starts from it. */
+  /** The editor's current target width; a drag starts from it. */
   readonly width: number
+  /** Whether the pane is open enough for this handle to be the live one. */
+  readonly open: boolean
   readonly onPreview: (width: number | undefined) => void
   readonly onCommit: (width: number) => void
 }): ReactNode {
   const drag = useRef<{ pointerId: number; originX: number; startWidth: number; width: number } | undefined>(undefined)
   const [dragging, setDragging] = useState(false)
+  // Easing a width while the pointer writes it would detach the pane edges
+  // from the handle, so a gesture marks the body for the stylesheet and clears
+  // the mark when it ends or this handle unmounts mid-gesture.
+  useEffect(() => {
+    if (!dragging) {
+      document.body.removeAttribute(EDITOR_RESIZE_MARKER)
+      return
+    }
+    document.body.setAttribute(EDITOR_RESIZE_MARKER, '')
+    return () => { document.body.removeAttribute(EDITOR_RESIZE_MARKER) }
+  }, [dragging])
   return (
     <div
       className={css.editorDivider}
       style={{ right }}
       data-sidebar-right-editor-divider
+      data-sidebar-right-editor-open={open || undefined}
       data-dragging={dragging || undefined}
       onPointerDown={(event) => {
         if (event.button !== 0) return
         event.preventDefault()
         event.currentTarget.setPointerCapture(event.pointerId)
+        // Set before the state commit so the first pointer move already runs
+        // against paused transitions.
+        document.body.setAttribute(EDITOR_RESIZE_MARKER, '')
         drag.current = { pointerId: event.pointerId, originX: event.clientX, startWidth: width, width }
         setDragging(true)
       }}
@@ -554,6 +595,11 @@ const RAIL_MARKER = 'data-sidebar-right-rail-mounted'
 const EDITOR_DIVIDER = 5
 /** Narrowest panel the right column leaves once the editor takes its share. */
 const PANEL_MIN = 160
+/**
+ * Body marker the editor divider sets while it drags; the stylesheet pauses
+ * the pane's eased widths on it so they stay 1:1 with the pointer.
+ */
+const EDITOR_RESIZE_MARKER = 'data-sidebar-right-editor-resizing'
 
 /**
  * The right column's occupant: the rail (always), the panel it opens, the
@@ -666,6 +712,11 @@ export function RightbarSeat({
     && editorTab !== undefined
     && surface.layout.expanded
     && editorTab.id !== activeDockTab
+  // The pane outlives its shown state by exactly the states that need a
+  // zero-width end: the files page carries an empty pane so the first open has
+  // something to grow from, and an editor tab keeps one so leaving the page or
+  // closing the tab has something to shrink.
+  const editorMounted = surface !== undefined && !fullscreen && (isFilesActive || editorTab !== undefined)
 
   // enpoi: auto-widen rightbar column on file open so preview and tree both fit comfortably!
   const widenedSession = useRef<string | null>(null)
@@ -700,17 +751,19 @@ export function RightbarSeat({
         t={t}
       />
       {panel !== undefined && <SidebarPanel {...panel} width={panelWidth} panelRef={panelRef} />}
-      {panel !== undefined && editorOpen && !fullscreen && editorTab !== undefined && (
+      {panel !== undefined && editorMounted && (
         <>
           <EditorPane
-            {...panel}
+            panel={panel}
             tab={editorTab}
+            open={editorOpen}
             width={editorWidth}
-            right={RAIL_WIDTH + panelWidth + EDITOR_DIVIDER}
+            right={RAIL_WIDTH + panelWidth + (editorOpen ? EDITOR_DIVIDER : 0)}
           />
           <EditorDivider
             right={RAIL_WIDTH + panelWidth}
             width={editorWidth}
+            open={editorOpen}
             onPreview={setPreviewWidth}
             onCommit={(px) => { setPreviewWidth(undefined); setEditorWidth(px) }}
           />

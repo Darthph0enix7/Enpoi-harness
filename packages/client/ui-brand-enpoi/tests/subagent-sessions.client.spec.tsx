@@ -74,20 +74,17 @@ describe('SubagentSessionsBody — lineage tree', () => {
     expect(openSession).toHaveBeenCalledWith('main')
   })
 
-  it('shows the root → current ancestor strip and jumps up a level from it', () => {
-    const { openSession } = mount([
+  it('navigates straight from a grandchild row without an ancestor strip', () => {
+    const { openSession, list } = mount([
       row('main', 'Main Session'),
       row('child', 'Fixer child', { parentId: 'main', origin: 'subagent' }),
       row('grand', 'Grandchild', { parentId: 'child', origin: 'subagent' }),
     ], 'grand')
 
-    const nav = within(screen.getByRole('navigation', { name: 'Session ancestry' }))
-    expect(nav.getByText('Main Session')).toBeTruthy()
-    expect(nav.getByText('Fixer child')).toBeTruthy()
-    expect(nav.getByText('Grandchild').getAttribute('aria-current')).toBe('page')
+    expect(screen.queryByRole('navigation', { name: 'Session ancestry' })).toBeNull()
 
-    fireEvent.click(nav.getByText('Main Session'))
-    expect(openSession).toHaveBeenCalledWith('main')
+    fireEvent.click(list().getByText('Fixer child'))
+    expect(openSession).toHaveBeenCalledWith('child')
   })
 
   it('caps rows at 50 and reports the full total', () => {

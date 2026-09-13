@@ -16,6 +16,11 @@
  * edge therefore travel together. Visibility flips after the slide so the box
  * is out of reach once off-edge, and flips back before the slide starts.
  *
+ * The panel's share of the column is its width, and the editor pane beside it
+ * eases the same value in reverse; both ride the slow variables so opening and
+ * closing the split is one gesture. A gesture that writes widths directly
+ * pauses that easing (see the pointer-cadence rules below).
+ *
  * The normal panel is below frame overlays (20); fullscreen (40) covers the
  * frame and remains below independently floating panels (60). The rail (46)
  * stays above both so the way back in never disappears.
@@ -39,27 +44,50 @@
   visibility: hidden;
   transition:
     transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    width var(--ds-transition-duration-slow) var(--ds-ease-in-out),
     visibility 0s linear var(--ds-transition-duration-slow);
 }
 
 .panel[data-sidebar-right-open] {
   transform: none;
   visibility: visible;
-  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  transition:
+    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    width var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
+/*
+ * Fullscreen is a mode switch, not a slide: the width goes to the viewport in
+ * one step (the frame also suppresses its own transitions on the way out), and
+ * the box is fixed rather than a column occupant.
+ */
 .panel[data-sidebar-right-panel='fullscreen'] {
   position: fixed;
   inset: 0;
   z-index: 40;
   border: none;
+  transition:
+    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    visibility 0s linear var(--ds-transition-duration-slow);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .panel,
-  .panel[data-sidebar-right-open] {
-    transition: none;
-  }
+/*
+ * Widths written at pointer cadence must not ease: the frame's own handle
+ * marks its drag on the frame, the editor divider marks its gesture on the
+ * body, and a fullscreen exit marks itself instant. The body marker covers the
+ * divider because the panel and the editor are siblings without a wrapper of
+ * their own; `data-dragging` on the frame covers the frame's resize handle.
+ */
+:global(body[data-sidebar-right-editor-resizing]) .panel,
+:global(body[data-sidebar-right-editor-resizing]) .editor,
+:global(body[data-sidebar-right-editor-resizing]) .editorDivider,
+:global([data-dragging]) .panel,
+:global([data-dragging]) .editor,
+:global([data-dragging]) .editorDivider,
+:global([data-rightbar-instant]) .panel,
+:global([data-rightbar-instant]) .editor,
+:global([data-rightbar-instant]) .editorDivider {
+  transition: none;
 }
 
 /*
@@ -188,20 +216,33 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* The pane's share is a width: its content is clipped while the pane is
+     narrower than the content, so the split reveals it instead of reflowing. */
+  overflow: hidden;
   background: var(--dsw-alias-bg-base);
   border-left: 0.5px solid var(--dsw-alias-border-l4);
-  animation: editorFadeIn var(--ds-transition-duration-normal) var(--ds-ease-in-out);
+  /* Closed: parked at the column's left edge at width zero, out of reach.
+     Visibility flips after the shrink so the exit is still drawn, and
+     pointer events are off so a zero-width pane cannot eat clicks on the
+     conversation's edge. */
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    width var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    right var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    visibility 0s linear var(--ds-transition-duration-slow);
 }
 
-@keyframes editorFadeIn {
-  from {
-    opacity: 0;
-    transform: translateX(12px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+.editor[data-sidebar-right-editor-open] {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    width var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    right var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 .editorDivider {
@@ -212,6 +253,18 @@
   width: 5px;
   cursor: col-resize;
   touch-action: none;
+  /* Mounted with its pane and riding the seam through the open and close
+     transitions; live only while the pane is open. */
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    right var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.editorDivider[data-sidebar-right-editor-open] {
+  pointer-events: auto;
+  opacity: 1;
 }
 
 .editorDivider::after {
@@ -259,4 +312,19 @@
   inset: 0;
   z-index: 60;
   pointer-events: none;
+}
+
+/*
+ * Reduced motion keeps the same layout at every step, just without the ride:
+ * this rule sits last so it wins over every open-state transition above.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .panel[data-sidebar-right-open],
+  .panel[data-sidebar-right-panel='fullscreen'],
+  .editor,
+  .editor[data-sidebar-right-editor-open],
+  .editorDivider {
+    transition: none;
+  }
 }

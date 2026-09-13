@@ -51,7 +51,7 @@ export interface MessageIconActionsProps {
  * @returns The actions row element.
  */
 export function MessageIconActions({
-  text, time, provider, model, reasoningEffort,
+  text, time, model,
   clock, onBranch, branchUnavailable = false, onRevert, className,
   extraActions, usageAction, t,
 }: MessageIconActionsProps) {
@@ -91,10 +91,7 @@ export function MessageIconActions({
           {' '}
           <span className={css.runTimeDot} aria-hidden>·</span>
           {' '}
-          <span
-            className={css.modelBadge}
-            title={`${provider !== undefined ? `${provider}/` : ''}${model}${reasoningEffort !== undefined ? ` (${reasoningEffort})` : ''}`}
-          >
+          <span className={css.modelBadge} title={model}>
             {model}
           </span>
         </>

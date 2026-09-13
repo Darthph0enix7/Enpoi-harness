@@ -111,7 +111,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
       />,
     )
 
-    expect(screen.getByText('📚 Librarian')).toBeTruthy()
+    expect(screen.getByText('Librarian')).toBeTruthy()
     expect(screen.getByText('Research WebSockets vs SSE')).toBeTruthy()
     expect(screen.getByText('gemini-3.7-flash-tiered')).toBeTruthy()
     expect(screen.getByText('⏱️ 2.4s')).toBeTruthy()
@@ -174,7 +174,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
       />,
     )
 
-    expect(screen.getByText('🔍 Explorer')).toBeTruthy()
+    expect(screen.getByText('Explorer')).toBeTruthy()
     expect(screen.getByText('Explore codebase architecture')).toBeTruthy()
 
     // Expand
