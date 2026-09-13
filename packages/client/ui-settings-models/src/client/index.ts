@@ -17,7 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { ModelsSection } from './ModelsSection.tsx'
 import type { ModelsSectionInjected } from './ModelsSection.tsx'
-import { ModelsFooterExtras, PoolProviderCardExtras } from './pool-extras.tsx'
+import { PoolProviderCardExtras } from './pool-extras.tsx'
 import type { PoolExtrasInjected } from './pool-extras.tsx'
 import { DeepSeekOnboardingDialog } from './DeepSeekOnboardingDialog.tsx'
 import type { DeepSeekOnboardingInjected } from './DeepSeekOnboardingDialog.tsx'
@@ -159,20 +159,16 @@ export function apply(ctx: ClientContext): void {
       'settings.models.footer': { kind: 'list', scope: 'root' },
     },
   }, ModelsSection))
-  // Key Pool UI rides the Models page's official extension seats: the per-card
-  // editor on every llm-pi-ai family card, and the quota/catalog card after
-  // the rows. Both wait on the section's own child declarations.
+  // Key Pool UI rides the Models page's official extension seats. The
+  // per-card editor registration stays (inert — the restored page edits the
+  // pool in its detail panel's Keys card). The Usage & Quota footer card was
+  // REMOVED by operator directive: it never reported real quota (these
+  // upstreams return no rate-limit headers) and it cluttered the page.
   ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
     name: 'settings.models.provider-card',
     key: 'llm-pi-ai',
     inject: poolExtrasInjected,
   }, PoolProviderCardExtras))
-  ctx.slots.inject('settings.models.footer', () => ctx.slots.register({
-    name: 'settings.models.footer',
-    id: 'enpoi-pool-quota',
-    order: 50,
-    inject: poolExtrasInjected,
-  }, ModelsFooterExtras))
   ctx.slots.inject('settings.onboarding', () => ctx.slots.register({
     name: 'settings.onboarding',
     id: 'welcome-notice',
