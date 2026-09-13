@@ -6,12 +6,14 @@ import Schema from '@deepseek-ai/schemastery'
 import { bindSnapshotSelector, RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import { ModelsSection, providerCopy } from '../src/client/ModelsSection.tsx'
+import { ModelsSection } from '../src/client/ModelsSection.tsx'
 import type { ModelsSectionInjected, ModelsSectionProps } from '../src/client/ModelsSection.tsx'
+import { ProviderEditor } from '../src/client/ProviderEditor.tsx'
 import { CustomProviderCard } from '../src/client/CustomProviderCard.tsx'
 import { formatCapacity, parseCapacity } from '../src/client/DeepSeekModelsEditor.tsx'
 import { SettingsDescribeMirror } from '@deepseek-ai/dsh-client-ui-settings/src/client/settings-mirror.ts'
 import { ModelsSettingsStore, deriveKeyRef, protocolChoices } from '../src/client/store.ts'
+import type { ModelsWire } from '../src/client/store.ts'
 import { createModelsOperations } from '../src/client/operations.ts'
 import type { ModelsOperations } from '../src/client/operations.ts'
 import { en } from '../src/client/locales.ts'
@@ -142,6 +144,15 @@ function scriptedFace(options: {
   return { face, discover, mutate, set, namespace }
 }
 
+/**
+ * The generated Remote wire the page consumes. The scripted face implements
+ * only the calls these specs make, so the narrowing to {@link ModelsWire}
+ * happens once here instead of at every mount.
+ */
+function wireOf(face: ReturnType<typeof scriptedFace>['face']): ModelsWire {
+  return face as unknown as ModelsWire
+}
+
 type PageContext = ConstructorParameters<typeof ModelsSettingsStore>[0]
 
 /**
@@ -206,7 +217,7 @@ async function mountSection(options: Parameters<typeof scriptedFace>[0] = {}) {
   const injected: ModelsSectionProps = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
-    operations: operationsWith(scripted.face),
+    api: wireOf(scripted.face),
     schema: settingsSchema,
     t,
     renderSlot: () => null,
@@ -215,14 +226,43 @@ async function mountSection(options: Parameters<typeof scriptedFace>[0] = {}) {
   return { ...scripted, controller }
 }
 
-/** Open the editor of one configured row and expand its customized fold. */
-function openEditor(provider: string): void {
-  const row = screen.getByText(provider).closest('li')
-  if (row === null) throw new Error(`no row for ${provider}`)
-  fireEvent.click(within_(row, en.edit))
+/**
+ * Render one pi-ai route's editor card over its scripted namespace and expand
+ * the customized fold. The route editor is a component in its own right (the
+ * onboarding dialog reuses it), so the form specs mount it directly instead of
+ * reaching it through the section page.
+ */
+function renderEditor(
+  face: object,
+  namespace: SettingsNamespaceView,
+  provider: string,
+  declared = false,
+): void {
+  render(<ProviderEditor
+    provider={provider}
+    displayName={provider}
+    declared={declared}
+    namespace={namespace}
+    schema={settingsSchema}
+    settingsPath={['providers', provider]}
+    operations={operationsWith(face)}
+    t={t}
+    readOnly={false}
+    onClose={() => {}}
+  />)
   const summary = document.querySelector('summary')
   if (summary === null) throw new Error('no customized fold')
   fireEvent.click(summary)
+}
+
+/** Mount the editor of one route over a freshly scripted face. */
+function mountEditor(
+  provider: string,
+  options: Parameters<typeof scriptedFace>[0] = {},
+): ReturnType<typeof scriptedFace> {
+  const scripted = scriptedFace(options)
+  renderEditor(scripted.face, scripted.namespace, provider, options.declaredRoutes?.includes(provider) ?? false)
+  return scripted
 }
 
 /** Open one model row's advanced fold, where the capacities live. */
@@ -257,9 +297,7 @@ describe('protocolChoices', () => {
 
 describe('model list editing', () => {
   it('adds, edits, and removes rows without storing emptied optional fields', async () => {
-    const { mutate } = await mountSection()
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai')
     fireEvent.click(screen.getByRole('button', { name: en.addModel }))
     fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'acme-large' } })
     expandModel(1)
@@ -278,11 +316,9 @@ describe('model list editing', () => {
   })
 
   it('names a duplicate model id in the edit flow too', async () => {
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('openai', {
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'dup' }] } },
     })
-    openEditor('openai')
-
     fireEvent.click(screen.getByRole('button', { name: en.addModel }))
     fireEvent.change(screen.getByLabelText(`${en.modelId} 2`), { target: { value: 'dup' } })
 
@@ -294,9 +330,7 @@ describe('model list editing', () => {
   })
 
   it('reads K and M suffixes and keeps the text the user typed', async () => {
-    const { mutate } = await mountSection()
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai')
     fireEvent.click(screen.getByRole('button', { name: en.addModel }))
     fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'm' } })
     expandModel(1)
@@ -317,9 +351,7 @@ describe('model list editing', () => {
   })
 
   it('refuses to apply while a capacity is unreadable', async () => {
-    const { mutate } = await mountSection()
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai')
     fireEvent.click(screen.getByRole('button', { name: en.addModel }))
     fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'm' } })
     expandModel(1)
@@ -334,7 +366,7 @@ describe('model list editing', () => {
   })
 
   it('spells a stored capacity back the way it is typed', async () => {
-    await mountSection({
+    mountEditor('openai', {
       providers: {
         openai: {
           baseURL: 'https://proxy.example/v1',
@@ -342,7 +374,6 @@ describe('model list editing', () => {
         },
       },
     })
-    openEditor('openai')
     expandModel(1)
 
     // Opening a row reads the stored counts, which are plain integers; showing
@@ -353,11 +384,9 @@ describe('model list editing', () => {
   })
 
   it('edits one row of several and lets a cleared capacity leave the profile', async () => {
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('openai', {
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'first' }, { id: 'second' }] } },
     })
-    openEditor('openai')
-
     expandModel(2)
     fireEvent.change(screen.getByLabelText(`${en.modelMaxTokens} 2`), { target: { value: '2048' } })
     fireEvent.change(screen.getByLabelText(`${en.modelName} 2`), { target: { value: 'Second' } })
@@ -374,9 +403,7 @@ describe('model list editing', () => {
   })
 
   it('shows the adapter defaults as inherited until an edit takes them over', async () => {
-    await mountSection({ providers: { openai: { baseURL: 'https://proxy.example/v1' } } })
-    openEditor('openai')
-
+    mountEditor('openai', { providers: { openai: { baseURL: 'https://proxy.example/v1' } } })
     // The user layer names no models, so the list belongs to the adapter and
     // says so; taking it over is an explicit act, not a side effect of opening.
     expect(screen.getByText(en.modelsInherited)).toBeTruthy()
@@ -385,7 +412,7 @@ describe('model list editing', () => {
 
 
   it('keeps expansion on the row it belongs to after an earlier one is removed', async () => {
-    await mountSection({
+    mountEditor('openai', {
       providers: {
         openai: {
           baseURL: 'https://proxy.example/v1',
@@ -393,8 +420,6 @@ describe('model list editing', () => {
         },
       },
     })
-    openEditor('openai')
-
     // Expansion is keyed by position, so removing an earlier row shifts the
     // rest down; without reindexing, row 3 would inherit row 2's open state.
     expandModel(2)
@@ -408,7 +433,7 @@ describe('model list editing', () => {
   })
 
   it('leaves an earlier row expanded and forgets the removed row\u2019s own state', async () => {
-    await mountSection({
+    mountEditor('openai', {
       providers: {
         openai: {
           baseURL: 'https://proxy.example/v1',
@@ -416,8 +441,6 @@ describe('model list editing', () => {
         },
       },
     })
-    openEditor('openai')
-
     // A row before the removal keeps its own position and stays open.
     expandModel(1)
     fireEvent.click(screen.getByLabelText(`${en.removeModel} 2`))
@@ -432,11 +455,9 @@ describe('model list editing', () => {
   })
 
   it('separates emptying the list from restoring the adapter defaults', async () => {
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('openai', {
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'kept' }] } },
     })
-    openEditor('openai')
-
     // An empty override is a route that serves no models — a different intent
     // from handing the catalog back, which is what the reset affordance does.
     expect(screen.getByText(en.modelsCustomized)).toBeTruthy()
@@ -490,9 +511,7 @@ describe('capacity spellings', () => {
 describe('endpoint interrogation', () => {
   it('asks the endpoint the form shows, with a key that is not yet stored', async () => {
     const discover = vi.fn(() => Promise.resolve(ok([{ id: 'acme-large', contextWindow: 65_536 }])))
-    await mountSection({ discover })
-    openEditor('openai')
-
+    mountEditor('openai', { discover })
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'typed-not-saved' } })
     fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://edited.example/v1' } })
     fireEvent.click(screen.getByText(en.fetchModels))
@@ -510,12 +529,10 @@ describe('endpoint interrogation', () => {
 
   it('carries the protocol the profile already names', async () => {
     const discover = vi.fn(() => Promise.resolve(ok([])))
-    await mountSection({
+    mountEditor('openai', {
       discover,
       providers: { openai: { baseURL: 'https://proxy.example/v1', api: 'openai-responses' } },
     })
-    openEditor('openai')
-
     fireEvent.click(screen.getByText(en.fetchModels))
 
     await waitFor(() => { expect(discover).toHaveBeenCalled() })
@@ -532,12 +549,10 @@ describe('endpoint interrogation', () => {
       { id: 'kept', contextWindow: 999 },
       { id: 'fresh', contextWindow: 4096, maxTokens: 2048, name: 'Fresh' },
     ])))
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('openai', {
       discover,
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'kept', contextWindow: 111 }] } },
     })
-    openEditor('openai')
-
     fireEvent.click(screen.getByText(en.fetchModels))
     await screen.findByText(en.fetchTitle)
     // The already-configured row starts unchecked; the new one starts checked.
@@ -563,9 +578,7 @@ describe('endpoint interrogation', () => {
     const discover = vi.fn(() => Promise.resolve(
       fail('https://proxy.example/v1/models answered 401; check the API key', 'llm/model-discovery-rejected'),
     ))
-    await mountSection({ discover })
-    openEditor('openai')
-
+    mountEditor('openai', { discover })
     fireEvent.click(screen.getByText(en.fetchModels))
 
     await screen.findByText(/answered 401; check the API key/)
@@ -575,17 +588,14 @@ describe('endpoint interrogation', () => {
 
   it('reports an empty listing', async () => {
     const empty = vi.fn(() => Promise.resolve(ok([])))
-    await mountSection({ discover: empty })
-    openEditor('openai')
+    mountEditor('openai', { discover: empty })
     fireEvent.click(screen.getByText(en.fetchModels))
     await screen.findByText(en.fetchEmpty)
   })
 
   it('can be asked for a configured route even with no endpoint', async () => {
     const discover = vi.fn(() => Promise.resolve(ok([{ id: 'from-registry' }])))
-    await mountSection({ discover, providers: { openai: {} } })
-    openEditor('openai')
-
+    mountEditor('openai', { discover, providers: { openai: {} } })
     // A route the adapter already describes needs no endpoint at all.
     expect(buttonNamed(en.fetchModels).disabled).toBe(false)
     fireEvent.click(screen.getByText(en.fetchModels))
@@ -620,11 +630,9 @@ describe('endpoint interrogation', () => {
   })
 
   it('folds a row\u2019s capacities away until they are asked for', async () => {
-    await mountSection({
+    mountEditor('openai', {
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'only' }] } },
     })
-    openEditor('openai')
-
     // The row shows what identifies a model; capacities are the exception.
     expect(screen.queryByLabelText(`${en.modelContextWindow} 1`)).toBeNull()
     expandModel(1)
@@ -635,9 +643,7 @@ describe('endpoint interrogation', () => {
 
   it('closes the picker without adopting anything on cancel', async () => {
     const discover = vi.fn(() => Promise.resolve(ok([{ id: 'fresh' }])))
-    const { mutate } = await mountSection({ discover })
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai', { discover })
     fireEvent.click(screen.getByText(en.fetchModels))
     const dialog = await screen.findByRole('dialog')
     // The editor card carries a Cancel of its own; this one is the dialog's.
@@ -651,9 +657,7 @@ describe('endpoint interrogation', () => {
     const discover = vi.fn(() => Promise.resolve(ok([
       { id: 'a' }, { id: 'b', maxTokens: 2048 },
     ])))
-    const { mutate } = await mountSection({ discover })
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai', { discover })
     fireEvent.click(screen.getByText(en.fetchModels))
     await screen.findByText(en.fetchTitle)
     const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
@@ -672,9 +676,7 @@ describe('endpoint interrogation', () => {
     const discover = vi.fn(() => Promise.resolve(ok([
       { id: 'alpha' }, { id: 'opaque-id', name: 'Beta Display' }, { id: 'gamma' },
     ])))
-    await mountSection({ discover })
-    openEditor('openai')
-
+    mountEditor('openai', { discover })
     fireEvent.click(screen.getByText(en.fetchModels))
     const dialog = await screen.findByRole('dialog')
     const search = screen.getByLabelText<HTMLInputElement>(en.fetchSearch)
@@ -722,9 +724,12 @@ describe('provider rows', () => {
       declaredRoutes: ['acme-gateway'],
     })
 
+    // The master-detail sidebar renders each provider as a selectable row.
     const rowOf = (provider: string): HTMLElement => {
-      const row = screen.getByText(provider).closest('li')
-      if (row === null) throw new Error(`no row for ${provider}`)
+      const row = screen.getAllByText(provider)
+        .map(node => node.closest<HTMLElement>('[role="button"]'))
+        .find(candidate => candidate !== null)
+      if (row === undefined || row === null) throw new Error(`no row for ${provider}`)
       return row
     }
     expect(rowOf('acme-gateway').textContent).toContain(en.customTag)
@@ -747,7 +752,7 @@ describe('provider rows', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
-      operations={operationsWith(scripted.face)}
+      api={wireOf(scripted.face)}
       schema={settingsSchema}
       t={t}
       renderSlot={() => null}
@@ -831,31 +836,27 @@ describe('hand-declared providers', () => {
 
     // A shipped route's models each carry their own protocol, so its editor
     // offers no route-level protocol to override them with.
-    await mountSection({ providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' } } })
-    openEditor('openai')
+    mountEditor('openai', { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' } } })
     fireEvent.click(screen.getByText(en.customized))
     expect(fields()).toEqual([en.keyInput, en.baseUrl])
     cleanup()
 
     // A hand-declared route named its own protocol at creation, so editing it
     // reaches the same field the create card asked for.
-    await mountSection({
+    mountEditor('acme-gateway', {
       providers: { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://gateway.acme.example/v1' } },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
     expect(fields()).toEqual([en.keyInput, en.customDisplayName, en.baseUrl, en.customApi])
   })
 
   it('renames a declared route and falls back to its id when the name is cleared', async () => {
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('acme-gateway', {
       providers: {
         'acme-gateway': { displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.test/v1' },
       },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
-
     const name = screen.getByLabelText<HTMLInputElement>(en.customDisplayName)
     expect(name.value).toBe('Acme Gateway')
     // The route id, not the stored name: it is what the route will be called
@@ -874,56 +875,24 @@ describe('hand-declared providers', () => {
     // route's profile is not always the page's own. The field edits the user
     // layer alone, and clearing it restores the layer beneath — the
     // composition name here, not the route id — so that is what it offers.
-    await mountSection({
+    mountEditor('acme-gateway', {
       providers: { 'acme-gateway': { displayName: 'Acme (pinned)', api: 'openai-completions' } },
       baseProviders: { 'acme-gateway': { displayName: 'Acme (pinned)', api: 'openai-completions' } },
       userProviders: {},
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
-
     const name = screen.getByLabelText<HTMLInputElement>(en.customDisplayName)
     expect(name.value).toBe('')
     expect(name.placeholder).toBe('Acme (pinned)')
   })
 
-  it('names the provider as the refreshed directory reports it after a rename', async () => {
-    // A name can change after the card opens, so the saved status reads the
-    // refreshed directory name rather than the target captured at open.
-    const { face } = await mountSection({
-      providers: { 'acme-gateway': { displayName: 'Acme Gateway', api: 'openai-completions' } },
-      declaredRoutes: ['acme-gateway'],
-    })
-    // The reload after the write answers with the renamed route, exactly as
-    // the adapter re-registers it.
-    face.llm.listConfigurableProviders = vi.fn(() => Promise.resolve(ok([{
-      provider: 'acme-gateway',
-      displayName: 'Acme 网关',
-      settingsNs: 'llm-pi-ai',
-      settingsPath: ['providers', 'acme-gateway'],
-      declared: true,
-    }])))
-    openEditor('acme-gateway')
-
-    fireEvent.change(screen.getByLabelText(en.customDisplayName), { target: { value: 'Acme 网关' } })
-    fireEvent.click(screen.getByText(en.apply))
-
-    const notice = await screen.findByRole('status')
-    expect(notice.textContent).toBe(providerCopy(en.savedProvider, {
-      provider: 'acme-gateway',
-      displayName: 'Acme 网关',
-    }))
-  })
-
   it('drops the stored name rather than storing an empty one the adapter refuses', async () => {
     // `llm-pi-ai` rejects an empty displayName outright, so clearing the field
     // must unset it — which is also what the user means: use the route id.
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('acme-gateway', {
       providers: { 'acme-gateway': { displayName: 'Acme Gateway', api: 'openai-completions' } },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
-
     fireEvent.change(screen.getByLabelText(en.customDisplayName), { target: { value: '   ' } })
     fireEvent.click(screen.getByText(en.apply))
 
@@ -933,7 +902,7 @@ describe('hand-declared providers', () => {
   })
 
   it('edits the protocol a declared route was created with', async () => {
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('acme-gateway', {
       providers: {
         'acme-gateway': {
           apiKeyEnv: 'ACME_GATEWAY_API_KEY',
@@ -944,8 +913,6 @@ describe('hand-declared providers', () => {
       },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
-
     const protocol = screen.getByLabelText<HTMLSelectElement>(en.customApi)
     expect(protocol.value).toBe('openai-completions')
     fireEvent.change(protocol, { target: { value: 'anthropic-messages' } })
@@ -965,12 +932,10 @@ describe('hand-declared providers', () => {
     // A route hand-written into settings.yaml with no model needs no protocol
     // to resolve, so the card can be opened over one. The select must not read
     // as if that route had picked its first choice.
-    await mountSection({
+    mountEditor('acme-gateway', {
       providers: { 'acme-gateway': { baseURL: 'https://gateway.acme.example/v1' } },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
-
     expect(screen.getByLabelText<HTMLSelectElement>(en.customApi).value).toBe('')
   })
 
@@ -1345,27 +1310,16 @@ describe('hand-declared providers', () => {
     expect(buttonNamed(en.create).disabled).toBe(true)
   })
 
-  it('closes the create card when an existing row is opened for editing', async () => {
-    await mountSection({ providers: { openai: { baseURL: 'https://proxy.example/v1' } } })
-
-    fireEvent.click(screen.getByRole('button', { name: en.customAdd }))
-    expect(screen.getByText(en.customTitle)).toBeTruthy()
-
-    // Two cards at once would each be closable by the other: whichever one is
-    // dismissed clears the shared state and discards the other's draft.
-    openEditor('openai')
-    expect(screen.queryByText(en.customTitle)).toBeNull()
-  })
-
-  it('reaches the card from the section and returns to the button on cancel', async () => {
+  it('opens the add-provider dialog from the section and closes it on cancel', async () => {
     await mountSection()
 
-    fireEvent.click(screen.getByRole('button', { name: en.customAdd }))
-    expect(screen.getByText(en.customTitle)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.addProviderAction }))
+    const dialog = await screen.findByRole('dialog', { name: en.add })
+    expect(dialog).toBeTruthy()
 
-    fireEvent.click(screen.getByText(en.cancel))
-    await waitFor(() => { expect(screen.queryByText(en.customTitle)).toBeNull() })
-    expect(screen.getByRole('button', { name: en.customAdd })).toBeTruthy()
+    fireEvent.click(within_(dialog, en.cancel))
+    await waitFor(() => { expect(screen.queryByRole('dialog', { name: en.add })).toBeNull() })
+    expect(screen.getByRole('button', { name: en.addProviderAction })).toBeTruthy()
   })
 
   it('refuses an unusable key on the field and blocks creation', () => {
@@ -1435,9 +1389,7 @@ describe('hand-declared providers', () => {
 
 describe('API key field', () => {
   it('submits with a blank key field without writing a credential', async () => {
-    const { mutate, set } = await mountSection()
-    openEditor('openai')
-
+    const { mutate, set } = mountEditor('openai')
     // The field opens empty even for a provider whose key is stored, where it
     // means "keep that one" — so editing anything else must not require it.
     fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://moved.example/v1' } })
@@ -1449,9 +1401,7 @@ describe('API key field', () => {
   })
 
   it('clears a whitespace-only base URL instead of writing the spaces', async () => {
-    const { mutate } = await mountSection()
-    openEditor('openai')
-
+    const { mutate } = mountEditor('openai')
     // The field renders this as empty, so the draft must agree: storing the
     // spaces would hand both adapters a non-empty string they accept as a URL.
     fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: '   ' } })
@@ -1464,9 +1414,7 @@ describe('API key field', () => {
   })
 
   it('blocks submit and names the field when the key holds only whitespace', async () => {
-    const { mutate, set } = await mountSection()
-    openEditor('openai')
-
+    const { mutate, set } = mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: '   ' } })
 
     expect(screen.getByText(en.keyBlank)).toBeTruthy()
@@ -1476,9 +1424,7 @@ describe('API key field', () => {
   })
 
   it('blocks submit when the key contains characters no header can carry', async () => {
-    const { set } = await mountSection()
-    openEditor('openai')
-
+    const { set } = mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'sk-\u{1F600}' } })
 
     expect(screen.getByText(en.keyIllegalCharacters)).toBeTruthy()
@@ -1487,9 +1433,7 @@ describe('API key field', () => {
   })
 
   it('blocks submit when a whole NAME=value line was pasted', async () => {
-    await mountSection()
-    openEditor('openai')
-
+    mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'OPENAI_API_KEY=sk-abc' } })
 
     expect(screen.getByText(en.keyIllegalCharacters)).toBeTruthy()
@@ -1497,9 +1441,7 @@ describe('API key field', () => {
   })
 
   it('trims a padded key before storing it', async () => {
-    const { set } = await mountSection()
-    openEditor('openai')
-
+    const { set } = mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: '  sk-abc  ' } })
     expect(buttonNamed(en.apply).disabled).toBe(false)
     fireEvent.click(screen.getByText(en.apply))
@@ -1509,9 +1451,7 @@ describe('API key field', () => {
   })
 
   it('blocks the interrogation too, rather than spending a round trip on a refused key', async () => {
-    const { discover } = await mountSection()
-    openEditor('openai')
-
+    const { discover } = mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'sk-\u{1F600}' } })
 
     // The host would refuse this before building the header anyway; asking is
@@ -1522,9 +1462,7 @@ describe('API key field', () => {
   })
 
   it('carries the trimmed key into an interrogation, not the padded draft', async () => {
-    const { discover } = await mountSection()
-    openEditor('openai')
-
+    const { discover } = mountEditor('openai')
     fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: '  sk-abc  ' } })
     fireEvent.click(screen.getByRole('button', { name: en.fetchModels }))
 
@@ -1536,15 +1474,19 @@ describe('API key field', () => {
     const { controller, mutate } = await mountSection()
     const load = vi.spyOn(controller, 'load')
 
-    fireEvent.click(screen.getByRole('button', { name: en.customAdd }))
-    fireEvent.change(screen.getByLabelText(en.customRoute), { target: { value: 'acme' } })
-    fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://acme.test/v1' } })
-    fireEvent.click(screen.getByRole('button', { name: en.addModel }))
-    fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'm' } })
-    fireEvent.click(screen.getByText(en.create))
+    fireEvent.click(screen.getByRole('button', { name: en.addProviderAction }))
+    await screen.findByRole('dialog', { name: en.add })
+    // The dialog's empty-provider route asks for the id, endpoint, and nothing
+    // else: the adapter sizes the placeholder model and no key is required.
+    fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+    fireEvent.change(screen.getByPlaceholderText('e.g. openai'), { target: { value: 'acme' } })
+    fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), {
+      target: { value: 'https://acme.test/v1' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: en.create }))
 
     await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
     await waitFor(() => { expect(load).toHaveBeenCalledOnce() })
-    expect(screen.queryByText(en.customTitle)).toBeNull()
+    expect(screen.queryByRole('dialog', { name: en.add })).toBeNull()
   })
 })

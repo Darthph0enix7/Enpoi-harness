@@ -90,7 +90,10 @@ describe('ui-settings-models apply', () => {
     expect(injected.t('deleteTitle')).toBe('删除 {provider}？')
     expect(typeof injected.controller.load).toBe('function')
     expect(injected.hooks.snapshot).toBe(injected.controller.store)
-    expect(typeof injected.operations.writeSettings).toBe('function')
+    // The page writes through the bound wire faces, not a host-operations bag.
+    expect(typeof injected.api.settings.mutate).toBe('function')
+    expect(typeof injected.api.credentials.describe).toBe('function')
+    expect(typeof injected.api.llm.discoverModels).toBe('function')
     const onboarding = before.slots.entries('settings.onboarding')
     expect(onboarding).toHaveLength(2)
     expect(onboarding.find(entry => entry.options.id === 'welcome-notice')).toMatchObject({
