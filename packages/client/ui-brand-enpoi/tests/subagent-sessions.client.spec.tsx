@@ -49,13 +49,12 @@ function mount(rows: Row[], sessionId = 'child', phase: Phase = 'ready') {
   const rerender = (next: { sessionId?: string; rows?: Row[]; phase?: Phase } = {}): void => {
     const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase }) => unknown) =>
       selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase })
-    view.rerender(
-      <SubagentSessionsBody
-        {...props}
-        sessionId={next.sessionId ?? sessionId}
-        useSessions={useNextSessions as typeof useSessions}
-      />,
-    )
+    const nextProps = {
+      ...props,
+      sessionId: next.sessionId ?? sessionId,
+      useSessions: useNextSessions,
+    } as unknown as Parameters<typeof SubagentSessionsBody>[0]
+    view.rerender(<SubagentSessionsBody {...nextProps} />)
   }
 
   return {
