@@ -63,7 +63,8 @@ const FLEET_CATEGORIES: PersonaCategory[] = [
       { id: 'skeptic', name: 'Skeptic', icon: 'M12 4l-8 8m0-8l8 8' },
       { id: 'architect', name: 'Architect', icon: 'M3 13V8m3 5V5m3 8V3m3 10V7' },
       { id: 'pragmatist', name: 'Pragmatist', icon: 'M3 8h10M10 4l3 4-3 4' },
-      { id: 'critic', name: 'Critic', icon: 'M8 2a6 6 0 100 12A6 6 0 008 2zm0 3v4l3 2' },
+      { id: 'referee', name: 'Referee', icon: 'M3 5h10M3 8h10M3 11h6M11 11l2 2 3-3' },
+      { id: 'chair', name: 'Chair', icon: 'M4 3v6h8V3M3 9v4m10-4v4M5 13v0m6 0h0M6 13h4l1 0v0' },
     ],
   },
   {
@@ -72,7 +73,6 @@ const FLEET_CATEGORIES: PersonaCategory[] = [
       { id: 'visionary', name: 'Visionary', icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z' },
       { id: 'experiencer', name: 'Experiencer', icon: 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z' },
       { id: 'integrator', name: 'Integrator', icon: 'M4 4h4v4H4zM8 8h4v4H8z' },
-      { id: 'curator', name: 'Curator', icon: 'M8 3v10M3 8h10' },
     ],
   },
 ]
@@ -89,7 +89,14 @@ function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
 }
 
 /** Monochrome tab glyph for Agent Models (thin stroke, currentColor), also the guide capsule icon. */
-export function FleetRoutingIcon({ size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined }) {
+export function FleetRoutingIcon({
+  size = 16,
+  className,
+}: {
+  size?: number | undefined
+  active?: boolean | undefined
+  className?: string | undefined
+}) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
       <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -164,7 +171,7 @@ export function AgentModelsBody({
                 const override: ModelSelectOverride = {
                   current: isExplicitlyAssigned ? assigned : null,
                   placeholder: seat.defaultLabel ?? 'Inherit',
-                  select: selection => {
+                  select: (selection) => {
                     assignPersona(seat.id, selection)
                     return Promise.resolve(true)
                   },

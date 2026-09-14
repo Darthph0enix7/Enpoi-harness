@@ -59,11 +59,11 @@ function inferPersona(toolName: string, args: Record<string, unknown>): PersonaI
   if (/\b(oracle|review|architecture|audit)\b/i.test(combined)) {
     return { label: '🔮 Oracle', roleKey: 'oracle' }
   }
-  if (/\b(critic|critique|evaluator)\b/i.test(combined)) {
-    return { label: '⚖️ Critic', roleKey: 'critic' }
+  if (/\b(referee|arbiter|adjudicat)\b/i.test(combined)) {
+    return { label: '⚖️ Referee', roleKey: 'referee' }
   }
-  if (/\b(curator|gems?|harvest)\b/i.test(combined)) {
-    return { label: '💎 Curator', roleKey: 'curator' }
+  if (/\b(chair|synthesis|compil)\b/i.test(combined)) {
+    return { label: '🪑 Chair', roleKey: 'chair' }
   }
   if (/\b(visionary|moonshot|horizon)\b/i.test(combined)) {
     return { label: '🔭 Visionary', roleKey: 'visionary' }
@@ -113,10 +113,10 @@ function extractChildSessionId(block: ToolCallOwnerProps['block']): string | und
 
   // Check text content for session id patterns
   const text = textOfContent(block.content)
-  const subagentMatch = text.match(/started subagent\s+([a-zA-Z0-9_-]+)/i)
+  const subagentMatch = text.match(/started subagent\s+([\w-]+)/i)
   if (subagentMatch?.[1]) return subagentMatch[1]
 
-  const sessionMatch = text.match(/(session-[0-9a-fA-F-]{36})/i)
+  const sessionMatch = text.match(/(session-[0-9a-f-]{36})/i)
   if (sessionMatch?.[1]) return sessionMatch[1]
 
   return undefined
