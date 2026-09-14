@@ -256,7 +256,9 @@ function assertCurrentLlmShape(event: Record<string, unknown>, index: number): v
     }
     assertAdapterDefaults(headerRecord['adapterDefaults'], configRecord, index)
     const reason = record?.['reason']
-    if (reason !== 'initial' && reason !== 'resume' && reason !== 'change' && reason !== 'series') {
+    // 'custom' is legacy (enpoi persona-model headers pre-dating the 0.1.5
+    // validator) — treat it as 'change' so those sessions still load.
+    if (reason !== 'initial' && reason !== 'resume' && reason !== 'change' && reason !== 'series' && reason !== 'custom') {
       throw new Error(`seed request/header at index ${index} has an invalid reason`)
     }
     if (record?.['startsSeries'] !== undefined && record['startsSeries'] !== true) {
