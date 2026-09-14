@@ -58,13 +58,18 @@ const FLEET_CATEGORIES: PersonaCategory[] = [
     ],
   },
   {
+    title: 'Council Arbiters (shared across all councils)',
+    seats: [
+      { id: 'referee', name: 'Referee', icon: 'M3 5h10M3 8h10M3 11h6M11 11l2 2 3-3' },
+      { id: 'chair', name: 'Chair', icon: 'M4 3v6h8V3M3 9v4m10-4v4M5 13v0m6 0h0M6 13h4l1 0v0' },
+    ],
+  },
+  {
     title: 'Roundtable Debaters',
     seats: [
       { id: 'skeptic', name: 'Skeptic', icon: 'M12 4l-8 8m0-8l8 8' },
       { id: 'architect', name: 'Architect', icon: 'M3 13V8m3 5V5m3 8V3m3 10V7' },
       { id: 'pragmatist', name: 'Pragmatist', icon: 'M3 8h10M10 4l3 4-3 4' },
-      { id: 'referee', name: 'Referee', icon: 'M3 5h10M3 8h10M3 11h6M11 11l2 2 3-3' },
-      { id: 'chair', name: 'Chair', icon: 'M4 3v6h8V3M3 9v4m10-4v4M5 13v0m6 0h0M6 13h4l1 0v0' },
     ],
   },
   {
