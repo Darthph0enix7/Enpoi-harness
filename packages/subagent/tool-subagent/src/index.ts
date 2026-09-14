@@ -420,12 +420,42 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
  * @param role - the inferred specialist role, if any.
  * @returns the composed filter, or the configured filter for a provider that cannot apply one.
  */
+/**
+ * Operator-overridable role availability (doc 55 P2): when the permission
+ * settings define `agents[role].available`, that allowlist REPLACES the
+ * built-in role deny map (the operator's explicit surface wins wholesale);
+ * absent → the built-in ROLE_CHILD_DENY table applies unchanged. Read fresh
+ * per spawn, so edits hot-swap on the next dispatch.
+ */
+function roleAvailableAllowlist(ctx: Context, role: string | undefined): string[] | undefined {
+  if (role === undefined) return undefined
+  try {
+    const settings = ctx.get('settings') as { get?: (ns: string) => { permissions?: { agents?: Record<string, { available?: string[] }> } } } | undefined
+    const available = settings?.get?.('enpoi-orchestration')?.permissions?.agents?.[role]?.available
+    return Array.isArray(available) ? available.map(String) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function childToolFilter(
+  ctx: Context,
   provider: SubagentProvider,
   configured: Config['toolFilter'],
   role: string | undefined,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
+  const available = roleAvailableAllowlist(ctx, role)
+  if (available !== undefined) {
+    // Operator-defined surface: allow the named tools, deny everything else
+    // except the shared anti-leak floor (never widen what SHARED_CHILD_DENY
+    // already removes).
+    return {
+      ...configured,
+      allow: [...new Set([...configured?.allow ?? [], ...available])],
+      deny: [...new Set([...configured?.deny ?? [], ...SHARED_CHILD_DENY])],
+    }
+  }
   const roleDeny = role === undefined ? [] : ROLE_CHILD_DENY[role] ?? []
   return {
     ...configured,
@@ -703,7 +733,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...(() => {
-              const delegated = childToolFilter(subagentProvider, config.toolFilter, role)
+              const delegated = childToolFilter(ctx, subagentProvider, config.toolFilter, role)
               return delegated === undefined ? {} : { toolFilter: delegated }
             })(),
             ...maxDepth !== undefined ? { maxDepth } : {},
