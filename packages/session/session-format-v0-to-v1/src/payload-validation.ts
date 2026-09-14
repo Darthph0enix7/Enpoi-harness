@@ -37,7 +37,7 @@ export function assertReleasedPayloadSemantics(event: SessionFormatEvent, versio
       return
     case 'approval/decided':
       nonEmptyString(data['id'], `${label} id`)
-      literalValue(data['outcome'], ['allowed-once', 'rejected', 'cancelled', 'unavailable'], `${label} outcome`)
+      literalValue(data['outcome'], ['allowed-once', 'allowed-always', 'rejected', 'cancelled', 'unavailable'], `${label} outcome`)
       return
     case 'approval/policy':
       literalValue(data['policy'], ['ask', 'never'], `${label} policy`)

@@ -61,7 +61,7 @@ export interface ApprovalPresentationRequest {
 }
 
 /** Decisions this interactive Client presentation can return. */
-export type ApprovalDecision = 'allowed-once' | 'rejected'
+export type ApprovalDecision = 'allowed-once' | 'allowed-always' | 'rejected'
 
 let nextApprovalKey = 0
 

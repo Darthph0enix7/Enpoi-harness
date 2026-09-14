@@ -26,10 +26,11 @@ export function ApprovalRequestId(id: string): ApprovalRequestId {
 }
 
 /**
- * Closed approval outcomes: a one-shot grant, explicit rejection, withdrawn
- * request, or unavailable answerer. Callers fail closed on `unavailable`.
+ * Closed approval outcomes: a one-shot grant, a one-shot grant plus a
+ * standing allow-always decision, explicit rejection, withdrawn request, or
+ * unavailable answerer. Callers fail closed on `unavailable`.
  */
-export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+export type ApprovalOutcome = 'allowed-once' | 'allowed-always' | 'rejected' | 'cancelled' | 'unavailable'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
