@@ -359,6 +359,8 @@ export function FilesBody({
   const state = useStore(store => store.byTab[tab.id])
   const pathRef = useRef<HTMLDivElement>(null)
   const pathTextRef = useRef<HTMLSpanElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const scrollTopRef = useRef(0)
   usePathClipped(pathRef, pathTextRef, state?.root)
 
   const [menu, dispatchMenu] = useReducer(menuReducer, null)
@@ -366,11 +368,27 @@ export function FilesBody({
   const [creating, setCreating] = useState<CreateState | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const fsops = useMemo(createFsOps, [])
-  const bodyRef = useRef<HTMLDivElement>(null)
   // The element Escape/outside-click hands focus back to: the row (or the
   // empty area) whose gesture opened the menu. Not render state.
   const returnFocusRef = useRef<HTMLElement | null>(null)
 
+  // Come back where the reader was: loaded levels outlive the body in the
+  // store, so a remounted tree lays out at its full height before this runs
+  // and the stored offset re-lands exactly. A fresh tree stores 0.
+  const seeded = state !== undefined
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (seeded && body !== null) {
+      body.scrollTop = state.scrollTop
+      scrollTopRef.current = body.scrollTop
+    }
+  }, [seeded])
+  // Scrolling only moves the ref; the store hears about it once, on unmount,
+  // so a scroll neither re-renders the tree nor writes after the owner's
+  // abort has forgotten the bucket.
+  useEffect(() => () => {
+    if (seeded && !signal.aborted) actions.scrolled(tab.id, scrollTopRef.current)
+  }, [seeded, signal, tab.id, actions])
   useEffect(() => {
     // A bucket gone because the record aborted must not be re-seeded by a
     // component that has not unmounted yet.
@@ -601,7 +619,9 @@ export function FilesBody({
         className={css.body}
         tabIndex={-1}
         data-files-area
+        data-files-body
         onContextMenu={openAreaMenu}
+        onScroll={(event) => { scrollTopRef.current = event.currentTarget.scrollTop }}
       >
         {notice !== null && <div className={css.notice} role="alert" data-files-notice>{notice}</div>}
         <ul className={css.level}><Level path={state.root} tree={tree} /></ul>

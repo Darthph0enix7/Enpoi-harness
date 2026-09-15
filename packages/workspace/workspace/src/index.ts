@@ -264,10 +264,14 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Remove one session from the registry-global archive set (used after a
-   * permanent session delete so deleted ids do not ride the archive set
-   * forever). A session without an archive entry resolves without writing.
-   * @param sessionId - The session to un-archive.
+   * Unarchive one session durably by dropping it from the registry-global
+   * archive set; the accounting slot was never touched, so the session
+   * returns to its recorded position. Unarchiving runs no session-existence
+   * check because removing an id cannot introduce an unknown one, so an
+   * entry whose session is gone still resolves. An id that is not archived
+   * resolves without writing. Also used after a permanent session delete so
+   * deleted ids do not ride the archive set forever.
+   * @param sessionId - The session to unarchive.
    * @returns resolution after durability.
    */
   unarchiveSession(sessionId: SessionId): Promise<void> {

@@ -198,6 +198,8 @@ export class FakeApiClient {
 
   onWorkspaceArchiveSession: (payload: unknown) => Promise<RemoteResult<{ archivedSessionIds: SessionId[] }>> =
     payload => Promise.resolve(ok({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
+  onWorkspaceUnarchiveSession: (payload: unknown) => Promise<RemoteResult<{ archivedSessionIds: SessionId[] }>> =
+    payload => Promise.resolve(ok({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
   onWorkspaceMoveSession: (payload: unknown) => Promise<RemoteResult<void>> =
     () => Promise.resolve(ok(undefined))
 
@@ -282,6 +284,11 @@ export class FakeApiClient {
           'workspace.archiveSession',
           payload,
           this.onWorkspaceArchiveSession(payload),
+        ),
+        unarchiveSession: payload => this.record(
+          'workspace.unarchiveSession',
+          payload,
+          this.onWorkspaceUnarchiveSession(payload),
         ),
         moveSession: payload => this.record(
           'workspace.moveSession',

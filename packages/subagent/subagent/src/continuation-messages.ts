@@ -129,7 +129,7 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
 }
 
 /**
- * Build the runtime-owned settlement notice delivered to a child's parent.
+ * Build the runtime-owned settlement notice from the child's nonempty closing text.
  * @param childId - durable child session id named in the notice.
  * @param terminal - recorded terminal state for the settled Activation.
  * @returns the durable user-message representation delivered to the parent.
@@ -139,17 +139,24 @@ export function createSettlementMessage(
   terminal: ActivationTerminal,
 ): ReturnType<typeof createUserMessage> {
   const summary = settlementSummary(childId, terminal.stopReason)
+  // Parent providers receive this notice as a user message and may reject
+  // nontext assistant blocks. Keep this conversion local so SDK/UI consumers
+  // retain the complete child output.
+  const closingText = (terminal.output ?? []).flatMap(block =>
+    block.type === 'text' && block.text.length > 0 ? [block] : [],
+  )
   return createUserMessage({
     content: [
       { type: 'text' as const, text: summary },
-      ...terminal.output === undefined
+      ...closingText.length === 0
         ? [{ type: 'text' as const, text: 'It left no closing message.' }]
         : [
           { type: 'text' as const, text: 'Its closing message:' },
           // Only the child's final REPORT reaches the parent: reasoning and
           // tool-call blocks (its thinking and intermediate actions) are
-          // stripped, mirroring the foreground path.
-          ...terminal.output.filter(
+          // stripped, mirroring the foreground path. Images ride along: they
+          // are legitimate report content.
+          ...(terminal.output ?? []).filter(
             (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
               block.type === 'text' || block.type === 'image',
           ),

@@ -27,15 +27,16 @@
  * The registration adopts Session stores and injects the mounted seat binding;
  * callers use the service's navigation methods.
  */
+import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import type { FloatRect, PaneId, TabId, TabRecord } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { activeDockPaneId, canSplit, dockPaneIds, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { activeDockPaneId, canSplit, findContentTab, dockPaneIds, findTabPane, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightTabParamsFor } from './contract/params.ts'
 import { pageAddress } from './contract/seed.ts'
 import type { SidebarRightTabClaim, SidebarRightTabRegistry } from './tab-registry.ts'
 import { SidebarRightRail } from './rail.ts'
-import type { SidebarRightState, SurfaceState } from './stores.ts'
+import { canCloseTab, type SidebarRightState, type SurfaceState } from './stores.ts'
 import type { createSidebarRightStore } from './stores.ts'
 import type { SurfacePersistence } from './surface-storage.ts'
 import { TabDomain, type PinResource } from './tab-domain.ts'
@@ -148,6 +149,9 @@ export interface SidebarRightOpenTabOptions<K extends string = string> extends S
 /** The scheme every resource address carries; anything else is not a resource this face opens. */
 const RESOURCE_SCHEME = 'dsh-resource://'
 
+/** Synchronous close/replacement hook; resource owners retain any background cleanup. */
+export type SidebarRightCloseHandler = (sessionId: SessionId, tab: TabRecord) => void
+
 /** The outward right-Sidebar face (`ctx.sidebarRight`). */
 export interface ISidebarRight {
   /**
@@ -217,6 +221,19 @@ export interface ISidebarRight {
 /** Cross-plugin right-Sidebar face (ctx.sidebarRight). */
 export class SidebarRightController implements ISidebarRight {
   private binding: SidebarRightBinding | undefined
+  private readonly closeHandlers = new Map<string, SidebarRightCloseHandler>()
+
+  /**
+   * Register resource cleanup before explicit removal. Failure preserves the tab.
+   * @param kind - tab kind owned by the registering plugin.
+   * @param handler - saves any background cleanup before returning and allowing removal.
+   * @returns an effect-scoped unregister callback.
+   */
+  registerCloseHandler(kind: string, handler: SidebarRightCloseHandler): () => void {
+    if (this.closeHandlers.has(kind)) throw new Error(`sidebarRight: close handler already registered for ${kind}`)
+    this.closeHandlers.set(kind, handler)
+    return () => { if (this.closeHandlers.get(kind) === handler) this.closeHandlers.delete(kind) }
+  }
 
   /**
    * The Tab domain this controller navigates into; synced from each adopted
@@ -311,7 +328,16 @@ export class SidebarRightController implements ISidebarRight {
    */
   closeIn(sessionId: SessionId, tabId: TabId): void {
     const actions = this.actionsFor(sessionId)
-    if (actions !== undefined) actions.closeTab(sessionId, tabId)
+    const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
+    if (actions === undefined || surface === undefined) return
+    const tab = surface.layout.tabs[tabId]
+    if (tab === undefined || !canCloseTab(surface, tabId)) return
+    this.removeAfterCleanup(sessionId, tab, () => { actions.closeTab(sessionId, tabId) })
+  }
+
+  private removeAfterCleanup(sessionId: SessionId, tab: TabRecord, commit: () => void): void {
+    this.closeHandlers.get(tab.kind)?.(sessionId, tab)
+    commit()
   }
 
   // enpoi: resources open in the editor pane beside the panel, never as the panel's page.
@@ -337,7 +363,7 @@ export class SidebarRightController implements ISidebarRight {
   ): void {
     const definition = this.tabs.get(kind)
     if (definition === undefined) throw new Error(`sidebarRight: no tab type is registered as "${kind}"`)
-    const address = pageAddress(kind)
+    const address = definition.multiple === true ? `${pageAddress(kind)}/${randomUUID()}` : pageAddress(kind)
     this.place(sessionId, actions, { kind, contentId: address, title: definition.title(address) }, address, options, options.params)
   }
 
@@ -351,7 +377,7 @@ export class SidebarRightController implements ISidebarRight {
     params: SidebarRightNavigationParams,
     editor = false,
   ): void {
-    actions.openContent(sessionId, {
+    const commit = (): void => { actions.openContent(sessionId, {
       kind: claim.kind,
       contentId: claim.contentId,
       title: claim.title,
@@ -365,7 +391,15 @@ export class SidebarRightController implements ISidebarRight {
       // is an open of the column, and a page open is the rail's new lit kind.
       if (editor) this.rail.setOpen(true)
       else this.rail.setKind(claim.kind)
-    })
+    }) }
+    // Replacing a tab runs the replaced record's close handler in the same
+    // step, so upstream's cleanup path frames our own commit.
+    const layout = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]?.layout
+    const replaced = placement.replaceTab === undefined ? undefined : layout?.tabs[placement.replaceTab]
+    const revealed = layout === undefined || placement.revealIfOpened === false
+      ? undefined : findContentTab(layout, claim.contentId, claim.kind)
+    if (replaced === undefined || replaced.id === revealed) { commit(); return }
+    this.removeAfterCleanup(sessionId, replaced, commit)
   }
 
   // enpoi: the icon rail's open/collapse gesture.
@@ -386,13 +420,9 @@ export class SidebarRightController implements ISidebarRight {
       actions.setExpanded(sessionId, false)
       return
     }
-    const definition = this.tabs.get(kind)
-    if (definition === undefined) throw new Error(`sidebarRight: no tab type is registered as "${kind}"`)
-    const address = pageAddress(kind)
-    this.rail.setKind(kind)
-    actions.openContent(sessionId, { kind, contentId: address, title: definition.title(address) }, (tabId) => {
-      this.tabDomain.navigate(sessionId, tabId, { address, params: undefined })
-    })
+    // A rail click is an ordinary page open: placement, replacement cleanup,
+    // and the navigation record all ride the one public path.
+    this.placeTab(sessionId, actions, kind, {})
   }
 
   /**
@@ -401,6 +431,7 @@ export class SidebarRightController implements ISidebarRight {
    */
   close(tabId: TabId): void {
     const { sessionId, actions } = this.require()
+    if (this.adopted.has(sessionId)) { this.closeIn(sessionId, tabId); return }
     actions.closeTab(sessionId, tabId)
   }
 

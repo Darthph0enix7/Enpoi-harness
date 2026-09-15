@@ -48,7 +48,7 @@ export type { SidebarRightRailState } from './rail.ts'
 export type { SidebarRightState, SurfaceState } from './stores.ts'
 export type {
   ISidebarRight, SidebarRightBinding, SidebarRightOpenResourceOptions, SidebarRightOpenTabOptions,
-  SidebarRightPlacement, SurfaceActions,
+  SidebarRightPlacement, SidebarRightCloseHandler, SurfaceActions,
 } from './service.ts'
 export type {
   SidebarRightGuideBox, SidebarRightGuideEntry, SidebarRightRailItem, SidebarRightTabClaim,
@@ -56,7 +56,7 @@ export type {
 } from './tab-registry.ts'
 export type {
   SidebarRightTabInfo, SidebarRightTabInjected, UseSidebarRightTabInfo, SidebarRightTabActions,
-  SidebarRightTabMenuOwnerProps, SidebarRightTabNavigation, SidebarRightTabPlacement,
+  SidebarRightTabMenuOwnerProps, SidebarRightTabNavigation, SidebarRightTabPlacement, SidebarRightGuideEntryOwnerProps,
 } from './contract/slots.ts'
 export type {
   SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightResourceParamsMap,
@@ -152,7 +152,7 @@ export function apply(ctx: ClientContext): void {
       },
     }
     const layout: ILayout = ctx.layout
-    const injected: Omit<SidebarRightInjected, 'keyedHooks' | 'occurrence'> = {
+    const injected: Omit<SidebarRightInjected, 'keyedHooks' | 'occurrence' | 'closeTab'> = {
       syncPresentation({ shown, track, fullscreen }) {
         if (shown) layout.openRightbar(track, fullscreen)
         else layout.closeRightbar()
@@ -187,6 +187,10 @@ export function apply(ctx: ClientContext): void {
         store,
         inject: (sessionId): SidebarRightInjected => ({
           ...injected,
+          closeTab: (tabId) => {
+            try { controller.closeIn(sessionId, tabId) }
+            catch (error) { console.error('Sidebar tab close failed:', error) }
+          },
           keyedHooks: { tabNavigation: key => controller.tabDomain.occurrence(sessionId, { id: key as TabId }).navigation },
           occurrence: tab => controller.tabDomain.occurrence(sessionId, tab),
         }),
@@ -201,6 +205,9 @@ export function apply(ctx: ClientContext): void {
       name: 'sidebar.right.pane.tab',
       key: GUIDE_ID,
       children: {
+        'sidebar.right.tab.guide.entry': {
+          kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: guideTabInfoFactory } },
+        },
         'sidebar.right.tab.guide': {
           kind: 'chain', scope: 'session', inject: { hooks: { tabInfo: guideTabInfoFactory } },
         },

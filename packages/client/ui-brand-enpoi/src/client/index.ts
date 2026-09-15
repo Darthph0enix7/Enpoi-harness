@@ -184,6 +184,7 @@ export function apply(ctx: Context): void {
     priority: 'extension',
     title: () => 'Capabilities',
     guide: [{
+      id: CAPABILITIES_KIND,
       order: 55,
       title: () => 'Capabilities',
       description: () => 'Toggle MCP servers, skills, and subagents',
@@ -196,6 +197,7 @@ export function apply(ctx: Context): void {
     priority: 'extension',
     title: () => 'Agent Models',
     guide: [{
+      id: AGENT_MODELS_KIND,
       order: 56,
       title: () => 'Agent Models',
       description: () => 'Assign a model to each fleet persona',
@@ -208,6 +210,7 @@ export function apply(ctx: Context): void {
     priority: 'extension',
     title: () => 'Subagent Sessions',
     guide: [{
+      id: SUBAGENT_SESSIONS_KIND,
       order: 57,
       title: () => 'Subagent Sessions',
       description: () => 'Watch and open dispatched subagent sessions',
@@ -220,6 +223,7 @@ export function apply(ctx: Context): void {
     priority: 'extension',
     title: () => 'Git',
     guide: [{
+      id: GIT_KIND,
       order: 58,
       title: () => 'Git',
       description: () => 'Branches, changes, and diffs for the session workspace',
@@ -232,6 +236,7 @@ export function apply(ctx: Context): void {
     priority: 'extension',
     title: () => 'Terminal',
     guide: [{
+      id: TERMINAL_KIND,
       order: 59,
       title: () => 'Terminal',
       description: () => 'Interactive shells in the sidebar and the bottom panel',

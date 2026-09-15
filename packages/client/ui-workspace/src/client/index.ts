@@ -137,10 +137,6 @@ export function apply(ctx: Context): void {
     downloadSession: (sessionId) => {
       void (ctx.get('sessionLogDownload') as { download?: (id: SessionId) => Promise<void> } | undefined)?.download?.(sessionId)
     },
-
-    insertSessionBefore: async (workspaceId, sessionId, beforeSessionId) => {
-      await workspaces.insertSessionBefore(workspaceId, sessionId, beforeSessionId)
-    },
     createWorkspace: input => workspaces.create(input),
     hooks: { directoryFlow: browserFlowSource, hostInfo },
   })
