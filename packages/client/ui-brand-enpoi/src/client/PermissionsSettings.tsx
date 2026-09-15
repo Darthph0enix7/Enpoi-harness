@@ -10,7 +10,6 @@
  * write so the array is built from fresh state, never a stale snapshot.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { KNOWN_CAPABILITIES } from './CapabilitiesBody.tsx'
 import {
   AGENT_ROSTER,
   buildAgentList,
@@ -314,7 +313,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
 
   useEffect(() => { load() }, [load])
 
-  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, KNOWN_CAPABILITIES), [mcpServers])
+  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers), [mcpServers])
   const agents = useMemo(() => buildAgentList(AGENT_ROSTER, Object.keys(perms?.agents ?? {})), [perms])
 
   // --- writes (0ms optimistic, rollback on rejected persistence) ---
@@ -440,8 +439,10 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       <div className={c('intro')}>
         <span className={c('introIcon')}><Icon d={ICONS.shield} size={14} /></span>
         <span>
-          Permission policy. Shipped defaults: reads and web allow, bash and str_replace_editor ask,
-          unknown tools ask. Everything here is settings-backed and applies from the next use.
+          <b>Global is the source of truth</b> — agent panes inherit it and override only where you set a rule.
+          Legend: <b>filled segment</b> = your rule · <b>dashed segment</b> = shipped default applying · the eye = whether the
+          role sees the tool at all (unavailable tools are stripped — their policy is irrelevant). Reads and web ship
+          allow; bash and unknown tools ship ask. Everything is settings-backed and applies from the next dispatch.
         </span>
       </div>
       <div className={c('layout')}>

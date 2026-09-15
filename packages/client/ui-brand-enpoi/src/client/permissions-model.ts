@@ -153,14 +153,15 @@ export interface PermissionToolRow {
  */
 export function buildPermissionToolRows(
   mcpServers: Record<string, McpServerRef> | undefined,
-  known: readonly { id: string; name: string; kind?: 'tool' | 'skill' | 'mcp' }[],
+  _known: readonly { id: string; name: string; kind?: 'tool' | 'skill' | 'mcp' }[] = [],
 ): PermissionToolRow[] {
+  // The matrix rows are REAL tools (doc 55 P2 redesign). Specialist names
+  // (fixer/explorer/…) are ROLE SUBJECTS in the left rail, not tool rows;
+  // the context keeper is a background service, not an agent-dispatchable
+  // tool; MCP servers are dynamic rows from the catalog + one family row.
   const rows = new Map<string, PermissionToolRow>()
-  for (const cap of known) {
-    if (cap.kind === 'tool' && !rows.has(cap.id)) rows.set(cap.id, { id: cap.id, name: cap.name })
-  }
   for (const id of CORE_PERMISSION_TOOLS) {
-    if (!rows.has(id)) rows.set(id, { id, name: prettyToolName(id) })
+    rows.set(id, { id, name: prettyToolName(id) })
   }
   for (const [id, def] of Object.entries(mcpServers ?? {})) {
     const serverName = typeof def?.serverName === 'string' && def.serverName !== '' ? def.serverName : id
@@ -196,6 +197,7 @@ export type PermissionProvenance = 'agent rule' | 'global rule' | 'inherit (defa
 const FULL_OPERATOR_SURFACE: readonly string[] = [
   'bash', 'read', 'glob', 'grep', 'read_image',
   'edit', 'write', 'str_replace_editor',
+  'web_search', 'web_fetch',
   'todo_write', 'todo_read', 'skill', 'plan_mode', 'exit_plan_mode',
   'subagent', 'task', 'workflow', 'ralph', 'goal', 'create_goal', 'get_goal', 'update_goal',
   'oracle_review', 'request_evidence', 'roundtable', 'chorus',

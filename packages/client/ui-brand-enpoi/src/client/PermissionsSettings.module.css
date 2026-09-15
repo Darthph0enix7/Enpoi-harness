@@ -207,8 +207,10 @@
   color: #fff;
 }
 .segActive {
-  background: rgba(103, 220, 231, 0.18);
-  color: #7fe3ec;
+  background: rgba(103, 220, 231, 0.55);
+  color: #04121c;
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(103, 220, 231, 0.35);
 }
 .segDefault {
   color: rgba(255, 255, 255, 0.55);
