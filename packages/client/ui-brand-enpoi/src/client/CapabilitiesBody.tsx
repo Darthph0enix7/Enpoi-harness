@@ -23,9 +23,10 @@
  * persona/params stores): synchronous 0ms snapshot on mount, optimistic local
  * toggles with rollback, background persistence.
  */
-import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { AGENT_MODELS_KIND } from './kinds.ts'
+import { countPermissionRules, type PermissionsConfig } from './permissions-model.ts'
 import css from './CapabilitiesBody.module.css'
 
 /** How many session ids the skill catalog tries before reporting unavailable. */
@@ -74,7 +75,14 @@ function iconTerminal(size = 12): ReactNode {
 }
 
 /** Monochrome tab glyph for Capabilities (thin stroke, currentColor), also the guide capsule icon. */
-export function CapabilitiesIcon({ size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined }) {
+export function CapabilitiesIcon({
+  size = 16,
+  className,
+}: {
+  size?: number | undefined
+  active?: boolean | undefined
+  className?: string | undefined
+}) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
       <path d="M5.5 1.5v3M10.5 1.5v3M3.5 7h9v1.5a4.5 4.5 0 0 1-9 0V7ZM8 13v1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
@@ -230,8 +238,11 @@ interface OrchestrationNamespaceView {
     capabilities?: Partial<CapabilitiesState>
     mcpStatus?: Record<string, McpStatusEntry>
     mcpServers?: Record<string, McpServerEntry>
+    permissions?: PermissionsConfig
   }
 }
+
+/** Doc 55 permission policy wire types live in permissions-model.ts. */
 
 /** Read the enpoi-orchestration namespace through the live gateway. */
 async function describeOrchestration(): Promise<OrchestrationNamespaceView | undefined> {
@@ -441,6 +452,51 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
 
 export type CapabilitiesBodyProps = PropsRuntime<'sidebar.right.pane.tab'>
 
+/**
+ * Doc 55 permissions Tier-1 strip: a read-only counts row over the live
+ * policy (global + per-agent tool rules, standing grants). Full editing
+ * lives in the Settings page's Permissions section; no cross-surface
+ * settings-open action is exposed to tab components, so no link is offered.
+ */
+function PermissionsSection() {
+  const [counts, setCounts] = useState<{ rules: number; grants: number } | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      const ns = await describeOrchestration()
+      if (ns === undefined) {
+        setFailed(true)
+        return
+      }
+      setFailed(false)
+      setCounts(countPermissionRules(ns.value?.permissions))
+    })()
+  }, [])
+
+  return (
+    <section className={c('group')} key="permissions">
+      <div className={c('groupHead')}>
+        <div className={c('groupHeadLeft')}>
+          <span className={c('groupIcon')}>{iconTerminal()}</span>
+          <span className={c('groupTitle')}>Permissions</span>
+        </div>
+        {counts !== null && (
+          <span className={c('countBadge')}>{counts.rules} rules · {counts.grants} grants</span>
+        )}
+      </div>
+      {counts === null ? (
+        <div className={c('empty')}>{failed ? 'Permission policy unavailable.' : 'Loading policy…'}</div>
+      ) : (
+        <div className={c('permHint')}>
+          Unconfigured tools default to <b>ask</b>. Bash commands match patterns first, then the tool policy.
+          Edit rules in Settings under Permissions.
+        </div>
+      )}
+    </section>
+  )
+}
+
 export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: CapabilitiesBodyProps) {
   const { tab } = useTabInfo()
   const view = useSyncExternalStore(subscribe, () => snapshotCache)
@@ -518,7 +574,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     : undefined
 
   const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', banner?: ReactNode) => {
-    const activeCount = items.filter(item => {
+    const activeCount = items.filter((item) => {
       if (kind === 'tool') return caps.tools[item.id] !== false
       if (kind === 'skill') return caps.skills[item.id] !== false
       if (kind === 'mcp') return caps.mcp[item.id] === true
@@ -536,7 +592,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
         </div>
         {banner}
         <div className={c('list')}>
-          {items.map(item => {
+          {items.map((item) => {
             const isProtected = PROTECTED_CAPABILITIES.has(item.id)
             const isEnabled = isProtected
               ? true
@@ -644,6 +700,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       </header>
 
       <div className={c('groups')}>
+        <PermissionsSection />
         {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpList, 'mcp')}
         {skillsSection}
         {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}

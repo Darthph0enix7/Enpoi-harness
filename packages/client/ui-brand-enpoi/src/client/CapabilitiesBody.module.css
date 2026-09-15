@@ -306,3 +306,11 @@
     max-width: none;
   }
 }
+
+
+/* ── Permission strip (doc 55): counts row + hint; editing lives in Settings ── */
+.permHint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #8997a7);
+  padding: 4px 10px 2px;
+}

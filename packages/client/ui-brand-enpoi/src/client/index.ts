@@ -27,6 +27,7 @@ import {
 import { GitBody, GitIcon } from './GitBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
+import { PermissionsSettings } from './PermissionsSettings.tsx'
 import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
 import type { TerminalRegistryState } from './terminal/registry.ts'
@@ -166,6 +167,14 @@ export function apply(ctx: Context): void {
     order: 20,
     label: () => 'Orchestration',
   }, OrchestrationSettings))
+
+  // 2c. Permission policy settings section (doc 55)
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'permissions',
+    order: 21,
+    label: () => 'Permissions',
+  }, PermissionsSettings))
 
   // 3. Global operator tabs: right-Sidebar tab types (guide-discoverable) with
   // their bodies under the same implementation id.
