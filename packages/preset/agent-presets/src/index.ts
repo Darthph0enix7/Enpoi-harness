@@ -73,7 +73,7 @@ export interface AgentPresetSettings {
 /** Runtime schema for the user-writable slice. */
 export const AgentPresetSettingsSchema: z<AgentPresetSettings> = z.object({
   default: z.string(),
-  modeSelectionEnabled: z.boolean(),})
+  modeSelectionEnabled: z.boolean() })
 
 export { COMPOSITION_FILE, discoverPresets, scanRoot, SHIPPED_PRESET_ROOT } from './discovery.ts'
 export {

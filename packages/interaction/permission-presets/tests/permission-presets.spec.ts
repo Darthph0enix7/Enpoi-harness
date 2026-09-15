@@ -118,7 +118,7 @@ describe('PermissionPresetService', () => {
   it('publishes an effect-scoped current-session preset and removes it on unload', async () => {
     const ctx = await mounted()
     const fiber = await mountAuto(ctx)
-    expect(ctx.permissionPresets.names).toEqual(['workspace-write', 'danger-full-access', AUTO_PRESET])
+    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
     expect(ctx.permissionPresets.resolve(AUTO_PRESET)).toEqual({
       sandbox: 'danger-full-access', approval: 'never',
     })
@@ -128,7 +128,7 @@ describe('PermissionPresetService', () => {
     })
 
     await fiber.dispose()
-    expect(ctx.permissionPresets.names).toEqual(['workspace-write', 'danger-full-access'])
+    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(() => ctx.permissionPresets.resolve(AUTO_PRESET)).toThrow(/unknown preset "auto"/)
   })
 

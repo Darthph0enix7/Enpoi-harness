@@ -370,16 +370,20 @@ describe('startInProcessRun', () => {
     await expect(disposed.result).resolves.toMatchObject({ stopReason: 'aborted' })
   })
 
-  it('cleans a failed unpublished setup before rejecting', async () => {
+  it('an unknown toolFilter deny name does not fail the run (enpoi fork)', async () => {
+    // Unknown DENY names are skipped by `tools.restrict()` in this fork: the
+    // composed council/worker deny lists name per-child tools that are absent
+    // from the global registry. The run must start normally.
     const { ctx, parent } = await setup([])
     const beforeAgents = ctx.agents.list().length
     const beforeSessions = ctx.sessions.list().length
-    await expect(startInProcessRun({
+    const run = await startInProcessRun({
       ...request(parent),
       toolFilter: { deny: ['unknown-tool'] },
-    }, {})).rejects.toThrow('unknown global tool')
-    expect(ctx.agents.list()).toHaveLength(beforeAgents)
-    expect(ctx.sessions.list()).toHaveLength(beforeSessions)
+    }, {})
+    expect(ctx.agents.list().length).toBeGreaterThanOrEqual(beforeAgents)
+    expect(ctx.sessions.list().length).toBeGreaterThanOrEqual(beforeSessions)
+    await run.dispose?.()
   })
 
   it('treats abort after factory publication as a cancelled run with an id', async () => {

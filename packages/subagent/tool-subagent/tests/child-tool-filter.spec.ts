@@ -25,20 +25,20 @@ const SHARED_DENY = [
   'job_list',
   'job_kill',
   'ask_user_question',
-  'todo_write',
-  'memory_save',
-  'memory_rescind',
-  'memory_confirm',
+  // Operator default: sub-agents keep their OWN todo list and their OWN
+  // memory writes (isolated sessions), so these are not denied.
   'send_message',
   'interrupt_agent',
   'list_agents',
 ]
 
+// Operator default: every sub-agent may run bash, use skills, search/write
+// memory and keep its own todo list — readers keep only the mutation veto.
 const ROLE_EXTRAS = {
-  explorer: ['bash', 'edit', 'write', 'skill', 'web_search', 'web_fetch', 'memory_search'],
-  librarian: ['bash', 'edit', 'write', 'skill', 'memory_search'],
-  fixer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
-  designer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
+  explorer: ['edit', 'write', 'str_replace_editor'],
+  librarian: ['edit', 'write', 'str_replace_editor'],
+  fixer: [],
+  designer: [],
 }
 
 /** Spawn one foreground delegation and return the request the provider saw. */
@@ -63,13 +63,17 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     ['librarian', 'Librarian: research the API documentation', ROLE_EXTRAS.librarian],
     ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer],
     ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer],
-    // `oracle` has a persona but no dedicated tool policy: shared set only.
+    // `oracle` is the one child allowed to delegate: the shared set minus
+    // the subagent veto (operator design — the reviewer spawns researchers).
     ['oracle', 'Oracle: architecture review', []],
     // No role inferred: shared set only.
     ['unknown', 'Do the thing', []],
   ])('denies the shared worker set plus %s extras at spawn', async (_role, description, extras) => {
     const request = await captureRequest(description)
-    expect(request.toolFilter).toEqual({ deny: [...SHARED_DENY, ...extras] })
+    const expected = _role === 'oracle'
+      ? SHARED_DENY.filter(name => name !== 'subagent')
+      : [...SHARED_DENY, ...extras]
+    expect(request.toolFilter).toEqual({ deny: expected })
   })
 
   it('merges an existing configured deny list first and de-duplicates the union', async () => {

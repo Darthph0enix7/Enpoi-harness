@@ -4,7 +4,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { createSettlementMessage } from '../src/continuation-messages.ts'
 
 const childId = SessionId('settled-child')
-const summary = { type: 'text', text: `Background subagent ${childId} finished and will do no further work unless you send it more.` }
+const summary = { type: 'text', text: `Background subagent ${childId} finished.` }
 const reasoning: ContentBlock = { type: 'reasoning', text: 'private child reasoning' }
 const toolCall: ContentBlock = { type: 'tool-call', id: ToolCallId('child-call'), name: 'read', arguments: '{}' }
 

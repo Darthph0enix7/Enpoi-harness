@@ -93,22 +93,22 @@ describe('permissions projection unit', () => {
     ctx.on('permission-presets/catalog-changed', () => { notifications.push(notifications.length + 1) })
 
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['workspace-write', 'danger-full-access'])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     const fiber = await mountAuto(ctx)
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['workspace-write', 'danger-full-access', AUTO_PRESET])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
     expect(session.seq).toBe(beforeSeq)
     expect(ctx.sessionProjections.snapshot(session)).toEqual(beforeProjection)
 
     await fiber.dispose()
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['workspace-write', 'danger-full-access'])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(session.seq).toBe(beforeSeq)
     expect(ctx.sessionProjections.snapshot(session)).toEqual(beforeProjection)
 
     const reinstalled = await mountAuto(ctx)
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['workspace-write', 'danger-full-access', AUTO_PRESET])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
     expect(notifications).toEqual([1, 2, 3])
     await reinstalled.dispose()
     expect(notifications).toEqual([1, 2, 3, 4])
@@ -151,7 +151,7 @@ describe('/permission command', () => {
     const listed = await ctx.commands.execute(agent, '/permission', [], new AbortController().signal)
     expect(listed?.result).toEqual({
       kind: 'success',
-      text: 'current preset workspace-write (available: workspace-write, danger-full-access, auto)',
+      text: 'current preset workspace-write (available: read-only, workspace-write, danger-full-access, auto)',
     })
     const switched = await ctx.commands.execute(agent, '/permission auto', [], new AbortController().signal)
     expect(switched?.result).toEqual({ kind: 'success', text: 'preset auto' })

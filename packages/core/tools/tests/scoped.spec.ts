@@ -192,12 +192,15 @@ describe('restrict()', () => {
     // is a caller error rather than a silent no-op.
     expect(() => scope.ctx.tools.restrict({ allow: ['local'] })).toThrow(/unknown global tool "local"/)
     expect(() => scope.ctx.tools.restrict({ allow: ['reall'] })).toThrow(/unknown global tool "reall".*known global tools: real/s)
-    expect(() => scope.ctx.tools.restrict({ deny: ['ghost', 'wraith'] })).toThrow(/unknown global tools "ghost", "wraith"/)
+    // enpoi fork: unknown DENY names are no-ops — the composed council and
+    // worker deny lists legitimately name tools that exist in other contexts
+    // (e.g. `report`, per-child tools), and throwing there broke every spawn.
+    // Unknown ALLOW names still throw (asserted above).
+    expect(() => scope.ctx.tools.restrict({ deny: ['ghost', 'wraith'] })).not.toThrow()
 
     const emptyCtx = await mount()
     const { scope: emptyScope } = await mintAgentScope(emptyCtx, 'empty')
-    expect(() => emptyScope.ctx.tools.restrict({ deny: ['ghost'] }))
-      .toThrow(/known global tools: \(none\)/)
+    expect(() => emptyScope.ctx.tools.restrict({ deny: ['ghost'] })).not.toThrow()
   })
 })
 

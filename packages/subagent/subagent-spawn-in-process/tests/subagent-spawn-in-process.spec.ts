@@ -443,15 +443,24 @@ describe('dsh-subagent-spawn-in-process', () => {
       await run.dispose()
     })
 
-    it('an unknown toolFilter name fails the spawn loudly with no orphaned child', async () => {
-      const { ctx, parent } = await setup([])
-      const before = ctx.agents.list().length
-      await expect(start(ctx, 'spawn', {
+    it('an unknown toolFilter deny name is a no-op, not a failed spawn (enpoi fork)', async () => {
+      // The composed council/worker deny lists legitimately name tools that
+      // exist only in other contexts (e.g. the per-child `report` tool), so
+      // `tools.restrict()` skips unknown DENY names instead of throwing.
+      // Unknown ALLOW names still fail loudly (covered in the tools suite).
+      const { ctx, parent, adapter } = await setup([textResponse('done')])
+      const run = await start(ctx, 'spawn', {
         prompt: [{ type: 'text', text: 'do X' }],
         parent,
         toolFilter: { deny: ['no_such_tool'] },
-      })).rejects.toThrow(/unknown global tool "no_such_tool"/)
-      expect(ctx.agents.list().length).toBe(before)
+      })
+      const result = await run.result
+      expect(result.stopReason).toBe('completed')
+      // The child was created and ran (a throwing restrict would have
+      // rejected the spawn before any child existed).
+      expect(ctx.agents.get(run.id)).toBeDefined()
+      void adapter
+      await run.dispose()
     })
   })
 

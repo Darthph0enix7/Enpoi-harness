@@ -931,7 +931,7 @@ describe('direct-child Queue residency routing', () => {
     // This child is itself a parent, so its grandchild's settlement notice is
     // an ordinary later user message in its log.
     expect(userTexts(loaded.events).slice(0, 2)).toEqual(['child task', 'while waiting'])
-    expect(userTexts(loaded.events).slice(2).join('\n')).toContain('finished and will do no further work')
+    expect(userTexts(loaded.events).slice(2).join('\n')).toContain('finished.')
   })
 
   it('holds one ownership edge per child: a followup under an existing hold is a no-op re-hold', async () => {
@@ -2508,12 +2508,12 @@ describe('continuable settlement delivery', () => {
     const notice = settlementNotices(parent)[0]!
     expect(notice.sender).toBe(started.childId)
     expect(notice.text).toBe(
-      `Background subagent ${started.childId} finished and will do no further work unless you send it more.`
+      `Background subagent ${started.childId} finished.`
       + '\nIts closing message:\nthe answer',
     )
     // The collapsed row states the outcome without the child's content.
     expect(notice.summary).toBe(
-      `Background subagent ${started.childId} finished and will do no further work unless you send it more.`,
+      `Background subagent ${started.childId} finished.`,
     )
   })
 
