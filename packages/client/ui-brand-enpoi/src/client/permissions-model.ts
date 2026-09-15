@@ -186,17 +186,37 @@ export type PermissionProvenance = 'agent rule' | 'global rule' | 'inherit (defa
  * Drives the availability eye when the role has no `available` override:
  * built-in-visible tools show on, everything else shows crossed-out.
  */
+/**
+ * The operator-level surface: the acting agents (orchestrator, sysadmin,
+ * creator) share one FULL surface — from a permissions perspective they are
+ * the same agent: they act, they delegate, they configure. MCP server tools
+ * are deliberately absent here: MCP availability is a sidebar capability
+ * toggle (per-server, hot-swappable), not a per-role surface decision.
+ */
+const FULL_OPERATOR_SURFACE: readonly string[] = [
+  'bash', 'read', 'glob', 'grep', 'read_image',
+  'edit', 'write', 'str_replace_editor',
+  'todo_write', 'todo_read', 'skill', 'plan_mode', 'exit_plan_mode',
+  'subagent', 'task', 'workflow', 'ralph', 'goal', 'create_goal', 'get_goal', 'update_goal',
+  'oracle_review', 'request_evidence', 'roundtable', 'chorus',
+  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
+  'job_output', 'job_list', 'job_kill', 'ask_user_question',
+]
+
+/**
+ * The shipped per-role surfaces. Specialists and council seats carry the
+ * minimal surface their work needs; delegation is structural (workers never
+ * spawn children — the shared anti-leak floor bounds them regardless).
+ */
 export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
-  orchestrator: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'web_search', 'web_fetch', 'skill', 'plan_mode', 'subagent', 'task', 'workflow', 'job_output', 'job_list', 'job_kill', 'oracle_review', 'request_evidence', 'roundtable', 'chorus', 'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm', 'ask_user_question', 'goal', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'ralph'],
-  sysadmin: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'web_search', 'web_fetch', 'skill', 'subagent', 'task', 'oracle_review', 'request_evidence', 'memory_save', 'memory_search', 'job_output', 'job_list', 'job_kill'],
-  creator: ['read', 'glob', 'grep', 'bash', 'fs_write', 'skill', 'jobs', 'cordis', 'ask_user_question'],
-  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'run_code'],
-  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'run_code'],
-  explorer: ['read', 'glob', 'grep', 'read_image'],
+  orchestrator: FULL_OPERATOR_SURFACE,
+  sysadmin: FULL_OPERATOR_SURFACE,
+  creator: FULL_OPERATOR_SURFACE,
+  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'run_code'],
+  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'run_code'],
+  explorer: ['read', 'glob', 'grep', 'read_image', 'todo_read'],
   librarian: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  designer_alt: [],
-  oracle: ['read', 'glob', 'grep', 'read_image', 'web_search', 'request_evidence'],
-  keeper: [],
+  oracle: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'request_evidence', 'subagent', 'task'],
   referee: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
   chair: ['read', 'glob', 'grep', 'read_image'],
   skeptic: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],

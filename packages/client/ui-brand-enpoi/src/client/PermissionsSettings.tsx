@@ -27,6 +27,7 @@ import {
   type PermissionToolRow,
   type PolicyValue,
   builtRoleAvailability,
+  BUILT_ROLE_SURFACE,
 } from './permissions-model.ts'
 import css from './PermissionsSettings.module.css'
 
@@ -358,12 +359,12 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Whole-array bash pattern write against a freshly re-read document. */
+  /** Whole-array bash pattern write — optimistic on the current document. */
   const writeBashPatterns = (build: (fresh: PermissionsConfig) => BashPatternRule[]) => {
     const previous = perms
     void (async () => {
       if (perms === null) return
-      const fresh = (await describePermissionsView())?.value?.permissions ?? {}
+      const fresh = perms
       const patterns = build(fresh)
       setPerms({ ...fresh, bashPatterns: patterns })
       const ok = patterns.length === 0
@@ -401,23 +402,24 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Toggle one tool in an agent allowlist against a freshly re-read document. */
+  /** Toggle one tool in an agent allowlist — 0ms optimistic, background write. */
   const toggleAgentToolAvailable = (agent: string, tool: string) => {
     const previous = perms
-    void (async () => {
-      if (perms === null) return
-      const fresh = (await describePermissionsView())?.value?.permissions ?? {}
-      const members = [...(fresh.agents?.[agent]?.available ?? [])]
-      const available = members.includes(tool)
-        ? members.filter(name => name !== tool).sort((left, right) => left.localeCompare(right))
-        : [...members, tool].sort((left, right) => left.localeCompare(right))
-      const agentCfg = { ...(fresh.agents?.[agent] ?? {}), available }
-      setPerms({ ...fresh, agents: { ...(fresh.agents ?? {}), [agent]: agentCfg } })
-      const ok = available.length === 0
-        ? await unsetPermissionPath(['agents', agent, 'available'])
-        : await setPermissionPath(['agents', agent, 'available'], available)
-      if (!ok) setPerms(previous)
-    })()
+    if (perms === null) return
+    // Seed the allowlist from the built-in role surface when no explicit
+    // override exists yet, so the FIRST flip writes a complete list (the
+    // built-in visible set plus/minus this tool) instead of a bare [tool].
+    const seed = BUILT_ROLE_SURFACE[agent]
+    const members = [...(perms.agents?.[agent]?.available ?? (seed !== undefined ? [...seed] : []))]
+    const available = members.includes(tool)
+      ? members.filter(name => name !== tool).sort((left, right) => left.localeCompare(right))
+      : [...members, tool].sort((left, right) => left.localeCompare(right))
+    const agentCfg = { ...(perms.agents?.[agent] ?? {}), available }
+    setPerms({ ...perms, agents: { ...(perms.agents ?? {}), [agent]: agentCfg } })
+    const ok = available.length === 0
+      ? unsetPermissionPath(['agents', agent, 'available'])
+      : setPermissionPath(['agents', agent, 'available'], available)
+    void ok.then((writeOk) => { if (!writeOk) setPerms(previous) })
   }
 
   if (perms === null) {
