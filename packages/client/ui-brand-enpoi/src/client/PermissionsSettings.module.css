@@ -416,6 +416,13 @@
   border-radius: 7px;
   outline: none;
   flex-shrink: 0;
+  /* Native popups inherit the OS palette unless the control opts into dark
+     mode — without this the option list renders white-on-white. */
+  color-scheme: dark;
+}
+.addSelect option {
+  background-color: #0f1722;
+  color: #e7eef6;
 }
 
 .addBtn {

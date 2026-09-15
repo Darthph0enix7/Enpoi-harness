@@ -206,28 +206,30 @@ const FULL_OPERATOR_SURFACE: readonly string[] = [
 ]
 
 /**
- * The shipped per-role surfaces. Specialists and council seats carry the
- * minimal surface their work needs; delegation is structural (workers never
- * spawn children — the shared anti-leak floor bounds them regardless).
+ * The shipped per-role surfaces (mirrors the fork's role tables). Operator
+ * defaults: every sub-agent may run bash (reading, analysis, tests), use
+ * skills, search/write memory, and keep its own todo list; readers keep only
+ * the mutation veto. MCP rows are deliberately absent — MCP availability is a
+ * sidebar capability toggle, not a per-role surface decision.
  */
 export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
   orchestrator: FULL_OPERATOR_SURFACE,
   sysadmin: FULL_OPERATOR_SURFACE,
   creator: FULL_OPERATOR_SURFACE,
-  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'run_code'],
-  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'run_code'],
-  explorer: ['read', 'glob', 'grep', 'read_image', 'todo_read'],
-  librarian: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  oracle: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'request_evidence', 'subagent', 'task'],
-  referee: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  chair: ['read', 'glob', 'grep', 'read_image'],
-  skeptic: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  architect: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  pragmatist: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  visionary: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  experiencer: ['read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch'],
-  integrator: ['read', 'glob', 'grep', 'read_image'],
-  curator: ['read', 'glob', 'grep', 'read_image'],
+  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch', 'run_code'],
+  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch', 'run_code'],
+  explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save'],
+  librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
+  oracle: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'memory_rescind', 'memory_confirm', 'web_search', 'web_fetch', 'request_evidence', 'subagent', 'task'],
+  referee: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  chair: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  skeptic: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  architect: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  pragmatist: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  visionary: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  experiencer: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  integrator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  curator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
 }
 
 /**
