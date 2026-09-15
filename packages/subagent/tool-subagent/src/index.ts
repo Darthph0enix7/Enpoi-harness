@@ -381,10 +381,8 @@ const SHARED_CHILD_DENY: readonly string[] = [
   'job_list',
   'job_kill',
   'ask_user_question',
-  'todo_write',
-  'memory_save',
-  'memory_rescind',
-  'memory_confirm',
+  // Sub-agents keep their own todo list and their own memory writes (their
+  // sessions are isolated; the operator's default is "let them work").
   'send_message',
   'interrupt_agent',
   'list_agents',
@@ -402,10 +400,13 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   // transport is reserved, and `tools.restrict()` throws when a filter names
   // it. A child holding it can only orchestrate the tools it can already see,
   // which these lists bound.
-  explorer: ['bash', 'edit', 'write', 'skill', 'web_search', 'web_fetch', 'memory_search'],
-  librarian: ['bash', 'edit', 'write', 'skill', 'memory_search'],
-  fixer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
-  designer: ['skill', 'web_search', 'web_fetch', 'memory_search'],
+  //
+  // Operator defaults (Adam): every sub-agent may run bash (reading,
+  // analysis, tests — not only writing), use skills, search memory, and keep
+  // its own todo list. Readers keep only the mutation veto; implementers are
+  // unrestricted beyond the shared anti-leak floor.
+  explorer: ['edit', 'write', 'str_replace_editor'],
+  librarian: ['edit', 'write', 'str_replace_editor'],
 }
 
 /**
@@ -445,6 +446,12 @@ function childToolFilter(
   role: string | undefined,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
+  // The Oracle is the one child allowed to delegate (operator design: the
+  // reviewer spawns its own researchers). Every other role keeps the shared
+  // subagent veto.
+  const sharedDeny = role === 'oracle'
+    ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
+    : SHARED_CHILD_DENY
   const available = roleAvailableAllowlist(ctx, role)
   if (available !== undefined) {
     // Operator-defined surface: allow the named tools, deny everything else
@@ -453,13 +460,13 @@ function childToolFilter(
     return {
       ...configured,
       allow: [...new Set([...configured?.allow ?? [], ...available])],
-      deny: [...new Set([...configured?.deny ?? [], ...SHARED_CHILD_DENY])],
+      deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
   const roleDeny = role === undefined ? [] : ROLE_CHILD_DENY[role] ?? []
   return {
     ...configured,
-    deny: [...new Set([...configured?.deny ?? [], ...SHARED_CHILD_DENY, ...roleDeny])],
+    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleDeny])],
   }
 }
 
