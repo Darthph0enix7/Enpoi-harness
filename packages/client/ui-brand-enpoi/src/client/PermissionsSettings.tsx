@@ -266,7 +266,7 @@ function AgentPane({ agent, perms, toolRows, onCycleTool, onToggleAvailable, onR
         <div className={c('paneHint')}>
           Rules refine the global policy. The eye marks a tool in this role allowlist.
         </div>
-        {toolRows.map(row => (
+        {toolRows.filter(row => !row.id.startsWith('mcp__')).map(row => (
           <PolicyRow
             key={row.id}
             row={row}
