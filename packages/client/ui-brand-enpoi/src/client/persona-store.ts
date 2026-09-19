@@ -4,6 +4,9 @@
  * Ensures synchronous 0ms render on tab switch or session switch (zero delay,
  * zero reloading, zero 2-second fallback jumps), and hot-syncs changes to
  * the server's `enpoi-orchestration` settings namespace in the background.
+ * `refreshFromServer` re-reads the namespace for cross-client live sync; a
+ * persona key with a local write in flight keeps its optimistic value until
+ * that write settles.
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 
@@ -13,6 +16,8 @@ export type PersonaMap = Record<string, ModelSelection | null>
 let currentPersonas: PersonaMap = {}
 let primed = false
 const listeners = new Set<() => void>()
+/** Persona keys with a local write in flight; their optimistic value wins over a refresh. */
+const pendingPersonaKeys = new Set<string>()
 
 function notify(): void {
   for (const listener of listeners) {
@@ -20,34 +25,79 @@ function notify(): void {
   }
 }
 
-/** Eagerly prime the global in-memory cache from host settings on boot. */
-export function primePersonaAssignments(): void {
-  if (primed) return
-  primed = true
-  void fetch('/api/settings.describe', {
+/** One describe view of the enpoi-orchestration namespace, structural subset. */
+interface OrchestrationNamespaceView {
+  ns?: string
+  value?: { personas?: PersonaMap }
+  user?: { personas?: PersonaMap }
+}
+
+/** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */
+let describeSeq = 0
+
+/** Monotonic write rpcIds for the same reason. */
+let writeSeq = 0
+
+/** Read the enpoi-orchestration namespace through the live gateway. */
+async function describeOrchestration(): Promise<OrchestrationNamespaceView | undefined> {
+  describeSeq += 1
+  const res = await fetch('/api/settings.describe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       type: 'client-request',
       method: 'settings.describe',
-      rpcId: 'prime-personas',
+      rpcId: `persona-describe-${describeSeq}`,
       payload: { args: {} },
     }),
   })
-    .then(async (res) => {
-      if (!res.ok) return
-      const json: unknown = await res.json()
-      const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-      const orch = Array.isArray(namespaces)
-        ? (namespaces as Array<{ ns?: string; value?: { personas?: Record<string, ModelSelection> }; user?: { personas?: Record<string, ModelSelection> } }>).find(n => n.ns === 'enpoi-orchestration')
-        : undefined
-      const personas = orch?.value?.personas ?? orch?.user?.personas
-      if (personas && typeof personas === 'object') {
-        currentPersonas = { ...personas }
-        notify()
-      }
-    })
-    .catch(() => {})
+  if (!res.ok) return undefined
+  const json: unknown = await res.json()
+  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+  return Array.isArray(namespaces)
+    ? (namespaces as OrchestrationNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
+    : undefined
+}
+
+/**
+ * Replace the snapshot from one server read. Keys with an in-flight local write
+ * keep their optimistic value; every other key follows the server (so a
+ * concurrent clear in another client is applied).
+ * @param serverPersonas - the personas map the host just reported.
+ */
+function applyServerPersonas(serverPersonas: PersonaMap): void {
+  const merged: PersonaMap = { ...serverPersonas }
+  for (const key of pendingPersonaKeys) {
+    if (!Object.hasOwn(currentPersonas, key)) {
+      delete merged[key]
+      continue
+    }
+    const local = currentPersonas[key]
+    if (local !== undefined) merged[key] = local
+  }
+  currentPersonas = merged
+  notify()
+}
+
+/** Re-read the namespace and merge it into the snapshot (cross-client live sync). */
+export async function refreshFromServer(): Promise<void> {
+  try {
+    const view = await describeOrchestration()
+    if (view === undefined) return
+    const personas = view.value?.personas ?? view.user?.personas
+    if (personas !== undefined && typeof personas === 'object') {
+      applyServerPersonas({ ...personas })
+    }
+  } catch {
+    // Offline or malformed answer: the last snapshot stays until the next push.
+  }
+}
+
+/** Eagerly prime the global in-memory cache from host settings on boot. */
+export function primePersonaAssignments(): void {
+  if (primed) return
+  primed = true
+  void refreshFromServer()
 }
 
 // Auto-prime on module import so it's already ready before any session opens.
@@ -68,11 +118,19 @@ export function subscribePersonaAssignments(listener: () => void): () => void {
   }
 }
 
-/** Assign an explicit model to a persona globally (0ms instant update + background persist). */
+/**
+ * Optimistically assign an explicit model to a persona (0ms update) and persist
+ * the leaf write in the background. The key stays marked pending until the
+ * write settles so a concurrent refresh cannot clobber the optimistic value.
+ * @param personaId - display persona id.
+ * @param selection - the model selection to store.
+ * @returns whether the mutation was persisted.
+ */
 export function setPersonaAssignment(personaId: string, selection: ModelSelection): Promise<boolean> {
   const key = personaId.toLowerCase().replace(/^the\s+/, '').trim()
   currentPersonas = { ...currentPersonas, [key]: selection }
   notify()
+  pendingPersonaKeys.add(key)
 
   return fetch('/api/settings.mutate', {
     method: 'POST',
@@ -80,7 +138,7 @@ export function setPersonaAssignment(personaId: string, selection: ModelSelectio
     body: JSON.stringify({
       type: 'client-request',
       method: 'settings.mutate',
-      rpcId: `persona-set-${key}`,
+      rpcId: `persona-set-${key}-${String(++writeSeq)}`,
       payload: {
         args: {
           ns: 'enpoi-orchestration',
@@ -91,9 +149,17 @@ export function setPersonaAssignment(personaId: string, selection: ModelSelectio
   })
     .then(res => res.ok)
     .catch(() => false)
+    .finally(() => {
+      pendingPersonaKeys.delete(key)
+    })
 }
 
-/** Clear explicit assignment, reverting persona back to "Inherit" (0ms instant update + background persist). */
+/**
+ * Optimistically clear an explicit assignment, reverting the persona back to
+ * "Inherit" (0ms update) and persisting the leaf write in the background.
+ * @param personaId - display persona id.
+ * @returns whether the mutation was persisted.
+ */
 export function clearPersonaAssignment(personaId: string): Promise<boolean> {
   const key = personaId.toLowerCase().replace(/^the\s+/, '').trim()
   const next: PersonaMap = {}
@@ -104,6 +170,7 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
   }
   currentPersonas = next
   notify()
+  pendingPersonaKeys.add(key)
 
   return fetch('/api/settings.mutate', {
     method: 'POST',
@@ -111,7 +178,7 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
     body: JSON.stringify({
       type: 'client-request',
       method: 'settings.mutate',
-      rpcId: `persona-clear-${key}`,
+      rpcId: `persona-clear-${key}-${String(++writeSeq)}`,
       payload: {
         args: {
           ns: 'enpoi-orchestration',
@@ -122,4 +189,7 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
   })
     .then(res => res.ok)
     .catch(() => false)
+    .finally(() => {
+      pendingPersonaKeys.delete(key)
+    })
 }

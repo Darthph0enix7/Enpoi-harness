@@ -18,7 +18,7 @@ import {
   type AgentModelsDirectoryFace,
   type AgentModelsInjected,
 } from './AgentModelsBody.tsx'
-import { CapabilitiesBody, CapabilitiesIcon } from './CapabilitiesBody.tsx'
+import { CapabilitiesBody, CapabilitiesIcon, refreshCapabilities } from './CapabilitiesBody.tsx'
 import {
   SubagentSessionsBody,
   SubagentSessionsIcon,
@@ -52,11 +52,14 @@ import {
   subscribePersonaAssignments,
   setPersonaAssignment,
   clearPersonaAssignment,
+  refreshFromServer as refreshPersonaAssignments,
   type PersonaMap,
 } from './persona-store.ts'
+import { refreshFromServer as refreshOrchestrationParams } from './params-store.ts'
+import { refreshFromServer as refreshPermissionsView } from './permissions-model.ts'
 
-/** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, and locale. */
-export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale']
+/** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, locale, and Remote push. */
+export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale', 'remote']
 
 /** Session-less model directory: the global catalog mapped to the directory state shape. */
 type CatalogDirectoryFace = Omit<AgentModelsDirectoryFace, 'available'> & { available: true }
@@ -138,6 +141,32 @@ function resolveAgentModelsDirectory(
  * @param ctx - Client root context.
  */
 export function apply(ctx: Context): void {
+  // enpoi: cross-client live settings sync. A commit in the
+  // enpoi-orchestration namespace by ANY open client is debounced, then the
+  // persona, orchestration-parameter, and permissions stores re-read the
+  // namespace; each store ignores server values for paths with a local write
+  // still in flight, so optimistic edits are never clobbered.
+  ctx.effect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const scheduleRefresh = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = undefined
+        void refreshPersonaAssignments()
+        void refreshOrchestrationParams()
+        void refreshPermissionsView()
+        void refreshCapabilities()
+      }, 250)
+    }
+    const dispose = ctx.remote.$on('settings/document-updated', (ns) => {
+      if (ns === 'enpoi-orchestration') scheduleRefresh()
+    })
+    return () => {
+      if (timer !== undefined) clearTimeout(timer)
+      dispose()
+    }
+  }, 'enpoi: cross-client settings refresh')
+
   // 1. Brand marks in sidebar & conversation hero
   ctx.slots.inject('sidebar.brand.mark', () =>
     ctx.slots.inject('sidebar.brand.name', () =>

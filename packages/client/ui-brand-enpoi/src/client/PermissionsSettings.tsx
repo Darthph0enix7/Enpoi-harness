@@ -6,18 +6,25 @@
  * pattern editor and the standing-grants list (Global), and the unknown-tools
  * default. Glass theme, monochrome stroke icons, 0ms optimistic updates:
  * leaf paths persist as atomic per-path ops; whole-array keys (bashPatterns,
- * agents[name].available) re-read the live document immediately before each
- * write so the array is built from fresh state, never a stale snapshot.
+ * agents[name].available) go through the revision-fenced writers, which
+ * re-read the live document per attempt and re-apply the operator's change
+ * onto that fresh value. A pushed `settings/document-updated` refresh merges
+ * the server view in without clobbering a path whose write is in flight.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AGENT_ROSTER,
   buildAgentList,
   buildPermissionToolRows,
-  describePermissionsView,
   effectivePolicy,
+  getPermissionsViewState,
+  mergeServerPermissionsWithPending,
+  persistAgentAvailable,
+  persistBashPatterns,
   provenanceFor,
+  refreshFromServer,
   setPermissionPath,
+  subscribePermissionsView,
   unsetPermissionPath,
   type BashPatternRule,
   type McpServerRef,
@@ -300,18 +307,34 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
 
   const load = useCallback(() => {
     void (async () => {
-      const view = await describePermissionsView()
-      if (view === undefined) {
+      await refreshFromServer()
+      const state = getPermissionsViewState()
+      if (state.view === undefined) {
         setFailed(true)
         return
       }
       setFailed(false)
-      setPerms(view.value?.permissions ?? {})
-      setMcpServers(view.value?.mcpServers ?? {})
+      setPerms(state.view.value?.permissions ?? {})
+      setMcpServers(state.view.value?.mcpServers ?? {})
     })()
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Cross-client live sync: every pushed refresh re-merges the server view over
+  // the local optimistic one, except at paths whose write is still in flight.
+  const permsRef = useRef<PermissionsConfig | null>(null)
+  permsRef.current = perms
+  useEffect(() => subscribePermissionsView(() => {
+    const state = getPermissionsViewState()
+    if (state.view === undefined) return
+    const local = permsRef.current
+    setPerms(local === null
+      ? (state.view.value?.permissions ?? {})
+      : mergeServerPermissionsWithPending(state.view.value?.permissions, local))
+    setMcpServers(state.view.value?.mcpServers ?? {})
+    setFailed(false)
+  }), [])
 
   const toolRows = useMemo(() => buildPermissionToolRows(mcpServers), [mcpServers])
   const agents = useMemo(() => buildAgentList(AGENT_ROSTER, Object.keys(perms?.agents ?? {})), [perms])
@@ -358,26 +381,19 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Whole-array bash pattern write — optimistic on the current document. */
-  const writeBashPatterns = (build: (fresh: PermissionsConfig) => BashPatternRule[]) => {
+  /** Whole-array bash pattern write — optimistic on the current document, fenced persist. */
+  const writeBashPatterns = (build: (fresh: readonly BashPatternRule[]) => BashPatternRule[]) => {
     const previous = perms
-    void (async () => {
-      if (perms === null) return
-      const fresh = perms
-      const patterns = build(fresh)
-      setPerms({ ...fresh, bashPatterns: patterns })
-      const ok = patterns.length === 0
-        ? await unsetPermissionPath(['bashPatterns'])
-        : await setPermissionPath(['bashPatterns'], patterns)
-      if (!ok) setPerms(previous)
-    })()
+    if (perms === null) return
+    setPerms({ ...perms, bashPatterns: build(perms.bashPatterns ?? []) })
+    void persistBashPatterns(build).then((ok) => { if (!ok) setPerms(previous) })
   }
 
   const addBashPattern = (pattern: string, policy: PolicyValue) => {
     const trimmed = pattern.trim()
     if (trimmed === '') return
     writeBashPatterns((fresh) => {
-      const patterns = [...(fresh.bashPatterns ?? [])]
+      const patterns = [...fresh]
       const existing = patterns.findIndex(pat => pat.pattern === trimmed)
       if (existing >= 0) patterns[existing] = { pattern: trimmed, policy }
       else patterns.push({ pattern: trimmed, policy })
@@ -386,7 +402,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
   }
 
   const removeBashPattern = (pattern: string) => {
-    writeBashPatterns(fresh => (fresh.bashPatterns ?? []).filter(pat => pat.pattern !== pattern))
+    writeBashPatterns(fresh => fresh.filter(pat => pat.pattern !== pattern))
   }
 
   /** Revoke one standing grant: ['grants', id]. */
@@ -401,7 +417,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Toggle one tool in an agent allowlist — 0ms optimistic, background write. */
+  /** Toggle one tool in an agent allowlist — 0ms optimistic, fenced background write. */
   const toggleAgentToolAvailable = (agent: string, tool: string) => {
     const previous = perms
     if (perms === null) return
@@ -415,10 +431,13 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       : [...members, tool].sort((left, right) => left.localeCompare(right))
     const agentCfg = { ...(perms.agents?.[agent] ?? {}), available }
     setPerms({ ...perms, agents: { ...(perms.agents ?? {}), [agent]: agentCfg } })
-    const ok = available.length === 0
-      ? unsetPermissionPath(['agents', agent, 'available'])
-      : setPermissionPath(['agents', agent, 'available'], available)
-    void ok.then((writeOk) => { if (!writeOk) setPerms(previous) })
+    // Re-apply the toggle to the freshest server list on every attempt; an
+    // explicit empty override stays empty, an absent one seeds from the role surface.
+    void persistAgentAvailable(agent, (fresh) => {
+      const base = fresh ?? (seed !== undefined ? [...seed] : [])
+      const next = base.includes(tool) ? base.filter(name => name !== tool) : [...base, tool]
+      return next.sort((left, right) => left.localeCompare(right))
+    }).then((writeOk) => { if (!writeOk) setPerms(previous) })
   }
 
   if (perms === null) {

@@ -23,13 +23,19 @@ export function DefaultConversationViews({
   const storedDraft = useStore(s => s.draft)
   const viewRequest = useStore(s => s.viewRequest ?? null)
 
+  // The mount seed and a later server-side adoption (a draft synced from
+  // another device) both fill an empty composer; a non-empty editor is never
+  // overwritten, so in-progress typing always wins over an arriving draft.
   useEffect(() => {
     if (inputState.draft === '' && storedDraft !== '') inputActions.setDraft(storedDraft)
+  }, [storedDraft, inputState.draft, inputActions])
+
+  useEffect(() => {
     const unmirror = bindDraftMirror(actions.setDraft)
     return () => { unmirror() }
-    // Mount-only (deps pinned to inputActions): later store writes come from
-    // the machine mirror, not this seed effect.
-  }, [inputActions])
+    // The machine mirror pushes editor changes into the store; store-to-editor
+    // adoption is the seed effect above.
+  }, [actions])
 
   if (session.blank && conversationPhase(session, conversation) === 'blank') return null
   const viewId = view ?? active?.id

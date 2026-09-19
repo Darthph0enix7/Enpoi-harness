@@ -38,7 +38,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SidebarRightTabNavigation } from './contract/slots.ts'
 import { GUIDE_KIND, pageAddress, type SidebarRightSeed } from './contract/seed.ts'
-import type { SurfacePersistence } from './surface-storage.ts'
+import type { SurfaceEnvelope, SurfacePersistence } from './surface-storage.ts'
 
 /** One session's docking surface: the layout, its sequence, and the id counter. */
 export interface SurfaceState {
@@ -495,6 +495,181 @@ export function createSidebarRightStore(
 /** How long a commit waits before its surface is stored; a drag or tab churn collapses into one write. */
 const PERSIST_DELAY_MS = 400
 
+/** How long a written record waits before it reaches the server; a burst of commits collapses into one push. */
+const SURFACE_PUSH_DELAY_MS = 600
+
+/** One `enpoiUiState.*` call's outcome. */
+type UiStateResult<T> = { ok: true; value: T } | { ok: false; message: string }
+
+/** Whether a wire value is a JSON object rather than an array or a primitive. */
+function isWireRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+let uiStateSeq = 0
+
+/**
+ * One `enpoiUiState.*` call over the shared client-request envelope, the same
+ * POST-per-method pattern `/api/enpoiGit.*` uses.
+ * @param method - remote endpoint (`enpoiUiState.get`, `enpoiUiState.put`).
+ * @param args - exact named wire arguments.
+ * @returns the business value or a displayable failure message.
+ */
+async function uiStateRpc<T>(method: string, args: Record<string, unknown>): Promise<UiStateResult<T>> {
+  try {
+    const response = await fetch(`/api/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method,
+        rpcId: `${method}-${uiStateSeq += 1}`,
+        payload: { args },
+      }),
+    })
+    if (!response.ok) return { ok: false, message: `gateway responded ${response.status}` }
+    const json = await response.json() as {
+      result?: { ok?: boolean; value?: unknown; error?: { message?: unknown } }
+    }
+    const result = json.result
+    if (result?.ok !== true) {
+      const message = result?.error?.message
+      return { ok: false, message: typeof message === 'string' && message !== '' ? message : 'ui state request was rejected' }
+    }
+    return { ok: true, value: result.value as T }
+  } catch (error: unknown) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** The half of a session's server sync the persistence binding drives. */
+interface SurfaceSync {
+  /** Mirror one freshly written record after the quiet window; bursts coalesce. */
+  mirror: (envelope: SurfaceEnvelope) => void
+  /** Cancel pending work; the session's teardown calls this. */
+  stop: () => void
+}
+
+/**
+ * Keep one session's column on the server: fetch the server's record once at
+ * attach and adopt it when it is newer, then mirror every local write.
+ *
+ * The local record stays the rendering source — the column draws from storage
+ * before any response — and last-write-wins orders the two by the record's own
+ * revision time. Two cases need care. The seat materializes a default column
+ * for its first paint when the session has none, and that is not an operator
+ * edit: a device that had stored nothing before this attach adopts the server's
+ * record regardless, or cross-device adoption could never happen. And a local
+ * change whose write landed while the fetch was in flight is compared by its
+ * stored revision time, so a stale fetched record cannot undo it.
+ *
+ * A failed read leaves the session local-only, silently: without the server's
+ * record there is no honest ordering, so a blind push could overwrite a newer
+ * remote column. A failed write only skips that attempt — the local store is
+ * never touched, one log line marks the first failure, and the next change
+ * retries.
+ *
+ * @param instance - the session's store instance.
+ * @param sessionId - the session whose surface this instance holds.
+ * @param persistence - the versioned storage that owns the record.
+ * @returns the mirror sink and stop for the persistence binding.
+ */
+function bindSurfaceSync(
+  instance: EngineStoreInstance<SidebarRightState, SidebarRightActions>,
+  sessionId: string,
+  persistence: SurfacePersistence,
+): SurfaceSync {
+  const noop: SurfaceSync = { mirror: () => {}, stop: () => {} }
+  if (typeof localStorage === 'undefined' || typeof fetch !== 'function') return noop
+  const localAt = persistence.read(sessionId)?.updatedAt ?? 0
+  let stopped = false
+  let readFailed = false
+  let readComplete = false
+  let failureLogged = false
+  let lastPushedUpdatedAt = -1
+  let pushTimer: ReturnType<typeof setTimeout> | undefined
+  let pending: SurfaceEnvelope | undefined
+
+  const push = (): void => {
+    const next = pending
+    pending = undefined
+    if (stopped || next === undefined || next.updatedAt <= lastPushedUpdatedAt) return
+    void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch: { surface: next } })
+      .then((result) => {
+        if (stopped) return
+        if (!result.ok) {
+          if (!failureLogged) {
+            failureLogged = true
+            console.error(`enpoiUiState.put (surface) failed for session "${sessionId}": ${result.message}`)
+          }
+          return
+        }
+        failureLogged = false
+        // A response may settle out of order; the highest revision stays pushed.
+        lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, next.updatedAt)
+      })
+  }
+
+  const mirror = (envelope: SurfaceEnvelope): void => {
+    if (readFailed) return
+    pending = envelope
+    if (pushTimer !== undefined) clearTimeout(pushTimer)
+    pushTimer = setTimeout(() => {
+      pushTimer = undefined
+      // The read is still in flight; its handler decides what supersedes what.
+      if (readComplete) push()
+    }, SURFACE_PUSH_DELAY_MS)
+  }
+
+  void uiStateRpc<unknown>('enpoiUiState.get', { sessionId }).then((result) => {
+    if (stopped) return
+    if (!result.ok) {
+      readFailed = true
+      pending = undefined
+      return
+    }
+    readComplete = true
+    const wire = isWireRecord(result.value) ? result.value : {}
+    const fallback = typeof wire.updatedAt === 'number' && Number.isFinite(wire.updatedAt)
+      ? Math.max(0, Math.floor(wire.updatedAt))
+      : 0
+    const remote = persistence.readRemote(wire.surface, fallback)
+    const stored = persistence.read(sessionId)
+    let localNow = Math.max(localAt, stored?.updatedAt ?? 0)
+    if (remote === undefined && stored !== undefined && localNow === 0) {
+      // A record stored before the mirror existed carries no revision time;
+      // give it one so it can seed the server and order future merges.
+      const minted = { ...stored, updatedAt: Date.now() }
+      persistence.cache(sessionId, minted)
+      localNow = minted.updatedAt
+    }
+    if (remote !== undefined && (localAt === 0 || remote.updatedAt > localNow)) {
+      // The server's record supersedes everything local; a column the seat
+      // materialized for the first paint is not the operator's work.
+      pending = undefined
+      persistence.cache(sessionId, remote)
+      lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, remote.updatedAt)
+      instance.store.update((draft) => { draft.bySession[sessionId] = remote.surface })
+      return
+    }
+    // Local is newer (or the server has nothing): seed the server from here.
+    if (pending === undefined && localNow > (remote?.updatedAt ?? 0)) {
+      pending = persistence.payload(sessionId)
+    }
+    push()
+  })
+
+  return {
+    mirror,
+    stop: () => {
+      stopped = true
+      if (pushTimer !== undefined) clearTimeout(pushTimer)
+      pushTimer = undefined
+      pending = undefined
+    },
+  }
+}
+
 /**
  * Restore one session's surface and keep it stored.
  *
@@ -505,12 +680,15 @@ const PERSIST_DELAY_MS = 400
  * before the subscription, so reading a stored surface never echoes it straight
  * back to storage.
  *
+ * enpoi: the server mirror rides this binding. The stored record is written
+ * first (0ms cache semantics unchanged), then mirrored after the quiet window.
+ *
  * @param instance - the session's store instance, fresh from the engine.
  * @param sessionId - the session whose surface this instance holds.
  * @param persistence - the versioned storage.
  * @param navigation - reads the session's live tab navigation records at write time.
  * @param takePrecedence - replace a surface the layout mirror restored, not just an absent one.
- * @returns a stop that cancels the pending write and detaches the subscription.
+ * @returns a stop that cancels the pending writes and detaches the subscription.
  */
 export function bindSurfacePersistence(
   instance: EngineStoreInstance<SidebarRightState, SidebarRightActions>,
@@ -525,6 +703,7 @@ export function bindSurfacePersistence(
       if (takePrecedence || draft.bySession[sessionId] === undefined) draft.bySession[sessionId] = restored.surface
     })
   }
+  const sync = bindSurfaceSync(instance, sessionId, persistence)
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
   const unsubscribe = instance.subscribe(() => {
@@ -533,7 +712,9 @@ export function bindSurfacePersistence(
     timer = setTimeout(() => {
       timer = undefined
       const surface = instance.getSnapshot().bySession[sessionId]
-      if (surface !== undefined) persistence.write(sessionId, surface, navigation?.(sessionId) ?? {})
+      if (surface !== undefined) {
+        sync.mirror(persistence.write(sessionId, surface, navigation?.(sessionId) ?? {}))
+      }
     }, PERSIST_DELAY_MS)
   })
   const stop = (): void => {
@@ -542,6 +723,7 @@ export function bindSurfacePersistence(
     if (timer !== undefined) clearTimeout(timer)
     timer = undefined
     unsubscribe()
+    sync.stop()
   }
   // A pruned session must not leave its surface behind: the framework clears a
   // dead scope's persisted state, so this session's stored entry goes with it.

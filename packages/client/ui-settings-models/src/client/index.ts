@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // (settings/credentials invalidations ride the allowlist) into this program.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { ModelsSection } from './ModelsSection.tsx'
+import { refreshFromServer as refreshHiddenModels } from './hidden-models.ts'
 import type { ModelsSectionInjected } from './ModelsSection.tsx'
 import { PoolProviderCardExtras } from './pool-extras.tsx'
 import type { PoolExtrasInjected } from './pool-extras.tsx'
@@ -136,13 +137,29 @@ export function apply(ctx: ClientContext): void {
   // follows its settings scope, so it needs no subscription here.
   ctx.effect(() => {
     const refreshModels = (): void => { refreshIfLoaded(controller) }
+    // Cross-client live sync for the hidden-model map: an
+    // enpoi-orchestration commit in any other client is debounced, then merged
+    // into the local store (the settings page and the model picker both
+    // subscribe to its change event).
+    let hiddenRefreshTimer: ReturnType<typeof setTimeout> | undefined
+    const scheduleHiddenModelsRefresh = (): void => {
+      if (hiddenRefreshTimer !== undefined) clearTimeout(hiddenRefreshTimer)
+      hiddenRefreshTimer = setTimeout(() => {
+        hiddenRefreshTimer = undefined
+        void refreshHiddenModels()
+      }, 250)
+    }
     const disposers = [
-      ctx.remote.$on('settings/document-updated', () => { refreshModels() }),
+      ctx.remote.$on('settings/document-updated', (ns) => {
+        if (ns === 'enpoi-orchestration') scheduleHiddenModelsRefresh()
+        refreshModels()
+      }),
       ctx.remote.$on('credentials/reference-updated', refreshModels),
       ctx.remote.$on('llm/adapters-updated', refreshModels),
       ctx.on('connection/reset', refreshModels),
     ]
     return () => {
+      if (hiddenRefreshTimer !== undefined) clearTimeout(hiddenRefreshTimer)
       welcomeController.dispose()
       for (const dispose of disposers) dispose()
     }

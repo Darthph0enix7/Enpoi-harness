@@ -1,6 +1,7 @@
 /** Per-session Conversation store shared by the shell body and header. */
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { bindDraftSync, clearDraftSync } from './draft-sync.ts'
 import type { ConversationStoreState } from './contract/views.ts'
 
 const CONVERSATION_STORE_KEY = 'dsh.conversation'
@@ -15,10 +16,14 @@ type ConversationActions = {
 
 /**
  * Declare per-session draft persistence and View selection.
+ *
+ * enpoi: each session-scoped instance also mirrors its draft to the server
+ * (`enpoiUiState`), so the unsent prompt follows the operator across devices.
+ * The store's own localStorage persistence stays the synchronous render source.
  * @returns the store handle.
  */
 export function createConversationStore(): EngineStoreHandle<ConversationStoreState, ConversationActions> {
-  return defineStore({
+  const handle = defineStore({
     init: (): ConversationStoreState => ({ draft: '', view: null, viewRequest: null }),
     persist: CONVERSATION_STORE_KEY,
     actions: {
@@ -31,6 +36,24 @@ export function createConversationStore(): EngineStoreHandle<ConversationStoreSt
       completeViewRequest: (d) => { d.viewRequest = null },
     },
   })
+  return {
+    ...handle,
+    create(scopeKey?: string) {
+      const instance = handle.create(scopeKey)
+      if (scopeKey === undefined) return instance
+      const stopSync = bindDraftSync(instance, scopeKey)
+      return {
+        ...instance,
+        // A pruned session's server draft is not explicitly deleted here: the
+        // namespace has no delete and the record dies with the session.
+        clearPersisted: () => {
+          instance.clearPersisted()
+          clearDraftSync(scopeKey)
+          stopSync()
+        },
+      }
+    },
+  }
 }
 
 /**

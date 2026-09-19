@@ -37,6 +37,16 @@ export interface StoredSurface {
   readonly surface: SurfaceState
   /** Tab id to the navigation the previous page recorded; the Tab domain seeds from it. */
   readonly navigation: Readonly<Record<string, SidebarRightTabNavigation>>
+  /** When this record last changed, in epoch milliseconds; 0 for a record stored before the field existed. */
+  readonly updatedAt: number
+}
+
+/** One session's record as the server's opaque `surface` slot carries it. */
+export interface SurfaceEnvelope {
+  /** The serialized column: layout, id counter, editor record, and navigation. */
+  readonly value: unknown
+  /** When the record last changed; the slot's own revision time, which orders concurrent edits. */
+  readonly updatedAt: number
 }
 
 /** How a session's surface reaches storage and comes back; `SurfaceStorage` is the product implementation. */
@@ -49,20 +59,59 @@ export interface SurfacePersistence {
   read(sessionId: string): StoredSurface | undefined
   /**
    * Merge one session's committed column into storage, dropping the oldest sessions past the cap.
+   * An unchanged record is not written again and keeps its revision time.
    * @param sessionId - the session being written.
    * @param surface - its committed surface.
    * @param navigation - its live tab navigation records.
+   * @returns the record as the server's opaque `surface` slot carries it.
    */
-  write(sessionId: string, surface: SurfaceState, navigation: Readonly<Record<string, SidebarRightTabNavigation>>): void
+  write(sessionId: string, surface: SurfaceState, navigation: Readonly<Record<string, SidebarRightTabNavigation>>): SurfaceEnvelope
   /**
    * Drop one session's stored column; the session was pruned.
    * @param sessionId - the session being dropped.
    */
   clear(sessionId: string): void
+  /**
+   * The record one session's server slot carries, validated into what a store may adopt.
+   * @param value - the slot's raw value: an envelope, or a bare record from a writer without one.
+   * @param fallbackUpdatedAt - revision time for a bare record, generally the response's record time.
+   * @returns the restored surface and navigation, or `undefined` when the slot holds nothing usable.
+   */
+  readRemote(value: unknown, fallbackUpdatedAt: number): StoredSurface | undefined
+  /**
+   * Write an adopted remote record into local storage, keeping its revision time.
+   * @param sessionId - the session the record belongs to.
+   * @param stored - the validated record to cache.
+   */
+  cache(sessionId: string, stored: StoredSurface): void
+  /**
+   * The record one session currently has stored, as the server's slot carries it.
+   * @param sessionId - the session to read.
+   * @returns the envelope, or `undefined` when nothing usable is stored.
+   */
+  payload(sessionId: string): SurfaceEnvelope | undefined
 }
 
 /** A plain JSON object, as storage may hand one back. */
 type UnknownRecord = Record<string, unknown>
+
+/**
+ * The revision time a stored record carries, or 0 when it has none.
+ * @param value - the stored `updatedAt`.
+ * @returns the epoch milliseconds.
+ */
+function storedUpdatedAt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+}
+
+/**
+ * A stored record's content without its revision time, for change detection.
+ * @param record - the stored session record.
+ * @returns its JSON text minus `updatedAt`.
+ */
+function contentKey(record: UnknownRecord): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'updatedAt')))
+}
 
 /**
  * Whether a parsed value is a JSON object rather than an array, `null`, or a primitive.
@@ -342,6 +391,7 @@ function restoreSession(value: unknown, isKnownKind: (kind: string) => boolean):
     // tab may have taken with it, and stepping into them would be a defect.
     surface: { layout, history: EMPTY_HISTORY, minted: counter, editorTabId: editor },
     navigation: restoreNavigation(value.navigation, layout.tabs),
+    updatedAt: storedUpdatedAt(value.updatedAt),
   }
 }
 
@@ -399,28 +449,24 @@ export class SurfaceStorage implements SurfacePersistence {
   /**
    * Merge one session's committed column into storage; the entry moves to the
    * newest position, so the cap drops the least recently written session.
-   * An unchanged payload is not written again.
+   * An unchanged record is not written again and keeps its revision time.
    * @param sessionId - the session being written.
    * @param surface - its committed surface.
    * @param navigation - its live tab navigation records.
+   * @returns the record as the server's opaque `surface` slot carries it.
    */
-  write(sessionId: string, surface: SurfaceState, navigation: Readonly<Record<string, SidebarRightTabNavigation>>): void {
-    const { storage } = this
-    if (storage === undefined) return
+  write(sessionId: string, surface: SurfaceState, navigation: Readonly<Record<string, SidebarRightTabNavigation>>): SurfaceEnvelope {
     const raw = this.readRaw()
     const sessions = new Map<string, unknown>(parseSessions(raw) ?? [])
+    const previous = sessions.get(sessionId)
+    const value = serializeSession(surface, navigation)
+    const updatedAt = isRecord(previous) && contentKey(previous) === contentKey(value)
+      ? storedUpdatedAt(previous.updatedAt)
+      : Date.now()
     sessions.delete(sessionId)
-    sessions.set(sessionId, serializeSession(surface, navigation))
-    const payload = JSON.stringify({
-      version: SURFACE_VERSION,
-      sessions: Object.fromEntries([...sessions.entries()].slice(-SURFACE_SESSION_LIMIT)),
-    })
-    if (payload === raw) return
-    try {
-      storage.setItem(SURFACES_STORAGE_KEY, payload)
-    } catch {
-      // A full or unavailable store only disables persistence; the column stays in memory.
-    }
+    sessions.set(sessionId, { ...value, updatedAt })
+    this.persist(sessions, raw)
+    return { value, updatedAt }
   }
 
   /**
@@ -445,6 +491,73 @@ export class SurfaceStorage implements SurfacePersistence {
       }))
     } catch {
       // Same non-fatal contract as write: cleanup that cannot run leaves the entry behind.
+    }
+  }
+
+  /**
+   * The record one session's server slot carries, validated into what a store may adopt.
+   * @param value - the slot's raw value: an envelope, or a bare record from a writer without one.
+   * @param fallbackUpdatedAt - revision time for a bare record, generally the response's record time.
+   * @returns the restored surface and navigation, or `undefined` when the slot holds nothing usable.
+   */
+  readRemote(value: unknown, fallbackUpdatedAt: number): StoredSurface | undefined {
+    if (!isRecord(value)) return undefined
+    const wrapped = 'value' in value
+    const restored = restoreSession(wrapped ? value.value : value, this.isKnownKind)
+    if (restored === undefined) return undefined
+    const revision = wrapped ? storedUpdatedAt(value.updatedAt) : 0
+    return { ...restored, updatedAt: revision > 0 ? revision : storedUpdatedAt(fallbackUpdatedAt) }
+  }
+
+  /**
+   * Write an adopted remote record into local storage, keeping its revision time
+   * so the next open is instant and the next comparison stays honest.
+   * @param sessionId - the session the record belongs to.
+   * @param stored - the validated record to cache.
+   */
+  cache(sessionId: string, stored: StoredSurface): void {
+    const raw = this.readRaw()
+    const sessions = new Map<string, unknown>(parseSessions(raw) ?? [])
+    sessions.delete(sessionId)
+    sessions.set(sessionId, {
+      ...serializeSession(stored.surface, stored.navigation),
+      updatedAt: stored.updatedAt,
+    })
+    this.persist(sessions, raw)
+  }
+
+  /**
+   * The record one session currently has stored, as the server's slot carries it.
+   * @param sessionId - the session to read.
+   * @returns the envelope, or `undefined` when nothing usable is stored.
+   */
+  payload(sessionId: string): SurfaceEnvelope | undefined {
+    const sessions = parseSessions(this.readRaw())
+    if (sessions === undefined) return undefined
+    const record = new Map(sessions.slice(-SURFACE_SESSION_LIMIT)).get(sessionId)
+    if (record === undefined) return undefined
+    const stored = restoreSession(record, this.isKnownKind)
+    if (stored === undefined) return undefined
+    return { value: serializeSession(stored.surface, stored.navigation), updatedAt: stored.updatedAt }
+  }
+
+  /**
+   * Write every session's record back under the versioned key, capped; an identical payload is left alone.
+   * @param sessions - the records, oldest first.
+   * @param raw - the storage entry as last read, for the unchanged check.
+   */
+  private persist(sessions: ReadonlyMap<string, unknown>, raw: string | undefined): void {
+    const { storage } = this
+    if (storage === undefined) return
+    const payload = JSON.stringify({
+      version: SURFACE_VERSION,
+      sessions: Object.fromEntries([...sessions.entries()].slice(-SURFACE_SESSION_LIMIT)),
+    })
+    if (payload === raw) return
+    try {
+      storage.setItem(SURFACES_STORAGE_KEY, payload)
+    } catch {
+      // A full or unavailable store only disables persistence; the column stays in memory.
     }
   }
 

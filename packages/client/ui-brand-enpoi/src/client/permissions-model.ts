@@ -6,8 +6,10 @@
  *
  * Writes are atomic per-path leaf ops (one `settings.mutate` call per rule,
  * `ns` + `args` wrapper mandatory). Whole-array keys (bashPatterns,
- * agents[name].available) re-read the live document immediately before each
- * write so the array is built from fresh state, never a stale snapshot.
+ * agents[name].available) go through the fenced writers below: every attempt
+ * re-reads the live document, re-applies the operator's change onto that fresh
+ * value, and carries the read revision as `expectedRevision`; a
+ * `settings/conflict` answer re-reads and retries.
  */
 
 export type PolicyValue = 'allow' | 'ask' | 'deny'
@@ -287,6 +289,17 @@ function nextRpcId(prefix: string): string {
   return `${prefix}-${rpcSeq}`
 }
 
+/** One describe view of the enpoi-orchestration namespace the permissions UI reads. */
+export interface OrchestrationSettingsView {
+  ns?: string
+  /** Monotonic revision the namespace was read at; the whole-array write fence. */
+  revision?: number
+  value?: {
+    permissions?: PermissionsConfig
+    mcpServers?: Record<string, McpServerRef>
+  }
+}
+
 /** Read the enpoi-orchestration namespace through the live gateway. */
 export async function describePermissionsView(): Promise<OrchestrationSettingsView | undefined> {
   const res = await fetch('/api/settings.describe', {
@@ -305,31 +318,197 @@ export async function describePermissionsView(): Promise<OrchestrationSettingsVi
   return Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
 }
 
+// --- cross-client live view -------------------------------------------------
+
+/** The latest describe answer, or undefined before the first successful read. */
+let latestView: OrchestrationSettingsView | undefined
+/** True when no read has succeeded yet and the gateway is unreachable. */
+let latestFailed = false
+const viewListeners = new Set<() => void>()
 /**
- * Atomic leaf write — one policy cell or whole-array key under
- * `enpoi-orchestration.permissions`, no whole-doc read-modify-write races.
- * The gateway answers HTTP 200 for business failures too, so only an
- * explicit `ok: true` result counts as persisted.
+ * Paths (relative to the permissions section) with a local write in flight.
+ * A pending path's optimistic local value wins over a refresh until it settles.
+ */
+const pendingPaths = new Set<string>()
+
+/** Snapshot of the live permissions view for the settings section. */
+export interface PermissionsViewState {
+  view: OrchestrationSettingsView | undefined
+  failed: boolean
+}
+
+function notifyView(): void {
+  for (const listener of viewListeners) {
+    listener()
+  }
+}
+
+/** Synchronous snapshot reader for the settings section. */
+export function getPermissionsViewState(): PermissionsViewState {
+  return { view: latestView, failed: latestFailed }
+}
+
+/**
+ * Subscribe to permissions-view changes pushed by `refreshFromServer`.
+ * @param listener - called after each successful or failed refresh.
+ * @returns unsubscribe function.
+ */
+export function subscribePermissionsView(listener: () => void): () => void {
+  viewListeners.add(listener)
+  return () => viewListeners.delete(listener)
+}
+
+/**
+ * Re-read the namespace and publish the fresh view (cross-client live sync).
+ * A failed read keeps the previous view so an offline blip never blanks the
+ * settings page.
+ */
+export async function refreshFromServer(): Promise<void> {
+  let view: OrchestrationSettingsView | undefined
+  try {
+    view = await describePermissionsView()
+  } catch {
+    // Transport failure: treated like an unreachable gateway below.
+    view = undefined
+  }
+  if (view === undefined) {
+    if (latestView === undefined) {
+      latestFailed = true
+      notifyView()
+    }
+    return
+  }
+  latestView = view
+  latestFailed = false
+  notifyView()
+}
+
+// --- path helpers for the pending-overlay merge -----------------------------
+
+/** Read a JSON path out of a plain document (undefined when it is absent). */
+function readPathAt(root: unknown, path: readonly (string | number)[]): unknown {
+  let node: unknown = root
+  for (const segment of path) {
+    if (node === null || typeof node !== 'object') return undefined
+    node = (node as Record<string | number, unknown>)[segment]
+  }
+  return node
+}
+
+/** Write a JSON path into a freshly cloned plain document. */
+function writePathAt(root: Record<string | number, unknown>, path: readonly (string | number)[], value: unknown): void {
+  let node: Record<string | number, unknown> = root
+  for (let index = 0; index < path.length - 1; index++) {
+    const child = node[path[index] as string | number]
+    if (child === null || typeof child !== 'object') {
+      const next: Record<string | number, unknown> = {}
+      node[path[index] as string | number] = next
+      node = next
+    } else {
+      node = child as Record<string | number, unknown>
+    }
+  }
+  node[path[path.length - 1] as string | number] = value
+}
+
+/** Delete a JSON path from a freshly cloned plain document. */
+function deletePathAt(root: Record<string | number, unknown>, path: readonly (string | number)[]): void {
+  let node: Record<string | number, unknown> = root
+  for (let index = 0; index < path.length - 1; index++) {
+    const child = node[path[index] as string | number]
+    if (child === null || typeof child !== 'object') return
+    node = child as Record<string | number, unknown>
+  }
+  delete node[path[path.length - 1] as string | number]
+}
+
+/**
+ * Merge one server permissions section with the local optimistic state: every
+ * path without an in-flight write follows the server; a pending path keeps the
+ * local value (or its local absence) until the write settles.
+ * @param server - the fresh `permissions` section from a describe.
+ * @param local - the page's optimistic section.
+ * @returns the section the page should render.
+ */
+export function mergeServerPermissionsWithPending(
+  server: PermissionsConfig | undefined,
+  local: PermissionsConfig,
+): PermissionsConfig {
+  const merged = structuredClone(server ?? {}) as Record<string | number, unknown>
+  for (const key of pendingPaths) {
+    const path = JSON.parse(key) as (string | number)[]
+    const value = readPathAt(local, path)
+    if (value === undefined) deletePathAt(merged, path)
+    else writePathAt(merged, path, structuredClone(value))
+  }
+  return merged as PermissionsConfig
+}
+
+// --- writes -----------------------------------------------------------------
+
+/** One mutate answer: whether it persisted, and whether it failed on the revision fence. */
+interface MutationOutcome {
+  ok: boolean
+  conflict: boolean
+}
+
+/** One raw `settings.mutate` op inside the permissions section. */
+interface PermissionPathOp {
+  op: 'set' | 'unset'
+  path: (string | number)[]
+  value?: unknown
+}
+
+/** Post one mutation op; only an explicit `ok: true` result counts as persisted. */
+async function postMutation(op: PermissionPathOp, expectedRevision: number | undefined): Promise<MutationOutcome> {
+  const args: Record<string, unknown> = { ns: 'enpoi-orchestration', ops: [op] }
+  if (expectedRevision !== undefined) args.expectedRevision = expectedRevision
+  try {
+    const res = await fetch('/api/settings.mutate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.mutate',
+        rpcId: nextRpcId('perm-mutate'),
+        payload: { args },
+      }),
+    })
+    if (!res.ok) return { ok: false, conflict: false }
+    const json = await res.json() as { result?: { ok?: boolean; error?: { code?: string } } }
+    if (json?.result?.ok === true) return { ok: true, conflict: false }
+    return { ok: false, conflict: json?.result?.error?.code === 'settings/conflict' }
+  } catch {
+    // Transport failure: not a revision conflict, so the caller stops retrying.
+    return { ok: false, conflict: false }
+  }
+}
+
+/** Run one path's pending marker for the lifetime of its write. */
+async function withPendingPath<T>(path: readonly (string | number)[], run: () => Promise<T>): Promise<T> {
+  const key = JSON.stringify(path)
+  pendingPaths.add(key)
+  try {
+    return await run()
+  } finally {
+    pendingPaths.delete(key)
+  }
+}
+
+/**
+ * Atomic leaf write — one policy cell under `enpoi-orchestration.permissions`,
+ * no whole-doc read-modify-write races. The gateway answers HTTP 200 for
+ * business failures too, so only an explicit `ok: true` result counts as
+ * persisted.
  * @param path - path inside the permissions section (['tools', tool], …).
  * @param value - JSON value to write.
  * @returns whether the mutation was persisted.
  */
-export async function setPermissionPath(path: readonly (string | number)[], value: unknown): Promise<boolean> {
-  const res = await fetch('/api/settings.mutate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.mutate',
-      rpcId: nextRpcId('perm-set'),
-      payload: {
-        args: { ns: 'enpoi-orchestration', ops: [{ op: 'set', path: ['permissions', ...path], value }] },
-      },
-    }),
+export function setPermissionPath(path: readonly (string | number)[], value: unknown): Promise<boolean> {
+  return withPendingPath(path, async () => {
+    const outcome = await postMutation({ op: 'set', path: ['permissions', ...path], value }, undefined)
+    return outcome.ok
   })
-  if (!res.ok) return false
-  const json = await res.json() as { result?: { ok?: boolean } }
-  return json?.result?.ok === true
 }
 
 /**
@@ -337,20 +516,67 @@ export async function setPermissionPath(path: readonly (string | number)[], valu
  * @param path - path inside the permissions section.
  * @returns whether the mutation was persisted.
  */
-export async function unsetPermissionPath(path: readonly (string | number)[]): Promise<boolean> {
-  const res = await fetch('/api/settings.mutate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.mutate',
-      rpcId: nextRpcId('perm-unset'),
-      payload: {
-        args: { ns: 'enpoi-orchestration', ops: [{ op: 'unset', path: ['permissions', ...path] }] },
-      },
-    }),
+export function unsetPermissionPath(path: readonly (string | number)[]): Promise<boolean> {
+  return withPendingPath(path, async () => {
+    const outcome = await postMutation({ op: 'unset', path: ['permissions', ...path] }, undefined)
+    return outcome.ok
   })
-  if (!res.ok) return false
-  const json = await res.json() as { result?: { ok?: boolean } }
-  return json?.result?.ok === true
+}
+
+/** How many times a fenced whole-array write re-reads and retries on conflict. */
+const MAX_WRITE_RETRIES = 3
+
+/**
+ * Replace `permissions.bashPatterns` (whole-array write) with the operator's
+ * change applied to the freshest server array, fenced by revision. Each attempt
+ * re-reads the live document, so a concurrent write by another client is merged
+ * rather than clobbered; a conflict re-reads and retries.
+ * @param build - derives the next rule list from the fresh server list.
+ * @returns whether the change was persisted.
+ */
+export function persistBashPatterns(
+  build: (fresh: readonly BashPatternRule[]) => BashPatternRule[],
+): Promise<boolean> {
+  return withPendingPath(['bashPatterns'], async () => {
+    for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
+      const view = await describePermissionsView()
+      if (view === undefined) return false
+      const next = build(view.value?.permissions?.bashPatterns ?? [])
+      const op: PermissionPathOp = next.length === 0
+        ? { op: 'unset', path: ['permissions', 'bashPatterns'] }
+        : { op: 'set', path: ['permissions', 'bashPatterns'], value: next }
+      const outcome = await postMutation(op, view.revision)
+      if (outcome.ok) return true
+      if (!outcome.conflict) return false
+    }
+    return false
+  })
+}
+
+/**
+ * Replace `permissions.agents[agent].available` (whole-array write) with the
+ * operator's change applied to the freshest server array, fenced by revision.
+ * `undefined` means the role has no explicit override yet.
+ * @param agent - the role whose allowlist is written.
+ * @param build - derives the next allowlist from the fresh server allowlist.
+ * @returns whether the change was persisted.
+ */
+export function persistAgentAvailable(
+  agent: string,
+  build: (fresh: readonly string[] | undefined) => string[],
+): Promise<boolean> {
+  return withPendingPath(['agents', agent, 'available'], async () => {
+    for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
+      const view = await describePermissionsView()
+      if (view === undefined) return false
+      const next = build(view.value?.permissions?.agents?.[agent]?.available)
+      const op: PermissionPathOp = next.length === 0
+        ? { op: 'unset', path: ['permissions', 'agents', agent, 'available'] }
+        : { op: 'set', path: ['permissions', 'agents', agent, 'available'], value: next }
+      const outcome = await postMutation(op, view.revision)
+      if (outcome.ok) return true
+      if (!outcome.conflict) return false
+    }
+    return false
+  })
 }

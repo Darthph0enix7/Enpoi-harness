@@ -368,29 +368,44 @@ export async function refreshMcpStatus(): Promise<void> {
 let capabilitiesPrimed = false
 
 /** Prime the capability map + MCP state once when the first tab mounts. */
+function applyOrchestration(orch: Awaited<ReturnType<typeof describeOrchestration>>): void {
+  const serverCaps = orch?.value?.capabilities
+  if (serverCaps !== undefined) {
+    const next = initialCaps()
+    if (serverCaps.tools !== undefined) Object.assign(next.tools, serverCaps.tools)
+    if (serverCaps.skills !== undefined) Object.assign(next.skills, serverCaps.skills)
+    if (serverCaps.mcp !== undefined) Object.assign(next.mcp, serverCaps.mcp)
+    for (const p of PROTECTED_CAPABILITIES) next.tools[p] = true
+    globalCapsState = next
+    notify()
+  }
+  if (orch?.value?.mcpStatus !== undefined && typeof orch.value.mcpStatus === 'object') {
+    globalMcpStatus = orch.value.mcpStatus
+    notify()
+  }
+  if (orch?.value?.mcpServers !== undefined && typeof orch.value.mcpServers === 'object') {
+    globalMcpServers = orch.value.mcpServers
+    notify()
+  }
+}
+
+/**
+ * Re-read this namespace and repaint: the cross-client settings subscription
+ * calls it when another client changes capabilities (skills, tools, MCPs).
+ */
+export async function refreshCapabilities(): Promise<void> {
+  try {
+    applyOrchestration(await describeOrchestration())
+  } catch {
+    // keep last known state on transient failures
+  }
+}
+
 export async function primeCapabilities(): Promise<void> {
   if (capabilitiesPrimed) return
   capabilitiesPrimed = true
   try {
-    const orch = await describeOrchestration()
-    const serverCaps = orch?.value?.capabilities
-    if (serverCaps !== undefined) {
-      const next = initialCaps()
-      if (serverCaps.tools !== undefined) Object.assign(next.tools, serverCaps.tools)
-      if (serverCaps.skills !== undefined) Object.assign(next.skills, serverCaps.skills)
-      if (serverCaps.mcp !== undefined) Object.assign(next.mcp, serverCaps.mcp)
-      for (const p of PROTECTED_CAPABILITIES) next.tools[p] = true
-      globalCapsState = next
-      notify()
-    }
-    if (orch?.value?.mcpStatus !== undefined && typeof orch.value.mcpStatus === 'object') {
-      globalMcpStatus = orch.value.mcpStatus
-      notify()
-    }
-    if (orch?.value?.mcpServers !== undefined && typeof orch.value.mcpServers === 'object') {
-      globalMcpServers = orch.value.mcpServers
-      notify()
-    }
+    applyOrchestration(await describeOrchestration())
   } catch {
     // keep last known state on transient failures
   }
