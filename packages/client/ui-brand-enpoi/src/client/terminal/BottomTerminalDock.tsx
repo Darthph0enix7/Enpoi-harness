@@ -111,9 +111,11 @@ export function BottomTerminalDock({
   writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock, setTerminalDockHeight,
 }: BottomTerminalDockProps): ReactNode {
   const dock = useTerminals(state => state.dock)
-  const currentSessionId = useSessions(state => state?.current)
+  // The merged session list has no global "current" selection (navigation is
+  // per-view): the dock binds the first listed session, preserving its old
+  // fallback behavior.
   const fallbackSessionId = useSessions(state => state?.ids?.[0] ?? Object.keys(state?.byId ?? {})[0])
-  const sessionId = currentSessionId ?? fallbackSessionId ?? 'global'
+  const sessionId = fallbackSessionId ?? 'global'
   const cwd = useSessions(state => (sessionId === undefined ? undefined : state?.byId?.[sessionId as never]?.cwd))
   const session = useTerminals(state => (sessionId === undefined ? undefined : state.bySession[sessionId]))
   const tabs = useMemo(() => session?.tabs.filter(tab => tab.place === 'bottom') ?? EMPTY_TABS, [session])

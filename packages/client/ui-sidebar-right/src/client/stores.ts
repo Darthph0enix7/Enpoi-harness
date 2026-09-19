@@ -27,6 +27,7 @@
  * The kit plans none of this; it is decided here before its planners run.
  */
 import { defineStore, type EngineStoreHandle, type EngineStoreInstance } from '@deepseek-ai/dsh-client-store'
+import { clearSidebarLayout, readSidebarLayout, writeSidebarLayout } from './persistence.ts'
 import type {
   DockMode, DockZone, FloatRect, History, LayoutOp, LayoutState, Mint, PaneId, SplitId, TabId, TabRecord,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
@@ -94,6 +95,8 @@ export interface OpenContentIntent {
   readonly title: string
   /** Land a new tab in this pane. */
   readonly paneId?: PaneId
+  /** Split the target pane and put new content alone in the new pane. */
+  readonly preferNewPane?: boolean
   /** Take this tab's pane and slot, and close it in the same entry. */
   readonly replaceTab?: TabId
   /** Resource tabs reveal an existing identity by default; `false` permits duplicates. Pages always deduplicate within the target pane. */
@@ -279,7 +282,7 @@ function stepped(surface: SurfaceState, step: HistoryStepper): SurfaceState {
 }
 
 /**
- * Create the Sidebar store handle.
+ * Create the Sidebar store handle with per-Session JSON persistence in localStorage.
  *
  * The default page arrives as a thunk: a pane is seeded when a split or an
  * expansion of an empty column needs one, which can be long after the store was
@@ -290,7 +293,7 @@ function stepped(surface: SurfaceState, step: HistoryStepper): SurfaceState {
 export function createSidebarRightStore(
   seed: () => SidebarRightSeed,
 ): EngineStoreHandle<SidebarRightState, SidebarRightActions> {
-  return defineStore({
+  const handle = defineStore<SidebarRightState, SidebarRightActions>({
     init: (): SidebarRightState => ({ bySession: {} }),
     actions: {
       // Materialize a session's surface without changing it, so the first read
@@ -351,29 +354,39 @@ export function createSidebarRightStore(
             // `revealIfOpened: false` still permits a second copy.
             const editor = intent.editor === true && !page
             const activeBefore = editor ? getPane(state, paneId ?? activeDockPaneId(state)).activeTabId : undefined
-            const held = page
+            const revealed = page
               ? panePage(state, paneId ?? activeDockPaneId(state), kind)
-              : editor
-                ? intent.revealIfOpened === false ? undefined : findContentTab(state, contentId, kind)
-                : undefined
-            const planned = held !== undefined
-              ? {
-                ops: editor ? [] : [{ type: 'focusTab' as const, tabId: held }],
-                tabId: held,
-              }
-              : planOpenContent(state, mint, {
-                kind,
-                contentId,
-                title,
-                ...paneId === undefined ? {} : { paneId },
-                ...index === undefined ? {} : { index },
-                ...page || editor
-                  ? { revealIfOpened: false }
-                  : intent.revealIfOpened === undefined ? {} : { revealIfOpened: intent.revealIfOpened },
+              : intent.revealIfOpened === false ? undefined : findContentTab(state, contentId, kind)
+            // enpoi: neither an editor open nor a page open splits — the editor pane
+            // owns the record, and a page is unique per pane already. A plain
+            // resource open may prefer a pane of its own.
+            let openedInNewPane: TabId | undefined
+            const split = intent.preferNewPane === true && !editor && replace === undefined && revealed === undefined
+              ? planSplitPane(state, mint, paneId, (id) => {
+                openedInNewPane = id
+                return { id, kind, contentId, title }
               })
+              : []
+            const planned = revealed !== undefined
+              ? {
+                ops: editor ? [] : [{ type: 'focusTab' as const, tabId: revealed }],
+                tabId: revealed,
+              }
+              : openedInNewPane !== undefined
+                ? { ops: split, tabId: openedInNewPane }
+                : planOpenContent(state, mint, {
+                  kind,
+                  contentId,
+                  title,
+                  ...paneId === undefined ? {} : { paneId },
+                  ...index === undefined ? {} : { index },
+                  ...page || editor
+                    ? { revealIfOpened: false }
+                    : intent.revealIfOpened === undefined ? {} : { revealIfOpened: intent.revealIfOpened },
+                })
             ops.push(...planned.ops)
             // enpoi: opening seats the new tab active; the editor puts the page back.
-            if (editor && held === undefined && activeBefore !== undefined && activeBefore !== planned.tabId) {
+            if (editor && revealed === undefined && activeBefore !== undefined && activeBefore !== planned.tabId) {
               ops.push({ type: 'focusTab', tabId: activeBefore })
             }
             if (replace !== undefined && replace !== planned.tabId) ops.push({ type: 'closeTab', tabId: replace })
@@ -458,24 +471,45 @@ export function createSidebarRightStore(
       },
     },
   })
+  // enpoi: upstream's per-session layout mirror rides along with the fork's
+  // surface storage. It keeps every commit's layout under the key the tab
+  // inventory's startup discovery reads, so dormant sessions publish their open
+  // tabs without a seat; the fork's binding (below) restores the richer record
+  // — editor pane and navigation included — and takes precedence over it.
+  return { ...handle, create(scopeKey) {
+    const instance = handle.create(scopeKey)
+    if (scopeKey === undefined) return instance
+    const saved = readSidebarLayout(scopeKey)
+    if (saved !== undefined) instance.store.set({ bySession: { [scopeKey]: saved } })
+    instance.subscribe(() => {
+      const surface = instance.getSnapshot().bySession[scopeKey]
+      if (surface !== undefined) writeSidebarLayout(scopeKey, surface)
+    })
+    return { ...instance, clearPersisted: () => { clearSidebarLayout(scopeKey) } }
+  } }
 }
 
-// enpoi: the fork persists each session's column; upstream keeps it in memory only.
+// enpoi: the fork persists each session's surface — layout, editor record, and
+// navigation; upstream's layout mirror above is the tab inventory's discovery
+// source, and this binding is the authority wherever both hold the session.
 /** How long a commit waits before its surface is stored; a drag or tab churn collapses into one write. */
 const PERSIST_DELAY_MS = 400
 
 /**
  * Restore one session's surface and keep it stored.
  *
- * The restore only fills a session the store has no state for, so a fresh page
- * load seeds the column and a live in-memory surface is never overwritten. The
- * restore runs before the subscription, so reading a stored surface never echoes
- * it straight back to storage.
+ * The restore fills a session the store has no state for, so a fresh page load
+ * seeds the column and a live in-memory surface is never overwritten; with
+ * `takePrecedence` it also replaces a surface the layout mirror already put
+ * there, because the fork's stored record is the richer one. The restore runs
+ * before the subscription, so reading a stored surface never echoes it straight
+ * back to storage.
  *
  * @param instance - the session's store instance, fresh from the engine.
  * @param sessionId - the session whose surface this instance holds.
  * @param persistence - the versioned storage.
  * @param navigation - reads the session's live tab navigation records at write time.
+ * @param takePrecedence - replace a surface the layout mirror restored, not just an absent one.
  * @returns a stop that cancels the pending write and detaches the subscription.
  */
 export function bindSurfacePersistence(
@@ -483,11 +517,12 @@ export function bindSurfacePersistence(
   sessionId: string,
   persistence: SurfacePersistence,
   navigation?: (sessionId: string) => Readonly<Record<string, SidebarRightTabNavigation>>,
+  takePrecedence = false,
 ): () => void {
   const restored = persistence.read(sessionId)
   if (restored !== undefined) {
     instance.store.update((draft) => {
-      if (draft.bySession[sessionId] === undefined) draft.bySession[sessionId] = restored.surface
+      if (takePrecedence || draft.bySession[sessionId] === undefined) draft.bySession[sessionId] = restored.surface
     })
   }
   let timer: ReturnType<typeof setTimeout> | undefined

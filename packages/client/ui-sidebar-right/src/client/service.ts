@@ -40,6 +40,7 @@ import { canCloseTab, type SidebarRightState, type SurfaceState } from './stores
 import type { createSidebarRightStore } from './stores.ts'
 import type { SurfacePersistence } from './surface-storage.ts'
 import { TabDomain, type PinResource } from './tab-domain.ts'
+import { SidebarTabInventory } from './tab-inventory.ts'
 
 /** The seat's bound action set. */
 export type SurfaceActions = BoundActions<ReturnType<typeof createSidebarRightStore>>
@@ -63,12 +64,14 @@ interface Adoption {
  * Adoption seeds the occurrence table from what a reload stored, then
  * subscribes and reconciles immediately: a restored surface is already
  * committed when the store is minted and may need no further action, so waiting
- * for a commit that never comes would leave its tabs without occurrences.
+ * for a commit that never comes would leave its tabs without occurrences. It
+ * also republishes the session's open tabs into the inventory providers read,
+ * and `forget` retires them when the scope is cleared.
  * @param tabs - registered tab types.
  * @param pin - resource retention for an occurrence's lifetime.
  * @param rail - the global rail preferences shared with the panel seat.
  * @param persistence - the stored navigation records a reload restores.
- * @returns the controller and a callback releasing exactly its own adoption.
+ * @returns the controller and plugin-owned adoption and scope-removal callbacks.
  */
 export function createSidebarRightController(
   tabs: SidebarRightTabRegistry, pin: PinResource, rail: SidebarRightRail = new SidebarRightRail(),
@@ -76,17 +79,21 @@ export function createSidebarRightController(
 ): {
   controller: SidebarRightController
   adopt: (sessionId: SessionId, store: SidebarRightSurfaceStore) => () => void
+  forget: (sessionId: SessionId) => void
 } {
   const adopted = new Map<SessionId, Adoption>()
-  const controller = new SidebarRightController(tabs, pin, rail, adopted)
+  const inventory = new SidebarTabInventory()
+  const controller = new SidebarRightController(tabs, pin, rail, adopted, inventory.source)
   return {
     controller,
+    forget: (sessionId) => { inventory.remove(sessionId) },
     adopt(sessionId, store) {
       adopted.get(sessionId)?.unsubscribe()
       const restored = persistence?.read(sessionId)
       if (restored !== undefined) controller.tabDomain.restore(sessionId, restored.navigation)
       const sync = (): void => {
         const surface = store.getSnapshot().bySession[sessionId]
+        inventory.update(sessionId, Object.values(surface?.layout.tabs ?? {}))
         if (surface !== undefined) controller.tabDomain.sync(sessionId, surface.layout)
       }
       const adoption: Adoption = { store, unsubscribe: store.subscribe(sync) }
@@ -123,6 +130,8 @@ export interface SidebarRightBinding {
 export interface SidebarRightPlacement {
   /** Land a new tab in this pane instead of the active docked one. */
   readonly paneId?: PaneId
+  /** Prefer a new pane for new content; use the target pane when splitting is unavailable. */
+  readonly preferNewPane?: boolean
   /** Take this tab's place — its pane and its strip slot — and close it in the same step. */
   readonly replaceTab?: TabId
   /**
@@ -220,6 +229,8 @@ export interface ISidebarRight {
 
 /** Cross-plugin right-Sidebar face (ctx.sidebarRight). */
 export class SidebarRightController implements ISidebarRight {
+  /** Open tab metadata across saved and adopted Sessions, independent of visible seats. */
+  readonly openTabs: SidebarTabInventory['source']
   private binding: SidebarRightBinding | undefined
   private readonly closeHandlers = new Map<string, SidebarRightCloseHandler>()
 
@@ -247,14 +258,26 @@ export class SidebarRightController implements ISidebarRight {
    * @param pin - `ctx.resources.pin`, which the Tab domain holds addresses with.
    * @param rail - the global rail preferences: the lit kind, the open intent, and the editor width.
    * @param adopted - plugin-owned session stores used by occurrence actions.
+   * @param openTabs - plugin-owned metadata source across saved and adopted layouts.
    */
   constructor(
     private readonly tabs: SidebarRightTabRegistry,
     pin: PinResource,
     readonly rail: SidebarRightRail,
     private readonly adopted = new Map<SessionId, Adoption>(),
+    openTabs: SidebarTabInventory['source'] = new SidebarTabInventory().source,
   ) {
+    this.openTabs = openTabs
     this.tabDomain = new TabDomain(this, pin)
+  }
+
+  /**
+   * Read the committed tabs of a Session so providers can restore their content.
+   * @param sessionId - Session whose layout has been adopted.
+   * @returns its open records, or an empty list before adoption.
+   */
+  tabsIn(sessionId: SessionId): readonly TabRecord[] {
+    return Object.values(this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]?.layout.tabs ?? {})
   }
 
   /**
@@ -340,7 +363,9 @@ export class SidebarRightController implements ISidebarRight {
     commit()
   }
 
-  // enpoi: resources open in the editor pane beside the panel, never as the panel's page.
+  // enpoi: a resource open lands in the editor pane beside the panel, never as
+  // the panel's page, unless the caller names a placement — a pane, a replaced
+  // tab, or a preferred split — which asks for the panel itself.
   /** Claim a resource and place it in one session; an address outside the scheme or one no type claims throws. */
   private placeResource(
     sessionId: SessionId,
@@ -351,7 +376,8 @@ export class SidebarRightController implements ISidebarRight {
     if (!address.startsWith(RESOURCE_SCHEME)) {
       throw new Error(`sidebarRight: no registered tab type claims "${address}"`)
     }
-    this.place(sessionId, actions, this.tabs.claim(address, options.kind), address, options, options.params, true)
+    const editor = options.paneId === undefined && options.preferNewPane !== true && options.replaceTab === undefined
+    this.place(sessionId, actions, this.tabs.claim(address, options.kind), address, options, options.params, editor)
   }
 
   /** Place a page type in one session at the address pages are recorded under; an unregistered kind throws. */
@@ -377,24 +403,42 @@ export class SidebarRightController implements ISidebarRight {
     params: SidebarRightNavigationParams,
     editor = false,
   ): void {
+    const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
+      ?? (this.binding?.sessionId === sessionId ? this.binding.surfaces[sessionId] : undefined)
+    const targetPane = surface === undefined ? undefined : placement.paneId ?? activeDockPaneId(surface.layout)
+    const target = targetPane === undefined ? undefined : surface?.layout.nodes[targetPane]
+    const preferNewPane = placement.preferNewPane === true
+      && placement.replaceTab === undefined
+      && surface !== undefined
+      && target?.kind === 'pane'
+      && target.host === 'dock'
+      && target.tabs.length > 0
+      && canSplit(surface.layout)
+      && dockPaneIds(surface.layout).length < 2
+      && this.binding?.sessionId === sessionId
+      && this.binding.canSplitPane(target.id)
     const commit = (): void => { actions.openContent(sessionId, {
       kind: claim.kind,
       contentId: claim.contentId,
       title: claim.title,
       ...placement.paneId === undefined ? {} : { paneId: placement.paneId },
+      ...preferNewPane && !editor ? { preferNewPane: true } : {},
       ...placement.replaceTab === undefined ? {} : { replaceTab: placement.replaceTab },
       ...placement.revealIfOpened === undefined ? {} : { revealIfOpened: placement.revealIfOpened },
       ...editor ? { editor: true } : {},
     }, (tabId) => {
       this.tabDomain.navigate(sessionId, tabId, { address, params })
-      // enpoi: the rail is global state: a resource opening in the editor pane
-      // is an open of the column, and a page open is the rail's new lit kind.
-      if (editor) this.rail.setOpen(true)
-      else this.rail.setKind(claim.kind)
+      // enpoi: the rail is global state: any open of the column opens the panel,
+      // and a page open is the rail's new lit kind. A resource placed in the
+      // panel leaves the lit page alone — the rail still stands for the page.
+      if (address === pageAddress(claim.kind)) this.rail.setKind(claim.kind)
+      else this.rail.setOpen(true)
     }) }
     // Replacing a tab runs the replaced record's close handler in the same
-    // step, so upstream's cleanup path frames our own commit.
-    const layout = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]?.layout
+    // step, so upstream's cleanup path frames our own commit. The adopted
+    // store's snapshot is the authority; the seat binding is the fallback for
+    // a session whose store the runtime has not minted yet.
+    const layout = surface?.layout
     const replaced = placement.replaceTab === undefined ? undefined : layout?.tabs[placement.replaceTab]
     const revealed = layout === undefined || placement.revealIfOpened === false
       ? undefined : findContentTab(layout, claim.contentId, claim.kind)

@@ -356,7 +356,9 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, open
         parentId: summary.parentId,
         origin: summary.origin,
         running: summary.running,
-        completed: summary.completed === true,
+        // The merged SessionSummary carries `running` (upstream dropped the
+        // durable `completed` bit): a no-longer-running child reads as done.
+        completed: !summary.running,
         updatedAt: summary.updatedAt,
       })
     }

@@ -10,6 +10,7 @@ import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { PaneId, SplitId, TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { dockPaneIds, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
 import { apply, inject } from '../src/client/index.ts'
 import { intentsFor } from '../src/client/shell/SidebarRight.tsx'
 import { GUIDE_KIND } from '../src/client/contract/seed.ts'
@@ -75,6 +76,7 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
     'rightbar': { kind: 'single', scope: 'root' },
   })
   await runtime.sessions.add({ id: SESSION })
+  let reference = runtime.sessions.retainFor(runtime.ctx, SESSION, { source: 'mainView' })
   const feature = await runtime.mount({ inject: [...inject], apply })
   const bodies = new Map<string, SidebarRightTabInfo>()
   const titles = new Map<string, SidebarRightTabInfo>()
@@ -103,14 +105,23 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
     runtime.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'test/text' }, Title)
   })
   const view = runtime.renderSlot('rightbar', { width: 420, viewportWidth, canShow })
-  const instance = runtime.storeOf('rightbar.session', SESSION) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
+  const instance = runtime.storeOf('rightbar.session', reference) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
   const controller = runtime.ctx.sidebarRight
   const layout = () => instance.getSnapshot().bySession[SESSION]!.layout
   const open = (name = 'a.txt', options?: Parameters<typeof controller.openResource>[1]) => {
     act(() => { controller.openResource(`dsh-resource://file/session/s-test/${name}`, options) })
     return controller.active()!
   }
-  return { runtime, feature, controller, instance, actions: instance.actions, layout, open, frame, pin, bodies, titles, hooks, view }
+  const selectSession = (id: SessionId): SessionReference => {
+    const next = runtime.sessions.retainFor(runtime.ctx, id, { source: 'mainView' })
+    reference.release()
+    reference = next
+    return next
+  }
+  return {
+    runtime, feature, controller, instance, actions: instance.actions, layout,
+    open, selectSession, frame, pin, bodies, titles, hooks, view,
+  }
 }
 
 function element(container: HTMLElement, selector: string): HTMLElement {
@@ -302,8 +313,9 @@ describe('RightbarSeat presentation', () => {
     h.open('kept.txt')
     await h.runtime.sessions.add({ id: OTHER })
     h.frame.closeRightbar.mockClear()
-    await h.runtime.sessions.setCurrent(OTHER)
-    const other = h.runtime.storeOf('rightbar.session', OTHER) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
+    let otherRef!: SessionReference
+    act(() => { otherRef = h.selectSession(OTHER) })
+    const other = h.runtime.storeOf('rightbar.session', otherRef) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
     // The target materializes expanded with the lit page in the same frame, so
     // the frame never learns a collapse it would have to take back.
     expect(other.getSnapshot().bySession[OTHER]?.layout.expanded).toBe(true)
@@ -459,6 +471,7 @@ describe('RightbarSeat fullscreen entry', () => {
     else if (change === 'push') fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     else if (change === 'session') {
       await h.runtime.sessions.add({ id: OTHER })
+      act(() => { h.selectSession(OTHER) })
       act(() => { h.controller.openResource('dsh-resource://file/session/s-other/b.txt') })
     } else await h.runtime.dispose()
     const openCalls = [...h.frame.openRightbar.mock.calls]
@@ -545,6 +558,7 @@ describe('slot-owned useTabInfo', () => {
     await h.runtime.sessions.add({ id: OTHER })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(info.tab.signal.aborted).toBe(false)
+    act(() => { h.selectSession(OTHER) })
     act(() => { h.controller.openResource('dsh-resource://file/session/s-other/other.txt', { params: { line: 9 } }) })
     const otherTab = h.controller.active()!
     expect(otherTab.id).toBe(own.id)
@@ -557,7 +571,6 @@ describe('slot-owned useTabInfo', () => {
     act(() => { info.tab.actions.close() })
     expect(info.tab.signal.aborted).toBe(true)
     expect(otherInfo.tab.signal.aborted).toBe(false)
-    await h.runtime.sessions.setCurrent(SESSION)
     const remaining = h.bodies.get(h.controller.active()!.id)!
     expect(remaining.tab.navigation.revision).toBe(1)
     await h.feature.dispose()

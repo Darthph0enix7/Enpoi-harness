@@ -67,6 +67,7 @@ export type { FloatRect, PaneId, TabId, TabRecord } from '@deepseek-ai/dsh-clien
 export type { PinResource, SidebarRightNavigator, TabOccurrence } from './tab-domain.ts'
 export type { SidebarRightKey } from './locales.ts'
 export type { OpenContentIntent } from './stores.ts'
+export type { SidebarRightOpenTab } from './tab-inventory.ts'
 
 /** This package's copy namespace. */
 const NS = 'sidebarRight'
@@ -104,7 +105,7 @@ export function apply(ctx: ClientContext): void {
   const rail = new SidebarRightRail()
   // enpoi: per-session column surfaces, restored from localStorage on reload.
   const surfaces = new SurfaceStorage(kind => tabs.get(kind) !== undefined)
-  const { controller, adopt } = createSidebarRightController(
+  const { controller, adopt, forget } = createSidebarRightController(
     tabs,
     (address, signal) => { ctx.resources.pin(address, signal) },
     rail,
@@ -140,15 +141,22 @@ export function apply(ctx: ClientContext): void {
       create: (scopeKey) => {
         const instance = handle.create(scopeKey)
         if (scopeKey !== undefined) {
+          // The fork's surface storage restores the richer record — editor pane
+          // and navigation included — over the layout mirror the handle already
+          // applied, so both keys can hold the session and the fork's wins.
           persistences.push(bindSurfacePersistence(
             instance,
             scopeKey,
             surfaces,
             sessionId => controller.tabDomain.records(sessionId as SessionId),
+            true,
           ))
           adoptions.push(adopt(scopeKey as SessionId, instance))
         }
-        return instance
+        return { ...instance, clearPersisted() {
+          instance.clearPersisted()
+          if (scopeKey !== undefined) forget(scopeKey as SessionId)
+        } }
       },
     }
     const layout: ILayout = ctx.layout

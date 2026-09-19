@@ -11,6 +11,11 @@
  *   - Pure monochrome vector icons throughout.
  *   - Input-matching glass material & border tokens.
  *
+ * Data and submission ride the SAME per-session ModelDirectory as the /model
+ * popup, and a pick reflects immediately (0ms) while the Host answer settles.
+ * A rejected selection announces through the shared transient Toast anchored
+ * to the composer card.
+ *
  * @module dsh-client-ui-model-selection/ModelSelect
  */
 
@@ -21,6 +26,7 @@ import {
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import type { ModelReasoningEffort, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelectInjected } from './slots.ts'
@@ -77,9 +83,19 @@ export interface ModelSelectOverride {
 /** Unplaced portal panel: hidden but laid out so `offsetWidth` is real for the clamp. */
 const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 
+/**
+ * The seat's submit gate. The shared directory reports a RemoteResult; a
+ * caller override reports the boolean its own store accepted, so both
+ * outcomes settle through one path.
+ */
+type ModelSelectSubmit = (
+  selection: ModelSelection,
+) => Promise<RemoteResult<void> | boolean | undefined>
+
 export function ModelSelect(
   { locked, available, directory, load, select, compact, override, t }:
-  ModelSelectInjected
+  Omit<ModelSelectInjected, 'select'>
+  & { select: ModelSelectSubmit }
   & { locked: boolean; compact?: boolean; override?: ModelSelectOverride }
   & PropsLocale<'model'>,
 ) {
@@ -256,6 +272,32 @@ export function ModelSelect(
 
   if (!available) return null
 
+  /** Raise one transient banner anchored to the composer card. */
+  const raise = (text: string): void => {
+    toastSeq.current += 1
+    setToast({ seq: toastSeq.current, text })
+  }
+
+  /**
+   * Surface the submit outcome after the 0ms close. A RemoteResult carries the
+   * Host's own refusal; an override's boolean leaves its message on the
+   * directory snapshot. Success needs nothing — the shared current already
+   * moved.
+   */
+  const announce = (outcome: RemoteResult<void> | boolean | undefined): void => {
+    if (outcome === undefined || outcome === true) return
+    if (outcome === false) {
+      const message = directory.getSnapshot().error
+      if (message !== null) raise(t('error.action', { message }))
+      return
+    }
+    if (outcome.ok) return
+    const { error } = outcome
+    raise(error.code === 'session/writer-held'
+      ? t('error.sessionInUse')
+      : t('error.action', { message: `${error.code}: ${error.message}` }))
+  }
+
   const choose = (selection: ModelSelection): void => {
     recordRecentModel(selection.provider, selection.model)
     // 0ms instant UI close: popover dismisses immediately on click without waiting for network/disk RPCs
@@ -266,15 +308,7 @@ export function ModelSelect(
     }
     lastActionRef.current = 'select'
     const submit = override !== undefined ? override.select : select
-    void submit(selection).then((accepted) => {
-      if (!accepted) {
-        const message = directory.getSnapshot().error
-        if (message !== null) {
-          toastSeq.current += 1
-          setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
-        }
-      }
-    })
+    void submit(selection).then(announce)
   }
 
   const chooseEffort = (effort: string | undefined): void => {
@@ -291,15 +325,7 @@ export function ModelSelect(
     }
     lastActionRef.current = 'select'
     const submit = override !== undefined ? override.select : select
-    void submit(selection).then((accepted) => {
-      if (!accepted) {
-        const message = directory.getSnapshot().error
-        if (message !== null) {
-          toastSeq.current += 1
-          setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
-        }
-      }
-    })
+    void submit(selection).then(announce)
   }
 
   // Model lookup map for quick access (computed on-demand when popover opens)

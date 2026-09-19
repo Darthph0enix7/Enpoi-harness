@@ -300,13 +300,15 @@ export function apply(ctx: Context): void {
       name: 'sidebar.right.pane.tab',
       key: SUBAGENT_SESSIONS_ID,
       inject: (): SubagentSessionsInjected => {
+        const uiWorkspace = ctx.get('uiWorkspace')
         const sessions = ctx.get('sessions')
         return {
-          openSession: (id) => { sessions?.open(id) },
+          openSession: (id) => { uiWorkspace?.openSession(id) },
           // Children carry a durable parent address: a plain session address is
           // refused by the host for subagent-origin Sessions, so the panel opens
-          // them through the catalog-derived subagent address instead.
-          openChild: (address) => { sessions?.openSubagent(address) },
+          // them through the catalog-derived subagent address instead (the
+          // workspace navigation accepts either).
+          openChild: (address) => { uiWorkspace?.openSession(address) },
           refreshSessions: async () => { await sessions?.refresh() },
         }
       },
@@ -334,9 +336,9 @@ export function apply(ctx: Context): void {
 
   // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
   ctx.slots.inject('tool.call.toolview', function* () {
-    const sessions = ctx.get('sessions')
+    const uiWorkspace = ctx.get('uiWorkspace')
     const openSession = (id: SessionId) => {
-      sessions?.open(id)
+      uiWorkspace?.openSession(id)
     }
     yield ctx.slots.register({
       name: 'tool.call.toolview',

@@ -626,6 +626,25 @@ const EDITOR_RESIZE_MARKER = 'data-sidebar-right-editor-resizing'
  * frame learns the panel's presentation, and where `ctx.sidebarRight` learns
  * which session it is acting on, because this is the seat that knows both.
  */
+/**
+ * enpoi: a seat leaving during a session switch would hand the frame a
+ * transient no-surface report (collapse) that the replacement seat has to take
+ * back in the same frame. The leave report is deferred by a microtask; the
+ * replacement seat cancels it on mount, while a true unmount still reports.
+ */
+let pendingLeaveReport: (() => void) | undefined
+function scheduleLeaveReport(report: () => void): void {
+  pendingLeaveReport = report
+  queueMicrotask(() => {
+    const run = pendingLeaveReport
+    pendingLeaveReport = undefined
+    run?.()
+  })
+}
+function cancelLeaveReport(): void {
+  pendingLeaveReport = undefined
+}
+
 export function RightbarSeat({
   sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
   selectKind, setEditorWidth, setRightbarWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
@@ -720,7 +739,11 @@ export function RightbarSeat({
   }, [sessionId, shown, track, fullscreen, syncPresentation, surface, railState.open, canShow])
   // Leaving is part of that report: a seat that unmounts with its session must
   // hand the track back rather than leave one sized for a surface nobody draws.
-  useLayoutEffect(() => () => { syncPresentation({ shown: false, track: false, fullscreen: false }) }, [syncPresentation])
+  useLayoutEffect(() => () => {
+    scheduleLeaveReport(() => { syncPresentation({ shown: false, track: false, fullscreen: false }) })
+  }, [syncPresentation])
+  // The replacement seat (session switch) cancels the departing seat's report.
+  useLayoutEffect(() => { cancelLeaveReport() }, [])
 
   // Republished on every committed change: the service's readers answer from the
   // last commit, and its commands act on the session actually on screen.

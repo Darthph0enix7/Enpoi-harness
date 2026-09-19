@@ -8,7 +8,7 @@ import type {
   ModelCatalogFailure, ModelProviderGroup, ModelSelection, ModelSelectionProjection,
 } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
+import type { RemoteResult, TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelCatalogDirectory } from './catalog.ts'
@@ -80,16 +80,18 @@ export class ModelDirectory {
   }
 
   /**
-   * Select the complete provider/model/reasoning selection. The durable
-   * projection frame updates the shared current; failures surface on the store
-   * and throw so each entry's own retry surface engages.
+   * Select the complete provider/model/reasoning selection. The choice reaches
+   * the shared current immediately (optimistic), so both entries and a
+   * remounting seat show it without waiting for the Host; the answer replaces
+   * it, and a rejection restores the previous selection while surfacing the
+   * failure on the store and returning it to the caller.
    * @param selection - provider, provider-owned model id, and optional adapter-owned effort.
- */
-  async select(selection: ModelSelection): Promise<void> {
+   * @returns the selection outcome, including the original Remote failure.
+   */
+  async select(selection: ModelSelection): Promise<RemoteResult<void>> {
     this.assertAvailable()
     const generation = ++this.generation
     const prevCurrent = this.store.getSnapshot().current
-    // Optimistic update: instantly reflect the user's choice with 0ms delay!
     this.store.update((s) => {
       s.current = selection
       s.routable = true
@@ -106,7 +108,7 @@ export class ModelDirectory {
           : { reasoningEffort: selection.reasoningEffort },
       })
       if (this.disposed || generation !== this.generation) {
-        return
+        return result.ok ? { ok: true, value: undefined } : result
       }
       if (!result.ok) {
         this.store.update((s) => {
@@ -114,7 +116,7 @@ export class ModelDirectory {
           s.status = 'error'
           s.error = `${result.error.code}: ${result.error.message}`
         })
-        throw new Error(`session.selectModel failed: ${result.error.code}: ${result.error.message}`)
+        return result
       }
       this.store.update((s) => {
         s.current = result.value.selected
@@ -133,6 +135,7 @@ export class ModelDirectory {
       throw err
     }
     this.syncInputs()
+    return { ok: true, value: undefined }
   }
 
   /**
