@@ -201,155 +201,157 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   return (
     <>
       <div className={styles['masterDetailLayout']}>
-      {/* LEFT SIDEBAR: Provider List */}
-      <aside className={styles['providersSidebar']}>
-        <div className={styles['sidebarHeader']}>
-          <div className={styles['sidebarTitleRow']}>
-            <span className={styles['sidebarTitle']}>{t('providersTitle')}</span>
-            <span className={styles['providerCountBadge']}>{configuredRows.length}</span>
-          </div>
-
-          <div className={styles['sidebarSearchWrap']}>
-            <IconSearch size={13} />
-            <input
-              className={styles['sidebarSearchInput']}
-              type="text"
-              placeholder={t('providersFilterPlaceholder')}
-              value={providerSearch}
-              onChange={e => setProviderSearch(e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className={styles['providerListScrollable']}>
-          {filteredRows.length === 0 ? (
-            <div className={styles['emptySidebar']}>{t('providersEmpty')}</div>
-          ) : (
-            filteredRows.map((row) => {
-              const isSelected = row.entry.provider === selectedProviderId
-              const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
-              const modelCount = modelCountByProvider.get(row.entry.provider)
-
-              return (
-                <div
-                  key={row.entry.provider}
-                  className={`${styles['providerListItem']} ${isSelected ? styles['providerListItemActive'] : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  // 0ms optimistic: synchronous state switch, no await before DOM update
-                  onClick={() => setSelectedProviderId(row.entry.provider)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
-                  }}
-                >
-                  <span
-                    className={`${styles['providerStatusDot']} ${
-                      isConfigured ? styles['statusDotGreen'] : styles['statusDotYellow']
-                    }`}
-                    title={isConfigured ? t('providerConnected') : t('providerMissingKey')}
-                  />
-
-                  <div className={styles['providerListInfo']}>
-                    <div className={styles['providerListNameRow']}>
-                      <span className={styles['providerListName']}>{row.entry.displayName}</span>
-                      {row.entry.declared && <span className={styles['customTagSmall']}>{t('customTag')}</span>}
-                    </div>
-                    <span className={styles['providerListSlug']}>{row.entry.provider}</span>
-                  </div>
-
-                  {modelCount !== undefined && (
-                    <span className={styles['providerModelCountPill']}>{modelCount}</span>
-                  )}
-                </div>
-              )
-            })
-          )}
-        </div>
-
-        <div className={styles['sidebarFooter']}>
-          <Button
-            variant="outline"
-            className={styles['addProviderBtn']}
-            onClick={() => setAddModalOpen(true)}
-            disabled={!state.writable}
-          >
-            <IconPlusOutline16 size={14} />
-            {t('addProviderAction')}
-          </Button>
-        </div>
-      </aside>
-
-      {/* RIGHT MAIN PANEL: Provider Detail */}
-      <main className={styles['providerDetailMain']}>
-        {selectedRow && selectedNamespace ? (
-          <ProviderDetailPanel
-            row={selectedRow}
-            namespace={selectedNamespace}
-            schema={schema}
-            api={api}
-            t={t}
-            readOnly={!state.writable}
-            onDelete={() => setDeleteTarget(selectedRow)}
-            onSaved={() => void controller.load()}
-          />
-        ) : (
-          <div className={styles['emptyDetail']}>
-            <div className={styles['emptyDetailIcon']}>
-              <IconServer size={32} />
+        {/* LEFT SIDEBAR: Provider List */}
+        <aside className={styles['providersSidebar']}>
+          <div className={styles['sidebarHeader']}>
+            <div className={styles['sidebarTitleRow']}>
+              <span className={styles['sidebarTitle']}>{t('providersTitle')}</span>
+              <span className={styles['providerCountBadge']}>{configuredRows.length}</span>
             </div>
-            <h3>{t('noProviderSelected')}</h3>
-            <p>{t('noProviderSelectedHint')}</p>
+
+            <div className={styles['sidebarSearchWrap']}>
+              <IconSearch size={13} />
+              <input
+                className={styles['sidebarSearchInput']}
+                type="text"
+                placeholder={t('providersFilterPlaceholder')}
+                value={providerSearch}
+                onChange={e => setProviderSearch(e.target.value)}
+              />
+            </div>
           </div>
-        )}
-      </main>
 
-      {/* ADD PROVIDER MODAL */}
-      <AddProviderModal
-        open={addModalOpen}
-        taken={takenProviderIds}
-        protocols={protocols}
-        api={api}
-        t={t}
-        readOnly={!state.writable}
-        onClose={(created) => {
-          setAddModalOpen(false)
-          if (created) void controller.load()
-        }}
-      />
+          <div className={styles['providerListScrollable']}>
+            {filteredRows.length === 0 ? (
+              <div className={styles['emptySidebar']}>{t('providersEmpty')}</div>
+            ) : (
+              filteredRows.map((row) => {
+                const isSelected = row.entry.provider === selectedProviderId
+                const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
+                const modelCount = modelCountByProvider.get(row.entry.provider)
 
-      {/* DELETE CONFIRMATION MODAL */}
-      <Modal
-        open={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title={deleteTarget ? providerCopy(t('deleteTitle'), deleteTarget.entry) : ''}
-        closeLabel={t('close')}
-        description={
-          deleteTarget
-            ? providerCopy(
-              deleteTarget.apiKeyEnv ? t('deleteDescriptionWithCredential') : t('deleteDescription'),
-              deleteTarget.entry,
-            )
-            : ''
-        }
-        className={styles['deleteDialog'] ?? ''}
-        footer={
-          <>
-            <Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>
-              {t('cancel')}
-            </Button>
+                return (
+                  <div
+                    key={row.entry.provider}
+                    className={`${styles['providerListItem']} ${isSelected ? styles['providerListItemActive'] : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    // 0ms optimistic: synchronous state switch, no await before DOM update
+                    onClick={() => setSelectedProviderId(row.entry.provider)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
+                    }}
+                  >
+                    <span
+                      className={`${styles['providerStatusDot']} ${
+                        isConfigured ? styles['statusDotGreen'] : styles['statusDotYellow']
+                      }`}
+                      title={isConfigured ? t('providerConnected') : t('providerMissingKey')}
+                    />
+
+                    <div className={styles['providerListInfo']}>
+                      <div className={styles['providerListNameRow']}>
+                        <span className={styles['providerListName']}>{row.entry.displayName}</span>
+                        {row.entry.declared && <span className={styles['customTagSmall']}>{t('customTag')}</span>}
+                      </div>
+                      <span className={styles['providerListSlug']}>{row.entry.provider}</span>
+                    </div>
+
+                    {modelCount !== undefined && (
+                      <span className={styles['providerModelCountPill']}>{modelCount}</span>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </div>
+
+          <div className={styles['sidebarFooter']}>
             <Button
               variant="outline"
-              className={styles['deleteConfirmBtn']}
-              disabled={deleting}
-              onClick={confirmDelete}
+              className={styles['addProviderBtn']}
+              onClick={() => setAddModalOpen(true)}
+              disabled={!state.writable}
             >
-              {deleting ? t('deletingAction') : t('confirmDeleteAction')}
+              <IconPlusOutline16 size={14} />
+              {t('addProviderAction')}
             </Button>
-          </>
-        }
-      >
-        {deleteError && <p className={styles['error']}>{deleteError}</p>}
-      </Modal>
+          </div>
+        </aside>
+
+        {/* RIGHT MAIN PANEL: Provider Detail */}
+        <main className={styles['providerDetailMain']}>
+          {selectedRow && selectedNamespace ? (
+            <ProviderDetailPanel
+              row={selectedRow}
+              namespace={selectedNamespace}
+              schema={schema}
+              api={api}
+              t={t}
+              readOnly={!state.writable}
+              onDelete={() => setDeleteTarget(selectedRow)}
+              onSaved={() => void controller.load()}
+            />
+          ) : (
+            <div className={styles['emptyDetail']}>
+              <div className={styles['emptyDetailIcon']}>
+                <IconServer size={32} />
+              </div>
+              <h3>{t('noProviderSelected')}</h3>
+              <p>{t('noProviderSelectedHint')}</p>
+            </div>
+          )}
+        </main>
+
+        {/* ADD PROVIDER MODAL */}
+        <AddProviderModal
+          open={addModalOpen}
+          taken={takenProviderIds}
+          protocols={protocols}
+          api={api}
+          t={t}
+          readOnly={!state.writable}
+          onClose={(created) => {
+            setAddModalOpen(false)
+            if (created) void controller.load()
+          }}
+        />
+
+        {/* DELETE CONFIRMATION MODAL */}
+        <Modal
+          open={deleteTarget !== null}
+          // A delete in flight keeps the dialog up: dismissing it would hide a
+          // failure and leave the operator believing the provider was removed.
+          onClose={() => { if (!deleting) setDeleteTarget(null) }}
+          title={deleteTarget ? providerCopy(t('deleteTitle'), deleteTarget.entry) : ''}
+          closeLabel={t('close')}
+          description={
+            deleteTarget
+              ? providerCopy(
+                deleteTarget.apiKeyEnv ? t('deleteDescriptionWithCredential') : t('deleteDescription'),
+                deleteTarget.entry,
+              )
+              : ''
+          }
+          className={styles['deleteDialog'] ?? ''}
+          footer={
+            <>
+              <Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                variant="outline"
+                className={styles['deleteConfirmBtn']}
+                disabled={deleting}
+                onClick={confirmDelete}
+              >
+                {deleting ? t('deletingAction') : t('confirmDeleteAction')}
+              </Button>
+            </>
+          }
+        >
+          {deleteError && <p className={styles['error']}>{deleteError}</p>}
+        </Modal>
       </div>
       {/* Extensions (pool usage & quota, catalog helpers). Rendered FULL-WIDTH
           below the master-detail row: inside the flex row it became a third
