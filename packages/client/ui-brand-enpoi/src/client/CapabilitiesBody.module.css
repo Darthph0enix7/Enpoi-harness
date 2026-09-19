@@ -314,3 +314,130 @@
   color: var(--dsw-alias-label-tertiary, #8997a7);
   padding: 4px 10px 2px;
 }
+
+/* ── MCP catalog editor: add form, per-row remove, mount-error line ── */
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.removeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 5px;
+  background: rgba(229, 113, 111, 0.08);
+  border: 1px solid rgba(229, 113, 111, 0.22);
+  color: #e5716f;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.removeBtn:hover {
+  background: rgba(229, 113, 111, 0.18);
+  border-color: rgba(229, 113, 111, 0.45);
+}
+
+.confirmText {
+  font-size: 10px;
+  color: #e5716f;
+  white-space: nowrap;
+}
+
+.confirmBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(229, 113, 111, 0.12);
+  border: 1px solid rgba(229, 113, 111, 0.35);
+  color: #e5716f;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.confirmBtn:hover {
+  background: rgba(229, 113, 111, 0.22);
+  border-color: rgba(229, 113, 111, 0.55);
+}
+
+.rowError {
+  font-size: 9.5px;
+  color: #e5716f;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.addWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.addInput {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 24px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.1));
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  font-size: 10.5px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.addInput:focus {
+  outline: none;
+  border-color: rgba(103, 220, 231, 0.4);
+}
+
+.addActions {
+  display: flex;
+  gap: 6px;
+}
+
+.addBtn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(103, 220, 231, 0.08);
+  border: 1px solid rgba(103, 220, 231, 0.25);
+  color: #67dce7;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.addBtn:hover {
+  background: rgba(103, 220, 231, 0.16);
+  border-color: rgba(103, 220, 231, 0.45);
+}
+
+.addBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AGENT_ROSTER,
-  buildAgentList,
+  buildAgentSubjects,
   buildPermissionToolRows,
   effectivePolicy,
   getPermissionsViewState,
@@ -26,6 +26,7 @@ import {
   setPermissionPath,
   subscribePermissionsView,
   unsetPermissionPath,
+  type AgentPermissions,
   type BashPatternRule,
   type McpServerRef,
   type PermissionGrant,
@@ -33,8 +34,15 @@ import {
   type PermissionToolRow,
   type PolicyValue,
   builtRoleAvailability,
-  BUILT_ROLE_SURFACE,
+  roleSurfaceFor,
 } from './permissions-model.ts'
+import {
+  getRoleRegistry,
+  normalizeRoleId,
+  refreshFromServer as refreshRoleRegistry,
+  subscribeRoleRegistry,
+  type RoleRegistryMap,
+} from './role-registry.ts'
 import css from './PermissionsSettings.module.css'
 
 /** CSS-module reads are `string | undefined` under noUncheckedIndexedAccess; keys are static. */
@@ -70,13 +78,14 @@ function policyTint(policy: PolicyValue): string {
   return policy === 'allow' ? c('tintAllow') : policy === 'ask' ? c('tintAsk') : c('tintDeny')
 }
 
-/** One glass section: icon + title header over row content. */
-function Group({ title, icon, children }: { title: string; icon: string; children: ReactNode }) {
+/** One glass section: icon + title header over row content, with an optional trailing action. */
+function Group({ title, icon, action, children }: { title: string; icon: string; action?: ReactNode; children: ReactNode }) {
   return (
     <section className={c('group')}>
       <div className={c('groupHead')}>
         <span className={c('groupIcon')}><Icon d={icon} /></span>
         <span className={c('groupTitle')}>{title}</span>
+        {action}
       </div>
       {children}
     </section>
@@ -257,10 +266,14 @@ function GlobalPane({ perms, toolRows, onCycleTool, onSetUnknownTools, onAddPatt
 }
 
 /** One agent subject: overlay tool rules with provenance, allowlist eyes, agent-scoped grants. */
-function AgentPane({ agent, perms, toolRows, onCycleTool, onToggleAvailable, onRevokeGrant }: {
+function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubject, onCycleTool, onToggleAvailable, onRevokeGrant }: {
   agent: string
+  registry: RoleRegistryMap
   perms: PermissionsConfig
   toolRows: readonly PermissionToolRow[]
+  /** True when the subject exists only in `permissions.agents` (never a shipped roster row). */
+  removable: boolean
+  onRemoveSubject: (agent: string) => void
   onCycleTool: (agent: string, tool: string, next: PolicyValue | undefined) => void
   onToggleAvailable: (agent: string, tool: string) => void
   onRevokeGrant: (grantId: string) => void
@@ -269,7 +282,21 @@ function AgentPane({ agent, perms, toolRows, onCycleTool, onToggleAvailable, onR
   const agentGrants = Object.values(perms.grants ?? {}).filter(grant => grant.agent === agent)
   return (
     <>
-      <Group title={`Agent rules — ${agent}`} icon={ICONS.agent}>
+      <Group
+        title={`Agent rules — ${agent}`}
+        icon={ICONS.agent}
+        action={removable ? (
+          <button
+            type="button"
+            className={c('revokeBtn')}
+            title="Remove this subject (its rules and allowlist are deleted)"
+            aria-label={`Remove subject ${agent}`}
+            onClick={() => { onRemoveSubject(agent) }}
+          >
+            <Icon d={ICONS.remove} size={10} />
+          </button>
+        ) : undefined}
+      >
         <div className={c('paneHint')}>
           Rules refine the global policy. The eye marks a tool in this role allowlist.
         </div>
@@ -281,7 +308,7 @@ function AgentPane({ agent, perms, toolRows, onCycleTool, onToggleAvailable, onR
             effective={effectivePolicy(perms, agent, row.id)}
             ownOverride={perms.agents?.[agent]?.tools?.[row.id]}
             onCycle={(next) => { onCycleTool(agent, row.id, next) }}
-            available={(available !== undefined && available.includes(row.id)) || builtRoleAvailability(agent, row.id) === true}
+            available={(available !== undefined && available.includes(row.id)) || builtRoleAvailability(agent, row.id, registry) === true}
             onToggleAvailable={() => { onToggleAvailable(agent, row.id) }}
           />
         ))}
@@ -302,12 +329,15 @@ function AgentPane({ agent, perms, toolRows, onCycleTool, onToggleAvailable, onR
 export function PermissionsSettings(_props: { close: () => void }): React.ReactNode {
   const [perms, setPerms] = useState<PermissionsConfig | null>(null)
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerRef>>({})
+  const [registry, setRegistry] = useState<RoleRegistryMap>(() => getRoleRegistry())
   const [failed, setFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  const [draftSubject, setDraftSubject] = useState('')
 
   const load = useCallback(() => {
     void (async () => {
-      await refreshFromServer()
+      await Promise.all([refreshFromServer(), refreshRoleRegistry()])
+      setRegistry(getRoleRegistry())
       const state = getPermissionsViewState()
       if (state.view === undefined) {
         setFailed(true)
@@ -336,8 +366,14 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
     setFailed(false)
   }), [])
 
+  // The role registry is its own store: rebuild the rail whenever it changes.
+  useEffect(() => subscribeRoleRegistry(() => { setRegistry(getRoleRegistry()) }), [])
+
   const toolRows = useMemo(() => buildPermissionToolRows(mcpServers), [mcpServers])
-  const agents = useMemo(() => buildAgentList(AGENT_ROSTER, Object.keys(perms?.agents ?? {})), [perms])
+  const subjects = useMemo(
+    () => buildAgentSubjects(registry, AGENT_ROSTER, Object.keys(perms?.agents ?? {})),
+    [registry, perms],
+  )
 
   // --- writes (0ms optimistic, rollback on rejected persistence) ---
 
@@ -421,10 +457,10 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
   const toggleAgentToolAvailable = (agent: string, tool: string) => {
     const previous = perms
     if (perms === null) return
-    // Seed the allowlist from the built-in role surface when no explicit
-    // override exists yet, so the FIRST flip writes a complete list (the
-    // built-in visible set plus/minus this tool) instead of a bare [tool].
-    const seed = BUILT_ROLE_SURFACE[agent]
+    // Seed the allowlist from the built-in role surface (then the registry
+    // role's surface, then empty), so the FIRST flip writes a complete list
+    // (the built-in visible set plus/minus this tool) instead of a bare [tool].
+    const seed = roleSurfaceFor(agent, registry)
     const members = [...(perms.agents?.[agent]?.available ?? (seed !== undefined ? [...seed] : []))]
     const available = members.includes(tool)
       ? members.filter(name => name !== tool).sort((left, right) => left.localeCompare(right))
@@ -438,6 +474,43 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       const next = base.includes(tool) ? base.filter(name => name !== tool) : [...base, tool]
       return next.sort((left, right) => left.localeCompare(right))
     }).then((writeOk) => { if (!writeOk) setPerms(previous) })
+  }
+
+  /**
+   * Create one user-defined subject in `permissions.agents`, seeded from the
+   * registry role's allowlist when the id matches, empty otherwise.
+   * @param raw - the operator-typed role id.
+   */
+  const addSubject = (raw: string) => {
+    const previous = perms
+    if (perms === null) return
+    const id = normalizeRoleId(raw)
+    if (id === '' || Object.hasOwn(perms.agents ?? {}, id)) return
+    const seed: AgentPermissions = {}
+    const available = registry[id]?.tools?.available
+    if (available !== undefined) seed.available = [...available]
+    setPerms({ ...perms, agents: { ...(perms.agents ?? {}), [id]: seed } })
+    setSelected(id)
+    setDraftSubject('')
+    void setPermissionPath(['agents', id], seed)
+      .then((ok) => { if (!ok) setPerms(previous) })
+  }
+
+  /**
+   * Delete a subject that exists only in `permissions.agents`; a shipped
+   * roster row is never removed.
+   * @param agent - the subject id to delete.
+   */
+  const removeSubject = (agent: string) => {
+    const previous = perms
+    if (perms === null) return
+    if (AGENT_ROSTER.includes(agent) || !Object.hasOwn(perms.agents ?? {}, agent)) return
+    const agentsMap = { ...(perms.agents ?? {}) }
+    delete agentsMap[agent]
+    setPerms({ ...perms, agents: agentsMap })
+    setSelected(null)
+    void unsetPermissionPath(['agents', agent])
+      .then((ok) => { if (!ok) setPerms(previous) })
   }
 
   if (perms === null) {
@@ -473,16 +546,36 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
           >
             Global (all agents)
           </button>
-          {agents.map(agent => (
+          {subjects.map(subject => (
             <button
               type="button"
-              key={agent}
-              className={`${c('railCell')} ${selected === agent ? c('railCellActive') : ''}`}
-              onClick={() => { setSelected(agent) }}
+              key={subject.id}
+              className={`${c('railCell')} ${selected === subject.id ? c('railCellActive') : ''}`}
+              onClick={() => { setSelected(subject.id) }}
             >
-              {agent}
+              {subject.label}
             </button>
           ))}
+          <div className={c('railAdd')}>
+            <input
+              type="text"
+              className={c('railAddInput')}
+              placeholder="New role id"
+              value={draftSubject}
+              onChange={(e) => { setDraftSubject(e.target.value) }}
+              onKeyDown={(e) => { if (e.key === 'Enter') addSubject(draftSubject) }}
+              aria-label="New permission subject id"
+            />
+            <button
+              type="button"
+              className={c('railAddBtn')}
+              title="Add subject"
+              aria-label="Add subject"
+              onClick={() => { addSubject(draftSubject) }}
+            >
+              <Icon d={ICONS.add} size={11} />
+            </button>
+          </div>
         </nav>
         <div className={c('pane')}>
           {selected === null ? (
@@ -498,8 +591,11 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
           ) : (
             <AgentPane
               agent={selected}
+              registry={registry}
               perms={perms}
               toolRows={toolRows}
+              removable={!AGENT_ROSTER.includes(selected) && Object.hasOwn(perms.agents ?? {}, selected)}
+              onRemoveSubject={removeSubject}
               onCycleTool={cycleAgentTool}
               onToggleAvailable={toggleAgentToolAvailable}
               onRevokeGrant={revokeGrant}

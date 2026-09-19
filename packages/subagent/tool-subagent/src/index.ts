@@ -293,26 +293,39 @@ interface DelegationRunSpec {
 
 
 /**
- * Resolve persona model from Settings > enpoi-orchestration.personas by matching
- * role names in the description or prompt (e.g. "fixer", "librarian", "explorer").
+ * Resolve the child route from Settings > enpoi-orchestration.personas for the
+ * role selected for this delegation (explicit `role` argument first, then the
+ * detected role), falling back to matching any persona key in the delegation
+ * text (e.g. "fixer", "librarian", "explorer").
+ * @param personas - the namespace's per-role child routes.
+ * @param role - the role selected for this delegation, if any.
+ * @param description - the delegated task description.
+ * @param prompt - the delegated task prompt.
+ * @returns the selected role's child route, or undefined when none is configured.
  */
-function resolveSubagentPersonaModel(ctx: Context, description?: string, prompt?: string): AgentOptions | undefined {
-  try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { personas?: Record<string, { provider?: string; model?: string }> } } | undefined
-    const doc = settings?.get?.('enpoi-orchestration')
-    const personas = doc?.personas
-    if (!personas) return undefined
-    const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
-    for (const role of ['fixer', 'explorer', 'librarian', 'designer', 'oracle', 'critic', 'visionary', 'curator', 'skeptic', 'architect', 'pragmatist', 'experiencer', 'integrator']) {
-      const re = new RegExp(`\\b${role}\\b`, 'i')
-      if (re.test(text)) {
-        const entry = personas[role]
-        if (entry && entry.provider && entry.model) {
-          return { provider: entry.provider, model: entry.model }
-        }
-      }
+function resolveSubagentPersonaModel(
+  personas: OrchestrationSettingsDocument['personas'],
+  role: string | undefined,
+  description?: string,
+  prompt?: string,
+): AgentOptions | undefined {
+  if (personas === undefined) return undefined
+  const routeFor = (candidate: string): AgentOptions | undefined => {
+    const entry = personas[candidate]
+    return entry?.provider && entry.model ? { provider: entry.provider, model: entry.model } : undefined
+  }
+  if (role !== undefined) {
+    const selected = routeFor(role)
+    if (selected !== undefined) return selected
+  }
+  const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
+  for (const candidate of Object.keys(personas)) {
+    if (candidate === role) continue
+    if (new RegExp(`\\b${escapeRegExp(candidate)}\\b`, 'i').test(text)) {
+      const selected = routeFor(candidate)
+      if (selected !== undefined) return selected
     }
-  } catch {}
+  }
   return undefined
 }
 
@@ -410,41 +423,179 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   librarian: ['edit', 'write', 'str_replace_editor'],
 }
 
+/** Grouping label for one role seat on the operator's orchestration surfaces. */
+export type RoleGroup = 'supervision' | 'specialists' | 'council' | 'custom'
+
+/** One `enpoi-orchestration.roles` settings entry. */
+export interface RoleRegistryEntry {
+  /** Display label for the role; defaults to the capitalized id for user roles. */
+  label?: string
+  /** System-prompt text a child spawned with this role receives. */
+  persona?: string
+  /** Fleet grouping hint for UI consumers. */
+  group?: RoleGroup
+  /**
+   * Whether a Fleet seat row shows this role (default true). `false` keeps the
+   * role spawnable and listed in permissions while hiding its seat row.
+   */
+  seat?: boolean
+  /** Retire the role — not spawnable, absent from every surface — keeping its definition. */
+  disabled?: boolean
+  /** Child tool surface for this role. */
+  tools?: {
+    /** Allowlist that replaces this role's built-in child deny map. */
+    available?: string[]
+  }
+}
+
+/** One role after the settings registry merges over the code defaults. */
+export interface ResolvedRole {
+  /** Registry id used by the `role` tool parameter and settings keys. */
+  id: string
+  /** Display label, when one is configured. */
+  label?: string
+  /** Child system-prompt persona. */
+  persona?: string
+  /** Fleet grouping hint for UI consumers. */
+  group?: RoleGroup
+  /** Whether a Fleet seat row shows this role (retired roles are absent). */
+  seat: boolean
+  /** Whether this role exists in the code defaults (not only in settings). */
+  builtin: boolean
+  /**
+   * Explicit child tool allowlist from `tools.available`; when present it
+   * replaces {@link ResolvedRole.deny} for this role.
+   */
+  available?: readonly string[]
+  /** Built-in child tool deny extras; empty for a settings-only role or when `available` replaces the deny map. */
+  deny: readonly string[]
+}
+
+/** The Settings service handle this tool reads through (`ctx.get('settings')`). */
+export interface OrchestrationSettingsHandle {
+  /** Read one namespace's resolved document; `undefined` while unregistered. */
+  get?: (namespace: string) => unknown
+}
+
+/** Structural view of the `enpoi-orchestration` document this tool consumes. */
+export interface OrchestrationSettingsDocument {
+  /** Per-role child model route, keyed by role id. */
+  personas?: Record<string, { provider?: string; model?: string }>
+  /** Operator role registry, merged over the code defaults. */
+  roles?: Record<string, RoleRegistryEntry>
+  /** Operator permission overrides, including per-role tool availability. */
+  permissions?: { agents?: Record<string, { available?: string[] }> }
+}
+
+/** The group values a {@link RoleRegistryEntry.group} may name. */
+const ROLE_GROUPS: readonly RoleGroup[] = ['supervision', 'specialists', 'council', 'custom']
+
+/** Escape a role id so it matches literally inside a word-boundary pattern. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Read one settings entry as a registry object; invalid JSON entries are ignored. */
+function asRoleRegistryEntry(value: unknown): RoleRegistryEntry | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value
+    : undefined
+}
+
+/** Keep only a declared {@link RoleGroup}. */
+function asRoleGroup(value: unknown): RoleGroup | undefined {
+  return ROLE_GROUPS.includes(value as RoleGroup) ? value as RoleGroup : undefined
+}
+
+/**
+ * Read the live `enpoi-orchestration` document through the Settings service.
+ * A missing service, an unregistered namespace, or a failed read yields
+ * `undefined`, so delegation keeps its code defaults instead of failing.
+ * @param settings - the Settings service handle (`ctx.get('settings')`).
+ * @returns the document, or `undefined` when it is unavailable.
+ */
+export function readOrchestrationDocument(
+  settings: OrchestrationSettingsHandle | undefined,
+): OrchestrationSettingsDocument | undefined {
+  try {
+    const document = settings?.get?.('enpoi-orchestration')
+    if (typeof document !== 'object' || document === null) return undefined
+    return document
+  } catch {
+    // A settings read is best-effort: a provider fault must not fail delegation.
+    return undefined
+  }
+}
+
+/**
+ * Resolve the operator's role registry: the code-default roles merged with
+ * `enpoi-orchestration.roles`. A settings entry with a built-in id overrides
+ * that role's persona, label, group, and tool surface; an entry with a new id
+ * adds a role; `disabled: true` retires a role — built-in or not — from every
+ * surface, while `seat: false` only hides its Fleet row. Read fresh per spawn,
+ * so settings edits apply on the next dispatch.
+ * @param settings - the Settings service handle; omit for the code defaults.
+ * @returns every active role keyed by its id.
+ */
+export function listRoleRegistry(
+  settings?: OrchestrationSettingsHandle,
+): Record<string, ResolvedRole> {
+  const configured: unknown = readOrchestrationDocument(settings)?.roles
+  const overrides = new Map<string, RoleRegistryEntry>()
+  const retired = new Set<string>()
+  if (typeof configured === 'object' && configured !== null && !Array.isArray(configured)) {
+    for (const [id, value] of Object.entries(configured)) {
+      const entry = asRoleRegistryEntry(value)
+      if (entry === undefined) continue
+      if (entry.disabled === true) retired.add(id)
+      else overrides.set(id, entry)
+    }
+  }
+  const registry: Record<string, ResolvedRole> = {}
+  for (const id of new Set([...Object.keys(ROLE_PERSONAS), ...overrides.keys()])) {
+    if (retired.has(id)) continue
+    const builtinPersona = ROLE_PERSONAS[id]
+    const entry = overrides.get(id)
+    const available = Array.isArray(entry?.tools?.available)
+      ? entry.tools.available.map(String)
+      : undefined
+    const persona = typeof entry?.persona === 'string' ? entry.persona : builtinPersona
+    const label = typeof entry?.label === 'string' ? entry.label : undefined
+    const group = asRoleGroup(entry?.group)
+    registry[id] = {
+      id,
+      seat: entry?.seat !== false,
+      builtin: builtinPersona !== undefined,
+      deny: available === undefined ? ROLE_CHILD_DENY[id] ?? [] : [],
+      ...persona !== undefined ? { persona } : {},
+      ...label !== undefined ? { label } : {},
+      ...group !== undefined ? { group } : {},
+      ...available !== undefined ? { available } : {},
+    }
+  }
+  return registry
+}
+
 /**
  * Compose the per-child tool filter: the configured filter merged with the
- * shared worker deny list and the inferred role's extras. Configured deny
+ * shared worker deny list and the selected role's surface. Configured deny
  * entries survive (first, de-duplicated), the configured `allow` list passes
  * through untouched, and `deny` wins over `allow` in `tools.restrict()`.
  * Unknown deny names are no-ops there. Providers without the `toolFilter`
  * capability keep the configured filter unchanged.
  * @param provider - the provider that will start the child.
  * @param configured - the tool instance's configured filter, if any.
- * @param role - the inferred specialist role, if any.
+ * @param document - the live `enpoi-orchestration` document, if any.
+ * @param role - the selected specialist role, if any.
+ * @param roleEntry - the registry entry for `role`, when the registry has it.
  * @returns the composed filter, or the configured filter for a provider that cannot apply one.
  */
-/**
- * Operator-overridable role availability (doc 55 P2): when the permission
- * settings define `agents[role].available`, that allowlist REPLACES the
- * built-in role deny map (the operator's explicit surface wins wholesale);
- * absent → the built-in ROLE_CHILD_DENY table applies unchanged. Read fresh
- * per spawn, so edits hot-swap on the next dispatch.
- */
-function roleAvailableAllowlist(ctx: Context, role: string | undefined): string[] | undefined {
-  if (role === undefined) return undefined
-  try {
-    const settings = ctx.get('settings') as { get?: (ns: string) => { permissions?: { agents?: Record<string, { available?: string[] }> } } } | undefined
-    const available = settings?.get?.('enpoi-orchestration')?.permissions?.agents?.[role]?.available
-    return Array.isArray(available) ? available.map(String) : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function childToolFilter(
-  ctx: Context,
   provider: SubagentProvider,
   configured: Config['toolFilter'],
+  document: OrchestrationSettingsDocument | undefined,
   role: string | undefined,
+  roleEntry: ResolvedRole | undefined,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
   // The Oracle is the one child allowed to delegate (operator design: the
@@ -453,7 +604,7 @@ function childToolFilter(
   const sharedDeny = role === 'oracle'
     ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
     : SHARED_CHILD_DENY
-  const available = roleAvailableAllowlist(ctx, role)
+  const available = roleEntry?.available ?? roleAvailableAllowlist(document, role)
   if (available !== undefined) {
     // Operator-defined surface: allow the named tools, deny everything else
     // except the shared anti-leak floor (never widen what SHARED_CHILD_DENY
@@ -464,31 +615,62 @@ function childToolFilter(
       deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
-  const roleDeny = role === undefined ? [] : ROLE_CHILD_DENY[role] ?? []
   return {
     ...configured,
-    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleDeny])],
+    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleEntry?.deny ?? []])],
   }
 }
 
-/** Detect the specialist role named in a delegation description or prompt. */
-function detectSubagentRole(description?: string, prompt?: string): string | undefined {
+/**
+ * Operator-overridable role availability (doc 55 P2): when the permission
+ * settings define `agents[role].available`, that allowlist REPLACES the
+ * built-in role deny map (the operator's explicit surface wins wholesale);
+ * absent → the registry's `tools.available` or the built-in ROLE_CHILD_DENY
+ * table applies. Read fresh per spawn, so edits hot-swap on the next dispatch.
+ * @param document - the live `enpoi-orchestration` document, if any.
+ * @param role - the selected specialist role, if any.
+ * @returns the permission allowlist, or undefined when the operator set none.
+ */
+function roleAvailableAllowlist(
+  document: OrchestrationSettingsDocument | undefined,
+  role: string | undefined,
+): string[] | undefined {
+  if (role === undefined) return undefined
+  const available = document?.permissions?.agents?.[role]?.available
+  return Array.isArray(available) ? available.map(String) : undefined
+}
+
+/** Task-type fallback signals; a signal only selects a role the registry still has. */
+const ROLE_SIGNALS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['librarian', /\b(research|investigate|gather|sources?|api docs?|documentation|web search|external)\b/],
+  ['explorer', /\b(map|explore|codebase|structure|locate|find where|understand the code)\b/],
+  ['designer', /\b(ui|ux|design|style|interface|responsive|visual|layout)\b/],
+  ['fixer', /\b(implement|fix|add|patch|refactor|write code|bug|change the code)\b/],
+]
+
+/**
+ * Detect the specialist role named in a delegation description or prompt.
+ * @param registry - the live role registry; its ids are the explicit names.
+ * @param description - the delegated task description.
+ * @param prompt - the delegated task prompt.
+ * @returns the selected role id, or undefined when nothing matches.
+ */
+function detectSubagentRole(
+  registry: Record<string, ResolvedRole>,
+  description?: string,
+  prompt?: string,
+): string | undefined {
   const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
   // 1. Explicit role name wins.
-  for (const role of Object.keys(ROLE_PERSONAS)) {
-    const re = new RegExp(`\\b${role}\\b`, 'i')
+  for (const role of Object.keys(registry)) {
+    const re = new RegExp(`\\b${escapeRegExp(role)}\\b`, 'i')
     if (re.test(text)) return role
   }
   // 2. Task-type heuristics as a fallback — the delegating model often strips
-  // the role name from the prompt, so infer the specialist from the work.
-  const signals: Array<[string, RegExp]> = [
-    ['librarian', /\b(research|investigate|gather|sources?|api docs?|documentation|web search|external)\b/],
-    ['explorer', /\b(map|explore|codebase|structure|locate|find where|understand the code)\b/],
-    ['designer', /\b(ui|ux|design|style|interface|responsive|visual|layout)\b/],
-    ['fixer', /\b(implement|fix|add|patch|refactor|write code|bug|change the code)\b/],
-  ]
-  for (const [role, re] of signals) {
-    if (re.test(text)) return role
+  // the role name from the prompt, so infer the specialist from the work. A
+  // retired role is never inferred.
+  for (const [role, re] of ROLE_SIGNALS) {
+    if (registry[role] !== undefined && re.test(text)) return role
   }
   return undefined
 }
@@ -587,9 +769,11 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           + (subagentProvider.inheritsParentContext
             ? ' Changing the route can prevent provider-side reuse of the inherited conversation prefix.'
             : '')
+      const roleDescription = ' An optional `role` names the child\'s specialist identity from the operator role registry '
+        + '(for example `librarian`, `fixer`, `explorer`); omit it to infer the role from the task.'
       const disposeTool = runtimeCtx.tools.register(defineTool({
         name: toolName,
-        description: wording.description + (backgroundEnabled
+        description: wording.description + roleDescription + (backgroundEnabled
           // The completion notice is the continuation service's own behavior, not
           // a separately installed capability, so this promise holds whenever the
           // continuable background path is reachable at all.
@@ -607,6 +791,11 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             type: 'string',
             required: true,
             description: wording.promptDescription,
+          },
+          role: {
+            type: 'string' as const,
+            description: 'Optional specialist role id for the child, naming a role in the operator role registry. '
+              + 'Omit to infer the role from the description and prompt. An unknown id is rejected and lists the configured roles.',
           },
           ...modelSelectionEnabled ? {
             provider: {
@@ -688,6 +877,21 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
 
           const modelRequest = args as DelegationModelRequest
           const parentOptions = parentAgentOptionsForDelegation(parent)
+          // Role selection is settings-backed and read fresh per spawn: the
+          // registry supplies explicit names, personas, and tool surfaces, and
+          // an explicit `role` argument is validated before any child starts.
+          const settingsHandle = runtimeCtx.get('settings') as OrchestrationSettingsHandle | undefined
+          const document = readOrchestrationDocument(settingsHandle)
+          const registry = listRoleRegistry(settingsHandle)
+          const requestedRole = args.role
+          if (requestedRole !== undefined && registry[requestedRole] === undefined) {
+            const availableRoles = Object.keys(registry)
+            throw new Error(availableRoles.length === 0
+              ? `unknown subagent role "${requestedRole}": this deployment configures no roles`
+              : `unknown subagent role "${requestedRole}"; available roles: ${availableRoles.join(', ')}`)
+          }
+          const role = requestedRole ?? detectSubagentRole(registry, args.description, args.prompt)
+          const roleEntry = role === undefined ? undefined : registry[role]
           const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
             || hasConfiguredLlmSelection(config.agentOptions)
           const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
@@ -698,7 +902,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             configuredChildAgentOptions,
             modelRequest,
             modelSelectionEnabled,
-          ) ?? resolveSubagentPersonaModel(runtimeCtx, args.description, args.prompt)
+          ) ?? resolveSubagentPersonaModel(document?.personas, role, args.description, args.prompt)
           assertAllowedModelSelection(
             modelSelectionPolicy,
             parentOptions,
@@ -726,15 +930,15 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           // (own editable delegation limits) — keep their resolution, keep our
           // role-specific persona + label.
           const maxDepth = runtimeCtx.subagents.resolveMaxDepth(config.maxDepth)
-          // Role-specific persona: an explicit config persona wins; otherwise a
-          // specialist role named in the delegation (librarian/fixer/explorer/
-          // designer/oracle) gives the child its own identity instead of
-          // inheriting the parent's (e.g. the Master Orchestrator).
-          const role = detectSubagentRole(args.description, args.prompt)
+          // Role-specific persona: an explicit config persona wins; otherwise the
+          // registry entry for the selected role (librarian/fixer/explorer/
+          // designer/oracle or an operator-defined role) gives the child its own
+          // identity instead of inheriting the parent's (e.g. the Master
+          // Orchestrator).
           const rolePersona = config.persona !== undefined
             ? config.persona
-            : ROLE_PERSONAS[role ?? '']
-          const formattedLabel = role && !new RegExp(`\\b${role}\\b`, 'i').test(args.description)
+            : roleEntry?.persona
+          const formattedLabel = role !== undefined && !new RegExp(`\\b${escapeRegExp(role)}\\b`, 'i').test(args.description)
             ? `${role.charAt(0).toUpperCase() + role.slice(1)}: ${args.description}`
             : args.description
           const request = {
@@ -744,7 +948,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...(() => {
-              const delegated = childToolFilter(ctx, subagentProvider, config.toolFilter, role)
+              const delegated = childToolFilter(subagentProvider, config.toolFilter, document, role, roleEntry)
               return delegated === undefined ? {} : { toolFilter: delegated }
             })(),
             ...maxDepth !== undefined ? { maxDepth } : {},

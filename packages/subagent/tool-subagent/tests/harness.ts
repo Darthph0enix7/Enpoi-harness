@@ -30,6 +30,8 @@ let setupAgentCounter = 0
 type SetupConfig = tool.Config & {
   withModelSelection?: boolean
   parentAgentOptions?: AgentOptions
+  /** Test-only `enpoi-orchestration` document served through a stub Settings handle. */
+  settingsDocument?: Record<string, unknown>
 }
 
 const TEST_ALLOWED_MODELS = [
@@ -43,7 +45,14 @@ const TEST_ALLOWED_MODELS = [
 
 export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Config> = {}): Promise<Context> {
   const ctx = new Context()
-  const { withModelSelection, parentAgentOptions, ...config } = toolConfig
+  const { withModelSelection, parentAgentOptions, settingsDocument, ...config } = toolConfig
+  if (settingsDocument !== undefined) {
+    // Reproduce the settings seam the tool reads (`ctx.get('settings')`) without
+    // mounting a Settings provider.
+    ctx.reflect.provide('settings', {
+      get: (namespace: string) => namespace === 'enpoi-orchestration' ? settingsDocument : undefined,
+    })
+  }
   if (withModelSelection === true) {
     await ctx.plugin(SubagentModelSelectionConfig, {
       enabled: true,

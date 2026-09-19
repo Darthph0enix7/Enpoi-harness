@@ -6,17 +6,21 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildAgentList,
+  buildAgentSubjects,
   buildPermissionToolRows,
+  builtRoleAvailability,
   countPermissionRules,
   cyclePolicy,
   describePermissionsView,
   effectivePolicy,
   provenanceFor,
+  roleSurfaceFor,
   setPermissionPath,
   shippedPolicyFor,
   unsetPermissionPath,
   type PermissionsConfig,
 } from '../src/client/permissions-model.ts'
+import { mergeRoleRegistry } from '../src/client/role-registry.ts'
 
 describe('cyclePolicy', () => {
   it('advances allow → ask → deny → inherit and restarts the cycle', () => {
@@ -35,6 +39,40 @@ describe('buildAgentList', () => {
 
   it('skips empty names and tolerates an empty roster', () => {
     expect(buildAgentList([], ['', 'muse'])).toEqual(['muse'])
+  })
+})
+
+describe('buildAgentSubjects', () => {
+  it('leads with registry roles (labelled) and dedupes the roster and permission extras against them', () => {
+    const registry = mergeRoleRegistry({ muse: { label: 'The Muse' } })
+    const subjects = buildAgentSubjects(registry, ['oracle', 'keeper', 'fixer'], ['zeta', 'muse'])
+    expect(subjects.slice(0, 6).map(subject => subject.id))
+      .toEqual(['oracle', 'fixer', 'explorer', 'librarian', 'designer', 'muse'])
+    expect(subjects.find(subject => subject.id === 'muse')?.label).toBe('The Muse')
+    // Roster and permission-only names keep their id as the label.
+    expect(subjects.find(subject => subject.id === 'keeper')?.label).toBe('keeper')
+    expect(subjects.map(subject => subject.id)).toContain('zeta')
+    expect(subjects.filter(subject => subject.id === 'oracle')).toHaveLength(1)
+  })
+})
+
+describe('registry role surfaces', () => {
+  it('falls back to a registry role tools.available and reports unknown roles as no surface', () => {
+    const registry = mergeRoleRegistry({ muse: { tools: { available: ['read', 'bash'] } } })
+    expect(builtRoleAvailability('muse', 'bash', registry)).toBe(true)
+    expect(builtRoleAvailability('muse', 'web_search', registry)).toBe(false)
+    expect(builtRoleAvailability('ghost', 'bash', registry)).toBeUndefined()
+    // A shipped surface still wins over a registry entry for the same id.
+    expect(builtRoleAvailability('oracle', 'subagent', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(true)
+    // Without a registry the shipped behavior is unchanged.
+    expect(builtRoleAvailability('fixer', 'edit')).toBe(true)
+    expect(builtRoleAvailability('ghost', 'edit')).toBeUndefined()
+  })
+
+  it('roleSurfaceFor resolves a registry-only role surface', () => {
+    expect(roleSurfaceFor('muse', mergeRoleRegistry({ muse: { tools: { available: ['read'] } } }))).toEqual(['read'])
+    expect(roleSurfaceFor('muse')).toBeUndefined()
+    expect(roleSurfaceFor(undefined)).toBeUndefined()
   })
 })
 
@@ -65,7 +103,7 @@ describe('shippedPolicyFor', () => {
 })
 
 describe('buildPermissionToolRows', () => {
-  it('unions known tool descriptors with the core list, then per-server and generic MCP rows', () => {
+  it('lists the core tool rows, then per-server and generic MCP rows', () => {
     const rows = buildPermissionToolRows(
       { plane: { serverName: 'plane' } },
       [
@@ -76,7 +114,8 @@ describe('buildPermissionToolRows', () => {
     )
     const ids = rows.map(row => row.id)
     expect(ids.filter(id => id === 'bash')).toHaveLength(1)
-    expect(ids).toContain('keeper')
+    // Role names are subjects in the left rail, never tool rows.
+    expect(ids).not.toContain('keeper')
     expect(ids).toContain('str_replace_editor')
     expect(ids).not.toContain('tier1-workflow')
     expect(ids[ids.length - 1]).toBe('mcp__*')

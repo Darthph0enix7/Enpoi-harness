@@ -1,0 +1,121 @@
+/** Settings-backed role registry: code defaults, merge, spawn-by-name, unknown ids. */
+
+import { describe, expect, it } from 'vitest'
+import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import * as tool from '../src/index.ts'
+import { callSubagent, setup, text } from './harness.ts'
+
+/** Settings handle serving one `enpoi-orchestration` document through the tool's read seam. */
+function settingsHandle(document: Record<string, unknown>): tool.OrchestrationSettingsHandle {
+  return { get: (namespace: string) => namespace === 'enpoi-orchestration' ? document : undefined }
+}
+
+/** Spawn one foreground delegation and return the request the provider saw. */
+async function captureRequest(
+  description: string,
+  document: Record<string, unknown> | undefined,
+  args: Record<string, unknown> = {},
+): Promise<SubagentStartRequest> {
+  let seen: SubagentStartRequest | undefined
+  const ctx = await setup(
+    {
+      provider: 'mock',
+      ...document !== undefined ? { settingsDocument: document } : {},
+    },
+    { onStart: (request) => { seen = request } },
+  )
+  await callSubagent(ctx, { description, prompt: `Task: ${description}`, ...args })
+  if (seen === undefined) throw new Error('scripted provider never saw a start request')
+  return seen
+}
+
+describe('dsh-tool-subagent settings role registry', () => {
+  it('resolves the five code-default roles without a settings handle', () => {
+    const registry = tool.listRoleRegistry(undefined)
+    expect(Object.keys(registry)).toEqual(['librarian', 'fixer', 'explorer', 'designer', 'oracle'])
+    expect(registry['librarian']?.persona).toContain('You are the Librarian')
+    expect(registry['librarian']?.builtin).toBe(true)
+    expect(registry['explorer']?.deny).toEqual(['edit', 'write', 'str_replace_editor'])
+  })
+
+  it('keeps built-in personas and tool surfaces when the registry is empty', async () => {
+    const request = await captureRequest('Librarian: research the API documentation', undefined)
+    expect(request.persona).toContain('You are the Librarian')
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['edit', 'write', 'subagent']))
+  })
+
+  it('merges a settings entry over a built-in persona', async () => {
+    const request = await captureRequest('Librarian: research the API documentation', {
+      roles: { librarian: { persona: 'You are the Archive Keeper.', label: 'Archive' } },
+    })
+    expect(request.persona).toBe('You are the Archive Keeper.')
+    // Fields the entry omits keep their built-in definition.
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['edit', 'write']))
+  })
+
+  it('spawns a settings-defined role by name with its persona and allowlist', async () => {
+    const request = await captureRequest('Review the parser diff', {
+      roles: {
+        auditor: {
+          label: 'Auditor',
+          persona: 'You are the Auditor.',
+          group: 'specialists',
+          tools: { available: ['read', 'bash'] },
+        },
+      },
+    }, { role: 'auditor' })
+    expect(request.persona).toBe('You are the Auditor.')
+    expect(request.label).toBe('Auditor: Review the parser diff')
+    expect(request.toolFilter?.allow).toEqual(['read', 'bash'])
+    expect(request.toolFilter?.deny).toContain('subagent')
+    // `tools.available` replaces the built-in role deny extras, never unions them.
+    expect(request.toolFilter?.deny).not.toContain('edit')
+  })
+
+  it('routes a settings-defined role through personas by name', async () => {
+    const request = await captureRequest('Review the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.' } },
+      personas: { auditor: { provider: 'alpha', model: 'fast-model' } },
+    }, { role: 'auditor' })
+    expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model' })
+  })
+
+  it('retires a built-in role with disabled:true and only hides a seat for seat:false', () => {
+    const registry = tool.listRoleRegistry(settingsHandle({
+      roles: { oracle: { disabled: true }, designer: { seat: false } },
+    }))
+    expect(registry['oracle']).toBeUndefined()
+    expect(registry['librarian']).toBeDefined()
+    // seat:false keeps the role spawnable while its Fleet row is hidden.
+    expect(registry['designer']).toBeDefined()
+    expect(registry['designer']?.seat).toBe(false)
+  })
+
+  it('still spawns a role whose seat is hidden', async () => {
+    const request = await captureRequest('Design the empty state for the settings page', {
+      roles: { designer: { seat: false } },
+    })
+    expect(request.persona).toContain('Designer')
+  })
+
+  it('does not infer a retired built-in role from task text', async () => {
+    const request = await captureRequest('Research the SQLite documentation', {
+      roles: { librarian: { disabled: true } },
+    })
+    expect(request.persona).toBeUndefined()
+    expect(request.toolFilter?.deny).toContain('subagent')
+    expect(request.toolFilter?.deny).not.toContain('edit')
+  })
+
+  it('rejects an unknown role argument and lists the configured ids', async () => {
+    const ctx = await setup({
+      provider: 'mock',
+      settingsDocument: { roles: { auditor: { persona: 'You are the Auditor.' } } },
+    })
+    const result = await callSubagent(ctx, { description: 'do it', prompt: 'work', role: 'ghost' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('unknown subagent role "ghost"')
+    expect(text(result)).toContain('librarian')
+    expect(text(result)).toContain('auditor')
+  })
+})

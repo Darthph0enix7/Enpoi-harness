@@ -11,6 +11,7 @@
  * value, and carries the read revision as `expectedRevision`; a
  * `settings/conflict` answer re-reads and retries.
  */
+import type { RoleRegistryMap } from './role-registry.ts'
 
 export type PolicyValue = 'allow' | 'ask' | 'deny'
 
@@ -116,6 +117,40 @@ export function buildAgentList(roster: readonly string[], extraNames: Iterable<s
     .filter(name => name !== '' && !list.includes(name))
     .sort((left, right) => left.localeCompare(right))
   return [...list, ...extras]
+}
+
+/** One left-rail subject: the policy key plus its display label. */
+export interface PermissionSubject {
+  id: string
+  label: string
+}
+
+/**
+ * Build the subject rail: registry roles (labelled) first, then the shipped
+ * roster, then names found only in `permissions.agents` — deduped by id.
+ * @param registry - the effective role registry.
+ * @param roster - shipped agent names in display order.
+ * @param extraNames - names found in `permissions.agents`.
+ * @returns the merged rail subjects.
+ */
+export function buildAgentSubjects(
+  registry: RoleRegistryMap,
+  roster: readonly string[],
+  extraNames: Iterable<string>,
+): PermissionSubject[] {
+  const subjects: PermissionSubject[] = []
+  const seen = new Set<string>()
+  for (const [id, entry] of Object.entries(registry)) {
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    subjects.push({ id, label: entry.label ?? id })
+  }
+  for (const id of buildAgentList(roster, extraNames)) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    subjects.push({ id, label: id })
+  }
+  return subjects
 }
 
 /**
@@ -235,12 +270,31 @@ export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
 }
 
 /**
- * Effective availability for one role×tool: an explicit `available` allowlist
- * wins; otherwise the built-in role surface decides (undefined role = the
- * orchestrator-like full surface).
+ * The effective default surface for one role: the shipped role table wins,
+ * then the registry role's `tools.available` (the user-defined role surface).
+ * @param agent - the subject role id, or undefined.
+ * @param registry - the effective role registry.
+ * @returns the default allowlist, or undefined when the role has no surface.
  */
-export function builtRoleAvailability(agent: string | undefined, tool: string): boolean | undefined {
-  const surface = agent !== undefined ? BUILT_ROLE_SURFACE[agent] : undefined
+export function roleSurfaceFor(agent: string | undefined, registry?: RoleRegistryMap): readonly string[] | undefined {
+  if (agent === undefined) return undefined
+  const surface = BUILT_ROLE_SURFACE[agent]
+  if (surface !== undefined) return surface
+  const available = registry?.[agent]?.tools?.available
+  return Array.isArray(available) ? available : undefined
+}
+
+/**
+ * Effective availability for one role×tool: an explicit `available` allowlist
+ * wins; otherwise the built-in role surface decides, then a registry role's
+ * `tools.available`; undefined = no known surface (all eyes off).
+ * @param agent - the subject role id, or undefined.
+ * @param tool - the tools-map key.
+ * @param registry - the effective role registry.
+ * @returns true/false when a surface names the tool, otherwise undefined.
+ */
+export function builtRoleAvailability(agent: string | undefined, tool: string, registry?: RoleRegistryMap): boolean | undefined {
+  const surface = roleSurfaceFor(agent, registry)
   if (surface === undefined) return undefined
   return surface.includes(tool)
 }

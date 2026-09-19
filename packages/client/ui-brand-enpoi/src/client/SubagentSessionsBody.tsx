@@ -17,7 +17,9 @@
  *
  * Rows lead with the agent identity, never the query: the persona is parsed
  * from the host's subagent identity projection (`council debater: Critic` →
- * `Critic`), then from the title's role pattern, then from the row metadata;
+ * `Critic`), then from a role the title names — a `<role>:` prefix resolved
+ * through the settings-backed role registry, else a registry role mentioned in
+ * the title — with the registry label or the title-cased role id as the label;
  * the session title stays as the secondary line and the hover tooltip. A
  * pending list snapshot (reconnect, first load) keeps the last rendered tree
  * on screen instead of flashing the empty state.
@@ -26,7 +28,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { registryRoleLabel, type RoleRegistryMap } from './role-registry.ts'
 import css from './SubagentSessionsBody.module.css'
 
 /** One session derived from the list projection. */
@@ -64,6 +67,8 @@ const INDENT_STEP = 14
 
 /** Injected business face of the Subagent Sessions tab (built in apply from ctx). */
 export interface SubagentSessionsInjected {
+  /** The settings-backed role registry as a bound `useRoleRegistry` hook. */
+  hooks: { roleRegistry: HostObservable<RoleRegistryMap> }
   /**
    * Select a listed subagent session as current.
    * @param id - session identity from the list projection.
@@ -119,29 +124,52 @@ function personaFromLabel(label: string): string | undefined {
   return name === '' ? undefined : titleCasePersona(name)
 }
 
+/** A role prefix carried by a session title (`fixer: fix the bug`). */
+function rolePrefixFromTitle(title: string): { role: string; rest: string } | undefined {
+  const match = /^\s*([a-z][a-z0-9_-]*)\s*:\s*(.+)$/i.exec(title)
+  if (match?.[1] === undefined || match[2] === undefined) return undefined
+  const role = match[1].toLowerCase().replace(/^the\s+/, '')
+  return { role, rest: match[2].trim() }
+}
+
 /**
- * Primary identity label and secondary session title for one row. The subagent
- * identity projection wins, then the title's role pattern, then the row
- * metadata, so a row is always identifiable by its agent rather than its query.
+ * First registry role id named as a whole word in a title (the light fallback
+ * for titles the host did not label with a role prefix).
+ * @param registry - the effective role registry.
+ * @param title - the session display title.
+ * @returns the matched role id, or undefined.
  */
-function nodeDisplay(node: TreeRow): { label: string; cleanTitle: string } {
-  const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
-  const rolePattern =
-    /^(fixer|explorer|librarian|designer|oracle|critic|visionary|curator|skeptic|architect|pragmatist|experiencer|integrator)\s*:\s*(.+)$/i
-  const match = rolePattern.exec(node.title)
-  if (match && match[1] && match[2]) {
-    return {
-      label: persona ?? titleCasePersona(match[1]),
-      cleanTitle: match[2].trim(),
-    }
+function mentionedRole(registry: RoleRegistryMap, title: string): string | undefined {
+  const words = new Set(title.toLowerCase().split(/[^a-z0-9_-]+/).filter(Boolean))
+  for (const id of Object.keys(registry)) {
+    if (words.has(id)) return id
   }
-  for (const role of ['fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
-    if (new RegExp(`\\b${role}\\b`, 'i').test(node.title)) {
-      return { label: persona ?? titleCasePersona(role), cleanTitle: node.title }
-    }
+  return undefined
+}
+
+/**
+ * Primary identity label and secondary session title for one row. The host's
+ * subagent identity projection wins, then a registry role named by the title
+ * (the registry label, else the title-cased role id), then the row metadata.
+ * @param node - the rendered tree row.
+ * @param registry - the effective role registry.
+ * @returns the leading label and the remaining session title.
+ */
+function nodeDisplay(node: TreeRow, registry: RoleRegistryMap): { label: string; cleanTitle: string } {
+  const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
+  const prefix = rolePrefixFromTitle(node.title)
+  if (prefix !== undefined && registry[prefix.role] !== undefined) {
+    return { label: persona ?? registryRoleLabel(registry, prefix.role), cleanTitle: prefix.rest }
+  }
+  if (persona !== undefined) {
+    return { label: persona, cleanTitle: node.title }
+  }
+  const role = mentionedRole(registry, node.title)
+  if (role !== undefined) {
+    return { label: registryRoleLabel(registry, role), cleanTitle: node.title }
   }
   return {
-    label: persona ?? (node.depth === 0 ? 'Main' : (node.origin === 'subagent' ? 'Subagent' : 'Session')),
+    label: node.depth === 0 ? 'Main' : (node.origin === 'subagent' ? 'Subagent' : 'Session'),
     cleanTitle: node.title,
   }
 }
@@ -288,10 +316,11 @@ export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsI
   )
 }
 
-export function SubagentSessionsBody({ sessionId, useSessions, openSession, openChild, refreshSessions }: SubagentSessionsBodyProps) {
+export function SubagentSessionsBody({ sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions }: SubagentSessionsBodyProps) {
   const byId = useSessions(state => state.byId)
   const phase = useSessions(state => state.phase)
   const catalogs = useSessions(state => (state as SessionListState).subagentsByParent)
+  const registry = useRoleRegistry(snapshot => snapshot)
   const [refreshing, setRefreshing] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -409,7 +438,7 @@ export function SubagentSessionsBody({ sessionId, useSessions, openSession, open
         <div className={css.list} aria-label="Session lineage">
           {visibleRows.map((row) => {
             const state = statusOf(row)
-            const { label, cleanTitle } = nodeDisplay(row)
+            const { label, cleanTitle } = nodeDisplay(row, registry)
             return (
               <button
                 key={row.id}

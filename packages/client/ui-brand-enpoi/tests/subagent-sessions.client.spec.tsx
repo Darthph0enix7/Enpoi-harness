@@ -2,6 +2,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 import { SubagentSessionsBody } from '../src/client/SubagentSessionsBody.tsx'
+import { mergeRoleRegistry, type RoleRegistryMap } from '../src/client/role-registry.ts'
 
 /** One projection row the tree builder consumes (structural subset of SessionSummary). */
 interface Row {
@@ -39,17 +40,20 @@ function mount(
   sessionId = 'child',
   phase: Phase = 'ready',
   catalogs: Record<string, unknown> = {},
+  registry: RoleRegistryMap = mergeRoleRegistry(undefined),
 ) {
   const openSession = vi.fn()
   const openChild = vi.fn()
   const refreshSessions = vi.fn(async () => {})
   const useSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; subagentsByParent: unknown }) => unknown) =>
     selector({ byId: byIdOf(rows), phase, subagentsByParent: catalogs })
+  const useRoleRegistry = (selector: (value: RoleRegistryMap) => unknown) => selector(registry)
   // Presentation props only: the component never reads the standard seats the
   // renderer would bind (session lifecycle, projections, tab info).
   const props = {
     sessionId,
     useSessions,
+    useRoleRegistry,
     useTabInfo: () => ({}),
     openSession,
     openChild,
@@ -195,6 +199,29 @@ describe('SubagentSessionsBody — agent identity rows', () => {
     expect(skeptic.textContent).toContain('Prepare the options')
 
     // A label carrying no persona falls back to the row's metadata role.
+    const bare = list().getByText('Unlabeled work').closest('button') as HTMLElement
+    expect(within(bare).getByText('Subagent')).toBeTruthy()
+  })
+
+  it('labels a row from the registry role id when the host projection has no persona', () => {
+    const registry = mergeRoleRegistry({ muse: { label: 'The Muse', group: 'council' }, scribe: {} })
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('child', 'muse: Draft the set', { parentId: 'main', origin: 'subagent' }),
+      row('scribe', 'Scribe: Write the notes', { parentId: 'main', origin: 'subagent' }),
+      row('unlabeled', 'Unlabeled work', { parentId: 'main', origin: 'subagent' }),
+    ], 'child', 'ready', {}, registry)
+
+    // A registry role with a label leads the row; the query stays secondary.
+    const muse = list().getByText('The Muse').closest('button') as HTMLElement
+    expect(muse.textContent).toContain('Draft the set')
+    expect(muse.textContent!.indexOf('The Muse')).toBeLessThan(muse.textContent!.indexOf('Draft the set'))
+
+    // A registry role without a label falls back to the title-cased role id.
+    const scribe = list().getByText('Scribe').closest('button') as HTMLElement
+    expect(scribe.textContent).toContain('Write the notes')
+
+    // A title naming no registry role keeps the metadata fallback.
     const bare = list().getByText('Unlabeled work').closest('button') as HTMLElement
     expect(within(bare).getByText('Subagent')).toBeTruthy()
   })

@@ -63,7 +63,7 @@ describe('persona-store live sync', () => {
     fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
       const method = (JSON.parse(String(init.body)) as { method: string }).method
       if (method === 'settings.describe') {
-        return describeResponse({ personas: { orchestrator: { provider: 'deepseek-official', model: 'deepseek-v4' } }, }, 2)
+        return describeResponse({ personas: { orchestrator: { provider: 'deepseek-official', model: 'deepseek-v4' } } }, 2)
       }
       return mutateOk()
     })

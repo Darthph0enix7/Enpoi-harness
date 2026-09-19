@@ -202,7 +202,7 @@ export function toggleModelHidden(provider: string, modelId: string): boolean {
   }
   map[provider] = [...list]
   writeStore(map, provider)
-  void persistHiddenModels(provider, fresh => {
+  void persistHiddenModels(provider, (fresh) => {
     const freshList = new Set(fresh[provider] ?? [])
     if (nextHidden) freshList.add(modelId)
     else freshList.delete(modelId)
@@ -231,7 +231,7 @@ export function showAllModels(provider: string): void {
   const map = readStore()
   const { [provider]: _removed, ...rest } = map
   writeStore(rest, provider)
-  void persistHiddenModels(provider, fresh => {
+  void persistHiddenModels(provider, (fresh) => {
     const { [provider]: _dropped, ...others } = fresh
     return others
   })

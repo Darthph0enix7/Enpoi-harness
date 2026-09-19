@@ -54,6 +54,23 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-subagent) is the exhaustive source for every accepted field and its JSDoc.
 
+### Delegating with a specialist role
+
+The tool accepts an optional `role` argument naming a specialist. Roles are data, not code: the settings namespace `enpoi-orchestration.roles` holds a registry merged over the built-in defaults (librarian, fixer, explorer, designer, oracle), so an operator can override a built-in's persona or tool surface, retire it, or add a new role. A role entry is `{ label?, persona?, group?, seat?, tools?: { available?: string[] } }`:
+
+```yaml
+enpoi-orchestration:
+  roles:
+    auditor:
+      label: Auditor
+      group: specialists
+      persona: You review changes for correctness and report findings.
+      tools:
+        available: [read, glob, grep, web_search]
+```
+
+`role` wins over inference. Without it the tool infers a role from the delegation text (explicit registry names first, then task heuristics). An unknown `role` fails the call with the available ids. A role's `tools.available` list replaces that role's built-in deny map and is always bounded by the shared child floor; model routing reads `enpoi-orchestration.personas[<role>]` fresh per spawn, so assigning or clearing a seat model applies to the next delegation without a restart.
+
 ### Foreground and background modes
 
 Under `one-shot` policy, an omitted `run_in_background` waits in the foreground and returns the child's final text; `run_in_background: true` starts a plain parent-owned background job and returns `started background subagent job <id>`, collected with `job_output` and stopped with `job_kill`.
@@ -211,6 +228,8 @@ These limits define what this tool does not return or enforce; they are current 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries nonempty text from its final assistant output, but it is not this call's return value and cannot be awaited here.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
 - **Shipped fork tools cannot select a child LLM route** — they inherit the parent's provider and model to keep the copied conversation prefix eligible for KV Cache reuse. Re-enable selection only when route changes preserve reuse or expose a bounded recomputation cost.
+- **The role registry is read twice per spawn** — `readOrchestrationDocument` and `listRoleRegistry` each read the namespace, so a settings write between them could pair personas from one revision with roles from another. Harmless in practice; a single read would be stricter.
+- **A role's available-list typos are silent** — an unknown tool name in `tools.available` keeps that tool denied rather than failing, matching the permissions matrix path.
 - **Non-routing child policy is fixed per instance** — another persona, tool filter, or depth cap requires another distinctly named tool. LLM selection requires an enabled per-Session preference and a provider that advertises `agentOptions`; both in-process providers and DSH SDK advertise it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
 <a id="dev-note"></a>

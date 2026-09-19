@@ -57,6 +57,12 @@ import {
 } from './persona-store.ts'
 import { refreshFromServer as refreshOrchestrationParams } from './params-store.ts'
 import { refreshFromServer as refreshPermissionsView } from './permissions-model.ts'
+import {
+  getRoleRegistry,
+  refreshFromServer as refreshRoleRegistry,
+  subscribeRoleRegistry,
+  type RoleRegistryMap,
+} from './role-registry.ts'
 
 /** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, locale, and Remote push. */
 export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale', 'remote']
@@ -155,6 +161,7 @@ export function apply(ctx: Context): void {
         void refreshPersonaAssignments()
         void refreshOrchestrationParams()
         void refreshPermissionsView()
+        void refreshRoleRegistry()
         void refreshCapabilities()
       }, 250)
     }
@@ -319,6 +326,10 @@ export function apply(ctx: Context): void {
             getSnapshot: getPersonaAssignments,
             subscribe: subscribePersonaAssignments,
           } satisfies HostObservable<PersonaMap>,
+          roleRegistry: {
+            getSnapshot: getRoleRegistry,
+            subscribe: subscribeRoleRegistry,
+          } satisfies HostObservable<RoleRegistryMap>,
         },
         resolveDirectory: sessionId => resolveAgentModelsDirectory(ctx, fallbackDirectory, sessionId),
         assignPersona: (personaId, selection) => { void setPersonaAssignment(personaId, selection) },
@@ -332,6 +343,12 @@ export function apply(ctx: Context): void {
         const uiWorkspace = ctx.get('uiWorkspace')
         const sessions = ctx.get('sessions')
         return {
+          hooks: {
+            roleRegistry: {
+              getSnapshot: getRoleRegistry,
+              subscribe: subscribeRoleRegistry,
+            } satisfies HostObservable<RoleRegistryMap>,
+          },
           openSession: (id) => { uiWorkspace?.openSession(id) },
           // Children carry a durable parent address: a plain session address is
           // refused by the host for subagent-origin Sessions, so the panel opens

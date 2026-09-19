@@ -211,7 +211,7 @@ export function setOrchestrationParam(
       },
     }),
   })
-    .then(res => {
+    .then((res) => {
       // Oracle: a server REJECTION must roll back the optimistic value —
       // otherwise the panel lies until reload.
       if (!res.ok) {
