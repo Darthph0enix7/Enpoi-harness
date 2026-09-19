@@ -696,7 +696,11 @@ export function RightbarSeat({
     if (railState.open) {
       if (litKind === undefined || !canShow) return
       const address = pageAddress(litKind)
-      if (!surface.layout.expanded || findContentTab(surface.layout, address, litKind) === undefined) {
+      // A kind that allows multiple pages stores each under its own address:
+      // any tab of the kind already shows the lit page, so no second one opens.
+      const litOpen = findContentTab(surface.layout, address, litKind) !== undefined
+        || Object.values(surface.layout.tabs).some(tab => tab.kind === litKind)
+      if (!surface.layout.expanded || !litOpen) {
         actions.openContent(sessionId, {
           kind: litKind, contentId: address, title: litDefinition?.title(address) ?? litKind,
         }, () => { /* the page open records no navigation parameters */ })

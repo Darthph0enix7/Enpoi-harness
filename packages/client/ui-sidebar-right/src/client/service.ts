@@ -431,7 +431,11 @@ export class SidebarRightController implements ISidebarRight {
       // enpoi: the rail is global state: any open of the column opens the panel,
       // and a page open is the rail's new lit kind. A resource placed in the
       // panel leaves the lit page alone — the rail still stands for the page.
-      if (address === pageAddress(claim.kind)) this.rail.setKind(claim.kind)
+      // A kind that allows multiple pages records each one under its own
+      // `sidebar://<kind>/<uuid>` address, so the lit check accepts the whole
+      // address family and not only the bare page address.
+      const page = pageAddress(claim.kind)
+      if (address === page || address.startsWith(`${page}/`)) this.rail.setKind(claim.kind)
       else this.rail.setOpen(true)
     }) }
     // Replacing a tab runs the replaced record's close handler in the same
@@ -462,6 +466,19 @@ export class SidebarRightController implements ISidebarRight {
     if (shown === kind && this.mounted()?.layout.expanded === true) {
       this.rail.setOpen(false)
       actions.setExpanded(sessionId, false)
+      return
+    }
+    // A kind that allows multiple pages (the browser) may already hold one
+    // open: the rail icon stands for the kind, so an existing page is focused
+    // rather than stacking another copy behind it.
+    const layout = this.mounted()?.layout
+    const existing = layout === undefined
+      ? undefined
+      : Object.values(layout.tabs).find(tab => tab.kind === kind)
+    if (existing !== undefined) {
+      this.rail.setKind(kind)
+      this.rail.setOpen(true)
+      actions.focusTab(sessionId, existing.id)
       return
     }
     // A rail click is an ordinary page open: placement, replacement cleanup,
