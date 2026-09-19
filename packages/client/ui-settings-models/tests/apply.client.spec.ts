@@ -175,9 +175,11 @@ describe('ui-settings-models apply', () => {
       () => null,
     )
     b.slots.register({ name: 'settings.models.footer', id: 'extra', order: 0 } as never, () => null)
-    // The shipped Key Pool extension also occupies both seats under this key.
+    // This package's apply contributes one provider-card entry; the Key Pool
+    // extension that once occupied both seats lives outside this package now,
+    // so the footer holds only the entry registered above.
     expect(b.slots.entries('settings.models.provider-card')).toHaveLength(2)
-    expect(b.slots.entries('settings.models.footer')).toHaveLength(2)
+    expect(b.slots.entries('settings.models.footer')).toHaveLength(1)
     // Extension-side HMR safety: its own disposer removes the entry.
     disposeCard()
     expect(b.slots.entries('settings.models.provider-card')).toHaveLength(1)

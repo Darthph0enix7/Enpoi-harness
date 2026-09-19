@@ -265,16 +265,6 @@ function mountEditor(
   return scripted
 }
 
-/** Open the editor of one configured row and expand its customized fold. */
-function openEditor(provider: string): void {
-  const row = screen.getByText(provider).closest('li')
-  if (row === null) throw new Error(`no row for ${provider}`)
-  fireEvent.click(within_(row, en.edit))
-  const summary = document.querySelector('summary')
-  if (summary === null) throw new Error('no customized fold')
-  fireEvent.click(summary)
-}
-
 /** Open one model row's advanced fold, where the capacities live. */
 function expandModel(index: number): void {
   fireEvent.click(screen.getByLabelText(`${en.modelAdvanced} ${index}`))
@@ -308,10 +298,9 @@ describe('protocolChoices', () => {
 describe('model list editing', () => {
   it('changes image input without rewriting a neighboring model declaration', async () => {
     const neighbor = { id: 'vision', input: ['image'], name: 'Kept vision model' }
-    const { mutate } = await mountSection({
+    const { mutate } = mountEditor('openai', {
       providers: { openai: { models: [{ id: 'preview' }, neighbor] } },
     })
-    openEditor('openai')
     expandModel(1)
     fireEvent.click(within(screen.getByRole('group', { name: `${en.modelInputTypes} 1` })).getByRole('checkbox', { name: en.modelInputImage }))
     fireEvent.click(screen.getByText(en.apply))
@@ -541,8 +530,7 @@ describe('endpoint interrogation', () => {
       { id: 'vision', inputModalities: ['text', 'image'] },
     ])))
     const model = { id: 'vision', ...input === undefined ? {} : { input } }
-    const { mutate } = await mountSection({ discover, providers: { openai: { models: [model] } } })
-    openEditor('openai')
+    const { mutate } = mountEditor('openai', { discover, providers: { openai: { models: [model] } } })
     expandModel(1)
     const types = within(screen.getByRole('group', { name: `${en.modelInputTypes} 1` }))
     await waitFor(() => { expect(types.getByRole<HTMLInputElement>('checkbox', { name: en.modelInputImage }).disabled).toBe(false) })
@@ -554,7 +542,7 @@ describe('endpoint interrogation', () => {
   })
 
   it('inherits a custom provider default input and persists an explicit model override', async () => {
-    const { discover, mutate } = await mountSection({
+    const { discover, mutate } = mountEditor('acme-gateway', {
       providers: {
         'acme-gateway': {
           api: 'openai-completions', baseURL: 'https://gateway.acme.example/v1',
@@ -563,7 +551,6 @@ describe('endpoint interrogation', () => {
       },
       declaredRoutes: ['acme-gateway'],
     })
-    openEditor('acme-gateway')
     expandModel(1)
     const types = within(screen.getByRole('group', { name: `${en.modelInputTypes} 1` }))
     expect(types.getByRole<HTMLInputElement>('checkbox', { name: en.modelInputText }).checked).toBe(true)
