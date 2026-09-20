@@ -38,6 +38,12 @@ export interface SettingsOnboardingStep {
 export type SettingsRootInjected = {
   /** Request the current shell-owned update action. */
   openDesktopUpdate: () => void
+  /**
+   * Publish the shell's open-at-a-section handler for the `settingsUi`
+   * service; the returned disposer clears it when this occurrence unmounts
+   * (a later mount republishes).
+   */
+  publishOpenSection: (handler: (id: string) => void) => () => void
   /** Request a fresh logical generation and physical WebSocket immediately. */
   reconnect: () => void
   hooks: {
@@ -70,3 +76,15 @@ export type SettingsRootComponentProps =
   >
   & InjectFace<SettingsRootInjected>
   & PropsLocale<'settings'>
+
+/** Cross-plugin handle for opening the Settings panel at one registered section. */
+export interface SettingsUiService {
+  /** Open the panel on `id`; unknown ids fall back to the panel default view. */
+  openSection: (id: string) => void
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    settingsUi: SettingsUiService
+  }
+}

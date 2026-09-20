@@ -103,8 +103,13 @@ export function apply(ctx: ClientContext): void {
   let rows: readonly SettingsSectionRow[] = []
   let onboardingVersion = -1
   let onboardingSteps: readonly SettingsOnboardingStep[] = []
+  let openSectionImpl: (id: string) => void = () => {}
   const shellInjected = (): SettingsRootInjected => ({
     openDesktopUpdate: () => { desktopUpdate.open() },
+    publishOpenSection: (handler) => {
+      openSectionImpl = handler
+      return () => { if (openSectionImpl === handler) openSectionImpl = () => {} }
+    },
     reconnect: () => { connection.reconnect() },
     hooks: {
       desktopUpdate: desktopUpdate.store,
@@ -155,6 +160,10 @@ export function apply(ctx: ClientContext): void {
       },
     },
   })
+  // Cross-plugin door to the panel: any feature may open Settings on a section
+  // (the capabilities drawer links to Permissions and Dynamic this way).
+  ctx.effect(() => ctx.provide('settingsUi', { openSection: (id) => { openSectionImpl(id) } }), 'ui-settings-general: settingsUi service')
+
   ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
     name: 'sidebar.settings',
     locale: NS,

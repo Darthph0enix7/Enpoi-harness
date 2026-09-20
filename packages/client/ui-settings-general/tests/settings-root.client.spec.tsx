@@ -99,6 +99,7 @@ function mount({
     wide,
     reconnect,
     openDesktopUpdate: () => {},
+    publishOpenSection: () => () => {},
     useDesktopUpdate: select => select(desktopUpdate),
     t: makeTranslate(dictionary),
     useConnectionState: (select) => {

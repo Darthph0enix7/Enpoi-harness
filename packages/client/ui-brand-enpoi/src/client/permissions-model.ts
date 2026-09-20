@@ -160,9 +160,12 @@ export function buildAgentSubjects(
  * @returns the Tier-1 strip counters.
  */
 export function countPermissionRules(perms: PermissionsConfig | undefined): { rules: number; grants: number } {
-  let rules = Object.keys(perms?.tools ?? {}).length
+  // Rules the operator authored: global tool rows, per-agent rows, and bash
+  // patterns. The shipped baseline (allow reads, ask on danger commands) is not
+  // counted — it is not something the operator wrote.
+  let rules = Object.keys(perms?.tools ?? {}).length + (perms?.bashPatterns?.length ?? 0)
   for (const agent of Object.values(perms?.agents ?? {})) {
-    rules += Object.keys(agent?.tools ?? {}).length
+    rules += Object.keys(agent?.tools ?? {}).length + (agent?.bashPatterns?.length ?? 0)
   }
   return { rules, grants: Object.keys(perms?.grants ?? {}).length }
 }
@@ -473,7 +476,7 @@ function deletePathAt(root: Record<string | number, unknown>, path: readonly (st
     if (child === null || typeof child !== 'object') return
     node = child as Record<string | number, unknown>
   }
-  delete node[path[path.length - 1] as string | number]
+  Reflect.deleteProperty(node, path[path.length - 1] as string | number)
 }
 
 /**

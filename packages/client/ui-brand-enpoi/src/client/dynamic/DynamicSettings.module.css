@@ -1,0 +1,52 @@
+/* Dynamic entities settings page — compact, liquid-glass, responsive. */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px 18px;
+  max-width: 720px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tab {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.55));
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tabActive {
+  color: #04121c;
+  background: rgba(127, 227, 236, 0.85);
+  border-color: rgba(127, 227, 236, 0.85);
+}
+
+.panel {
+  background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.72));
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  backdrop-filter: blur(8px) saturate(140%);
+  padding: 12px;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  padding: 2px 2px 0;
+}
+
+.stub {
+  font-size: 12px;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  padding: 8px 2px;
+}

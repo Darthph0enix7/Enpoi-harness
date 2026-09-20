@@ -119,6 +119,23 @@ export const PROTECTED_CAPABILITIES = new Set<string>([
   'grep',
 ])
 
+/**
+ * Cross-plugin door into the Settings panel (wired from `apply` through the
+ * `settingsUi` service). A module-level slot keeps this pure-presentation
+ * component free of ctx; the drawer links to Permissions and Dynamic with it.
+ */
+let openSettingsHandler: ((id: string) => void) | null = null
+
+/** Install (or clear with `null`) the settings opener used by this drawer. */
+export function setOpenSettingsHandler(handler: ((id: string) => void) | null): void {
+  openSettingsHandler = handler
+}
+
+/** Open Settings on one registered section when the shell is present. */
+function openSettings(section: string): void {
+  openSettingsHandler?.(section)
+}
+
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
   // MCP Servers (Default OFF)
   { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
@@ -596,8 +613,9 @@ export async function addMcpServer(input: McpServerInput): Promise<McpWriteResul
 export async function removeMcpServer(id: string): Promise<McpWriteResult> {
   const previous = globalMcpServers
   if (previous[id] === undefined) return { ok: true }
-  const next = { ...previous }
-  delete next[id]
+  const next = Object.fromEntries(
+    Object.entries(previous).filter(([key]) => key !== id),
+  ) as typeof previous
   globalMcpServers = next
   notify()
   for (let attempt = 0; attempt <= MAX_MCP_WRITE_RETRIES; attempt++) {
@@ -650,15 +668,20 @@ function PermissionsSection() {
           <span className={c('groupTitle')}>Permissions</span>
         </div>
         {counts !== null && (
-          <span className={c('countBadge')}>{counts.rules} rules · {counts.grants} grants</span>
+          <span className={c('countBadge')}>
+            {counts.rules} {counts.rules === 1 ? 'rule' : 'rules'} · {counts.grants} {counts.grants === 1 ? 'grant' : 'grants'}
+          </span>
         )}
       </div>
       {counts === null ? (
         <div className={c('empty')}>{failed ? 'Permission policy unavailable.' : 'Loading policy…'}</div>
       ) : (
         <div className={c('permHint')}>
-          Unconfigured tools default to <b>ask</b>. Bash commands match patterns first, then the tool policy.
-          Edit rules in Settings under Permissions.
+          Unconfigured tools default to <b>ask</b>; bash commands match patterns first, then the tool policy.
+          {' '}
+          <button type="button" className={c('footLink')} onClick={() => { openSettings('permissions') }}>
+            Edit rules
+          </button>
         </div>
       )}
     </section>
@@ -1032,7 +1055,13 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     <div className={c('container')}>
       <header className={c('head')}>
         <h3 className={c('headTitle')}>Capabilities Control Center</h3>
-        <p className={c('headSub')}>Toggle MCPs, Skills &amp; Subagents in real time</p>
+        <p className={c('headSub')}>
+          Toggle MCPs, Skills &amp; Subagents in real time
+          {' · '}
+          <button type="button" className={c('footLink')} onClick={() => { openSettings('dynamic') }}>
+            Manage in Settings
+          </button>
+        </p>
       </header>
 
       <div className={c('groups')}>

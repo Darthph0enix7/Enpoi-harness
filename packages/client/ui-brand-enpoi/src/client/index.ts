@@ -18,7 +18,7 @@ import {
   type AgentModelsDirectoryFace,
   type AgentModelsInjected,
 } from './AgentModelsBody.tsx'
-import { CapabilitiesBody, CapabilitiesIcon, refreshCapabilities } from './CapabilitiesBody.tsx'
+import { CapabilitiesBody, CapabilitiesIcon, refreshCapabilities, setOpenSettingsHandler } from './CapabilitiesBody.tsx'
 import {
   SubagentSessionsBody,
   SubagentSessionsIcon,
@@ -28,6 +28,7 @@ import { GitBody, GitIcon } from './GitBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
 import { OrchestrationSettings } from './OrchestrationSettings.tsx'
 import { PermissionsSettings } from './PermissionsSettings.tsx'
+import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
 import type { TerminalRegistryState } from './terminal/registry.ts'
@@ -204,6 +205,15 @@ export function apply(ctx: Context): void {
     label: () => 'Orchestration',
   }, OrchestrationSettings))
 
+  // 2d. Dynamic entities settings section (doc 59): roles, councils, MCPs,
+  // skills/tools, and the prompts behind them.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'dynamic',
+    order: 22,
+    label: () => 'Dynamic',
+  }, DynamicSettings))
+
   // 2c. Permission policy settings section (doc 55)
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -310,6 +320,16 @@ export function apply(ctx: Context): void {
       terminals.toggleDock()
     })
   }
+
+  // The drawer's Settings links resolve the shell's service lazily (the click
+  // happens long after both plugins are up; either load order is fine).
+  ctx.effect(() => {
+    setOpenSettingsHandler((id) => {
+      const settingsUi = ctx.get('settingsUi') as { openSection?: (id: string) => void } | undefined
+      settingsUi?.openSection?.(id)
+    })
+    return () => { setOpenSettingsHandler(null) }
+  }, 'enpoi: settings-ui opener')
 
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
   ctx.slots.inject('sidebar.right.pane.tab', function* () {

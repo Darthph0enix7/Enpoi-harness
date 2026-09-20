@@ -1,0 +1,224 @@
+/* SkillsPanel — skills & tools capability toggles (compact, liquid-glass). */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 2px 12px;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  line-height: 1.5;
+}
+
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #94a3b8);
+}
+
+.group {
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.groupHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.05));
+}
+
+.groupTitle {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+}
+
+.countBadge {
+  font-size: 9.5px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--dsw-alias-label-secondary, #cbd5e1);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 5px 10px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.04));
+}
+
+.rowInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.rowName {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+}
+
+.rowName > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowDesc {
+  font-size: 10px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 8.5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(103, 220, 231, 0.1);
+  color: #67dce7;
+  border: 1px solid rgba(103, 220, 231, 0.2);
+  flex-shrink: 0;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.switchInput {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.switchTrack {
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.15s ease;
+}
+
+.switchOn {
+  background: rgba(52, 211, 153, 0.3);
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+.switchKnob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary, #94a3b8);
+  transition: all 0.15s ease;
+}
+
+.switchKnobOn {
+  left: 17px;
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.8);
+}
+
+.empty {
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  padding: 6px 10px;
+  line-height: 1.45;
+}
+
+.errorRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 10px;
+}
+
+.errorLine {
+  font-size: 10px;
+  color: #e5716f;
+  line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+
+.actionError {
+  font-size: 10px;
+  color: #e5716f;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.retryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(103, 220, 231, 0.08);
+  border: 1px solid rgba(103, 220, 231, 0.25);
+  color: #67dce7;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.retryBtn:hover {
+  background: rgba(103, 220, 231, 0.16);
+  border-color: rgba(103, 220, 231, 0.45);
+}
+
+.foot {
+  font-size: 9px;
+  color: var(--dsw-alias-label-dimmed, #64748b);
+}
