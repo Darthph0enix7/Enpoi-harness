@@ -19,6 +19,8 @@ import {
   refreshCapabilities,
 } from '../CapabilitiesBody.tsx'
 import css from './SkillsPanel.module.css'
+import { setStatus } from './status.ts'
+import { withWriteTimeout } from './write-timeout.ts'
 
 /** One live skill catalog row (skills.list superset with the file path). */
 interface SkillRow {
@@ -220,7 +222,6 @@ export function SkillsPanel() {
   const [loadingSkills, setLoadingSkills] = useState(true)
   const [revision, setRevision] = useState<number | undefined>(undefined)
   const [settingsError, setSettingsError] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
   const [pending, setPending] = useState<Record<string, boolean>>({})
 
   /** Re-read capability flags and the session-addressed skill catalog. */
@@ -274,7 +275,7 @@ export function SkillsPanel() {
   }, [])
 
   /** Apply one capability write with conflict retry; returns the reason on failure. */
-  const writeCapability = async (kind: 'skill' | 'tool', id: string, enabled: boolean): Promise<string | null> => {
+  const writeCapability = (kind: 'skill' | 'tool', id: string, enabled: boolean): Promise<string | null> => withWriteTimeout((async () => {
     for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
       const view = await describeOrchestration()
       if (view === undefined) return 'settings service is unavailable'
@@ -287,11 +288,11 @@ export function SkillsPanel() {
       if (!outcome.conflict) return outcome.reason ?? 'settings write was rejected'
     }
     return 'settings write conflicted repeatedly'
-  }
+  })(), 'settings write timed out')
 
   /** Flip one skill capability optimistically, rolling back on rejection. */
   const toggleSkill = (id: string, next: boolean): void => {
-    setActionError(null)
+    setStatus(null)
     const previous = skillCaps
     setSkillCaps(current => ({ ...current, [id]: next }))
     setPending(current => ({ ...current, [id]: true }))
@@ -301,7 +302,7 @@ export function SkillsPanel() {
       ))
       if (reason !== null) {
         setSkillCaps(previous)
-        setActionError(reason)
+        setStatus(reason)
         return
       }
       void refreshCapabilities()
@@ -310,7 +311,7 @@ export function SkillsPanel() {
 
   /** Flip one tool capability optimistically, rolling back on rejection. */
   const toggleTool = (id: string, next: boolean): void => {
-    setActionError(null)
+    setStatus(null)
     const previous = tools
     setTools(current => current === null ? current : { ...current, [id]: next })
     setPending(current => ({ ...current, [id]: true }))
@@ -320,7 +321,7 @@ export function SkillsPanel() {
       ))
       if (reason !== null) {
         setTools(previous)
-        setActionError(reason)
+        setStatus(reason)
         return
       }
       void refreshCapabilities()
@@ -381,7 +382,6 @@ export function SkillsPanel() {
           <button type="button" className={css.retryBtn} onClick={() => { void load() }}>Retry</button>
         </div>
       )}
-      {actionError !== null && <div className={css.actionError}>{actionError}</div>}
 
       <section className={css.group}>
         <div className={css.groupHead}>

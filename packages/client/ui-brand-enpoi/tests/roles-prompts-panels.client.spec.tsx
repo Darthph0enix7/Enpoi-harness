@@ -214,6 +214,7 @@ describe('RolesPanel', () => {
       return gate
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
+    const { getStatus } = await import('../src/client/dynamic/status.ts')
     render(<mod.RolesPanel />)
     await screen.findByText('The Oracle')
 
@@ -222,8 +223,10 @@ describe('RolesPanel', () => {
     expect(await screen.findByText('retired')).toBeTruthy()
 
     release?.(jsonResponse({ result: { ok: false, error: { code: 'internal', message: 'nope', details: {} } } }))
-    expect(await screen.findByRole('alert')).toBeTruthy()
-    expect(screen.getByText('Could not save Fixer — the change was reverted.')).toBeTruthy()
+    // The failure is hoisted to the section status line, so it survives a tab switch.
+    await waitFor(() => {
+      expect(getStatus()).toBe('Could not save Fixer — the change was reverted.')
+    })
     await waitFor(() => { expect(screen.queryByText('retired')).toBeNull() })
   })
 

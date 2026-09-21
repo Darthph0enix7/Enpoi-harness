@@ -143,10 +143,16 @@ export function registryRoleLabel(registry: RoleRegistryMap, id: string): string
  * @returns the effective registry (code defaults included).
  */
 export function mergeRoleRegistry(serverRoles: RoleRegistryMap | undefined): RoleRegistryMap {
-  const merged: RoleRegistryMap = { ...BUILT_IN_ROLES }
-  for (const [id, entry] of Object.entries(serverRoles ?? {})) {
-    if (entry === null || typeof entry !== 'object' || entry.disabled === true) delete merged[id]
-    else merged[id] = entry
+  // Rebuild instead of deleting: a server entry that is null/malformed/retired
+  // drops its role from the merged map.
+  const merged: RoleRegistryMap = {}
+  const server = serverRoles ?? {}
+  for (const [id, entry] of Object.entries(BUILT_IN_ROLES)) {
+    if (!(id in server)) merged[id] = entry
+  }
+  for (const [id, entry] of Object.entries(server)) {
+    if (entry === null || typeof entry !== 'object' || entry.disabled === true) continue
+    merged[id] = entry
   }
   return merged
 }
@@ -164,7 +170,10 @@ export function coerceRoleRegistry(raw: unknown): RoleRegistryMap {
     const id = normalizeRoleId(rawId)
     if (id === '') continue
     if (value === null) {
-      delete registry[id]
+      // A null entry deletes the role: rebuild the map without that key.
+      for (const candidate of Object.keys(registry)) {
+        if (candidate === id) Reflect.deleteProperty(registry, candidate)
+      }
       continue
     }
     if (typeof value !== 'object' || Array.isArray(value)) continue
@@ -245,8 +254,21 @@ export function buildFleetCategories(registry: RoleRegistryMap, personaKeys: Ite
 /** One describe view of the enpoi-orchestration namespace, structural subset. */
 interface OrchestrationRolesView {
   ns?: string
-  value?: { roles?: unknown }
-  user?: { roles?: unknown }
+  value?: { roles?: unknown; councils?: unknown; mcpServers?: unknown }
+  user?: { roles?: unknown; councils?: unknown; mcpServers?: unknown }
+}
+
+/**
+ * Fingerprint over the CONFIG slices every Dynamic panel renders (roles,
+ * councils, mcpServers). Volatile status writes — the 15s `mcpStatus`
+ * heartbeat in particular — are deliberately excluded, so a push that only
+ * carries status does not make the panels re-describe.
+ */
+let orchestrationConfigFingerprint = ''
+
+/** Fingerprint of the config slices the Dynamic panels derive their rows from. */
+export function getOrchestrationConfigFingerprint(): string {
+  return orchestrationConfigFingerprint
 }
 
 let currentRegistry: RoleRegistryMap = mergeRoleRegistry(undefined)
@@ -290,6 +312,12 @@ export async function refreshFromServer(): Promise<void> {
     if (view === undefined) return
     const roles = view.value?.roles ?? view.user?.roles
     if (roles === undefined) return
+    // The panels' change gate: config slices only, so status heartbeats are inert.
+    orchestrationConfigFingerprint = JSON.stringify({
+      roles: roles ?? null,
+      councils: view.value?.councils ?? view.user?.councils ?? null,
+      mcpServers: view.value?.mcpServers ?? view.user?.mcpServers ?? null,
+    })
     currentRegistry = mergeRoleRegistry(coerceRoleRegistry(roles))
     notify()
   } catch {

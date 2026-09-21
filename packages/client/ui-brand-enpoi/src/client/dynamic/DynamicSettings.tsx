@@ -12,6 +12,7 @@ import { PromptsPanel } from './PromptsPanel.tsx'
 import { CouncilsPanel } from './CouncilsPanel.tsx'
 import { McpPanel } from './McpPanel.tsx'
 import { SkillsPanel } from './SkillsPanel.tsx'
+import { useStatus } from './status.ts'
 
 type TabId = 'roles' | 'councils' | 'mcp' | 'skills' | 'prompts'
 
@@ -29,6 +30,7 @@ export type DynamicSettingsProps = PropsRuntime<'settings.section'>
 /** Render the dynamic-entities page with its panel tabs. */
 export function DynamicSettings(_props: DynamicSettingsProps) {
   const [tab, setTab] = useState<TabId>('roles')
+  const status = useStatus()
   return (
     <div className={css.container}>
       <p className={css.hint}>
@@ -49,6 +51,7 @@ export function DynamicSettings(_props: DynamicSettingsProps) {
         ))}
       </nav>
       <section className={css.panel}>
+        {status !== null && <p className={css.status} role="alert">{status}</p>}
         {tab === 'roles' && <RolesPanel />}
         {tab === 'councils' && <CouncilsPanel />}
         {tab === 'mcp' && <McpPanel />}

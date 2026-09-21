@@ -395,22 +395,62 @@ describe('switching one session\'s composition', () => {
     expect(ctx.agentPresets.composedPreset(agent.ctx)).toBe('standard')
   })
 
-  it('refuses once the conversation has started', async () => {
+  it('switches a started-but-idle session and records the committed selection', async () => {
     const ctx = await harness()
-    const agent = await agentOn(ctx, 'sel-locked', 'standard')
-    // One turn is enough: the history from here on was produced under
-    // `standard`'s tools, and a swap would strand those tool calls.
-    agent.session.append('turn/start', { turn: 0 })
+    const agent = await agentOn(ctx, 'sel-started', 'standard')
+    // A closed turn is history, not an obstacle: a switch between turns is
+    // what this feature is for.
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    expect(await ctx.agentPresets.select(agent, 'minimal')).toBe('minimal')
+
+    expect(ctx.agentPresets.composedPreset(agent.ctx)).toBe('minimal')
+    expect(recordedPreset(agent)).toEqual({ agentPreset: 'minimal' })
+  })
+
+  it('settles a switch to the preset the session already runs', async () => {
+    const ctx = await harness()
+    const agent = await agentOn(ctx, 'sel-same', 'standard')
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    expect(await ctx.agentPresets.select(agent, 'standard')).toBe('standard')
+    expect(ctx.agentPresets.composedPreset(agent.ctx)).toBe('standard')
+  })
+
+  it('refuses while a turn is running', async () => {
+    const ctx = await harness()
+    const agent = await agentOn(ctx, 'sel-busy', 'standard')
+    // An open turn resolves tools and persona from the composition it started
+    // under, so a swap would corrupt the running loop.
+    agent.session.append('turn/start', { turn: 1 })
 
     const failure = await remoteFailure(ctx.agentPresets.select(agent, 'minimal'))
 
     expect(failure).toMatchObject({
-      code: 'agent-preset/locked',
-      message: 'session "sel-locked" has already started; its agent preset is fixed',
-      details: { sessionId: SessionId('sel-locked'), agentPreset: 'minimal' },
+      code: 'agent-preset/busy',
+      message: 'session "sel-busy" has a turn running; switch again once it settles',
+      details: { sessionId: SessionId('sel-busy'), agentPreset: 'minimal' },
     })
     expect(ctx.agentPresets.composedPreset(agent.ctx)).toBe('standard')
     expect(recordedPreset(agent)).toBeUndefined()
+  })
+
+  it('serializes two queued switches on a started session', async () => {
+    const ctx = await harness()
+    const agent = await agentOn(ctx, 'sel-started-race', 'standard')
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    await Promise.all([
+      ctx.agentPresets.select(agent, 'minimal'),
+      ctx.agentPresets.select(agent, 'standard'),
+    ])
+
+    // One winner, and the log agrees with it: the last committed switch.
+    expect(recordedPreset(agent)).toEqual({ agentPreset: 'standard' })
+    expect(ctx.agentPresets.composedPreset(agent.ctx)).toBe('standard')
   })
 
   it('leaves the session on its composition when the named preset is unknown', async () => {

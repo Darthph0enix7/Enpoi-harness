@@ -14,6 +14,8 @@
  */
 import { useEffect, useState } from 'react'
 import css from './CouncilsPanel.module.css'
+import { setStatus } from './status.ts'
+import { withWriteTimeout } from './write-timeout.ts'
 
 /** One council seat as stored in a declarative council spec. */
 interface CouncilSeat {
@@ -302,12 +304,10 @@ function draftFromSpec(spec: CouncilSpec | undefined): PromptDraft {
 export function CouncilsPanel() {
   const [rows, setRows] = useState<CouncilRow[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<Record<string, PromptDraft>>({})
   const [editBusyId, setEditBusyId] = useState<string | null>(null)
-  const [editError, setEditError] = useState<string | null>(null)
 
   // Add-council form.
   const [addOpen, setAddOpen] = useState(false)
@@ -321,7 +321,6 @@ export function CouncilsPanel() {
   const [addSystemPrompt, setAddSystemPrompt] = useState('')
   const [addUserTemplate, setAddUserTemplate] = useState('')
   const [addBusy, setAddBusy] = useState(false)
-  const [addError, setAddError] = useState<string | null>(null)
 
   /** Re-read the host roster and the stored overrides in one pass. */
   const refresh = async (): Promise<void> => {
@@ -342,7 +341,7 @@ export function CouncilsPanel() {
   }, [])
 
   /** Apply a write with conflict retry; returns the reason, or null when persisted. */
-  const writeFenced = async (ops: SettingsPathOp[]): Promise<string | null> => {
+  const writeFenced = (ops: SettingsPathOp[]): Promise<string | null> => withWriteTimeout((async () => {
     for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
       const view = await describeOrchestration()
       if (view === undefined) return 'settings service is unavailable'
@@ -351,30 +350,30 @@ export function CouncilsPanel() {
       if (!outcome.conflict) return outcome.reason ?? 'settings write was rejected'
     }
     return 'settings write conflicted repeatedly'
-  }
+  })(), 'settings write timed out')
 
   /** Retire or re-enable one council by writing its `disabled` flag. */
   const toggleEnabled = async (row: CouncilRow): Promise<void> => {
-    setActionError(null)
+    setStatus(null)
     const previous = rows
     setRows(current => current?.map(item => item.id === row.id ? { ...item, enabled: !row.enabled } : item) ?? current)
     const reason = await writeFenced([{ op: 'set', path: ['councils', row.id, 'disabled'], value: row.enabled }])
     if (reason !== null) {
       setRows(previous)
-      setActionError(reason)
+      setStatus(reason)
     }
   }
 
   /** Unset one council override; a built-in reappears from its code default. */
   const removeCouncil = async (row: CouncilRow): Promise<void> => {
-    setActionError(null)
+    setStatus(null)
     setConfirmRemove(null)
     const previous = rows
     setRows(current => current?.filter(item => item.id !== row.id) ?? current)
     const reason = await writeFenced([{ op: 'unset', path: ['councils', row.id] }])
     if (reason !== null) {
       setRows(previous)
-      setActionError(reason)
+      setStatus(reason)
       return
     }
     // Built-ins are re-seeded from code after the unset; re-read to show them.
@@ -383,7 +382,7 @@ export function CouncilsPanel() {
 
   /** Expand one row (or collapse it) and seed its prompt draft from the stored spec. */
   const toggleExpand = (row: CouncilRow): void => {
-    setEditError(null)
+    setStatus(null)
     const next = expandedId === row.id ? null : row.id
     if (next !== null && drafts[row.id] === undefined) {
       setDrafts(prev => ({ ...prev, [row.id]: draftFromSpec(row.spec) }))
@@ -407,7 +406,7 @@ export function CouncilsPanel() {
   const savePrompts = async (row: CouncilRow): Promise<void> => {
     const draft = drafts[row.id]
     if (draft === undefined) return
-    setEditError(null)
+    setStatus(null)
     setEditBusyId(row.id)
     const previous = rows
     const seats = sanitizeSeats(draft.seats)
@@ -422,27 +421,30 @@ export function CouncilsPanel() {
     setEditBusyId(null)
     if (reason !== null) {
       setRows(previous)
-      setEditError(reason)
+      setStatus(reason)
     }
   }
 
-  /** Submit the add-council form; validation failures render inline. */
+  /** Submit the add-council form; validation failures render in the section status line. */
   const submitAdd = async (): Promise<void> => {
-    setAddError(null)
+    setStatus(null)
     const id = addId.trim()
     const label = addLabel.trim()
-    if (id === '') { setAddError('council id is required'); return }
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) { setAddError('council id must start alphanumeric and use only letters, digits, ".", "_", "-"'); return }
-    if (label === '') { setAddError('council label is required'); return }
+    if (id === '') { setStatus('council id is required'); return }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
+      setStatus('council id must start alphanumeric and use only letters, digits, ".", "_", "-"')
+      return
+    }
+    if (label === '') { setStatus('council label is required'); return }
     const seats = sanitizeSeats(addSeats)
-    if (seats.length === 0) { setAddError('at least one named seat is required'); return }
-    if (new Set(seats.map(seat => seat.id)).size !== seats.length) { setAddError('seat ids must be unique'); return }
+    if (seats.length === 0) { setStatus('at least one named seat is required'); return }
+    if (new Set(seats.map(seat => seat.id)).size !== seats.length) { setStatus('seat ids must be unique'); return }
     const actions = parseCommaList(addActions)
-    if (actions.length === 0) { setAddError('at least one action is required'); return }
+    if (actions.length === 0) { setStatus('at least one action is required'); return }
     let stoppingPolicy: StoppingPolicy
     if (addStopping === 'fixed_epochs') {
       const maxEpochs = Number(addMaxEpochs)
-      if (!Number.isInteger(maxEpochs) || maxEpochs < 1) { setAddError('maxEpochs must be a positive integer'); return }
+      if (!Number.isInteger(maxEpochs) || maxEpochs < 1) { setStatus('maxEpochs must be a positive integer'); return }
       stoppingPolicy = { type: 'fixed_epochs', maxEpochs }
     } else {
       stoppingPolicy = { type: addStopping }
@@ -462,25 +464,28 @@ export function CouncilsPanel() {
     const optimistic: CouncilRow = { id, label, seatCount: seats.length, enabled: true, spec }
     setRows(current => [...(current ?? []).filter(row => row.id !== id), optimistic].sort((a, b) => a.id.localeCompare(b.id)))
     setAddBusy(true)
-    let reason: string | null = null
-    for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
-      const view = await describeOrchestration()
-      if (view === undefined) { reason = 'settings service is unavailable'; break }
-      const stored = view.value?.councils
-      if (stored !== null && stored !== undefined && typeof stored === 'object' && !Array.isArray(stored)
-        && (stored as Record<string, unknown>)[id] !== undefined) {
-        reason = `council id "${id}" already exists`
-        break
+    const reason = await withWriteTimeout((async (): Promise<string | null> => {
+      let result: string | null = null
+      for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
+        const view = await describeOrchestration()
+        if (view === undefined) { result = 'settings service is unavailable'; break }
+        const stored = view.value?.councils
+        if (stored !== null && stored !== undefined && typeof stored === 'object' && !Array.isArray(stored)
+          && (stored as Record<string, unknown>)[id] !== undefined) {
+          result = `council id "${id}" already exists`
+          break
+        }
+        const outcome = await postSettingsMutation([{ op: 'set', path: ['councils', id], value: spec }], view.revision)
+        if (outcome.ok) { result = null; break }
+        if (!outcome.conflict) { result = outcome.reason ?? 'settings write was rejected'; break }
+        result = 'settings write conflicted repeatedly'
       }
-      const outcome = await postSettingsMutation([{ op: 'set', path: ['councils', id], value: spec }], view.revision)
-      if (outcome.ok) { reason = null; break }
-      if (!outcome.conflict) { reason = outcome.reason ?? 'settings write was rejected'; break }
-      reason = 'settings write conflicted repeatedly'
-    }
+      return result
+    })(), 'settings write timed out')
     setAddBusy(false)
     if (reason !== null) {
       setRows(previous)
-      setAddError(reason)
+      setStatus(reason)
       return
     }
     setAddId('')
@@ -504,7 +509,6 @@ export function CouncilsPanel() {
           <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>Retry</button>
         </div>
       )}
-      {actionError !== null && <div className={css.actionError}>{actionError}</div>}
       <div className={css.list}>
         {rows === null && <div className={css.empty}>Loading councils…</div>}
         {rows !== null && rows.length === 0 && <div className={css.empty}>No councils registered yet.</div>}
@@ -555,7 +559,7 @@ export function CouncilsPanel() {
                       className={css.removeBtn}
                       aria-label={`Delete ${row.label}`}
                       title={`Unset councils.${row.id} — a built-in falls back to its code default`}
-                      onClick={() => { setActionError(null); setConfirmRemove(row.id) }}
+                      onClick={() => { setStatus(null); setConfirmRemove(row.id) }}
                     >
                       ×
                     </button>
@@ -612,7 +616,6 @@ export function CouncilsPanel() {
                         onChange={(e) => { setDrafts(prev => ({ ...prev, [row.id]: { ...draft, userPromptTemplate: e.target.value } })) }}
                       />
                     </label>
-                    {editError !== null && <div className={css.actionError}>{editError}</div>}
                     <div className={css.addActions}>
                       <button type="button" className={css.addBtn} disabled={editBusyId === row.id} onClick={() => { void savePrompts(row) }}>
                         {editBusyId === row.id ? 'Saving…' : 'Save prompts'}
@@ -694,16 +697,15 @@ export function CouncilsPanel() {
               <span className={css.fieldLabel}>Chair user prompt template</span>
               <textarea className={css.addInput} rows={2} aria-label="Council chair user prompt template" value={addUserTemplate} onChange={(e) => { setAddUserTemplate(e.target.value) }} />
             </label>
-            {addError !== null && <div className={css.actionError}>{addError}</div>}
             <div className={css.addActions}>
               <button type="button" className={css.addBtn} disabled={addBusy} onClick={() => { void submitAdd() }}>
                 {addBusy ? 'Adding…' : 'Add council'}
               </button>
-              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setAddError(null) }}>Cancel</button>
+              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>Cancel</button>
             </div>
           </div>
         ) : (
-          <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setAddError(null) }}>
+          <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setStatus(null) }}>
             + Add council
           </button>
         )}

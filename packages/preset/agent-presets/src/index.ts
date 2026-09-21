@@ -655,10 +655,9 @@ export class AgentPresets extends TypertRemoteService {
   /**
    * Re-link one agent to a different preset's standing composition.
    *
-   * Only valid while the agent has produced nothing: swapping tools mid
-   * conversation would leave logged tool calls the new composition cannot
-   * make. The CALLER owns that check — this method does not read session
-   * history.
+   * The safe window is between turns: swapping tools under a running loop would
+   * leave it resolving tool calls the new composition cannot make. The CALLER
+   * owns that check — this method does not read session history.
    *
    * The swap is a parent re-link, not an unmount: standing mounts are shared
    * and permanent, so the old composition stays for its other agents and the
@@ -712,11 +711,15 @@ export class AgentPresets extends TypertRemoteService {
   private readonly switches = new Map<string, Promise<unknown>>()
 
   /**
-   * Compose a blank session's agent from a different preset and record it.
+   * Compose an idle session's agent from a different preset and record it.
+   *
+   * Allowed whenever the session is idle, including one that has already run
+   * turns (and when the target is the preset it already runs); refused only
+   * while a turn is running.
    * @param agent - the session's live agent, resolved from the wire identity.
    * @param agentPreset - the preset to compose the agent from instead.
    * @returns the preset id that was recorded.
-   * @throws {RemoteError} with `gateway/bad-request`, `agent-preset/locked`,
+   * @throws {RemoteError} with `gateway/bad-request`, `agent-preset/busy`,
    * `agent-preset/not-found`, or `agent-preset/invalid` when refused.
    */
   @Remote('select')
@@ -735,16 +738,16 @@ export class AgentPresets extends TypertRemoteService {
 
   /** One queued switch: re-check, recompose, then record what the agent runs. */
   private async swap(agent: Agent, agentPreset: string): Promise<string> {
-    // Re-read inside the queue: an earlier switch may have run, and a
-    // conversation may have started, since this call was queued. A turn is one
-    // model-loop execution; standalone plugin events never open one, so a
-    // session that has only run commands is still blank.
+    // Re-read inside the queue: an earlier switch may have run, or a turn may
+    // have started, since this call was queued. History is no obstacle — a
+    // switch between turns is what this feature is for — but a running turn is:
+    // swapping mid-turn would resolve tools and persona under the new
+    // composition for a loop that already started under the old one.
     const boundary = this.selfCtx.sessionProjections.stateOf(agent.session, 'turnBoundary')
-    if (boundary !== undefined
-      && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)) {
+    if (boundary !== undefined && boundary.openTurnStartSeq !== null) {
       throw new RemoteError(
-        'agent-preset/locked',
-        `session "${agent.id}" has already started; its agent preset is fixed`,
+        'agent-preset/busy',
+        `session "${agent.id}" has a turn running; switch again once it settles`,
         { sessionId: agent.id, agentPreset },
       )
     }

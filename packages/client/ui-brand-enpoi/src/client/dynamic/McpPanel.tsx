@@ -21,6 +21,8 @@ import {
   type McpStatusEntry,
 } from '../CapabilitiesBody.tsx'
 import css from './McpPanel.module.css'
+import { setStatus } from './status.ts'
+import { withWriteTimeout } from './write-timeout.ts'
 
 /** One path op inside the enpoi-orchestration namespace. */
 interface SettingsPathOp {
@@ -158,17 +160,15 @@ interface StatusFace {
 /** The MCP catalog editor. */
 export function McpPanel() {
   const [servers, setServers] = useState<Record<string, McpServerEntry> | null>(null)
-  const [status, setStatus] = useState<Record<string, McpStatusEntry>>({})
+  const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatusEntry>>({})
   const [caps, setCaps] = useState<Record<string, boolean>>({})
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
 
   const [addOpen, setAddOpen] = useState(false)
   const [addName, setAddName] = useState('')
   const [addUrl, setAddUrl] = useState('')
   const [addApiKeyEnv, setAddApiKeyEnv] = useState('')
   const [addHeaders, setAddHeaders] = useState('')
-  const [addError, setAddError] = useState<string | null>(null)
   const [addBusy, setAddBusy] = useState(false)
 
   const [editId, setEditId] = useState<string | null>(null)
@@ -189,7 +189,7 @@ export function McpPanel() {
     setLoadError(null)
     const value = view.value ?? {}
     setServers(isRecord(value.mcpServers) ? value.mcpServers as Record<string, McpServerEntry> : {})
-    setStatus(isRecord(value.mcpStatus) ? value.mcpStatus as Record<string, McpStatusEntry> : {})
+    setMcpStatus(isRecord(value.mcpStatus) ? value.mcpStatus as Record<string, McpStatusEntry> : {})
     setCaps(isRecord(value.capabilities?.mcp) ? value.capabilities.mcp as Record<string, boolean> : {})
   }
 
@@ -203,7 +203,7 @@ export function McpPanel() {
   }, [])
 
   /** Apply a write with conflict retry; returns the reason, or null when persisted. */
-  const writeFenced = async (ops: SettingsPathOp[]): Promise<string | null> => {
+  const writeFenced = (ops: SettingsPathOp[]): Promise<string | null> => withWriteTimeout((async () => {
     for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
       const view = await describeOrchestration()
       if (view === undefined) return 'settings service is unavailable'
@@ -212,24 +212,24 @@ export function McpPanel() {
       if (!outcome.conflict) return outcome.reason ?? 'settings write was rejected'
     }
     return 'settings write conflicted repeatedly'
-  }
+  })(), 'settings write timed out')
 
   /** Flip one server's capability flag through the shared writer. */
   const onToggle = (id: string, next: boolean): void => {
-    setActionError(null)
+    setStatus(null)
     const previous = caps
     setCaps(current => ({ ...current, [id]: next }))
-    void toggleCapability('mcp', id, next).then((accepted) => {
+    void withWriteTimeout(toggleCapability('mcp', id, next), false).then((accepted) => {
       if (!accepted) {
         setCaps(previous)
-        setActionError(`could not ${next ? 'enable' : 'disable'} "${id}"`)
+        setStatus(`could not ${next ? 'enable' : 'disable'} "${id}"`)
       }
     })
   }
 
   /** Open the inline editor with the stored record's values. */
   const startEdit = (id: string, entry: McpServerEntry | undefined): void => {
-    setActionError(null)
+    setStatus(null)
     setConfirmRemove(null)
     setEditId(id)
     setEditUrl(entry?.url ?? '')
@@ -239,14 +239,14 @@ export function McpPanel() {
 
   /** Persist one inline edit as a whole-record fenced write. */
   const saveEdit = async (id: string): Promise<void> => {
-    setActionError(null)
+    setStatus(null)
     const url = editUrl.trim()
-    if (!isHttpUrl(url)) { setActionError('url must be an http(s) address'); return }
+    if (!isHttpUrl(url)) { setStatus('url must be an http(s) address'); return }
     let headers: Record<string, string> | undefined
     try {
       headers = parseHeadersField(editHeaders)
     } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : String(err))
+      setStatus(err instanceof Error ? err.message : String(err))
       return
     }
     const existing = servers?.[id]
@@ -264,7 +264,7 @@ export function McpPanel() {
     setEditBusy(false)
     if (reason !== null) {
       setServers(previous)
-      setActionError(reason)
+      setStatus(reason)
       return
     }
     setEditId(null)
@@ -273,17 +273,17 @@ export function McpPanel() {
 
   /** Submit the add form through the shared catalog writer. */
   const submitAdd = async (): Promise<void> => {
-    setAddError(null)
+    setStatus(null)
     const id = addName.trim()
     const url = addUrl.trim()
-    if (id === '') { setAddError('server id is required'); return }
-    if (!isHttpUrl(url)) { setAddError('url must be an http(s) address'); return }
-    if (servers !== null && servers[id] !== undefined) { setAddError(`server id "${id}" already exists`); return }
+    if (id === '') { setStatus('server id is required'); return }
+    if (!isHttpUrl(url)) { setStatus('url must be an http(s) address'); return }
+    if (servers !== null && servers[id] !== undefined) { setStatus(`server id "${id}" already exists`); return }
     let headers: Record<string, string> | undefined
     try {
       headers = parseHeadersField(addHeaders)
     } catch (err: unknown) {
-      setAddError(err instanceof Error ? err.message : String(err))
+      setStatus(err instanceof Error ? err.message : String(err))
       return
     }
     const entry: McpServerEntry = {
@@ -296,16 +296,16 @@ export function McpPanel() {
     const previous = servers
     setServers(current => ({ ...(current ?? {}), [id]: entry }))
     setAddBusy(true)
-    const result = await addMcpServer({
+    const result = await withWriteTimeout(addMcpServer({
       serverName: id,
       url,
       apiKeyEnv: addApiKeyEnv,
       ...(headers !== undefined ? { headers } : {}),
-    })
+    }), { ok: false, reason: 'settings write timed out' } as const)
     setAddBusy(false)
     if (!result.ok) {
       setServers(previous)
-      setAddError(result.reason)
+      setStatus(result.reason)
       return
     }
     setAddName('')
@@ -318,7 +318,7 @@ export function McpPanel() {
 
   /** Confirm-and-remove one catalog server through the shared writer. */
   const submitRemove = async (id: string): Promise<void> => {
-    setActionError(null)
+    setStatus(null)
     setConfirmRemove(null)
     const previous = servers
     setServers(current => Object.fromEntries(
@@ -326,17 +326,17 @@ export function McpPanel() {
     ))
     // The shared writer skips ids its own catalog cache has not seen: sync it first.
     await refreshMcpStatus()
-    const result = await removeMcpServer(id)
+    const result = await withWriteTimeout(removeMcpServer(id), { ok: false, reason: 'settings write timed out' } as const)
     if (!result.ok) {
       setServers(previous)
-      setActionError(result.reason)
+      setStatus(result.reason)
       return
     }
     // A no-op (cache miss) still answers ok; confirm the key actually left the document.
     const after = await describeOrchestration()
     if (after === undefined || after.value?.mcpServers?.[id] !== undefined) {
       setServers(previous)
-      setActionError(after === undefined ? 'settings service is unavailable' : `mcpServers.${id} was not removed`)
+      setStatus(after === undefined ? 'settings service is unavailable' : `mcpServers.${id} was not removed`)
       return
     }
     void refreshMcpStatus()
@@ -344,7 +344,7 @@ export function McpPanel() {
 
   /** Connection dot of one row from the host heartbeat. */
   const statusFace = (id: string): StatusFace => {
-    const entry = status[id]
+    const entry = mcpStatus[id]
     if (entry === undefined) return { color: '#475569', glow: 'none', title: 'No heartbeat yet' }
     if (Date.now() - entry.checkedAt > 45_000) return { color: '#475569', glow: 'none', title: 'Checking availability…' }
     if (entry.error !== undefined) {
@@ -384,7 +384,6 @@ export function McpPanel() {
           <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>Retry</button>
         </div>
       )}
-      {actionError !== null && <div className={css.actionError}>{actionError}</div>}
       <div className={css.list}>
         {servers === null && <div className={css.empty}>Loading MCP catalog…</div>}
         {servers !== null && rows.map((row) => {
@@ -442,7 +441,7 @@ export function McpPanel() {
                       className={css.removeBtn}
                       aria-label={`Remove ${row.name}`}
                       title={`Unset mcpServers.${row.id}`}
-                      onClick={() => { setActionError(null); setConfirmRemove(row.id) }}
+                      onClick={() => { setStatus(null); setConfirmRemove(row.id) }}
                     >
                       ×
                     </button>
@@ -481,16 +480,15 @@ export function McpPanel() {
             <input className={css.addInput} aria-label="MCP server URL" placeholder="https://host/mcp" value={addUrl} onChange={(e) => { setAddUrl(e.target.value) }} />
             <input className={css.addInput} aria-label="MCP server API key env" placeholder="API key env (optional)" value={addApiKeyEnv} onChange={(e) => { setAddApiKeyEnv(e.target.value) }} />
             <textarea className={css.addInput} rows={2} aria-label="MCP server headers JSON" placeholder='Headers JSON (optional), e.g. {"x-workspace-slug":"main"}' value={addHeaders} onChange={(e) => { setAddHeaders(e.target.value) }} />
-            {addError !== null && <div className={css.actionError}>{addError}</div>}
             <div className={css.addActions}>
               <button type="button" className={css.addBtn} disabled={addBusy} onClick={() => { void submitAdd() }}>
                 {addBusy ? 'Adding…' : 'Add server'}
               </button>
-              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setAddError(null) }}>Cancel</button>
+              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>Cancel</button>
             </div>
           </div>
         ) : (
-          <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setAddError(null) }}>
+          <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setStatus(null) }}>
             + Add MCP server
           </button>
         )}

@@ -15,7 +15,7 @@
  * that the Prompts tab reads through {@link subscribeRoleSettings}, plus the
  * shared optimistic writer {@link editRole}.
  */
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   BUILT_IN_ROLES,
   ROLE_GROUP_LABELS,
@@ -24,6 +24,7 @@ import {
   normalizeRoleId,
   refreshFromServer as refreshRoleRegistry,
   subscribeRoleRegistry,
+  getOrchestrationConfigFingerprint,
   titleCaseRoleId,
   type RoleEntry,
   type RoleGroup,
@@ -35,6 +36,8 @@ import {
   type PermissionToolRow,
 } from '../permissions-model.ts'
 import css from './RolesPanel.module.css'
+import { setStatus } from './status.ts'
+import { withWriteTimeout } from './write-timeout.ts'
 
 /** CSS-module reads are `string | undefined` under noUncheckedIndexedAccess; keys are static. */
 function c(name: string): string {
@@ -137,6 +140,22 @@ async function describeDynamicSettings(): Promise<DynamicSettingsView | undefine
     : undefined
 }
 
+/**
+ * Fingerprint of the config slices this panel renders. It covers roles AND the
+ * councils/mcpServers slices the panel and the Prompts tab read, so a change to
+ * any of them still refreshes across clients; only status-only pushes (the 15s
+ * mcpStatus heartbeat) are skipped.
+ */
+function roleSliceFingerprint(): string {
+  return getOrchestrationConfigFingerprint()
+}
+
+/** Fingerprint applied by the last describe; a push that matches it skips the describe. */
+let lastRoleSliceFingerprint: string | undefined
+
+/** Whether the unconditional first load has landed, so push dedupe has a baseline. */
+let roleSlicePrimed = false
+
 /** One server read applied to the snapshot; roles with a write in flight keep their optimistic entry. */
 function applyServerView(view: DynamicSettingsView): void {
   const serverRoles: RoleRegistryMap = coerceRoleRegistry(view.value?.roles ?? view.user?.roles)
@@ -160,6 +179,8 @@ function applyServerView(view: DynamicSettingsView): void {
       : {},
   }
   notify()
+  lastRoleSliceFingerprint = roleSliceFingerprint()
+  roleSlicePrimed = true
 }
 
 /** Re-read the namespace and publish the fresh snapshot (boot priming and pushed changes). */
@@ -180,10 +201,18 @@ export function primeRoleSettings(): void {
 }
 
 // Auto-prime on module import so the tab renders instantly, and follow the
-// shared role registry's pushed refreshes for cross-client live sync.
+// shared role registry's pushed refreshes for cross-client live sync. The
+// first load is unconditional; later pushes describe only when the role slice
+// actually changed, so the 15s mcpStatus heartbeat writes do not re-describe.
 if (typeof window !== 'undefined') {
   primeRoleSettings()
-  subscribeRoleRegistry(() => { void refreshRoleSettings() })
+  subscribeRoleRegistry(() => {
+    if (!roleSlicePrimed) return
+    const fingerprint = roleSliceFingerprint()
+    if (fingerprint === lastRoleSliceFingerprint) return
+    lastRoleSliceFingerprint = fingerprint
+    void refreshRoleSettings()
+  })
 }
 
 // --- role entries and writes ------------------------------------------------
@@ -264,7 +293,7 @@ function applyLocalRole(id: string, entry: RoleEntry | null): void {
  * @returns whether the write persisted.
  */
 export function persistRoleWrite(id: string, build: (fresh: RoleEntry) => RoleEntry | undefined): Promise<boolean> {
-  return (async () => {
+  return withWriteTimeout((async () => {
     try {
       for (let attempt = 0; attempt <= MAX_ROLE_WRITE_RETRIES; attempt++) {
         const view = await describeDynamicSettings()
@@ -286,7 +315,7 @@ export function persistRoleWrite(id: string, build: (fresh: RoleEntry) => RoleEn
       // A thrown transport read behaves like a failed write: the caller rolls back.
       return false
     }
-  })()
+  })(), false)
 }
 
 /**
@@ -372,6 +401,36 @@ function buildRoleToolRows(rows: PermissionToolRow[], entry: RoleEntry): Permiss
 
 // --- controls ---------------------------------------------------------------
 
+/**
+ * Local draft state that survives a store refresh while the operator types.
+ * A pushed value is adopted unless the field is focused AND its text diverged
+ * from the value the panel last committed; commit or blur-with-no-change
+ * clears that guard so the store wins again.
+ */
+function useDraft(value: string, onCommit: (next: string) => void) {
+  const [draft, setDraft] = useState(value)
+  const focused = useRef(false)
+  const dirty = useRef(false)
+
+  useEffect(() => {
+    if (focused.current && dirty.current) return
+    setDraft(value)
+    dirty.current = false
+  }, [value])
+
+  const onChange = (next: string): void => {
+    setDraft(next)
+    dirty.current = next !== value
+  }
+  const onFocus = (): void => { focused.current = true }
+  const onBlur = (): void => {
+    focused.current = false
+    if (dirty.current) onCommit(draft)
+    dirty.current = false
+  }
+  return { draft, onChange, onFocus, onBlur }
+}
+
 /** Text input that keeps a local draft and commits on blur (Enter also commits). */
 export function DraftInput({ value, label, placeholder, onCommit }: {
   value: string
@@ -379,17 +438,17 @@ export function DraftInput({ value, label, placeholder, onCommit }: {
   placeholder?: string
   onCommit: (next: string) => void
 }) {
-  const [draft, setDraft] = useState(value)
-  useEffect(() => { setDraft(value) }, [value])
+  const draft = useDraft(value, onCommit)
   return (
     <input
       type="text"
       className={c('input')}
       aria-label={label}
       placeholder={placeholder}
-      value={draft}
-      onChange={(event) => { setDraft(event.target.value) }}
-      onBlur={() => { if (draft !== value) onCommit(draft) }}
+      value={draft.draft}
+      onChange={(event) => { draft.onChange(event.target.value) }}
+      onFocus={draft.onFocus}
+      onBlur={draft.onBlur}
       onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
     />
   )
@@ -402,17 +461,17 @@ export function DraftTextarea({ value, label, placeholder, onCommit }: {
   placeholder?: string
   onCommit: (next: string) => void
 }) {
-  const [draft, setDraft] = useState(value)
-  useEffect(() => { setDraft(value) }, [value])
+  const draft = useDraft(value, onCommit)
   return (
     <textarea
       className={c('textarea')}
       aria-label={label}
       placeholder={placeholder}
       rows={2}
-      value={draft}
-      onChange={(event) => { setDraft(event.target.value) }}
-      onBlur={() => { if (draft !== value) onCommit(draft) }}
+      value={draft.draft}
+      onChange={(event) => { draft.onChange(event.target.value) }}
+      onFocus={draft.onFocus}
+      onBlur={draft.onBlur}
     />
   )
 }
@@ -561,7 +620,6 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
 /** Roles tab: registry list with inline editing of every operator-owned field. */
 export function RolesPanel() {
   const snapshot = useSyncExternalStore(subscribeRoleSettings, getRoleSettings)
-  const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [draftId, setDraftId] = useState('')
   const [draftLabel, setDraftLabel] = useState('')
@@ -580,8 +638,8 @@ export function RolesPanel() {
 
   /** Commit one field edit through the shared optimistic/fenced writer. */
   const commit = (id: string, build: (fresh: RoleEntry) => RoleEntry | undefined): void => {
-    setError(null)
-    editRole(id, build, setError)
+    setStatus(null)
+    editRole(id, build, setStatus)
   }
 
   const setRoleLabel = (id: string, next: string): void => {
@@ -623,11 +681,11 @@ export function RolesPanel() {
   const addRole = (): void => {
     const id = normalizeRoleId(draftId)
     if (id === '') {
-      setError('Enter a role id.')
+      setStatus('Enter a role id.')
       return
     }
     if (Object.hasOwn(snapshot.roles, id) || Object.hasOwn(BUILT_IN_ROLES, id)) {
-      setError(`Role "${id}" already exists.`)
+      setStatus(`Role "${id}" already exists.`)
       return
     }
     const label = draftLabel.trim()
@@ -637,8 +695,8 @@ export function RolesPanel() {
       ...(label !== '' ? { label } : {}),
       ...(persona !== '' ? { persona } : {}),
     }
-    setError(null)
-    editRole(id, () => entry, setError)
+    setStatus(null)
+    editRole(id, () => entry, setStatus)
     setDraftId('')
     setDraftLabel('')
     setDraftPersona('')
@@ -652,7 +710,6 @@ export function RolesPanel() {
         Edits write <code>enpoi-orchestration.roles</code> and apply from the next spawn — no restart.
         Seat models are assigned in Agent Models.
       </p>
-      {error !== null && <p className={c('error')} role="alert">{error}</p>}
       {groups.map(group => (
         <section key={group.group} className={c('group')}>
           <header className={c('groupHead')}>{group.title}</header>

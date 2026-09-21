@@ -9,7 +9,7 @@
  * seats and chair template. Council prompts are Edited in Councils; this tab
  * never writes them.
  */
-import { useMemo, useState, useSyncExternalStore } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
 import { titleCaseRoleId } from '../role-registry.ts'
 import {
   DraftTextarea,
@@ -20,6 +20,7 @@ import {
   withoutRoleKey,
 } from './RolesPanel.tsx'
 import css from './RolesPanel.module.css'
+import { setStatus } from './status.ts'
 
 /** CSS-module reads are `string | undefined` under noUncheckedIndexedAccess; keys are static. */
 function c(name: string): string {
@@ -87,17 +88,16 @@ function buildCouncilRows(raw: unknown): CouncilRow[] {
 /** Prompts tab: role personas (writable) over read-only council prompt locations. */
 export function PromptsPanel() {
   const snapshot = useSyncExternalStore(subscribeRoleSettings, getRoleSettings)
-  const [error, setError] = useState<string | null>(null)
 
   const rows = useMemo(() => buildRoleRows(snapshot.roles).filter(row => !row.retired), [snapshot.roles])
   const councils = useMemo(() => buildCouncilRows(snapshot.councils), [snapshot.councils])
 
   /** Write one role persona through the shared optimistic/fenced writer. */
   const commitPersona = (id: string, next: string): void => {
-    setError(null)
+    setStatus(null)
     editRole(id, fresh => next.trim() === ''
       ? withoutRoleKey(fresh, 'persona')
-      : { ...fresh, persona: next }, setError)
+      : { ...fresh, persona: next }, setStatus)
   }
 
   return (
@@ -106,7 +106,6 @@ export function PromptsPanel() {
         Role personas write <code>enpoi-orchestration.roles.&lt;id&gt;.persona</code>; a built-in role gets an
         override entry on first save. Seat models are assigned in Agent Models.
       </p>
-      {error !== null && <p className={c('error')} role="alert">{error}</p>}
       <section className={c('group')}>
         <header className={c('groupHead')}>ROLE PERSONAS</header>
         <div className={c('rows')}>

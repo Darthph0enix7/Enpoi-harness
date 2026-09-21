@@ -684,10 +684,9 @@ serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): 
 /**
  * Re-link one agent to a different preset's standing composition.
  *
- * Only valid while the agent has produced nothing: swapping tools mid
- * conversation would leave logged tool calls the new composition cannot
- * make. The CALLER owns that check — this method does not read session
- * history.
+ * The safe window is between turns: swapping tools under a running loop would
+ * leave it resolving tool calls the new composition cannot make. The CALLER
+ * owns that check — this method does not read session history.
  *
  * The swap is a parent re-link, not an unmount: standing mounts are shared
  * and permanent, so the old composition stays for its other agents and the
@@ -707,11 +706,15 @@ serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): 
 async recompose(agentCtx: Context, id: string): Promise<AgentPreset>
 
 /**
- * Compose a blank session's agent from a different preset and record it.
+ * Compose an idle session's agent from a different preset and record it.
+ *
+ * Allowed whenever the session is idle, including one that has already run
+ * turns (and when the target is the preset it already runs); refused only
+ * while a turn is running.
  * @param agent - the session's live agent, resolved from the wire identity.
  * @param agentPreset - the preset to compose the agent from instead.
  * @returns the preset id that was recorded.
- * @throws {RemoteError} with `gateway/bad-request`, `agent-preset/locked`,
+ * @throws {RemoteError} with `gateway/bad-request`, `agent-preset/busy`,
  * `agent-preset/not-found`, or `agent-preset/invalid` when refused.
  */
 @Remote('select') async select(agent: Agent, agentPreset: string): Promise<string>
