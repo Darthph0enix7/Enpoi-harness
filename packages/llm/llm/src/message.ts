@@ -13,6 +13,12 @@ export interface AssistantProviderMetadata {
   /** Provider model id that produced the message. */
   model: string
   /**
+   * Model group (failover chain) the selection carried, when the answer came
+   * from a grouped assignment. Set together with the ANSWERING link's
+   * provider/model, so a reader can attribute `group (link)`.
+   */
+  chain?: string
+  /**
    * Lossless-JSON adapter state needed to replay the provider response.
    * `LlmRuntime` exposes it to a target adapter only when that adapter instance
    * currently owns both this historical provider and the target provider.

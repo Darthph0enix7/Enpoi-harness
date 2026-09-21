@@ -316,6 +316,8 @@ async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
     api: wireOf(face),
     schema: settingsSchema,
     t,
+    picker: null,
+    modelT: key => key,
     renderSlot: renderSlot as unknown as ModelsSectionProps['renderSlot'],
   }
   const view = render(<ModelsSection {...injected} />)
@@ -387,6 +389,8 @@ describe('ModelsSection', () => {
       api={wireOf(face)}
       schema={settingsSchema}
       t={t}
+      picker={null}
+      modelT={key => key}
       renderSlot={() => null}
     />)
 
@@ -1238,6 +1242,8 @@ describe('ModelsSection', () => {
       api={wireOf(face.face)}
       schema={settingsSchema}
       t={t}
+      picker={null}
+      modelT={key => key}
       renderSlot={() => null}
     />)
     expect(screen.getByText(/directory down/)).toBeTruthy()
@@ -1261,6 +1267,8 @@ describe('ModelsSection', () => {
       api={wireOf(face)}
       schema={settingsSchema}
       t={t}
+      picker={null}
+      modelT={key => key}
       renderSlot={() => null}
     />)
     // The sidebar's add action and the detail panel's delete are both inert.
@@ -1278,6 +1286,8 @@ describe('ModelsSection', () => {
       api={wireOf(face)}
       schema={settingsSchema}
       t={t}
+      picker={null}
+      modelT={key => key}
       renderSlot={() => null}
     />)
     await screen.findByText('DeepSeek')

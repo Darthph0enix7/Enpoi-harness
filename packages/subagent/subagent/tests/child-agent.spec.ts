@@ -18,6 +18,11 @@ function parentAgent(): Agent {
   } as Agent
 }
 
+function groupedParentAgent(): Agent {
+  const parent = parentAgent()
+  return { ...parent, options: { ...parent.options, chain: 'stable' } }
+}
+
 describe('child Agent options', () => {
   it('inherits the parent effort while the exact route is unchanged', () => {
     expect(resolveChildAgentOptions(parentAgent(), undefined, 1)).toEqual({
@@ -69,6 +74,27 @@ describe('child Agent options', () => {
       provider: 'current-provider',
       model: 'current-model',
       reasoningEffort: 'low',
+      maxTokens: 512,
+      subagentDepth: 1,
+    })
+  })
+
+  it('passes an explicitly requested child group through and never inherits the parent group', () => {
+    expect(resolveChildAgentOptions(groupedParentAgent(), {
+      provider: 'child-provider',
+      model: 'child-model',
+      chain: 'child-group',
+    }, 1)).toEqual({
+      provider: 'child-provider',
+      model: 'child-model',
+      chain: 'child-group',
+      maxTokens: 512,
+      subagentDepth: 1,
+    })
+    expect(resolveChildAgentOptions(groupedParentAgent(), undefined, 1)).toEqual({
+      provider: 'parent-provider',
+      model: 'parent-model',
+      reasoningEffort: 'high',
       maxTokens: 512,
       subagentDepth: 1,
     })

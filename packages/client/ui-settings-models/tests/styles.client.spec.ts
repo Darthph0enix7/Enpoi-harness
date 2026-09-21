@@ -11,6 +11,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const css = readFileSync(fileURLToPath(new URL('../src/client/ModelsSection.module.css', import.meta.url)), 'utf8')
+// The Model groups row ships its own sheet; it answers the same theme-token
+// contract as the section sheet.
+const groupCss = readFileSync(fileURLToPath(new URL('../src/client/ModelGroups.module.css', import.meta.url)), 'utf8')
 // The theme package maps `./styles/*` to `./src/styles/*`, so the declarations
 // stay on the source plane rather than needing a build.
 // Every theme sheet, not just the platform tokens: font and scrollbar
@@ -37,10 +40,12 @@ describe('ModelsSection theme styles', () => {
     // Every theme-variable prefix the sheets actually use, not just `--dsw-`:
     // a `--dsh-` name reads as a plausible sibling and would otherwise slip
     // past this gate into a fallback literal.
-    const named = [...css.matchAll(/var\((--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(match => match[1])
-    const undeclared = [...new Set(named)].filter(name => !tokens.includes(`  ${String(name)}:`))
-    expect(undeclared).toEqual([])
-    expect(css).not.toMatch(/var\(--(?:surface|text-|border|accent-strong)/)
+    for (const sheet of [css, groupCss]) {
+      const named = [...sheet.matchAll(/var\((--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(match => match[1])
+      const undeclared = [...new Set(named)].filter(name => !tokens.includes(`  ${String(name)}:`))
+      expect(undeclared).toEqual([])
+      expect(sheet).not.toMatch(/var\(--(?:surface|text-|border|accent-strong)/)
+    }
   })
 
   it('closes every block, so no rule is swallowed by the one above it', () => {

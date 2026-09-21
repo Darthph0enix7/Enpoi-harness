@@ -28,6 +28,12 @@ export interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
+  /**
+   * Enpoi Harness model-group id this Agent's requests carry. The step retry
+   * loop resolves the group's links to escalate a retried step; unknown or
+   * absent group ids keep the provider/model route.
+   */
+  chain?: string
   /** Adapter-owned reasoning effort for the selected provider/model route. */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */

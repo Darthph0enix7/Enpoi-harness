@@ -205,6 +205,12 @@ function durableFinishChunk(stream: readonly AssistantStreamRecord[]): Extract<S
 }
 
 /**
+ * Provider/model identity recorded on a durable Assistant message source,
+ * plus the optional model-group id (`chain`) the producing selection carried.
+ */
+type ProvenanceWithChain = AssistantProvenanceView & { chain?: string }
+
+/**
  * Provider/model identity recorded on a durable Assistant message source.
  * The transport replays `assistant/message` without the live stream, so this
  * source is the attribution that survives a reload; an unrecognized producer
@@ -212,11 +218,15 @@ function durableFinishChunk(stream: readonly AssistantStreamRecord[]): Extract<S
  * @param source - Durable `assistant/message` source.
  * @returns The recorded provider/model, or undefined when absent.
  */
-function sourceProvenance(source: unknown): AssistantProvenanceView | undefined {
+function sourceProvenance(source: unknown): ProvenanceWithChain | undefined {
   if (typeof source !== 'object' || source === null) return undefined
-  const { kind, provider, model } = source as Record<string, unknown>
+  const { kind, provider, model, chain } = source as Record<string, unknown>
   if (kind !== 'model' || typeof provider !== 'string' || typeof model !== 'string') return undefined
-  return { provider, model }
+  return {
+    provider,
+    model,
+    ...typeof chain === 'string' && chain !== '' ? { chain } : {},
+  }
 }
 
 function finalNode(
@@ -235,15 +245,20 @@ function finalNode(
       provider?: string
       model?: string
       reasoningEffort?: string
+      chain?: string
     } | null | undefined
     const provider = response?.provider
     const model = response?.model
     const reasoningEffort = response?.reasoningEffort
+    // The answering link may still carry the group id the request was made
+    // under; attribution prefers the selection's own id either way.
+    const chain = typeof response?.chain === 'string' && response.chain !== '' ? response.chain : undefined
     const requestConfig = typeof provider === 'string' && typeof model === 'string'
       ? {
         provider,
         model,
         ...typeof reasoningEffort === 'string' ? { reasoningEffort } : {},
+        ...chain === undefined ? {} : { chain },
       }
       : undefined
     const provenance = sourceProvenance(event.data.message.source)

@@ -16,9 +16,12 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type {
+  AnsweringLink, GenerateOptions, LlmCallConfig, Message, ModelChainLink, ModelChainResolver, PreparedLlmCall,
+} from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
+  ReasoningEffortId,
   createAssistantMessage,
   errorChain,
   markAgentLoopRequest,
@@ -58,6 +61,45 @@ type PreparedStep =
     startsRequestSeries?: true
     assembly: PromptAssembly
   }
+
+/** One step's model-group snapshot; links are copied so a mid-step edit cannot change a retry. */
+interface ChainSnapshot {
+  /** Group id used by audit lines. */
+  readonly id: string
+  /** Ordered links, never empty. */
+  readonly links: readonly ModelChainLink[]
+}
+
+/** Chain ids already warned about, so fail-open writes one stderr line per id. */
+const warnedStepChainIds = new Set<string>()
+
+/** Read the model-group id carried alongside one request config (declared on `GenerateOptions.chain`). */
+function chainOf(config: LlmCallConfig): string | undefined {
+  return (config as LlmCallConfig & { chain?: string }).chain
+}
+
+/**
+ * Re-route one proposed config onto a group link. The link's own effort wins; a
+ * link that is the config's own route keeps the requested effort, and any other
+ * link drops an effort its model does not own so the model resolves its default.
+ * @param config - config proposed by the request waterfall.
+ * @param link - link that owns the retried attempt.
+ * @returns the link-routed config.
+ */
+function routeToLink(config: LlmCallConfig, link: ModelChainLink): LlmCallConfig {
+  const effort = link.effort !== undefined
+    ? ReasoningEffortId(link.effort)
+    : link.provider === config.provider && link.model === config.model
+      ? config.reasoningEffort
+      : undefined
+  const { reasoningEffort: _inheritedEffort, ...inherited } = config as LlmCallConfig & { chain?: string }
+  return {
+    ...inherited,
+    provider: link.provider,
+    model: link.model,
+    ...effort === undefined ? {} : { reasoningEffort: effort },
+  }
+}
 
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
@@ -387,8 +429,25 @@ export class ReactLoopAgent implements Agent {
     const { assembly } = decision
     const renderedPrompt = renderPrompt(assembly)
     let firstAttempt = true
+    let attemptIndex = 0
+    let chainResolved = false
+    let chain: ChainSnapshot | undefined
+    let chainStart: number | undefined
+    let lastRoute: { provider: string; model: string } | undefined
     while (true) {
-      const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
+      const link = this.chainLinkAt(chain, chainStart, attemptIndex)
+      const { config, preparedCall } = await this.prepareRequest(turn, step, signal, link)
+      if (!chainResolved) {
+        chainResolved = true
+        chain = this.snapshotChain(config)
+        // A route the group does not name escalates from the group's first link
+        // on a retry instead of skipping it; a named route resumes after itself.
+        chainStart = chain === undefined
+          ? undefined
+          : Math.max(-1, chain.links.findIndex(candidate =>
+            candidate.provider === config.provider && candidate.model === config.model))
+      }
+      lastRoute = { provider: config.provider, model: config.model }
       const startsRequestSeries = firstAttempt && decision.startsRequestSeries === true
       const commits = this.systemPrompt.project(renderedPrompt, {
         inHistory: preparedCall?.systemPromptUpdate === 'in-history',
@@ -431,6 +490,10 @@ export class ReactLoopAgent implements Agent {
         (frame) => { this.dispatch.emit('agent/assistant-stream', { frame }) },
       )
       let started = false
+      // The route the answering model actually ran under. The runtime reports
+      // it on the terminal chunk when its own group loop escalated away from
+      // the proposed route; absent means the proposed route answered.
+      let answeredLink: AnsweringLink | undefined
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
@@ -438,6 +501,7 @@ export class ReactLoopAgent implements Agent {
         started = true
         for await (const chunk of stream) {
           signal.throwIfAborted()
+          if (chunk.type === 'finish' && chunk.answeringLink !== undefined) answeredLink = chunk.answeringLink
           live.push(chunk)
         }
         signal.throwIfAborted()
@@ -453,8 +517,9 @@ export class ReactLoopAgent implements Agent {
                 message: createAssistantMessage({
                   content,
                   source: {
-                    provider: request.provider,
-                    model: request.model,
+                    provider: answeredLink?.provider ?? request.provider,
+                    model: answeredLink?.model ?? request.model,
+                    ...request.chain === undefined ? {} : { chain: request.chain },
                     ...live.replayState === undefined ? {} : { replayState: live.replayState },
                   },
                 }),
@@ -505,14 +570,24 @@ export class ReactLoopAgent implements Agent {
           if (action?.kind !== 'retry') {
             throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
           }
+          attemptIndex += 1
+          const nextLink = this.chainLinkAt(chain, chainStart, attemptIndex)
+          if (chain !== undefined && nextLink !== undefined
+            && (nextLink.provider !== lastRoute.provider || nextLink.model !== lastRoute.model)) {
+            process.stderr.write(
+              `[model-chain] ${chain.id}: step ${turn}/${step} retry → `
+              + `link ${String((chainStart ?? 0) + attemptIndex + 1)} ${nextLink.provider}/${nextLink.model}\n`,
+            )
+          }
           continue
         }
 
         const message = createAssistantMessage({
           content: live.blocks(),
           source: {
-            provider: request.provider,
-            model: request.model,
+            provider: answeredLink?.provider ?? request.provider,
+            model: answeredLink?.model ?? request.model,
+            ...request.chain === undefined ? {} : { chain: request.chain },
             ...live.replayState !== undefined ? { replayState: live.replayState } : {},
           },
         })
@@ -542,11 +617,82 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
+  /**
+   * Resolve the group link one step attempt runs.
+   * @param chain - step snapshot, or undefined when the step carries no usable group.
+   * @param start - snapshot index the step's own route names, or -1 when it names none.
+   * @param attemptIndex - zero-based attempt counter, one per request-error retry.
+   * @returns the link to route this attempt to, or undefined to keep the proposed route.
+   */
+  private chainLinkAt(
+    chain: ChainSnapshot | undefined,
+    start: number | undefined,
+    attemptIndex: number,
+  ): ModelChainLink | undefined {
+    if (chain === undefined || start === undefined) return undefined
+    const index = start + attemptIndex
+    if (index < 0) return undefined
+    return chain.links[Math.min(index, chain.links.length - 1)]
+  }
+
+  /**
+   * Snapshot the model group one resolved request carries. The optional
+   * registry is read structurally; a missing service, unknown id, throwing
+   * resolver, or link-less group fails open to the config's own route with one
+   * stderr warning per group id.
+   * @param config - config resolved for the step's first attempt.
+   * @returns copied links for this step's retries, or undefined to keep single-model routing.
+   */
+  private snapshotChain(config: LlmCallConfig): ChainSnapshot | undefined {
+    const chainId = chainOf(config)
+    if (chainId === undefined) return undefined
+    const service = this.ctx.get('modelChains') as ModelChainResolver | undefined
+    if (service === undefined) {
+      this.warnChainFailOpen(chainId, 'no model-chains service is mounted')
+      return undefined
+    }
+    let resolved: ReturnType<ModelChainResolver['resolve']>
+    try {
+      resolved = service.resolve(chainId)
+    } catch (error: unknown) {
+      // A broken group registry must not fail the step: fall back to the current model.
+      this.warnChainFailOpen(chainId, `resolving the group failed (${errorChain(error)})`)
+      return undefined
+    }
+    if (resolved === undefined) {
+      this.warnChainFailOpen(chainId, 'the group id is not declared')
+      return undefined
+    }
+    const links = resolved.links
+      .filter(link => typeof link.provider === 'string' && link.provider.length > 0
+        && typeof link.model === 'string' && link.model.length > 0)
+      .map((link): ModelChainLink => ({
+        provider: link.provider,
+        model: link.model,
+        ...link.effort === undefined ? {} : { effort: link.effort },
+      }))
+    if (links.length === 0) {
+      this.warnChainFailOpen(chainId, 'the group declares no usable links')
+      return undefined
+    }
+    return { id: resolved.id, links }
+  }
+
+  /** Write one fail-open diagnostic per group id. */
+  private warnChainFailOpen(chainId: string, reason: string): void {
+    if (warnedStepChainIds.has(chainId)) return
+    warnedStepChainIds.add(chainId)
+    process.stderr.write(
+      `[model-chain] ${chainId}: ${reason}; step retries keep the current model\n`,
+    )
+  }
+
   /** Resolve request config and bind its adapter before admitting model-visible input. */
   private async prepareRequest(
     turn: number,
     step: number,
     signal: AbortSignal,
+    link?: ModelChainLink,
   ): Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
@@ -554,7 +700,11 @@ export class ReactLoopAgent implements Agent {
     // effort owned by that exact model. Later steps re-resolve marked defaults.
     const persistedHeader = session.requestHeader()
     const persistedConfig = persistedHeader?.config
-    const route = { provider: this.options.provider ?? '', model: this.options.model ?? '' }
+    const route = {
+      provider: this.options.provider ?? '',
+      model: this.options.model ?? '',
+      ...this.options.chain === undefined ? {} : { chain: this.options.chain },
+    }
     const persistedReasoningEffort = persistedConfig?.provider === route.provider
       && persistedConfig.model === route.model
       && persistedHeader?.adapterDefaults?.reasoningEffort !== true
@@ -577,18 +727,19 @@ export class ReactLoopAgent implements Agent {
       () => Promise.resolve(seedConfig),
     )
     signal.throwIfAborted()
-    if (!proposedConfig.provider || !proposedConfig.model) {
+    const routedConfig = link === undefined ? proposedConfig : routeToLink(proposedConfig, link)
+    if (!routedConfig.provider || !routedConfig.model) {
       throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or supply both via the agent/request waterfall`)
     }
     let config: LlmCallConfig
     let preparedCall: PreparedLlmCall | undefined
     try {
-      preparedCall = await this.loopCtx.llm.prepareCall(proposedConfig, signal)
+      preparedCall = await this.loopCtx.llm.prepareCall(routedConfig, signal)
       config = preparedCall.config
     } catch (error: unknown) {
       // Middleware may serve an unregistered route; terminal dispatch still requires an adapter.
       if (!(error instanceof LlmError) || error.code !== 'NO_ADAPTER') throw error
-      config = proposedConfig
+      config = routedConfig
     }
     signal.throwIfAborted()
     return { config, ...preparedCall === undefined ? {} : { preparedCall } }

@@ -15,6 +15,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: pulls the ctx.remote merge and the forwarded-event key face
 // (settings/credentials invalidations ride the allowlist) into this program.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+// Type-only: pulls the ctx.modelDirectories merge and the model locale
+// namespace used by the shared picker the group editor embeds.
+import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { ModelsSection } from './ModelsSection.tsx'
 import { refreshFromServer as refreshHiddenModels } from './hidden-models.ts'
 import type { ModelsSectionInjected } from './ModelsSection.tsx'
@@ -28,6 +31,8 @@ import { decodeWelcomeSection, WelcomeNoticeStore } from './welcome-store.ts'
 import { ModelsSettingsStore } from './store.ts'
 import type { ModelsWire } from './store.ts'
 import { createModelsOperations } from './operations.ts'
+import { createCatalogPickerFace } from './picker-face.ts'
+import type { ModelPickerFace } from './picker-face.ts'
 import { createSettingsSchemaOperations } from './schema-operations.ts'
 import { en, zh, type ModelsKey } from './locales.ts'
 import { WELCOME_NOTICE_SETTINGS_NAMESPACE } from '../onboarding-copy.ts'
@@ -95,12 +100,35 @@ export function apply(ctx: ClientContext): void {
   // Registration-time text (the nav label thunk) and the inject faces share
   // one bound translate; copy freshness rides the locale revision.
   const t = ctx.locale.bind(NS) as ModelsSectionInjected['t']
+  // The embedded picker reads its own package's dictionary; the namespace is
+  // registered by ui-model-selection (a soft service edge, see `picker`).
+  const modelT = ctx.locale.bind('model')
+  // The group editor's picker face is resolved lazily through `ctx.get`, not a
+  // fiber inject: the Models page must render even when the model-selection
+  // plugin is absent, and a lazy read sees the service regardless of which
+  // plugin activated first.
+  const pickerDisposers: Array<() => void> = []
+  let pickerFace: ModelPickerFace | null | undefined
+  const picker = (): ModelPickerFace | null => {
+    if (pickerFace !== undefined) return pickerFace
+    const service = ctx.get('modelDirectories')
+    if (service === undefined) {
+      pickerFace = null
+      return null
+    }
+    const created = createCatalogPickerFace(service.catalog)
+    pickerDisposers.push(created.dispose)
+    pickerFace = created.face
+    return pickerFace
+  }
   const injected = (): ModelsSectionInjected => ({
     controller,
     hooks: { snapshot: controller.store },
     api: wire,
     schema,
     t,
+    picker: picker(),
+    modelT,
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({
     controller,
@@ -161,6 +189,7 @@ export function apply(ctx: ClientContext): void {
     return () => {
       if (hiddenRefreshTimer !== undefined) clearTimeout(hiddenRefreshTimer)
       welcomeController.dispose()
+      for (const dispose of pickerDisposers) dispose()
       for (const dispose of disposers) dispose()
     }
   }, 'ui-settings-models: pushed invalidations')

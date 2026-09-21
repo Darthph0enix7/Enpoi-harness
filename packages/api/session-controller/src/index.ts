@@ -21,7 +21,7 @@ import { SessionHistoryController } from './history.ts'
 import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog } from './catalog.ts'
-import { installModelSelectionProjection } from './model-selection-projection.ts'
+import { installModelSelectionProjection, chainOfRequestConfig } from './model-selection-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
 import type {
@@ -171,6 +171,7 @@ export class SessionController extends TypertRemoteService {
           event.data.header.config.provider,
           event.data.header.config.model,
           event.data.header.config.reasoningEffort,
+          chainOfRequestConfig(event.data.header.config),
         )
       }
       if (event.type !== 'user/message' || event.data.source.kind !== 'user') return

@@ -149,9 +149,15 @@ export class SessionCommandController {
             ? {}
             : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }),
         })
+        // An empty group id is an absent assignment, never a durable value no
+        // group registry can resolve.
+        const chain = request.chain === undefined || request.chain.trim() === ''
+          ? undefined
+          : request.chain
         const selected: AgentModelSelection = {
           provider: resolved.provider,
           model: resolved.model,
+          ...(chain === undefined ? {} : { chain }),
           ...(resolved.reasoningEffort === undefined
             ? {}
             : { reasoningEffort: resolved.reasoningEffort }),
@@ -262,7 +268,7 @@ export class SessionCommandController {
     const childId = brandString<SessionId>(`session-${randomUUID()}`)
     const composition = await this.agents.composeAgent(this.agents.presetForObservation(source))
     try {
-      const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
+      const { provider, model, chain } = this.ctx.agentDefaultModel.currentSelection()
       await this.ctx.agents.create({
         sessionId: childId,
         seed: source.events.slice(0, cut),
@@ -275,7 +281,7 @@ export class SessionCommandController {
             ? {}
             : { agentPreset: composition.agentPreset }),
         },
-        agentOptions: { provider, model },
+        agentOptions: { provider, model, ...chain === undefined ? {} : { chain } },
         setup: composition.setup,
       })
     } catch (error) {
@@ -629,7 +635,9 @@ export class SessionCommandController {
     if (agent === undefined) {
       reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
     }
-    const waterfall = (this.ctx as unknown as { waterfall?: (name: string, payload: unknown, next: () => unknown) => Promise<unknown> }).waterfall
+    const waterfall = (this.ctx as unknown as {
+      waterfall?: (name: string, payload: unknown, next: () => unknown) => Promise<unknown>
+    }).waterfall
     if (waterfall === undefined) {
       reject('file-revert-unavailable', 'file-revert plugin is not mounted; cannot resolve conflicts', { sessionId: request.sessionId })
     }

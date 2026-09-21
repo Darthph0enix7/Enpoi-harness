@@ -26,6 +26,8 @@ export interface AgentDefaultModelSettings {
   provider: string
   /** Provider-owned model id. */
   model: string
+  /** Optional model-group id whose links route the default selection's requests. */
+  chain?: string
   /** Adapter-owned reasoning effort, or provider/default behavior when absent. */
   reasoningEffort?: string
 }
@@ -34,6 +36,7 @@ export interface AgentDefaultModelSettings {
 export const AGENT_DEFAULT_MODEL_SETTINGS_SCHEMA: z<AgentDefaultModelSettings> = z.object({
   provider: z.string().required(),
   model: z.string().required(),
+  chain: z.string(),
   reasoningEffort: z.string(),
 })
 
@@ -43,6 +46,8 @@ export interface Config {
   provider: string
   /** Provider-owned model id. */
   model: string
+  /** Optional model-group id whose links route the default selection's requests. */
+  chain?: string
 }
 
 /** Project stored settings onto the Agent-facing selection type. */
@@ -50,6 +55,7 @@ function selection(settings: AgentDefaultModelSettings): ModelSelection {
   return {
     provider: settings.provider,
     model: settings.model,
+    ...settings.chain === undefined ? {} : { chain: settings.chain },
     ...settings.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: ReasoningEffortId(settings.reasoningEffort) },
@@ -71,7 +77,11 @@ export class AgentDefaultModelConfig extends Service {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'agentDefaultModel')
-    const entry: AgentDefaultModelSettings = { provider: config.provider, model: config.model }
+    const entry: AgentDefaultModelSettings = {
+      provider: config.provider,
+      model: config.model,
+      ...config.chain === undefined ? {} : { chain: config.chain },
+    }
     this.source = () => entry
     ctx.inject(['settings'], (settingsCtx) => {
       settingsCtx.settings.installSection(ctx, AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE, AGENT_DEFAULT_MODEL_SETTINGS_SCHEMA, entry, {
@@ -101,6 +111,7 @@ export class AgentDefaultModelConfig extends Service {
     await this.ctx.get('settings')?.replace(AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE, {
       provider: next.provider,
       model: next.model,
+      ...next.chain === undefined ? {} : { chain: next.chain },
       ...next.reasoningEffort === undefined ? {} : { reasoningEffort: String(next.reasoningEffort) },
     })
   }

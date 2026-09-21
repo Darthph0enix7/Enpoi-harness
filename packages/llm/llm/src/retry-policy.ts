@@ -9,6 +9,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { STREAM_CUT_CODE } from './assembler.ts'
 import { EMPTY_RESPONSE_CODE } from './error.ts'
 
 const DEFAULT_MAX_RETRIES = 5
@@ -17,6 +18,9 @@ const DEFAULT_MAX_DELAY_MS = 10_000
 const DEFAULT_JITTER_RATIO = 0.1
 const DEFAULT_RETRYABLE_CODES = Object.freeze([
   EMPTY_RESPONSE_CODE,
+  // A stream cut (truncated tool-call arguments, or a truncated answer) is a
+  // provider-side failure, so a retried step restarts cleanly on the next link.
+  STREAM_CUT_CODE,
   'RATE_LIMIT',
   'SERVER',
   'TIMEOUT',

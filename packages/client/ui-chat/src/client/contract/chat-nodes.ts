@@ -96,6 +96,14 @@ export interface TurnTailChatData {
   readonly provider?: string
   readonly model?: string
   readonly reasoningEffort?: string
+  /** Model group the producing selection carried, when it carried one. */
+  readonly chain?: string
+  /**
+   * Attribution badge text for the answering model: `Stable (gemini-3.8-flash)`
+   * under its group, `Stable → mimo-v2.5` after a failover, or the plain model
+   * when the turn carried no group.
+   */
+  readonly modelBadge?: string
   /** Exact per-Turn accounting; absent when the loaded evidence is incomplete. */
   readonly tokenUsage?: TurnTokenUsage
 }

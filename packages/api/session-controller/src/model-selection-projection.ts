@@ -1,6 +1,7 @@
 /** Durable model-selection intent and request-use projection. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
@@ -13,8 +14,20 @@ import type {
 const modelSelectionSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
+  chain: z.string().min(1).optional(),
   reasoningEffort: z.string().min(1).optional(),
 }) as unknown as z.ZodType<ModelSelection>
+
+/**
+ * Read the optional model-group id carried structurally by one request config.
+ * dsh-llm declares the field on `GenerateOptions`; a request header echoes the
+ * config the loop dispatched.
+ * @param config - request config as carried by a `request/header` snapshot.
+ * @returns the carried group id, or undefined for single-model routing.
+ */
+export function chainOfRequestConfig(config: LlmCallConfig): string | undefined {
+  return (config as LlmCallConfig & { chain?: string }).chain
+}
 
 const modelSelectionProjectionStateSchema = z.object({
   lastUsed: modelSelectionSchema.nullable(),
@@ -42,9 +55,11 @@ function applyModelSelectionProjection(
       : { lastUsed: state.lastUsed, pending: event.data }
   }
   if (event.type !== 'request/header') return state
+  const chain = chainOfRequestConfig(event.data.header.config)
   const lastUsed: ModelSelection = {
     provider: event.data.header.config.provider,
     model: event.data.header.config.model,
+    ...chain === undefined ? {} : { chain },
     ...(event.data.header.config.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: String(event.data.header.config.reasoningEffort) }),
@@ -64,13 +79,14 @@ const modelSelectionProjection = {
     viewSchema: modelSelectionProjectionSchema,
     view: state => ({ lastUsed: state.lastUsed, next: state.pending ?? state.lastUsed }),
   },
-  stateVersion: 2,
+  stateVersion: 3,
 } satisfies ProjectionDefinition<'modelSelection', ModelSelectionProjectionState>
 
 function sameSelection(left: ModelSelection | null, right: ModelSelection | null): boolean {
   return left === right || (left !== null && right !== null
     && left.provider === right.provider
     && left.model === right.model
+    && left.chain === right.chain
     && left.reasoningEffort === right.reasoningEffort)
 }
 

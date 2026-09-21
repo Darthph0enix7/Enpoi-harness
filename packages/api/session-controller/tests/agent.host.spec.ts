@@ -324,6 +324,18 @@ describe('ApiSession model selection', () => {
     expect(agents.consumeSelection(pending, 'selected-provider', 'selected-model', 'high')).toBe(true)
     expect(selection.current).toEqual({ provider: 'fixture', model: 'fixture-model' })
 
+    const grouped = agent(ctx, header('pending-group'))
+    agents.selectForNextRequest(grouped, {
+      provider: 'selected-provider',
+      model: 'selected-model',
+      chain: 'stable',
+    })
+    expect(agents.selectionFor(grouped).current).toMatchObject({
+      provider: 'selected-provider', model: 'selected-model', chain: 'stable',
+    })
+    expect(agents.consumeSelection(grouped, 'selected-provider', 'selected-model', undefined, 'other')).toBe(false)
+    expect(agents.consumeSelection(grouped, 'selected-provider', 'selected-model', undefined, 'stable')).toBe(true)
+
     const untouched = agent(ctx, header('uninstalled-model'))
     expect(agents.consumeSelection(untouched, 'fixture', 'fixture-model', undefined)).toBe(false)
   })

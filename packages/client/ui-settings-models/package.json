@@ -30,7 +30,11 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-model-selection",
         "@deepseek-ai/dsh-api-remotes"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-model-selection/client"
       ],
       "platform": "web"
     }
@@ -52,6 +56,7 @@
     "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
     "@deepseek-ai/dsh-client-ui-settings": "workspace:^",
     "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-model-selection": "workspace:^",
     "@types/react": "~18.3.1",
     "@deepseek-ai/cordis": "workspace:^",
     "react": "^18.2.0",

@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { BlockAssembler } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, STREAM_CUT_CODE } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 
@@ -89,16 +89,25 @@ describe('BlockAssembler properties', () => {
     }))
   })
 
-  it('finish reflects the last finish chunk, or defaults to stop when none arrives', () => {
+  it('finish reflects the last finish chunk or classifies an incomplete tool call as a cut', () => {
     fc.assert(fc.property(streamArb, (chunks) => {
       const a = feed(chunks)
+      const finish = a.finish
       const finishes = chunks.filter(c => c.type === 'finish')
+      if (finish.kind === 'error' && finish.failure.code === STREAM_CUT_CODE) {
+        // The cut guard may only replace a non-error finish when the stream
+        // carried tool-call material (the incomplete-arguments check itself is
+        // covered by the assembler's example tests).
+        expect(chunks.some(c => c.type === 'tool-call-delta'
+          || (c.type === 'block-end' && c.block.type === 'tool-call'))).toBe(true)
+        return
+      }
       if (finishes.length === 0) {
-        expect(a.finish).toEqual({ kind: 'stop' })
+        expect(finish).toEqual({ kind: 'stop' })
       } else {
         // last-write-wins: the assembler keeps the most recent finish reason.
         const last = finishes[finishes.length - 1]
-        if (last?.type === 'finish') expect(a.finish).toEqual(last.reason)
+        if (last?.type === 'finish') expect(finish).toEqual(last.reason)
       }
     }))
   })

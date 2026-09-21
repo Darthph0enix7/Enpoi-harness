@@ -44,9 +44,10 @@ function send(agent: Agent, text: string) {
 }
 
 describe('tool JSON parse', () => {
-  it('passes through non-JSON arguments string without crashing', async () => {
+  it('settles a malformed tool-call stream as a cut attempt without committing the call', async () => {
     const adapter = new MockAdapter([
-      // model emits tool-call with malformed arguments (not valid JSON)
+      // model emits tool-call with malformed arguments (not valid JSON): the
+      // stream was cut mid-arguments, so the attempt must not commit the call.
       [
         { type: 'block-start' as const, index: 0, blockType: 'tool-call' as const },
         { type: 'block-end' as const, index: 0, block: { type: 'tool-call' as const, id: ToolCallId('c1'), name: 'echo', arguments: 'not json' } },
@@ -68,14 +69,16 @@ describe('tool JSON parse', () => {
     send(agent, 'use tool')
     await waitForIdle(ctx, agent)
 
-    // tool/call event should have recorded the raw arguments string
-    const callEvent = agent.session.snapshotEvents().find(e => e.type === 'tool/call')
-    expect(callEvent).toBeDefined()
-    if (callEvent!.type === 'tool/call') {
-      expect(callEvent!.data.arguments).toBe('not json')
-    }
-    // the loop did not crash — a result was produced
-    expect(agent.session.snapshotEvents().some(e => e.type === 'tool/result')).toBe(true)
+    // No malformed call and no tool turn reach the transcript; the error finish
+    // settles the attempt so a retry (or the next chain link) starts fresh.
+    expect(agent.session.snapshotEvents().some(e => e.type === 'tool/call')).toBe(false)
+    expect(agent.session.snapshotEvents().some(e => e.type === 'tool/result')).toBe(false)
+    expect(agent.session.snapshotEvents().filter(e => e.type === 'assistant/attempt')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(e => e.type === 'assistant/message')).toBe(false)
+    expect(agent.session.snapshotEvents().find(e => e.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'STREAM_CUT' } } },
+    })
   })
 
   it('uses empty object when tool-call arguments are empty string', async () => {

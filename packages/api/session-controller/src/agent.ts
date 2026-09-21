@@ -14,6 +14,7 @@ import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import { chainOfRequestConfig } from './model-selection-projection.ts'
 import type { ModelSelection } from './types.ts'
 
 /** Cold Session identity absent from persistence. */
@@ -67,7 +68,12 @@ export type ApiSessionAgentResult =
 
 type InstalledSelection = ModelSelectionRef & {
   current: AgentModelSelection
-  consume(provider: string, model: string, reasoningEffort: string | undefined): boolean
+  consume(
+    provider: string,
+    model: string,
+    reasoningEffort: string | undefined,
+    chain?: string,
+  ): boolean
 }
 
 /**
@@ -297,9 +303,11 @@ export class ApiSessionAgentController {
         const loggedHeader = agent.session.requestHeader()
         if (loggedHeader === undefined) return defaultModel.currentSelection()
         const logged = loggedHeader.config
+        const chain = chainOfRequestConfig(logged)
         return {
           provider: logged.provider,
           model: logged.model,
+          ...chain === undefined ? {} : { chain },
           // An effort the adapter defaulted is not a conversation choice: restoring
           // it as one would make an unchanged default read as a request change.
           ...(logged.reasoningEffort === undefined
@@ -311,10 +319,16 @@ export class ApiSessionAgentController {
       set current(next: AgentModelSelection) {
         picked = next
       },
-      consume(provider: string, model: string, reasoningEffort: string | undefined): boolean {
+      consume(
+        provider: string,
+        model: string,
+        reasoningEffort: string | undefined,
+        chain?: string,
+      ): boolean {
         if (picked?.provider !== provider
           || picked.model !== model
-          || picked.reasoningEffort !== reasoningEffort) return false
+          || picked.reasoningEffort !== reasoningEffort
+          || picked.chain !== chain) return false
         picked = undefined
         return true
       },
@@ -341,6 +355,7 @@ export class ApiSessionAgentController {
    * @param provider - provider route used by the request.
    * @param model - provider-owned model used by the request.
    * @param reasoningEffort - adapter-owned effort used by the request.
+   * @param chain - model-group id carried by the request, or undefined when the request carries none.
    * @returns whether the pending selection was consumed.
    */
   consumeSelection(
@@ -348,8 +363,9 @@ export class ApiSessionAgentController {
     provider: string,
     model: string,
     reasoningEffort: string | undefined,
+    chain?: string,
   ): boolean {
-    return this.selections.get(agent)?.consume(provider, model, reasoningEffort) ?? false
+    return this.selections.get(agent)?.consume(provider, model, reasoningEffort, chain) ?? false
   }
 
   /**
@@ -495,8 +511,8 @@ export class ApiSessionAgentController {
   }
 
   private agentOptions(): AgentOptions {
-    const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
-    return { provider, model }
+    const { provider, model, chain } = this.ctx.agentDefaultModel.currentSelection()
+    return { provider, model, ...chain === undefined ? {} : { chain } }
   }
 
   private installSelection(agent: Agent): void {
@@ -529,6 +545,7 @@ function agentModelSelection(selection: ModelSelection): AgentModelSelection {
   return {
     provider: selection.provider,
     model: selection.model,
+    ...(selection.chain === undefined ? {} : { chain: selection.chain }),
     ...(selection.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: ReasoningEffortId(selection.reasoningEffort) }),

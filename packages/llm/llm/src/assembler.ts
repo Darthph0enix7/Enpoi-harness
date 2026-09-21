@@ -24,6 +24,20 @@ interface PartialBlock {
 }
 
 /**
+ * Canonical failure code for a response whose stream ended with tool-call
+ * arguments that are not valid JSON. The attempt is completed as an error
+ * finish so the malformed tool call is never committed to the transcript and
+ * the caller can retry the step (on the next chain link).
+ */
+export const STREAM_CUT_CODE = 'STREAM_CUT'
+
+/** Failure fact carried by a {@link STREAM_CUT_CODE} finish. */
+const STREAM_CUT_FAILURE = Object.freeze({
+  message: 'the model stream ended with incomplete tool-call arguments',
+  code: STREAM_CUT_CODE,
+})
+
+/**
  * Incrementally assembles raw {@link StreamChunk}s into complete
  * {@link ContentBlock}s and a final assistant {@link Message}.
  *
@@ -129,14 +143,16 @@ export class BlockAssembler {
 
   /**
    * The one shared keep/drop decision over all seen blocks: max-token
-   * truncation drops tool calls that cannot be executed safely. Emitted blocks
-   * and replay metadata both derive from this result, so they cannot disagree.
+   * truncation and a stream cut both drop tool calls that cannot be executed
+   * safely. Emitted blocks and replay metadata both derive from this result,
+   * so they cannot disagree.
    */
   private assembled(): { blocks: ContentBlock[]; replay: ReplayEnvelope | undefined } {
     const all = this.order.map(index => this.assemble(this.mustGet(index), index))
-    const kept = this.finish.kind === 'max-tokens'
-      ? all.map(block => block.type !== 'tool-call')
-      : undefined
+    const finish = this.finish
+    const dropsToolCalls = finish.kind === 'max-tokens'
+      || (finish.kind === 'error' && finish.failure.code === STREAM_CUT_CODE)
+    const kept = dropsToolCalls ? all.map(block => block.type !== 'tool-call') : undefined
     const blocks = kept === undefined ? all : all.filter((_, position) => kept[position])
     const envelope = this._replayState
     if (envelope?.blocks === undefined) return { blocks, replay: envelope }
@@ -151,9 +167,10 @@ export class BlockAssembler {
 
   /**
    * Assemble all blocks seen so far, in stream order.
-   * @returns one block per seen index, except that max-token truncation drops
-   *   tool calls that cannot be executed safely; an open block assembles from
-   *   its accumulated deltas (an unknown block type never closed by `block-end` throws).
+   * @returns one block per seen index, except that max-token truncation and a
+   *   stream cut drop tool calls that cannot be executed safely; an open block
+   *   assembles from its accumulated deltas (an unknown block type never closed
+   *   by `block-end` throws).
    */
   blocks(): ContentBlock[] {
     return this.assembled().blocks
@@ -183,8 +200,46 @@ export class BlockAssembler {
     return this._usage
   }
 
-  /** Finish reason from the `finish` chunk; `{kind: 'stop'}` when the stream ended without one. */
+  /**
+   * Whether any seen tool call carries non-empty arguments that are not valid
+   * JSON. Empty input is legal and maps to `{}` in the tool-call consumer, so
+   * only a non-empty unparseable string proves the stream was cut mid-JSON.
+   */
+  private hasIncompleteToolCallArguments(): boolean {
+    for (const index of this.order) {
+      const partial = this.mustGet(index)
+      const block = partial.block
+      const type = block?.type ?? partial.blockType
+      if (type !== 'tool-call') continue
+      const raw = block?.type === 'tool-call' ? block.arguments : partial.toolCallArguments
+      if (raw === '') continue
+      try {
+        JSON.parse(raw)
+      } catch {
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * Finish reason from the `finish` chunk; `{kind: 'stop'}` when the stream
+   * ended without one. A stream that terminates with unparseable tool-call
+   * arguments is classified as a `STREAM_CUT` error instead of a successful
+   * finish, so no malformed tool call is ever committed. An explicit
+   * error/aborted failure keeps its own cause, and max-tokens keeps its kind
+   * because its tool calls are dropped during assembly.
+   */
   get finish(): FinishReason {
+    if (this._finish !== undefined
+      && (this._finish.kind === 'error'
+        || this._finish.kind === 'aborted'
+        || this._finish.kind === 'max-tokens')) {
+      return this._finish
+    }
+    if (this.hasIncompleteToolCallArguments()) {
+      return { kind: 'error', failure: STREAM_CUT_FAILURE }
+    }
     return this._finish ?? { kind: 'stop' }
   }
 

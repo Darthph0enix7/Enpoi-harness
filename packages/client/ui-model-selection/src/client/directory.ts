@@ -13,9 +13,14 @@ import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelCatalogDirectory } from './catalog.ts'
 
+/** Read the optional group id off a selection, ignoring non-string wiring. */
+function chainOf(selection: ModelSelection): string | undefined {
+  const chain = selection.chain
+  return typeof chain === 'string' && chain !== '' ? chain : undefined
+}
+
 /** Directory snapshot both entries render from. */
-export interface ModelDirectoryState {
-  /** Effective selection: durable next-request projection, then Host default. */
+export interface ModelDirectoryState {  /** Effective selection: durable next-request projection, then Host default. */
   current: ModelSelection | null
   /**
    * Whether an adapter serves the current selection's provider, as the host reports
@@ -84,29 +89,28 @@ export class ModelDirectory {
    * the shared current immediately (optimistic), so both entries and a
    * remounting seat show it without waiting for the Host; the answer replaces
    * it, and a rejection restores the previous selection while surfacing the
-   * failure on the store and returning it to the caller.
-   * @param selection - provider, provider-owned model id, and optional adapter-owned effort.
+   * failure on the store and returning it to the caller. A selection may carry
+   * a model-group id (`chain`); a Host that refuses the unknown field is retried
+   * without it, so the concrete provider/model selection still applies.
+   * @param selection - provider, provider-owned model id, optional adapter-owned effort, optional group id.
    * @returns the selection outcome, including the original Remote failure.
    */
   async select(selection: ModelSelection): Promise<RemoteResult<void>> {
     this.assertAvailable()
     const generation = ++this.generation
     const prevCurrent = this.store.getSnapshot().current
+    const chainId = chainOf(selection)
+    const optimistic: ModelSelection = chainId === undefined
+      ? selection
+      : { ...selection, chain: chainId }
     this.store.update((s) => {
-      s.current = selection
+      s.current = optimistic
       s.routable = true
       s.status = 'selecting'
       s.error = null
     })
     try {
-      const result = await this.sessions.selectModel({
-        sessionId: this.sessionId,
-        provider: selection.provider,
-        model: selection.model,
-        ...selection.reasoningEffort === undefined
-          ? {}
-          : { reasoningEffort: selection.reasoningEffort },
-      })
+      const { result, chainAccepted } = await this.selectOnHost(selection, chainId)
       if (this.disposed || generation !== this.generation) {
         return result.ok ? { ok: true, value: undefined } : result
       }
@@ -118,8 +122,11 @@ export class ModelDirectory {
         })
         return result
       }
+      const accepted: ModelSelection = chainAccepted && chainId !== undefined
+        ? { ...result.value.selected, chain: chainId }
+        : result.value.selected
       this.store.update((s) => {
-        s.current = result.value.selected
+        s.current = accepted
         s.routable = true
         s.status = 'ready'
         s.error = null
@@ -136,6 +143,34 @@ export class ModelDirectory {
     }
     this.syncInputs()
     return { ok: true, value: undefined }
+  }
+
+  /**
+   * Submit one selection to the Host, carrying the optional group id. The
+   * request object is extended at the wire boundary (the selection lane adds
+   * `chain` to the request type); a Host that does not admit the field refuses
+   * the call, and that refusal is retried without it so the concrete
+   * provider/model selection still takes effect.
+   */
+  private async selectOnHost(
+    selection: ModelSelection,
+    chain: string | undefined,
+  ): Promise<{
+    result: RemoteResult<{ selected: { provider: string; model: string; reasoningEffort?: string } }>
+    chainAccepted: boolean
+  }> {
+    const base = {
+      sessionId: this.sessionId,
+      provider: selection.provider,
+      model: selection.model,
+      ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+    }
+    if (chain === undefined) {
+      return { result: await this.sessions.selectModel(base), chainAccepted: false }
+    }
+    const first = await this.sessions.selectModel({ ...base, chain })
+    if (first.ok) return { result: first, chainAccepted: true }
+    return { result: await this.sessions.selectModel(base), chainAccepted: false }
   }
 
   /**

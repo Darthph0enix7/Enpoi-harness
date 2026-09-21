@@ -37,8 +37,11 @@ import {
   type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
-  IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain,
+  IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain, IconChain,
 } from './icons.tsx'
+import {
+  MODEL_GROUPS_CHANGED_EVENT, assignableModelGroups, ensureModelGroups, modelGroupById, refreshModelGroups,
+} from './model-groups.ts'
 import css from './ModelSelect.module.css'
 
 /** Cached hidden-map reader for hot render paths: parse once per prefsVersion. */
@@ -79,7 +82,6 @@ export interface ModelSelectOverride {
   /** Optional placeholder when current is null (e.g. "Inherit" or "Auto"). */
   placeholder?: string
 }
-
 /** Unplaced portal panel: hidden but laid out so `offsetWidth` is real for the clamp. */
 const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 
@@ -129,13 +131,19 @@ export function ModelSelect(
   // Listen to preference changes across tabs / components
   useEffect(() => {
     const onPrefsChange = () => setPrefsVersion(v => v + 1)
+    const onGroupsChange = () => {
+      void refreshModelGroups()
+      setPrefsVersion(v => v + 1)
+    }
     window.addEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
     window.addEventListener('dsh:hidden-models-changed', onPrefsChange)
     window.addEventListener('storage', onPrefsChange)
+    window.addEventListener(MODEL_GROUPS_CHANGED_EVENT, onGroupsChange)
     return () => {
       window.removeEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
       window.removeEventListener('dsh:hidden-models-changed', onPrefsChange)
       window.removeEventListener('storage', onPrefsChange)
+      window.removeEventListener(MODEL_GROUPS_CHANGED_EVENT, onGroupsChange)
     }
   }, [])
 
@@ -146,6 +154,16 @@ export function ModelSelect(
       load()
     }
   }, [available, load])
+
+  // A picker mounted before the registry's import-time read settled repaints
+  // once that read resolves; a later read rides the groups-changed event.
+  useEffect(() => {
+    let cancelled = false
+    void ensureModelGroups().then(() => {
+      if (!cancelled) setPrefsVersion(v => v + 1)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // 0ms hot-path caches: parse hidden/collapsed maps once per prefsVersion, not per model
   const hiddenMap = useMemo(() => readHiddenMap(), [prefsVersion])
@@ -322,6 +340,8 @@ export function ModelSelect(
       provider: activeSel.provider,
       model: activeSel.model,
       ...effort === undefined ? {} : { reasoningEffort: effort },
+      // An effort change on a group assignment stays inside the group.
+      ...activeSel.chain === undefined ? {} : { chain: activeSel.chain },
     }
     lastActionRef.current = 'select'
     const submit = override !== undefined ? override.select : select
@@ -392,10 +412,23 @@ export function ModelSelect(
   // Filtered queries
   const q = searchQuery.toLowerCase().trim()
 
+  // Assignable model groups: enabled groups with at least one link, read from
+  // the cached registry and refreshed on the groups-changed event.
+  const chainGroups = useMemo(() => assignableModelGroups(), [prefsVersion])
+
   const filteredFavorites = useMemo(() => {
     if (!q) return favoriteItems
     return favoriteItems.filter(f => f.model.name.toLowerCase().includes(q) || f.model.id.toLowerCase().includes(q))
   }, [favoriteItems, q])
+
+  // Groups answer the same search box as models: label, id, or an ordered link.
+  const filteredChainGroups = useMemo(() => {
+    if (!q) return chainGroups
+    return chainGroups.filter(group =>
+      group.label.toLowerCase().includes(q)
+      || group.id.toLowerCase().includes(q)
+      || group.links.some(link => `${link.provider}/${link.model}`.toLowerCase().includes(q)))
+  }, [chainGroups, q])
 
   // Reorder Provider Groups via Drag & Drop
   const handleProviderDragStart = (e: DragEvent, providerId: string) => {
@@ -450,7 +483,9 @@ export function ModelSelect(
   // trigger so the picker never looks broken on legacy sessions. When an
   // override names a placeholder (e.g. "Inherit"), unassigned rows use that.
   const fallbackLabel = override?.placeholder ?? t('trigger.fallback')
-  const modelLabel = currentChoice?.model.name ?? activeSel?.model ?? fallbackLabel
+  // A group assignment labels the trigger with the group, not the active link.
+  const activeChain = activeSel?.chain === undefined ? undefined : modelGroupById(activeSel.chain)
+  const modelLabel = activeChain?.label ?? currentChoice?.model.name ?? activeSel?.model ?? fallbackLabel
 
   return (
     <div ref={rootRef} className={clsx(css.root, compact === true && css.compactRoot)}>
@@ -466,6 +501,11 @@ export function ModelSelect(
           setPickerOpen(!pickerOpen)
         }}
       >
+        {activeChain !== undefined && (
+          <span className={css.chainTriggerIcon} aria-hidden>
+            <IconChain />
+          </span>
+        )}
         <span className={css.modelNameLabel}>{modelLabel}</span>
         <span className={clsx(css.chevronIcon, pickerOpen && css.chevronOpen)}>
           <IconChevron />
@@ -532,6 +572,63 @@ export function ModelSelect(
           </div>
 
           <div className={clsx(css.pickerScrollable, 'scrollable')}>
+            {/* MODEL GROUPS (above Favorites; rendered only when groups exist) */}
+            {filteredChainGroups.length > 0 && (
+              <div className={css.groupSection}>
+                <div
+                  className={css.groupHeader}
+                  onClick={() => {
+                    toggleGroupCollapsed('__chains__')
+                    setPrefsVersion(v => v + 1)
+                  }}
+                >
+                  <div className={css.groupHeaderLeft}>
+                    <span className={css.groupIcon}>
+                      <IconChain />
+                    </span>
+                    <span className={css.groupTitleText}>{t('group.groups')}</span>
+                    <span className={css.groupBadge}>{filteredChainGroups.length}</span>
+                  </div>
+                  <span className={clsx(css.groupChevron, !collapsedSet.has('__chains__') && css.groupChevronExpanded)}>
+                    <IconChevron />
+                  </span>
+                </div>
+
+                {!collapsedSet.has('__chains__') && (
+                  <div className={css.groupBody}>
+                    {filteredChainGroups.map((group) => {
+                      const first = group.links[0]
+                      if (first === undefined) return null
+                      const isSelected = activeSel?.chain === group.id
+                      return (
+                        <div
+                          key={`chain-${group.id}`}
+                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                          title={group.links.map(link => `${link.provider}/${link.model}`).join('\n')}
+                          onClick={() => choose({ provider: first.provider, model: first.model, chain: group.id })}
+                        >
+                          <div className={css.modelRowLeft}>
+                            <span className={css.chainRowIcon}>
+                              <IconChain />
+                            </span>
+                            <span className={css.modelNameText}>{group.label}</span>
+                          </div>
+                          <div className={css.modelRowRight}>
+                            <span className={css.contextTag}>
+                              {group.links.length === 1
+                                ? t('group.model', { count: group.links.length })
+                                : t('group.models', { count: group.links.length })}
+                            </span>
+                            {isSelected && <IconCheck className={css.checkIcon} />}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* FAVORITES GROUP */}
             {filteredFavorites.length > 0 && (
               <div className={css.groupSection}>

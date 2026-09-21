@@ -70,7 +70,7 @@ export const TurnTailNodeView = memo(function TurnTailNodeView({
         text={assistantText(closing.blocks)}
         time={closing.time}
         provider={provider}
-        model={model}
+        model={data.modelBadge ?? model}
         reasoningEffort={reasoningEffort}
         clock="end"
         onBranch={() => { forkAt(closing.finalNode.seq) }}

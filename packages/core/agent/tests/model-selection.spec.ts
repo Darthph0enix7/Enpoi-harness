@@ -160,6 +160,32 @@ describe('installModelSelection()', () => {
     await ctx.fiber.dispose()
   })
 
+  it('routes an assigned model group with the selection and clears an inherited group', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+    installModelSelection(ctx, selection)
+    const agent = createAgent()
+    const signal = new AbortController().signal
+
+    selection.current = { provider: 'alpha', model: 'a1', chain: 'stable' }
+    await ctx.systemPrompt.assemble()
+    const inherited = { provider: 'seed', model: 'seed', chain: 'inherited' }
+    await expect(agentEvents(ctx, agent).waterfall(
+      'agent/request', { turn: 1, step: 0, signal },
+      () => Promise.resolve(inherited as LlmCallConfig),
+    )).resolves.toEqual({ provider: 'alpha', model: 'a1', chain: 'stable' })
+
+    selection.current = { provider: 'beta', model: 'b1' }
+    await ctx.systemPrompt.assemble()
+    await expect(agentEvents(ctx, agent).waterfall(
+      'agent/request', { turn: 1, step: 1, signal },
+      () => Promise.resolve({ provider: 'alpha', model: 'a1', chain: 'stable' } as LlmCallConfig),
+    )).resolves.toEqual({ provider: 'beta', model: 'b1' })
+
+    await ctx.fiber.dispose()
+  })
+
   it('passes empty no-call decisions and tool continuations through unchanged', async () => {
     const { agent, ctx } = await switchHarness(
       { provider: 'alpha', model: 'a1' },

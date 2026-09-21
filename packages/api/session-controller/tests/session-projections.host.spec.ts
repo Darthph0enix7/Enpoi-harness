@@ -16,7 +16,7 @@ import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -219,6 +219,14 @@ describe('session.history projections block', () => {
     expect(ctx.sessionProjections.snapshot(session).values.modelSelection).toEqual({
       lastUsed: selected,
       next: selected,
+    })
+
+    session.append('request/header', {
+      header: { config: { provider: 'p', model: 'grouped', chain: 'stable' } as LlmCallConfig }, reason: 'initial',
+    })
+    expect(ctx.sessionProjections.snapshot(session).values.modelSelection).toEqual({
+      lastUsed: { provider: 'p', model: 'grouped', chain: 'stable' },
+      next: { provider: 'p', model: 'grouped', chain: 'stable' },
     })
   })
 

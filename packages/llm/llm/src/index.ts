@@ -22,15 +22,18 @@ import type {
   LlmPoolOperations,
   LlmResolvedModelInfo,
   LlmProviderInfo,
+  ModelChainLink,
+  ModelChainResolver,
   ModelModality,
+  ResolvedModelChain,
   StreamChunk,
   SystemPromptUpdate,
 } from './types.ts'
 import { freezeMessage, type Message } from './message.ts'
 import { resolveRetryPolicy } from './retry-policy.ts'
 import type { ResolvedRetryPolicy } from './retry-policy.ts'
-import type { ProviderRequestId } from './brand.ts'
-import { callConfigEquals } from './call-config.ts'
+import type { ProviderRequestId, ReasoningEffortId } from './brand.ts'
+import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
@@ -49,7 +52,7 @@ export * from './content.ts'
 export * from './assistant-stream.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
-export { BlockAssembler } from './assembler.ts'
+export { BlockAssembler, STREAM_CUT_CODE } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 
@@ -163,6 +166,126 @@ export function assertUsableApiKey(raw: string, pkg: string, ref: string): strin
     INVALID_CREDENTIAL_CODE,
   )
 }
+
+/**
+ * Wall-clock budget for one chain link's pre-commit phase: the time its
+ * identity pool may spend rotating keys before the chain escalates. The budget
+ * stops applying at the first non-usage chunk, so a committed generation runs
+ * to its own end. Mirrors llm-pi-ai's `poolDeadlineMs` default.
+ */
+const CHAIN_LINK_BUDGET_MS = 15_000
+
+/** Overall pre-commit wall-clock budget across one request's chain links. */
+const CHAIN_BUDGET_MS = 60_000
+
+/**
+ * Failure codes that move a chain to its next link. The transient set mirrors
+ * the resolved retry policy's defaults; the route failures are ones only a
+ * different provider can survive (exhausted key pool, model outage, auth,
+ * quota, a route with no adapter, a route whose model is not configured).
+ * FATAL codes (bad request, schema, context overflow, image offload) are
+ * absent on purpose: they never rotate.
+ */
+const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
+  'EMPTY_RESPONSE',
+  'RATE_LIMIT',
+  'SERVER',
+  'TIMEOUT',
+  'TRANSPORT',
+  'PROVIDER_POOL_EXHAUSTED',
+  'PROVIDER_MODEL_OUTAGE',
+  'UNKNOWN_MODEL',
+  'NO_ADAPTER',
+  'AUTH',
+  'QUOTA',
+  'MISSING_CREDENTIAL',
+])
+
+/** Terminal failure code for a chain whose links all failed. */
+export const MODEL_CHAIN_EXHAUSTED_CODE = 'MODEL_CHAIN_EXHAUSTED'
+
+/** Chain ids already warned about, so fail-open writes one stderr line per id. */
+const warnedChainIds = new Set<string>()
+
+/** One fail-open diagnostic naming why a carried chain fell back to its own route. */
+function warnChainFailOpen(chainId: string, reason: string): void {
+  if (warnedChainIds.has(chainId)) return
+  warnedChainIds.add(chainId)
+  process.stderr.write(`[model-chain] ${chainId}: ${reason}; using the request's own model\n`)
+}
+
+/** Detach one externally declared link, or `undefined` when the entry is unusable. */
+function normalizeChainLink(candidate: unknown): ModelChainLink | undefined {
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const entry = candidate as Partial<ModelChainLink>
+  if (typeof entry.provider !== 'string' || entry.provider.length === 0) return undefined
+  if (typeof entry.model !== 'string' || entry.model.length === 0) return undefined
+  if (entry.effort !== undefined && typeof entry.effort !== 'string') return undefined
+  return Object.freeze({
+    provider: entry.provider,
+    model: entry.model,
+    ...entry.effort === undefined ? {} : { effort: entry.effort },
+  })
+}
+
+/** One escalation audit line: the dead link, why it moved, and where it moved to. */
+function writeChainEscalation(
+  chainId: string,
+  from: number,
+  fromLink: ModelChainLink,
+  to: number,
+  toLink: ModelChainLink,
+  failure: LlmFailure,
+): void {
+  process.stderr.write(
+    `[model-chain] ${chainId}: link ${from} ${fromLink.provider}/${fromLink.model}`
+    + ` → RETRYABLE (${failure.code}) → link ${to} ${toLink.provider}/${toLink.model}\n`,
+  )
+}
+
+/** Terminal failure chunk after the chain's links are exhausted. */
+function chainFailureChunk(
+  chainId: string,
+  attempted: readonly { link: ModelChainLink; failure: LlmFailure }[],
+): StreamChunk {
+  const last = attempted[attempted.length - 1]
+  if (last === undefined) {
+    return {
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          message: `model chain "${chainId}": the failover budget elapsed before any link produced a result`,
+          code: MODEL_CHAIN_EXHAUSTED_CODE,
+        },
+      },
+    }
+  }
+  // One attempted link is today's single-model call: keep its exact failure so
+  // consumers route on the same code and facts they already handle.
+  if (attempted.length === 1) return { type: 'finish', reason: { kind: 'error', failure: last.failure } }
+  const named = attempted
+    .map((entry, position) =>
+      `link ${position + 1} ${entry.link.provider}/${entry.link.model} (${entry.failure.code}: ${entry.failure.message})`)
+    .join('; ')
+  return {
+    type: 'finish',
+    reason: {
+      kind: 'error',
+      failure: {
+        message: `model chain "${chainId}" failed after ${attempted.length} links: ${named}`,
+        code: MODEL_CHAIN_EXHAUSTED_CODE,
+      },
+    },
+  }
+}
+
+/** One link's terminal outcome inside the chain loop. */
+type ChainLinkOutcome =
+  /** A terminal chunk (or clean end) already reached the consumer. */
+  | { readonly kind: 'answered' }
+  /** Nothing reached the consumer; the chain may move on or report the failure. */
+  | { readonly kind: 'failed'; readonly failure: LlmFailure; readonly retryable: boolean }
 
 /** One model call whose config and adapter registration were resolved together. */
 export interface PreparedLlmCall {
@@ -1196,8 +1319,208 @@ export class LlmRuntime extends TypertRemoteService {
       this,
       'llm/stream',
       options,
-      () => this.adapterStream(options, prepared),
+      () => this.dispatchStream(options, prepared),
     )
+  }
+
+  /**
+   * Chain-aware dispatch behind the `llm/stream` waterfall: one link when the
+   * request carries no usable group, otherwise the link loop. Each link runs
+   * through {@link adapterStream}, so provider resolution, capability
+   * projections, and wire capture are recomputed for the link that actually
+   * runs.
+   */
+  private async * dispatchStream(
+    options: GenerateOptions,
+    prepared?: PreparedDispatch,
+  ): AsyncGenerator<StreamChunk> {
+    const chain = options.chain === undefined ? undefined : this.resolveChain(options.chain)
+    if (chain === undefined) {
+      yield* this.adapterStream(options, prepared)
+      return
+    }
+    yield* this.chainStream(options, prepared, chain)
+  }
+
+  /**
+   * Resolve one carried group id through the optional `modelChains` service.
+   * Missing service, unknown id, and an id whose links are all unusable are
+   * fail-open: one stderr warning and today's single-model dispatch.
+   */
+  private resolveChain(id: string): ResolvedModelChain | undefined {
+    const service = this.ctx.get('modelChains') as ModelChainResolver | undefined
+    if (service === undefined || typeof service.resolve !== 'function') {
+      warnChainFailOpen(id, 'no model-chains service is mounted')
+      return undefined
+    }
+    let resolved: ResolvedModelChain | undefined
+    try {
+      resolved = service.resolve(id)
+    } catch (error: unknown) {
+      warnChainFailOpen(id, `resolving the group failed (${error instanceof Error ? error.message : String(error)})`)
+      return undefined
+    }
+    if (resolved === undefined) {
+      warnChainFailOpen(id, 'the group id is not declared')
+      return undefined
+    }
+    // Snapshot the links now: a settings swap mid-turn must not change the
+    // group between this request's attempts, and a malformed entry is dropped
+    // rather than dispatched.
+    const declared: unknown = resolved.links
+    const links: ModelChainLink[] = []
+    if (Array.isArray(declared)) {
+      for (const candidate of declared as readonly unknown[]) {
+        const link = normalizeChainLink(candidate)
+        if (link !== undefined) links.push(link)
+      }
+    }
+    if (links.length === 0) {
+      warnChainFailOpen(id, 'the group declares no usable links')
+      return undefined
+    }
+    return { id, links: Object.freeze(links) }
+  }
+
+  /**
+   * Try the group's links in order. The first link is the one the request
+   * already names (a consumer's retry advances that selection); links before it
+   * are not re-run. Budgets are pre-commit only: once a link commits, its
+   * generation runs to its own end and only a terminal chunk is yielded.
+   */
+  private async * chainStream(
+    options: GenerateOptions,
+    prepared: PreparedDispatch | undefined,
+    chain: ResolvedModelChain,
+  ): AsyncGenerator<StreamChunk> {
+    const links = chain.links
+    const named = links.findIndex(link => link.provider === options.provider && link.model === options.model)
+    const start = named < 0 ? 0 : named
+    const budgetEnd = Date.now() + CHAIN_BUDGET_MS
+    const attempted: { link: ModelChainLink; failure: LlmFailure }[] = []
+    for (let index = start; index < links.length; index += 1) {
+      const link = links[index]
+      if (link === undefined) continue
+      const remaining = budgetEnd - Date.now()
+      if (remaining <= 0) break
+      const outcome = yield* this.chainLink(options, prepared, link, Math.min(CHAIN_LINK_BUDGET_MS, remaining))
+      if (outcome.kind === 'answered') return
+      attempted.push({ link, failure: outcome.failure })
+      const next = links[index + 1]
+      if (!outcome.retryable || next === undefined || budgetEnd - Date.now() <= 0) {
+        yield chainFailureChunk(chain.id, attempted)
+        return
+      }
+      writeChainEscalation(chain.id, index + 1, link, index + 2, next, outcome.failure)
+    }
+    yield chainFailureChunk(chain.id, attempted)
+  }
+
+  /**
+   * Run one link through the normal dispatch path under its own pre-commit
+   * budget. A retryable failure that arrives before the first non-usage chunk
+   * is returned instead of yielded, so the consumer only ever sees the link
+   * that answered.
+   */
+  private async * chainLink(
+    options: GenerateOptions,
+    prepared: PreparedDispatch | undefined,
+    link: ModelChainLink,
+    budgetMs: number,
+  ): AsyncGenerator<StreamChunk, ChainLinkOutcome, void> {
+    const caller = options.signal
+    const controller = new AbortController()
+    const abortFromCaller = (): void => { controller.abort(caller?.reason) }
+    const timer = setTimeout(() => { controller.abort(new LlmError('chain link budget elapsed', 'TIMEOUT')) }, budgetMs)
+    if (caller?.aborted === true) controller.abort(caller.reason)
+    else caller?.addEventListener('abort', abortFromCaller, { once: true })
+    const usePrepared = prepared !== undefined
+      && prepared.registration.provider.id === link.provider
+      && prepared.config.model === link.model
+    let committed = false
+    try {
+      for await (const chunk of this.adapterStream(
+        this.linkRequest(options, link, controller.signal),
+        usePrepared ? prepared : undefined,
+      )) {
+        if (chunk.type === 'finish') {
+          if (chunk.reason.kind !== 'error' && chunk.reason.kind !== 'aborted') {
+            yield this.answeringFinish(chunk, options, link)
+            return { kind: 'answered' }
+          }
+          const retryable = caller?.aborted !== true
+            && !committed
+            && (chunk.reason.kind === 'aborted' || this.escalates(link, chunk.reason.failure))
+          if (retryable) return { kind: 'failed', failure: chunk.reason.failure, retryable: true }
+          yield chunk
+          return { kind: 'answered' }
+        }
+        if (chunk.type !== 'usage') {
+          committed = true
+          // A committed generation owns its own clock; only the pool phase is budgeted.
+          clearTimeout(timer)
+        }
+        yield chunk
+      }
+      if (!committed && caller?.aborted !== true) {
+        return {
+          kind: 'failed',
+          failure: {
+            message: `link ${link.provider}/${link.model} ended without a terminal finish`,
+            code: 'STREAM_CUT',
+          },
+          retryable: true,
+        }
+      }
+      return { kind: 'answered' }
+    } finally {
+      clearTimeout(timer)
+      caller?.removeEventListener('abort', abortFromCaller)
+    }
+  }
+
+  /**
+   * Report the link that produced one successful terminal finish when it
+   * differs from the request's own route, so the consumer attributes the
+   * answer to the model that ran rather than the route it proposed. The
+   * request's own link, and every request without a group, pass through
+   * untouched (byte-identical).
+   */
+  private answeringFinish(
+    chunk: Extract<StreamChunk, { type: 'finish' }>,
+    options: GenerateOptions,
+    link: ModelChainLink,
+  ): StreamChunk {
+    if (link.provider === options.provider && link.model === options.model) return chunk
+    return { ...chunk, answeringLink: Object.freeze({ provider: link.provider, model: link.model }) }
+  }
+
+  /**
+   * Build one link's request: the link's route/effort swap over the original
+   * request, the link-scoped abort signal, and the loop-request identity kept
+   * when the caller's request carried it.
+   */
+  private linkRequest(options: GenerateOptions, link: ModelChainLink, signal: AbortSignal): GenerateOptions {
+    const onRequestLink = link.provider === options.provider && link.model === options.model
+    const effort = link.effort !== undefined
+      ? link.effort as ReasoningEffortId
+      : onRequestLink ? options.reasoningEffort : undefined
+    const next: GenerateOptions = {
+      ...options,
+      provider: link.provider,
+      model: link.model,
+      signal,
+      ...effort === undefined ? {} : { reasoningEffort: effort },
+    }
+    const frozen = Object.isFrozen(options) ? deepFreeze(next) : next
+    return isAgentLoopRequest(options) ? markAgentLoopRequest(frozen) : frozen
+  }
+
+  /** Whether one link's pre-commit failure should move the chain to its next link. */
+  private escalates(link: ModelChainLink, failure: LlmFailure): boolean {
+    if (CHAIN_ESCALATION_CODES.has(failure.code)) return true
+    const policy = this.adapters.get(link.provider)?.retryPolicy
+    return policy?.mode === 'normal' && policy.retryableCodes.includes(failure.code)
   }
 }
 
@@ -1238,14 +1561,32 @@ export default LlmRuntime
  * (only `config` should change; `system`/`tools` must stay identical).
  * Fire-and-forget: a write failure must never affect the request.
  */
-let wireCapturePending: Promise<void> | undefined
+// Serialized, not merely tracked: a chain dispatches several requests in
+// sequence and their captures must be written in that same sequence, so
+// `wire-last.json` holds the link that actually answered rather than whichever
+// write happened to finish last.
+let wireCapturePending: Promise<void> = Promise.resolve()
 
+/** Take a queue slot synchronously, then write one capture in that order. */
 async function captureWireRequest(options: GenerateOptions): Promise<void> {
+  // Read the destination at dispatch time and claim the slot before any await:
+  // resolving imports first would let a later dispatch enqueue ahead of this
+  // one, and would read an environment a later caller may already have changed.
+  const wireLogPath = process.env.DSH_WIRE_LOG
+  wireCapturePending = wireCapturePending.then(
+    () => writeWireCapture(options, wireLogPath),
+    () => writeWireCapture(options, wireLogPath),
+  )
+  await wireCapturePending
+}
+
+/** Write one dispatched request's capture; best-effort, never affects the request. */
+async function writeWireCapture(options: GenerateOptions, wireLogPath: string | undefined): Promise<void> {
   try {
     const { homedir } = await import('node:os')
     const { mkdir, writeFile } = await import('node:fs/promises')
     const { dirname, join } = await import('node:path')
-    const root = process.env.DSH_WIRE_LOG ? dirname(process.env.DSH_WIRE_LOG) : homedir() + '/.dsh/logs'
+    const root = wireLogPath === undefined ? homedir() + '/.dsh/logs' : dirname(wireLogPath)
     const payload = {
       time: Date.now(),
       provider: options.provider,
@@ -1263,11 +1604,10 @@ async function captureWireRequest(options: GenerateOptions): Promise<void> {
     // holds only the MAIN agent call (no `purpose` — auxiliary calls like
     // session-title/context-keeper are excluded), so it is always inspectable.
     const serialized = JSON.stringify(payload)
-    wireCapturePending = writeFile(join(root, `wire-${Date.now()}.json`), serialized)
-      .then(() => options.purpose === undefined
-        ? writeFile(process.env.DSH_WIRE_LOG ?? join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
-        : undefined, () => undefined)
-    await wireCapturePending
+    await writeFile(join(root, `wire-${Date.now()}.json`), serialized).then(undefined, () => undefined)
+    if (options.purpose === undefined) {
+      await writeFile(wireLogPath ?? join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
+    }
   } catch {
     // Best-effort diagnostics never break a request.
   }

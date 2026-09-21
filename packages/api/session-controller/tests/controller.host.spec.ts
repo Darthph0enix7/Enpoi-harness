@@ -116,7 +116,7 @@ describe('SessionController facade', () => {
       reason: 'initial',
     })
     expect(consumeSelection).toHaveBeenCalledWith(
-      agent, 'fixture', 'fixture-model', undefined,
+      agent, 'fixture', 'fixture-model', undefined, undefined,
     )
     const unowned = ctx.sessions.create(SessionId('controller-unowned'), {
       meta: { cwd: '/workspace' },

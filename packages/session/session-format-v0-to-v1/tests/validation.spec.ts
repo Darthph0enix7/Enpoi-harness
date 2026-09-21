@@ -64,13 +64,13 @@ const validPayloads: Readonly<Record<string, SessionFormatJsonValue>> = {
     retry: 1, maxRetries: 2, delayMs: 10, failure: { message: 'retry', code: 'SERVER' },
   },
   'llm/retry-started': { retryId: 'retry-1', turn: 1, step: 0, retry: 1 },
-  'model/selection': { provider: 'mock', model: 'mock', reasoningEffort: 'high' },
+  'model/selection': { provider: 'mock', model: 'mock', chain: 'stable', reasoningEffort: 'high' },
   'permission/preset': { preset: 'default' },
   'plan/mode': { active: true },
   'request/context': { provider: 'mock', model: 'mock', contextWindow: 8192 },
   'request/header': {
     header: {
-      config: { provider: 'mock', model: 'mock', reasoningEffort: 'high', maxTokens: 100 },
+      config: { provider: 'mock', model: 'mock', chain: 'stable', reasoningEffort: 'high', maxTokens: 100 },
       adapterDefaults: { reasoningEffort: true, maxTokens: true },
       system: 'system',
       tools: [{ name: 'tool', description: 'Tool', parameters: { type: 'object' } }],

@@ -220,6 +220,8 @@ async function mountSection(options: Parameters<typeof scriptedFace>[0] = {}) {
     api: wireOf(scripted.face),
     schema: settingsSchema,
     t,
+    picker: null,
+    modelT: key => key,
     renderSlot: () => null,
   }
   render(<ModelsSection {...injected} />)

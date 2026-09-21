@@ -463,6 +463,13 @@ export type StreamChunk =
     reason: FinishReason
     /** Replay metadata for a successful response; see {@link ReplayEnvelope}. */
     replayState?: ReplayEnvelope
+    /**
+     * Enpoi Harness model-group provenance: the link that produced this
+     * terminal outcome when the runtime escalated away from the request's own
+     * route. Absent on every single-model request and whenever the request's
+     * own route answered, so consumers that ignore it behave exactly as before.
+     */
+    answeringLink?: AnsweringLink
   }
 
 /**
@@ -479,11 +486,76 @@ export interface ToolSchema {
   parameters: Record<string, unknown>
 }
 
+/** One ordered provider/model link of a model group. */
+export interface ModelChainLink {
+  /** Registered provider route selecting the adapter instance for this link. */
+  provider: string
+  /** Exact model id this link runs. */
+  model: string
+  /**
+   * Adapter-owned reasoning effort for this link. Absent keeps the request's
+   * effort when the link is the request's own route, and leaves the model's
+   * own default otherwise, so an effort owned by a different model never
+   * rejects the request.
+   */
+  effort?: string
+}
+
+/**
+ * The model-group link that produced one request's terminal stream outcome.
+ * Reported only when the runtime escalated away from the request's own route,
+ * so a consumer can attribute the answer to the model that actually ran it.
+ */
+export interface AnsweringLink {
+  /** Provider route that produced the outcome. */
+  readonly provider: string
+  /** Exact model id that produced the outcome. */
+  readonly model: string
+}
+
+/**
+ * One resolved model group (failover chain): an ordered list of links the
+ * runtime tries before giving up on a request.
+ */
+export interface ResolvedModelChain {
+  /** Stable group id carried by {@link GenerateOptions.chain}. */
+  id: string
+  /** Human-readable group name for diagnostics. */
+  label?: string
+  /** Ordered links; mixed providers are the point. */
+  links: readonly ModelChainLink[]
+  /** Attempts per link. The identity pool owns key rotation inside one link. */
+  attempts?: number
+  /** Consumer policy for a post-commit cut. The runtime never uses it. */
+  onCut?: 'failover' | 'continue'
+}
+
+/**
+ * Optional `modelChains` service resolving a group id to its ordered links.
+ * Read structurally through `ctx.get('modelChains')`; a deployment that
+ * mounts no group registry keeps the single-model behavior.
+ */
+export interface ModelChainResolver {
+  /**
+   * Resolve one group id.
+   * @param id - group id carried by {@link GenerateOptions.chain}.
+   * @returns the ordered group, or `undefined` for an unknown id.
+   */
+  resolve(id: string): ResolvedModelChain | undefined
+}
+
 /** A single model request, fully assembled. */
 export interface GenerateOptions {
   /** Registered provider route selecting the adapter instance. */
   provider: string
   model: string
+  /**
+   * Enpoi Harness model-group id. When set, {@link LlmRuntime.stream} resolves
+   * the group through the optional `modelChains` service and re-issues the
+   * request on the next link after a retryable pre-commit failure. Unset,
+   * unknown, or link-less group ids keep today's single-model dispatch.
+   */
+  chain?: string
   /** Adapter-owned reasoning effort selected for this exact model. */
   reasoningEffort?: ReasoningEffortId
   /**

@@ -506,6 +506,51 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
+  it('carries a model group through selection and normalizes an empty id', async () => {
+    const { ctx, sessionId } = await harness()
+    const remote = createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }),
+      cwd: '/tmp',
+    })
+
+    const selected = expectValue(await remote.selectModel(request({
+      sessionId,
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      chain: 'stable',
+    })))
+    expect(selected.selected).toEqual({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      chain: 'stable',
+      reasoningEffort: 'high',
+    })
+    expect(currentSelection(ctx, sessionId)).toEqual({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      chain: 'stable',
+      reasoningEffort: 'high',
+    })
+
+    const cleared = expectValue(await remote.selectModel(request({
+      sessionId,
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      chain: '',
+    })))
+    expect(cleared.selected).toEqual({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      reasoningEffort: 'high',
+    })
+    expect(currentSelection(ctx, sessionId)).toEqual({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+      reasoningEffort: 'high',
+    })
+    await ctx.fiber.dispose()
+  })
+
   it('reads the Agent default live for a session whose log names no selection', async () => {
     const { ctx, sessionId } = await harness()
     let stored = { provider: 'deepseek-official', model: 'deepseek-chat' }

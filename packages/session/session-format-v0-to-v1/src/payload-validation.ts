@@ -144,6 +144,7 @@ export function assertReleasedPayloadSemantics(event: SessionFormatEvent, versio
     case 'model/selection':
       nonEmptyString(data['provider'], `${label} provider`)
       nonEmptyString(data['model'], `${label} model`)
+      if (data['chain'] !== undefined) nonEmptyString(data['chain'], `${label} chain`)
       if (data['reasoningEffort'] !== undefined) nonEmptyString(data['reasoningEffort'], `${label} reasoningEffort`)
       return
     case 'permission/preset':
@@ -802,10 +803,11 @@ function requestHeaderValue(value: SessionFormatJsonValue | undefined, label: st
     header['config'],
     `${label} config`,
     ['provider', 'model'],
-    ['reasoningEffort', 'temperature', 'maxTokens', 'stop'],
+    ['chain', 'reasoningEffort', 'temperature', 'maxTokens', 'stop'],
   )
   nonEmptyString(config['provider'], `${label} provider`)
   nonEmptyString(config['model'], `${label} model`)
+  if (config['chain'] !== undefined) nonEmptyString(config['chain'], `${label} chain`)
   if (config['reasoningEffort'] !== undefined) nonEmptyString(config['reasoningEffort'], `${label} reasoningEffort`)
   if (config['temperature'] !== undefined) finiteNumberValue(config['temperature'], `${label} temperature`)
   if (config['maxTokens'] !== undefined) positiveIntegerValue(config['maxTokens'], `${label} maxTokens`)

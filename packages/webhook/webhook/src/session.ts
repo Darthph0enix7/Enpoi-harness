@@ -62,7 +62,11 @@ function resolveRequest(ctx: Context, input: WebhookSessionRequest): ResolvedWeb
   let modelSelection: ModelSelection
   if (model === undefined) {
     const selected = ctx.agentDefaultModel.currentSelection()
-    agentOptions = { provider: selected.provider, model: selected.model }
+    agentOptions = {
+      provider: selected.provider,
+      model: selected.model,
+      ...selected.chain === undefined ? {} : { chain: selected.chain },
+    }
     modelSelection = { ...selected }
   } else {
     const modelRecord = model as Record<string, unknown>
@@ -95,10 +99,15 @@ function installInitialModelSelection(agentCtx: Context, selection: ModelSelecti
     if (agent.session.requestHeader() !== undefined
       || resolved.provider !== selection.provider
       || resolved.model !== selection.model) return resolved
-    const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved
+    const {
+      reasoningEffort: _inheritedEffort,
+      chain: _inheritedChain,
+      ...withoutInheritedRouting
+    } = resolved as LlmCallConfig & { chain?: string }
     return {
-      ...withoutInheritedEffort,
+      ...withoutInheritedRouting,
       ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+      ...selection.chain === undefined ? {} : { chain: selection.chain },
     }
   })
 }

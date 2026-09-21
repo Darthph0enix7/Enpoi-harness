@@ -86,6 +86,12 @@ export type PromptContentPart =
 export interface ModelSelection {
   readonly provider: string
   readonly model: string
+  /**
+   * Optional model-group id whose links route this Session's requests. The
+   * provider/model pair is the group's active link; an unknown or absent group
+   * keeps single-model routing.
+   */
+  readonly chain?: string
   readonly reasoningEffort?: string
 }
 

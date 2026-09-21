@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BlockAssembler, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, STREAM_CUT_CODE, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
 
 describe('BlockAssembler', () => {
   it('assembles interleaved text, reasoning, and tool-call deltas', () => {
@@ -222,6 +222,46 @@ describe('BlockAssembler duplicate-close contract', () => {
     const assembler = new BlockAssembler()
     for (const chunk of chunks) assembler.push(chunk)
     expect(assembler.blocks()).toEqual([{ type: 'reasoning', text: 'first' }])
+  })
+})
+
+describe('BlockAssembler stream-cut guard', () => {
+  it('classifies a tool call truncated at stream termination as an error and drops it from the blocks', () => {
+    const assembler = new BlockAssembler()
+    assembler.push({ type: 'block-end', index: 0, block: { type: 'text', text: 'writing the file' } })
+    assembler.push({ type: 'block-start', index: 1, blockType: 'tool-call' })
+    assembler.push({ type: 'tool-call-delta', index: 1, id: ToolCallId('c1'), name: 'write', argumentsDelta: '{"path":"src/' })
+
+    expect(assembler.finish).toEqual({
+      kind: 'error',
+      failure: { message: 'the model stream ended with incomplete tool-call arguments', code: STREAM_CUT_CODE },
+    })
+    // The unparseable tool call is never part of a committable block list.
+    expect(assembler.blocks()).toEqual([{ type: 'text', text: 'writing the file' }])
+  })
+
+  it('overrides a tool-calls finish whose arguments never completed', () => {
+    const assembler = new BlockAssembler()
+    assembler.push({ type: 'tool-call-delta', index: 0, id: ToolCallId('c1'), name: 'write', argumentsDelta: '{"path":' })
+    assembler.push({ type: 'finish', reason: { kind: 'tool-calls' } })
+
+    expect(assembler.finish.kind).toBe('error')
+  })
+
+  it('keeps empty arguments, max-tokens, and explicit failures unchanged', () => {
+    const empty = new BlockAssembler()
+    empty.push({ type: 'tool-call-delta', index: 0, id: ToolCallId('c1'), name: 'ping', argumentsDelta: '' })
+    expect(empty.finish).toEqual({ kind: 'stop' })
+
+    const capped = new BlockAssembler()
+    capped.push({ type: 'tool-call-delta', index: 0, id: ToolCallId('c1'), name: 'write', argumentsDelta: '{"path":' })
+    capped.push({ type: 'finish', reason: { kind: 'max-tokens' } })
+    expect(capped.finish).toEqual({ kind: 'max-tokens' })
+
+    const failed = new BlockAssembler()
+    failed.push({ type: 'tool-call-delta', index: 0, id: ToolCallId('c1'), name: 'write', argumentsDelta: '{"path":' })
+    failed.push({ type: 'finish', reason: { kind: 'error', failure: { message: 'transport died', code: 'TRANSPORT' } } })
+    expect(failed.finish).toEqual({ kind: 'error', failure: { message: 'transport died', code: 'TRANSPORT' } })
   })
 })
 

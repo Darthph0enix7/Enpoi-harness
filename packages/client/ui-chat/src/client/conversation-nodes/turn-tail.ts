@@ -10,6 +10,7 @@ import type {
   AssistantChatData, FinalAssistantChatData, TurnTailChatData,
 } from '../contract/chat-nodes.ts'
 import { deriveTurnMetrics } from '../contract/turn-metrics.ts'
+import { chainAttribution, chainOfRecord } from '../chat/chain-attribution.ts'
 import { CHAT_SYNTHETIC_SEQ_OFFSETS, chatNode } from './common.ts'
 import { toAssistantBlocks } from './event-projection.ts'
 
@@ -153,6 +154,10 @@ function tailData(context: ConversationNodeContext<TurnTailState>): TurnTailChat
   const provider = requestConfig?.provider ?? provenance?.provider
   const model = requestConfig?.model ?? provenance?.model
   const reasoningEffort = requestConfig?.reasoningEffort
+  const attribution = chainAttribution(
+    chainOfRecord(provenance) ?? chainOfRecord(requestConfig),
+    model,
+  )
   const tokenUsage = context.start?.event.type === 'turn/start'
     ? deriveTurnTokenUsage(context.matches.map(match => match.event).filter(isSessionEvent))
     : undefined
@@ -167,6 +172,7 @@ function tailData(context: ConversationNodeContext<TurnTailState>): TurnTailChat
     ...provider !== undefined ? { provider } : {},
     ...model !== undefined ? { model } : {},
     ...reasoningEffort !== undefined ? { reasoningEffort } : {},
+    ...attribution === undefined ? {} : { chain: attribution.chain, modelBadge: attribution.badge },
     ...tokenUsage === undefined ? {} : { tokenUsage },
   }
 }

@@ -17,11 +17,16 @@
 import { useState, useMemo, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { InjectFace, PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the model namespace merge for the shared picker's copy seat.
+import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 // Type-only: pulls this package's SlotMap merge (the two Models child slots).
 import type {} from './slot-contract.ts'
 import { ProviderDetailPanel } from './ProviderDetailPanel.tsx'
 import { AddProviderModal } from './AddProviderModal.tsx'
+import { ModelGroupsRow } from './ModelGroupsRow.tsx'
+import { ORCHESTRATION_NS } from './model-groups.ts'
+import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
@@ -41,7 +46,14 @@ export interface ModelsSectionInjected {
   /** Settings schema and immutable path callbacks. */
   schema: SettingsSchemaOperations
   /** Section copy. */
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
+  /**
+   * Catalog-backed picker face for the Model groups link editor, or null when
+   * the shared model directory service is not mounted.
+   */
+  picker: ModelPickerFace | null
+  /** The shared picker's own copy seat (`model` namespace). */
+  modelT: TranslateNS<'model'>
 }
 
 /** The child slots this section declares and dispatches (see ./slot-contract.ts). */
@@ -61,16 +73,16 @@ type ModelsSectionFace = InjectFace<ModelsSectionInjected>
  * @returns the master-detail page.
  */
 export function ModelsSection(props: ModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, api, schema, t, renderSlot } = props
+  const { controller, useSnapshot, api, schema, t, renderSlot, picker, modelT } = props
   if (
     controller === undefined || useSnapshot === undefined || api === undefined
-    || schema === undefined || t === undefined
+    || schema === undefined || t === undefined || modelT === undefined
   ) return null
-  return <Loaded injected={{ controller, useSnapshot, api, schema, t }} renderSlot={renderSlot} />
+  return <Loaded injected={{ controller, useSnapshot, api, schema, t, picker: picker ?? null, modelT }} renderSlot={renderSlot} />
 }
 
 function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderSlot: ModelsRenderSlot }): ReactNode {
-  const { controller, api, schema, t } = injected
+  const { controller, api, schema, t, picker, modelT } = injected
   const state = injected.useSnapshot(snapshot => snapshot)
 
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
@@ -353,6 +365,18 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           {deleteError && <p className={styles['error']}>{deleteError}</p>}
         </Modal>
       </div>
+      {/* MODEL GROUPS: a full-width row below the master-detail page. It
+          renders nothing while no group exists, and it is the only creation
+          surface, so the picker and provider list carry no group chrome. */}
+      <ModelGroupsRow
+        namespace={state.namespaces.get(ORCHESTRATION_NS)}
+        api={api}
+        readOnly={!state.writable}
+        picker={picker}
+        t={t}
+        modelT={modelT}
+        onSaved={() => void controller.load()}
+      />
       {/* Extensions (pool usage & quota, catalog helpers). Rendered FULL-WIDTH
           below the master-detail row: inside the flex row it became a third
           column that compressed the provider list and detail into unusable

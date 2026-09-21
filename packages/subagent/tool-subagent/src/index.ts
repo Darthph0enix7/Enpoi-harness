@@ -312,7 +312,14 @@ function resolveSubagentPersonaModel(
   if (personas === undefined) return undefined
   const routeFor = (candidate: string): AgentOptions | undefined => {
     const entry = personas[candidate]
-    return entry?.provider && entry.model ? { provider: entry.provider, model: entry.model } : undefined
+    if (entry?.provider === undefined || entry.model === undefined) return undefined
+    return {
+      provider: entry.provider,
+      model: entry.model,
+      // A seat assigned to a model group spawns on its first link and keeps the
+      // group id, so the runtime can fail over to the next link.
+      ...entry.chain === undefined ? {} : { chain: entry.chain },
+    }
   }
   if (role !== undefined) {
     const selected = routeFor(role)
@@ -480,7 +487,7 @@ export interface OrchestrationSettingsHandle {
 /** Structural view of the `enpoi-orchestration` document this tool consumes. */
 export interface OrchestrationSettingsDocument {
   /** Per-role child model route, keyed by role id. */
-  personas?: Record<string, { provider?: string; model?: string }>
+  personas?: Record<string, { provider?: string; model?: string; chain?: string }>
   /** Operator role registry, merged over the code defaults. */
   roles?: Record<string, RoleRegistryEntry>
   /** Operator permission overrides, including per-role tool availability. */
