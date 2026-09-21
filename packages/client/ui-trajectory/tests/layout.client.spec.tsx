@@ -725,3 +725,206 @@ describe('durable file attachments', () => {
     ])
   })
 })
+
+
+describe('deriveTrajectoryLayout revert records', () => {
+  const timestamp = (seq: number) => 1_700_000_000_000 + seq
+  const revertedNodes = [
+    { kind: 'user', seq: 1, time: timestamp(1), content: [{ type: 'text', text: 'first prompt' }], source: null },
+    {
+      kind: 'assistant', seq: 2, time: timestamp(2), turn: 1, step: 1,
+      blocks: [{ kind: 'text', text: 'first answer' }],
+    },
+    { kind: 'user', seq: 3, time: timestamp(3), content: [{ type: 'text', text: 'second prompt' }], source: null },
+    {
+      kind: 'assistant', seq: 4, time: timestamp(4), turn: 2, step: 1,
+      blocks: [{ kind: 'text', text: 'second answer' }],
+    },
+    { kind: 'user', seq: 9, time: timestamp(9), content: [{ type: 'text', text: 'replacement' }], source: null },
+  ] as unknown as LegacyConversationSlice['nodes']
+  const boundaries = [
+    { seq: 6, time: timestamp(6), fromSeq: 1, cause: 'revert' as const },
+    { seq: 10, time: timestamp(10), fromSeq: null, cause: 'commit' as const },
+  ]
+  const fileResults = [{
+    seq: 7,
+    revertSeq: 1,
+    outcomes: {
+      '/w/a.ts': { status: 'restored' },
+      '/w/b.ts': { status: 'trashed', dest: '/home/adam/.dsh/trash/b.ts' },
+      '/w/c.ts': { status: 'no_op' },
+    },
+  }, {
+    seq: 8,
+    revertSeq: 1,
+    outcomes: { '/w/a.ts': { status: 'saved_beside', dest: '/w/a.ts.bak' } },
+  }]
+  const conflicts = [{
+    seq: 7,
+    conflictId: 'c1',
+    targetKey: '/w/d.ts',
+    displayPath: '/w/d.ts',
+    state: 'conflict' as const,
+    boundarySeq: 1,
+  }]
+
+  it('renders the boundary span, projected file rows, and the replacement commit', () => {
+    const turns = deriveTrajectoryLayout({
+      nodes: revertedNodes,
+      partial: null,
+      runningCalls: [],
+      reverts: boundaries,
+      revertFiles: fileResults,
+      revertConflicts: conflicts,
+      revert: { fromSeq: null, shadowRanges: [{ start: 1, end: 9 }], outcomes: {}, conflicts: [] },
+    })
+    const cells = [...turns].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    const boundary = cells.find(cell => cell.revertRole === 'boundary')
+    expect(boundary?.text).toBe('Revert from #1 · turns 1–2 · 2 messages · span no longer live')
+    expect(boundary?.sourceSeq).toBe(6)
+    // Last write per path wins, no_op rows are omitted, and an unresolved
+    // conflict stays visible; the later saved_beside batch replaces a.ts.
+    expect(cells.filter(cell => cell.revertRole === 'file').map(cell => cell.text)).toEqual([
+      '/w/a.ts · Saved beside → /w/a.ts.bak',
+      '/w/b.ts · Trashed → /home/adam/.dsh/trash/b.ts',
+      '/w/d.ts · Conflict pending',
+    ])
+    expect(cells.find(cell => cell.kind === 'user' && cell.sourceSeq === 9)?.revertRole)
+      .toBe('replacement')
+    expect(cells.filter(cell => cell.shadowed === true).map(cell => cell.sourceSeq))
+      .toEqual([1, 2, 3, 4])
+    expect(turns.find(turn => turn.turn === 3)?.groups.map(group => group.title))
+      .toEqual(['Revert', 'Message'])
+  })
+
+  it('marks the tool rows of a shadowed assistant without touching later tools', () => {
+    const nodes = [
+      { kind: 'user', seq: 1, time: timestamp(1), content: [{ type: 'text', text: 'ask' }], source: null },
+      {
+        kind: 'assistant', seq: 2, time: timestamp(2), turn: 1, step: 1,
+        blocks: [{ kind: 'tool-call', callId: 'c1', name: 'bash', argsRaw: '{"command":"a"}' }],
+      },
+      {
+        kind: 'tool-result', seq: 3, time: timestamp(3), callId: 'c1',
+        call: { name: 'bash', argsRaw: '{"command":"a"}' }, callTime: timestamp(2),
+        content: [{ type: 'text', text: 'a' }], isError: false, subCalls: [],
+      },
+      { kind: 'user', seq: 5, time: timestamp(5), content: [{ type: 'text', text: 'next' }], source: null },
+      {
+        kind: 'assistant', seq: 6, time: timestamp(6), turn: 2, step: 1,
+        blocks: [{ kind: 'tool-call', callId: 'c2', name: 'bash', argsRaw: '{"command":"b"}' }],
+      },
+      {
+        kind: 'tool-result', seq: 7, time: timestamp(7), callId: 'c2',
+        call: { name: 'bash', argsRaw: '{"command":"b"}' }, callTime: timestamp(6),
+        content: [{ type: 'text', text: 'b' }], isError: false, subCalls: [],
+      },
+    ] as unknown as LegacyConversationSlice['nodes']
+    const turns = deriveTrajectoryLayout({
+      nodes,
+      partial: null,
+      runningCalls: [],
+      reverts: [{ seq: 4, time: timestamp(4), fromSeq: 1, cause: 'revert' }],
+      revert: { fromSeq: null, shadowRanges: [{ start: 1, end: 5 }], outcomes: {}, conflicts: [] },
+    })
+    const cells = [...turns].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    expect(cells.find(cell => cell.previewMarkdown === '{"command":"a"}')?.shadowed).toBe(true)
+    expect(cells.find(cell => cell.previewMarkdown === '{"command":"b"}')?.shadowed).toBeUndefined()
+    expect(cells.find(cell => cell.kind === 'user' && cell.sourceSeq === 5)?.revertRole)
+      .toBe('replacement')
+  })
+
+  it('labels the active boundary from the shared Session fold', () => {
+    const turns = deriveTrajectoryLayout({
+      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      partial: null,
+      runningCalls: [],
+      reverts: [{ seq: 6, time: timestamp(6), fromSeq: 3, cause: 'revert' }],
+      revert: {
+        fromSeq: 3,
+        shadowRanges: [],
+        outcomes: { '/w/e.ts': { status: 'kept' } },
+        conflicts: [{
+          conflictId: 'c2',
+          targetKey: '/w/f.ts',
+          displayPath: '/w/f.ts',
+          state: 'missing',
+          reason: 'missing',
+        }],
+      },
+    })
+    const cells = [...turns].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    expect(cells.find(cell => cell.revertRole === 'boundary')?.text)
+      .toBe('Revert from #3 · turn 2 · 1 messages · hidden from the model on the next prompt')
+    expect(cells.filter(cell => cell.revertRole === 'file').map(cell => cell.text)).toEqual([
+      '/w/e.ts · Kept',
+      '/w/f.ts · Conflict pending',
+    ])
+  })
+
+  it('names a seq span when no assistant turn covers the reverted range', () => {
+    const turns = deriveTrajectoryLayout({
+      nodes: [],
+      partial: null,
+      runningCalls: [],
+      reverts: [
+        { seq: 6, time: timestamp(6), fromSeq: 3, cause: 'revert' },
+        { seq: 8, time: timestamp(8), fromSeq: null, cause: 'commit' },
+      ],
+    })
+    const cells = [...turns].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    expect(cells.map(cell => cell.text)).toEqual([
+      'Revert from #3 · events #3–#7 · span no longer live',
+      'Revert committed',
+    ])
+  })
+
+  it('renders restore boundaries and leaves a non-reverted session without revert records', () => {
+    const restored = deriveTrajectoryLayout({
+      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      partial: null,
+      runningCalls: [],
+      reverts: [{ seq: 6, time: timestamp(6), fromSeq: null, cause: 'restore' }],
+    })
+    const restoredCells = [...restored].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    expect(restoredCells.map(cell => cell.text)).toContain('Revert fully restored')
+    const restoredOne = deriveTrajectoryLayout({
+      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      partial: null,
+      runningCalls: [],
+      reverts: [{ seq: 6, time: timestamp(6), fromSeq: 3, cause: 'restore' }],
+    })
+    expect([...restoredOne].flatMap(turn => turn.groups.flatMap(group => group.cells))
+      .map(cell => cell.text)).toContain('Restored from #3')
+
+    const untouched = deriveTrajectoryLayout({
+      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      partial: null,
+      runningCalls: [],
+    })
+    expect([...untouched].flatMap(turn => turn.groups.flatMap(group => group.cells))
+      .some(cell => cell.kind === 'revert')).toBe(false)
+  })
+
+  it('attributes a restore-all batch and an unknown-anchor boundary without inventing rows', () => {
+    const turns = deriveTrajectoryLayout({
+      nodes: revertedNodes as unknown as LegacyConversationSlice['nodes'],
+      partial: null,
+      runningCalls: [],
+      reverts: [
+        { seq: 6, time: timestamp(6), fromSeq: null, cause: 'restore' },
+        { seq: 12, time: timestamp(12), fromSeq: null, cause: 'revert' },
+      ],
+      revertFiles: [{
+        seq: 7,
+        revertSeq: -1,
+        outcomes: { '/w/g.ts': { status: 'restored' } },
+      }],
+    })
+    const cells = [...turns].flatMap(turn => turn.groups.flatMap(group => group.cells))
+    expect(cells.filter(cell => cell.revertRole === 'boundary').map(cell => cell.text))
+      .toEqual(['Revert fully restored', 'Revert boundary'])
+    expect(cells.filter(cell => cell.revertRole === 'file').map(cell => cell.text))
+      .toEqual(['/w/g.ts · Restored'])
+  })
+})

@@ -63,10 +63,10 @@ export function apply(ctx: ClientContext): void {
       ctx.uiWorkspace.openSession(address)
     },
     openChildAside(address: SubagentAddress) {
-      ctx.sidebarRight.openResource(subagentChatAddress(address), {
-        kind: 'subagentchat',
-        preferNewPane: true,
-      })
+      // The chat type declares `opensIn: 'panel'`: the session view lands as the
+      // panel's own tab. No preferred split — a second pane would leave the
+      // file page standing beside every later rail switch.
+      ctx.sidebarRight.openResource(subagentChatAddress(address), { kind: 'subagentchat' })
     },
     refresh(parentSessionId: SessionId) {
       void sessions.refreshSubagents(parentSessionId)

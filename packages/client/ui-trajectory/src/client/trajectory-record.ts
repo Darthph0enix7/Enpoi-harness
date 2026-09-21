@@ -14,6 +14,10 @@ export type TrajectoryCellKind =
   | 'message'
   | 'tool'
   | 'subtool'
+  | 'revert'
+
+/** Ledger role of a revert record: the boundary itself, one file row, or the replacement commit. */
+export type TrajectoryRevertRole = 'boundary' | 'file' | 'replacement'
 
 /** Recorded inputs needed to derive assistant TTFT and decode throughput. */
 export interface AssistantMetricDetail {
@@ -102,6 +106,10 @@ export interface TrajectoryCellProps extends HTMLAttributes<HTMLDivElement> {
   think?: number
   /** Whether the legacy standalone cell renders its selection treatment. */
   selected?: boolean
+  /** Whether a committed revert replaced this record's span: it is no longer model-visible. */
+  shadowed?: boolean
+  /** Revert ledger role of this record, when it belongs to a revert. */
+  revertRole?: TrajectoryRevertRole
 }
 
 /**

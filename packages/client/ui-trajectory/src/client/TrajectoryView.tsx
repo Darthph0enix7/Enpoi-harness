@@ -189,6 +189,14 @@ export function TrajectoryView({
   const historyLoading = useSession(snapshot => snapshot.openState === 'loading')
   const olderHistoryLoading = useSession(snapshot => snapshot.loadingOlder)
   const sessionHasOlderHistory = useSession(snapshot => snapshot.hasMore)
+  // Revert facts the Session fold already owns (the same truth the revert tray
+  // reads): the active boundary, its file rows, and the committed shadow ranges
+  // come from this fold; older batches project the durable revert/file-* events
+  // the fold intentionally dropped when the next boundary opened.
+  const revertFromSeq = useSession(snapshot => snapshot.revertFromSeq)
+  const revertShadowRanges = useSession(snapshot => snapshot.revertShadowRanges)
+  const revertFileOutcomes = useSession(snapshot => snapshot.revertFileOutcomes)
+  const revertFileConflicts = useSession(snapshot => snapshot.revertFileConflicts)
   const hasResidentOlderHistory = historyStartIndex > 0
   const hasOlderHistory = hasResidentOlderHistory
     || sessionHasOlderHistory
@@ -324,11 +332,22 @@ export function TrajectoryView({
       requests,
       systemPrompts: inspection.systemPrompts,
       callSchemas,
+      reverts: inspection.reverts,
+      revertFiles: inspection.revertFiles,
+      revertConflicts: inspection.revertConflicts,
+      revert: {
+        fromSeq: revertFromSeq,
+        shadowRanges: revertShadowRanges,
+        outcomes: revertFileOutcomes,
+        conflicts: revertFileConflicts,
+      },
     }, t)
     return { turns, lastIndex: lastCellIndex(turns) }
   }, [
     nodes, eventLocations, partialTurn, partialStep,
-    runningCalls, requests, inspection.systemPrompts, callSchemas, t,
+    runningCalls, requests, inspection.systemPrompts, inspection.reverts,
+    inspection.revertFiles, inspection.revertConflicts, callSchemas,
+    revertFromSeq, revertShadowRanges, revertFileOutcomes, revertFileConflicts, t,
   ])
   const timelinePartialSignature = partialStructureSignature(partial)
   const timelinePartial = useMemo<TrajectorySnapshot['partial']>(() => partial === null

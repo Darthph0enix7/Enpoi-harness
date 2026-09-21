@@ -185,6 +185,9 @@ export function registerSidebarChat(ctx: Context, t: TranslateNS<typeof NS>): vo
     kind: 'subagentchat',
     patterns: [`${SUBAGENT_CHAT_ADDRESS}**`],
     priority: 'builtin',
+    // An embedded session conversation is not a document: it lands as the
+    // panel's own tab, never in the editor pane that forces the file tree.
+    opensIn: 'panel',
     canOpen: address => parseSubagentChatAddress(address) !== undefined,
     title: (address) => {
       const child = parseSubagentChatAddress(address)?.childSessionId

@@ -32,9 +32,17 @@ import {
 } from '../role-registry.ts'
 import {
   buildPermissionToolRows,
+  BUILT_ROLE_SURFACE,
   type McpServerRef,
   type PermissionToolRow,
 } from '../permissions-model.ts'
+import {
+  effectiveRolesUnavailable,
+  getEffectiveRoles,
+  subscribeEffectiveRoles,
+  type EffectiveRoleMap,
+} from '../role-effective.ts'
+import { openSettingsSection } from '../settings-nav.ts'
 import css from './RolesPanel.module.css'
 import { setStatus } from './status.ts'
 import { withWriteTimeout } from './write-timeout.ts'
@@ -362,24 +370,81 @@ export function editRole(
 export interface RoleRow {
   id: string
   entry: RoleEntry
+  /** The raw settings override as written (`{}` for an untouched built-in). */
+  override: RoleEntry
+  /** Effective baseline: host role-table values over the client code defaults. */
+  baseline: RoleBaseline
   builtIn: boolean
   retired: boolean
+}
+
+/** The effective values one role shows when its settings entry leaves a field unset. */
+export interface RoleBaseline {
+  label?: string
+  persona?: string
+  group?: RoleGroup
+  /** The role's effective tool surface: settings override, host allowlist, then the shipped surface. */
+  available?: string[]
+}
+
+/**
+ * The baseline for one row: the host's effective registry (label, persona,
+ * group, capability allowlist) over the client code defaults. Persona text is
+ * never duplicated here — it comes from the host role tables through the
+ * `enpoiRoles.list` RPC.
+ * @param id - the role id.
+ * @param entry - the code-default-over-settings effective entry.
+ * @param override - the raw settings entry.
+ * @param effective - the host's effective registry map (empty when unavailable).
+ * @returns baseline values with only the fields that have one.
+ */
+export function buildRoleBaseline(
+  id: string,
+  entry: RoleEntry,
+  override: RoleEntry,
+  effective: EffectiveRoleMap,
+): RoleBaseline {
+  const host = effective[id]
+  const baseline: RoleBaseline = {}
+  const label = entry.label ?? host?.label
+  if (label !== undefined && label !== '') baseline.label = label
+  const persona = entry.persona ?? host?.persona
+  if (persona !== undefined && persona !== '') baseline.persona = persona
+  const hostGroup = host?.group
+  const group = entry.group
+    ?? (hostGroup === 'supervision' || hostGroup === 'specialists' || hostGroup === 'council' || hostGroup === 'custom'
+      ? hostGroup
+      : undefined)
+  if (group !== undefined) baseline.group = group
+  if (override.tools?.available !== undefined) baseline.available = override.tools.available
+  else if (host?.available !== undefined) baseline.available = host.available
+  else if (BUILT_ROLE_SURFACE[id] !== undefined) baseline.available = [...BUILT_ROLE_SURFACE[id]]
+  return baseline
 }
 
 /**
  * Every role the tab lists: code defaults plus settings-only ids, retired
  * entries included so they can be restored.
  * @param roles - the raw settings role map.
+ * @param effective - the host's effective registry map (empty when the RPC is unavailable).
  * @returns rows in fleet group order, built-ins first.
  */
-export function buildRoleRows(roles: RoleRegistryMap): RoleRow[] {
+export function buildRoleRows(roles: RoleRegistryMap, effective: EffectiveRoleMap = {}): RoleRow[] {
   const ids = [...Object.keys(BUILT_IN_ROLES)]
   for (const id of Object.keys(roles)) {
     if (!ids.includes(id)) ids.push(id)
   }
   const rows = ids.map((id): RoleRow => {
     const entry = effectiveRoleEntry(roles, id)
-    return { id, entry, builtIn: Object.hasOwn(BUILT_IN_ROLES, id), retired: entry.disabled === true }
+    const override = roles[id] ?? {}
+    return {
+      id,
+      entry,
+      override,
+      baseline: buildRoleBaseline(id, entry, override, effective),
+      builtIn: Object.hasOwn(BUILT_IN_ROLES, id),
+      retired: entry.disabled === true,
+    }
   })
   rows.sort((left, right) => {
     const byGroup = ROLE_GROUP_ORDER.indexOf(left.entry.group ?? 'custom')
@@ -392,8 +457,8 @@ export function buildRoleRows(roles: RoleRegistryMap): RoleRow[] {
 }
 
 /** The tool checkboxes one role shows: the permission rows plus allowlist ids outside them. */
-function buildRoleToolRows(rows: PermissionToolRow[], entry: RoleEntry): PermissionToolRow[] {
-  const available = entry.tools?.available ?? []
+function buildRoleToolRows(rows: PermissionToolRow[], entry: RoleEntry, baseline: readonly string[] = []): PermissionToolRow[] {
+  const available = [...new Set([...(entry.tools?.available ?? []), ...baseline])]
   const known = new Set(rows.map(row => row.id))
   const extras = available.filter(id => !known.has(id)).map(id => ({ id, name: id }))
   return [...rows, ...extras]
@@ -476,33 +541,38 @@ export function DraftTextarea({ value, label, placeholder, onCommit }: {
   )
 }
 
-/** One role switch (seat visibility / retirement). */
-function RoleSwitch({ checked, label, title, onToggle }: {
+/** One role switch (fleet-seat visibility / retirement) with its visible caption. */
+function RoleSwitch({ checked, caption, ariaLabel, title, onToggle }: {
   checked: boolean
-  label: string
+  caption: string
+  ariaLabel: string
   title: string
   onToggle: () => void
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={title}
-      className={checked ? `${c('switch')} ${c('switchOn')}` : c('switch')}
-      onClick={onToggle}
-    >
-      <span className={c('knob')} />
-    </button>
+    <span className={c('switchField')} title={title}>
+      <span className={c('switchLabel')}>{caption}</span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={ariaLabel}
+        className={checked ? `${c('switch')} ${c('switchOn')}` : c('switch')}
+        onClick={onToggle}
+      >
+        <span className={c('knob')} />
+      </button>
+    </span>
   )
 }
 
 /** One role row: compact head plus the inline editor when expanded. */
-function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, onEditPersona,
+function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleExpanded, onEditLabel, onEditPersona,
   onEditGroup, onToggleSeat, onToggleRetired, onToggleTool, onDelete }: {
   row: RoleRow
   toolRows: PermissionToolRow[]
+  /** True when the effective-registry RPC is unavailable (settings-layer display only). */
+  effectiveUnavailable: boolean
   expanded: boolean
   onToggleExpanded: () => void
   onEditLabel: (next: string) => void
@@ -513,9 +583,10 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
   onToggleTool: (tool: string) => void
   onDelete: () => void
 }) {
-  const label = row.entry.label !== undefined && row.entry.label !== '' ? row.entry.label : titleCaseRoleId(row.id)
-  const available = row.entry.tools?.available ?? []
+  const label = row.entry.label ?? row.baseline.label ?? titleCaseRoleId(row.id)
+  const available = row.entry.tools?.available ?? row.baseline.available ?? []
   const seatOff = row.entry.seat === false
+  const hasOverride = (key: keyof RoleEntry): boolean => row.override[key] !== undefined
   return (
     <div className={row.retired ? `${c('row')} ${c('rowRetired')}` : c('row')}>
       <div className={c('rowHead')}>
@@ -536,14 +607,20 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
         <span className={c('spacer')} />
         <RoleSwitch
           checked={!seatOff}
-          label={`Seat for ${label}`}
-          title={seatOff ? 'Show this role in Fleet Routing' : 'Hide this role from Fleet Routing'}
+          caption="Fleet seat"
+          ariaLabel={`Fleet seat for ${label}`}
+          title={seatOff
+            ? 'Fleet seat off — hidden from Fleet Routing and Agent Models. The role still spawns and its permissions stay editable.'
+            : 'Fleet seat on — offerable for model assignment in Fleet Routing and Agent Models. Never removes the role.'}
           onToggle={onToggleSeat}
         />
         <RoleSwitch
           checked={row.retired}
-          label={row.retired ? `Restore ${label}` : `Retire ${label}`}
-          title={row.retired ? 'Restore this role everywhere' : 'Retire this role everywhere'}
+          caption="Retired"
+          ariaLabel={row.retired ? `Restore ${label}` : `Retire ${label}`}
+          title={row.retired
+            ? 'Retired on — removed from the effective registry everywhere (no spawn, no seat, no permissions row). Turn off to restore.'
+            : 'Retired off — the role is live everywhere. Turn on to remove it from the effective registry; delete restores the code default.'}
           onToggle={onToggleRetired}
         />
         <button
@@ -560,17 +637,26 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
       </div>
       {expanded && (
         <div className={c('editor')}>
+          {effectiveUnavailable && (
+            <p className={c('fieldHint')}>
+              Effective values are unavailable — showing the settings layer only.
+            </p>
+          )}
           <div className={c('editGrid')}>
             <label className={c('field')}>
-              <span className={c('fieldLabel')}>Label</span>
-              <DraftInput value={row.entry.label ?? ''} label={`Label for ${label}`} onCommit={onEditLabel} />
+              <span className={c('fieldLabel')}>
+                Label{!hasOverride('label') && <span className={c('fieldTag')}>built-in</span>}
+              </span>
+              <DraftInput value={row.entry.label ?? row.baseline.label ?? ''} label={`Label for ${label}`} onCommit={onEditLabel} />
             </label>
             <label className={c('field')}>
-              <span className={c('fieldLabel')}>Group</span>
+              <span className={c('fieldLabel')}>
+                Group{!hasOverride('group') && <span className={c('fieldTag')}>built-in</span>}
+              </span>
               <select
                 className={c('select')}
                 aria-label={`Group for ${label}`}
-                value={row.entry.group ?? 'custom'}
+                value={row.entry.group ?? row.baseline.group ?? 'custom'}
                 onChange={(event) => { onEditGroup(event.target.value as RoleGroup) }}
               >
                 {ROLE_GROUP_ORDER.map(group => (
@@ -580,18 +666,23 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
             </label>
           </div>
           <label className={c('field')}>
-            <span className={c('fieldLabel')}>Persona</span>
+            <span className={c('fieldLabel')}>
+              Persona{!hasOverride('persona') && <span className={c('fieldTag')}>built-in</span>}
+            </span>
             <DraftTextarea
-              value={row.entry.persona ?? ''}
+              value={row.entry.persona ?? row.baseline.persona ?? ''}
               label={`Persona for ${label}`}
-              placeholder="Code default"
+              {...(row.baseline.persona === undefined ? { placeholder: 'Code default' } : {})}
               onCommit={onEditPersona}
             />
           </label>
           <div className={c('field')}>
-            <span className={c('fieldLabel')}>Tools — empty keeps this role's default surface</span>
+            <span className={c('fieldLabel')}>
+              Tools — this role's surface; empty keeps the effective default
+              {!hasOverride('tools') && <span className={c('fieldTag')}>built-in</span>}
+            </span>
             <div className={c('toolGrid')}>
-              {buildRoleToolRows(toolRows, row.entry).map(tool => (
+              {buildRoleToolRows(toolRows, row.entry, row.baseline.available ?? []).map(tool => (
                 <label key={tool.id} className={c('toolItem')}>
                   <input
                     type="checkbox"
@@ -604,6 +695,10 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
               ))}
             </div>
           </div>
+          <p className={c('fieldHint')}>
+            This list is the role's fallback surface: the Permissions allowlist wins when it names tools; both are bounded
+            by the built-in deny floor.
+          </p>
           <p className={c('fieldHint')}>
             {row.builtIn
               ? 'Delete restores the code default; Retire removes the role everywhere.'
@@ -620,13 +715,14 @@ function RoleRowView({ row, toolRows, expanded, onToggleExpanded, onEditLabel, o
 /** Roles tab: registry list with inline editing of every operator-owned field. */
 export function RolesPanel() {
   const snapshot = useSyncExternalStore(subscribeRoleSettings, getRoleSettings)
+  const effectiveRoles = useSyncExternalStore(subscribeEffectiveRoles, getEffectiveRoles)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [draftId, setDraftId] = useState('')
   const [draftLabel, setDraftLabel] = useState('')
   const [draftPersona, setDraftPersona] = useState('')
   const [draftGroup, setDraftGroup] = useState<RoleGroup>('custom')
 
-  const rows = useMemo(() => buildRoleRows(snapshot.roles), [snapshot.roles])
+  const rows = useMemo(() => buildRoleRows(snapshot.roles, effectiveRoles), [snapshot.roles, effectiveRoles])
   const groups = useMemo(() => ROLE_GROUP_ORDER
     .map(group => ({
       group,
@@ -663,9 +759,9 @@ export function RolesPanel() {
     commit(id, fresh => fresh.disabled === true ? withoutRoleKey(fresh, 'disabled') : { ...fresh, disabled: true })
   }
 
-  const toggleRoleTool = (id: string, tool: string): void => {
+  const toggleRoleTool = (id: string, tool: string, baseline: readonly string[]): void => {
     commit(id, (fresh) => {
-      const members = new Set(fresh.tools?.available ?? [])
+      const members = new Set(fresh.tools?.available ?? baseline)
       if (members.has(tool)) members.delete(tool)
       else members.add(tool)
       const available = [...members].sort((left, right) => left.localeCompare(right))
@@ -708,7 +804,18 @@ export function RolesPanel() {
     <div className={c('wrap')}>
       <p className={c('hint')}>
         Edits write <code>enpoi-orchestration.roles</code> and apply from the next spawn — no restart.
-        Seat models are assigned in Agent Models.
+        Seat models are assigned in Agent Models. Unset fields show their effective built-in value.
+      </p>
+      <p className={c('hint')}>
+        Tool boxes here are the role's surface layer: used when Permissions sets no allowlist for the role.
+        {' '}
+        <button
+          type="button"
+          className={c('crossLink')}
+          onClick={() => { openSettingsSection('permissions') }}
+        >
+          Open Permissions
+        </button>
       </p>
       {groups.map(group => (
         <section key={group.group} className={c('group')}>
@@ -719,6 +826,7 @@ export function RolesPanel() {
                 key={row.id}
                 row={row}
                 toolRows={toolRows}
+                effectiveUnavailable={effectiveRolesUnavailable()}
                 expanded={expanded === row.id}
                 onToggleExpanded={() => { setExpanded(expanded === row.id ? null : row.id) }}
                 onEditLabel={(next) => { setRoleLabel(row.id, next) }}
@@ -726,7 +834,7 @@ export function RolesPanel() {
                 onEditGroup={(next) => { setRoleGroup(row.id, next) }}
                 onToggleSeat={() => { toggleRoleSeat(row.id) }}
                 onToggleRetired={() => { toggleRoleRetired(row.id) }}
-                onToggleTool={(tool) => { toggleRoleTool(row.id, tool) }}
+                onToggleTool={(tool) => { toggleRoleTool(row.id, tool, row.baseline.available ?? []) }}
                 onDelete={() => { deleteRole(row.id) }}
               />
             ))}

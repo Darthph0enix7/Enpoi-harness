@@ -19,7 +19,7 @@ import { useEffect, useMemo } from 'react'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, InjectFace, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PersonaMap } from './persona-store.ts'
 import { buildFleetCategories, type RoleRegistryMap } from './role-registry.ts'
 import { CAPABILITIES_KIND } from './kinds.ts'
@@ -81,6 +81,8 @@ export interface AgentModelsInjected {
   assignPersona: (personaId: string, selection: ModelSelection) => void
   /** Clear an explicit assignment, reverting the persona to its fallback route. */
   clearPersona: (personaId: string) => void
+  /** Translator bound to the shared model namespace, for the embedded picker's chrome. */
+  t: TranslateNS<'model'>
 }
 
 export type AgentModelsBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & InjectFace<AgentModelsInjected>
@@ -93,6 +95,7 @@ export function AgentModelsBody({
   resolveDirectory,
   assignPersona,
   clearPersona,
+  t,
 }: AgentModelsBodyProps) {
   const { tab } = useTabInfo()
   const assignments = usePersonaAssignments(snapshot => snapshot)
@@ -165,7 +168,7 @@ export function AgentModelsBody({
                           select={() => Promise.resolve(true)}
                           compact
                           override={override}
-                          t={(key: string) => (key === 'effort.providerDefault' ? 'Default' : key)}
+                          t={t}
                         />
                       ) : (
                         <span className={css.noDir}>no session</span>

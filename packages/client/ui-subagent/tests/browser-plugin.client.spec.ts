@@ -120,7 +120,7 @@ describe('apply', () => {
         method: 'openResource',
         args: [
           'dsh-resource://subagentchat/session/c1?parent=parent&mode=continuable',
-          { kind: 'subagentchat', preferNewPane: true },
+          { kind: 'subagentchat' },
         ],
       },
       { method: 'refreshSubagents', args: [sid('parent')] },

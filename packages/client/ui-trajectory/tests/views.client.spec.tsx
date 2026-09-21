@@ -42,7 +42,7 @@ import { zh as conversationZh } from '@deepseek-ai/dsh-client-ui-conversation/sr
 import { apply as localeApply, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-trajectory/client'
 import { apply as nodeApply } from '@deepseek-ai/dsh-client-ui-trajectory'
-import type { TrajectoryTurnModel } from '../src/client/layout.ts'
+import { type TrajectoryTurnModel } from '../src/client/layout.ts'
 import { TrajectoryTimeline as LocalizedTrajectoryTimeline } from '../src/client/TrajectoryTimeline.tsx'
 import {
   TrajectoryView, type TrajectoryViewInjected,
@@ -150,11 +150,12 @@ function conversationSnapshot(
 
 function standaloneHistory(
   snapshot: TrajectorySnapshot,
+  overrides: Partial<SessionSnapshot> = {},
 ): Pick<
   ComponentProps<typeof TrajectoryView>,
   'useSession' | 'useTrajectory' | 'loadOlder'
 > {
-  const session = createSnapshotStore(sessionSnapshot(snapshot.eventNodes))
+  const session = createSnapshotStore({ ...sessionSnapshot(snapshot.eventNodes), ...overrides })
   const trajectory = createSnapshotStore(snapshot)
   return {
     useSession: bindSnapshotSelector(session),
@@ -1525,5 +1526,90 @@ describe('TrajectoryView state', () => {
 describe('node half', () => {
   it('node apply is an intentional no-op (loader-managed lifecycle only)', () => {
     expect(() => { nodeApply() }).not.toThrow()
+  })
+})
+
+describe('TrajectoryView revert rendering', () => {
+  const timestamp = (seq: number) => 1_700_000_000_000 + seq
+  const revertedNodes: LegacyConversationSlice['nodes'] = [
+    { kind: 'user', seq: 1, time: timestamp(1), content: [{ type: 'text', text: 'first prompt' }], source: null },
+    {
+      kind: 'assistant', seq: 2, time: timestamp(2), turn: 1, step: 1,
+      blocks: [{ kind: 'text', text: 'first answer' }],
+    },
+    { kind: 'user', seq: 3, time: timestamp(3), content: [{ type: 'text', text: 'second prompt' }], source: null },
+    {
+      kind: 'assistant', seq: 4, time: timestamp(4), turn: 2, step: 1,
+      blocks: [{ kind: 'text', text: 'second answer' }],
+    },
+    { kind: 'user', seq: 9, time: timestamp(9), content: [{ type: 'text', text: 'continued prompt' }], source: null },
+  ]
+
+  it('shows the revert boundary, the replacement, the shadowed span, and file outcomes', () => {
+    const snapshot = historySnapshot(revertedNodes, {
+      reverts: [
+        { seq: 6, time: timestamp(6), fromSeq: 1, cause: 'revert' },
+        { seq: 10, time: timestamp(10), fromSeq: null, cause: 'commit' },
+      ],
+      revertFiles: [
+        {
+          seq: 7,
+          revertSeq: 1,
+          outcomes: {
+            '/w/a.ts': { status: 'restored' },
+            '/w/b.ts': { status: 'trashed', dest: '/home/adam/.dsh/trash/b.ts' },
+            '/w/c.ts': { status: 'no_op' },
+          },
+        },
+        { seq: 8, revertSeq: 1, outcomes: { '/w/a.ts': { status: 'saved_beside', dest: '/w/a.ts.bak' } } },
+      ],
+      revertConflicts: [{
+        seq: 7,
+        conflictId: 'c1',
+        targetKey: '/w/d.ts',
+        displayPath: '/w/d.ts',
+        state: 'conflict',
+        boundarySeq: 1,
+      }],
+    })
+    const { container } = render(
+      <TrajectoryView
+        {...standaloneProps([])}
+        {...standaloneHistory(snapshot, {
+          revertFromSeq: null,
+          revertShadowRanges: [{ start: 1, end: 9 }],
+          revertFileOutcomes: {},
+          revertFileConflicts: [],
+        })}
+        {...standaloneDuration()}
+        t={tTrajectory}
+      />,
+    )
+    const text = screen.getByRole('table').textContent ?? ''
+    expect(text).toContain('Revert from #1 · turns 1–2 · 2 messages · span no longer live')
+    expect(text).toContain('/w/a.ts · Saved beside → /w/a.ts.bak')
+    expect(text).toContain('/w/b.ts · Trashed → /home/adam/.dsh/trash/b.ts')
+    expect(text).toContain('/w/d.ts · Conflict pending')
+    expect(text).not.toContain('/w/c.ts')
+    expect(container.querySelectorAll('tr[data-revert-role="boundary"]')).toHaveLength(2)
+    expect(container.querySelectorAll('tr[data-revert-role="file"]')).toHaveLength(3)
+    expect(container.querySelectorAll('tr[data-revert-role="replacement"]')).toHaveLength(1)
+    expect(container.querySelectorAll('tr[data-shadowed="true"]')).toHaveLength(4)
+    expect(screen.getAllByText('no longer live')).toHaveLength(4)
+    expect(screen.getAllByText('replacement')).toHaveLength(1)
+  })
+
+  it('leaves a session without reverts free of revert records', () => {
+    const { container } = render(
+      <TrajectoryView
+        {...standaloneProps([])}
+        {...standaloneHistory(historySnapshot(revertedNodes))}
+        {...standaloneDuration()}
+        t={tTrajectory}
+      />,
+    )
+    expect(screen.getByRole('table').textContent).toContain('continued prompt')
+    expect(container.querySelectorAll('tr[data-revert-role]')).toHaveLength(0)
+    expect(container.querySelectorAll('tr[data-shadowed="true"]')).toHaveLength(0)
   })
 })

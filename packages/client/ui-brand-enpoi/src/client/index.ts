@@ -19,6 +19,7 @@ import {
   type AgentModelsInjected,
 } from './AgentModelsBody.tsx'
 import { CapabilitiesBody, CapabilitiesIcon, refreshCapabilities, setOpenSettingsHandler } from './CapabilitiesBody.tsx'
+import { setOpenSettingsSection } from './settings-nav.ts'
 import {
   SubagentSessionsBody,
   SubagentSessionsIcon,
@@ -58,6 +59,7 @@ import {
 } from './persona-store.ts'
 import { refreshFromServer as refreshOrchestrationParams } from './params-store.ts'
 import { refreshFromServer as refreshPermissionsView } from './permissions-model.ts'
+import { refreshEffectiveRoles } from './role-effective.ts'
 import {
   getRoleRegistry,
   refreshFromServer as refreshRoleRegistry,
@@ -164,6 +166,7 @@ export function apply(ctx: Context): void {
         void refreshPermissionsView()
         void refreshRoleRegistry()
         void refreshCapabilities()
+        void refreshEffectiveRoles()
       }, 250)
     }
     const dispose = ctx.remote.$on('settings/document-updated', (ns) => {
@@ -324,11 +327,16 @@ export function apply(ctx: Context): void {
   // The drawer's Settings links resolve the shell's service lazily (the click
   // happens long after both plugins are up; either load order is fine).
   ctx.effect(() => {
-    setOpenSettingsHandler((id) => {
+    const openSection = (id: string): void => {
       const settingsUi = ctx.get('settingsUi') as { openSection?: (id: string) => void } | undefined
       settingsUi?.openSection?.(id)
-    })
-    return () => { setOpenSettingsHandler(null) }
+    }
+    setOpenSettingsHandler(openSection)
+    setOpenSettingsSection(openSection)
+    return () => {
+      setOpenSettingsHandler(null)
+      setOpenSettingsSection(null)
+    }
   }, 'enpoi: settings-ui opener')
 
   const fallbackDirectory = createCatalogDirectoryFace(ctx)
@@ -354,6 +362,9 @@ export function apply(ctx: Context): void {
         resolveDirectory: sessionId => resolveAgentModelsDirectory(ctx, fallbackDirectory, sessionId),
         assignPersona: (personaId, selection) => { void setPersonaAssignment(personaId, selection) },
         clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
+        // The embedded picker renders in the shared `model` namespace, so its
+        // Groups title and "n models" rows resolve instead of echoing raw keys.
+        t: ctx.locale.bind('model'),
       }),
     }, AgentModelsBody)
     yield ctx.slots.register({

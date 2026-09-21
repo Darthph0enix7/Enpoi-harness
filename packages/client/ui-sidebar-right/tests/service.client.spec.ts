@@ -159,6 +159,54 @@ describe('SidebarRightController — opening', () => {
     expect(titles()).toContain('hex view')
   })
 
+  it('lands a panel-placement resource as the panel\'s own tab, never in the editor pane', () => {
+    const { controller, tabs, instance, publish, layout, tabOf, expand } = harness()
+    tabs.register({
+      id: 'test/session-view',
+      kind: 'sessionview',
+      patterns: ['dsh-resource://test/session/**'],
+      opensIn: 'panel',
+      title: () => 'session view',
+    })
+    expand()
+    publish()
+    controller.openResource('dsh-resource://test/session/s-test/child?parent=s-test')
+    const tab = tabOf('session view')
+    // Not an editor record: the preview pane is untouched and the panel's own
+    // pane holds the tab, focused, without a split.
+    expect(instance.getSnapshot().bySession[SESSION]?.editorTabId).toBeUndefined()
+    expect(getPane(layout(), layout().activePaneId).activeTabId).toBe(tab)
+    expect(dockPaneIds(layout())).toHaveLength(1)
+  })
+
+  it('brings the lit kind\'s page forward instead of collapsing while another kind is in front', () => {
+    const { controller, tabs, publish, layout, tabOf, expand } = harness()
+    tabs.register({
+      id: 'test/session-view',
+      kind: 'sessionview',
+      patterns: ['dsh-resource://test/session/**'],
+      opensIn: 'panel',
+      title: () => 'session view',
+    })
+    expand()
+    publish()
+    controller.selectKind('guide')
+    publish()
+    expect(controller.active()?.kind).toBe('guide')
+    // Tab the guide behind a session view: the rail's lit icon now asks for the
+    // page instead of collapsing the column.
+    controller.openResource('dsh-resource://test/session/s-test/child')
+    publish()
+    expect(controller.active()?.kind).toBe('sessionview')
+    controller.selectKind('guide')
+    expect(layout().expanded).toBe(true)
+    expect(getPane(layout(), layout().activePaneId).activeTabId).toBe(tabOf('seed'))
+    // With the page in front the same gesture is the collapse again.
+    publish()
+    controller.selectKind('guide')
+    expect(layout().expanded).toBe(false)
+  })
+
   it('lands a new tab in the pane the caller names', () => {
     const { controller, instance, publish, layout, tabOf, expand } = harness()
     expand()

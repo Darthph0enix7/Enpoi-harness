@@ -56,6 +56,7 @@ const KIND_LABEL_KEY: Record<TrajectoryCellKind, TrajectoryKey> = {
   message: 'kind.assistant',
   tool: 'kind.tool',
   subtool: 'kind.subtool',
+  revert: 'kind.revert',
 }
 
 function ToolWrenchIcon(): ReactNode {
@@ -119,6 +120,26 @@ function CompactedIcon(): ReactNode {
   )
 }
 
+function RevertIcon(): ReactNode {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      data-role-icon="revert"
+      aria-hidden="true"
+    >
+      <path d="M4 3v6h6" />
+      <path d="M4 9a5 5 0 1 0 1.8-3.85" />
+    </svg>
+  )
+}
+
 const KIND_ICON: Record<TrajectoryCellKind, ReactNode> = {
   system: <IconSettingsOutline16 size={13} />,
   user: <IconUserOutline16 size={13} />,
@@ -127,6 +148,7 @@ const KIND_ICON: Record<TrajectoryCellKind, ReactNode> = {
   message: <IconSparkle16 size={13} />,
   tool: <ToolWrenchIcon />,
   subtool: <ToolWrenchIcon />,
+  revert: <RevertIcon />,
 }
 
 interface TableRecord {
@@ -2727,6 +2749,8 @@ export function TrajectoryTable({
                       data-turn-start={record.turnStart || undefined}
                       data-error={record.cell.isError || undefined}
                       data-running={stateOf(record) === 'running' || undefined}
+                      data-shadowed={record.cell.shadowed || undefined}
+                      data-revert-role={record.cell.revertRole}
                       data-turn-end={record.turnEnd || undefined}
                       data-collapsed-summary={record.collapsedSummaryKind}
                       data-selected={!isCollapsedSummary && selectedIndex === record.cell.index || undefined}
@@ -2851,7 +2875,9 @@ export function TrajectoryTable({
                                             ? css.assistantVioletBright
                                             : record.cell.kind === 'subtool'
                                               ? css.subtoolAmber
-                                              : css[record.cell.kind]
+                                              : record.cell.kind === 'revert'
+                                                ? css.revert
+                                                : css[record.cell.kind]
                                 }`}
                                 data-role-kind={record.cell.kind}
                               >
@@ -2888,6 +2914,14 @@ export function TrajectoryTable({
                                   ? listDisplayText
                                   : `${listDisplayText} → ${resultText}`}
                               >
+                                {record.cell.shadowed === true && (
+                                  <span className={css.shadowedBadge}>{t('revert.shadowedBadge')}</span>
+                                )}
+                                {record.cell.revertRole === 'replacement' && (
+                                  <span className={css.replacementBadge}>
+                                    {t('revert.replacementBadge')}
+                                  </span>
+                                )}
                                 <span className={resultText === undefined ? undefined : css.resultRequest}>
                                   <RecordListText
                                     displayText={displayText}

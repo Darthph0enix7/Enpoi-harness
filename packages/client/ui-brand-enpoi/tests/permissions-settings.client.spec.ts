@@ -62,8 +62,12 @@ describe('registry role surfaces', () => {
     expect(builtRoleAvailability('muse', 'bash', registry)).toBe(true)
     expect(builtRoleAvailability('muse', 'web_search', registry)).toBe(false)
     expect(builtRoleAvailability('ghost', 'bash', registry)).toBeUndefined()
-    // A shipped surface still wins over a registry entry for the same id.
-    expect(builtRoleAvailability('oracle', 'subagent', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(true)
+    // The registry entry (Dynamic → Roles) is the fallback surface and wins
+    // over the shipped table for the same id; the Permissions allowlist is
+    // read by the caller before this fallback (doc 61 WP-S6).
+    const narrowed = mergeRoleRegistry({ oracle: { tools: { available: [] } } })
+    expect(builtRoleAvailability('oracle', 'subagent', narrowed)).toBe(false)
+    expect(builtRoleAvailability('oracle', 'read', narrowed)).toBe(false)
     // Without a registry the shipped behavior is unchanged.
     expect(builtRoleAvailability('fixer', 'edit')).toBe(true)
     expect(builtRoleAvailability('ghost', 'edit')).toBeUndefined()

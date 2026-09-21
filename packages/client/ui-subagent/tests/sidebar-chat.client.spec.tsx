@@ -101,6 +101,7 @@ describe('Sidebar chat registration', () => {
 
     expect(definition?.id).toBe(SUBAGENT_CHAT_ID)
     expect(definition?.kind).toBe('subagentchat')
+    expect(definition?.opensIn).toBe('panel')
     expect(definition?.canOpen?.(subagentChatAddress(ADDRESS))).toBe(true)
     expect(definition?.canOpen?.('dsh-resource://subagentchat/invalid')).toBe(false)
     expect(definition?.title(subagentChatAddress(ADDRESS))).toBe('Worker')

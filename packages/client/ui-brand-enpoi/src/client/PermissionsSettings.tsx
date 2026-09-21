@@ -43,6 +43,7 @@ import {
   subscribeRoleRegistry,
   type RoleRegistryMap,
 } from './role-registry.ts'
+import { openSettingsSection } from './settings-nav.ts'
 import css from './PermissionsSettings.module.css'
 
 /** CSS-module reads are `string | undefined` under noUncheckedIndexedAccess; keys are static. */
@@ -298,7 +299,12 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
         ) : undefined}
       >
         <div className={c('paneHint')}>
-          Rules refine the global policy. The eye marks a tool in this role allowlist.
+          Rules refine the global policy. The eye marks a tool in this role allowlist — the hard gate: it wins over the
+          role's Dynamic surface for the tools it names.
+          {' '}
+          <button type="button" className={c('crossLink')} onClick={() => { openSettingsSection('dynamic') }}>
+            Open Dynamic → Roles
+          </button>
         </div>
         {toolRows.filter(row => !row.id.startsWith('mcp__')).map(row => (
           <PolicyRow
@@ -505,8 +511,10 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
     const previous = perms
     if (perms === null) return
     if (AGENT_ROSTER.includes(agent) || !Object.hasOwn(perms.agents ?? {}, agent)) return
-    const agentsMap = { ...(perms.agents ?? {}) }
-    delete agentsMap[agent]
+    // Rebuild instead of deleting: the removed subject drops out of the map.
+    const agentsMap = Object.fromEntries(
+      Object.entries(perms.agents ?? {}).filter(([candidate]) => candidate !== agent),
+    ) as NonNullable<typeof perms.agents>
     setPerms({ ...perms, agents: agentsMap })
     setSelected(null)
     void unsetPermissionPath(['agents', agent])

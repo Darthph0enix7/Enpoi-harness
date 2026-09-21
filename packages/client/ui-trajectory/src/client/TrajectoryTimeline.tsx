@@ -91,6 +91,7 @@ function timelineKindLabel(kind: TrajectoryCellKind, t: TrajectoryTranslate): st
     case 'message': return t('kind.assistant')
     case 'tool': return t('kind.tool')
     case 'subtool': return t('kind.subtool')
+    case 'revert': return t('kind.revert')
   }
 }
 

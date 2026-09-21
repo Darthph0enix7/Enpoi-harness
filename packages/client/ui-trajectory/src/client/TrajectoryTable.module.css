@@ -604,6 +604,41 @@
   background: var(--dsw-alias-state-business-tertiary);
 }
 
+.revert {
+  color: var(--dsw-alias-state-error-secondary);
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-state-error-primary) 14%,
+    var(--dsw-alias-bg-layer-1)
+  );
+}
+
+.shadowedBadge,
+.replacementBadge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 16px;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font: var(--dsw-font-xxs-12);
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.shadowedBadge {
+  color: var(--dsw-alias-label-tertiary);
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 14%, transparent);
+}
+
+.replacementBadge {
+  color: var(--dsw-alias-state-success-primary);
+  background: var(--dsw-alias-state-success-tertiary);
+}
+
 .systemNeutral {
   color: var(--dsw-alias-label-secondary);
   background: var(--dsw-alias-bg-module-platform);

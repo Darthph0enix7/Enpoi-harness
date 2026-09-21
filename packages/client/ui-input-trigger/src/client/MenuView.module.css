@@ -26,6 +26,11 @@
   border: 0;
   border-radius: 20px;
   background: var(--dsw-specific-menu);
+  /* The surface is translucent; without a backdrop blur the text under it
+     stays sharp and the crumbs/rows lose legibility. Same token set as the
+     composer card, and the strength stays hot-swappable from the skin-center
+     setting. */
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
   box-shadow: var(--dsw-elevation-prominent);
 }

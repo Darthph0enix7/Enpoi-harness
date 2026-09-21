@@ -21,6 +21,7 @@ import { registerTrajectoryAssistantDefinition } from './trajectory-assistant-de
 import { registerTrajectoryCompactionDefinitions } from './trajectory-compaction-definition.ts'
 import { registerTrajectoryMessageDefinitions } from './trajectory-message-definitions.ts'
 import { registerTrajectoryRequestHeaderDefinition } from './trajectory-request-header-definition.ts'
+import { registerTrajectoryRevertDefinition } from './trajectory-revert-definition.ts'
 import {
   EMPTY_TRAJECTORY_SNAPSHOT, registerTrajectoryConversationView,
 } from './trajectory-snapshot-builder.ts'
@@ -71,6 +72,7 @@ export function apply(ctx: Context): void {
   registerTrajectoryAssistantDefinition(ctx)
   registerTrajectoryToolDefinition(ctx)
   registerTrajectoryCompactionDefinitions(ctx)
+  registerTrajectoryRevertDefinition(ctx)
   registerTrajectoryConversationView(ctx)
   ctx.uiSession.provide({
     hooks: ['trajectory'],

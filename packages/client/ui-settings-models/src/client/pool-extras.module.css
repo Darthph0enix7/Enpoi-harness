@@ -72,16 +72,37 @@
   box-sizing: border-box;
   height: 32px;
   padding: 0 8px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
+  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
   border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-1);
+  background-color: var(--dsw-specific-input-major);
+  backdrop-filter: blur(8px) saturate(140%);
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.poolStrategy:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l3);
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.poolStrategy:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, transparent);
 }
 
 .poolStrategy:disabled {
   color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+
+/* The native dropdown list cannot inherit the glass surface; keep it legible. */
+.poolStrategy option {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .poolIconButton {

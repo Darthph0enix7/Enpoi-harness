@@ -24,6 +24,7 @@ const KIND_LABEL_KEY: Record<TrajectoryCellKind, TrajectoryKey> = {
   message: 'kind.message',
   tool: 'kind.tool',
   subtool: 'kind.sub',
+  revert: 'kind.revert',
 }
 
 const TAG_CLASS: Record<TrajectoryCellKind, string | undefined> = {
@@ -34,6 +35,7 @@ const TAG_CLASS: Record<TrajectoryCellKind, string | undefined> = {
   message: css.tagMessage,
   tool: css.tagTool,
   subtool: css.tagSubtool,
+  revert: css.tagRevert,
 }
 
 /**
@@ -59,6 +61,8 @@ export function TrajectoryCell({
   callId: _callId,
   toolName: _toolName,
   isError: _isError,
+  shadowed: _shadowed,
+  revertRole: _revertRole,
   timeSeconds,
   startedAt: _startedAt,
   input,

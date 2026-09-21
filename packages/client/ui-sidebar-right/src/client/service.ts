@@ -171,7 +171,9 @@ export interface ISidebarRight {
    * type in force opens the address (its `canOpen` still applies). An address
    * outside `dsh-resource://`, or one no type will open, is a wiring mistake,
    * not a user error, so it throws. The column expands in the same step,
-   * because content the user cannot see is not opened.
+   * because content the user cannot see is not opened. The claiming type's
+   * `opensIn` picks the pane: the editor pane beside the panel by default, the
+   * panel's own pane for a type that asks for it.
    * @param address - a `dsh-resource://<type>/…` address.
    * @param options - placement, the opening type, and navigation parameters.
    */
@@ -364,8 +366,9 @@ export class SidebarRightController implements ISidebarRight {
   }
 
   // enpoi: a resource open lands in the editor pane beside the panel, never as
-  // the panel's page, unless the caller names a placement — a pane, a replaced
-  // tab, or a preferred split — which asks for the panel itself.
+  // the panel's page, unless its type asks for the panel (`opensIn: 'panel'`) or
+  // the caller names a placement — a pane, a replaced tab, or a preferred split
+  // — which also asks for the panel itself.
   /** Claim a resource and place it in one session; an address outside the scheme or one no type claims throws. */
   private placeResource(
     sessionId: SessionId,
@@ -376,8 +379,10 @@ export class SidebarRightController implements ISidebarRight {
     if (!address.startsWith(RESOURCE_SCHEME)) {
       throw new Error(`sidebarRight: no registered tab type claims "${address}"`)
     }
+    const claim = this.tabs.claim(address, options.kind)
     const editor = options.paneId === undefined && options.preferNewPane !== true && options.replaceTab === undefined
-    this.place(sessionId, actions, this.tabs.claim(address, options.kind), address, options, options.params, editor)
+      && (this.tabs.get(claim.kind)?.opensIn ?? 'editor') === 'editor'
+    this.place(sessionId, actions, claim, address, options, options.params, editor)
   }
 
   /** Place a page type in one session at the address pages are recorded under; an unregistered kind throws. */
@@ -454,16 +459,18 @@ export class SidebarRightController implements ISidebarRight {
   /**
    * Open or collapse the page a rail icon stands for.
    *
-   * The icon of the already-shown kind collapses the panel; any other icon
-   * opens the panel on its kind, focusing the page where the session already
-   * holds one. The rail itself never hides.
+   * The icon of the already-shown kind collapses the panel while that kind's
+   * page is the one in front; any other click opens the panel on its kind,
+   * focusing the page where the session already holds one — including when
+   * another kind's tab (an embedded session chat) is in front of it. The rail
+   * itself never hides.
    * @param kind - the kind whose rail icon was clicked.
    */
   selectKind(kind: string): void {
     const { sessionId, actions } = this.require()
     const rail = this.rail.state.getSnapshot()
     const shown = rail.kind ?? this.tabs.rail()[0]?.kind ?? null
-    if (shown === kind && this.mounted()?.layout.expanded === true) {
+    if (shown === kind && this.mounted()?.layout.expanded === true && this.active()?.kind === kind) {
       this.rail.setOpen(false)
       actions.setExpanded(sessionId, false)
       return

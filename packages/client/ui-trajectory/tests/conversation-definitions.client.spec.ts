@@ -16,6 +16,7 @@ import { registerTrajectoryCompactionDefinitions } from '../src/client/trajector
 import type { TrajectorySnapshot } from '../src/client/trajectory-contract.ts'
 import { registerTrajectoryMessageDefinitions } from '../src/client/trajectory-message-definitions.ts'
 import { registerTrajectoryRequestHeaderDefinition } from '../src/client/trajectory-request-header-definition.ts'
+import { registerTrajectoryRevertDefinition } from '../src/client/trajectory-revert-definition.ts'
 import { trajectoryViewDefinition } from '../src/client/trajectory-snapshot-builder.ts'
 import { registerTrajectoryToolDefinition } from '../src/client/trajectory-tool-definition.ts'
 
@@ -38,6 +39,7 @@ registerTrajectoryRequestHeaderDefinition(registrationContext)
 registerTrajectoryAssistantDefinition(registrationContext)
 registerTrajectoryToolDefinition(registrationContext)
 registerTrajectoryCompactionDefinitions(registrationContext)
+registerTrajectoryRevertDefinition(registrationContext)
 
 class TestEventDefinitions {
   entries(): readonly ConversationNodeDefinition[] {
@@ -965,5 +967,112 @@ describe('Trajectory conversation Definitions', () => {
       { kind: 'user', seq: 12 },
       { kind: 'steering', seq: 16 },
     ])
+  })
+})
+
+describe('Trajectory revert Definitions', () => {
+  it('projects revert boundaries, sealed file results, and conflicts', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', {
+        id: 'u1', role: 'user', content: [{ type: 'text', text: 'first' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' }),
+      at(4, 'assistant/message', { turn: 1, step: 1, message: assistantMessage('a1', 'one') }),
+      at(5, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+      at(6, 'revert/state', { fromSeq: 3, cause: 'revert' }),
+      at(7, 'revert/file-result', {
+        revertSeq: 3,
+        outcomes: { '/w/a.ts': { status: 'restored', toSha: 'abc' } },
+      }),
+      at(8, 'revert/file-conflict', {
+        conflictId: 'c1', targetKey: '/w/b.ts', displayPath: '/w/b.ts', state: 'conflict',
+        reason: 'manual edit', boundarySeq: 3, preSha: null, postSha: null, currentSha: null,
+      }),
+      at(9, 'user/message', {
+        id: 'u2', role: 'user', content: [{ type: 'text', text: 'replacement' }],
+        source: { kind: 'user' },
+      }, { surfaceOp: { op: 'replace', startSeq: 3, endSeq: 4 } }),
+      at(10, 'revert/state', { fromSeq: null, cause: 'commit' }),
+      at(11, 'turn/start', { turn: 2 }),
+      at(12, 'assistant/message', { turn: 2, step: 1, message: assistantMessage('a2', 'two') }),
+    ])
+
+    expect(snapshot(value).reverts).toEqual([
+      { seq: 6, time: 1_700_000_000_006, fromSeq: 3, cause: 'revert' },
+      { seq: 10, time: 1_700_000_000_010, fromSeq: null, cause: 'commit' },
+    ])
+    expect(snapshot(value).revertFiles).toEqual([{
+      seq: 7,
+      revertSeq: 3,
+      outcomes: { '/w/a.ts': { status: 'restored', toSha: 'abc' } },
+    }])
+    expect(snapshot(value).revertConflicts).toEqual([{
+      seq: 8,
+      conflictId: 'c1',
+      targetKey: '/w/b.ts',
+      displayPath: '/w/b.ts',
+      state: 'conflict',
+      boundarySeq: 3,
+    }])
+  })
+
+  it('leaves a session without revert events unchanged', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', {
+        id: 'u1', role: 'user', content: [{ type: 'text', text: 'first' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' }),
+      at(4, 'assistant/message', { turn: 1, step: 1, message: assistantMessage('a1', 'one') }),
+    ])
+
+    expect(snapshot(value).reverts).toEqual([])
+    expect(snapshot(value).revertFiles).toEqual([])
+    expect(snapshot(value).revertConflicts).toEqual([])
+    expect(snapshot(value).eventNodes.map(node => node.kind)).toEqual(['user', 'assistant'])
+  })
+
+  it('pins the revert Definition edges the engine cannot reach', () => {
+    const definition = DEFINITIONS.find(candidate => candidate.kind === 'trajectory-revert')
+    if (definition === undefined) throw new Error('trajectory-revert Definition is not registered')
+    const input = at(6, 'revert/state', { fromSeq: 3, cause: 'revert' })
+    const invalidStart = { ...input, role: 'start' as const, location: { kind: 'session' as const } }
+    const state = { seq: 6, time: 6, fromSeq: 3, cause: 'revert' as const }
+    expect(definition.match(at(1, 'turn/start', { turn: 1 }).event)).toBeNull()
+    expect(() => definition.start(
+      {} as never,
+      { ...invalidStart, event: at(1, 'turn/start', { turn: 1 }).event },
+      {} as never,
+    )).toThrow('trajectory-revert start requires revert/state')
+    expect(definition.update({ state } as never, invalidStart)).toBe(state)
+    expect(definition.buildViewNode?.({ state: undefined } as never)).toBeNull()
+    // Logs written before `cause` existed derive it from `fromSeq`.
+    const legacyRestore = { ...invalidStart, event: at(6, 'revert/state', { fromSeq: null }).event }
+    expect(definition.start({} as never, legacyRestore, {} as never)).toMatchObject({ cause: 'restore' })
+    const legacyRevert = { ...invalidStart, event: at(6, 'revert/state', { fromSeq: 3 }).event }
+    expect(definition.start({} as never, legacyRevert, {} as never)).toMatchObject({ cause: 'revert' })
+
+    const files = DEFINITIONS.find(candidate => candidate.kind === 'trajectory-revert-files')
+    if (files === undefined) throw new Error('trajectory-revert-files Definition is not registered')
+    expect(files.match(at(1, 'turn/start', { turn: 1 }).event)).toBeNull()
+    expect(() => files.start(
+      {} as never,
+      { ...invalidStart, event: at(1, 'turn/start', { turn: 1 }).event },
+      {} as never,
+    )).toThrow('trajectory-revert-files start requires revert/file-result')
+    expect(files.update({ state } as never, invalidStart)).toBe(state)
+    expect(files.buildViewNode?.({ state: undefined } as never)).toBeNull()
+
+    const conflict = DEFINITIONS.find(candidate => candidate.kind === 'trajectory-revert-conflict')
+    if (conflict === undefined) throw new Error('trajectory-revert-conflict Definition is not registered')
+    expect(conflict.match(at(1, 'turn/start', { turn: 1 }).event)).toBeNull()
+    expect(() => conflict.start(
+      {} as never,
+      { ...invalidStart, event: at(1, 'turn/start', { turn: 1 }).event },
+      {} as never,
+    )).toThrow('trajectory-revert-conflict start requires revert/file-conflict')
+    expect(conflict.update({ state } as never, invalidStart)).toBe(state)
+    expect(conflict.buildViewNode?.({ state: undefined } as never)).toBeNull()
   })
 })

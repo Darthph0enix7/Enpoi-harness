@@ -368,9 +368,13 @@
   border: none;
   border-radius: 50%;
   background: transparent;
-  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  color: var(--dsw-alias-state-error-primary, #e5716f);
   cursor: pointer;
-  transition: color 120ms ease, background 120ms ease;
+}
+
+.patternRemove:hover {
+  color: var(--dsw-alias-state-error-primary, #f87171);
+  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(229, 113, 111, 0.16));
 }
 
 .patternRemove:hover {
@@ -445,6 +449,7 @@
 }
 
 /* Grant revoke */
+/* Destructive actions read as danger at rest, never only on hover. */
 .revokeBtn {
   display: inline-flex;
   align-items: center;
@@ -454,14 +459,41 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  color: var(--dsw-alias-state-error-primary, #e5716f);
   cursor: pointer;
   transition: color 120ms ease, background 120ms ease;
 }
 
 .revokeBtn:hover {
-  color: #e5716f;
-  background: rgba(229, 113, 111, 0.1);
+  color: var(--dsw-alias-state-error-primary, #f87171);
+  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(229, 113, 111, 0.16));
+}
+
+.revokeBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-interactive-bg-hover-accent, rgba(127, 227, 236, 0.45));
+}
+
+.crossLink {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--dsw-alias-link, #7fe3ec);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.crossLink:hover {
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+}
+
+.crossLink:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-interactive-bg-hover-accent, rgba(127, 227, 236, 0.45));
 }
 
 /* Mobile: stack rail over pane, rail becomes a wrapping row */

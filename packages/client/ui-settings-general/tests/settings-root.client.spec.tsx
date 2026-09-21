@@ -337,6 +337,9 @@ describe('SettingsPanel navigation', () => {
         { id: 'general', order: 0, label: 'General' },
         { id: 'models', order: 10, label: 'Models' },
         { id: 'agent-presets', order: 20, label: 'Agent presets' },
+        { id: 'orchestration', order: 21, label: 'Orchestration' },
+        { id: 'permissions', order: 22, label: 'Permissions' },
+        { id: 'dynamic', order: 23, label: 'Dynamic' },
         { id: 'plugins', order: 30, label: 'Plugins' },
         { id: 'archived-sessions', order: 40, label: 'Archived sessions' },
         { id: 'contributed', order: 50, label: 'Contributed' },
@@ -344,14 +347,15 @@ describe('SettingsPanel navigation', () => {
     })
     openPanel()
     // Glyphs carry no id of their own, so the drawn paths are what tells them apart.
-    const glyphs = ['General', 'Models', 'Agent presets', 'Plugins', 'Archived sessions', 'Contributed']
+    const glyphs = ['General', 'Models', 'Agent presets', 'Orchestration', 'Permissions', 'Dynamic', 'Plugins', 'Archived sessions', 'Contributed']
       .map(name => screen.getByRole('button', { name }).querySelector('svg')?.innerHTML)
 
     expect(glyphs.every(glyph => glyph !== undefined && glyph !== '')).toBe(true)
-    // The four ids the shell names get their own glyph; every other section —
-    // including one this package never heard of — shares the gear.
-    expect(new Set(glyphs.slice(0, 5)).size).toBe(5)
-    expect(glyphs[5]).toBe(glyphs[0])
+    // The ids the shell names get their own glyph — no two share, and the
+    // fork's four operator sections never fall back to the settings gear.
+    expect(new Set(glyphs.slice(0, 8)).size).toBe(8)
+    // Every other section — including one this package never heard of — shares the gear.
+    expect(glyphs[8]).toBe(glyphs[0])
   })
 
   it('switches the rendered section on nav click', () => {

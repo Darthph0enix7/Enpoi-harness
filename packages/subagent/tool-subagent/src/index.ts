@@ -611,7 +611,12 @@ function childToolFilter(
   const sharedDeny = role === 'oracle'
     ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
     : SHARED_CHILD_DENY
-  const available = roleEntry?.available ?? roleAvailableAllowlist(document, role)
+  // Layer precedence (doc 61 WP-S6): the permission allowlist is the operator's
+  // hard gate and wins; the role registry's `tools.available` (Dynamic → Roles)
+  // is the fallback that gives a user-defined role a surface; absent both, the
+  // registry entry's built-in deny extras apply. The shared anti-leak floor is
+  // always unioned in.
+  const available = roleAvailableAllowlist(document, role) ?? roleEntry?.available
   if (available !== undefined) {
     // Operator-defined surface: allow the named tools, deny everything else
     // except the shared anti-leak floor (never widen what SHARED_CHILD_DENY
@@ -631,9 +636,10 @@ function childToolFilter(
 /**
  * Operator-overridable role availability (doc 55 P2): when the permission
  * settings define `agents[role].available`, that allowlist REPLACES the
- * built-in role deny map (the operator's explicit surface wins wholesale);
- * absent → the registry's `tools.available` or the built-in ROLE_CHILD_DENY
- * table applies. Read fresh per spawn, so edits hot-swap on the next dispatch.
+ * registry's `tools.available` and the built-in role deny map (the operator's
+ * explicit surface wins wholesale); absent → the registry's `tools.available`
+ * or the built-in ROLE_CHILD_DENY table applies. Read fresh per spawn, so
+ * edits hot-swap on the next dispatch.
  * @param document - the live `enpoi-orchestration` document, if any.
  * @param role - the selected specialist role, if any.
  * @returns the permission allowlist, or undefined when the operator set none.

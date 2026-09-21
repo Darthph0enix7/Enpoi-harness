@@ -37,6 +37,11 @@ function mutateRejected(): Response {
   return jsonResponse({ result: { ok: false, error: { code: 'internal', message: 'nope', details: {} } } })
 }
 
+/** One `enpoiRoles.list` answer; empty keeps the panel on the settings layer. */
+function effectiveRolesResponse(): Response {
+  return jsonResponse({ result: { ok: true, value: { roles: [] } } })
+}
+
 beforeEach(() => {
   vi.resetModules()
 })
@@ -57,6 +62,7 @@ describe('Fix 1 — a focused draft survives a pushed refresh', () => {
       if (body.method === 'settings.describe') {
         return describeResponse({ roles: { fixer: { label: serverLabel } } }, 1)
       }
+      if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
       mutations.push(body)
       return mutateOk(1)
     }))
@@ -92,6 +98,7 @@ describe('Fix 2 — a hung write times out and releases the queue', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as RequestBody
       if (body.method === 'settings.describe') return describeResponse({ roles: {} }, 1)
+      if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
       mutations.push(body)
       if (hanging) return new Promise<Response>(() => { /* never settles */ })
       return mutateOk(1)
@@ -157,6 +164,7 @@ describe('Fix 4 — unchanged pushes do not re-describe', () => {
         revision += 1
         return describeResponse({ roles: serverRoles }, revision)
       }
+      if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
       return mutateOk(revision)
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')

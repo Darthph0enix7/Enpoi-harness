@@ -256,8 +256,8 @@ export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
   orchestrator: FULL_OPERATOR_SURFACE,
   sysadmin: FULL_OPERATOR_SURFACE,
   creator: FULL_OPERATOR_SURFACE,
-  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch', 'run_code'],
-  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch', 'run_code'],
+  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
+  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
   explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save'],
   librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
   oracle: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'memory_rescind', 'memory_confirm', 'web_search', 'web_fetch', 'request_evidence', 'subagent', 'task'],
@@ -273,24 +273,25 @@ export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
 }
 
 /**
- * The effective default surface for one role: the shipped role table wins,
- * then the registry role's `tools.available` (the user-defined role surface).
+ * The effective fallback surface for one role when the Permissions page has no
+ * explicit `agents[role].available`: the registry role's `tools.available`
+ * (Dynamic → Roles) wins, then the shipped role table. The caller reads the
+ * permissions allowlist first — it is the operator's hard gate.
  * @param agent - the subject role id, or undefined.
  * @param registry - the effective role registry.
- * @returns the default allowlist, or undefined when the role has no surface.
+ * @returns the fallback allowlist, or undefined when the role has no surface.
  */
 export function roleSurfaceFor(agent: string | undefined, registry?: RoleRegistryMap): readonly string[] | undefined {
   if (agent === undefined) return undefined
-  const surface = BUILT_ROLE_SURFACE[agent]
-  if (surface !== undefined) return surface
   const available = registry?.[agent]?.tools?.available
-  return Array.isArray(available) ? available : undefined
+  if (Array.isArray(available)) return available
+  return BUILT_ROLE_SURFACE[agent]
 }
 
 /**
- * Effective availability for one role×tool: an explicit `available` allowlist
- * wins; otherwise the built-in role surface decides, then a registry role's
- * `tools.available`; undefined = no known surface (all eyes off).
+ * Fallback availability for one role×tool when the Permissions page has no
+ * explicit allowlist entry: the registry role's surface (Dynamic → Roles)
+ * decides, then the shipped role table; undefined = no known surface.
  * @param agent - the subject role id, or undefined.
  * @param tool - the tools-map key.
  * @param registry - the effective role registry.

@@ -6,6 +6,7 @@ import type {
 import { COMPACTION_INTERRUPTED_ERROR } from './copy-codes.ts'
 import type {
   TrajectoryConversationViewNode, TrajectoryRequestHeaderState,
+  TrajectoryRevertBoundary, TrajectoryRevertConflict, TrajectoryRevertFileResult,
   TrajectorySnapshot,
 } from './trajectory-contract.ts'
 
@@ -21,6 +22,9 @@ export const EMPTY_TRAJECTORY_SNAPSHOT: TrajectorySnapshot = {
   callSchemas: new Map(),
   partial: null,
   runningCalls: EMPTY_LIST,
+  reverts: EMPTY_LIST,
+  revertFiles: EMPTY_LIST,
+  revertConflicts: EMPTY_LIST,
 }
 
 function stepKey(turn: number, step: number): string {
@@ -214,6 +218,9 @@ export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
     }[] = []
     const callSchemas = new Map<string, ToolSchema>()
     const consumedPromptChanges = new Set<number>()
+    const reverts: TrajectoryRevertBoundary[] = []
+    const revertFiles: TrajectoryRevertFileResult[] = []
+    const revertConflicts: TrajectoryRevertConflict[] = []
     let previousHeader: TrajectoryRequestHeaderState | undefined
     let previousTools: ReadonlyMap<string, ToolSchema> = new Map()
     let partial: TrajectorySnapshot['partial'] = null
@@ -266,6 +273,18 @@ export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
         boundaries.push({ seq: data.seq, time: data.time })
         continue
       }
+      if (data.kind === 'revert') {
+        reverts.push(data.revert)
+        continue
+      }
+      if (data.kind === 'revert-files') {
+        revertFiles.push(data.files)
+        continue
+      }
+      if (data.kind === 'revert-conflict') {
+        revertConflicts.push(data.conflict)
+        continue
+      }
       turnEndings.push({
         turn: data.turn,
         time: data.time,
@@ -287,6 +306,9 @@ export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
       callSchemas,
       partial,
       runningCalls,
+      reverts,
+      revertFiles,
+      revertConflicts,
     }
   }
 

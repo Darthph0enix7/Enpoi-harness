@@ -123,14 +123,23 @@
   position: absolute;
   inset: 0;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.1));
   transition: all 0.15s ease;
 }
 
+.switch:hover .switchTrack {
+  border-color: var(--dsw-alias-border-l4, rgba(255, 255, 255, 0.26));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.16));
+}
+
+.switchInput:focus-visible + .switchTrack {
+  box-shadow: 0 0 0 2px var(--dsw-alias-interactive-bg-hover-accent, rgba(127, 227, 236, 0.45));
+}
+
 .switchOn {
-  background: rgba(52, 211, 153, 0.3);
-  border-color: rgba(52, 211, 153, 0.5);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #34d399) 26%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #34d399) 55%, transparent);
 }
 
 .switchKnob {
@@ -146,8 +155,8 @@
 
 .switchKnobOn {
   left: 17px;
-  background: #34d399;
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.8);
+  background: var(--dsw-alias-state-success-primary, #34d399);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--dsw-alias-state-success-primary, #34d399) 70%, transparent);
 }
 
 .btn {

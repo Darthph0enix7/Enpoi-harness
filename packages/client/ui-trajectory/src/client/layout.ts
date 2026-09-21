@@ -17,9 +17,13 @@ import type {
   TrajectoryCellProps,
   TrajectorySourceBlock,
 } from './trajectory-record.ts'
-import type { TrajectorySnapshot } from './trajectory-contract.ts'
+import type {
+  TrajectoryRevertBoundary, TrajectoryRevertConflict, TrajectoryRevertFileResult,
+  TrajectoryRevertView, TrajectorySnapshot,
+} from './trajectory-contract.ts'
+import type { SessionRevertShadowRange } from '@deepseek-ai/dsh-api-session-controller/client'
 import { formatElapsedSeconds } from './trajectory-record.ts'
-import type { TrajectoryTranslate } from './locales.ts'
+import type { TrajectoryKey, TrajectoryTranslate } from './locales.ts'
 import { COMPACTION_INTERRUPTED_ERROR } from './copy-codes.ts'
 
 /** One Message or Step group inside a turn. */
@@ -44,6 +48,14 @@ export interface TrajectoryLayoutInput {
   runningCalls: TrajectorySnapshot['runningCalls']
   requests?: readonly RequestView[]
   callSchemas?: RequestInspectionSnapshot['callSchemas']
+  /** Durable revert boundaries in window order, oldest first. */
+  reverts?: TrajectorySnapshot['reverts']
+  /** Durable per-file revert outcome batches in window order. */
+  revertFiles?: TrajectorySnapshot['revertFiles']
+  /** Durable file-revert conflicts awaiting resolution, in window order. */
+  revertConflicts?: TrajectorySnapshot['revertConflicts']
+  /** Revert fold shared with the Session: live truth for the active batch. */
+  revert?: TrajectoryRevertView
 }
 
 interface UsageLike {
@@ -104,6 +116,241 @@ type OrderedLayoutEntry =
     seq: number
     request: AssistantRequestView
   }
+  | {
+    kind: 'revert'
+    seq: number
+    revert: TrajectoryRevertBoundary
+  }
+
+/** One revert file row rendered by the ledger. */
+interface RevertFileRow {
+  readonly path: string
+  readonly status: string
+  readonly dest?: string
+}
+
+/** Statuses the revert tray omits because the file was never affected. */
+const REVERT_HIDDEN_STATUSES: ReadonlySet<string> = new Set(['no_op', 'already_clean'])
+
+/** Display labels for the statuses the file-revert plugin seals. */
+const REVERT_STATUS_KEYS: Readonly<Record<string, TrajectoryKey>> = {
+  restored: 'revert.statusRestored',
+  trashed: 'revert.statusTrashed',
+  kept: 'revert.statusKept',
+  overridden: 'revert.statusOverridden',
+  saved_beside: 'revert.statusSavedBeside',
+  pending_conflict: 'revert.statusConflictPending',
+  conflict_escalated: 'revert.statusConflictEscalated',
+  error: 'revert.statusError',
+}
+
+function revertFileRow(path: string, status: string, dest: string | undefined): RevertFileRow {
+  return { path, status, ...(dest === undefined || dest === '' ? {} : { dest }) }
+}
+
+/**
+ * Attribute one durable batch record to its revert boundary: the nearest
+ * boundary whose anchor the record cites, else the nearest preceding boundary.
+ */
+function revertBatchOwner(
+  boundaries: readonly TrajectoryRevertBoundary[],
+  seq: number,
+  revertSeq: number | undefined,
+): number | undefined {
+  let fallback: number | undefined
+  for (let index = boundaries.length - 1; index >= 0; index--) {
+    const boundary = boundaries[index]
+    if (boundary === undefined || boundary.seq >= seq) continue
+    fallback ??= boundary.seq
+    if (revertSeq !== undefined && boundary.fromSeq === revertSeq) return boundary.seq
+    if (revertSeq === -1 && boundary.cause === 'restore') return boundary.seq
+  }
+  return fallback
+}
+
+/**
+ * Group durable file records under their boundary with last-write-per-path
+ * semantics (the client fold's truth), keeping conflicts with no sealed outcome.
+ */
+function groupRevertFileRows(
+  boundaries: readonly TrajectoryRevertBoundary[],
+  files: readonly TrajectoryRevertFileResult[],
+  conflicts: readonly TrajectoryRevertConflict[],
+): ReadonlyMap<number, readonly RevertFileRow[]> {
+  const rows = new Map<number, Map<string, RevertFileRow>>()
+  const pending = new Map<number, Map<string, RevertFileRow>>()
+  const rowsFor = (
+    target: Map<number, Map<string, RevertFileRow>>, owner: number,
+  ): Map<string, RevertFileRow> => {
+    let entry = target.get(owner)
+    if (entry === undefined) {
+      entry = new Map()
+      target.set(owner, entry)
+    }
+    return entry
+  }
+  for (const batch of files) {
+    const owner = revertBatchOwner(boundaries, batch.seq, batch.revertSeq)
+    if (owner === undefined) continue
+    const entry = rowsFor(rows, owner)
+    for (const [path, value] of Object.entries(batch.outcomes)) {
+      // Durable log data: validate the status before trusting the typed fold.
+      const outcome = value as { readonly status?: unknown; readonly dest?: unknown }
+      if (typeof outcome.status !== 'string') continue
+      if (REVERT_HIDDEN_STATUSES.has(outcome.status)) {
+        entry.delete(path)
+        continue
+      }
+      entry.set(path, revertFileRow(
+        path,
+        outcome.status,
+        typeof outcome.dest === 'string' ? outcome.dest : undefined,
+      ))
+    }
+  }
+  for (const conflict of conflicts) {
+    const owner = revertBatchOwner(
+      boundaries,
+      conflict.seq,
+      typeof conflict.boundarySeq === 'number' ? conflict.boundarySeq : undefined,
+    )
+    if (owner === undefined) continue
+    rowsFor(pending, owner).set(
+      conflict.targetKey,
+      revertFileRow(conflict.displayPath || conflict.targetKey, 'pending_conflict', undefined),
+    )
+  }
+  for (const [owner, conflictsOfBatch] of pending) {
+    const entry = rowsFor(rows, owner)
+    for (const [targetKey, row] of conflictsOfBatch) {
+      // A sealed outcome in the same batch supersedes the pending conflict.
+      if (!entry.has(targetKey) && !entry.has(row.path)) entry.set(targetKey, row)
+    }
+  }
+  return new Map([...rows].map(([owner, entry]) => [owner, [...entry.values()]]))
+}
+
+/** File rows for the active batch, read from the Session fold the tray reads. */
+function liveRevertFileRows(revert: TrajectoryRevertView | undefined): readonly RevertFileRow[] {
+  if (revert === undefined) return []
+  const rows: RevertFileRow[] = []
+  const covered = new Set<string>()
+  for (const [path, value] of Object.entries(revert.outcomes)) {
+    // Durable log data: validate the status before trusting the typed fold.
+    const outcome = value as { readonly status?: unknown; readonly dest?: unknown }
+    if (typeof outcome.status !== 'string') continue
+    if (REVERT_HIDDEN_STATUSES.has(outcome.status)) continue
+    rows.push(revertFileRow(
+      path,
+      outcome.status,
+      typeof outcome.dest === 'string' ? outcome.dest : undefined,
+    ))
+    covered.add(path)
+  }
+  for (const conflict of revert.conflicts) {
+    if (covered.has(conflict.targetKey)) continue
+    rows.push(revertFileRow(conflict.displayPath || conflict.targetKey, 'pending_conflict', undefined))
+  }
+  return rows
+}
+
+function revertFileText(row: RevertFileRow, t: TrajectoryTranslate): string {
+  const key = REVERT_STATUS_KEYS[row.status]
+  const status = key === undefined ? row.status : t(key)
+  return row.dest === undefined
+    ? t('revert.fileRow', { path: row.path, status })
+    : t('revert.fileRowDest', { path: row.path, status, dest: row.dest })
+}
+
+/**
+ * Name one revert boundary: the trigger, the reverted span (turns or seq
+ * range), how many messages it contains, and whether the span is still live.
+ */
+function revertBoundaryText(
+  revert: TrajectoryRevertBoundary,
+  boundaries: readonly TrajectoryRevertBoundary[],
+  shadowRanges: readonly SessionRevertShadowRange[],
+  nodes: TrajectorySnapshot['eventNodes'],
+  activeFromSeq: number | null,
+  t: TrajectoryTranslate,
+): string {
+  if (revert.cause === 'commit') return t('revert.rowCommit')
+  if (revert.cause === 'restore') {
+    return revert.fromSeq === null
+      ? t('revert.rowRestoreAll')
+      : t('revert.rowRestore', { from: revert.fromSeq })
+  }
+  const fromSeq = revert.fromSeq
+  if (fromSeq === null) return t('revert.rowRevertUnknown')
+  const parts = [t('revert.rowRevert', { from: fromSeq })]
+  const replacement = shadowRanges.find(range => range.start === fromSeq)
+  const next = boundaries.find(boundary => boundary.seq > revert.seq)
+  const endSeq = replacement?.end ?? next?.seq
+  let firstTurn = Number.POSITIVE_INFINITY
+  let lastTurn = 0
+  let messages = 0
+  for (const node of nodes) {
+    if (node.seq < fromSeq) continue
+    if (endSeq !== undefined && node.seq >= endSeq) continue
+    if (node.kind === 'assistant' && node.turn > 0) {
+      firstTurn = Math.min(firstTurn, node.turn)
+      lastTurn = Math.max(lastTurn, node.turn)
+    }
+    if (node.kind === 'user' || node.kind === 'steering') messages += 1
+  }
+  if (firstTurn !== Number.POSITIVE_INFINITY) {
+    parts.push(firstTurn === lastTurn
+      ? t('revert.spanTurn', { turn: firstTurn })
+      : t('revert.spanTurns', { from: firstTurn, to: lastTurn }))
+  } else if (endSeq !== undefined) {
+    parts.push(t('revert.spanSeqs', { from: fromSeq, to: endSeq - 1 }))
+  }
+  if (messages > 0) parts.push(t('revert.spanMessages', { count: messages }))
+  parts.push(replacement === undefined && activeFromSeq === fromSeq
+    ? t('revert.pendingHidden')
+    : t('revert.spanShadowed'))
+  return parts.join(' · ')
+}
+
+/** Next assistant at or after a seq, for turn placement of a log-only record. */
+function nextAssistantAfter(
+  nodes: TrajectorySnapshot['eventNodes'],
+  seq: number,
+): AssistantMessageNode | undefined {
+  for (const node of nodes) {
+    if (node.seq > seq && node.kind === 'assistant') return node
+  }
+  return undefined
+}
+
+/** Mark one laid cell as part of a shadowed span or as its replacement commit. */
+function markRevertCell(cell: TrajectoryCellProps, ranges: readonly SessionRevertShadowRange[]): void {
+  const seq = cell.sourceSeq
+  if (cell.kind === 'revert' || seq === undefined) return
+  if (ranges.some(range => seq >= range.start && seq < range.end)) {
+    cell.shadowed = true
+    return
+  }
+  if (ranges.some(range => range.end === seq)) cell.revertRole = 'replacement'
+}
+
+/**
+ * Mark a group's cells. Tool cells carry no event seq (their call seq lives on
+ * the assistant message), so they inherit the shadow state of the message that
+ * requested them.
+ */
+function markRevertCells(laid: readonly LaidCell[], ranges: readonly SessionRevertShadowRange[]): void {
+  let messageShadowed = false
+  for (const entry of laid) {
+    const cell = entry.cell
+    if (cell.kind === 'revert') continue
+    markRevertCell(cell, ranges)
+    if (cell.kind === 'message') messageShadowed = cell.shadowed === true
+    else if (messageShadowed && (cell.kind === 'tool' || cell.kind === 'subtool')) {
+      cell.shadowed = true
+    }
+  }
+}
 
 function layoutEntryOrder(entry: OrderedLayoutEntry): number {
   return entry.kind === 'system' && entry.change.kind === 'initial'
@@ -157,6 +404,18 @@ export function deriveTrajectoryLayout(
   const {
     nodes, eventLocations, partial, runningCalls, requests = [], callSchemas,
   } = input
+  const reverts = input.reverts ?? []
+  const shadowRanges = input.revert?.shadowRanges ?? []
+  const revertFileRows = groupRevertFileRows(
+    reverts,
+    input.revertFiles ?? [],
+    input.revertConflicts ?? [],
+  )
+  const liveRevertRows = liveRevertFileRows(input.revert)
+  const activeFromSeq = input.revert?.fromSeq ?? null
+  const latestRevert = reverts.at(-1)
+  const liveRevertRowsApply = liveRevertRows.length > 0
+    && (activeFromSeq === null || latestRevert?.fromSeq === activeFromSeq)
   const resultByCall = indexResults(nodes)
   const callById = new Map<string, ToolCallBlock>(resultByCall)
   for (const call of runningCalls) callById.set(call.callId, call)
@@ -219,6 +478,17 @@ export function deriveTrajectoryLayout(
     if (request === -1) existing.laid.push(...laid)
     else existing.laid.splice(request, 0, ...laid)
   }
+  const pushRevert = (turn: number, laid: readonly LaidCell[]) => {
+    if (laid.length === 0) return
+    const groups = bucket(turn).groups
+    const title = t('group.revert')
+    const existing = groups.find(group => group.title === title)
+    if (existing !== undefined) {
+      existing.laid.push(...laid)
+      return
+    }
+    groups.push({ title, laid: [...laid] })
+  }
 
   const representedRequests = new Set<string>()
   for (const node of nodes) {
@@ -273,9 +543,49 @@ export function deriveTrajectoryLayout(
         seq: request.startSeq,
         request,
       })),
+    ...reverts.map(revert => ({
+      kind: 'revert' as const,
+      seq: revert.seq,
+      revert,
+    })),
   ].sort((left, right) => layoutEntryOrder(left) - layoutEntryOrder(right))
 
   for (const entry of entries) {
+    if (entry.kind === 'revert') {
+      const { revert } = entry
+      const turn = enclosingUserTurn(nextAssistantAfter(nodes, revert.seq), partial, lastAssistantTurn)
+      const laid: LaidCell[] = [{
+        absTime: finiteTime(revert.time),
+        cell: {
+          index: ++index,
+          kind: 'revert',
+          revertRole: 'boundary',
+          sourceSeq: revert.seq,
+          text: revertBoundaryText(revert, reverts, shadowRanges, nodes, activeFromSeq, t),
+          inputDetail: JSON.stringify(revert, null, 2),
+          timeSeconds: 0,
+          startedAt: finiteTime(revert.time),
+        },
+      }]
+      const rows = revert.seq === latestRevert?.seq && liveRevertRowsApply
+        ? liveRevertRows
+        : revertFileRows.get(revert.seq) ?? []
+      for (const row of rows) {
+        laid.push({
+          absTime: null,
+          cell: {
+            index: ++index,
+            kind: 'revert',
+            revertRole: 'file',
+            text: revertFileText(row, t),
+            timeSeconds: null,
+          },
+        })
+      }
+      pushRevert(turn, laid)
+      prevAbsTime = finiteTime(revert.time) ?? prevAbsTime
+      continue
+    }
     if (entry.kind === 'request') {
       const { request } = entry
       pushStep(request.turn, request.step, [{
@@ -540,6 +850,14 @@ export function deriveTrajectoryLayout(
   for (const entry of [...turns.values(), ...standaloneCompactions]) {
     for (const group of entry.groups) {
       for (const laid of group.laid) attachToolSchema(laid, callSchemas)
+    }
+  }
+
+  if (shadowRanges.length > 0) {
+    for (const entry of [...turns.values(), ...standaloneCompactions]) {
+      for (const group of entry.groups) {
+        markRevertCells(group.laid, shadowRanges)
+      }
     }
   }
 

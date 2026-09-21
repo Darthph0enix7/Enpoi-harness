@@ -141,6 +141,15 @@ export interface SidebarRightTabDefinition {
    */
   readonly canOpen?: (address: string) => boolean
   /**
+   * Where a resource open of this type lands. `'editor'` (the default) is the
+   * editor pane beside the panel: the document viewers, whose preview needs the
+   * tree's page lit beside it. `'panel'` is the panel's own pane as an ordinary
+   * tab — an embedded session conversation, which is not a document and must
+   * neither force the file tree nor steal the preview. A page type ignores this:
+   * `openTab` never lands in the editor pane.
+   */
+  readonly opensIn?: 'editor' | 'panel'
+  /**
    * The tab chip's initial text, captured into the layout record at open time.
    * @param address - the address being opened.
    * @returns the title in the current language.

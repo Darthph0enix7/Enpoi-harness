@@ -99,6 +99,28 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(request.toolFilter).toEqual({ allow: ['read'], deny: ['dangerous', ...SHARED_DENY] })
   })
 
+  it('lets the permissions allowlist win over the registry tools.available', async () => {
+    // Layer precedence (doc 61 WP-S6): Permissions → availability is the hard
+    // gate; the Dynamic → Roles surface is the fallback; the shared anti-leak
+    // floor is always unioned in.
+    const request = await captureRequest('Fixer: patch the parser bug', {
+      settingsDocument: {
+        roles: { fixer: { tools: { available: ['read', 'grep'] } } },
+        permissions: { agents: { fixer: { available: ['read'] } } },
+      },
+    })
+    expect(request.toolFilter?.allow).toEqual(['read'])
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
+  })
+
+  it('falls back to the registry tools.available when permissions sets no allowlist', async () => {
+    const request = await captureRequest('Fixer: patch the parser bug', {
+      settingsDocument: { roles: { fixer: { tools: { available: ['read', 'grep'] } } } },
+    })
+    expect(request.toolFilter?.allow).toEqual(['read', 'grep'])
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
+  })
+
   it('passes the configured filter through unchanged when the provider cannot apply one', async () => {
     // The capability-less provider runtime rejects the unmodified filter rather
     // than silently applying a partial worker surface.
