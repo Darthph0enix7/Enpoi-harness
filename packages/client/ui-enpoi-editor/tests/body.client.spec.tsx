@@ -1,18 +1,18 @@
 // @vitest-environment jsdom
 /**
- * The body's render surfaces that do not mount CodeMirror: the File-not-found
- * state (with the kept dirty buffer) and the read-only preview, plus the
- * toolbar's dirty dot and banners. CodeMirror itself is intentionally never
- * rendered here.
+ * The body's render surfaces that do not mount CodeMirror's editing state:
+ * the File-not-found state (with the kept dirty buffer), the conflict flow's
+ * three actions and their confirmations, the auto-save toggle, and the save
+ * state line.
  */
 import { describe, expect, it } from 'vitest'
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 import type { FileSnapshot } from '../src/client/fsops.ts'
 import type { EditorFsOps } from '../src/client/fsops.ts'
 import { createEditorStore } from '../src/client/store.ts'
 import type { EditorBodyProps } from '../src/client/EditorBody.tsx'
 import { EditorBody } from '../src/client/EditorBody.tsx'
-import { sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 
 const TAB = 'tab-1'
 const ADDRESS = sessionFileAddress('session-1', 'notes.md')
@@ -48,7 +48,7 @@ function propsFor(store: ReturnType<ReturnType<typeof createEditorStore>['create
       panel: { id: 'pane-1' },
       tab: {
         id: TAB,
-        kind: 'enpoi-editor',
+        kind: 'text',
         title: 'notes.md',
         contentId: ADDRESS,
         visible: true,
@@ -63,9 +63,10 @@ function propsFor(store: ReturnType<ReturnType<typeof createEditorStore>['create
 describe('editor body surfaces', () => {
   it('shows the File-not-found state and says the dirty buffer is kept', () => {
     const store = createEditorStore().create()
-    store.actions.synced(TAB, snapshot('hello'))
-    store.actions.edited(TAB, 'my buffer')
-    store.actions.missing(TAB)
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    store.actions.missing(ADDRESS)
     const { container } = render(<EditorBody {...propsFor(store)} />)
     expect(container.querySelector('[data-enpoi-editor-missing]')).not.toBeNull()
     expect(container.querySelector('[data-enpoi-editor-buffer-kept]')).not.toBeNull()
@@ -73,32 +74,100 @@ describe('editor body surfaces', () => {
     cleanup()
   })
 
-  it('renders the read-only Markdown preview with the dirty dot and the change banner', () => {
+  it('offers exactly the three conflict actions on the conflict banner', () => {
     const store = createEditorStore().create()
-    store.actions.synced(TAB, snapshot('# Title'))
-    store.actions.edited(TAB, '# Title\n\nedited')
-    store.actions.changed(TAB)
-    store.actions.setMode(TAB, 'preview')
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    store.actions.conflicted(ADDRESS)
     const { container } = render(<EditorBody {...propsFor(store)} />)
-    expect(container.querySelector('[data-enpoi-editor-dirty]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-banner="external-change"]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-reload-now]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-dismiss]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-preview]')?.textContent).toContain('edited')
-    expect(container.querySelector('[data-enpoi-editor-cm]')).toBeNull()
+    expect(container.querySelector('[data-enpoi-editor-banner="conflict"]')).not.toBeNull()
+    expect(container.querySelector('[data-enpoi-editor-overwrite-ask]')).not.toBeNull()
+    expect(container.querySelector('[data-enpoi-editor-discard-ask]')).not.toBeNull()
+    expect(container.querySelector('[data-enpoi-editor-beside]')).not.toBeNull()
+    expect(container.querySelector('[data-enpoi-editor-dismiss]')).toBeNull()
     cleanup()
   })
 
-  it('offers Overwrite and Reload on the conflict banner', () => {
+  it('confirms the Overwrite with the file-history promise before forcing', () => {
     const store = createEditorStore().create()
-    store.actions.synced(TAB, snapshot('hello'))
-    store.actions.edited(TAB, 'my buffer')
-    store.actions.conflicted(TAB)
-    store.actions.setMode(TAB, 'preview')
-    const { container } = render(<EditorBody {...propsFor(store)} />)
-    expect(container.querySelector('[data-enpoi-editor-banner="conflict"]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-overwrite]')).not.toBeNull()
-    expect(container.querySelector('[data-enpoi-editor-reload-now]')).not.toBeNull()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    store.actions.conflicted(ADDRESS)
+    const view = render(<EditorBody {...propsFor(store)} />)
+    fireEvent.click(view.container.querySelector('[data-enpoi-editor-overwrite-ask]')!)
+    expect(view.container.querySelector('[data-enpoi-editor-confirm="overwrite"]')).not.toBeNull()
+    // The confirmation names the file-history promise (keyed copy under test).
+    expect(view.container.textContent).toContain('overwriteConfirm')
+    expect(view.container.querySelector('[data-enpoi-editor-banner="conflict"]')).toBeNull()
+    cleanup()
+  })
+
+  it('makes Save a copy beside the prominent exit of the Discard confirmation', () => {
+    const store = createEditorStore().create()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    store.actions.conflicted(ADDRESS)
+    const view = render(<EditorBody {...propsFor(store)} />)
+    fireEvent.click(view.container.querySelector('[data-enpoi-editor-discard-ask]')!)
+    expect(view.container.querySelector('[data-enpoi-editor-confirm="discard"]')).not.toBeNull()
+    const copy = view.container.querySelector('[data-enpoi-editor-save-copy-beside]')!
+    expect(copy.className).toContain('primary')
+    expect(view.container.querySelector('[data-enpoi-editor-discard]')).not.toBeNull()
+    cleanup()
+  })
+
+  it('carries a dirty buffer around a clean display-type switch through the store', () => {
+    const store = createEditorStore().create()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    const first = render(<EditorBody {...propsFor(store)} />)
+    first.unmount()
+    // The bucket is keyed by the address, not the tab id, and survives the body.
+    expect(store.getSnapshot().byAddress[ADDRESS]?.draft).toBe('my buffer')
+    const second = render(<EditorBody {...propsFor(store)} />)
+    expect(second.container.querySelector('[data-enpoi-editor-cm]')).not.toBeNull()
+    cleanup()
+  })
+
+  it('shares one bucket between two tabs of the same file and drops it with the last', () => {
+    const store = createEditorStore().create()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.attach(ADDRESS, 'tab-2')
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'shared buffer')
+    // The first tab's record ends; the second keeps editing the same buffer.
+    store.actions.detach(ADDRESS, TAB)
+    expect(store.getSnapshot().byAddress[ADDRESS]?.draft).toBe('shared buffer')
+    store.actions.detach(ADDRESS, 'tab-2')
+    expect(store.getSnapshot().byAddress[ADDRESS]).toBeUndefined()
+  })
+
+  it('exposes the auto-save toggle with its persisted on state', () => {
+    const store = createEditorStore().create()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    const view = render(<EditorBody {...propsFor(store)} />)
+    const toggle = view.container.querySelector('[data-enpoi-editor-autosave]')!
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    cleanup()
+  })
+
+  it('shows the save state line as Unsaved while dirty, then Saved after the write', () => {
+    const store = createEditorStore().create()
+    store.actions.attach(ADDRESS, TAB)
+    store.actions.synced(ADDRESS, snapshot('hello'))
+    store.actions.edited(ADDRESS, 'my buffer')
+    const view = render(<EditorBody {...propsFor(store)} />)
+    expect(view.container.textContent).toContain('unsaved')
+    store.actions.saving(ADDRESS)
+    store.actions.saved(ADDRESS, 'my buffer', { sha256: 'sha-2', mtimeMs: 2000, size: 9 }, undefined)
+    // The selector is not live in this fixture, so a fresh render reads the write.
+    const after = render(<EditorBody {...propsFor(store)} />)
+    expect(after.container.querySelector('[data-enpoi-editor-saved]')).not.toBeNull()
     cleanup()
   })
 })

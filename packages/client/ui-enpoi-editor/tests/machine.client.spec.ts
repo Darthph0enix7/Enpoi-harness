@@ -8,9 +8,10 @@ import { describe, expect, it } from 'vitest'
 import { createFsOps, FsOpsError } from '../src/client/fsops.ts'
 import { loadOnce, pollOnce } from '../src/client/machine.ts'
 import { createEditorStore } from '../src/client/store.ts'
+import { sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 import { errorValue, fakeFsOpsServer, readValue, statValue } from './fixtures.client.ts'
 
-const TAB = 'tab-1'
+const ADDRESS = sessionFileAddress('session-1', 'notes.md')
 const SESSION = 'session-1'
 const PATH = 'notes.md'
 
@@ -79,9 +80,9 @@ describe('external-change polling', () => {
   it('raises the banner without reading or clobbering a dirty buffer', async () => {
     const server = fakeFsOpsServer({ 'fs.stat': () => ({ status: 200, body: statValue(2000, 11) }) })
     const store = createEditorStore().create()
-    store.actions.loading(TAB)
-    store.actions.synced(TAB, { content: 'hello', sha256: 'sha-1', mtimeMs: 1000, size: 5, truncated: false })
-    store.actions.edited(TAB, 'my buffer')
+    store.actions.loading(ADDRESS)
+    store.actions.synced(ADDRESS, { content: 'hello', sha256: 'sha-1', mtimeMs: 1000, size: 5, truncated: false })
+    store.actions.edited(ADDRESS, 'my buffer')
     const outcome = await pollOnce({
       fs: createFsOps(server.fetch),
       sessionId: SESSION,
@@ -94,9 +95,9 @@ describe('external-change polling', () => {
     })
     expect(outcome).toEqual({ kind: 'banner' })
     expect(server.calls.map(call => call.method)).toEqual(['fs.stat'])
-    store.actions.changed(TAB)
-    const state = store.getSnapshot().byTab[TAB]
-    expect(state?.banner).toBe('external-change')
+    store.actions.conflicted(ADDRESS)
+    const state = store.getSnapshot().byAddress[ADDRESS]
+    expect(state?.banner).toBe('conflict')
     expect(state?.draft).toBe('my buffer')
     expect(state?.dirty).toBe(true)
   })
@@ -122,8 +123,8 @@ describe('external-change polling', () => {
   it('reports a vanished file as missing while a dirty buffer stays in the store', async () => {
     const server = fakeFsOpsServer({ 'fs.stat': () => ({ status: 404, body: errorValue('not-found', 'gone') }) })
     const store = createEditorStore().create()
-    store.actions.synced(TAB, { content: 'hello', sha256: 'sha-1', mtimeMs: 1000, size: 5, truncated: false })
-    store.actions.edited(TAB, 'my buffer')
+    store.actions.synced(ADDRESS, { content: 'hello', sha256: 'sha-1', mtimeMs: 1000, size: 5, truncated: false })
+    store.actions.edited(ADDRESS, 'my buffer')
     const outcome = await pollOnce({
       fs: createFsOps(server.fetch),
       sessionId: SESSION,
@@ -135,8 +136,8 @@ describe('external-change polling', () => {
       currentRevision: () => 1,
     })
     expect(outcome).toEqual({ kind: 'missing' })
-    store.actions.missing(TAB)
-    const state = store.getSnapshot().byTab[TAB]
+    store.actions.missing(ADDRESS)
+    const state = store.getSnapshot().byAddress[ADDRESS]
     expect(state?.status).toBe('missing')
     expect(state?.draft).toBe('my buffer')
     expect(state?.dirty).toBe(true)

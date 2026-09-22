@@ -164,8 +164,11 @@ describe.skipIf(MODE === 'record')('web e2e: document preview through Files', ()
     ])
 
     const column = page.locator('[data-rightbar-col]')
-    await page.locator('[data-sidebar-right-expand]').click()
-    await column.locator('[data-sidebar-right-guide-entry="files"]').click()
+    // The fork keeps a persistent icon rail; the panel may already be open on
+    // Files (its default), in which case clicking the rail icon would collapse it.
+    if (!(await column.locator('[data-files-state="tree"]').isVisible())) {
+      await column.locator('[data-sidebar-right-rail-item="files"]').click()
+    }
     await column.locator('[data-files-state="tree"]').waitFor({ state: 'visible' })
     await column.locator('[data-files-reload]').click()
     const filesTab = column.locator('[data-dockkit-tab]').filter({ has: page.getByText('Files', { exact: true }) })
@@ -645,8 +648,9 @@ describe.skipIf(MODE === 'record')('web e2e: Host Office preview', () => {
     const convert = vi.spyOn(scaffold.ctx.officeToPdf, 'convert')
     try {
       const column = page.locator('[data-rightbar-col]')
-      await page.locator('[data-sidebar-right-expand]').click()
-      await column.locator('[data-sidebar-right-guide-entry="files"]').click()
+      if (!(await column.locator('[data-files-state="tree"]').isVisible())) {
+        await column.locator('[data-sidebar-right-rail-item="files"]').click()
+      }
       await column.locator('[data-files-state="tree"]').waitFor({ state: 'visible' })
       await column.locator('[data-files-reload]').click()
       const filesTab = column.locator('[data-dockkit-tab]').filter({ has: page.getByText('Files', { exact: true }) })

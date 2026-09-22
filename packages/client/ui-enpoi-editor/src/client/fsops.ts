@@ -80,16 +80,26 @@ export interface EditorFsOps {
    */
   read(sessionId: string, path: string, signal?: AbortSignal): Promise<FileSnapshot>
   /**
-   * Write one file, optionally expecting the digest last read.
+   * Write one file.
    * @param sessionId - the session whose workspace contains the file.
    * @param path - the address's absolute or workspace-relative path.
    * @param content - the full replacement text.
-   * @param expectedSha - the digest the write must still match; `undefined` forces the write.
+   * @param expectedSha - the digest the write must still match; `null` makes the
+   * write create-only (a beside-copy); `undefined` omits the check.
+   * @param force - skip the digest check and overwrite whatever is on disk (the
+   * conflict flow's explicit Overwrite); the route still backs up the replaced bytes.
    * @param signal - aborts the request when the tab record disappears.
    * @returns the route's digest/stat ack.
-   * @throws {FsOpsError} `conflict` when the file changed, or a transport failure.
+   * @throws {FsOpsError} `conflict` when the file changed and the write is not forced, or a transport failure.
    */
-  write(sessionId: string, path: string, content: string, expectedSha: string | undefined, signal?: AbortSignal): Promise<WriteAck>
+  write(
+    sessionId: string,
+    path: string,
+    content: string,
+    expectedSha: string | null | undefined,
+    force: boolean | undefined,
+    signal?: AbortSignal,
+  ): Promise<WriteAck>
   /**
    * Stat one file without reading it.
    * @param sessionId - the session whose workspace resolves a relative path.
@@ -138,13 +148,15 @@ export function createFsOps(request: typeof fetch = fetch): EditorFsOps {
   }
   return {
     read: (sessionId, path, signal) => call<FileSnapshot>('fs.read', { sessionId, path }, signal),
-    write: (sessionId, path, content, expectedSha, signal) => call<WriteAck>('fs.write', {
+    write: (sessionId, path, content, expectedSha, force, signal) => call<WriteAck>('fs.write', {
       sessionId,
       path,
       content,
-      // Absent `expectedSha` is the route's force-write form; never send `null`
-      // (that spelling is a create-only request).
+      // `expectedSha: null` is the route's create-only form (a beside-copy);
+      // an omitted field skips the digest check; `force: true` is the explicit
+      // conflict-resolution overwrite.
       ...(expectedSha === undefined ? {} : { expectedSha }),
+      ...(force === true ? { force: true } : {}),
     }, signal),
     stat: (sessionId, path, signal) => call<FileStat>('fs.stat', { sessionId, path }, signal),
   }

@@ -1403,7 +1403,17 @@ export class LlmRuntime extends TypertRemoteService {
       if (link === undefined) continue
       const remaining = budgetEnd - Date.now()
       if (remaining <= 0) break
-      const outcome = yield* this.chainLink(options, prepared, link, Math.min(CHAIN_LINK_BUDGET_MS, remaining))
+      // Manual iteration instead of an assignment from `yield*`: the packed
+      // webworker deployment transform only accepts `yield*` in statement
+      // position, and an expression here broke that build.
+      const linkStream = this.chainLink(options, prepared, link, Math.min(CHAIN_LINK_BUDGET_MS, remaining))
+      let linkStep = await linkStream.next()
+      while (linkStep.done !== true) {
+        yield linkStep.value
+        linkStep = await linkStream.next()
+      }
+      const outcome = linkStep.done === true ? linkStep.value : undefined
+      if (outcome === undefined) return
       if (outcome.kind === 'answered') return
       attempted.push({ link, failure: outcome.failure })
       const next = links[index + 1]

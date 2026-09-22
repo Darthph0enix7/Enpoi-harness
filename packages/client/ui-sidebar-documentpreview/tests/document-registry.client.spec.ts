@@ -18,6 +18,21 @@ describe('document preview implementations', () => {
     expect(registry.candidates('/work/notes.md')).toEqual([builtin])
   })
 
+  it('ranks the editor tier below builtins and extensions, so it never opens by default', () => {
+    const registry = new DocumentPreviewRegistry()
+    const editor = definition('editor', { priority: 'editor' })
+    const builtin = definition('builtin', { priority: 'builtin' })
+    const plain = definition('default')
+    const extension = definition('extension', { priority: 'extension' })
+    registry.register(editor)
+    registry.register(builtin)
+    registry.register(plain)
+    registry.register(extension)
+    expect(registry.candidates('/work/notes.md')).toEqual([plain, extension, builtin, editor])
+    // The editor is still listed, so a picker can offer it.
+    expect(registry.candidates('/work/notes.md')).toContain(editor)
+  })
+
   it('breaks same-band ties by suffix specificity and then registration order', () => {
     const registry = new DocumentPreviewRegistry()
     const short = definition('short', { extensions: ['gz'] })

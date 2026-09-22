@@ -42,6 +42,7 @@ External packages installed for runtime use or distributed inside the prebuilt b
 | [`@codemirror/lang-markdown`](https://code.haverbeke.berlin/codemirror/lang-markdown) | MIT |
 | [`@codemirror/lang-python`](https://github.com/codemirror/lang-python) | MIT |
 | [`@codemirror/language`](https://code.haverbeke.berlin/codemirror/language) | MIT |
+| [`@codemirror/search`](https://code.haverbeke.berlin/codemirror/search) | MIT |
 | [`@codemirror/state`](https://code.haverbeke.berlin/codemirror/state) | MIT |
 | [`@codemirror/view`](https://code.haverbeke.berlin/codemirror/view) | MIT |
 | [`@deepseek-ai/libreoffice-kit`](https://github.com/deepseek-harness/libreoffice-kit) | MPL-2.0 |

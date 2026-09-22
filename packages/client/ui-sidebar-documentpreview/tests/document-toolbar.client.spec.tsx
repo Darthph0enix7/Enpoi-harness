@@ -286,6 +286,37 @@ describe('document toolbar', () => {
     h.controller.abort()
   })
 
+  it('keeps the editor tier out of the default view, offered in the picker, and switched in place by Edit', async () => {
+    const h = harness({ 1: page(1, ['# Title'], true) })
+    const editor: DocumentPreviewDefinition = {
+      id: 'enpoi-editor', extensions: ['md'], priority: 'editor', title: () => 'Editor (CodeMirror)', loading: 'renderer', wrap: true,
+    }
+    const code: DocumentPreviewDefinition = {
+      id: 'code', extensions: ['md'], priority: 'builtin', title: () => 'Code', loading: 'text-pages', wrap: true,
+    }
+    const useDocumentPreviews: TextPreviewProps['useDocumentPreviews'] = selector => selector([editor, code])
+    const props: TextPreviewProps = {
+      ...h.props(),
+      useDocumentPreviews,
+      renderSlot: vi.fn(() => null),
+    }
+    const view = render(<TextPreview {...props} />)
+    await settle()
+    // The editor is listed but never wins the automatic pick.
+    expect(view.container.querySelector('[data-document-preview]')?.getAttribute('data-document-preview')).toBe('code')
+    fireEvent.click(view.container.querySelector('[data-document-viewer-menu]')!)
+    expect(screen.getByRole('menuitem', { name: 'Editor (CodeMirror)' })).toBeDefined()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    // The Edit control switches this tab's display type in place: the editor
+    // tab kind has no open path anymore.
+    fireEvent.click(view.container.querySelector('[data-textpreview-tool="editor"]')!)
+    expect(h.instance.getSnapshot().byTab[TAB_ID]?.rendererId).toBe('enpoi-editor')
+    // With the editor display type selected the Edit control retires itself.
+    const switched = render(<TextPreview {...props} />)
+    expect(switched.container.querySelector('[data-textpreview-tool="editor"]')).toBeNull()
+    h.controller.abort()
+  })
+
   it('shows the unsupported empty state for a known binary suffix with no renderer, reading nothing', async () => {
     const h = harness()
     const base = h.props()

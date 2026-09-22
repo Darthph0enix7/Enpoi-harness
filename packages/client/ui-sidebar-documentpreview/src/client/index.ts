@@ -20,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-api-gateway/client'
 import type {} from '@deepseek-ai/dsh-api-workspace-files/remote'
 import type { WorkspaceFileParams } from '@deepseek-ai/dsh-api-workspace-files/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { TextPreview } from './TextPreview.tsx'
 import type { TextPreviewInjected } from './TextPreview.tsx'
 import { TextTitle } from './TextTitle.tsx'
@@ -47,8 +48,8 @@ export type { TextPreviewProps } from './TextPreview.tsx'
 export type { TextInjected } from './face.ts'
 export type { ReadDocumentBytes, DocumentFileBytes, ReadWorkspaceFilePage, SessionFile, WorkspaceFilesReadRemote } from './rpc.ts'
 export type { TextPage, TextState, TextStore, TextTabState } from './store.ts'
-export type { DocumentContent, DocumentPreviewProps, DocumentTextPage } from './document/contract.ts'
-export type { DocumentLoadMode, DocumentPreviewDefinition } from './document/registry.ts'
+export type { DocumentContent, DocumentPreviewProps, DocumentRendererCommands, DocumentTextPage } from './document/contract.ts'
+export type { DocumentLoadMode, DocumentPreviewCapabilities, DocumentPreviewDefinition } from './document/registry.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -109,6 +110,15 @@ export function apply(ctx: ClientContext): void {
       },
       inject: (sessionId, actions): TextPreviewInjected => ({
         ...face(sessionId, actions), hooks: { documentPreviews: source },
+        // The copy action's fallback for renderer-owned views: one complete
+        // Host read, decoded as UTF-8. A failure surfaces as the toolbar's
+        // copy-failure flash.
+        readAllText: async (file) => {
+          // The address is a string boundary: its id segment is the Session id it names.
+          const result = await ctx.remote.workspaceFiles.readAll(file.sessionId as SessionId, file.path)
+          if (!result.ok) throw new Error(result.error.code)
+          return new TextDecoder().decode(documentFileBytes(result.value).data)
+        },
       }),
     },
     TextPreview,

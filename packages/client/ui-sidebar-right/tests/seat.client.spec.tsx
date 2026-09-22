@@ -260,6 +260,44 @@ describe('RightbarSeat presentation', () => {
     expect(parseFloat(panel.style.width)).toBe(420 - 44)
   })
 
+  it('opens a tab action\'s file in the editor pane while the panel keeps its page', async () => {
+    const h = await mountSeat(1440, true, 0)
+    h.open('a.txt')
+    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    const page = Object.values(h.layout().tabs).find(tab => tab.kind === GUIDE_KIND)!
+    // The page's own action is how the file tree opens a row; it reports its
+    // docked pane as an implicit placement, which must not replace the page.
+    act(() => {
+      h.controller.tabDomain.occurrence(SESSION, { id: page.id })
+        .tabActions.openResource('dsh-resource://file/session/s-test/b.txt')
+    })
+    const b = Object.values(h.layout().tabs).find(tab => tab.title === 'b.txt')!
+    expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBe(b.id)
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
+    expect(element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]').dataset['tabBody']).toBe(b.id)
+    // The panel's own page still fills the panel body, not the file.
+    expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(page.id)
+    expect(element(h.view.container, '[data-sidebar-right-body]')).not.toBe(editor)
+  })
+
+  it('opens a panel-placement resource as the panel page with no editor pane', async () => {
+    const h = await mountSeat(1440, true, 0)
+    await act(async () => {
+      h.runtime.ctx.sidebarRightTabs.register({
+        id: 'test/session-view', kind: 'sessionview', priority: 'builtin',
+        patterns: ['dsh-resource://test/session/**'], opensIn: 'panel', title: () => 'session view',
+      })
+    })
+    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    act(() => { h.controller.openResource('dsh-resource://test/session/s-test/child') })
+    const tab = h.controller.active()!
+    expect(tab.kind).toBe('sessionview')
+    expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBeUndefined()
+    expect(element(h.view.container, '[data-sidebar-right-editor]').hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+  })
+
   it('keeps the preview drawn through a collapse, slid out with the panel', async () => {
     const h = await mountSeat()
     h.open()

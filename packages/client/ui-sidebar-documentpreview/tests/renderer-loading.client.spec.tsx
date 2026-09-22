@@ -56,9 +56,11 @@ it('lets a non-Office renderer load content, report its version, and reload thro
   expect(h.instance.getSnapshot().byTab[TAB_ID]?.version).toBe('v1')
   h.setVersion('v2')
   view.rerender(<TextPreview {...h.props()} renderSlot={renderSlot} useDocumentPreviews={useDocumentPreviews} />)
-  expect(screen.getByText('changed')).toBeTruthy()
+  // A renderer-owned body owns external sync, so the shared change bar stays hidden.
+  expect(screen.queryByText('changed')).toBeNull()
   expect(read).toHaveBeenCalledTimes(1)
-  fireEvent.click(screen.getByRole('button', { name: 'reloadNow' }))
+  // The toolbar reload still delegates through the renderer's own content channel.
+  fireEvent.click(view.container.querySelector('[data-textpreview-tool="reload"]')!)
   expect(await screen.findByText('Custom content v2')).toBeTruthy()
   expect(read).toHaveBeenCalledTimes(2)
   expect(h.instance.getSnapshot().byTab[TAB_ID]?.version).toBe('v2')
@@ -139,9 +141,10 @@ it('loads without reading raw bytes, retains content across remounts, and reload
   expect(h.read).toHaveBeenCalledTimes(1)
   h.h.setVersion('v2')
   mounted.rerender(<h.View />)
-  expect(screen.getByText('changed')).toBeTruthy()
+  // A renderer-owned body owns external sync, so the shared change bar stays hidden.
+  expect(screen.queryByText('changed')).toBeNull()
   expect(h.read).toHaveBeenCalledTimes(1)
-  fireEvent.click(screen.getByRole('button', { name: 'reloadNow' }))
+  fireEvent.click(mounted.container.querySelector('[data-textpreview-tool="reload"]')!)
   expect(h.read).toHaveBeenCalledTimes(2)
   await act(async () => { h.pending[1]!.deferred.resolve(result('v2')) })
   expect(screen.queryByText('changed')).toBeNull()

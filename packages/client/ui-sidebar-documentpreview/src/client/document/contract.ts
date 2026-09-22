@@ -27,6 +27,19 @@ export type DocumentContent =
     readonly reload: () => void
   }
 
+/**
+ * The commands a renderer-owned body offers the shared toolbar. Static
+ * capability flags on the definition say whether the entries render; this
+ * bridge is how the toolbar reaches the live implementation, mirroring
+ * `scrollportRef`.
+ */
+export interface DocumentRendererCommands {
+  /** Open the renderer's find surface, when it offers one. */
+  readonly find?: () => void
+  /** Jump to a line the renderer asks for, when it offers one. */
+  readonly gotoLine?: () => void
+}
+
 /** Content and viewing inputs shared by document bodies and nested PDF presentation. */
 export interface DocumentBodyOwner {
   /** Original file address, also readable through the standard useResource hook. */
@@ -37,6 +50,8 @@ export interface DocumentBodyOwner {
   readonly wrap: boolean
   /** Report a renderer-owned scrollport; passing `null` restores the shared body as the owner. */
   readonly scrollportRef: RefCallback<HTMLElement>
+  /** Report the renderer's toolbar commands; passing `null` withdraws them. */
+  readonly commandsRef?: RefCallback<DocumentRendererCommands | null>
 }
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

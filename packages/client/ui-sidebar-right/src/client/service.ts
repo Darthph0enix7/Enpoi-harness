@@ -367,8 +367,10 @@ export class SidebarRightController implements ISidebarRight {
 
   // enpoi: a resource open lands in the editor pane beside the panel, never as
   // the panel's page, unless its type asks for the panel (`opensIn: 'panel'`) or
-  // the caller names a placement — a pane, a replaced tab, or a preferred split
-  // — which also asks for the panel itself.
+  // the caller asks for a replaced tab or a split of its own. A pane named by
+  // the caller — including the pane a tab action reports as its own — only
+  // seats the editor record; it does not turn the open into the panel's page,
+  // which would replace the tree the editor is meant to sit beside.
   /** Claim a resource and place it in one session; an address outside the scheme or one no type claims throws. */
   private placeResource(
     sessionId: SessionId,
@@ -380,7 +382,7 @@ export class SidebarRightController implements ISidebarRight {
       throw new Error(`sidebarRight: no registered tab type claims "${address}"`)
     }
     const claim = this.tabs.claim(address, options.kind)
-    const editor = options.paneId === undefined && options.preferNewPane !== true && options.replaceTab === undefined
+    const editor = options.preferNewPane !== true && options.replaceTab === undefined
       && (this.tabs.get(claim.kind)?.opensIn ?? 'editor') === 'editor'
     this.place(sessionId, actions, claim, address, options, options.params, editor)
   }

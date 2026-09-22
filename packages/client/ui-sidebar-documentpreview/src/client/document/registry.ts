@@ -5,6 +5,14 @@ import { documentFileName, matchedSuffixLength, normalizeSuffix } from './suffix
 /** Shared text or byte reads, or content loading owned by the renderer. */
 export type DocumentLoadMode = 'text-pages' | 'bytes-complete' | 'renderer'
 
+/** What a renderer declares about its own navigation surface. */
+export interface DocumentPreviewCapabilities {
+  /** The renderer answers the toolbar's find-in-file command. */
+  readonly search?: boolean
+  /** The renderer answers the toolbar's go-to-line command. */
+  readonly gotoLine?: boolean
+}
+
 /** One renderer implementation, independent of its component registration. */
 export interface DocumentPreviewDefinition {
   /** Unique implementation name, also used as the document slot key. */
@@ -17,21 +25,35 @@ export interface DocumentPreviewDefinition {
    * Every entry must appear in `extensions`; `register` rejects strays.
    */
   readonly binaryExtensions?: readonly string[]
-  /** External implementations win over product implementations; defaults to extension. */
-  readonly priority?: 'builtin' | 'extension'
+  /**
+   * Band this implementation competes in. External implementations win over
+   * product implementations, and the explicit `editor` tier loses to both so an
+   * editing surface can be offered without ever being chosen automatically;
+   * defaults to extension.
+   */
+  readonly priority?: 'builtin' | 'extension' | 'editor'
   /** Localized implementation label, evaluated when the toolbar renders. @returns the visible name. */
   readonly title: () => string
   /** Content delivery mode supplied by the document owner. */
   readonly loading: DocumentLoadMode
   /** Whether the implementation consumes the document's wrap preference. */
   readonly wrap?: boolean
+  /** Which toolbar navigation entries the implementation answers; absent hides them. */
+  readonly capabilities?: DocumentPreviewCapabilities
+}
+
+/** Automatic-selection rank; a missing band is the default external band and `editor` is deliberately last. */
+function rankOf(priority: DocumentPreviewDefinition['priority']): number {
+  if (priority === 'editor') return 0
+  if (priority === 'builtin') return 1
+  return 2
 }
 
 /**
  * Rank an observed definition snapshot without consulting mutable service state.
  * @param definitions - registered implementations in registration order.
  * @param path - decoded filename or file path.
- * @returns matching implementations, external band first, then longest suffix.
+ * @returns matching implementations, external band first, then longest suffix, with `editor` last.
  */
 export function matchingDocumentPreviews(
   definitions: readonly DocumentPreviewDefinition[],
@@ -40,7 +62,7 @@ export function matchingDocumentPreviews(
   const name = documentFileName(path)
   return definitions.map((definition, order) => ({
     definition, order,
-    rank: definition.priority === 'builtin' ? 0 : 1,
+    rank: rankOf(definition.priority),
     length: matchedSuffixLength(name, definition.extensions),
   }))
     .filter(candidate => candidate.length > 0)
@@ -115,7 +137,7 @@ export class DocumentPreviewRegistry {
   /**
    * List every matching implementation in automatic-selection order.
    * @param path - decoded file path; matching never resolves filesystem access.
-   * @returns extension band first, then longest suffix, then registration order.
+   * @returns extension band first, then longest suffix, then registration order, with `editor` last.
    */
   candidates(path: string): readonly DocumentPreviewDefinition[] {
     return matchingDocumentPreviews(this.snapshot, path)

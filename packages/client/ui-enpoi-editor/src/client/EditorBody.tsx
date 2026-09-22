@@ -1,38 +1,45 @@
 /**
- * The editable workbench body: a file's content as a CodeMirror editor with
- * optimistic saves and no-data-loss external-change handling.
+ * The editable workbench surface: a file's content as a CodeMirror editor with
+ * auto-save, optimistic saves, and no-data-loss external-change handling.
  *
- * The body owns no file state of its own — content, the disk baseline, the
- * dirty buffer, and the view choices live in this type's store, bucketed by tab
- * id, so switching tabs and coming back keeps unsaved edits. I/O goes through
- * the injected {@link EditorFsOps}: one read on first mount, a 1500 ms
- * `fs.stat` poll while the tab is visible and addressed, a save that carries
- * the digest last read from disk, and a reload that never silently clobbers a
- * dirty buffer. The async decisions themselves live in `machine.ts`.
+ * The surface is the in-pane document renderer (`sidebar.right.tab.document`,
+ * keyed `enpoi-editor`): the document owner supplies the content channel, wrap
+ * preference, scrollport, and command bridge. Content, the disk baseline, the
+ * dirty buffer, and the reader's place live in this type's store bucketed by
+ * the canonical file address, so switching tabs or display types and coming
+ * back keeps unsaved edits, and two tabs of one file share one buffer instead
+ * of racing each other's writes. I/O goes through the injected
+ * {@link EditorFsOps}: one read on first mount, a 1500 ms `fs.stat` poll while
+ * the tab is visible and addressed (suppressed while a save is in flight), a
+ * debounced auto-save (default on, one I/O retry, halted by a conflict), and a
+ * conflict flow whose three actions — Overwrite disk, Discard mine, Save mine
+ * beside — never silently overwrite either side. The async decisions live in
+ * `machine.ts`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
-import type { PropsLocale, PropsRuntime, PropsStore, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
-import {
-  CodeBlock,
-  IconCheckOutline16,
-  IconRefreshOutline16,
-  MarkdownText,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import type { PropsLocale, PropsStore, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconCheckOutline16, IconRefreshOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { parseFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
-import type { EditorStore } from './store.ts'
+import type { DocumentPreviewProps } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
+import type { EditorStore, EditorViewState } from './store.ts'
 import type { EditorFsOps } from './fsops.ts'
 import type { EditorLoadOutcome } from './machine.ts'
-import { completeSave, loadOnce, pollOnce, saveOnce } from './machine.ts'
+import { completeSave, loadOnce, pollOnce, saveBesideOnce, saveOnce } from './machine.ts'
 import { CodeMirrorEditor } from './CodeMirrorEditor.tsx'
 import type { CodeMirrorHandle } from './CodeMirrorEditor.tsx'
-import { IconWrap16 } from './icons.tsx'
-import { languageIdForPath } from './languages.ts'
+import { readAutosavePref, writeAutosavePref } from './prefs.ts'
 import css from './EditorBody.module.css'
 
 /** How often the visible, addressed tab stats its file for external changes. */
 export const POLL_INTERVAL_MS = 1500
+
+/** How long after the last keystroke an auto-save writes. */
+export const AUTOSAVE_DEBOUNCE_MS = 800
+
+/** How long an auto-save waits before its single I/O retry. */
+export const AUTOSAVE_RETRY_MS = 3000
 
 /** The body's injected business face: the file operations over `/sidebar/fsops`. */
 export interface EditorInjected {
@@ -40,9 +47,9 @@ export interface EditorInjected {
   readonly fs: EditorFsOps
 }
 
-/** The body's composed props: the tab, this type's store, the fsops face, and copy. */
+/** The body's composed props: the document owner's shares, the store, face, and copy. */
 export type EditorBodyProps =
-  & PropsRuntime<'sidebar.right.pane.tab'>
+  & DocumentPreviewProps
   & PropsStore<EditorStore>
   & InjectFace<EditorInjected>
   & PropsLocale<'enpoiEditor'>
@@ -52,40 +59,84 @@ interface ReloadOptions {
   readonly discard?: boolean
 }
 
+/** Which confirmation row is open above the editor. */
+type Confirm = 'overwrite' | 'discard' | 'reload' | null
+
 /**
- * The editor type's body, registered under `sidebar.right.pane.tab` as
- * `enpoi-editor`.
- * @param props - composed slot props.
- * @returns the toolbar, banners, and the editor/preview/missing surface.
+ * The editor's body for the keyed document slot, registered as `enpoi-editor`.
+ * @param props - composed document-body props.
+ * @returns the shared editable surface.
  */
-export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyProps): ReactNode {
+export function EditorBody({
+  content, wrap, scrollportRef, commandsRef, useTabInfo, useStore, actions, fs, t,
+}: EditorBodyProps): ReactNode {
   const { tab } = useTabInfo()
   const file = useMemo(() => parseFileAddress(tab.contentId), [tab.contentId])
   const sessionId = file?.scope === 'session' ? file.sessionId : ''
   const path = file?.path ?? ''
-  const state = useStore(s => s.byTab[tab.id])
+  // One bucket per canonical file address, held by every tab record of the
+  // file: the buffer, baseline, and conflict state are the file's, not the tab's.
+  const key = tab.contentId
+  const state = useStore(s => s.byAddress[key])
   const stateRef = useRef(state)
   stateRef.current = state
+  const actionsRef = useRef(actions)
+  actionsRef.current = actions
   const editorRef = useRef<CodeMirrorHandle | null>(null)
-  // The body's own box: the file opens in the column's editor pane, where the
+  // The surface's own box: the file opens in the column's editor pane, where the
   // framework's tab-visibility flag reads false (that flag tracks the panel's
   // active page), so on-screen state is decided from the element itself.
   const hostRef = useRef<HTMLDivElement | null>(null)
-  const saveRef = useRef<(force: boolean) => void>(() => {})
-  /** A reload waiting for the discard confirmation. */
-  const [confirming, setConfirming] = useState(false)
+  const saveRef = useRef<(force: boolean, auto: boolean) => void>(() => {})
+  const contentRef = useRef(content)
+  contentRef.current = content
+  // The reader's live place, streamed by the editor and persisted to the store
+  // when the body unmounts, so a display-type switch restores it.
+  const viewRef = useRef<EditorViewState | null>(null)
+  if (viewRef.current === null) viewRef.current = state?.view ?? { anchor: 0, head: 0, scrollTop: 0 }
+  const retryTimerRef = useRef<number | undefined>(undefined)
+  // The auto-save I/O retry budget, one per editing stretch. Kept in a ref and
+  // spent at the failure site, so the decision never reads a render-stale count.
+  const retryBudgetRef = useRef(1)
+  /** The confirmation row currently open, if any. */
+  const [confirm, setConfirm] = useState<Confirm>(null)
+  const [autoSave, setAutoSave] = useState(readAutosavePref)
   // Reading the signal through a call keeps later awaits from being narrowed
   // away by the compiler: `aborted` really can flip while a request is in flight.
   const aborted = (): boolean => tab.signal.aborted
+  const bindRoot = useCallback((node: HTMLDivElement | null): void => {
+    hostRef.current = node
+    scrollportRef?.(node)
+  }, [scrollportRef])
+  const handleViewState = useCallback((view: EditorViewState): void => {
+    viewRef.current = view
+  }, [])
 
-  // The bucket lives as long as its tab record: the owner aborts the signal
-  // when the record disappears, and nothing of a dead tab stays behind.
+  // Hold the bucket for this tab record and release it when the record ends.
+  // Detaching rides the abort signal alone — a body unmount (a display-type
+  // switch, a hidden tab) must keep the bucket or it would drop unsaved edits.
   useEffect(() => {
+    actions.attach(key, tab.id)
     const { signal } = tab
-    const forget = (): void => { actions.forget(tab.id) }
-    signal.addEventListener('abort', forget)
-    return () => { signal.removeEventListener('abort', forget) }
-  }, [actions, tab.id, tab.signal])
+    const detach = (): void => { actions.detach(key, tab.id) }
+    if (signal.aborted) {
+      detach()
+      return undefined
+    }
+    signal.addEventListener('abort', detach, { once: true })
+    return () => { signal.removeEventListener('abort', detach) }
+  }, [actions, key, tab.id, tab.signal])
+
+  // Persist the reader's place when this body goes away; the editor has long
+  // since streamed every move into `viewRef`, so the store takes its last value.
+  useEffect(() => () => {
+    if (stateRef.current?.status === 'ready') {
+      actionsRef.current.viewChanged(key, viewRef.current ?? { anchor: 0, head: 0, scrollTop: 0 })
+    }
+  }, [key])
+
+  // A pending I/O retry must not fire into a gone tab.
+  useEffect(() => () => { window.clearTimeout(retryTimerRef.current) }, [])
 
   /**
    * Fold one read outcome into the store: a dirty buffer is adopted around, not
@@ -96,29 +147,31 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
       const current = stateRef.current
       const keep = options?.discard !== true && current !== undefined
         && (current.dirty || current.draft !== null)
-      if (keep) actions.adopted(tab.id, outcome.snapshot)
-      else actions.synced(tab.id, outcome.snapshot)
+      if (keep) actions.adopted(key, outcome.snapshot)
+      else actions.synced(key, outcome.snapshot)
+      const channel = contentRef.current
+      if (channel?.kind === 'renderer') channel.loaded(outcome.snapshot.sha256)
       return
     }
     if (outcome.kind === 'missing') {
-      actions.missing(tab.id)
+      actions.missing(key)
       return
     }
-    actions.failed(tab.id, outcome.message)
-  }, [actions, tab.id])
+    actions.failed(key, outcome.message)
+  }, [actions, key])
 
   /** Re-read the file from disk. */
   const reload = useCallback((options?: ReloadOptions): void => {
     if (sessionId === '' || path === '') return
-    actions.loading(tab.id)
+    actions.loading(key)
     void loadOnce(fs, sessionId, path, tab.signal).then((outcome) => {
       if (aborted()) return
       applyLoad(outcome, options)
     })
-  }, [actions, applyLoad, fs, path, sessionId, tab.id, tab.signal])
+  }, [actions, applyLoad, fs, key, path, sessionId, tab.signal])
 
-  // First mount reads; a remount with stored state (tab switched away and back)
-  // keeps that state instead of re-reading.
+  // First mount reads; a remount with stored state (tab switched away and back,
+  // or display type switched away and back) keeps that state instead of re-reading.
   useEffect(() => {
     const current = stateRef.current
     if (current !== undefined && current.status !== 'idle') return
@@ -129,9 +182,22 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
   const ready = status === 'ready'
   const missing = status === 'missing'
 
+  // The owner's reload channel: a bumped revision means the document owner asked
+  // for a fresh read, so a dirty buffer confirms first and a clean one reloads.
+  const revisionRef = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (content?.kind !== 'renderer') return
+    const previous = revisionRef.current
+    revisionRef.current = content.revision
+    if (previous === undefined || previous === content.revision) return
+    if (stateRef.current?.dirty ?? false) setConfirm('reload')
+    else reload()
+  }, [content, reload])
+
   // The external-change watcher: 1500 ms while the tab is visible and addressed.
-  // A missing file is probed for reappearance; a dirty or truncated buffer only
-  // ever raises the banner.
+  // Suppressed while a save is in flight — the poll would otherwise raise a
+  // conflict against the reader's own write. A missing file is probed for
+  // reappearance; a dirty or truncated buffer only ever raises the conflict.
   useEffect(() => {
     if ((status !== 'ready' && status !== 'missing') || sessionId === '' || path === '') return undefined
     const tick = (): void => {
@@ -141,7 +207,7 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
       const rect = host.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) return
       const current = stateRef.current
-      if (current === undefined) return
+      if (current === undefined || current.saveState === 'saving') return
       if (current.status === 'missing') {
         void loadOnce(fs, sessionId, path, tab.signal).then((outcome) => {
           if (aborted() || outcome.kind !== 'loaded') return
@@ -166,38 +232,44 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
           case 'failed':
             return
           case 'missing':
-            actions.missing(tab.id)
+            actions.missing(key)
             return
           case 'banner':
-            actions.changed(tab.id)
+            actions.conflicted(key)
             return
           case 'swap':
             // The poll already proved the buffer clean and unchanged since the
-            // read began; apply the swap to the view before recording it.
+            // read began; apply the swap to the view before recording it. The
+            // editor maps the cursor through the replacement, so it stays put.
             editorRef.current?.setDoc(outcome.snapshot.content)
-            actions.synced(tab.id, outcome.snapshot)
+            actions.synced(key, outcome.snapshot)
             return
         }
       })
     }
     const timer = window.setInterval(tick, POLL_INTERVAL_MS)
     return () => { window.clearInterval(timer) }
-  }, [actions, applyLoad, fs, path, sessionId, status, tab.id, tab.signal])
+  }, [actions, applyLoad, fs, key, path, sessionId, status, tab.id, tab.signal])
 
-  /** Save the buffer; `force` retries past the digest check (Overwrite). */
-  const save = useCallback((force: boolean): void => {
+  /**
+   * Save the buffer. `force` writes past the digest check (the conflict flow's
+   * Overwrite disk). `auto` marks the debounced auto-save: it keeps the retry
+   * budget, retries one I/O failure after a pause, and never retries a 409.
+   */
+  const save = useCallback((force: boolean, auto: boolean): void => {
     const current = stateRef.current
     if (current === undefined || current.status !== 'ready' || current.truncated) return
     if (sessionId === '' || path === '') return
-    const content = editorRef.current?.getDoc() ?? current.draft ?? current.content
-    if (!current.dirty && content === current.content) return
-    actions.saving(tab.id)
+    const written = editorRef.current?.getDoc() ?? current.draft ?? current.content
+    if (!current.dirty && written === current.content) return
+    if (!auto) retryBudgetRef.current = 1
+    actions.saving(key)
     void (async (): Promise<void> => {
       const outcome = await saveOnce({
         fs,
         sessionId,
         path,
-        content,
+        content: written,
         // The digest of what was last READ from disk — never the edited buffer.
         expectedSha: current.sha256 ?? undefined,
         force,
@@ -205,73 +277,118 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
       })
       if (aborted()) return
       if (outcome.kind === 'saved') {
-        const baseline = await completeSave(fs, sessionId, path, content, outcome, tab.signal)
+        const baseline = await completeSave(fs, sessionId, path, written, outcome, tab.signal)
         if (aborted()) return
-        actions.saved(tab.id, content, baseline)
+        // Text typed during the round-trip stays dirty; clearing the draft here
+        // would silently drop the keystrokes the write did not carry.
+        const liveDoc = editorRef.current !== null ? editorRef.current.getDoc() : stateRef.current?.draft ?? undefined
+        retryBudgetRef.current = 1
+        actions.saved(key, written, baseline, liveDoc)
+        const channel = contentRef.current
+        if (channel?.kind === 'renderer') channel.loaded(baseline.sha256 ?? '')
         return
       }
       if (outcome.kind === 'conflict') {
-        actions.conflicted(tab.id)
+        // Halt auto-save: the conflict flow takes over, with no retry.
+        actions.conflicted(key)
         return
       }
-      actions.saveFailed(tab.id, outcome.message)
+      actions.saveFailed(key, outcome.message)
+      if (auto && retryBudgetRef.current > 0) {
+        retryBudgetRef.current -= 1
+        window.clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = window.setTimeout(() => { saveRef.current(false, true) }, AUTOSAVE_RETRY_MS)
+      }
     })()
-  }, [actions, fs, path, sessionId, tab.id, tab.signal])
+  }, [actions, fs, key, path, sessionId, tab.signal])
   saveRef.current = save
+
+  /**
+   * Write the dirty buffer to `<file>.mine-<timestamp>` (create-only), then
+   * load the disk version: "Save mine beside", and the safe exit of a discard.
+   */
+  const saveBesideThenReload = useCallback((): void => {
+    const current = stateRef.current
+    if (current === undefined || current.status !== 'ready') return
+    const buffer = editorRef.current?.getDoc() ?? current.draft ?? current.content
+    actions.saving(key)
+    void saveBesideOnce({ fs, sessionId, path, content: buffer, signal: tab.signal }).then((outcome) => {
+      if (aborted()) return
+      if (outcome.kind === 'saved') {
+        const channel = contentRef.current
+        if (channel?.kind === 'renderer') channel.loaded(outcome.sha256 ?? '')
+        reload({ discard: true })
+        return
+      }
+      actions.saveFailed(key, outcome.kind === 'exists' ? t('besideTaken') : outcome.message)
+    })
+  }, [actions, fs, key, path, sessionId, t, tab.signal, reload])
+
+  /** The conflict flow's Overwrite disk: force the buffer through, then resume. */
+  const overwriteDisk = useCallback((): void => {
+    setConfirm(null)
+    saveRef.current(true, false)
+  }, [])
+
+  /** Discard the dirty buffer, optionally keeping a beside-copy first. */
+  const discardMine = useCallback((saveCopy: boolean): void => {
+    setConfirm(null)
+    if (saveCopy) saveBesideThenReload()
+    else reload({ discard: true })
+  }, [reload, saveBesideThenReload])
+
+  const toggleAutoSave = useCallback((): void => {
+    setAutoSave((value) => {
+      writeAutosavePref(!value)
+      return !value
+    })
+  }, [])
+
+  // Auto-save: debounce from the last keystroke while the tab is editable,
+  // clean of conflicts, and not already saving or within its retry pause. A
+  // save that completes with newer keystrokes in the buffer keeps it dirty, so
+  // this effect re-arms and the next round carries them.
+  const dirty = state?.dirty ?? false
+  const truncated = state?.truncated ?? false
+  const banner = state?.banner ?? null
+  const saveState = state?.saveState ?? 'idle'
+  useEffect(() => {
+    if (!autoSave || !ready || truncated || !dirty || banner !== null) return
+    if (saveState !== 'idle' && saveState !== 'saved') return
+    const timer = window.setTimeout(() => { saveRef.current(false, true) }, AUTOSAVE_DEBOUNCE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [autoSave, ready, truncated, dirty, banner, saveState])
+
+  // The command bridge: the toolbar's Find in file and Go to line drive the
+  // editor while this surface owns the content; `null` withdraws them.
+  useEffect(() => {
+    commandsRef?.({
+      find: () => { editorRef.current?.find() },
+      gotoLine: () => { editorRef.current?.gotoLine() },
+    })
+    return () => { commandsRef?.(null) }
+  }, [commandsRef])
 
   // The view follows the store: an external swap, a reload, or a restored
   // draft replaces the document in place; a keystroke already matches.
-  const docText = status === 'ready' ? (state?.draft ?? state?.content ?? '') : null
+  const docText = ready ? (state?.draft ?? state?.content ?? '') : null
   useEffect(() => {
     if (docText !== null) editorRef.current?.setDoc(docText)
   }, [docText])
 
-  const wrap = state?.wrap ?? true
-  const truncated = state?.truncated ?? false
-  const dirty = state?.dirty ?? false
-  const banner = state?.banner ?? null
-  const saveState = state?.saveState ?? 'idle'
-  const mode = state?.mode ?? 'edit'
-  useEffect(() => { editorRef.current?.setWrap(wrap) }, [wrap])
+  useEffect(() => { editorRef.current?.setWrap(wrap ?? true) }, [wrap])
   useEffect(() => { editorRef.current?.setReadOnly(truncated) }, [truncated])
-  useEffect(() => { setConfirming(false) }, [banner])
+  useEffect(() => { setConfirm(null) }, [banner])
 
-  // canOpen refuses anything but a session-scoped file address; this is the
-  // wiring-error backstop, not a user state.
+  // parseFileAddress refuses anything but a session-scoped file address; this is
+  // the wiring-error backstop, not a user state.
   if (file === undefined || file.scope !== 'session') return null
 
-  const previewText = state?.draft ?? state?.content ?? ''
-  const languageId = languageIdForPath(path)
-  const reloadWithConfirm = (): void => {
-    if (dirty) setConfirming(true)
-    else reload()
-  }
+  const savedAt = state?.savedAt ?? null
 
   return (
-    <div ref={hostRef} className={css.root} data-enpoi-editor data-enpoi-editor-tab={tab.id}>
+    <div ref={bindRoot} className={css.root} data-enpoi-editor data-enpoi-editor-tab={tab.id}>
       <div className={css.toolbar} data-enpoi-editor-toolbar>
-        {ready && !truncated && (
-          <div className={css.modeToggle} role="group">
-            <button
-              type="button"
-              className={clsx(css.modeButton, mode === 'edit' && css.modeActive)}
-              aria-pressed={mode === 'edit'}
-              data-enpoi-editor-mode="edit"
-              onClick={() => { actions.setMode(tab.id, 'edit') }}
-            >
-              {t('edit')}
-            </button>
-            <button
-              type="button"
-              className={clsx(css.modeButton, mode === 'preview' && css.modeActive)}
-              aria-pressed={mode === 'preview'}
-              data-enpoi-editor-mode="preview"
-              onClick={() => { actions.setMode(tab.id, 'preview') }}
-            >
-              {t('preview')}
-            </button>
-          </div>
-        )}
         {dirty && <span className={css.dirtyDot} title={t('dirty')} data-enpoi-editor-dirty />}
         {ready && !truncated && (
           <button
@@ -281,132 +398,142 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
             aria-label={t('save')}
             title={t('save')}
             data-enpoi-editor-save
-            onClick={() => { saveRef.current(false) }}
+            onClick={() => { saveRef.current(false, false) }}
           >
             <IconCheckOutline16 size={14} />
           </button>
         )}
-        {(ready || missing || status === 'error') && (
+        <button
+          type="button"
+          className={clsx(css.tool, autoSave && css.toolActive)}
+          aria-pressed={autoSave}
+          aria-label={t('autosave.aria')}
+          title={autoSave ? t('autosave.disable') : t('autosave.enable')}
+          data-enpoi-editor-autosave
+          onClick={toggleAutoSave}
+        >
+          {t('autosave')}
+        </button>
+        {ready && (
           <button
             type="button"
             className={css.tool}
             aria-label={t('reload')}
             title={t('reload')}
             data-enpoi-editor-reload
-            onClick={reloadWithConfirm}
+            onClick={() => {
+              if (stateRef.current?.dirty ?? false) setConfirm('reload')
+              else reload()
+            }}
           >
             <IconRefreshOutline16 size={14} />
           </button>
         )}
-        {ready && (
-          <button
-            type="button"
-            className={clsx(css.tool, wrap && css.toolActive)}
-            aria-pressed={wrap}
-            aria-label={t('wrapAria')}
-            title={wrap ? t('wrapDisable') : t('wrapEnable')}
-            data-enpoi-editor-wrap
-            onClick={() => { actions.toggledWrap(tab.id) }}
-          >
-            <IconWrap16 wrapped={wrap} />
-          </button>
-        )}
         {saveState === 'saving' && <span className={css.status}>{t('saving')}</span>}
-        {saveState === 'saved' && <span className={css.status} data-enpoi-editor-saved>{t('saved')}</span>}
+        {saveState === 'saved' && (
+          <span className={css.status} data-enpoi-editor-saved>
+            {t('savedAt', {
+              time: savedAt === null ? '' : new Date(savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            })}
+          </span>
+        )}
+        {saveState === 'idle' && dirty && <span className={css.status}>{t('unsaved')}</span>}
         {saveState === 'failed' && (
           <span className={clsx(css.status, css.statusError)} data-enpoi-editor-save-failed>{t('saveFailed')}</span>
         )}
       </div>
-      {confirming && (
-        <div className={css.banner} role="alert" data-enpoi-editor-banner="confirm">
-          <span className={css.bannerText}>{t('externalConfirm')}</span>
+      {confirm === 'overwrite' && (
+        <div className={css.banner} role="alert" data-enpoi-editor-confirm="overwrite">
+          <span className={css.bannerText}>{t('overwriteConfirm')}</span>
           <span className={css.bannerActions}>
             <button
               type="button"
               className={css.bannerButton}
+              data-enpoi-editor-overwrite
+              onClick={overwriteDisk}
+            >
+              {t('overwrite')}
+            </button>
+            <button type="button" className={css.bannerButton} onClick={() => { setConfirm(null) }}>
+              {t('cancel')}
+            </button>
+          </span>
+        </div>
+      )}
+      {(confirm === 'discard' || confirm === 'reload') && (
+        <div className={css.banner} role="alert" data-enpoi-editor-confirm="discard">
+          <span className={css.bannerText}>{t('discardConfirm')}</span>
+          <span className={css.bannerActions}>
+            <button
+              type="button"
+              className={css.primary}
+              data-enpoi-editor-save-copy-beside
+              onClick={() => { discardMine(true) }}
+            >
+              {t('saveCopyBeside')}
+            </button>
+            <button
+              type="button"
+              className={css.bannerButton}
               data-enpoi-editor-discard
-              onClick={() => { setConfirming(false); reload({ discard: true }) }}
+              onClick={() => { discardMine(false) }}
             >
               {t('discardReload')}
             </button>
-            <button type="button" className={css.bannerButton} onClick={() => { setConfirming(false) }}>
+            <button type="button" className={css.bannerButton} onClick={() => { setConfirm(null) }}>
               {t('keepEditing')}
             </button>
           </span>
         </div>
       )}
-      {banner === 'external-change' && (
-        <div className={css.banner} role="status" data-enpoi-editor-banner="external-change">
-          <span className={css.bannerText}>{t('externalChanged')}</span>
-          <span className={css.bannerActions}>
-            <button
-              type="button"
-              className={css.bannerButton}
-              data-enpoi-editor-reload-now
-              onClick={() => { setConfirming(true) }}
-            >
-              {t('reload')}
-            </button>
-            <button
-              type="button"
-              className={css.bannerButton}
-              data-enpoi-editor-dismiss
-              onClick={() => { setConfirming(false); actions.dismissed(tab.id) }}
-            >
-              {t('dismiss')}
-            </button>
-          </span>
-        </div>
-      )}
-      {banner === 'conflict' && (
+      {banner === 'conflict' && confirm === null && (
         <div className={css.banner} role="alert" data-enpoi-editor-banner="conflict">
           <span className={css.bannerText}>{t('conflict')}</span>
           <span className={css.bannerActions}>
             <button
               type="button"
               className={css.bannerButton}
-              data-enpoi-editor-overwrite
-              onClick={() => { saveRef.current(true) }}
+              data-enpoi-editor-overwrite-ask
+              onClick={() => { setConfirm('overwrite') }}
             >
               {t('overwrite')}
             </button>
             <button
               type="button"
               className={css.bannerButton}
-              data-enpoi-editor-reload-now
-              onClick={() => { setConfirming(true) }}
+              data-enpoi-editor-discard-ask
+              onClick={() => { setConfirm('discard') }}
             >
-              {t('reload')}
+              {t('discardMine')}
+            </button>
+            <button
+              type="button"
+              className={css.bannerButton}
+              data-enpoi-editor-beside
+              onClick={() => { setConfirm(null); saveBesideThenReload() }}
+            >
+              {t('saveBeside')}
             </button>
           </span>
         </div>
       )}
       {ready && truncated && <div className={css.notice} data-enpoi-editor-truncated>{t('truncated')}</div>}
-      {ready && mode === 'edit' && (
+      {ready && (
         <CodeMirrorEditor
           ref={editorRef}
           path={path}
           initialDoc={docText ?? ''}
-          wrap={wrap}
+          initialSelection={viewRef.current ?? undefined}
+          initialScrollTop={viewRef.current?.scrollTop}
+          wrap={wrap ?? true}
           readOnly={truncated}
-          onChange={(text) => { actions.edited(tab.id, text) }}
-          onSave={() => { saveRef.current(false) }}
+          onViewState={handleViewState}
+          onChange={(text) => {
+            retryBudgetRef.current = 1
+            actions.edited(key, text)
+          }}
+          onSave={() => { saveRef.current(false, false) }}
         />
-      )}
-      {ready && mode === 'preview' && (
-        <div className={css.preview} data-enpoi-editor-preview>
-          {languageId === 'markdown'
-            ? (
-              <MarkdownText
-                text={previewText}
-                labels={{
-                  code: { copyLabel: t('copy'), copiedLabel: t('copied') },
-                  footnotes: t('markdown.footnotes'),
-                }}
-              />
-            )
-            : <CodeBlock code={previewText} lang={languageId} copyLabel={t('copy')} copiedLabel={t('copied')} />}
-        </div>
       )}
       {(status === 'idle' || status === 'loading') && (
         <div className={css.center} data-enpoi-editor-loading>{t('loading')}</div>
@@ -419,13 +546,16 @@ export function EditorBody({ useTabInfo, useStore, actions, fs, t }: EditorBodyP
           {(state?.draft ?? null) !== null && (
             <p className={css.centerBuffer} data-enpoi-editor-buffer-kept>{t('bufferKept')}</p>
           )}
-          <button type="button" className={css.primary} onClick={reloadWithConfirm}>{t('reload')}</button>
+          <button type="button" className={css.primary} onClick={() => {
+            if (stateRef.current?.dirty ?? false) setConfirm('reload')
+            else reload()
+          }}>{t('reload')}</button>
         </div>
       )}
       {status === 'error' && (
         <div className={css.center} data-enpoi-editor-error>
           <p className={css.centerDetail}>{t('loadFailed', { message: state?.error ?? '' })}</p>
-          <button type="button" className={css.primary} onClick={reloadWithConfirm}>{t('retry')}</button>
+          <button type="button" className={css.primary} onClick={() => { reload() }}>{t('retry')}</button>
         </div>
       )}
     </div>

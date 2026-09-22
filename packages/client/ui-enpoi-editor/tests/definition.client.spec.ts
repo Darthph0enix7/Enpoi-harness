@@ -1,20 +1,52 @@
 /**
  * The definition's routing decisions: session-scoped text-ish addresses only,
- * with images, PDFs, and unknown categories left to the fallback preview.
+ * with images, PDFs, and unknown categories left to the fallback preview, and
+ * the editor itself demoted below the rich viewer.
  */
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { absoluteFileAddress, sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
-import { EDITOR_ID, EDITOR_KIND, basenameOf, editorDefinition, isEditablePath } from '../src/client/definition.ts'
+import { SidebarRightTabRegistry } from '@deepseek-ai/dsh-client-ui-sidebar-right/src/client/tab-registry.ts'
+import {
+  EDITOR_ID, EDITOR_KIND, basenameOf, editorDefinition, editorPreviewDefinition, isEditablePath,
+} from '../src/client/definition.ts'
 
 const address = (path: string): string => sessionFileAddress('s1', path)
 
 describe('enpoi-editor definition', () => {
-  it('is the extension-band session-file type under its own id and kind', () => {
+  it('is the fallback-band session-file type under its own id and kind', () => {
     const definition = editorDefinition()
     expect(definition.id).toBe(EDITOR_ID)
     expect(definition.kind).toBe(EDITOR_KIND)
-    expect(definition.priority).toBe('extension')
-    expect(definition.patterns).toEqual(['dsh-resource://file/**'])
+    expect(definition.priority).toBe('fallback')
+    // Shorter than the rich viewer's `dsh-resource://file/**`, so the same-band
+    // ranking prefers the rich viewer on an automatic open.
+    expect(definition.patterns).toEqual(['dsh-resource://**'])
+  })
+
+  it('loses an automatic open to the rich viewer and is reached only explicitly', () => {
+    const tabs = new SidebarRightTabRegistry(new Context())
+    tabs.register({ id: 'rich', kind: 'text', patterns: ['dsh-resource://file/**'], priority: 'fallback', title: () => 'rich' })
+    tabs.register(editorDefinition())
+    const target = address('notes.md')
+    expect(tabs.candidates(target).map(definition => definition.kind)).toEqual(['text', EDITOR_KIND])
+    expect(tabs.claim(target, EDITOR_KIND).kind).toBe(EDITOR_KIND)
+  })
+
+  it('fails open when the rich viewer is absent', () => {
+    const tabs = new SidebarRightTabRegistry(new Context())
+    tabs.register(editorDefinition())
+    expect(tabs.claim(address('notes.md')).kind).toBe(EDITOR_KIND)
+  })
+
+  it('registers an editor-tier document preview that loads its own bytes', () => {
+    const definition = editorPreviewDefinition(() => 'Editor')
+    expect(definition.id).toBe(EDITOR_ID)
+    expect(definition.priority).toBe('editor')
+    expect(definition.loading).toBe('renderer')
+    expect(definition.extensions).toContain('md')
+    expect(definition.extensions).toContain('ts')
+    expect(definition.extensions).toContain('html')
   })
 
   it('opens session text, code, markup, and configuration addresses', () => {

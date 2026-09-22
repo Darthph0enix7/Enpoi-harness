@@ -179,6 +179,22 @@ describe('SidebarRightController — opening', () => {
     expect(dockPaneIds(layout())).toHaveLength(1)
   })
 
+  it('lands a tab action\'s file open in the editor pane although the tab names its own pane', () => {
+    const h = harness()
+    const release = h.adopt(SESSION, h.instance)
+    try {
+      h.expand()
+      h.publish()
+      const page = h.tabOf('seed')
+      // The Tab domain hands a tab action its own docked pane as an implicit
+      // placement; that must not demote a file open to the panel's own page.
+      const occurrence = h.controller.tabDomain.occurrence(SESSION, { id: page })
+      occurrence.tabActions.openResource('dsh-resource://file/session/s-test/a.txt')
+      expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBe(h.tabOf('a.txt'))
+      expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(page)
+    } finally { release() }
+  })
+
   it('brings the lit kind\'s page forward instead of collapsing while another kind is in front', () => {
     const { controller, tabs, publish, layout, tabOf, expand } = harness()
     tabs.register({

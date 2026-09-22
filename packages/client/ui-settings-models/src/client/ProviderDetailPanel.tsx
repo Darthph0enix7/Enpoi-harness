@@ -551,7 +551,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       [identityId]: { state: 'testing' },
     }))
     try {
-      const poolTest = (api.llm as unknown as { poolTestIdentity?: (ns: string, p: string, id: string, key?: string) => Promise<unknown> }).poolTestIdentity
+      const poolTest = (api.llm as unknown as {
+        poolTestIdentity?: (ns: string, p: string, id: string, key?: string) => Promise<unknown>
+      }).poolTestIdentity
       if (typeof poolTest !== 'function') throw new Error('poolTestIdentity not available')
       const raw: unknown = await poolTest.call(api.llm, namespace.ns, providerId, identityId)
       // Unwrap RemoteResult if present
@@ -588,7 +590,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           }))
         }
       } else if (raw && typeof raw === 'object' && 'result' in (raw as Record<string, unknown>)) {
-        const rr = (raw as { result: { ok: boolean; value?: { ok: boolean; latencyMs?: number; error?: string }; error?: { message: string } } }).result
+        const rr = (raw as {
+          result: { ok: boolean; value?: { ok: boolean; latencyMs?: number; error?: string }; error?: { message: string } }
+        }).result
         if (rr.ok) {
           if (rr.value?.ok) {
             const lat = rr.value.latencyMs
@@ -662,7 +666,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }))
 
     try {
-      const poolReset = (api.llm as unknown as { poolResetCooldown?: (ns: string, p: string, id?: string) => Promise<unknown> }).poolResetCooldown
+      const poolReset = (api.llm as unknown as {
+        poolResetCooldown?: (ns: string, p: string, id?: string) => Promise<unknown>
+      }).poolResetCooldown
       if (typeof poolReset === 'function') {
         if (identityId) await poolReset.call(api.llm, namespace.ns, providerId, identityId)
         else await poolReset.call(api.llm, namespace.ns, providerId)
@@ -933,7 +939,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
             <div className={styles['poolHeaderActions']}>
               <select
-                className={styles['selectInput']}
+                className={`${styles['input']} ${styles['selectInput']}`}
                 value={poolConfig.strategy ?? 'priority-sticky'}
                 onChange={(e) => { void handleStrategyChange(e.target.value) }}
                 disabled={readOnly || busy}

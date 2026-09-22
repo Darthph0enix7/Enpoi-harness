@@ -164,11 +164,50 @@ export async function saveOnce(input: SaveInput): Promise<EditorSaveOutcome> {
       input.path,
       input.content,
       input.force ? undefined : input.expectedSha,
+      input.force,
       input.signal,
     )
     return { kind: 'saved', sha256: ack.sha256, mtimeMs: ack.mtimeMs, size: ack.size }
   } catch (error) {
     if (isConflict(error)) return { kind: 'conflict' }
+    return { kind: 'failed', code: codeOf(error), message: messageOf(error) }
+  }
+}
+
+/** What one beside-write settled as. */
+export type EditorSaveBesideOutcome =
+  | { readonly kind: 'saved'; readonly path: string; readonly sha256: string | undefined }
+  | { readonly kind: 'exists'; readonly path: string }
+  | { readonly kind: 'failed'; readonly code: string; readonly message: string }
+
+/** One beside-write's inputs. */
+export interface SaveBesideInput {
+  /** The file operations. */
+  readonly fs: EditorFsOps
+  /** The session whose workspace contains the file. */
+  readonly sessionId: string
+  /** The addressed file's path; the copy is its sibling. */
+  readonly path: string
+  /** The buffer to preserve. */
+  readonly content: string
+  /** Aborts the write. */
+  readonly signal?: AbortSignal | undefined
+}
+
+/**
+ * Write the buffer to `<file>.mine-<timestamp>` as a create-only write, the
+ * conflict flow's no-data-loss exit: the copy cannot clobber anything, and the
+ * original file is left exactly as the disk holds it.
+ * @param input - the beside-write inputs.
+ * @returns the copy's path, the taken name, or the failure.
+ */
+export async function saveBesideOnce(input: SaveBesideInput): Promise<EditorSaveBesideOutcome> {
+  const path = `${input.path}.mine-${Date.now()}`
+  try {
+    const ack = await input.fs.write(input.sessionId, path, input.content, null, false, input.signal)
+    return { kind: 'saved', path, sha256: ack.sha256 }
+  } catch (error) {
+    if (isConflict(error)) return { kind: 'exists', path }
     return { kind: 'failed', code: codeOf(error), message: messageOf(error) }
   }
 }

@@ -1,13 +1,19 @@
 /**
  * Stage one of this package's registration: what the `enpoi-editor` tab type IS.
  *
- * The type claims every session-scoped `dsh-resource://file/session/…` address
- * whose path classifies as an editable text file, at the `extension` band so it
- * beats the read-only `text` fallback (`ui-sidebar-documentpreview`) for exactly
- * those files. Images, PDFs, office documents, video, and unknown categories
- * stay with the fallback viewer, which owns their binary/download presentation.
+ * The type recognizes every session-scoped `dsh-resource://file/session/…`
+ * address whose path classifies as an editable text file, but it is deliberately
+ * demoted: it sits at the `fallback` band with a shorter glob than the rich
+ * `text` viewer (`ui-sidebar-documentpreview`, `dsh-resource://file/**`), so an
+ * automatic open always lands on the rich preview and the editor is reached only
+ * when a caller names its kind explicitly. With the rich viewer absent the
+ * editor is the only claimant left, which is the fail-open path.
+ *
+ * Images, PDFs, office documents, video, and unknown categories stay with the
+ * fallback viewer, which owns their binary/download presentation.
  */
 import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { DocumentPreviewDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import { classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import { parseFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 
@@ -36,7 +42,15 @@ const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
   'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat',
   'go', 'rs', 'java', 'kt', 'kts', 'swift', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'rb', 'php', 'lua', 'r', 'scala', 'dart', 'ex', 'exs', 'erl', 'zig', 'nim', 'vue', 'svelte',
   'css', 'scss', 'sass', 'less', 'xml', 'svg', 'txt',
+  'html', 'htm', 'xhtml', 'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'mts', 'cts', 'py', 'pyi', 'pyw', 'pl', 'pm',
 ])
+
+/**
+ * Suffixes the in-pane editor offers as a viewer candidate. Selection only
+ * needs the suffix to match; the editor's own `canOpen` still decides which
+ * addresses it will actually edit.
+ */
+const EDITOR_EXTENSIONS: readonly string[] = [...new Set(TEXT_EXTENSIONS)]
 
 /**
  * Basenames that carry no extension but are text files.
@@ -70,6 +84,28 @@ export function isEditablePath(path: string): boolean {
 }
 
 /**
+ * The in-pane editor's document-renderer registration.
+ *
+ * It sits in the `editor` priority tier, so it is listed among a file's viewer
+ * candidates but never chosen automatically: the rich renderer keeps the default
+ * and the reader picks CodeMirror explicitly. `loading: 'renderer'` tells the
+ * document owner the editor loads its own bytes through `fsops`.
+ * @param title - locale-owned implementation name.
+ * @returns the document renderer definition, keyed by the tab kind's own id.
+ */
+export function editorPreviewDefinition(title: () => string): DocumentPreviewDefinition {
+  return {
+    id: EDITOR_ID,
+    extensions: EDITOR_EXTENSIONS,
+    priority: 'editor',
+    title,
+    loading: 'renderer',
+    wrap: true,
+    capabilities: { search: true, gotoLine: true },
+  }
+}
+
+/**
  * The tab title for one `file:` address: its decoded basename.
  *
  * Decoding is per segment, matching how the address was built, so a name
@@ -90,14 +126,21 @@ export function basenameOf(address: string): string {
 
 /**
  * The editor type's registry definition.
+ *
+ * The kind stays registered only so persisted sessions and old surface records
+ * referencing it survive a restore: its body is the redirect to the unified
+ * document pane. No product UI opens it by kind anymore — the Edit control
+ * switches the display type in place.
  * @returns the definition to register.
  */
 export function editorDefinition(): SidebarRightTabDefinition {
   return {
     id: EDITOR_ID,
     kind: EDITOR_KIND,
-    patterns: ['dsh-resource://file/**'],
-    priority: 'extension',
+    // Shorter than the rich viewer's `dsh-resource://file/**`, so a same-band
+    // automatic open prefers the rich viewer and the editor stays explicit-only.
+    patterns: ['dsh-resource://**'],
+    priority: 'fallback',
     canOpen: (address) => {
       const file = parseFileAddress(address)
       return file?.scope === 'session' && file.path !== '' && isEditablePath(file.path)
