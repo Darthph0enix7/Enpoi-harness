@@ -14,10 +14,10 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, KeyboardEvent, MouseEvent } from 'react'
+import type { ChangeEvent, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import clsx from 'clsx'
 import {
-  IconPlusOutline16, IconWarningOutline16, Toast, Tooltip,
+  IconPlusOutline16, IconWarningOutline16, Toast, Tooltip, useSheetPresentation,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: the `plan` projection key merge (the TodoDock posture — the
 // composer reads a host-computed value; the domain owns the key).
@@ -117,6 +117,9 @@ export const InputBar = memo(function InputBar({
   }, [notice, showToast])
   const cardRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  // Phone composer layout: model/agent move to a rider row above the card and
+  // the card keeps the footer controls. Same threshold as the picker sheets.
+  const compactComposer = useSheetPresentation()
 
   // A continuable child without its live parent cannot accept human input,
   // but its independent Stop below stays available while it runs.
@@ -261,6 +264,14 @@ export const InputBar = memo(function InputBar({
     keepDraftFocus(e, editor)
   }
 
+  // Touch twin of keepFocus: preventDefault on pointerdown stops the browser
+  // from moving focus to the tapped button (and suppresses the compatibility
+  // mousedown), so the caret never leaves the draft editor.
+  const keepFocusTouch = (e: ReactPointerEvent<HTMLButtonElement>): void => {
+    e.preventDefault()
+    editor?.getRootElement()?.focus({ preventScroll: true })
+  }
+
   const onToggleCommandMenu = (): void => {
     if (keyboard === undefined) return
     // The menu is a combobox over the editor, so the keyboard has to be there
@@ -362,6 +373,14 @@ export const InputBar = memo(function InputBar({
           their pointer events), so the WHOLE capsule is the pick target.
           pointerdown stops here so the Menu's outside-close cannot race the
           click's reopen (close-then-open flickers the chip's open echo). */}
+      {/* Phone rider row: the model + agent pickers sit above the card, so the
+          footer keeps attach · permission · plan | send without crowding. */}
+      {compactComposer && sessionId !== undefined && (
+        <div className={css.rider} data-composer-rider>
+          {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
+          {renderSlot('conversation.input.agent', { locked })}
+        </div>
+      )}
       <div
         ref={cardRef}
         className={clsx(css.card, workspaceTrigger && css.cardWorkspaceTrigger)}
@@ -405,7 +424,7 @@ export const InputBar = memo(function InputBar({
           hint={hint}
           showPlaceholder={draft === '' && attachments.length === 0 && !claimActive}
         />
-        <div className={css.row}>
+        <div className={css.row} data-composer-footer>
           <div className={css.tools}>
             <Tooltip label={t('input.commands')} side="top" delayMs={500}>
               <button
@@ -416,6 +435,7 @@ export const InputBar = memo(function InputBar({
                 aria-expanded={commandMenuOpen}
                 disabled={locked || toggleCommandMenu === undefined}
                 onMouseDown={keepFocus}
+                onPointerDown={keepFocusTouch}
                 onClick={onToggleCommandMenu}
               >
                 <IconPlusOutline16 size={14} />
@@ -430,7 +450,10 @@ export const InputBar = memo(function InputBar({
               onChange={onPickFiles}
             />
             <div className={css.modes}>
-              {sessionId === undefined ? null : renderSlot('conversation.input.agent', { locked })}
+              {/* The agent picker rides the phone rider row above the card. */}
+              {sessionId === undefined || compactComposer
+                ? null
+                : renderSlot('conversation.input.agent', { locked })}
               {sessionId === undefined ? null : renderSlot('conversation.input.permission', { locked })}
               {sessionId === undefined ? null : renderSlot('conversation.input.plan', { locked })}
             </div>
@@ -442,7 +465,9 @@ export const InputBar = memo(function InputBar({
             {input === undefined || sessionId === undefined
               ? null
               : renderSlot('conversation.input.right', {})}
-            {sessionId === undefined ? null : renderSlot('conversation.input.model', { locked: modelSeatLocked })}
+            {sessionId === undefined || compactComposer
+              ? null
+              : renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             {interruptible && (
               <Tooltip label={t('input.stop')} side="top" delayMs={500} disabled={stop === undefined}>
                 <button
@@ -451,6 +476,7 @@ export const InputBar = memo(function InputBar({
                   aria-label={t('input.stop')}
                   disabled={stop === undefined}
                   onMouseDown={keepFocus}
+                  onPointerDown={keepFocusTouch}
                   onClick={stop}
                 >
                   <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
@@ -466,6 +492,7 @@ export const InputBar = memo(function InputBar({
                 aria-label={primaryLabel}
                 disabled={primaryDisabled}
                 onMouseDown={keepFocus}
+                onPointerDown={keepFocusTouch}
                 onClick={onPrimary}
               >
                 {primaryStops ? (

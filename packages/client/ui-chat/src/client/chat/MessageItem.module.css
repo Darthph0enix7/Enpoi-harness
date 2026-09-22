@@ -385,3 +385,77 @@
   font-size: 12px;
   line-height: 15px;
 }
+
+/* ── SwipeReveal: coarse-pointer destructive row action ──
+   Fine pointers render the row exactly as before — the action layer stays
+   `display: none` and the wrapper adds no box of its own. On touch, a
+   horizontal drag slides the content aside and reveals the destructive strip;
+   choosing it arms the inline confirm so the action is never one tap away. */
+.swipeRow {
+  position: relative;
+}
+.swipeContent {
+  min-width: 0;
+}
+.swipeAction {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .swipeRow {
+    overflow: hidden;
+    /* Horizontal drags belong to the reveal; vertical stays with the scroller. */
+    touch-action: pan-y;
+  }
+  .swipeContent {
+    transition: transform 160ms ease-out;
+  }
+  .swipeRow[data-dragging] .swipeContent {
+    transition: none;
+  }
+  .swipeAction {
+    position: absolute;
+    inset-block: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    /* 116px = the JS reveal travel (SWIPE_ACTION_WIDTH). */
+    width: 116px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease-out;
+  }
+  .swipeAction[data-open] {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .swipeDestructive,
+  .swipeConfirm,
+  .swipeCancel {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 8px;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 10px;
+    background: var(--dsw-alias-interactive-bg-hover-danger, rgba(239, 68, 68, 0.14));
+    color: #f87171;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .swipeConfirm {
+    flex: 1;
+    min-width: 0;
+  }
+  .swipeCancel {
+    border-color: var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.18));
+    background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.72));
+    color: var(--dsw-alias-label-primary, #f1f5f9);
+  }
+}

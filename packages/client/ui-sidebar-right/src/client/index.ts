@@ -31,6 +31,7 @@ import { GuideBody, type GuideInjected } from './tabs/guide/GuideBody.tsx'
 import { GuideTitle } from './tabs/guide/GuideTitle.tsx'
 import { RightbarSeat, type SidebarRightInjected } from './shell/SidebarRight.tsx'
 import { RightbarRoot } from './shell/RightbarRoot.tsx'
+import { MobileSurfaces, type MobileSurfacesInjected } from './shell/MobileSurfaces.tsx'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
 import { SidebarRightRail } from './rail.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
@@ -226,7 +227,32 @@ export function apply(ctx: ClientContext): void {
       { name: 'sidebar.right.pane.tab.title', key: GUIDE_ID },
       GuideTitle,
     ))
+    // The mobile shell's surface entries: the same rail items the icon rail
+    // draws, one registration for the bottom bar and one for the header
+    // overflow sheet, distinguished by the injected presentation.
+    const mobileInjected = (presentation: 'bar' | 'more'): MobileSurfacesInjected => ({
+      hooks: {
+        railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
+        rail: rail.state,
+      },
+      selectKind: (kind) => { controller.selectKind(kind) },
+      presentation,
+    })
+    const disposeMobileBar = ctx.slots.inject('shell.mobile.bar', () => ctx.slots.register({
+      name: 'shell.mobile.bar',
+      id: 'surfaces',
+      locale: NS,
+      inject: () => mobileInjected('bar'),
+    }, MobileSurfaces))
+    const disposeMobileMore = ctx.slots.inject('shell.mobile.more', () => ctx.slots.register({
+      name: 'shell.mobile.more',
+      id: 'surfaces',
+      locale: NS,
+      inject: () => mobileInjected('more'),
+    }, MobileSurfaces))
     return () => {
+      disposeMobileMore()
+      disposeMobileBar()
       disposeGuideTitle()
       disposeGuide()
       disposeSeat()

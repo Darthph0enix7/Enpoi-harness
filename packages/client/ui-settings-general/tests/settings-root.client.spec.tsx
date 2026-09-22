@@ -38,6 +38,7 @@ const useSessionStatus: SettingsRootComponentProps['useSessionStatus'] = selecto
 
 function mount({
   wide = true,
+  phone = false,
   dictionary = en,
   connectionState = 'connected',
   desktopUpdate = { failed: false, opening: false },
@@ -54,6 +55,7 @@ function mount({
   ],
 }: {
   wide?: boolean
+  phone?: boolean
   dictionary?: typeof en | typeof zh
   connectionState?: ConnectionSnapshot
   desktopUpdate?: DesktopUpdateView
@@ -101,6 +103,11 @@ function mount({
     openDesktopUpdate: () => {},
     publishOpenSection: () => () => {},
     useDesktopUpdate: select => select(desktopUpdate),
+    // jsdom is a desktop: the phone page stays out of the modal specs.
+    useDevice: select => select({
+      device: phone ? 'phone' : 'desktop', pointer: phone ? 'coarse' : 'fine',
+      width: phone ? 390 : 1440, keyboardOpen: false, keyboardInset: 0,
+    }),
     t: makeTranslate(dictionary),
     useConnectionState: (select) => {
       const [, force] = useState(0)
@@ -437,5 +444,31 @@ describe('SettingsPanel navigation', () => {
     expect(listeners.size).toBe(1)
     view.unmount()
     expect(listeners.size).toBe(0)
+  })
+})
+
+describe('SettingsRoot phone page', () => {
+  it('pushes a section and steps back to the list, then closes from the page control', () => {
+    mount({ phone: true })
+    openPanel()
+    // The modal layer never mounts on a phone; the page owns its own chrome.
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy()
+    expect(document.querySelector('[data-settings-mobile-list]')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }))
+    expect(document.querySelector('[data-settings-mobile-detail="models"]')).toBeTruthy()
+    expect(screen.getByTestId('section-models')).toBeTruthy()
+    expect(document.querySelector('[data-settings-mobile-list]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-settings-mobile-control]')!)
+    expect(document.querySelector('[data-settings-mobile-list]')).toBeTruthy()
+    expect(screen.queryByTestId('section-models')).toBeNull()
+    fireEvent.click(document.querySelector('[data-settings-mobile-control]')!)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('lists every registered section as a single-column row', () => {
+    mount({ phone: true })
+    openPanel()
+    const rows = document.querySelectorAll('[data-settings-mobile-row]')
+    expect([...rows].map(row => row.getAttribute('data-settings-mobile-row'))).toEqual(['general', 'models', 'agent-presets'])
   })
 })

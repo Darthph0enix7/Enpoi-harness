@@ -107,11 +107,23 @@ export function TheMarkTaskCard({
 
   return (
     <div className={styles.markTaskCard}>
-      {/* Zoom 1: Collapsed Header Badge Row */}
-      <div className={styles.markBadgeRow} onClick={() => setExpanded(!expanded)}>
+      {/* Zoom 1: Collapsed Header Badge Row (a real button: the whole card
+          head is the tap target and keyboard toggles the drawer too). */}
+      <button
+        type="button"
+        className={styles.markBadgeRow}
+        aria-expanded={expanded}
+        data-mark-task-head
+        onClick={() => setExpanded(!expanded)}
+      >
         <div className={styles.markBadgeLeft}>
           <span className={`${styles.statusIndicator} ${statusClass}`} title={statusLabel} />
-          <span className={styles.personaBadge}><span className={styles.personaIcon}><MicroIcon d={personaIconD(persona)} size={11} /></span>{personaLabel}</span>
+          <span className={styles.personaBadge}>
+            <span className={styles.personaIcon}>
+              <MicroIcon d={personaIconD(persona)} size={11} />
+            </span>
+            {personaLabel}
+          </span>
           <span className={styles.taskTitle} title={title}>
             {title}
           </span>
@@ -122,7 +134,7 @@ export function TheMarkTaskCard({
           {durationStr && <span className={styles.durationPill}>⏱️ {durationStr}</span>}
           <span className={styles.chevronToggle}>{expanded ? '▲' : '▼'}</span>
         </div>
-      </div>
+      </button>
 
       {/* Zoom 2: Live Action Calligraphy Strip */}
       {(status === 'running' || latchedTool) && (

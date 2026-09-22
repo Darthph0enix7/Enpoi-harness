@@ -64,7 +64,10 @@ export class ThemePresenter {
       this.appliedTokens.push(name)
     }
     this.themeColorMeta.content = getComputedStyle(body).backgroundColor
-    if (!this.themeColorMeta.isConnected) document.head.append(this.themeColorMeta)
+    // Prepended, not appended: index.html seeds static palette-exact
+    // theme-color metas for the pre-boot paint, and the first matching meta
+    // wins — the live computed value must take precedence over the seeds.
+    if (!this.themeColorMeta.isConnected) document.head.prepend(this.themeColorMeta)
   }
 
   /**

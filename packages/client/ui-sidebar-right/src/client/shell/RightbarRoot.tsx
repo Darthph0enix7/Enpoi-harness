@@ -8,13 +8,13 @@ import type {} from '../contract/slots.ts'
  * @returns the current Session's right Sidebar, or no content for a global panel.
  */
 export function RightbarRoot({
-  usePanelInfo, SessionProvider, renderSlot, width, viewportWidth, canShow,
+  usePanelInfo, SessionProvider, renderSlot, width, viewportWidth, canShow, mobile,
 }: PropsRuntime<'rightbar'> & PropsRenderSlots<'rightbar.session'>) {
   const visible = usePanelInfo(info => info.activePanelId === null)
   if (!visible) return null
   return (
     <SessionProvider>
-      {renderSlot('rightbar.session', { width, viewportWidth, canShow })}
+      {renderSlot('rightbar.session', { width, viewportWidth, canShow, mobile })}
     </SessionProvider>
   )
 }

@@ -73,3 +73,23 @@
   color: var(--dsw-alias-state-error-primary);
   border-color: transparent;
 }
+
+/* Phone: the action row wraps instead of clipping and every decision button
+   reaches the 44px touch floor. */
+@media (max-width: 560px) {
+  .actionRow {
+    flex-wrap: wrap;
+    justify-content: stretch;
+    gap: 8px;
+  }
+
+  .actionRow > * {
+    flex: 1 1 auto;
+  }
+}
+
+@media (pointer: coarse) {
+  .actionRow button {
+    min-height: 44px;
+  }
+}

@@ -4,6 +4,7 @@
 // 3. Affected Files: compact clickable file chips that open in the sidebar editor with outcome badges (Restored, Trashed, Conflict).
 
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Sheet, useSheetPresentation } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { RevertFileConflict, RevertFileOutcome } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -38,6 +39,7 @@ function basenameOf(path: string): string {
 export const RevertTray = memo(function RevertTray({
   useSession, useChat, t, revertRestore, forkAt, openFile, resolveFileConflict, inputActions,
 }: RevertTrayProps) {
+  const sheetMode = useSheetPresentation()
   const [expanded, setExpanded] = useState(false)
   const [inFlightConflictId, setInFlightConflictId] = useState<string | null>(null)
   const listRef = useRef<HTMLUListElement>(null)
@@ -102,7 +104,7 @@ export const RevertTray = memo(function RevertTray({
         await resolveFileConflict(conflictId, resolution)
       } else {
       }
-    } catch (err) {
+    } catch {
     } finally {
       setInFlightConflictId(null)
     }
@@ -128,123 +130,235 @@ export const RevertTray = memo(function RevertTray({
     }
   }
 
+  const conflictSection = conflicts.length === 0 ? null : (
+    <div className={css.conflictSection}>
+      <div className={css.conflictHeader}>
+        <span className={css.conflictIcon}>
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path
+              d="M8 1.5L14.5 13.5H1.5L8 1.5Z"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path d="M8 6V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <circle cx="8" cy="11.5" r="0.75" fill="currentColor" />
+          </svg>
+        </span>
+        <span className={css.conflictTitle}>{t('revert.conflictsTitle')}</span>
+      </div>
+      <div className={css.conflictList}>
+        {conflicts.map((c: RevertFileConflict) => {
+          const isBusy = inFlightConflictId === c.conflictId
+          const desc = c.state === 'missing'
+            ? t('revert.missingDesc')
+            : c.state === 'unavailable'
+              ? t('revert.unavailableDesc')
+              : t('revert.conflictDesc')
+
+          return (
+            <div key={c.conflictId} className={css.conflictCard}>
+              <div className={css.conflictInfo}>
+                <button
+                  type="button"
+                  className={css.fileChip}
+                  onClick={() => { void openFile(c.displayPath || c.targetKey) }}
+                  title={c.targetKey}
+                >
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M3 1.5H10L13.5 5V14.5H3V1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                    <path d="M10 1.5V5H13.5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                  </svg>
+                  <span className={css.fileChipName}>{basenameOf(c.displayPath || c.targetKey)}</span>
+                </button>
+                <span className={css.conflictDesc}>{desc}</span>
+              </div>
+
+              <div className={css.conflictActions}>
+                {(c.state === 'conflict' || (c.state !== 'missing' && c.state !== 'unavailable')) && (
+                  <>
+                    <button
+                      type="button"
+                      className={`${css.actionBtn} ${css.btnPrimary}`}
+                      disabled={isBusy}
+                      onClick={() => { void handleResolve(c.conflictId, 'keep') }}
+                    >
+                      {t('revert.btnKeep')}
+                    </button>
+                    <button
+                      type="button"
+                      className={`${css.actionBtn} ${css.btnDanger}`}
+                      disabled={isBusy}
+                      onClick={() => { void handleResolve(c.conflictId, 'restore') }}
+                    >
+                      {c.mode === 'restore' ? t('revert.btnForceRestore') : t('revert.btnRestore')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.actionBtn}
+                      disabled={isBusy}
+                      onClick={() => { void handleResolve(c.conflictId, 'recreate') }}
+                    >
+                      {t('revert.btnRecreate')}
+                    </button>
+                  </>
+                )}
+                {c.state === 'missing' && (
+                  <>
+                    <button
+                      type="button"
+                      className={`${css.actionBtn} ${css.btnPrimary}`}
+                      disabled={isBusy}
+                      onClick={() => { void handleResolve(c.conflictId, 'recreate') }}
+                    >
+                      {t('revert.btnRecreateFile')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.actionBtn}
+                      disabled={isBusy}
+                      onClick={() => { void handleResolve(c.conflictId, 'keep') }}
+                    >
+                      {t('revert.btnLeaveDeleted')}
+                    </button>
+                  </>
+                )}
+                {c.state === 'unavailable' && (
+                  <button
+                    type="button"
+                    className={css.actionBtn}
+                    disabled={isBusy}
+                    onClick={() => { void handleResolve(c.conflictId, 'keep') }}
+                  >
+                    {t('revert.btnDismiss')}
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  const revertedList = (
+    <ul ref={listRef} className={css.list}>
+      {reverted.map((item, index) => (
+        <li key={item.seq} className={css.item}>
+          <span className={css.itemText} title={item.text}>
+            {item.text}
+          </span>
+          <div className={css.itemActions}>
+            <button
+              type="button"
+              className={css.actionBtn}
+              onClick={() => handleRestore(item, index)}
+            >
+              {t('revert.restore')}
+            </button>
+            <button
+              type="button"
+              className={css.actionBtn}
+              onClick={() => forkAt(item.seq)}
+            >
+              {t('revert.fork')}
+            </button>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+
+  const filesSection = outcomeEntries.length === 0 ? null : (
+    <div className={css.filesSection}>
+      <div className={css.filesSectionTitle}>
+        {t('revert.affectedFiles', { count: outcomeEntries.length })}
+      </div>
+      <div className={css.filesGrid}>
+        {outcomeEntries.map(([path, out]: [string, RevertFileOutcome]) => (
+          <div key={path} className={css.fileRow}>
+            <button
+              type="button"
+              className={css.fileChip}
+              onClick={() => { void openFile(path) }}
+              title={path}
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 1.5H10L13.5 5V14.5H3V1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                <path d="M10 1.5V5H13.5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              </svg>
+              <span className={css.fileChipName}>{basenameOf(path)}</span>
+            </button>
+            {statusBadge(out.status)}
+            {out.dest && (
+              <span className={css.destNote} title={out.dest}>
+                → {basenameOf(out.dest)}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
+  const trayTitle = t('revert.trayLabel', { count: reverted.length })
+  const trayClosedTitle = reverted.length > 0 ? trayTitle : t('revert.conflictsTitle')
+
+  // Phone presentation: the trigger row stays above the composer and the tray
+  // body opens as a bottom sheet, keeping restore/fork and the affected-file
+  // chips inside it.
+  if (sheetMode) {
+    return (
+      <>
+        <div className={css.dock} data-revert-tray data-revert-tray-sheet>
+          <button
+            type="button"
+            className={css.sheetTrigger}
+            aria-haspopup="dialog"
+            aria-expanded={expanded}
+            data-revert-trigger
+            onClick={() => { setExpanded(true) }}
+          >
+            <span className={css.title}>{trayClosedTitle}</span>
+            {reverted.length > 0 && conflicts.length > 0 && (
+              <span className={css.filesCountBadge}>
+                {t('revert.openConflicts', { count: conflicts.length })}
+              </span>
+            )}
+            <span className={css.chevron}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path
+                  d="M2.5 7.5L6 4L9.5 7.5"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+          </button>
+        </div>
+        <Sheet
+          open={expanded}
+          onClose={() => { setExpanded(false) }}
+          title={trayClosedTitle}
+          closeLabel={t('revert.close')}
+          surfaceId="ui-chat:revert-tray"
+          contentClassName={css.sheetBody ?? ''}
+        >
+          {conflictSection}
+          {revertedList}
+          {filesSection}
+        </Sheet>
+      </>
+    )
+  }
+
   return (
     <div className={css.dock} data-revert-tray>
       <div className={css.panel}>
-        {/* ── 1. Conflict Banner (prominent if manual edits or missing files detected) ── */}
-        {conflicts.length > 0 && (
-          <div className={css.conflictSection}>
-            <div className={css.conflictHeader}>
-              <span className={css.conflictIcon}>
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M8 1.5L14.5 13.5H1.5L8 1.5Z"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path d="M8 6V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                  <circle cx="8" cy="11.5" r="0.75" fill="currentColor" />
-                </svg>
-              </span>
-              <span className={css.conflictTitle}>{t('revert.conflictsTitle')}</span>
-            </div>
-            <div className={css.conflictList}>
-              {conflicts.map((c: RevertFileConflict) => {
-                const isBusy = inFlightConflictId === c.conflictId
-                const desc = c.state === 'missing'
-                  ? t('revert.missingDesc')
-                  : c.state === 'unavailable'
-                    ? t('revert.unavailableDesc')
-                    : t('revert.conflictDesc')
-
-                return (
-                  <div key={c.conflictId} className={css.conflictCard}>
-                    <div className={css.conflictInfo}>
-                      <button
-                        type="button"
-                        className={css.fileChip}
-                        onClick={() => { void openFile(c.displayPath || c.targetKey) }}
-                        title={c.targetKey}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                          <path d="M3 1.5H10L13.5 5V14.5H3V1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                          <path d="M10 1.5V5H13.5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                        </svg>
-                        <span className={css.fileChipName}>{basenameOf(c.displayPath || c.targetKey)}</span>
-                      </button>
-                      <span className={css.conflictDesc}>{desc}</span>
-                    </div>
-
-                    <div className={css.conflictActions}>
-                      {(c.state === 'conflict' || (c.state !== 'missing' && c.state !== 'unavailable')) && (
-                        <>
-                          <button
-                            type="button"
-                            className={`${css.actionBtn} ${css.btnPrimary}`}
-                            disabled={isBusy}
-                            onClick={() => { void handleResolve(c.conflictId, 'keep') }}
-                          >
-                            {t('revert.btnKeep')}
-                          </button>
-                          <button
-                            type="button"
-                            className={`${css.actionBtn} ${css.btnDanger}`}
-                            disabled={isBusy}
-                            onClick={() => { void handleResolve(c.conflictId, 'restore') }}
-                          >
-                            {c.mode === 'restore' ? t('revert.btnForceRestore') : t('revert.btnRestore')}
-                          </button>
-                          <button
-                            type="button"
-                            className={css.actionBtn}
-                            disabled={isBusy}
-                            onClick={() => { void handleResolve(c.conflictId, 'recreate') }}
-                          >
-                            {t('revert.btnRecreate')}
-                          </button>
-                        </>
-                      )}
-                      {c.state === 'missing' && (
-                        <>
-                          <button
-                            type="button"
-                            className={`${css.actionBtn} ${css.btnPrimary}`}
-                            disabled={isBusy}
-                            onClick={() => { void handleResolve(c.conflictId, 'recreate') }}
-                          >
-                            {t('revert.btnRecreateFile')}
-                          </button>
-                          <button
-                            type="button"
-                            className={css.actionBtn}
-                            disabled={isBusy}
-                            onClick={() => { void handleResolve(c.conflictId, 'keep') }}
-                          >
-                            {t('revert.btnLeaveDeleted')}
-                          </button>
-                        </>
-                      )}
-                      {c.state === 'unavailable' && (
-                        <button
-                          type="button"
-                          className={css.actionBtn}
-                          disabled={isBusy}
-                          onClick={() => { void handleResolve(c.conflictId, 'keep') }}
-                        >
-                          {t('revert.btnDismiss')}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── 2. Reverted Messages Header & Expandable Tray ── */}
+        {conflictSection}
         {reverted.length > 0 && (
           <>
             <button
@@ -278,65 +392,8 @@ export const RevertTray = memo(function RevertTray({
 
             {expanded && (
               <div className={css.expandedBody}>
-                {/* Reverted Queries List */}
-                <ul ref={listRef} className={css.list}>
-                  {reverted.map((item, index) => (
-                    <li key={item.seq} className={css.item}>
-                      <span className={css.itemText} title={item.text}>
-                        {item.text}
-                      </span>
-                      <div className={css.itemActions}>
-                        <button
-                          type="button"
-                          className={css.actionBtn}
-                          onClick={() => handleRestore(item, index)}
-                        >
-                          {t('revert.restore')}
-                        </button>
-                        <button
-                          type="button"
-                          className={css.actionBtn}
-                          onClick={() => forkAt(item.seq)}
-                        >
-                          {t('revert.fork')}
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-
-                {/* Affected Files List */}
-                {outcomeEntries.length > 0 && (
-                  <div className={css.filesSection}>
-                    <div className={css.filesSectionTitle}>
-                      {t('revert.affectedFiles', { count: outcomeEntries.length })}
-                    </div>
-                    <div className={css.filesGrid}>
-                      {outcomeEntries.map(([path, out]: [string, RevertFileOutcome]) => (
-                        <div key={path} className={css.fileRow}>
-                          <button
-                            type="button"
-                            className={css.fileChip}
-                            onClick={() => { void openFile(path) }}
-                            title={path}
-                          >
-                            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                              <path d="M3 1.5H10L13.5 5V14.5H3V1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                              <path d="M10 1.5V5H13.5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                            </svg>
-                            <span className={css.fileChipName}>{basenameOf(path)}</span>
-                          </button>
-                          {statusBadge(out.status)}
-                          {out.dest && (
-                            <span className={css.destNote} title={out.dest}>
-                              → {basenameOf(out.dest)}
-                            </span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {revertedList}
+                {filesSection}
               </div>
             )}
           </>

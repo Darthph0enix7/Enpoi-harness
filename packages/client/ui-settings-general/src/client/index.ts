@@ -11,6 +11,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the ctx.remote merge and its fixed Host facts.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import { getDeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the settings slot declarations plus the ctx.settingsScope Context
 // merge. Cross-plugin collaboration goes through the service, never a value
@@ -113,6 +114,7 @@ export function apply(ctx: ClientContext): void {
     reconnect: () => { connection.reconnect() },
     hooks: {
       desktopUpdate: desktopUpdate.store,
+      device: getDeviceRuntime(),
       connectionState: connection.state,
       sections: {
         getSnapshot: () => {

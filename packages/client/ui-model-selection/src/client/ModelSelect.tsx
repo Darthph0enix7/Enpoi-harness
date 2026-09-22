@@ -27,7 +27,7 @@ import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import type { ModelReasoningEffort, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Sheet, Toast, useSheetPresentation } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelectInjected } from './slots.ts'
 import {
@@ -110,6 +110,7 @@ export function ModelSelect(
   // reused, otherwise the session's own current selection.
   const activeSel = override !== undefined ? override.current : state.current
 
+  const sheetMode = useSheetPresentation()
   const [pickerOpen, setPickerOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -187,6 +188,10 @@ export function ModelSelect(
   // Close outside
   useEffect(() => {
     if (!pickerOpen && !effortOpen) return
+    // Sheet presentation: the mask, Escape, and the touch back gesture own the
+    // dismissal, and the anchored popover's outside-pointer rule would fight
+    // the sheet's own pointer handling.
+    if (sheetMode) return
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Node
       if (pickerOpen && pickerRef.current && !pickerRef.current.contains(target) && !triggerRef.current?.contains(target)) {
@@ -199,7 +204,7 @@ export function ModelSelect(
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [pickerOpen, effortOpen])
+  }, [pickerOpen, effortOpen, sheetMode])
 
   // Focus search input on open
   useEffect(() => {
@@ -487,6 +492,344 @@ export function ModelSelect(
   const activeChain = activeSel?.chain === undefined ? undefined : modelGroupById(activeSel.chain)
   const modelLabel = activeChain?.label ?? currentChoice?.model.name ?? activeSel?.model ?? fallbackLabel
 
+  // Picker body shared by the desktop popover and the phone sheet.
+  const pickerPanel = (
+    <>
+      {/* Search Header */}
+      <div className={css.searchHeader}>
+        <span className={css.searchIcon}>
+          <IconSearch />
+        </span>
+        <input
+          ref={searchInputRef}
+          className={css.searchInput}
+          type="text"
+          placeholder="Search models..."
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+        />
+        {searchQuery && (
+          <button
+            type="button"
+            className={css.clearSearchBtn}
+            onClick={() => setSearchQuery('')}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      <div className={clsx(css.pickerScrollable, 'scrollable')}>
+        {/* MODEL GROUPS (above Favorites; rendered only when groups exist) */}
+        {filteredChainGroups.length > 0 && (
+          <div className={css.groupSection}>
+            <div
+              className={css.groupHeader}
+              onClick={() => {
+                toggleGroupCollapsed('__chains__')
+                setPrefsVersion(v => v + 1)
+              }}
+            >
+              <div className={css.groupHeaderLeft}>
+                <span className={css.groupIcon}>
+                  <IconChain />
+                </span>
+                <span className={css.groupTitleText}>{t('group.groups')}</span>
+                <span className={css.groupBadge}>{filteredChainGroups.length}</span>
+              </div>
+              <span className={clsx(css.groupChevron, !collapsedSet.has('__chains__') && css.groupChevronExpanded)}>
+                <IconChevron />
+              </span>
+            </div>
+
+            {!collapsedSet.has('__chains__') && (
+              <div className={css.groupBody}>
+                {filteredChainGroups.map((group) => {
+                  const first = group.links[0]
+                  if (first === undefined) return null
+                  const isSelected = activeSel?.chain === group.id
+                  return (
+                    <div
+                      key={`chain-${group.id}`}
+                      className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                      data-model-row=""
+                      title={group.links.map(link => `${link.provider}/${link.model}`).join('\n')}
+                      onClick={() => choose({ provider: first.provider, model: first.model, chain: group.id })}
+                    >
+                      <div className={css.modelRowLeft}>
+                        <span className={css.chainRowIcon}>
+                          <IconChain />
+                        </span>
+                        <span className={css.modelNameText}>{group.label}</span>
+                      </div>
+                      <div className={css.modelRowRight}>
+                        <span className={css.contextTag}>
+                          {group.links.length === 1
+                            ? t('group.model', { count: group.links.length })
+                            : t('group.models', { count: group.links.length })}
+                        </span>
+                        {isSelected && <IconCheck className={css.checkIcon} />}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* FAVORITES GROUP */}
+        {filteredFavorites.length > 0 && (
+          <div className={css.groupSection}>
+            <div
+              className={css.groupHeader}
+              onClick={() => {
+                toggleGroupCollapsed('__favorites__')
+                setPrefsVersion(v => v + 1)
+              }}
+            >
+              <div className={css.groupHeaderLeft}>
+                <span className={css.groupIcon} style={{ color: '#fbbf24' }}>
+                  <IconStar filled />
+                </span>
+                <span className={css.groupTitleText}>Favorites</span>
+                <span className={css.groupBadge}>{filteredFavorites.length}</span>
+              </div>
+              <span className={clsx(css.groupChevron, !collapsedSet.has('__favorites__') && css.groupChevronExpanded)}>
+                <IconChevron />
+              </span>
+            </div>
+
+            {!collapsedSet.has('__favorites__') && (
+              <div className={css.groupBody}>
+                {filteredFavorites.map((fav, fIdx) => {
+                  const isSelected = activeSel?.provider === fav.provider && activeSel.model === fav.model.id
+                  const contextStr = resolveModelContext(fav.model)
+
+                  return (
+                    <div
+                      key={`fav-${fav.provider}-${fav.model.id}`}
+                      className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                      data-model-row=""
+                      draggable={!q}
+                      onDragStart={e => handleFavoriteDragStart(e, fIdx)}
+                      onDragOver={e => e.preventDefault()}
+                      onDrop={e => handleFavoriteDrop(e, fIdx)}
+                      onClick={() => choose({ provider: fav.provider, model: fav.model.id })}
+                    >
+                      <div className={css.modelRowLeft}>
+                        {!q && (
+                          <span className={css.dragHandle} title="Drag to reorder favorite">
+                            <IconGrip />
+                          </span>
+                        )}
+                        <span className={css.modelNameText}>{fav.model.name}</span>
+                      </div>
+                      <div className={css.modelRowRight}>
+                        {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                        <button
+                          type="button"
+                          className={clsx(css.starBtn, css.starBtnActive)}
+                          title="Remove from favorites"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleModelFavorite(fav.provider, fav.model.id)
+                            setPrefsVersion(v => v + 1)
+                          }}
+                        >
+                          <IconStar filled />
+                        </button>
+                        {isSelected && <IconCheck className={css.checkIcon} />}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* RECENTS GROUP (when not searching) */}
+        {!q && recentItems.length > 0 && (
+          <div className={css.groupSection}>
+            <div
+              className={css.groupHeader}
+              onClick={() => {
+                toggleGroupCollapsed('__recents__')
+                setPrefsVersion(v => v + 1)
+              }}
+            >
+              <div className={css.groupHeaderLeft}>
+                <span className={css.groupIcon}>
+                  <IconClock />
+                </span>
+                <span className={css.groupTitleText}>Recent</span>
+                <span className={css.groupBadge}>{recentItems.length}</span>
+              </div>
+              <span className={clsx(css.groupChevron, !collapsedSet.has('__recents__') && css.groupChevronExpanded)}>
+                <IconChevron />
+              </span>
+            </div>
+
+            {!collapsedSet.has('__recents__') && (
+              <div className={css.groupBody}>
+                {recentItems.map((rec) => {
+                  const isSelected = activeSel?.provider === rec.provider && activeSel.model === rec.model.id
+                  const isFav = isModelFavorite(rec.provider, rec.model.id)
+                  const contextStr = resolveModelContext(rec.model)
+
+                  return (
+                    <div
+                      key={`rec-${rec.provider}-${rec.model.id}`}
+                      className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                      data-model-row=""
+                      onClick={() => choose({ provider: rec.provider, model: rec.model.id })}
+                    >
+                      <div className={css.modelRowLeft}>
+                        <span className={css.modelNameText}>{rec.model.name}</span>
+                      </div>
+                      <div className={css.modelRowRight}>
+                        {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                        <button
+                          type="button"
+                          className={clsx(css.starBtn, isFav && css.starBtnActive)}
+                          title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleModelFavorite(rec.provider, rec.model.id)
+                            setPrefsVersion(v => v + 1)
+                          }}
+                        >
+                          <IconStar filled={isFav} />
+                        </button>
+                        {isSelected && <IconCheck className={css.checkIcon} />}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* PROVIDER GROUPS - uses 0ms cached hidden/collapsed checks */}
+        {orderedGroups.map((group) => {
+          const visibleModels = group.models.filter((m) => {
+            const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
+            if (!matchesSearch) return false
+            const isCurrent = activeSel?.provider === group.id && activeSel.model === m.id
+            return isCurrent || !isHiddenCached(group.id, m.id)
+          })
+
+          if (visibleModels.length === 0) return null
+
+          const isCollapsed = !q && collapsedSet.has(group.id)
+
+          return (
+            <div
+              key={group.id}
+              className={clsx(css.groupSection, dragOverItem === group.id && css.dragOver)}
+              onDragOver={e => handleProviderDragOver(e, group.id)}
+              onDrop={e => handleProviderDrop(e, group.id)}
+            >
+              <div
+                className={css.groupHeader}
+                onClick={() => {
+                  if (!q) {
+                    toggleGroupCollapsed(group.id)
+                    setPrefsVersion(v => v + 1)
+                  }
+                }}
+              >
+                <div className={css.groupHeaderLeft}>
+                  {!q && (
+                    <span
+                      className={css.dragHandle}
+                      draggable
+                      onDragStart={e => handleProviderDragStart(e, group.id)}
+                      onClick={e => e.stopPropagation()}
+                      title="Drag to reorder provider"
+                    >
+                      <IconGrip />
+                    </span>
+                  )}
+                  <span className={css.groupTitleText}>{group.name}</span>
+                  <span className={css.groupBadge}>{visibleModels.length}</span>
+                </div>
+                <span className={clsx(css.groupChevron, !isCollapsed && css.groupChevronExpanded)}>
+                  <IconChevron />
+                </span>
+              </div>
+
+              {!isCollapsed && (
+                <div className={css.groupBody}>
+                  {visibleModels.map((model) => {
+                    const isSelected = activeSel?.provider === group.id && activeSel.model === model.id
+                    const isFav = isModelFavorite(group.id, model.id)
+                    const contextStr = resolveModelContext(model)
+
+                    return (
+                      <div
+                        key={model.id}
+                        className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
+                        data-model-row=""
+                        onClick={() => choose({ provider: group.id, model: model.id })}
+                      >
+                        <div className={css.modelRowLeft}>
+                          <span className={css.modelNameText}>{model.name}</span>
+                        </div>
+                        <div className={css.modelRowRight}>
+                          {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                          <button
+                            type="button"
+                            className={clsx(css.starBtn, isFav && css.starBtnActive)}
+                            title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleModelFavorite(group.id, model.id)
+                              setPrefsVersion(v => v + 1)
+                            }}
+                          >
+                            <IconStar filled={isFav} />
+                          </button>
+                          {isSelected && <IconCheck className={css.checkIcon} />}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Empty search results */}
+        {q && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
+          <div className={css.emptyState}>No models matching "{searchQuery}"</div>
+        )}
+      </div>
+    </>
+  )
+
+  const effortPanel = (
+    <>
+      {effortChoices.map((level) => {
+        const isSelected = effectiveEffort === level.effort
+        return (
+          <button
+            key={level.key}
+            type="button"
+            className={clsx(css.effortItem, isSelected && css.effortItemSelected)}
+            onClick={() => chooseEffort(level.effort)}
+          >
+            <span>{level.label}</span>
+            {isSelected && <IconCheck className={css.checkIcon} />}
+          </button>
+        )
+      })}
+    </>
+  )
+
   return (
     <div ref={rootRef} className={clsx(css.root, compact === true && css.compactRoot)}>
       {/* 1. Main Model Trigger Button */}
@@ -495,6 +838,7 @@ export function ModelSelect(
         type="button"
         className={clsx(css.modelTrigger, pickerOpen && css.modelTriggerActive)}
         title={modelLabel}
+        data-model-trigger
         disabled={locked}
         onClick={() => {
           setEffortOpen(false)
@@ -518,6 +862,7 @@ export function ModelSelect(
           type="button"
           className={clsx(css.effortTrigger, effortOpen && css.effortTriggerActive)}
           title={`Thinking / Reasoning Effort: ${effortLabel}`}
+          data-effort-trigger
           disabled={locked}
           onClick={() => {
             setPickerOpen(false)
@@ -534,351 +879,57 @@ export function ModelSelect(
         </button>
       )}
 
-      {/* 3. Main Model Picker Popover Window (OpenChamber UX). Portaled to
-          body (Menu primitive's portal mode) so the sidebar and column
-          overflow clips cannot crop the card; synthetic events still bubble
-          through this React subtree. */}
-      {pickerOpen && createPortal(
-        <div
-          ref={pickerRef}
-          className={css.pickerPopover}
-          style={menuPos ?? MEASURE_STYLE}
-          role="menu"
-          aria-label={t('menu.aria')}
-          aria-busy={state.status === 'loading' || state.status === 'selecting'}
-        >
-          {/* Search Header */}
-          <div className={css.searchHeader}>
-            <span className={css.searchIcon}>
-              <IconSearch />
-            </span>
-            <input
-              ref={searchInputRef}
-              className={css.searchInput}
-              type="text"
-              placeholder="Search models..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                className={css.clearSearchBtn}
-                onClick={() => setSearchQuery('')}
-              >
-                ×
-              </button>
-            )}
+      {/* 3. Main Model Picker: the anchored popover on desktop, a bottom
+          sheet at phone widths (search, favourites, recents, hidden-model
+          honouring, and the current row all preserved inside the sheet). */}
+      {pickerOpen && (sheetMode
+        ? (
+          <Sheet
+            open
+            onClose={() => { setPickerOpen(false); setSearchQuery('') }}
+            title={t('menu.aria')}
+            closeLabel={t('menu.close')}
+            surfaceId="ui-model-selection:picker"
+            contentClassName={css.sheetContent ?? ''}
+          >
+            {pickerPanel}
+          </Sheet>
+        )
+        : createPortal(
+          <div
+            ref={pickerRef}
+            className={css.pickerPopover}
+            data-model-popover
+            style={menuPos ?? MEASURE_STYLE}
+            role="menu"
+            aria-label={t('menu.aria')}
+            aria-busy={state.status === 'loading' || state.status === 'selecting'}
+          >
+            {pickerPanel}
+          </div>,
+          document.body,
+        ))}
+
+      {/* 4. Compact Effort Level Popover: anchored on desktop, a sheet at
+          phone widths. */}
+      {effortOpen && reasoning !== undefined && (sheetMode
+        ? (
+          <Sheet
+            open
+            onClose={() => { setEffortOpen(false) }}
+            title={t('menu.effort')}
+            closeLabel={t('menu.close')}
+            surfaceId="ui-model-selection:effort"
+            contentClassName={css.sheetContent ?? ''}
+          >
+            {effortPanel}
+          </Sheet>
+        )
+        : (
+          <div ref={effortRef} className={css.effortPopover}>
+            {effortPanel}
           </div>
-
-          <div className={clsx(css.pickerScrollable, 'scrollable')}>
-            {/* MODEL GROUPS (above Favorites; rendered only when groups exist) */}
-            {filteredChainGroups.length > 0 && (
-              <div className={css.groupSection}>
-                <div
-                  className={css.groupHeader}
-                  onClick={() => {
-                    toggleGroupCollapsed('__chains__')
-                    setPrefsVersion(v => v + 1)
-                  }}
-                >
-                  <div className={css.groupHeaderLeft}>
-                    <span className={css.groupIcon}>
-                      <IconChain />
-                    </span>
-                    <span className={css.groupTitleText}>{t('group.groups')}</span>
-                    <span className={css.groupBadge}>{filteredChainGroups.length}</span>
-                  </div>
-                  <span className={clsx(css.groupChevron, !collapsedSet.has('__chains__') && css.groupChevronExpanded)}>
-                    <IconChevron />
-                  </span>
-                </div>
-
-                {!collapsedSet.has('__chains__') && (
-                  <div className={css.groupBody}>
-                    {filteredChainGroups.map((group) => {
-                      const first = group.links[0]
-                      if (first === undefined) return null
-                      const isSelected = activeSel?.chain === group.id
-                      return (
-                        <div
-                          key={`chain-${group.id}`}
-                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
-                          title={group.links.map(link => `${link.provider}/${link.model}`).join('\n')}
-                          onClick={() => choose({ provider: first.provider, model: first.model, chain: group.id })}
-                        >
-                          <div className={css.modelRowLeft}>
-                            <span className={css.chainRowIcon}>
-                              <IconChain />
-                            </span>
-                            <span className={css.modelNameText}>{group.label}</span>
-                          </div>
-                          <div className={css.modelRowRight}>
-                            <span className={css.contextTag}>
-                              {group.links.length === 1
-                                ? t('group.model', { count: group.links.length })
-                                : t('group.models', { count: group.links.length })}
-                            </span>
-                            {isSelected && <IconCheck className={css.checkIcon} />}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* FAVORITES GROUP */}
-            {filteredFavorites.length > 0 && (
-              <div className={css.groupSection}>
-                <div
-                  className={css.groupHeader}
-                  onClick={() => {
-                    toggleGroupCollapsed('__favorites__')
-                    setPrefsVersion(v => v + 1)
-                  }}
-                >
-                  <div className={css.groupHeaderLeft}>
-                    <span className={css.groupIcon} style={{ color: '#fbbf24' }}>
-                      <IconStar filled />
-                    </span>
-                    <span className={css.groupTitleText}>Favorites</span>
-                    <span className={css.groupBadge}>{filteredFavorites.length}</span>
-                  </div>
-                  <span className={clsx(css.groupChevron, !collapsedSet.has('__favorites__') && css.groupChevronExpanded)}>
-                    <IconChevron />
-                  </span>
-                </div>
-
-                {!collapsedSet.has('__favorites__') && (
-                  <div className={css.groupBody}>
-                    {filteredFavorites.map((fav, fIdx) => {
-                      const isSelected = activeSel?.provider === fav.provider && activeSel.model === fav.model.id
-                      const contextStr = resolveModelContext(fav.model)
-
-                      return (
-                        <div
-                          key={`fav-${fav.provider}-${fav.model.id}`}
-                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
-                          draggable={!q}
-                          onDragStart={e => handleFavoriteDragStart(e, fIdx)}
-                          onDragOver={e => e.preventDefault()}
-                          onDrop={e => handleFavoriteDrop(e, fIdx)}
-                          onClick={() => choose({ provider: fav.provider, model: fav.model.id })}
-                        >
-                          <div className={css.modelRowLeft}>
-                            {!q && (
-                              <span className={css.dragHandle} title="Drag to reorder favorite">
-                                <IconGrip />
-                              </span>
-                            )}
-                            <span className={css.modelNameText}>{fav.model.name}</span>
-                          </div>
-                          <div className={css.modelRowRight}>
-                            {contextStr && <span className={css.contextTag}>{contextStr}</span>}
-                            <button
-                              type="button"
-                              className={clsx(css.starBtn, css.starBtnActive)}
-                              title="Remove from favorites"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                toggleModelFavorite(fav.provider, fav.model.id)
-                                setPrefsVersion(v => v + 1)
-                              }}
-                            >
-                              <IconStar filled />
-                            </button>
-                            {isSelected && <IconCheck className={css.checkIcon} />}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* RECENTS GROUP (when not searching) */}
-            {!q && recentItems.length > 0 && (
-              <div className={css.groupSection}>
-                <div
-                  className={css.groupHeader}
-                  onClick={() => {
-                    toggleGroupCollapsed('__recents__')
-                    setPrefsVersion(v => v + 1)
-                  }}
-                >
-                  <div className={css.groupHeaderLeft}>
-                    <span className={css.groupIcon}>
-                      <IconClock />
-                    </span>
-                    <span className={css.groupTitleText}>Recent</span>
-                    <span className={css.groupBadge}>{recentItems.length}</span>
-                  </div>
-                  <span className={clsx(css.groupChevron, !collapsedSet.has('__recents__') && css.groupChevronExpanded)}>
-                    <IconChevron />
-                  </span>
-                </div>
-
-                {!collapsedSet.has('__recents__') && (
-                  <div className={css.groupBody}>
-                    {recentItems.map((rec) => {
-                      const isSelected = activeSel?.provider === rec.provider && activeSel.model === rec.model.id
-                      const isFav = isModelFavorite(rec.provider, rec.model.id)
-                      const contextStr = resolveModelContext(rec.model)
-
-                      return (
-                        <div
-                          key={`rec-${rec.provider}-${rec.model.id}`}
-                          className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
-                          onClick={() => choose({ provider: rec.provider, model: rec.model.id })}
-                        >
-                          <div className={css.modelRowLeft}>
-                            <span className={css.modelNameText}>{rec.model.name}</span>
-                          </div>
-                          <div className={css.modelRowRight}>
-                            {contextStr && <span className={css.contextTag}>{contextStr}</span>}
-                            <button
-                              type="button"
-                              className={clsx(css.starBtn, isFav && css.starBtnActive)}
-                              title={isFav ? 'Remove from favorites' : 'Add to favorites'}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                toggleModelFavorite(rec.provider, rec.model.id)
-                                setPrefsVersion(v => v + 1)
-                              }}
-                            >
-                              <IconStar filled={isFav} />
-                            </button>
-                            {isSelected && <IconCheck className={css.checkIcon} />}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* PROVIDER GROUPS - uses 0ms cached hidden/collapsed checks */}
-            {orderedGroups.map((group) => {
-              const visibleModels = group.models.filter((m) => {
-                const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
-                if (!matchesSearch) return false
-                const isCurrent = activeSel?.provider === group.id && activeSel.model === m.id
-                return isCurrent || !isHiddenCached(group.id, m.id)
-              })
-
-              if (visibleModels.length === 0) return null
-
-              const isCollapsed = !q && collapsedSet.has(group.id)
-
-              return (
-                <div
-                  key={group.id}
-                  className={clsx(css.groupSection, dragOverItem === group.id && css.dragOver)}
-                  onDragOver={e => handleProviderDragOver(e, group.id)}
-                  onDrop={e => handleProviderDrop(e, group.id)}
-                >
-                  <div
-                    className={css.groupHeader}
-                    onClick={() => {
-                      if (!q) {
-                        toggleGroupCollapsed(group.id)
-                        setPrefsVersion(v => v + 1)
-                      }
-                    }}
-                  >
-                    <div className={css.groupHeaderLeft}>
-                      {!q && (
-                        <span
-                          className={css.dragHandle}
-                          draggable
-                          onDragStart={e => handleProviderDragStart(e, group.id)}
-                          onClick={e => e.stopPropagation()}
-                          title="Drag to reorder provider"
-                        >
-                          <IconGrip />
-                        </span>
-                      )}
-                      <span className={css.groupTitleText}>{group.name}</span>
-                      <span className={css.groupBadge}>{visibleModels.length}</span>
-                    </div>
-                    <span className={clsx(css.groupChevron, !isCollapsed && css.groupChevronExpanded)}>
-                      <IconChevron />
-                    </span>
-                  </div>
-
-                  {!isCollapsed && (
-                    <div className={css.groupBody}>
-                      {visibleModels.map((model) => {
-                        const isSelected = activeSel?.provider === group.id && activeSel.model === model.id
-                        const isFav = isModelFavorite(group.id, model.id)
-                        const contextStr = resolveModelContext(model)
-
-                        return (
-                          <div
-                            key={model.id}
-                            className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
-                            onClick={() => choose({ provider: group.id, model: model.id })}
-                          >
-                            <div className={css.modelRowLeft}>
-                              <span className={css.modelNameText}>{model.name}</span>
-                            </div>
-                            <div className={css.modelRowRight}>
-                              {contextStr && <span className={css.contextTag}>{contextStr}</span>}
-                              <button
-                                type="button"
-                                className={clsx(css.starBtn, isFav && css.starBtnActive)}
-                                title={isFav ? 'Remove from favorites' : 'Add to favorites'}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  toggleModelFavorite(group.id, model.id)
-                                  setPrefsVersion(v => v + 1)
-                                }}
-                              >
-                                <IconStar filled={isFav} />
-                              </button>
-                              {isSelected && <IconCheck className={css.checkIcon} />}
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-
-            {/* Empty search results */}
-            {q && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
-              <div className={css.emptyState}>No models matching "{searchQuery}"</div>
-            )}
-          </div>
-        </div>,
-        document.body,
-      )}
-
-      {/* 4. Compact Effort Level Popover */}
-      {effortOpen && reasoning !== undefined && (
-        <div ref={effortRef} className={css.effortPopover}>
-          {effortChoices.map((level) => {
-            const isSelected = effectiveEffort === level.effort
-            return (
-              <button
-                key={level.key}
-                type="button"
-                className={clsx(css.effortItem, isSelected && css.effortItemSelected)}
-                onClick={() => chooseEffort(level.effort)}
-              >
-                <span>{level.label}</span>
-                {isSelected && <IconCheck className={css.checkIcon} />}
-              </button>
-            )
-          })}
-        </div>
-      )}
+        ))}
 
       {/* Toast Feedback */}
       {toast !== null && (

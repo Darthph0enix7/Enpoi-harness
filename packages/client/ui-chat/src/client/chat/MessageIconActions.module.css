@@ -125,3 +125,25 @@
 .runTimeDot {
   margin: 0 10px;
 }
+
+/* Coarse pointers never rely on hover: the row is already revealed by the
+   absence of the hover guard above, and every action meets the 44px touch
+   floor here. Desktop keeps the 28px chrome. */
+@media (pointer: coarse) {
+  .actions {
+    height: auto;
+    min-height: 44px;
+    gap: 2px;
+  }
+
+  .action {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+
+  .action svg {
+    width: 18px;
+    height: 18px;
+  }
+}

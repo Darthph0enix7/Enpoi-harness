@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import { IconCloseOutline16 } from './icons/index.tsx'
+import { useBackHandler } from './back-stack.ts'
 import css from './Modal.module.css'
 
 interface ModalBaseProps {
@@ -47,6 +48,8 @@ export function Modal({
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [open, onClose])
+  // Touch devices route the browser back gesture into the same close.
+  useBackHandler('ui-primitives:modal', onClose, open)
 
   if (!open) return null
 

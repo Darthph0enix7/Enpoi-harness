@@ -31,6 +31,14 @@ kind: "package-reference"
 
 Windows Electron 的 `data-windows-titlebar` 标记在所有列上方预留顶栏高度，并移除收起后的侧栏轨道。内容区仅左上角保留 16px 圆角，其余角和内部交界处保持直角。框架发布 `--dsh-windows-content-radius` 和 `--dsh-windows-sidebar-width`，供 ui-sidebar-right 的全屏圆角及侧栏避让使用。普通 Web 文档不会获得该标记；macOS 保留其独立布局。
 
+### 自适应基础层
+
+`ui-layout` 安装自适应根层：启动 ui-primitives 的设备运行时，提供 `ctx.device`（共享 `DeviceRuntime`）与 `ctx.back`（共享 `BackStack`），并挂载 `adaptive.css`。该样式表的每条规则都限定在 `:root[data-device=…]`、`:root[data-keyboard=…]` 或指针/hover 媒体查询之下，拥有 `--dsh-safe-area-inset-*` 变量、触摸设备上的 `100dvh` 根高度与 `overscroll-behavior-y: none`、≥16px 的触摸输入规则（iOS 输入缩放），以及供后续移动端 lane 扩展的 `touch-action: manipulation` 交互配方。
+
+### 移动端外壳
+
+触摸设备（`device.device !== 'desktop'`）会挂载 `MobileFrame`，而不是三栏网格：`AppFrame` 在根部进行分支，`columns.ts` 中的求解器保持不变。该容器拥有 48px、带安全区内边距的顶栏（导航开关、当前会话标题、由聊天 lane 注入视图分段的 `shell.mobile.header` 座位、`shell.mobile.more` 溢出面板，以及一个调用 `ctx.back.dismissTop()` 的返回控件）、内容列、由 `shell.mobile.bar` 提供的底部操作栏、作为左栏的滑出抽屉（264px，带遮罩与边缘滑动，可用遮罩、滑动或返回关闭），以及右栏既有的全屏面板。`rightbar` owner 共享新增 `mobile: true`，占用方因此不再渲染 44px 图标栏、始终采用全屏呈现，并把打开文档渲染为面板内的推入页。chrome 的显隐完全由样式表负责：`[data-keyboard='open']`、`(orientation: landscape)` 与矮视口会隐藏底栏并显示顶栏溢出按钮。
+
 ### 主题呈现
 
 呈现器消费解析后的主题快照，并投影到 document：`html { color-scheme }` 驱动原生 UA 控件，依据当前配色方案设置 `body[data-ds-dark-theme]`，把主题的别名 token 与 `--dsh-content-font-size` 设为 body 上的内联变量，并持有一个 `<meta name="theme-color">`，其内容随计算后的 body 背景色更新。对呈现器执行 dispose（资源释放）时，它会连同其他全局写入一起移除自己的元数据节点。

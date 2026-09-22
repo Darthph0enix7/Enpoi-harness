@@ -9,13 +9,22 @@
  * the onboarding coordinator mounts exactly one ordered registrant while the
  * sessions-derived empty-Hero fact is active. Visible dialog chrome belongs
  * to the step, so a mounted-but-deciding step paints nothing here.
+ *
+ * On a phone the modal becomes a full-screen page instead: a section list
+ * pushes to one section detail, both under a chrome header whose control is a
+ * close at the list and a back at the detail, and the shared dismissal stack
+ * runs the same step. The page never covers its own close path, which is what
+ * the ≤768px modal layout did. It renders through a body portal: the trigger
+ * lives in the sidebar, whose mobile drawer slides on a transform, and a
+ * fixed-position page inside that drawer would be trapped and clipped by it.
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
-  ConnectionIndicator,
-  IconArchiveOutline20, IconCloseOutline16, IconDataOutline16,
-  IconPersonalizationOutline16, IconSettingsOutline16,
+  ConnectionIndicator, IconArchiveOutline20, IconChevronLeftOutline14, IconChevronRightOutline14,
+  IconCloseOutline16, IconDataOutline16,
+  IconPersonalizationOutline16, IconSettingsOutline16, useBackHandler,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConnectionIndicatorState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
@@ -115,6 +124,66 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
   )
 }
 
+type MobilePageProps = {
+  rows: readonly SettingsSectionRow[]
+  renderSlot: SettingsRootComponentProps['renderSlot']
+  activeId: string | undefined
+  onSelect: (id: string) => void
+  onBack: () => void
+  onClose: () => void
+  t: SettingsRootComponentProps['t']
+}
+
+/**
+ * The phone page: a header whose control closes at the list and returns to it
+ * at the detail, then either the single-column section list or the pushed
+ * section. Escape and the shared back gesture run the same step
+ * (`SettingsRoot` owns the stack registration).
+ */
+function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onClose, t }: MobilePageProps) {
+  const active = rows.find(row => row.id === activeId)
+  return (
+    <div className={css.mobilePage} role="dialog" aria-modal="true" aria-label={t('title')}>
+      <header className={css.mobileHeader}>
+        <button
+          type="button"
+          className={css.mobileControl}
+          aria-label={active === undefined ? t('close') : t('back')}
+          data-settings-mobile-control=""
+          onClick={active === undefined ? onClose : onBack}
+        >
+          {active === undefined ? <IconCloseOutline16 size={16} /> : <IconChevronLeftOutline14 size={16} />}
+        </button>
+        <div className={css.mobileTitle}>{active === undefined ? renderSlot('settings.header', {}) : active.label}</div>
+        <div className={css.mobileActions}>{renderSlot('settings.action', {})}</div>
+      </header>
+      {active === undefined
+        ? (
+          <div className={css.mobileList} data-settings-mobile-list="">
+            {rows.map(row => (
+              <button
+                key={row.id}
+                type="button"
+                className={css.mobileRow}
+                data-settings-mobile-row={row.id}
+                onClick={() => { onSelect(row.id) }}
+              >
+                {navIcon(row.id)}
+                <span className={css.mobileRowLabel}>{row.label}</span>
+                <IconChevronRightOutline14 size={14} />
+              </button>
+            ))}
+          </div>
+        )
+        : (
+          <div className={css.mobileDetail} data-settings-mobile-detail={active.id}>
+            {renderSlot('settings.section', { close: onClose }, { only: active.id })}
+          </div>
+        )}
+    </div>
+  )
+}
+
 /**
  * Render the settings trigger and panel.
  * @param props - composed slot props (contract/slots.ts).
@@ -123,7 +192,7 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
 export function SettingsRoot(props: SettingsRootComponentProps) {
   const {
     wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useSessions, renderSlot, t,
-    useDesktopUpdate, openDesktopUpdate, publishOpenSection,
+    useDesktopUpdate, useDevice, openDesktopUpdate, publishOpenSection,
   } = props
   const [open, setOpen] = useState(false)
   const [activeId, setActiveId] = useState<string | undefined>(undefined)
@@ -146,6 +215,15 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
     setActiveId(id)
     setOpen(true)
   }, [])
+
+  // The phone page steps list → detail → closed; the shared stack runs the
+  // same step for the back gesture, and both land on a visible control.
+  const phone = useDevice(snapshot => snapshot).device === 'phone'
+  const backToList = useCallback(() => { setActiveId(undefined) }, [])
+  useBackHandler('ui-settings:mobile', () => {
+    if (activeId === undefined) close()
+    else backToList()
+  }, phone && open)
 
   // The `settingsUi` service opens the panel through this live handler; the
   // published reference is cleared when this occurrence unmounts.
@@ -252,7 +330,17 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
         <DesktopUpdateIndicator wide={wide} hidden={connectionIndicator !== undefined && desktopUpdate.presentation?.phase !== 'installing'}
           t={t} view={desktopUpdate} onOpen={openDesktopUpdate} />
       </div>
-      {open && (
+      {open && (phone ? createPortal((
+        <MobileSettingsPage
+          rows={rows}
+          renderSlot={renderSlot}
+          activeId={activeId}
+          onSelect={setActiveId}
+          onBack={backToList}
+          onClose={close}
+          t={t}
+        />
+      ), document.body) : (
         <SettingsPanel
           rows={rows}
           renderSlot={renderSlot}
@@ -260,7 +348,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           onSelect={setActiveId}
           onClose={close}
         />
-      )}
+      ))}
       {/* Dialog chrome and `#root` inert ownership live inside each step's
           visible branch. A step still deciding (private facts loading)
           renders null, so nothing paints or blocks while it decides. */}

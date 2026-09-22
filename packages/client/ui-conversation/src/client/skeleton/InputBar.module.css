@@ -398,3 +398,66 @@
   font-size: 12px;
   cursor: pointer;
 }
+
+/* ── Phone composer ──
+   Rider row above the card (model + agent), the card keeps the footer
+   (attach · permission · plan | send/stop), the stack clears the safe area
+   and lifts by the classifier's keyboard occlusion on iOS-style viewports
+   whose layout height does not shrink. */
+
+.rider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  min-width: 0;
+  padding: 0 4px 6px;
+}
+
+.rider > * {
+  min-width: 0;
+}
+
+:root[data-device='phone'] .root {
+  padding-bottom: calc(4px + var(--dsh-safe-area-inset-bottom, 0px));
+}
+
+:root[data-device='phone'][data-keyboard='open'] .root {
+  /* No morph animation: the lift is a state change, not a transition. */
+  transform: translateY(calc(-1 * var(--dsh-keyboard-inset, 0px)));
+  transition: none;
+}
+
+@media (pointer: coarse) {
+  .add,
+  .primary {
+    width: 44px;
+    height: 44px;
+  }
+
+  .add svg,
+  .primary svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .row {
+    gap: 8px;
+    padding: 2px 10px 8px;
+  }
+
+  .tools,
+  .modes,
+  .trailing {
+    gap: 8px;
+  }
+
+  /* The draft grows to a cap that leaves room for the keyboard, then scrolls. */
+  .scroll {
+    max-height: min(
+      var(--dsh-composer-text-max-height),
+      calc(100dvh - var(--dsh-keyboard-inset, 0px) - 220px)
+    );
+  }
+}

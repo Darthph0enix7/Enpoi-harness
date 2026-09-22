@@ -13,8 +13,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { HostObservable, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import { backStack, getDeviceRuntime, startDeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { BackStack, DeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PanelInfo } from './service.ts'
 import { AppFrame } from './AppFrame.tsx'
+import type { AppFrameInjected } from './AppFrame.tsx'
+import { installAdaptiveStyles } from './adaptive-styles.ts'
 import { createLayoutStore } from './stores.ts'
 import { LayoutController } from './service.ts'
 import { ThemePresenter } from './theme-presenter.ts'
@@ -26,6 +30,7 @@ import { ThemePresenter } from './theme-presenter.ts'
 // against; the frame components and the store factory are package-internal.
 export { LayoutController } from './service.ts'
 export type { ILayout, MainPanelId, PanelInfo } from './service.ts'
+export type { BackStack, DeviceKind, DeviceRuntime, PointerKind } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Selector hook over root-scoped panel selection. */
 export type UsePanelInfo = SnapshotSelectorHook<PanelInfo>
@@ -34,6 +39,10 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The outward face only; the concrete service stays inside this plugin. */
     layout: import('./service.ts').ILayout
+    /** Adaptive classifier state: `data-device` / `data-pointer` / `data-keyboard`, safe-area geometry. */
+    device: DeviceRuntime
+    /** Centralized dismissal stack behind the back gesture; empty means native navigation. */
+    back: BackStack
   }
 }
 
@@ -89,6 +98,24 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * `id` is added beside the shipped entries instead of replacing them.
      */
     'shell.overlay': { kind: 'list'; scope: 'root' }
+    /**
+     * The mobile shell's compact-header extension seat: the Chat/Trajectory/
+     * Watchtower segmented pills and peer header content. Rendered between the
+     * session title and the back affordance; empty on desktop, where the
+     * conversation header owns its own tabs. Entries order among themselves.
+     */
+    'shell.mobile.header': { kind: 'list'; scope: 'root' }
+    /**
+     * The mobile bottom action bar: one entry per openable right surface. The
+     * entries come from the same registry that lights the desktop icon rail,
+     * so the bar grows with the registry instead of naming kinds here.
+     */
+    'shell.mobile.bar': { kind: 'list'; scope: 'root' }
+    /**
+     * The same surface entries inside the header overflow sheet, shown when
+     * the bottom bar is folded (soft keyboard, landscape, short viewport).
+     */
+    'shell.mobile.more': { kind: 'list'; scope: 'root' }
   }
 }
 
@@ -116,6 +143,12 @@ export interface RightbarOwnerProps {
    * Before a narrow opening, includes the space from collapsing the left sidebar.
    */
   canShow: boolean
+  /**
+   * True while the mobile container renders this column: the panel always
+   * fills the viewport, the icon rail is not a column, and a document open is
+   * a push inside the panel rather than a pane beside it.
+   */
+  mobile: boolean
 }
 
 /** Required services (cordis fiber inject — the loader passes all module exports as an object plugin). */
@@ -128,6 +161,24 @@ export const inject = ['slots', 'theme', 'locale']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // Adaptive foundation: the classifier projects `data-device` / `data-pointer`
+  // / `data-keyboard` and the safe-area and keyboard geometry before the frame
+  // renders. Components subscribe through ui-primitives' `useDevice`; the
+  // `ctx.device` and `ctx.back` services are the apply-world entry points.
+  ctx.effect(() => {
+    const device = getDeviceRuntime()
+    const stopDevice = startDeviceRuntime()
+    const disposeDeviceService = ctx.reflect.provide('device', device)
+    const disposeBackService = ctx.reflect.provide('back', backStack)
+    return () => {
+      // provide()'s disposer settles asynchronously; teardown is synchronous fire-and-forget.
+      void disposeDeviceService()
+      void disposeBackService()
+      stopDevice()
+    }
+  }, 'ui-layout: adaptive device + back stack')
+  installAdaptiveStyles(ctx)
+
   ctx.effect(() => {
     const handle = createLayoutStore()
     const instance = handle.create()
@@ -152,8 +203,18 @@ export function apply(ctx: ClientContext): void {
         'main': { kind: 'keyed', scope: 'root' },
         'rightbar': { kind: 'single', scope: 'root' },
         'shell.overlay': { kind: 'list', scope: 'root' },
+        'shell.mobile.header': { kind: 'list', scope: 'root' },
+        'shell.mobile.bar': { kind: 'list', scope: 'root' },
+        'shell.mobile.more': { kind: 'list', scope: 'root' },
       },
       store,
+      // The mobile container branches on the shared classifier and dismisses
+      // through the shared back stack; both are the apply world's, so they
+      // arrive as an injected hook source and a callback.
+      inject: (): AppFrameInjected => ({
+        hooks: { device: getDeviceRuntime() },
+        dismissBack: () => backStack.dismissTop(),
+      }),
     }, AppFrame)
     const disposePanels = ctx.slots.subscribe('main', retainMainPanels)
     retainMainPanels()

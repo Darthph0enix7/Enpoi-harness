@@ -317,3 +317,51 @@
   color: #64748b;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
+
+/* Phone: the card head is a 44px tap target, the badge row wraps instead of
+   clipping, and the expanded output stacks full-width with no fixed-height
+   scroll body (the card itself no longer holds a nested scrollbar). */
+@media (max-width: 560px) {
+  .markBadgeRow {
+    flex-wrap: wrap;
+    gap: 6px;
+    min-height: 44px;
+    width: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+  }
+
+  .markBadgeLeft,
+  .markBadgeRight {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .outputScroll {
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  .detailActions {
+    flex-wrap: wrap;
+  }
+
+  .detailBtnPrimary,
+  .detailBtn {
+    min-height: 44px;
+  }
+}
+
+/* Button reset outside the phone query: the head keeps its visual contract at
+   every width after becoming a real button. */
+.markBadgeRow {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}

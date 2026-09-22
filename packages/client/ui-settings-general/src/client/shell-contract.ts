@@ -7,6 +7,7 @@
  * The settings SLOT types (what registrants contribute) stay in ui-settings.
  */
 import type { ConnectionState } from '@deepseek-ai/dsh-client-connection/client'
+import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -49,6 +50,8 @@ export type SettingsRootInjected = {
   hooks: {
     /** Shared Electron status for both sidebar locations. */
     desktopUpdate: HostObservable<DesktopUpdateView>
+    /** The adaptive classifier: the phone presentation replaces the modal. */
+    device: HostObservable<DeviceSnapshot>
     /** Connection-owned state for the current Host connection. */
     connectionState: HostObservable<ConnectionState | undefined>
     /** settings.section ledger projected into ordered nav rows. */

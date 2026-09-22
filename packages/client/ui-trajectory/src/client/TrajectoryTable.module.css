@@ -2038,3 +2038,157 @@
     box-shadow: -12px 0 32px rgba(0, 0, 0, 0.14);
   }
 }
+
+/* Phone card list: below 560px the ledger drops the fixed table layout and
+   renders the same rows as stacked cards. The event cell becomes the card
+   head (kind tag + turn label) and the content cell the body; nothing is
+   dropped and no horizontal table remains. Virtual spacers stay in flow so
+   the virtualizer keeps its scroll height. */
+@container trajectory-table (max-width: 560px) {
+  .table,
+  .table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .table colgroup,
+  .table thead {
+    display: none;
+  }
+
+  .table tbody {
+    /* Border-box: the 8px card inset must not add to the 100% width, or every
+       card row overhangs the pane by the padding. */
+    box-sizing: border-box;
+    padding: 8px;
+  }
+
+  .table tbody tr {
+    display: block;
+    margin: 0 0 8px;
+    overflow: hidden;
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 12px;
+    background: var(--dsw-alias-bg-layer-2);
+  }
+
+  .table tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .table tbody tr[data-request-only='true'] {
+    display: none;
+  }
+
+  .table tbody tr[data-turn-start='true'] td::before {
+    content: none;
+  }
+
+  .table td {
+    display: block;
+    height: auto;
+    min-height: 0;
+    padding: 8px 12px;
+    overflow: visible;
+    border-bottom: none;
+    white-space: normal;
+  }
+
+  .event {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 0 !important;
+  }
+
+  .eventInner {
+    height: auto;
+  }
+
+  .kindSlot,
+  .kindSlot:where(:lang(zh)) {
+    width: auto;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .kindTag,
+  .table .kindSlot .message {
+    justify-content: flex-start;
+    width: auto;
+    padding-right: 5px;
+    padding-left: 5px;
+  }
+
+  .kindTagLabel {
+    max-width: none;
+    opacity: 1;
+  }
+
+  .turnLabel {
+    position: static;
+    border-radius: 2px;
+    padding: 1px 5px;
+  }
+
+  .turnRail,
+  .selectionRail {
+    display: none;
+  }
+
+  .content {
+    padding: 6px 12px 10px !important;
+  }
+
+  .contentText,
+  .collapsedTurnText {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
+
+  .resultPreview {
+    display: block;
+  }
+
+  .table tbody tr[data-collapsed-summary='turn'] td,
+  .table tbody tr[data-collapsed-summary='assistant'] td {
+    height: auto;
+  }
+
+  .table tbody .virtualSpacer,
+  .table tbody .virtualSpacer td {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+  }
+
+  .historyLoadRow td {
+    padding: 0;
+  }
+
+  .historyLoadButton {
+    min-height: 44px;
+  }
+
+  /* The inspector takes the full pane instead of a squeezed side column. */
+  .split {
+    flex-direction: column;
+  }
+
+  .details {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    width: 100%;
+    max-width: none;
+    border-left: 0;
+    border-top: 0.5px solid var(--dsw-alias-border-l2);
+  }
+
+  .detailsResizeHandle {
+    display: none;
+  }
+}

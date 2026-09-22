@@ -21,6 +21,7 @@ import { SidebarRightTabRegistry } from '../src/client/tab-registry.ts'
 import type { createSidebarRightStore } from '../src/client/stores.ts'
 import { RightbarSeat } from '../src/client/shell/SidebarRight.tsx'
 import { RightbarRoot } from '../src/client/shell/RightbarRoot.tsx'
+import { MobileSurfaces } from '../src/client/shell/MobileSurfaces.tsx'
 import { GuideBody } from '../src/client/tabs/guide/GuideBody.tsx'
 import { GuideTitle } from '../src/client/tabs/guide/GuideTitle.tsx'
 import { GUIDE_ID } from '../src/client/tabs/guide/definition.ts'
@@ -31,6 +32,7 @@ const SESSION = 's-test' as SessionId
 interface Recorded {
   name: string
   key?: string
+  id?: string
   locale?: string
   store?: unknown
   children?: unknown
@@ -93,15 +95,20 @@ describe('ui-sidebar-right apply', () => {
     expect(guide?.id).toBe(GUIDE_ID)
     expect(guide?.priority).toBe('builtin')
     expect(guide?.title('sidebar://guide')).toBe('tab.guide.title')
-    // Four registrations: the root and panel seats, and the guide body and chip
-    // title under the guide implementation's id. The guide draws no product copy
-    // of its own, so neither guide seat binds the dictionary.
+    // Six registrations: the root and panel seats, the guide body and chip
+    // title under the guide implementation's id, and the mobile shell's two
+    // surface entry lists. The guide draws no product copy of its own, so
+    // neither guide seat binds the dictionary.
     expect(registered.map(entry => [entry.name, entry.key, entry.locale, entry.component])).toEqual([
       ['rightbar', undefined, undefined, RightbarRoot],
       ['rightbar.session', undefined, 'sidebarRight', RightbarSeat],
       ['sidebar.right.pane.tab', GUIDE_ID, undefined, GuideBody],
       ['sidebar.right.pane.tab.title', GUIDE_ID, undefined, GuideTitle],
+      ['shell.mobile.bar', undefined, 'sidebarRight', MobileSurfaces],
+      ['shell.mobile.more', undefined, 'sidebarRight', MobileSurfaces],
     ])
+    // One entry per seat, named by the list registration's id.
+    expect(registered.filter(entry => entry.name.startsWith('shell.mobile')).map(entry => entry.id)).toEqual(['surfaces', 'surfaces'])
     // The panel declares the extension seats; the guide declares its chain child.
     expect(Object.keys(seat('rightbar.session').children as object)).toEqual([
       'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title', 'sidebar.right.tab.menu.item',
@@ -246,6 +253,6 @@ describe('ui-sidebar-right apply', () => {
     expect(dictionaries.size).toBe(0)
     await ctx.plugin({ inject: [...inject], apply }).await()
     expect(ctx.sidebarRightTabs.get('guide')?.id).toBe(GUIDE_ID)
-    expect(registered).toHaveLength(4)
+    expect(registered).toHaveLength(6)
   })
 })

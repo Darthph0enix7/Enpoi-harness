@@ -273,3 +273,35 @@
   display: inline-flex;
   color: var(--dsw-alias-label-caption);
 }
+
+/* ── Phone sheet presentation ──
+   Inside the Sheet the menu drops its anchored chrome and the viewport owns
+   the scrolling; rows keep the composer focus through pointerdown preventDefault. */
+.sheetMenu {
+  position: static;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.sheetMenu[data-overflow-below]::after {
+  content: none;
+}
+
+.sheetContent {
+  padding: 0 4px 8px;
+}
+
+@media (pointer: coarse) {
+  .sheetContent .item {
+    min-height: 44px;
+  }
+
+  .sheetContent .crumb {
+    min-height: 44px;
+  }
+}

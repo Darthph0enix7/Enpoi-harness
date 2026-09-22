@@ -39,7 +39,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronLeftOutline14, Tooltip, useBackHandler } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -157,6 +157,8 @@ interface PanelProps {
   readonly occurrence: SidebarRightInjected['occurrence']
   readonly fullscreen: boolean
   readonly autoFullscreen: boolean
+  /** The mobile container owns the viewport: the panel draws the file push. */
+  readonly mobile: boolean
   /** Receives the kit's room-rule readings for the service's `split`. */
   readonly reportRoom: (fits: ReadonlyMap<PaneId, HalvesFit>) => void
 }
@@ -436,8 +438,11 @@ function SidebarPanel(panel: PanelProps & {
   readonly panelRef: RefObject<HTMLDivElement>
   readonly editor: EditorSplit
 }): ReactNode {
-  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, panelRef, editor } = panel
+  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, mobile, panelRef, editor } = panel
   const { expanded } = surface.layout
+  // The file push is the panel's whole content while a document is open on a
+  // phone; the dock surface (the tree) waits one back step behind it.
+  const filePush = mobile && editor.tab !== undefined
   return (
     <div
       ref={panelRef}
@@ -450,36 +455,60 @@ function SidebarPanel(panel: PanelProps & {
       // accessibility tree.
       aria-hidden={!expanded || undefined}
     >
-      {editor.mounted && (
-        <EditorPane panel={panel} tab={editor.tab} width={editor.width} open={editor.open} />
+      {filePush ? (
+        <div className={css.filePush} data-sidebar-right-file-push>
+          <div className={css.filePushBar}>
+            <button
+              type="button"
+              className={css.filePushBack}
+              aria-label={t('mobile.fileBack')}
+              data-sidebar-right-file-back
+              onClick={() => { actions.clearEditor(sessionId) }}
+            >
+              <IconChevronLeftOutline14 size={16} />
+            </button>
+            <span className={css.filePushTitle} data-sidebar-right-file-title>
+              {editor.tab ? titlesFor(panel)(editor.tab) : null}
+            </span>
+          </div>
+          <div className={css.filePushBody} data-sidebar-right-file-body>
+            {editor.tab ? bodiesFor(panel)(editor.tab) : null}
+          </div>
+        </div>
+      ) : (
+        <>
+          {editor.mounted && (
+            <EditorPane panel={panel} tab={editor.tab} width={editor.width} open={editor.open} />
+          )}
+          {editor.mounted && (
+            <EditorDivider
+              width={editor.width}
+              open={editor.open}
+              live={editor.live}
+              onPreview={editor.onPreview}
+              onCommit={editor.onCommit}
+            />
+          )}
+          <div className={css.panelBody} data-sidebar-right-body>
+            <DockSurface
+              state={surface.layout}
+              canSplit={canSplit(surface.layout) && dockPaneIds(surface.layout).length < 2}
+              hideSplitWhenBlocked
+              dropZones="horizontal"
+              minPaneFraction={0.2}
+              canAddTab={paneId => guideIn(surface.layout, paneId) === undefined}
+              canCloseTab={tabId => canCloseTab(surface, tabId)}
+              intents={intentsFor(sessionId, actions, openTab, panel.closeTab)}
+              labels={dockLabels(t)}
+              renderTab={bodiesFor(panel)}
+              renderTabTitle={titlesFor(panel)}
+              renderTabMenuItems={(tab, dismiss) =>
+                renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
+              onRoom={reportRoom}
+            />
+          </div>
+        </>
       )}
-      {editor.mounted && (
-        <EditorDivider
-          width={editor.width}
-          open={editor.open}
-          live={editor.live}
-          onPreview={editor.onPreview}
-          onCommit={editor.onCommit}
-        />
-      )}
-      <div className={css.panelBody} data-sidebar-right-body>
-        <DockSurface
-          state={surface.layout}
-          canSplit={canSplit(surface.layout) && dockPaneIds(surface.layout).length < 2}
-          hideSplitWhenBlocked
-          dropZones="horizontal"
-          minPaneFraction={0.2}
-          canAddTab={paneId => guideIn(surface.layout, paneId) === undefined}
-          canCloseTab={tabId => canCloseTab(surface, tabId)}
-          intents={intentsFor(sessionId, actions, openTab, panel.closeTab)}
-          labels={dockLabels(t)}
-          renderTab={bodiesFor(panel)}
-          renderTabTitle={titlesFor(panel)}
-          renderTabMenuItems={(tab, dismiss) =>
-            renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
-          onRoom={reportRoom}
-        />
-      </div>
     </div>
   )
 }
@@ -646,7 +675,7 @@ function cancelLeaveReport(): void {
 }
 
 export function RightbarSeat({
-  sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
+  sessionId, width, viewportWidth, canShow, mobile, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
   selectKind, setEditorWidth, setRightbarWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
@@ -659,13 +688,16 @@ export function RightbarSeat({
   const railItems = useRailItems(items => items)
   const shown = surface !== undefined && surface.layout.expanded
   const autoFullscreen = viewportWidth < 768
-  const fullscreen = autoFullscreen || surface?.layout.mode === 'fullscreen'
+  // The mobile container owns the whole viewport: the panel is always the
+  // fullscreen presentation, whatever the saved manual mode says, and the rail
+  // never becomes a column (the shell's bottom bar stands in for it).
+  const fullscreen = mobile || autoFullscreen || surface?.layout.mode === 'fullscreen'
   const panelRef = useRef<HTMLDivElement | null>(null)
   // The kit's room-rule readings, kept in a ref: the service reads them at
   // call time through the binding, and a reading never re-renders anything.
   const room = useRef<ReadonlyMap<PaneId, HalvesFit>>(new Map())
   const reportRoom = useCallback((fits: ReadonlyMap<PaneId, HalvesFit>): void => { room.current = fits }, [])
-  const track = shown && !autoFullscreen
+  const track = shown && !mobile && !autoFullscreen
 
   // enpoi: the rail's lit kind is global: the operator's last choice, else the
   // first registered page. It stays lit whether or not the panel is drawn.
@@ -713,6 +745,14 @@ export function RightbarSeat({
   useLayoutEffect(() => {
     if (shown && !fullscreen && !canShow) actions.setExpanded(sessionId, false)
   }, [actions, sessionId, shown, fullscreen, canShow])
+
+  // Touch devices: the back gesture leaves fullscreen before it touches
+  // browser history. A viewport-derived or mobile fullscreen collapses the
+  // panel; the wide-frame mode switch returns to the pushed presentation.
+  useBackHandler('sidebar-right:fullscreen', () => {
+    if (mobile || autoFullscreen) actions.setExpanded(sessionId, false)
+    else actions.setMode(sessionId, 'push')
+  }, shown && fullscreen)
 
   // Fullscreen leaves the previous column report in force until its own slide
   // completes. Normal presentation and zero-duration transitions report before paint.
@@ -783,7 +823,14 @@ export function RightbarSeat({
   // zero-width end: the files page carries an empty pane so the first open has
   // something to grow from, and an editor tab keeps one so leaving the page or
   // closing the tab has something to shrink.
-  const editorMounted = surface !== undefined && !fullscreen && (isFilesActive || editorTab !== undefined)
+  const editorMounted = surface !== undefined && !mobile && !fullscreen && (isFilesActive || editorTab !== undefined)
+
+  // enpoi: the mobile file push. A document open lands in the editor record,
+  // which has no pane on a phone, so the panel draws the record itself as a
+  // full-screen push: the tree stays one back step behind it and the toolbar
+  // rides inside the tab body it always did.
+  const filePush = mobile && shown && editorTab !== undefined
+  useBackHandler('sidebar-right:file-push', () => { actions.clearEditor(sessionId) }, filePush)
 
   // enpoi: auto-widen rightbar column on file open so preview and tree both fit comfortably!
   const widenedSession = useRef<string | null>(null)
@@ -801,20 +848,24 @@ export function RightbarSeat({
     : 0
   const panel: PanelProps | undefined = surface === undefined ? undefined : {
     sessionId, actions, t, renderSlot, surface, openTab, closeTab, useTabTypes, useTabNavigation, useStore, occurrence,
-    fullscreen, autoFullscreen, reportRoom,
+    fullscreen, autoFullscreen, mobile, reportRoom,
   }
   return (
     <>
-      <Rail
-        items={railItems}
-        active={shown ? litKind : undefined}
-        fullscreen={fullscreen}
-        autoFullscreen={autoFullscreen}
-        actions={actions}
-        sessionId={sessionId}
-        onSelect={selectKind}
-        t={t}
-      />
+      {/* The mobile shell's bottom bar is the rail's equivalent; the 44px
+          column never renders over a phone viewport. */}
+      {!mobile && (
+        <Rail
+          items={railItems}
+          active={shown ? litKind : undefined}
+          fullscreen={fullscreen}
+          autoFullscreen={autoFullscreen}
+          actions={actions}
+          sessionId={sessionId}
+          onSelect={selectKind}
+          t={t}
+        />
+      )}
       {panel !== undefined && (
         <SidebarPanel
           {...panel}

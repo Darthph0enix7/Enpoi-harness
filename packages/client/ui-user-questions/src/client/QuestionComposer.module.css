@@ -458,3 +458,25 @@
     transition: none;
   }
 }
+
+/* Phone: pager and footer actions wrap, and every control reaches the 44px
+   touch floor. */
+@media (max-width: 560px) {
+  .footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .footerActions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (pointer: coarse) {
+  .footer button,
+  .footerActions button,
+  .iconButton {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

@@ -207,6 +207,7 @@ export const ENPOI_PROFILE_EVENT_TYPES = [
   'revert/file-intent',
   'revert/file-result',
   'revert/state',
+  'state/checkpoint',
 ] as const
 
 /** CLI entry: default writes the artifacts, `--check` fails if a committed copy

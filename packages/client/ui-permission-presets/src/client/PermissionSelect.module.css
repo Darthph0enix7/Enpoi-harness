@@ -40,3 +40,78 @@
   width: 14px;
   height: 14px;
 }
+
+/* ── Phone sheet presentation ── */
+.sheetContent {
+  padding: 0 8px 8px;
+}
+
+.sheetList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sheetRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheetRowText {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sheetRowLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+}
+
+.sheetRowBadge {
+  padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(103, 220, 231, 0.14);
+  color: #67dce7;
+  font-size: 10px;
+}
+
+.sheetRowDescription {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary, #94a3b8);
+}
+
+.sheetRowActive {
+  background: var(--dsw-alias-interactive-bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.sheetRowCheck {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary, #67dce7);
+}
+
+/* Coarse pointers: the permission trigger keeps its current-value glyph and
+   reaches the 44px touch floor. */
+@media (pointer: coarse) {
+  .trigger {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

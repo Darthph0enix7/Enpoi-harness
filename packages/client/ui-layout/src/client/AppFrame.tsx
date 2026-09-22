@@ -17,19 +17,36 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
-  PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
+  InjectFace, HostObservable, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
+import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { computeColumns, RIGHTBAR_DEFAULT_RATIO, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
 import { DocumentTitle } from './DocumentTitle.tsx'
+import { MobileFrame } from './MobileFrame.tsx'
 import type { createLayoutStore } from './stores.ts'
 import css from './AppFrame.module.css'
+
+/** What the root entry injects beyond the framework shares. */
+export interface AppFrameInjected {
+  /**
+   * The shared device classifier. The frame branches on it: a touch device
+   * mounts the mobile container, everything else the three-column solver.
+   */
+  readonly hooks: { readonly device: HostObservable<DeviceSnapshot> }
+  /** Dismiss the top registered surface through the shared stack. */
+  readonly dismissBack: () => boolean
+}
 
 /** Full composed props: runtime share + child-slot render share + store share. */
 export type AppFrameProps =
   & PropsRuntime<'root'>
-  & PropsRenderSlots<'sidebar' | 'main' | 'rightbar' | 'shell.overlay'>
+  & PropsRenderSlots<
+    'sidebar' | 'main' | 'rightbar' | 'shell.overlay'
+    | 'shell.mobile.header' | 'shell.mobile.bar' | 'shell.mobile.more'
+  >
   & PropsStore<ReturnType<typeof createLayoutStore>>
   & PropsLocale<'common'>
+  & InjectFace<AppFrameInjected>
 
 /** Center column grid item (session-body building block). */
 function CenterColumn(props: { children?: ReactNode }) {
@@ -122,6 +139,8 @@ export function AppFrame({
   useStore,
   useSessions,
   usePanelInfo,
+  useDevice,
+  dismissBack,
   actions,
   renderSlot,
   t,
@@ -129,8 +148,12 @@ export function AppFrame({
   const layoutInfo = useStore(state => state.layoutInfo)
   const frameRef = useRef<HTMLDivElement | null>(null)
   const viewport = layoutInfo.viewportWidth
+  const device = useDevice(snapshot => snapshot)
+  const mobile = device.device !== 'desktop'
 
   // Track the frame's own box (not the window): rAF-throttled ResizeObserver.
+  // The mode dependency re-attaches the observer when the branch swaps the
+  // measured element (a phone rotated past the tablet ceiling and back).
   useLayoutEffect(() => {
     const el = frameRef.current
     /* v8 ignore next -- the ref is always attached by effect time: the frame div renders unconditionally. */
@@ -155,7 +178,7 @@ export function AppFrame({
       observer.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
     }
-  }, [actions])
+  }, [actions, mobile])
 
   const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
   const sidebarCollapsed = narrow ? !layoutInfo.narrowExpanded : layoutInfo.sidebar === 0
@@ -193,14 +216,38 @@ export function AppFrame({
     actions.setRightbar(rightbarBase.current - dx)
   }, [actions])
   const productTitle = process.env.DSH_CLIENT_TITLE ?? t('brand.localBuild')
-  const sidebar = useMemo(() => renderSlot('sidebar', {
+  const sidebar = useMemo(() => (mobile ? null : renderSlot('sidebar', {
     collapsed: sidebarCollapsed,
     width: cols.sidebar,
-  }), [renderSlot, sidebarCollapsed, cols.sidebar])
+  })), [renderSlot, mobile, sidebarCollapsed, cols.sidebar])
   const main = useMemo(() => (
     <MainPanel usePanelInfo={usePanelInfo} renderSlot={renderSlot} />
   ), [usePanelInfo, renderSlot])
-  const overlays = useMemo(() => renderSlot('shell.overlay', {}), [renderSlot])
+  const overlays = useMemo(() => (mobile ? null : renderSlot('shell.overlay', {})), [renderSlot, mobile])
+
+  if (mobile) {
+    return (
+      <>
+        <DocumentTitle
+          productTitle={productTitle}
+          useSessions={useSessions}
+          usePanelInfo={usePanelInfo}
+        />
+        <MobileFrame
+          frameRef={frameRef}
+          productTitle={productTitle}
+          main={main}
+          renderSlot={renderSlot}
+          useSessions={useSessions}
+          usePanelInfo={usePanelInfo}
+          useStore={useStore}
+          dismissBack={dismissBack}
+          t={t}
+          viewport={viewport}
+        />
+      </>
+    )
+  }
 
   return (
     <div
@@ -229,7 +276,9 @@ export function AppFrame({
       <>
         <CenterColumn>{main}</CenterColumn>
         <RightbarColumn>
-          {renderSlot('rightbar', { width: normal.rightbar, viewportWidth: viewport, canShow: normal.rightbar > 0 })}
+          {renderSlot('rightbar', {
+            width: normal.rightbar, viewportWidth: viewport, canShow: normal.rightbar > 0, mobile: false,
+          })}
         </RightbarColumn>
       </>
       <div className={css.overlayLayer} data-shell-overlay>

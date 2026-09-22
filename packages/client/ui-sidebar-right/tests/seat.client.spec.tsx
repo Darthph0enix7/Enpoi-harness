@@ -62,7 +62,7 @@ function transition(property = 'transform') {
   }
 }
 
-async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
+async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0, mobile = false) {
   const runtime = await SlotTestRuntime.create()
   runtimes.push(runtime)
   const frame = { openRightbar: vi.fn(), closeRightbar: vi.fn(), setRightbar: vi.fn() }
@@ -104,7 +104,7 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0) {
     runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/text' }, Body)
     runtime.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'test/text' }, Title)
   })
-  const view = runtime.renderSlot('rightbar', { width: 420, viewportWidth, canShow })
+  const view = runtime.renderSlot('rightbar', { width: 420, viewportWidth, canShow, mobile })
   const instance = runtime.storeOf('rightbar.session', reference) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
   const controller = runtime.ctx.sidebarRight
   const layout = () => instance.getSnapshot().bySession[SESSION]!.layout
@@ -392,7 +392,7 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
     const stored = h.instance.getSnapshot()
     const body = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
-    h.view.update({ width: 420, viewportWidth: 768, canShow: true })
+    h.view.update({ width: 420, viewportWidth: 768, canShow: true, mobile: false })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
@@ -406,7 +406,7 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout().expanded).toBe(false)
     expect(h.layout().mode).toBe('push')
     const stored = h.instance.getSnapshot()
-    h.view.update({ width: 420, viewportWidth: 1440, canShow: true })
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(h.layout().tabs[tab.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
@@ -418,9 +418,9 @@ describe('RightbarSeat presentation', () => {
     h.open()
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     const stored = h.instance.getSnapshot()
-    h.view.update({ width: 420, viewportWidth: 500, canShow: false })
+    h.view.update({ width: 420, viewportWidth: 500, canShow: false, mobile: false })
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
-    h.view.update({ width: 420, viewportWidth: 1440, canShow: true })
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
     expect(h.instance.getSnapshot()).toBe(stored)
   })
@@ -429,12 +429,12 @@ describe('RightbarSeat presentation', () => {
     const h = await mountSeat()
     const tab = h.open()
     const signal = h.bodies.get(tab.id)!.tab.signal
-    h.view.update({ width: 420, viewportWidth: 900, canShow: false })
+    h.view.update({ width: 420, viewportWidth: 900, canShow: false, mobile: false })
     expect(h.layout().expanded).toBe(false)
     expect(h.layout().tabs[tab.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
     const stored = h.instance.getSnapshot()
-    h.view.update({ width: 420, viewportWidth: 1440, canShow: true })
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(h.layout().expanded).toBe(false)
   })
@@ -525,7 +525,7 @@ describe('RightbarSeat fullscreen entry', () => {
     const slide = transition()
     vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations').mockReturnValue([slide.animation])
     h.open()
-    h.view.update({ width: 420, viewportWidth: 500, canShow: false })
+    h.view.update({ width: 420, viewportWidth: 500, canShow: false, mobile: false })
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
     await act(async () => { slide.finish(); await slide.animation.finished })
     expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true)
@@ -776,4 +776,46 @@ it('keeps a resource tab and reports a synchronous cleanup failure from its clos
     logged.mockRestore()
     release()
   }
+})
+
+describe('RightbarSeat on the mobile container', () => {
+  it('drops the icon rail and fills the viewport without recording a manual mode', async () => {
+    const h = await mountSeat(390, true, 1, true)
+    h.open()
+    expect(h.view.container.querySelector('[data-sidebar-right-rail]')).toBeNull()
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(panel.style.width).toBe('100%')
+    expect(h.layout().mode).toBe('push')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
+  })
+
+  it('pushes an opened document full-screen and returns to the tree through the file back control', async () => {
+    const h = await mountSeat(390, true, 1, true)
+    // The seeded page stands in for the file tree the push drills out of.
+    expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
+    h.open('a.txt')
+    const editorTabId = h.instance.getSnapshot().bySession[SESSION]?.editorTabId
+    expect(editorTabId).toBeDefined()
+    const push = element(h.view.container, '[data-sidebar-right-file-push]')
+    expect(push.querySelector('[data-sidebar-right-file-back]')).toBeTruthy()
+    expect(element(h.view.container, '[data-sidebar-right-file-body] [data-tab-body]').dataset['tabBody']).toBe(editorTabId)
+    expect(h.view.container.querySelector('[data-sidebar-right-body]')).toBeNull()
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-file-back]'))
+    expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBeUndefined()
+    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
+    expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
+    // The document tab itself stays open: reopening from the tree reveals it again.
+    expect(h.layout().tabs[editorTabId!]).toBeDefined()
+  })
+
+  it('keeps the merged tree and pane on a desktop seat', async () => {
+    const h = await mountSeat(1440, true, 1)
+    expect(h.view.container.querySelector('[data-sidebar-right-rail]')).not.toBeNull()
+    h.open('a.txt')
+    const editorTabId = h.instance.getSnapshot().bySession[SESSION]?.editorTabId
+    expect(editorTabId).toBeDefined()
+    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
+    expect(h.view.container.querySelector(`[data-sidebar-right-editor] [data-tab-body="${editorTabId}"]`)).not.toBeNull()
+  })
 })

@@ -450,3 +450,27 @@ describe('createSidebarRightStore — page uniqueness', () => {
     expect(Object.values(layout().tabs).filter(tab => tab.kind === 'guide')).toHaveLength(1)
   })
 })
+
+describe('createSidebarRightStore — the editor record', () => {
+  it('clears the editor record without closing the tab or recording a history step', () => {
+    const { actions, surface, layout, entries } = harness()
+    const settled = vi.fn()
+    actions.openContent(SESSION, { kind: 'text', contentId: 'file:a', title: 'a', editor: true }, settled)
+    const editorTabId = surface().editorTabId
+    expect(editorTabId).toBeDefined()
+    const recorded = entries()
+    actions.clearEditor(SESSION)
+    expect(surface().editorTabId).toBeUndefined()
+    // Viewing state beside the layout: the tab stays, the history does not move.
+    expect(layout().tabs[editorTabId!]).toBeDefined()
+    expect(entries()).toBe(recorded)
+  })
+
+  it('leaves an already cleared editor record untouched', () => {
+    const { actions, surface } = harness()
+    actions.open(SESSION)
+    const before = surface()
+    actions.clearEditor(SESSION)
+    expect(surface()).toBe(before)
+  })
+})

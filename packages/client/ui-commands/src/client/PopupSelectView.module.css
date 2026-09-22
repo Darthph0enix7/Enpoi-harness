@@ -142,3 +142,32 @@
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
+
+/* ── Phone sheet presentation ──
+   Inside the Sheet the card drops its anchored chrome and the viewport owns
+   the scrolling; rows reach the 44px touch floor. */
+.sheetCard {
+  position: static;
+  max-height: none;
+  min-width: 0;
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.sheetContent {
+  padding: 0 4px 8px;
+}
+
+@media (pointer: coarse) {
+  .sheetContent .row {
+    min-height: 44px;
+  }
+
+  .sheetContent .search {
+    min-height: 44px;
+  }
+}

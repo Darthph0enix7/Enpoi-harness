@@ -1,0 +1,65 @@
+/*
+ * Mobile/adaptive foundation (phases 0 and 0.5). Every rule is scoped to the
+ * classifier's root attributes or a pointer/hover media query, so no shared
+ * desktop selector changes. The shell bifurcation and the surface layouts are
+ * the later phases' business; this file owns only the root layer the whole
+ * adaptive UI builds on.
+ */
+
+/* Safe-area and viewport tokens. env() falls back to 0 where the browser has
+   no cutout, so the variables always resolve. */
+:root {
+  --dsh-safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --dsh-safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --dsh-safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --dsh-safe-area-inset-left: env(safe-area-inset-left, 0px);
+  /* Projected by the device classifier: 0 while the soft keyboard is closed. */
+  --dsh-keyboard-inset: 0px;
+  /* Projected by the device classifier: visual viewport height, else the dvh. */
+  --dsh-visual-viewport-height: 100dvh;
+}
+
+/* Touch root container: the layout viewport binds to the dynamic viewport
+   height and rubber-band scrolling cannot chain past the app. */
+:root[data-device='phone'] body,
+:root[data-device='phone'] #root,
+:root[data-device='tablet'] body,
+:root[data-device='tablet'] #root {
+  height: 100dvh;
+  overscroll-behavior-y: none;
+}
+
+/* iOS input-zoom trap: touch-editable controls never drop below 16px, while a
+   larger conversation font-size preference is preserved. */
+:root[data-device='phone'] input:not([type='checkbox']):not([type='radio']):not([type='range']),
+:root[data-device='phone'] textarea,
+:root[data-device='phone'] [contenteditable='true'],
+:root[data-device='tablet'] input:not([type='checkbox']):not([type='radio']):not([type='range']),
+:root[data-device='tablet'] textarea,
+:root[data-device='tablet'] [contenteditable='true'] {
+  font-size: max(16px, var(--dsh-content-font-size, 16px));
+}
+
+/*
+ * Pointer-aware affordance recipe shared with the later mobile lanes:
+ * - hover-only reveals are gated by `@media (hover: hover) and (pointer: fine)`
+ *   (MessageIconActions carries the component-level template), and the same
+ *   control renders always visible on coarse pointers;
+ * - interactive targets are at least 44x44px under `@media (pointer: coarse)`
+ *   in the surface that owns them;
+ * - interactive elements set `touch-action: manipulation` — double-tap zoom
+ *   off, native scrolling preserved.
+ * Only the last rule is unconditional here: it is a pure fix under every
+ * coarse pointer, while hover reveals stay with their owning component.
+ */
+@media (pointer: coarse) {
+  a,
+  button,
+  [role='button'],
+  input,
+  select,
+  summary,
+  textarea {
+    touch-action: manipulation;
+  }
+}

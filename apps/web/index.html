@@ -3,9 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <script>(()=>{if(typeof globalThis.crypto==="undefined"){globalThis.crypto={};}if(typeof globalThis.crypto.randomUUID!=="function"){globalThis.crypto.randomUUID=function(){if(typeof globalThis.crypto.getRandomValues==="function"){var b=new Uint8Array(16);globalThis.crypto.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;var h=Array.from(b,function(x){return x.toString(16).padStart(2,"0");}).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20);}return"10000000-1000-4000-8000-100000000000".replace(/[018]/g,function(c){return(c^Math.random()*16>>c/4).toString(16);});};}})();</script>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#151517" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Enpoi Harness" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // Pre-paint device hint so the adaptive stylesheet never flashes the
+      // desktop layout; the live classification (resize, keyboard) is owned by
+      // ui-primitives/device.ts, which keeps this rule in sync.
+      (() => {
+        const touch = navigator.maxTouchPoints > 0 || matchMedia('(pointer: coarse)').matches
+        const width = innerWidth
+        const root = document.documentElement
+        root.dataset.device = touch && width <= 768 ? 'phone' : touch && width <= 1024 ? 'tablet' : 'desktop'
+        root.dataset.pointer = touch ? 'coarse' : 'fine'
+      })()
+    </script>
     <title>Enpoi Harness</title>
   </head>
   <body>

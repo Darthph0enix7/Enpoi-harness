@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import { IconCheckOutline16 } from './icons/index.tsx'
 import { usePointerGrace } from './pointer-grace.ts'
+import { useBackHandler } from './back-stack.ts'
 import css from './Menu.module.css'
 
 /** Selectable row (optionally with a nested submenu). */
@@ -119,6 +120,8 @@ export function Menu({ open, anchor, items, selectedId, selectedIds, onSelect, o
    * able to name by position.
    */
   const triggerRef = useRef<HTMLElement | null>(null)
+  // Touch devices route the browser back gesture into the same close.
+  useBackHandler('ui-primitives:menu', onClose, open)
 
   /**
    * Hand the keyboard back to the trigger that opened the menu — or, when the

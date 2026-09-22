@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { writeClipboard } from './clipboard.ts'
 import { usePointerGrace } from './pointer-grace.ts'
+import { useBackHandler } from './back-stack.ts'
 import css from './HoverCard.module.css'
 
 /**
@@ -58,6 +59,8 @@ export function HoverCard({
   }, [clearCopied])
 
   const { arm: armClose, cancel: cancelClose } = usePointerGrace(close)
+  // Touch devices route the browser back gesture into the same close.
+  useBackHandler('ui-primitives:hovercard', close, open)
 
   const clearTimer = () => {
     if (timerRef.current !== null) {

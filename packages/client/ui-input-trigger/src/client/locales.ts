@@ -15,6 +15,7 @@ export const zh = {
   'drill.key': 'Tab',
   'crumbs.aria': '目录导航',
   'suggestions.aria': '触发候选建议',
+  'close': '关闭',
 } satisfies Record<string, string>
 
 /** The slash.menu namespace key union. */
@@ -31,4 +32,5 @@ export const en = {
   'drill.key': 'Tab',
   'crumbs.aria': 'Folder navigation',
   'suggestions.aria': 'Trigger suggestions',
+  'close': 'Close',
 } satisfies Record<MenuKey, string>

@@ -22,6 +22,16 @@ export type { AnchoredPositionOptions } from './useAnchoredPosition.ts'
 export { useDismissOnOutsidePointer } from './useDismissOnOutsidePointer.ts'
 export { HoverCard } from './HoverCard.tsx'
 export { Modal } from './Modal.tsx'
+export { Sheet, useSheetPresentation, SHEET_MAX_WIDTH } from './Sheet.tsx'
+export {
+  classifyDevice, getDeviceRuntime, getDeviceSnapshot, startDeviceRuntime, useDevice, DeviceRuntime,
+  KEYBOARD_MIN_INSET, KEYBOARD_SETTLE_MS, PHONE_MAX_WIDTH, TABLET_MAX_WIDTH,
+} from './device.ts'
+export type { DeviceClassification, DeviceKind, DeviceReading, DeviceSnapshot, DeviceSource, PointerKind } from './device.ts'
+export {
+  backStack, registerBackSurface, useBackHandler, BackStack,
+  BACK_SURFACE_STATE_KEY, BACK_SURFACE_TOKEN_KEY, BACK_SURFACE_DEPTH_KEY,
+} from './back-stack.ts'
 export { OnboardingSurface } from './OnboardingSurface.tsx'
 export { RiskConfirmation } from './RiskConfirmation.tsx'
 export type { RiskConfirmationProps } from './RiskConfirmation.tsx'

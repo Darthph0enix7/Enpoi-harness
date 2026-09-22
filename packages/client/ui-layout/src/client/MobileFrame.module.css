@@ -1,0 +1,246 @@
+/*
+ * Mobile shell chrome. Every responsive fold (soft keyboard, landscape,
+ * short viewport) is a stylesheet rule so the frame needs no re-render; the
+ * desktop frame's own stylesheet is untouched. Geometry the other mobile
+ * lanes read: `--dsh-mobile-header-height` / `--dsh-mobile-bar-height` are
+ * the chrome insets the fullscreen right panel sits between.
+ */
+.frame {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+  --dsh-mobile-header-height: calc(48px + var(--dsh-safe-area-inset-top, 0px));
+  --dsh-mobile-bar-height: calc(56px + var(--dsh-safe-area-inset-bottom, 0px));
+}
+
+/* Landscape and short viewports fold the bar into the header overflow icon. */
+@media (orientation: landscape), (max-height: 499.98px) {
+  .frame {
+    --dsh-mobile-bar-height: 0px;
+  }
+}
+
+/* The soft keyboard owns the bottom strip: the bar folds into the header. */
+:global(:root[data-keyboard='open']) .frame {
+  --dsh-mobile-bar-height: 0px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: calc(48px + var(--dsh-safe-area-inset-top, 0px));
+  padding: 0 max(4px, var(--dsh-safe-area-inset-right, 0px)) 0 max(4px, var(--dsh-safe-area-inset-left, 0px));
+  padding-top: var(--dsh-safe-area-inset-top, 0px);
+  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-2));
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.frame[data-mobile-immersive] .header,
+.frame[data-mobile-immersive] .bar {
+  display: none;
+}
+
+/* Tap strip that brings the chrome back while immersive; the back gesture
+   restores it too. */
+.immersiveRestore {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  z-index: 55;
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.headerSeat {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.headerSeat:empty {
+  display: none;
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.iconButton:active {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.content {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: calc(56px + var(--dsh-safe-area-inset-bottom, 0px));
+  padding: 0 max(4px, var(--dsh-safe-area-inset-right, 0px)) var(--dsh-safe-area-inset-bottom, 0px) max(4px, var(--dsh-safe-area-inset-left, 0px));
+  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-2));
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.barItems {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.barButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.barButton:active {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+/* The overflow trigger is the folded bar's replacement: hidden while the bar
+   is drawn, shown in the same two states that hide it and over the keyboard. */
+.iconButton[data-mobile-overflow-toggle] {
+  display: none;
+}
+
+@media (orientation: landscape), (max-height: 499.98px) {
+  .bar {
+    display: none;
+  }
+
+  .iconButton[data-mobile-overflow-toggle] {
+    display: inline-flex;
+  }
+}
+
+:global(:root[data-keyboard='open']) .bar {
+  display: none;
+}
+
+:global(:root[data-keyboard='open']) .iconButton[data-mobile-overflow-toggle] {
+  display: inline-flex;
+}
+
+.drawerLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.drawerLayer[data-mobile-drawer='open'] {
+  pointer-events: auto;
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.24));
+  opacity: 0;
+  transition: opacity var(--ds-transition-duration-slow, 200ms) ease-out;
+}
+
+.drawerLayer[data-mobile-drawer='open'] .scrim {
+  opacity: 1;
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(264px, 86vw);
+  display: flex;
+  flex-direction: column;
+  padding-left: var(--dsh-safe-area-inset-left, 0px);
+  padding-top: var(--dsh-safe-area-inset-top, 0px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-2));
+  border-right: 0.5px solid var(--dsw-alias-border-l3);
+  box-shadow: var(--dsw-shadow-lv3);
+  transform: translateX(-100%);
+  transition: transform var(--ds-transition-duration-slow, 200ms) ease-out;
+}
+
+.drawerLayer[data-mobile-drawer='open'] .drawer {
+  transform: none;
+}
+
+.overlayLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+}
+
+.overlayLayer > * {
+  pointer-events: auto;
+}
+
+.overflowList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: var(--dsh-safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .drawer {
+    transition: none;
+  }
+}

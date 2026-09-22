@@ -1,0 +1,142 @@
+/* Bottom-sheet presentation for phone and tablet widths, centered card above
+   the phone ceiling. The panel owns the safe-area bottom pad and lifts clear
+   of the soft keyboard through the classifier's --dsh-keyboard-inset. */
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: var(--dsh-keyboard-inset, 0px);
+}
+
+.mask {
+  position: absolute;
+  inset: 0;
+  background: var(--dsw-alias-bg-mask-1);
+  backdrop-filter: var(--dsw-mask-blur);
+}
+
+.panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: min(85dvh, calc(100dvh - var(--dsh-keyboard-inset, 0px) - 24px));
+  overflow: hidden;
+  border-radius: 20px 20px 0 0;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
+  /* The sheet is the last surface above the system gesture area. */
+  padding-bottom: var(--dsh-safe-area-inset-bottom, 0px);
+}
+
+.grabber {
+  flex: none;
+  width: 36px;
+  height: 4px;
+  margin: 8px auto 0;
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.16));
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  padding: 10px 10px 8px 20px;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.close:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.description {
+  margin: 0;
+  padding: 0 20px 4px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 4px 8px;
+}
+
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 16px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1, transparent);
+}
+
+/* Coarse pointers get the documented 44px target floor. */
+@media (pointer: coarse) {
+  .close {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* Above the phone ceiling the sheet becomes a centered card, so an accidental
+   render on desktop still produces a sane modal. */
+@media (min-width: 561px) {
+  .root {
+    align-items: center;
+    padding: 24px;
+  }
+
+  .panel {
+    width: min(520px, 100%);
+    max-height: min(80dvh, 640px);
+    border-radius: 20px;
+    padding-bottom: 0;
+  }
+
+  .grabber {
+    display: none;
+  }
+}

@@ -7,6 +7,7 @@ import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { SlotRendererHost } from '@deepseek-ai/dsh-client-ui-slots'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { apply as themeApply, inject as themeInject, ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
+import { backStack, DeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import { apply, inject, LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import { apply as nodeApply } from '@deepseek-ai/dsh-client-ui-layout'
 import type { MainPanelId } from '../src/client/service.ts'
@@ -90,6 +91,9 @@ describe('ui-layout client apply', () => {
     expect(slots.spec('main')).toEqual({ kind: 'keyed', scope: 'root' })
     expect(slots.spec('rightbar')).toEqual({ kind: 'single', scope: 'root' })
     expect(slots.spec('shell.overlay')).toEqual({ kind: 'list', scope: 'root' })
+    expect(slots.spec('shell.mobile.header')).toEqual({ kind: 'list', scope: 'root' })
+    expect(slots.spec('shell.mobile.bar')).toEqual({ kind: 'list', scope: 'root' })
+    expect(slots.spec('shell.mobile.more')).toEqual({ kind: 'list', scope: 'root' })
   })
 
   it('shares a pre-created instance between service actions, root rendering, and panelInfo', async () => {
@@ -97,7 +101,14 @@ describe('ui-layout client apply', () => {
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     const entry = slots.entries('root')[0]!
-    expect(entry.inject).toBeUndefined()
+    // The mobile container's injected face: the classifier hook source and the
+    // back-stack dismissal reach AppFrame as data and a callback.
+    const injected = entry.inject!() as {
+      hooks: { device: { getSnapshot(): { device: string } } }
+      dismissBack: () => boolean
+    }
+    expect(injected.hooks.device.getSnapshot().device).toBe('desktop')
+    expect(injected.dismissBack()).toBe(false)
     const handle = entry.store as ReturnType<typeof createLayoutStore>
     const instance = handle.create()
     expect(handle.create()).toBe(instance)
@@ -120,6 +131,28 @@ describe('ui-layout client apply', () => {
     const pending = layout.beginNavigation()
     await fiber.dispose()
     expect(pending.aborted).toBe(true)
+  })
+
+  it('seats the adaptive device runtime, the back stack, and the root stylesheet', async () => {
+    const { ctx, slots, rendererHost } = await bench()
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    const device = ctx.get('device') as DeviceRuntime
+    expect(device).toBeInstanceOf(DeviceRuntime)
+    expect(ctx.get('back')).toBe(backStack)
+    rendererHost()
+    // jsdom is a fine, pointer-less desktop: the classifier attributes exist
+    // and the back stack stays out of native navigation.
+    expect(document.documentElement.dataset.device).toBe('desktop')
+    expect(document.documentElement.dataset.pointer).toBe('fine')
+    const sheet = document.head.querySelector<HTMLStyleElement>('style[data-plugin-css$="/adaptive.css"]')
+    expect(sheet?.dataset.pluginCss).toBe('@deepseek-ai/dsh-client-ui-layout/adaptive.css')
+    await fiber.dispose()
+    expect(ctx.get('device')).toBeUndefined()
+    expect(ctx.get('back')).toBeUndefined()
+    expect(document.documentElement.dataset.device).toBeUndefined()
+    expect(document.head.querySelector('style[data-plugin-css$="/adaptive.css"]')).toBeNull()
+    expect(slots.entries('root')).toHaveLength(0)
   })
 
   it('theme presenter applies the initial snapshot, follows theme/change, and unwinds on dispose', async () => {

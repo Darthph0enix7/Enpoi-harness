@@ -29,6 +29,13 @@ kind: "package-library"
 
 只要 Web 客户端需要标准控件或 agent 输出渲染器，就用这些原子组件拼装功能 UI。它们只经 React 渲染，并从主题取得 `--dsw-*` 设计 token，因此无需导入主题或 slot 系统即可适配任意插件。
 
+<a id="adaptive-foundation"></a>
+### 自适应设备、指针与返回栈
+
+`device.ts` 是浏览器级的分类器：`classifyDevice(reading)` 是纯决策（`hasTouch && width ≤ 768` → `phone`，`768–1024` 且支持触摸 → `tablet`，否则 `desktop`），`DeviceRuntime` 单例（`startDeviceRuntime()` / `getDeviceRuntime()` / `getDeviceSnapshot()`）把 `data-device`、`data-pointer`、`data-keyboard`、`--dsh-keyboard-inset` 与 `--dsh-visual-viewport-height` 投射到 `<html>`，并以 rAF 节流的 resize、`matchMedia` 与 `visualViewport` 跟踪变化。组件通过 `useDevice()` 订阅；键盘状态在打开前先等待 `KEYBOARD_SETTLE_MS`，避免 iOS 可视视口动画把状态抖开。
+
+`back-stack.ts` 是统一的关闭协调器：`registerBackSurface(id, dismiss)`（或 `useBackHandler(id, dismiss, active)` 钩子）为每个面推入一条合成历史记录并返回注销函数，`backStack.depth()` 读取栈深度，`backStack.dismissTop()` 为渲染出的标题栏返回按钮执行同一步骤，并返回是否关闭了某个面。每条历史记录都携带自身深度，因此唯一的 `popstate` 监听器每次返回只按 LIFO 关闭一个面，忽略前进导航以及程序化关闭面的 `history.back()` 回声；栈为空时不做任何事，原生浏览器历史照常工作。`Modal`、`Menu` 与 `HoverCard` 只在触摸设备上经它注册，桌面仍保留 Escape 与关闭控件。
+
 <a id="component-catalog"></a>
 ### 组件目录
 
@@ -47,6 +54,7 @@ kind: "package-library"
 | `ConnectionIndicator` | 行内连接恢复控件，覆盖断线、重试与已恢复三种状态。 |
 | `DisclosureRow` | 24px 紧凑折叠行，标题与内容左右排列。 |
 | `Modal` | 页面遮罩之上的居中对话框。 |
+| `Sheet` | 手机／平板宽度下为底部面板，560px 以上为居中卡片；带安全区内边距、感知键盘内缩，在固定页眉与页脚之间独立滚动，可通过遮罩、Escape、关闭按钮或触摸返回手势关闭。 |
 | `RiskConfirmation` | 以显式复选框把关的敏感操作确认。 |
 | `OnboardingSurface` | 首次运行的引导舞台，期间保持应用根节点 inert。 |
 | `Tooltip` | 克隆锚点上的悬停文本，可置于右、下、上三个方向。 |

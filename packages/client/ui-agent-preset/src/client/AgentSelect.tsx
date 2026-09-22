@@ -6,12 +6,17 @@
  * mid-flight (the host allows idle-session recomposition). The seat store
  * feeds both the roster and the session's live preset; `select()` stages and
  * applies through the same controller the hero chip uses.
+ *
+ * At phone widths the roster presents as a bottom sheet (search-free — the
+ * preset list is short); desktop keeps the anchored menu.
  */
 
 import { useEffect, useState } from 'react'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconAgentPresetOutline16, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  IconAgentPresetOutline16, IconCheckOutline16, IconChevronDownOutline14, Menu, Sheet, useSheetPresentation,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { AgentPresetSeatState } from './seat-store.ts'
 import { presetDisplayText } from './locales.ts'
@@ -40,6 +45,7 @@ export type AgentSelectSlotInjected = import('@deepseek-ai/dsh-client-ui-convers
  */
 export function AgentSelect({ load, select, useAgentPresetSeat, t }: AgentSelectProps) {
   const state = useAgentPresetSeat(snapshot => snapshot) as AgentPresetSeatState
+  const sheetMode = useSheetPresentation()
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
@@ -54,45 +60,92 @@ export function AgentSelect({ load, select, useAgentPresetSeat, t }: AgentSelect
 
   if (!ready) return null
 
+  const options = state.options.map((option) => {
+    const text = presetDisplayText(option, t)
+    return {
+      id: option.id,
+      name: text.name,
+      description: text.description ?? t('noDescription'),
+      selected: option.id === live,
+    }
+  })
+
+  const trigger = (
+    <button
+      type="button"
+      className={css.trigger}
+      aria-haspopup={sheetMode ? 'dialog' : 'menu'}
+      aria-expanded={open}
+      title={state.error ?? t('seatHint')}
+      disabled={state.busy}
+      data-agent-trigger
+      onClick={() => { setOpen(value => !value) }}
+    >
+      <IconAgentPresetOutline16 className={css.triggerIcon} />
+      <span className={css.triggerLabel}>{label?.name ?? live}</span>
+      <IconChevronDownOutline14 className={css.chevron} />
+    </button>
+  )
+
+  const pick = (id: string): void => {
+    setOpen(false)
+    if (id === live) return
+    void select(id)
+  }
+
+  if (sheetMode) {
+    return (
+      <>
+        {trigger}
+        <Sheet
+          open={open}
+          onClose={() => { setOpen(false) }}
+          title={t('nav')}
+          closeLabel={t('close')}
+          surfaceId="ui-agent-preset:picker"
+          contentClassName={css.sheetContent ?? ''}
+        >
+          <div className={css.sheetList} role="listbox" aria-label={t('nav')}>
+            {options.map(option => (
+              <button
+                key={option.id}
+                type="button"
+                role="option"
+                aria-selected={option.selected}
+                className={option.selected ? `${css.sheetRow} ${css.sheetRowActive}` : css.sheetRow}
+                onClick={() => { pick(option.id) }}
+              >
+                <span className={css.item}>
+                  <span className={css.itemName}>{option.name}</span>
+                  <span className={css.itemDesc}>{option.description}</span>
+                </span>
+                {option.selected && <IconCheckOutline16 className={css.check} />}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      </>
+    )
+  }
+
   return (
     <Menu
       open={open}
       onClose={() => { setOpen(false) }}
-      items={state.options.map((option) => {
-        const text = presetDisplayText(option, t)
-        return {
-          id: option.id,
-          label: (
-            <span className={css.item}>
-              <span className={css.itemName}>{text.name}</span>
-              <span className={css.itemDesc}>{text.description ?? t('noDescription')}</span>
-            </span>
-          ),
-        }
-      })}
+      items={options.map(option => ({
+        id: option.id,
+        label: (
+          <span className={css.item}>
+            <span className={css.itemName}>{option.name}</span>
+            <span className={css.itemDesc}>{option.description}</span>
+          </span>
+        ),
+      }))}
       selectedId={live}
-      onSelect={(id) => {
-        setOpen(false)
-        if (id === live) return
-        void select(id)
-      }}
+      onSelect={pick}
       align="start"
       portal
-      anchor={(
-        <button
-          type="button"
-          className={css.trigger}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          title={state.error ?? t('seatHint')}
-          disabled={state.busy}
-          onClick={() => { setOpen(value => !value) }}
-        >
-          <IconAgentPresetOutline16 className={css.triggerIcon} />
-          <span className={css.triggerLabel}>{label?.name ?? live}</span>
-          <IconChevronDownOutline14 className={css.chevron} />
-        </button>
-      )}
+      anchor={trigger}
     />
   )
 }

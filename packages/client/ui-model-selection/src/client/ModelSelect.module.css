@@ -588,3 +588,45 @@
 .chainRowIcon {
   margin-right: 2px;
 }
+
+/* ── Phone sheet presentation ──
+   Inside the Sheet the search header pins to the top of the scroll region and
+   every row reaches the 44px touch floor. Desktop popovers are untouched. */
+.sheetContent {
+  padding: 0 4px 4px;
+}
+
+.sheetContent .searchHeader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.sheetContent .pickerScrollable {
+  max-height: none;
+}
+
+@media (pointer: coarse) {
+  .sheetContent .modelRow,
+  .sheetContent .groupHeader,
+  .sheetContent .effortItem {
+    min-height: 44px;
+  }
+
+  .sheetContent .starBtn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* Coarse pointers: the model and effort triggers in the composer rider reach
+   the 44px touch floor. */
+@media (pointer: coarse) {
+  .modelTrigger,
+  .effortTrigger {
+    min-height: 44px;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}

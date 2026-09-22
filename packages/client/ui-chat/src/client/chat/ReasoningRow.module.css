@@ -108,3 +108,15 @@
     animation: none;
   }
 }
+
+/* Coarse pointers: the collapsed reasoning row is a one-line 44px tap target
+   (the summary text keeps its single-line ellipsis above). */
+@media (pointer: coarse) {
+  .root:not([data-expanded]) {
+    height: 44px;
+  }
+
+  .row {
+    height: 44px;
+  }
+}

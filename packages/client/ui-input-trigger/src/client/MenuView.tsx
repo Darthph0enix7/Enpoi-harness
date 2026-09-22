@@ -14,7 +14,9 @@
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import clsx from 'clsx'
-import { IconChevronRightOutline14, ReferenceIcon, useAnchoredMaxHeight } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  IconChevronRightOutline14, ReferenceIcon, Sheet, useAnchoredMaxHeight, useSheetPresentation,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './MenuView.module.css'
 import type { MenuViewInjected } from './slots.ts'
@@ -45,6 +47,7 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
     fn => headers.subscribe(fn),
     () => headers.getSnapshot(),
   )
+  const sheetMode = useSheetPresentation()
   const listRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const [hasOverflowBelow, setHasOverflowBelow] = useState(false)
@@ -83,13 +86,13 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
     return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
   }, [state.open, onDismiss])
   if (!state.open) return null
-  return (
+  const menuNode = (
     // The listbox role sits on the scrolling viewport, not this shell: a
     // breadcrumb header is not an option, and a listbox may not carry one.
     <div
       ref={listRef}
-      className={css.menu}
-      style={{ maxHeight }}
+      className={sheetMode ? `${css.menu} ${css.sheetMenu}` : css.menu}
+      style={sheetMode ? undefined : { maxHeight }}
       data-trigger-menu=""
       data-overflow-below={hasOverflowBelow || undefined}
     >
@@ -211,4 +214,22 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
       </div>
     </div>
   )
+  // Phone: the same candidate list presents as a bottom sheet above the
+  // keyboard; the composer keeps focus (rows still preventDefault on
+  // pointerdown) and back/Escape dismiss through the sheet.
+  if (sheetMode) {
+    return (
+      <Sheet
+        open
+        onClose={onDismiss}
+        title={t('suggestions.aria')}
+        closeLabel={t('close')}
+        surfaceId="ui-input-trigger:menu"
+        contentClassName={css.sheetContent ?? ''}
+      >
+        {menuNode}
+      </Sheet>
+    )
+  }
+  return menuNode
 }

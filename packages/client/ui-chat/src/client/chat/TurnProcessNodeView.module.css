@@ -46,3 +46,20 @@
     transition: none;
   }
 }
+
+/* Coarse pointers: the process fold keeps one line but reaches the 44px
+   touch floor. */
+@media (pointer: coarse) {
+  .root {
+    height: 44px;
+    padding: 0;
+  }
+
+  .root:not([data-open]) {
+    margin-bottom: 4px;
+  }
+
+  .label {
+    font-size: var(--dsh-content-font-size-secondary, 13px);
+  }
+}

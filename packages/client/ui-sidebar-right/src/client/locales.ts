@@ -26,6 +26,7 @@ export const zh = {
   'dock.drop.bottom': '下分栏',
   'tab.guide.title': '开始',
   'tab.unavailable': '这类内容还没有可用的查看方式。',
+  'mobile.fileBack': '返回文件列表',
 } satisfies Record<string, string>
 
 /** Right-Sidebar dictionary key union. */
@@ -51,4 +52,5 @@ export const en = {
   'dock.drop.bottom': 'Add bottom split',
   'tab.guide.title': 'Start',
   'tab.unavailable': 'Nothing here can view this kind of content yet.',
+  'mobile.fileBack': 'Back to files',
 } satisfies Record<SidebarRightKey, string>

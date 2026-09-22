@@ -8,6 +8,7 @@ import type { ModelRetryNode, TurnErrorNode, UserMessageNode } from '../contract
 import { CompactionItem } from './CompactionItem.tsx'
 import { ContextInjectionRow } from './ContextInjectionRow.tsx'
 import { MessageIconActions } from './MessageIconActions.tsx'
+import { SwipeReveal } from './SwipeReveal.tsx'
 import css from './MessageItem.module.css'
 
 type UserImage = Extract<UserMessageNode['content'][number], { type: 'image' }>
@@ -156,7 +157,7 @@ function TurnMaxTokensItem({ t }: {
 /** Right-aligned bubble shared by user and steering rows. */
 function UserStyleBubble({
   content, renderMessageImages, actions, pending = false, echo = false, referenceLabels = [], skillNames = [],
-  previewAttachments, references, t,
+  previewAttachments, references, swipeRevert, t,
 }: {
   content: readonly unknown[]
   renderMessageImages: ChatNodeOwnerProps['renderMessageImages']
@@ -173,6 +174,8 @@ function UserStyleBubble({
   /** Local submission-echo attachments replacing the content-derived attachment sequence. */
   previewAttachments?: readonly PresentedAttachment[]
   references?: Pick<ChatNodeOwnerProps, 'openFile' | 'openSkill'>
+  /** Touch-only swipe-reveal destructive action; omitted when the row has none. */
+  swipeRevert?: (() => void) | undefined
   t: ChatViewSlotProps['t']
 }): ReactNode {
   const { text, attachments: contentAttachments, rest } = contentParts(content)
@@ -180,7 +183,7 @@ function UserStyleBubble({
   const compactImages = attachments.length > 1
   const truncated = (total: number): string => t('json.truncated', { total })
   const showBubble = text !== '' || rest.length > 0
-  return (
+  const row = (
     <div
       className={css.userRow}
       data-pending-steering={pending || undefined}
@@ -225,6 +228,16 @@ function UserStyleBubble({
       </div>
       {actions?.(text)}
     </div>
+  )
+  return swipeRevert === undefined ? row : (
+    <SwipeReveal
+      actionLabel={t('message.revertFromHere')}
+      confirmLabel={t('message.revertConfirm')}
+      cancelLabel={t('message.revertCancel')}
+      onConfirm={swipeRevert}
+    >
+      {row}
+    </SwipeReveal>
   )
 }
 
@@ -324,6 +337,9 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
       {...data.referenceLabels === undefined ? {} : { referenceLabels: data.referenceLabels }}
       {...data.skillNames === undefined ? {} : { skillNames: data.skillNames }}
       t={t}
+      {...node.kind === 'user' && revertAt !== undefined
+        ? { swipeRevert: () => { revertAt(node.anchorSeq) } }
+        : {}}
       actions={text => (
         <MessageIconActions
           text={text}

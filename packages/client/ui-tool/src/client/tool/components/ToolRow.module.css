@@ -355,3 +355,14 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* Coarse pointers have no hover: the trajectory jump stays visible and its
+   row keeps a 44px tap target. */
+@media (pointer: coarse) {
+  .inspectButton {
+    opacity: 1;
+    min-height: 44px;
+    align-items: center;
+    padding: 2px 14px;
+  }
+}

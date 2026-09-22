@@ -31,6 +31,14 @@ Global panels occupy the root-scoped `main` keyed slot; `conversation` is the re
 
 Windows Electron's `data-windows-titlebar` marker reserves the caption height above all columns and removes the collapsed sidebar rail. Only the content area's top-left corner has a 16px radius; the other corners and the internal divider remain square. The frame publishes `--dsh-windows-content-radius` and `--dsh-windows-sidebar-width` for ui-sidebar-right's fullscreen corner and sidebar clearance. Ordinary Web documents do not receive the marker; macOS retains its separate layout.
 
+### Adaptive foundation
+
+`ui-layout` installs the adaptive root layer: it starts the ui-primitives device runtime, provides `ctx.device` (the shared `DeviceRuntime`) and `ctx.back` (the shared `BackStack`), and mounts `adaptive.css`, whose every rule is scoped to `:root[data-device=…]`, `:root[data-keyboard=…]`, or a pointer/hover media query. The stylesheet owns the `--dsh-safe-area-inset-*` variables, the `100dvh` root height with `overscroll-behavior-y: none` on touch devices, the ≥16px touch-input rule (iOS input zoom), and the `touch-action: manipulation` affordance recipe the later mobile lanes extend.
+
+### Mobile shell
+
+A touch device (`device.device !== 'desktop'`) mounts `MobileFrame` instead of the three-column grid: `AppFrame` branches at the root and the solver in `columns.ts` is untouched. The container owns a 48px safe-area-padded header (navigation trigger, the selected Session title, the `shell.mobile.header` seat the chat lane contributes view pills to, the `shell.mobile.more` overflow sheet, and one back affordance that calls `ctx.back.dismissTop()`), the content column, a bottom action bar fed by `shell.mobile.bar`, the left column as a slide-over drawer with a scrim and an edge swipe (264px, dismissed by scrim, swipe, or back), and the right column's existing fullscreen panel. The `rightbar` owner share carries `mobile: true` so the occupant drops its 44px rail, always takes the fullscreen presentation, and renders a document open as a push inside the panel. Chrome visibility is stylesheet-owned: `[data-keyboard='open']`, `(orientation: landscape)`, and short viewports hide the bar and show the header overflow trigger.
+
 ### Theme presentation
 
 The presenter consumes resolved theme snapshots and projects them onto the document: `html { color-scheme }` for native UA chrome, `body[data-ds-dark-theme]` from the active color scheme, the theme's alias tokens and `--dsh-content-font-size` as inline variables on body, and one owned `<meta name="theme-color">` whose content follows the computed body background. Disposing the presenter removes its metadata node with its other global writes.

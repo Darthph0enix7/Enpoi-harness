@@ -1,5 +1,7 @@
-import type { ReactNode } from 'react'
-import { SHIELD_OUTLINE_PATH, SHIELD_OUTLINE_STROKE } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useState, type ReactNode } from 'react'
+import {
+  IconCheckOutline16, SHIELD_OUTLINE_PATH, SHIELD_OUTLINE_STROKE, Sheet, useSheetPresentation,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRuntime,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -97,6 +99,8 @@ export type PermissionSelectProps =
 export function PermissionSelect({
   locked, select, usePermissionCatalog, useProjection, t,
 }: PermissionSelectProps) {
+  const sheetMode = useSheetPresentation()
+  const [open, setOpen] = useState(false)
   const selection = useProjection('permissions')
   const catalog = usePermissionCatalog(state => state.value)
 
@@ -119,18 +123,72 @@ export function PermissionSelect({
     void select(next).catch(() => false)
   }
 
-  return (
+  const trigger = (
     <button
       type="button"
       className={css.trigger}
       aria-label={t('mode', { name: currentAccessibleLabel })}
+      aria-haspopup={sheetMode ? 'dialog' : undefined}
+      aria-expanded={sheetMode ? open : undefined}
       title={current === undefined ? undefined : optionDescription(current, t)}
       disabled={locked}
-      onClick={cycle}
+      data-permission-trigger
+      onClick={sheetMode ? () => { setOpen(true) } : cycle}
     >
       {glyph !== undefined && (
         <span className={css.triggerIcon} aria-hidden>{glyph}</span>
       )}
     </button>
+  )
+
+  // Phone: the icon trigger stays the current-value chip, and the presets open
+  // as a sheet instead of cycling blindly through three modes.
+  if (!sheetMode) return trigger
+
+  return (
+    <>
+      {trigger}
+      <Sheet
+        open={open}
+        onClose={() => { setOpen(false) }}
+        title={t('sheet.title')}
+        closeLabel={t('close')}
+        surfaceId="ui-permission-presets:picker"
+        contentClassName={css.sheetContent ?? ''}
+      >
+        <div className={css.sheetList} role="listbox" aria-label={t('sheet.title')}>
+          {catalog.options.map((option) => {
+            const label = permissionLabel(option.value, option.name, t)
+            const badge = optionBadge(option.value, t)
+            const selected = option.value === currentValue
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                className={selected ? `${css.sheetRow} ${css.sheetRowActive}` : css.sheetRow}
+                onClick={() => {
+                  setOpen(false)
+                  if (selected) return
+                  void select(option.value).catch(() => false)
+                }}
+              >
+                <span className={css.sheetRowText}>
+                  <span className={css.sheetRowLabel}>
+                    {label}
+                    {badge !== undefined && <span className={css.sheetRowBadge}>{badge}</span>}
+                  </span>
+                  {optionDescription(option, t) !== undefined && (
+                    <span className={css.sheetRowDescription}>{optionDescription(option, t)}</span>
+                  )}
+                </span>
+                {selected && <IconCheckOutline16 className={css.sheetRowCheck} />}
+              </button>
+            )
+          })}
+        </div>
+      </Sheet>
+    </>
   )
 }

@@ -72,3 +72,54 @@
   font-size: 11px;
   color: var(--dsw-alias-label-dimmed, #94a3b8);
 }
+/* ── Phone sheet presentation ── */
+.sheetContent {
+  padding: 0 8px 8px;
+}
+
+.sheetList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sheetRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheetRow .item {
+  flex: 1;
+  min-width: 0;
+}
+
+.sheetRowActive {
+  background: var(--dsw-alias-interactive-bg-active, rgba(255, 255, 255, 0.08));
+}
+
+.check {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary, #67dce7);
+}
+
+.trigger {
+  min-height: 32px;
+}
+
+@media (pointer: coarse) {
+  .trigger {
+    min-height: 44px;
+    padding: 0 10px;
+  }
+}

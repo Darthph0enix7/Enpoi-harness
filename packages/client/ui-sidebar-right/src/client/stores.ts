@@ -253,6 +253,13 @@ export type SidebarRightActions = {
   ) => void
   duplicateTab: (draft: SidebarRightState, sessionId: string, tabId: TabId) => void
   closeTab: (draft: SidebarRightState, sessionId: string, tabId: TabId) => void
+  /**
+   * Drop the editor pane's record without closing its tab. The mobile file
+   * push uses this as its back step: the document tab stays open (reopening
+   * it from the tree reveals the same record), while the panel returns to the
+   * page it was drawn beside.
+   */
+  clearEditor: (draft: SidebarRightState, sessionId: string) => void
   focusTab: (draft: SidebarRightState, sessionId: string, tabId: TabId) => void
   focusPane: (draft: SidebarRightState, sessionId: string, paneId: PaneId) => void
   placeTab: (draft: SidebarRightState, sessionId: string, tabId: TabId, toPaneId: PaneId, index: number) => void
@@ -421,6 +428,12 @@ export function createSidebarRightStore(
       },
       focusTab: (d, sessionId: string, tabId: TabId) => {
         d.bySession = seat(d, sessionId, s => advance(s, state => planFocusTab(state, tabId), seed))
+      },
+      // The editor record is viewing state beside the layout, not part of it:
+      // clearing it records no plan and leaves the document tab itself open.
+      clearEditor: (d, sessionId: string) => {
+        d.bySession = seat(d, sessionId, surface =>
+          surface.editorTabId === undefined ? surface : { ...surface, editorTabId: undefined })
       },
       focusPane: (d, sessionId: string, paneId: PaneId) => {
         d.bySession = seat(d, sessionId, s => advance(s, state => planFocusPane(state, paneId), seed))

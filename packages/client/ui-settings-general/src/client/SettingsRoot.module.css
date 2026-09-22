@@ -279,6 +279,113 @@
   }
 }
 
+/* Phone page (the mobile shell's settings presentation): full-viewport, safe
+   area padded, list pushes to one section detail. It never covers its own
+   close path, so the stuck-modal state cannot recur. */
+.mobilePage {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.mobileHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: calc(48px + var(--dsh-safe-area-inset-top, 0px));
+  padding: 0 max(8px, var(--dsh-safe-area-inset-right, 0px)) 0 max(4px, var(--dsh-safe-area-inset-left, 0px));
+  padding-top: var(--dsh-safe-area-inset-top, 0px);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.08));
+}
+
+.mobileControl {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mobileControl:active {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.mobileTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.mobileActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobileList {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px max(8px, var(--dsh-safe-area-inset-right, 0px)) calc(12px + var(--dsh-safe-area-inset-bottom, 0px)) max(8px, var(--dsh-safe-area-inset-left, 0px));
+}
+
+.mobileRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 12px;
+  font-size: 14px;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mobileRow:active {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.mobileRowLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobileDetail {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding-bottom: var(--dsh-safe-area-inset-bottom, 0px);
+}
+
 /* Visually-hidden text seat (close button accessible name from slot content). */
 .hiddenLabel {
   position: absolute;

@@ -29,6 +29,13 @@ This package is a Web-shell build input. Its static ESM retains third-party impo
 
 Compose feature UI from these atoms whenever the web client needs a standard control or an agent-output renderer. They render through React only and take `--dsw-*` design tokens from the theme, so they fit any plugin without importing the theme or the slot system.
 
+<a id="adaptive-foundation"></a>
+### Adaptive device, pointer, and back stack
+
+`device.ts` owns the browser-wide classifier: `classifyDevice(reading)` is the pure decision (`hasTouch && width ≤ 768` → `phone`, `768–1024` + touch → `tablet`, else `desktop`), and the `DeviceRuntime` singleton (via `startDeviceRuntime()` / `getDeviceRuntime()` / `getDeviceSnapshot()`) projects `data-device`, `data-pointer`, `data-keyboard`, `--dsh-keyboard-inset`, and `--dsh-visual-viewport-height` onto `<html>` with rAF-throttled resize, `matchMedia`, and `visualViewport` tracking. Components subscribe through `useDevice()`; the keyboard state settles for `KEYBOARD_SETTLE_MS` before opening so the iOS visual-viewport animation cannot flip it.
+
+`back-stack.ts` owns the dismissal coordinator: `registerBackSurface(id, dismiss)` (or the `useBackHandler(id, dismiss, active)` hook) pushes one synthetic history record and returns the deregister function; `backStack.depth()` reads the stack depth, and `backStack.dismissTop()` runs the same step for a rendered header back affordance, returning whether a surface was dismissed. Each pushed record carries its depth, so the single `popstate` listener closes exactly one surface per back press in LIFO order, ignores forward navigation and the echo of a programmatically closed surface's own `history.back()`, and does nothing while the stack is empty, so native browser history keeps working. `Modal`, `Menu`, and `HoverCard` register through it on touch devices only; desktop keeps its Escape and close affordances.
+
 <a id="component-catalog"></a>
 ### Component catalog
 
@@ -47,6 +54,7 @@ Check this table before writing a control in a feature package. A plugin cannot 
 | `ConnectionIndicator` | Inline connection-recovery control across outage, retry, and recovered states. |
 | `DisclosureRow` | 24px compact disclosure that lays title and content side by side. |
 | `Modal` | Centered dialog over a page mask. |
+| `Sheet` | Bottom sheet on phone/tablet widths and a centered card above 560px; safe-area padded, keyboard-inset aware, scroll-contained between a fixed header and footer, dismissed by mask, Escape, close button, or the touch back gesture. |
 | `RiskConfirmation` | Sensitive action gated behind an explicit checkbox. |
 | `OnboardingSurface` | First-run stage that holds the application root inert. |
 | `Tooltip` | Hover text on a cloned anchor, placed right, bottom, or top. |

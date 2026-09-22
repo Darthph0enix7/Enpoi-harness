@@ -115,3 +115,36 @@
   display: flex;
   align-items: center;
 }
+
+/* Phone: the footer stacks its actions so nothing clips, and both buttons
+   reach the 44px touch floor. */
+@media (max-width: 560px) {
+  .footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .actions {
+    flex-wrap: wrap;
+  }
+
+  .actions > * {
+    flex: 1 1 auto;
+  }
+
+  .title {
+    white-space: normal;
+    overflow: visible;
+  }
+
+  .description {
+    -webkit-line-clamp: unset;
+  }
+}
+
+@media (pointer: coarse) {
+  .actions button,
+  .footer button {
+    min-height: 44px;
+  }
+}
