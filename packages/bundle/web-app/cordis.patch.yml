@@ -19,15 +19,15 @@
     personaPrefix: >-
       You are a coding agent powered by the {{model}} model.
 
-# Full-text session search is opt-in (the base row's `openAt: never`). This
-# restatement keeps the Web values on one ephemeral in-memory index; a
-# deployment enabling content search overrides `openAt` to `first-search` in a
-# later patch layer, which defers the node:sqlite import and in-memory handle
-# to the first search so Node 22 startup stays quiet.
+# enpoi: durable deployment index over the base row's opt-in `openAt: never` +
+# `:memory:` default. `first-search` keeps the node:sqlite import and handle
+# deferred to the first search call, so startup stays quiet; the durable path
+# under the harness home's cache directory lets the next boot reuse the index
+# instead of rebuilding it (an incompatible schema version resets in place).
 - id: session-query-sqlite
   config:
-    path: ':memory:'
-    openAt: never
+    path: !!js dshHomePath('cache', 'session-query', 'index.sqlite')
+    openAt: first-search
 
 - id: tools
   config:
@@ -93,6 +93,17 @@
     # projection key): every turn stays navigable before its events page in.
     - id: session-turn-outline
       name: '@deepseek-ai/dsh-session-turn-outline'
+
+    # enpoi: transcript recall for every preset agent. The five model-facing
+    # tools (session_search, session_event_search, session_trace,
+    # session_event_trace, session_event_read) register into the host tools
+    # registry's global layer, so each preset's scoped catalog merges them
+    # without a per-preset row; authorization stays per call (the caller's own
+    # session, or a persisted session sharing the caller's cwd). The plugin
+    # provides no service, so it needs no preset realm. The base stays without
+    # the row, so headless/SDK snapshots keep their current tool lists.
+    - id: tool-session-query
+      name: '@deepseek-ai/dsh-tool-session-query'
 
     # Resolve bind host, SSH launch, and display once at boot, then mount the
     # matching dual-face directory picker. Mount -native or -browse directly in
