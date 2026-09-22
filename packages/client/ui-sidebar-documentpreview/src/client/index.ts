@@ -30,7 +30,7 @@ import { createReadPage, documentFileBytes } from './rpc.ts'
 import { createTextStore } from './store.ts'
 import { en, zh } from './locales.ts'
 import { DocumentPreviewRegistry } from './document/registry.ts'
-import { documentTabInfoFactory } from './document/contract.ts'
+import { documentTabInfoFactory, documentToolbarTabInfoFactory } from './document/contract.ts'
 import { apply as registerText } from './text/index.ts'
 import { apply as registerMarkdown } from './markdown/index.ts'
 import { apply as registerHtml } from './html/index.ts'
@@ -107,6 +107,9 @@ export function apply(ctx: ClientContext): void {
       name: 'sidebar.right.pane.tab', key: TEXTPREVIEW_ID, locale: NS, store,
       children: {
         'sidebar.right.tab.document': { kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentTabInfoFactory } } },
+        'sidebar.right.tab.document.toolbar': {
+          kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentToolbarTabInfoFactory } },
+        },
       },
       inject: (sessionId, actions): TextPreviewInjected => ({
         ...face(sessionId, actions), hooks: { documentPreviews: source },

@@ -29,8 +29,19 @@ import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 
 type BodySlot = PropsRenderSlots<'sidebar.right.tab.document'>['renderSlot']
 
-/** Preserve the body-slot callback used by component fixtures. */
-export function documentSlots(body: BodySlot): TextPreviewProps['renderSlot'] { return body }
+/**
+ * Preserve the body-slot callback used by component fixtures, keeping the
+ * renderer-contributed toolbar seat empty: these fixtures exercise the body.
+ * @param body - the document-body renderer under test.
+ * @returns a renderSlot that delegates body keys and declines the toolbar key.
+ */
+export function documentSlots(body: BodySlot): TextPreviewProps['renderSlot'] {
+  const delegate = (key: string, owner: unknown, opts: unknown): ReturnType<BodySlot> => {
+    if (key === 'sidebar.right.tab.document.toolbar') return null
+    return body(key as Parameters<BodySlot>[0], owner as Parameters<BodySlot>[1], opts as Parameters<BodySlot>[2])
+  }
+  return delegate as unknown as TextPreviewProps['renderSlot']
+}
 
 export const TAB_ID = 'tab-1' as TabId
 export const SESSION = 's-1' as SessionId

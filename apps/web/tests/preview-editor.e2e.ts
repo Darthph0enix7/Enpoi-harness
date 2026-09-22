@@ -48,6 +48,8 @@ describe.skipIf(MODE === 'record')('web e2e: modernized document preview', () =>
   let outsideRoot: string | undefined
   /** The settled Session's workspace; the workbench walk writes and reads its files. */
   let workCwd: string | undefined
+  /** Console tripwire: the walk asserts zero page errors at the end. */
+  let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
     outsideRoot = await mkdtemp(join(tmpdir(), 'dsh-preview-modern-'))
@@ -56,7 +58,7 @@ describe.skipIf(MODE === 'record')('web e2e: modernized document preview', () =>
     })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
-    watchConsole(page)
+    tripwire = watchConsole(page)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await connectFreshWorkspace(page, scaffold.workspaceCwd)
     const settled = scaffold.whenTurnSettled()
@@ -232,18 +234,87 @@ describe.skipIf(MODE === 'record')('web e2e: modernized document preview', () =>
       .toContain('live')
     await shot(page, 'workbench-live-sync.png')
 
-    // Quick actions: find opens the CodeMirror search panel; copy path flashes.
-    await preview.locator('[data-textpreview-tool="find"]').click()
-    await preview.locator('.cm-panel').waitFor({ timeout: 5_000 })
-    await page.keyboard.press('Escape')
+    // One toolbar row: exactly one header container and one reload control.
+    expect(await page.locator('[data-textpreview-toolbar]').count()).toBe(1)
+    expect(await page.locator('[data-textpreview-tool="reload"]').count()).toBe(1)
+    expect(await page.locator('[data-enpoi-editor-toolbar]').count()).toBe(0)
+    // Auto-save is an icon toggle with a pressed state, not a text button.
+    const autoSave = preview.locator('[data-enpoi-editor-autosave]')
+    expect(await autoSave.locator('svg').count()).toBe(1)
+    // The walk left auto-save off: pressing the icon flips the pressed state.
+    expect(await autoSave.getAttribute('aria-pressed')).toBe('false')
+    await autoSave.click()
+    expect(await autoSave.getAttribute('aria-pressed')).toBe('true')
+    await autoSave.click()
+    expect(await autoSave.getAttribute('aria-pressed')).toBe('false')
+    await shot(page, 'workbench-toolbar-one-row.png')
+
+    // Find opens OUR themed bar over CodeMirror's search API: query, count,
+    // next/prev, toggles, Esc — and Mod-F opens it too.
+    await preview.locator('[data-enpoi-editor-cm] .cm-content').click()
+    await page.keyboard.press('ControlOrMeta+f')
+    const findBar = preview.locator('[data-enpoi-editor-find]')
+    await findBar.waitFor({ timeout: 5_000 })
+    await findBar.locator('input').fill('answer')
+    await expect.poll(() => findBar.locator('[data-enpoi-editor-find-count]').innerText(), { timeout: 5_000 })
+      .toContain('/')
+    await shot(page, 'workbench-toolbar-find.png')
+    await findBar.locator('[data-enpoi-editor-find-next]').click()
+    await findBar.locator('[data-enpoi-editor-find-prev]').click()
+    await findBar.locator('[data-enpoi-editor-find-case]').click()
+    await findBar.locator('[data-enpoi-editor-find-regex]').click()
+    await findBar.locator('[data-enpoi-editor-find-close]').click()
+    await expect.poll(() => preview.locator('[data-enpoi-editor-find]').count(), { timeout: 5_000 }).toBe(0)
+
+    // Go to line is our popover: Mod-G opens it, a number and Enter jump the
+    // CodeMirror cursor — no window.prompt anywhere (a prompt would stall the
+    // page; we also observe the dialog event).
+    let prompted = false
+    page.on('dialog', (dialog) => { prompted = true; void dialog.dismiss() })
+    await preview.locator('[data-enpoi-editor-cm] .cm-content').click()
+    await page.keyboard.press('ControlOrMeta+g')
+    const gotoField = preview.locator('[data-textpreview-popover="goto"] input')
+    await gotoField.waitFor({ timeout: 5_000 })
+    await gotoField.fill('1')
+    await shot(page, 'workbench-toolbar-goto.png')
+    await gotoField.press('Enter')
+    // The pane is on preview.ts here: line 1 is its first statement.
+    await expect.poll(() => preview.locator('[data-enpoi-editor-cm] .cm-activeLine').innerText(), { timeout: 5_000 })
+      .toContain('const answer')
+    expect(prompted).toBe(false)
+    expect(await preview.locator('[data-textpreview-popover="goto"]').count()).toBe(0)
+
+    // The host quick actions still work: copy path and copy content flash our
+    // own notices, wrap toggles its pressed state, download and reload run.
     await preview.locator('[data-textpreview-tool="copy-path"]').click()
     await preview.locator('[data-textpreview-flash]').waitFor({ timeout: 5_000 })
-    await shot(page, 'workbench-quick-actions.png')
+    await preview.locator('[data-textpreview-tool="copy-content"]').click()
+    await preview.locator('[data-textpreview-flash]').waitFor({ timeout: 5_000 })
+    const wrap = preview.locator('[data-textpreview-tool="wrap"]')
+    const wrapped = await wrap.getAttribute('aria-pressed')
+    await wrap.click()
+    await expect.poll(() => wrap.getAttribute('aria-pressed'), { timeout: 5_000 }).not.toBe(wrapped)
+    await wrap.click()
+    await preview.locator('[data-textpreview-tool="download"]').click()
+    await preview.locator('[data-textpreview-tool="reload"]').click()
+    await preview.locator('[data-enpoi-editor-cm] .cm-content').waitFor({ timeout: 10_000 })
+
+    // A narrow column keeps the single row: trailing actions collapse behind ⋯.
+    await page.setViewportSize({ width: 900, height: 1000 })
+    const header = preview.locator('[data-textpreview-toolbar]')
+    await expect.poll(async () => (await header.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeLessThan(60)
+    const more = preview.locator('[data-textpreview-more]')
+    await more.waitFor({ timeout: 5_000 })
+    await more.click()
+    expect(await page.getByRole('menuitem').count()).toBeGreaterThan(0)
+    await page.keyboard.press('Escape')
+    await page.setViewportSize({ width: 1440, height: 1000 })
 
     // The display-type pick survives a reload.
     await page.reload({ waitUntil: 'load' })
     await column.locator('[data-files-state="tree"]').waitFor({ state: 'visible', timeout: 15_000 })
     await openFile(column, preview, 'preview.md')
     await expect.poll(() => viewer.innerText(), { timeout: 15_000 }).toBe('Editor (CodeMirror)')
+    expect(tripwire.pageErrors).toEqual([])
   })
 })

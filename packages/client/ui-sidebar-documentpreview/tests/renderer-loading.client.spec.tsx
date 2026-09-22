@@ -46,6 +46,8 @@ it('lets a non-Office renderer load content, report its version, and reload thro
     return <p>{displayed?.text ?? 'Loading custom content'}</p>
   }
   const renderSlot: TextPreviewProps['renderSlot'] = (_name, input) => {
+    // The renderer-contributed toolbar segment is not this fixture's subject.
+    if (_name === 'sidebar.right.tab.document.toolbar') return null
     const owner = input as unknown as OwnerOf<'sidebar.right.tab.document'>
     return <CustomBody content={owner.content} />
   }
@@ -102,6 +104,8 @@ function setup() {
   const describeFailure: OfficeBodyProps['describeFailure'] = error => error.message
   let request: Extract<DocumentContent, { kind: 'renderer' }> | undefined
   const slots: TextPreviewProps['renderSlot'] = (_key, input, options) => {
+    // The renderer-contributed toolbar segment is not this fixture's subject.
+    if (_key === 'sidebar.right.tab.document.toolbar') return null
     const owner = input as unknown as OwnerOf<'sidebar.right.tab.document'>
     if (owner.content.kind !== 'renderer') return <p>Raw bytes</p>
     request = owner.content

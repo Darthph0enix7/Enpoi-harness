@@ -1,0 +1,55 @@
+/* The editor's segment of the document pane's single toolbar row: the same
+   tool-button proportions as the host's controls, so the row reads as one. */
+.segment {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  align-items: center;
+}
+
+.state {
+  flex: none;
+  margin: 0 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.stateError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.tool {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 6px;
+  color: var(--dsw-alias-label-secondary);
+  line-height: 1;
+  background: transparent;
+  border: none;
+  border-radius: 28px;
+  cursor: pointer;
+}
+
+.tool svg {
+  width: 15px;
+  height: 15px;
+}
+
+.tool:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.pressed {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.save {
+  color: var(--dsw-alias-label-primary);
+}

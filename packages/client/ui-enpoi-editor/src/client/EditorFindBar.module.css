@@ -1,0 +1,74 @@
+/* The find surface over the editing body: a small glass card on the same
+   tokens as the harness menus, so it reads as our UI and not a browser panel. */
+.bar {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 6px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-3);
+  border: 0;
+  border-radius: 16px;
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+.icon {
+  flex: none;
+  margin: 0 2px 0 4px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.input {
+  width: 168px;
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.count {
+  flex: none;
+  margin: 0 4px 0 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.button:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.button[aria-pressed='true'] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}

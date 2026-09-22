@@ -146,28 +146,4 @@ describe('editor body surfaces', () => {
     expect(store.getSnapshot().byAddress[ADDRESS]).toBeUndefined()
   })
 
-  it('exposes the auto-save toggle with its persisted on state', () => {
-    const store = createEditorStore().create()
-    store.actions.attach(ADDRESS, TAB)
-    store.actions.synced(ADDRESS, snapshot('hello'))
-    const view = render(<EditorBody {...propsFor(store)} />)
-    const toggle = view.container.querySelector('[data-enpoi-editor-autosave]')!
-    expect(toggle.getAttribute('aria-pressed')).toBe('true')
-    cleanup()
-  })
-
-  it('shows the save state line as Unsaved while dirty, then Saved after the write', () => {
-    const store = createEditorStore().create()
-    store.actions.attach(ADDRESS, TAB)
-    store.actions.synced(ADDRESS, snapshot('hello'))
-    store.actions.edited(ADDRESS, 'my buffer')
-    const view = render(<EditorBody {...propsFor(store)} />)
-    expect(view.container.textContent).toContain('unsaved')
-    store.actions.saving(ADDRESS)
-    store.actions.saved(ADDRESS, 'my buffer', { sha256: 'sha-2', mtimeMs: 2000, size: 9 }, undefined)
-    // The selector is not live in this fixture, so a fresh render reads the write.
-    const after = render(<EditorBody {...propsFor(store)} />)
-    expect(after.container.querySelector('[data-enpoi-editor-saved]')).not.toBeNull()
-    cleanup()
-  })
 })

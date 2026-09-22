@@ -34,10 +34,18 @@ export type DocumentContent =
  * `scrollportRef`.
  */
 export interface DocumentRendererCommands {
-  /** Open the renderer's find surface, when it offers one. */
+  /** Open the renderer's own find surface, when it offers one. */
   readonly find?: () => void
-  /** Jump to a line the renderer asks for, when it offers one. */
-  readonly gotoLine?: () => void
+  /** Jump to a 1-based line the shared toolbar's field carries, when the renderer offers it. */
+  readonly gotoLine?: (line: number) => void
+}
+
+/** Owner inputs of the shared toolbar's renderer-contributed segment. */
+export interface DocumentToolbarOwnerProps {
+  /** The display type the row is showing, so one seat serves every renderer. */
+  readonly rendererId: string
+  /** The row collapsed its optional actions; contributed controls should stay icon-only. */
+  readonly compact: boolean
 }
 
 /** Content and viewing inputs shared by document bodies and nested PDF presentation. */
@@ -68,6 +76,23 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         }
       }
     }
+    /**
+     * The renderer-contributed segment of the pane's single toolbar row: a
+     * keyed seat under the selected display type's id, so an editor can put
+     * its own save controls beside the shared actions instead of stacking a
+     * second row.
+     */
+    'sidebar.right.tab.document.toolbar': {
+      kind: 'keyed'
+      scope: 'session'
+      owner: DocumentToolbarOwnerProps
+      hookContext: UseSidebarRightTabInfo
+      inject: {
+        hooks: {
+          tabInfo: SlotHookFactory<'sidebar.right.tab.document.toolbar', UseSidebarRightTabInfo>
+        }
+      }
+    }
   }
 }
 
@@ -81,4 +106,13 @@ export type DocumentPreviewProps = PropsRuntime<'sidebar.right.tab.document'>
  * @returns the same reader, without another subscription adapter.
  */
 export const documentTabInfoFactory: SlotHookFactory<'sidebar.right.tab.document', UseSidebarRightTabInfo> =
+  (_standard, useTabInfo) => useTabInfo
+
+/**
+ * Forward the framework's tab reader to the selected toolbar segment.
+ * @param _standard - framework standard props.
+ * @param useTabInfo - enclosing tab's bound reader.
+ * @returns the same reader, without another subscription adapter.
+ */
+export const documentToolbarTabInfoFactory: SlotHookFactory<'sidebar.right.tab.document.toolbar', UseSidebarRightTabInfo> =
   (_standard, useTabInfo) => useTabInfo

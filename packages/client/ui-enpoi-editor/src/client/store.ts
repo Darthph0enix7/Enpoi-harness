@@ -63,6 +63,10 @@ export interface EditorTabState {
   savedAt: number | null
   /** Why the last read or save failed, for the toolbar/body line. */
   error: string | null
+  /** The persisted auto-save choice; `null` until the surface seeds it from the preference store. */
+  autoSave: boolean | null
+  /** Manual-save requests from the shared toolbar; the body consumes each new one. */
+  saveRequests: number
   /** Where the reader was, restored on remount. */
   view: EditorViewState
 }
@@ -92,6 +96,8 @@ export function freshEditorTab(): EditorTabState {
     saveState: 'idle',
     savedAt: null,
     error: null,
+    autoSave: null,
+    saveRequests: 0,
     view: { anchor: 0, head: 0, scrollTop: 0 },
   }
 }
@@ -120,6 +126,8 @@ type EditorActions = {
   saving: (draft: EditorState, address: string) => void
   saved: (draft: EditorState, address: string, content: string, baseline: SaveBaseline, liveDoc: string | undefined) => void
   saveFailed: (draft: EditorState, address: string, message: string) => void
+  autoSaveSet: (draft: EditorState, address: string, on: boolean) => void
+  saveRequested: (draft: EditorState, address: string) => void
   viewChanged: (draft: EditorState, address: string, view: EditorViewState) => void
 }
 
@@ -279,6 +287,21 @@ export function createEditorStore(): EngineStoreHandle<EditorState, EditorAction
         const state = bucket(d, address)
         state.saveState = 'failed'
         state.error = message
+      },
+      /**
+       * Record the auto-save choice, shared by the toolbar toggle and the body's schedule.
+       * @param d - draft. @param address - the file address. @param on - whether auto-save is on.
+       */
+      autoSaveSet: (d, address, on) => {
+        bucket(d, address).autoSave = on
+      },
+      /**
+       * Ask the body to save now; the toolbar's save icon has no editor handle of its own.
+       * @param d - draft. @param address - the file address.
+       */
+      saveRequested: (d, address) => {
+        const state = bucket(d, address)
+        state.saveRequests += 1
       },
       /**
        * Record where the reader was, so a remount restores the place.

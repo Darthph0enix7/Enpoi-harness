@@ -2,6 +2,7 @@
    put while the body below owns the remaining height. A renderer may replace
    the body's scrolling role with an inner scrollport. */
 .preview {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -311,6 +312,88 @@
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
+/* The shared controls of the single toolbar row: never wrap; extras collapse
+   behind the overflow menu when the header runs out of width. */
+.tools {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  align-items: center;
+}
+
+.tool[aria-pressed='true'] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The go-to-line and find popovers: a glass card under the toolbar row, on the
+   same tokens as the harness menus. */
+.popover {
+  position: absolute;
+  top: 40px;
+  right: 8px;
+  z-index: 40;
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 0 6px;
+  background: var(--dsw-alias-bg-layer-3);
+  border-radius: 17px;
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+.popoverIcon {
+  flex: none;
+  margin: 0 2px 0 4px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.popoverInput {
+  width: 168px;
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.popoverInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.popoverCount {
+  flex: none;
+  margin: 0 4px 0 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.popoverButton {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.popoverButton:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .viewerTool {
   flex: none;
   width: auto;

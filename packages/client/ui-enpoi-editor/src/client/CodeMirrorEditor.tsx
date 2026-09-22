@@ -17,9 +17,9 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
-import { EditorView, keymap, lineNumbers } from '@codemirror/view'
+import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
-import { gotoLine, openSearchPanel, search, searchKeymap } from '@codemirror/search'
+import { SearchQuery, search, setSearchQuery } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import { languageForPath } from './languages.ts'
 import css from './EditorBody.module.css'
@@ -34,11 +34,30 @@ export interface CodeMirrorHandle {
   setWrap(wrapped: boolean): void
   /** Flip the read-only state without rebuilding the view. */
   setReadOnly(readOnly: boolean): void
-  /** Open the search panel, the toolbar's Find in file. */
-  find(): void
-  /** Prompt for a line and move the cursor there, the toolbar's Go to line. */
-  gotoLine(): void
+  /** Focus the editing surface, for a find bar that is closing. */
+  focusEditor(): void
+  /** Move the cursor to a 1-based line and scroll it into view. */
+  gotoLine(line: number): void
+  /** Set the search query, highlight its matches, and reveal the first one. */
+  setSearch(text: string, options: { readonly caseSensitive: boolean; readonly regexp: boolean }): SearchMatches
+  /** Reveal the next match after the current one, wrapping once. */
+  searchNext(): SearchMatches
+  /** Reveal the previous match, wrapping once. */
+  searchPrevious(): SearchMatches
+  /** Clear the query and its match highlights. */
+  clearSearch(): void
 }
+
+/** How many matches a query found, and which of them the view is showing. */
+export interface SearchMatches {
+  /** Total matches in the document. */
+  readonly matches: number
+  /** 0-based position of the revealed match within the document's matches. */
+  readonly index: number
+}
+
+/** Matches above this count are not collected; the counter saturates. */
+const MAX_SEARCH_MATCHES = 5000
 
 /** Props of the CodeMirror host. */
 export interface CodeMirrorEditorProps {
@@ -133,6 +152,39 @@ const highlightStyle = HighlightStyle.define([
   { tag: [tags.strong], fontWeight: '600' },
 ])
 
+/**
+ * Reveal one match without moving DOM focus, so a focused find field keeps it.
+ * @param view - the editor view.
+ * @param match - the match range to select and center.
+ */
+function revealMatch(view: EditorView, match: { readonly from: number; readonly to: number }): void {
+  view.dispatch({
+    selection: { anchor: match.from, head: match.to },
+    effects: EditorView.scrollIntoView(match.from, { y: 'center' }),
+  })
+}
+
+/**
+ * Step through the collected matches, wrapping at either end.
+ * @param view - the editor view, or `null` before it mounts.
+ * @param state - the collected matches and the revealed index.
+ * @param delta - `1` for the next match, `-1` for the previous.
+ * @returns the match count and the newly revealed index.
+ */
+function stepSearch(
+  view: EditorView | null,
+  state: { matches: readonly { from: number; to: number }[]; index: number },
+  delta: 1 | -1,
+): SearchMatches {
+  const total = state.matches.length
+  if (view === null || total === 0) return { matches: total, index: state.index }
+  const index = (state.index + delta + total) % total
+  state.index = index
+  const match = state.matches[index]
+  if (match !== undefined) revealMatch(view, match)
+  return { matches: total, index }
+}
+
 /** The CodeMirror host: one view per mount, driven through its ref handle. */
 export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorProps>(
   function CodeMirrorEditor(props, ref): ReactNode {
@@ -148,6 +200,8 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
     onSaveRef.current = props.onSave
     const onViewStateRef = useRef(props.onViewState)
     onViewStateRef.current = props.onViewState
+    /** The current query's matches, in document order, and the revealed index. */
+    const searchRef = useRef<{ matches: readonly { from: number; to: number }[]; index: number }>({ matches: [], index: 0 })
     // Mount-time inputs: the view is created once and then driven by the
     // effects/handle, so later prop changes must not re-create it.
     const initialRef = useRef({
@@ -188,17 +242,64 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
           effects: readOnlyCompartment.current.reconfigure(readOnlyExtensions(readOnly)),
         })
       },
-      find: () => {
+      focusEditor: () => {
+        viewRef.current?.focus()
+      },
+      gotoLine: (line) => {
         const view = viewRef.current
         if (view === null) return
-        openSearchPanel(view)
+        const target = Math.min(Math.max(Math.trunc(line), 1), view.state.doc.lines)
+        const info = view.state.doc.line(target)
+        view.dispatch({
+          selection: { anchor: info.from },
+          effects: EditorView.scrollIntoView(info.from, { y: 'center' }),
+        })
         view.focus()
       },
-      gotoLine: () => {
+      setSearch: (text, options) => {
         const view = viewRef.current
+        if (view === null) return { matches: 0, index: 0 }
+        const query = new SearchQuery({
+          search: text,
+          caseSensitive: options.caseSensitive,
+          regexp: options.regexp,
+          // A search field is literal text: never expand escape sequences.
+
+          literal: true,
+        })
+        view.dispatch({ effects: setSearchQuery.of(query) })
+        if (text === '') {
+          searchRef.current = { matches: [], index: 0 }
+          return { matches: 0, index: 0 }
+        }
+        const matches: { from: number; to: number }[] = []
+        const cursor = query.getCursor(view.state.doc)
+        for (let step = cursor.next(); !step.done && matches.length < MAX_SEARCH_MATCHES; step = cursor.next()) {
+          matches.push(step.value)
+        }
+        if (matches.length === 0) {
+          searchRef.current = { matches: [], index: 0 }
+          return { matches: 0, index: 0 }
+        }
+        const anchor = view.state.selection.main.from
+        const found = matches.findIndex(match => match.from >= anchor)
+        const index = found === -1 ? 0 : found
+        const revealed = matches[index]
+        if (revealed === undefined) {
+          searchRef.current = { matches: [], index: 0 }
+          return { matches: 0, index: 0 }
+        }
+        searchRef.current = { matches, index }
+        revealMatch(view, revealed)
+        return { matches: matches.length, index }
+      },
+      searchNext: () => stepSearch(viewRef.current, searchRef.current, 1),
+      searchPrevious: () => stepSearch(viewRef.current, searchRef.current, -1),
+      clearSearch: () => {
+        const view = viewRef.current
+        searchRef.current = { matches: [], index: 0 }
         if (view === null) return
-        void gotoLine(view)
-        view.focus()
+        view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: '' })) })
       },
     }), [])
 
@@ -210,6 +311,8 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
         doc: initial.doc,
         extensions: [
           lineNumbers(),
+          highlightActiveLine(),
+          highlightActiveLineGutter(),
           history(),
           search(),
           EditorState.tabSize.of(2),
@@ -221,7 +324,6 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
           ...languageForPath(initial.path),
           keymap.of([
             { key: 'Mod-s', preventDefault: true, run: () => { onSaveRef.current(); return true } },
-            ...searchKeymap,
             ...defaultKeymap,
             ...historyKeymap,
           ]),

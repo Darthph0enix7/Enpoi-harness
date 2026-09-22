@@ -151,13 +151,14 @@ describe('document toolbar', () => {
       await pending.promise
     })
     h.bytes.mockReturnValueOnce(pending.promise)
-    const renderSlot = vi.fn(() => null)
+    const renderSlot = vi.fn((_key: string, _owner: unknown, _opts: unknown) => null)
     const props: TextPreviewProps = { ...h.props(), useDocumentPreviews: selector => selector([binary]), renderSlot }
     const view = render(<TextPreview {...props} />)
     expect(view.getByRole('status').hasAttribute('data-document-loading')).toBe(true)
     expect(view.getByRole('status').getAttribute('aria-label')).toBe('loading')
     expect(view.container.querySelector('[data-textpreview-body]')?.firstElementChild).toBe(view.getByRole('status'))
-    expect(renderSlot).not.toHaveBeenCalled()
+    // Only the toolbar seat is dispatched; the complete document body is not rendered yet.
+    expect(new Set(renderSlot.mock.calls.map(call => call[0]))).toEqual(new Set(['sidebar.right.tab.document.toolbar']))
     await act(async () => {
       pending.resolve(result)
       await pending.promise
@@ -286,7 +287,7 @@ describe('document toolbar', () => {
     h.controller.abort()
   })
 
-  it('keeps the editor tier out of the default view, offered in the picker, and switched in place by Edit', async () => {
+  it('keeps the editor tier out of the default view and offers it in the display-type menu', async () => {
     const h = harness({ 1: page(1, ['# Title'], true) })
     const editor: DocumentPreviewDefinition = {
       id: 'enpoi-editor', extensions: ['md'], priority: 'editor', title: () => 'Editor (CodeMirror)', loading: 'renderer', wrap: true,
@@ -304,16 +305,12 @@ describe('document toolbar', () => {
     await settle()
     // The editor is listed but never wins the automatic pick.
     expect(view.container.querySelector('[data-document-preview]')?.getAttribute('data-document-preview')).toBe('code')
+    // There is no separate fullscreen entry anymore: the menu switches the
+    // display type in place, and the choice is remembered.
+    expect(view.container.querySelector('[data-textpreview-tool="editor"]')).toBeNull()
     fireEvent.click(view.container.querySelector('[data-document-viewer-menu]')!)
-    expect(screen.getByRole('menuitem', { name: 'Editor (CodeMirror)' })).toBeDefined()
-    fireEvent.keyDown(document, { key: 'Escape' })
-    // The Edit control switches this tab's display type in place: the editor
-    // tab kind has no open path anymore.
-    fireEvent.click(view.container.querySelector('[data-textpreview-tool="editor"]')!)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Editor (CodeMirror)' }))
     expect(h.instance.getSnapshot().byTab[TAB_ID]?.rendererId).toBe('enpoi-editor')
-    // With the editor display type selected the Edit control retires itself.
-    const switched = render(<TextPreview {...props} />)
-    expect(switched.container.querySelector('[data-textpreview-tool="editor"]')).toBeNull()
     h.controller.abort()
   })
 

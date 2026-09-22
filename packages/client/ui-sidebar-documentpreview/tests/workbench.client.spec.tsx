@@ -11,7 +11,7 @@ import { TextPreview } from '../src/client/TextPreview.tsx'
 import type { TextPreviewProps } from '../src/client/TextPreview.tsx'
 import type { DocumentPreviewDefinition } from '../src/client/document/registry.ts'
 import { copyPlainText, downloadSessionFile } from '../src/client/quick-actions.ts'
-import { findLineOf, visibleTopLine } from '../src/client/text/lines.ts'
+import { findLinesOf } from '../src/client/text/lines.ts'
 import { documentSlots, ABSOLUTE_PATH, FILE, harness, page, settle } from './fixtures.client.ts'
 
 afterEach(cleanup)
@@ -22,29 +22,11 @@ describe('source-line search helpers', () => {
     { offset: 3, text: 'gamma', lines: 1 },
   ]
 
-  it('finds the first match at or below the given line, wrapping once', () => {
-    expect(findLineOf(pages, 'BETA', 1)).toBe(2)
-    expect(findLineOf(pages, 'gamma', 3)).toBe(3)
-    expect(findLineOf(pages, 'gamma', 4)).toBe(3)
-    expect(findLineOf(pages, 'missing', 1)).toBeUndefined()
-  })
-
-  it('reports the top visible line of a plain view', () => {
-    const host = document.createElement('div')
-    const row = (line: number, top: number): HTMLElement => {
-      const element = document.createElement('div')
-      element.setAttribute('data-textpreview-line', String(line))
-      Object.defineProperty(element, 'offsetTop', { configurable: true, value: top })
-      host.appendChild(element)
-      return element
-    }
-    row(1, 0)
-    row(2, 14)
-    row(3, 28)
-    Object.defineProperty(host, 'scrollTop', { configurable: true, value: 20 })
-    expect(visibleTopLine(host)).toBe(2)
-    Object.defineProperty(host, 'scrollTop', { configurable: true, value: 0 })
-    expect(visibleTopLine(host)).toBe(1)
+  it('lists every loaded line holding the term, in source order, ignoring case', () => {
+    expect(findLinesOf(pages, 'a')).toEqual([1, 2, 3])
+    expect(findLinesOf(pages, 'BETA')).toEqual([2])
+    expect(findLinesOf(pages, 'missing')).toEqual([])
+    expect(findLinesOf(pages, '')).toEqual([])
   })
 })
 
@@ -124,7 +106,7 @@ describe('capability-gated toolbar entries', () => {
     expect(imageView.container.querySelector('[data-textpreview-tool="download"]')).not.toBeNull()
   })
 
-  it('prefers the selected renderer command bridge over the host-owned prompt flow', async () => {
+  it('opens the themed go-to-line popover and hands the renderer the number, never a prompt', async () => {
     const h = harness({ 1: page(1, ['one\ntwo'], true) })
     const base = h.props()
     const info = base.useTabInfo()
@@ -151,10 +133,16 @@ describe('capability-gated toolbar entries', () => {
     />)
     await settle()
     fireEvent.click(view.container.querySelector('[data-textpreview-tool="find"]')!)
-    fireEvent.click(view.container.querySelector('[data-textpreview-tool="goto-line"]')!)
     expect(find).toHaveBeenCalledTimes(1)
-    expect(gotoLine).toHaveBeenCalledTimes(1)
+    // Go to line opens our popover; the renderer's jump happens on Enter.
+    fireEvent.click(view.container.querySelector('[data-textpreview-tool="goto-line"]')!)
+    const field = view.container.querySelector<HTMLInputElement>('[data-textpreview-popover="goto"] input')!
+    expect(field).not.toBeNull()
+    fireEvent.change(field, { target: { value: '12' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    expect(gotoLine).toHaveBeenCalledWith(12)
     expect(prompt).not.toHaveBeenCalled()
+    expect(view.container.querySelector('[data-textpreview-popover="goto"]')).toBeNull()
     vi.unstubAllGlobals()
   })
 
@@ -167,7 +155,7 @@ describe('capability-gated toolbar entries', () => {
       id: 'plain', extensions: ['md'], priority: 'builtin', title: () => 'Plain', loading: 'text-pages', wrap: true,
       capabilities: { search: true, gotoLine: true },
     }
-    const prompt = vi.fn(() => '7')
+    const prompt = vi.fn()
     vi.stubGlobal('prompt', prompt)
     const view = render(<TextPreview
       {...base}
@@ -177,8 +165,68 @@ describe('capability-gated toolbar entries', () => {
     />)
     await settle()
     fireEvent.click(view.container.querySelector('[data-textpreview-tool="goto-line"]')!)
-    expect(prompt).toHaveBeenCalled()
+    const field = view.container.querySelector<HTMLInputElement>('[data-textpreview-popover="goto"] input')!
+    fireEvent.change(field, { target: { value: '7' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
     expect(openResource).toHaveBeenCalledWith(info.tab.contentId, { params: { line: 7 } })
+    // Esc closes without navigating.
+    fireEvent.click(view.container.querySelector('[data-textpreview-tool="goto-line"]')!)
+    const reopened = view.container.querySelector<HTMLInputElement>('[data-textpreview-popover="goto"] input')!
+    fireEvent.keyDown(reopened, { key: 'Escape' })
+    expect(view.container.querySelector('[data-textpreview-popover="goto"]')).toBeNull()
+    expect(prompt).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
+  })
+
+  it('opens the host find popover with a count and working next/prev for a source view', async () => {
+    const h = harness({ 1: page(1, ['one\ntwo\none'], true) })
+    const base = h.props()
+    const info = base.useTabInfo()
+    const plain: DocumentPreviewDefinition = {
+      id: 'plain', extensions: ['md'], priority: 'builtin', title: () => 'Plain', loading: 'text-pages', wrap: true,
+      capabilities: { search: true, gotoLine: true },
+    }
+    const view = render(<TextPreview
+      {...base}
+      useTabInfo={() => info}
+      useDocumentPreviews={selector => selector([plain])}
+      renderSlot={() => null}
+    />)
+    await settle()
+    fireEvent.click(view.container.querySelector('[data-textpreview-tool="find"]')!)
+    const field = view.container.querySelector<HTMLInputElement>('[data-textpreview-popover="find"] input')!
+    expect(field).not.toBeNull()
+    fireEvent.change(field, { target: { value: 'one' } })
+    expect(view.container.querySelector('[data-textpreview-find-count]')?.textContent).toBe('find.count(index=1,total=2)')
+    fireEvent.click(view.container.querySelector('[data-textpreview-find-next]')!)
+    expect(view.container.querySelector('[data-textpreview-find-count]')?.textContent).toBe('find.count(index=2,total=2)')
+    fireEvent.click(view.container.querySelector('[data-textpreview-find-prev]')!)
+    expect(view.container.querySelector('[data-textpreview-find-count]')?.textContent).toBe('find.count(index=1,total=2)')
+    fireEvent.change(field, { target: { value: 'missing' } })
+    expect(view.container.querySelector('[data-textpreview-find-count]')?.textContent).toBe('find.noMatch')
+    fireEvent.keyDown(field, { key: 'Escape' })
+    expect(view.container.querySelector('[data-textpreview-popover="find"]')).toBeNull()
+  })
+
+  it('keeps Mod-F and Mod-G on our own surfaces, not the browser', async () => {
+    const h = harness({ 1: page(1, ['one\ntwo'], true) })
+    const base = h.props()
+    const info = base.useTabInfo()
+    const plain: DocumentPreviewDefinition = {
+      id: 'plain', extensions: ['md'], priority: 'builtin', title: () => 'Plain', loading: 'text-pages', wrap: true,
+      capabilities: { search: true, gotoLine: true },
+    }
+    const view = render(<TextPreview
+      {...base}
+      useTabInfo={() => info}
+      useDocumentPreviews={selector => selector([plain])}
+      renderSlot={() => null}
+    />)
+    await settle()
+    fireEvent.keyDown(view.container.firstElementChild!, { key: 'g', metaKey: true })
+    expect(view.container.querySelector('[data-textpreview-popover="goto"]')).not.toBeNull()
+    fireEvent.keyDown(view.container.querySelector('[data-textpreview-popover="goto"] input')!, { key: 'Escape' })
+    fireEvent.keyDown(view.container.firstElementChild!, { key: 'f', ctrlKey: true })
+    expect(view.container.querySelector('[data-textpreview-popover="find"]')).not.toBeNull()
   })
 })

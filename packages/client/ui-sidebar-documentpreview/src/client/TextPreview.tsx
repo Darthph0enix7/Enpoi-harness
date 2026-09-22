@@ -7,19 +7,23 @@
  * announced, not applied: reloading under a reader would lose their place, so
  * the bar waits for a click. A failed metadata frame — the file gone, its
  * workspace unknown — takes the same bar's place over the pages already loaded,
- * with the same reload. The type's controls sit at the end of
- * the path row: the display-type menu, the in-place Edit switch into the
- * editing renderer, the quick actions (download, copy path, copy content, go
- * to line, find in file), wrap and reload; the Sidebar's strip carries none of them.
+ * with the same reload. One toolbar row carries everything: the path, the
+ * display-type menu, the selected renderer's own segment
+ * ({@link DocumentRendererCommands} and the keyed document-toolbar seat), and
+ * the host quick actions (reload, download, copy path, copy content, go to
+ * line, find, wrap). Actions that do not fit collapse behind `⋯` rather than
+ * wrapping; go-to-line and the host-owned find open themed popovers, never a
+ * browser prompt.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import clsx from 'clsx'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  FileTypeIcon, IconCopyOutline16, IconDownloadOutline16, IconEditOutline16, IconLinkOutline16,
-  IconListPenOutline16, IconRefreshOutline16, IconSearchOutline16, Menu, Tooltip, classifyFileType,
+  FileTypeIcon, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconCopyOutline16,
+  IconDownloadOutline16, IconEllipsisOutline16, IconLinkOutline16, IconListPenOutline16,
+  IconRefreshOutline16, IconSearchOutline16, Menu, Tooltip, classifyFileType,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { pathPartsOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { TextInjected } from './face.ts'
@@ -36,12 +40,26 @@ import {
   extensionOf, readViewerPrefs, rememberViewerByExtension,
 } from './document/viewer-prefs.ts'
 import { PLAIN_BODY_ID } from './text/index.ts'
-import { findLineOf, loadedPages, lastLineLoaded, scrollToLine, visibleTopLine } from './text/lines.ts'
+import { findLinesOf, loadedPages, lastLineLoaded, scrollToLine } from './text/lines.ts'
 import { copyPlainText, downloadSessionFile } from './quick-actions.ts'
 import css from './TextPreview.module.css'
 
 export { linesOf, loadedPages, lastLineLoaded, scrollToLine } from './text/lines.ts'
 export type { LoadedPage } from './text/lines.ts'
+
+/** One shared toolbar control; the array order is the rendered order. */
+type ToolbarActionId = 'reload' | 'download' | 'copyPath' | 'copyContent' | 'gotoLine' | 'find' | 'wrap'
+
+/** The stable DOM id of each control, so selectors survive internal renaming. */
+const TOOL_ID: Record<ToolbarActionId, string> = {
+  reload: 'reload',
+  download: 'download',
+  copyPath: 'copy-path',
+  copyContent: 'copy-content',
+  gotoLine: 'goto-line',
+  find: 'find',
+  wrap: 'wrap',
+}
 
 /** Keep the path fade in sync with whether its full text fits the header row. */
 function usePathClipped(
@@ -99,7 +117,7 @@ export interface TextPreviewInjected extends TextInjected {
 /** The body's composed props: the tab, its navigation, the shared store and face, and copy. */
 export type TextPreviewProps =
   & PropsRuntime<'sidebar.right.pane.tab'>
-  & PropsRenderSlots<'sidebar.right.tab.document'>
+  & PropsRenderSlots<'sidebar.right.tab.document' | 'sidebar.right.tab.document.toolbar'>
   & PropsStore<TextStore>
   & InjectFace<TextPreviewInjected>
   & PropsLocale<'sidebarDocumentPreview'>
@@ -136,7 +154,6 @@ export function TextPreview({
     ?? candidates.find(candidate => candidate.id === prefs.byPath[file.path])
     ?? candidates.find(candidate => candidate.id === prefs.byExtension[extension])
     ?? candidates[0]
-  const editorCandidate = candidates.find(candidate => candidate.priority === 'editor')
   const mode = selected?.loading
   const contentRendererId = mode === 'renderer' ? selected?.id : undefined
   const current = (state?.mode ?? 'text-pages') === mode && state?.contentRendererId === contentRendererId ? state : undefined
@@ -151,9 +168,21 @@ export function TextPreview({
   }, [])
   const pathRef = useRef<HTMLDivElement | null>(null)
   const pathTextRef = useRef<HTMLSpanElement | null>(null)
+  // The single toolbar row: the header measures itself and moves trailing
+  // controls behind the overflow menu instead of wrapping.
+  const headerRef = useRef<HTMLDivElement | null>(null)
+  const [collapsed, setCollapsed] = useState(0)
+  const [moreOpen, setMoreOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  /** Whether the themed go-to-line popover is open. */
+  const [gotoOpen, setGotoOpen] = useState(false)
+  /** Whether the host-owned find popover is open (renderer-owned find uses its own surface). */
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findIndex, setFindIndex] = useState(0)
+  const gotoInputRef = useRef<HTMLInputElement | null>(null)
   /** The quick actions' last outcome, flashed beside the toolbar. */
-  const [flash, setFlash] = useState<'copied' | 'copiedPath' | 'downloadFailed' | 'copyFailed' | 'findNotFound' | null>(null)
+  const [flash, setFlash] = useState<'copied' | 'copiedPath' | 'downloadFailed' | 'copyFailed' | null>(null)
   useEffect(() => {
     if (flash === null) return undefined
     const timer = window.setTimeout(() => { setFlash(null) }, 2500)
@@ -226,6 +255,41 @@ export function TextPreview({
     selected?.id, mode, file, canRead, meta.value?.version,
   ])
 
+  // Which shared controls this display type offers, in rendered order. The
+  // editor-only entries are capability-gated; a rich view keeps only the host
+  // actions it can honour.
+  const toolbarActions = useMemo((): readonly ToolbarActionId[] => {
+    const actions: ToolbarActionId[] = ['reload', 'download', 'copyPath']
+    if (selected?.loading !== 'bytes-complete') actions.push('copyContent')
+    if (selected?.capabilities?.gotoLine === true) actions.push('gotoLine')
+    if (selected?.capabilities?.search === true) actions.push('find')
+    if (selected?.wrap === true) actions.push('wrap')
+    return actions
+  }, [selected])
+
+  // One row, never two: when the controls overrun the header, move the
+  // trailing ones into the overflow menu (the path shrinks first, and the
+  // reload control never collapses).
+  const maxCollapsed = Math.max(toolbarActions.length - 1, 0)
+  const collapsedNow = Math.min(collapsed, maxCollapsed)
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (header === null) return undefined
+    const measure = (): void => {
+      const overflowing = header.scrollWidth > header.clientWidth + 1
+      setCollapsed((current) => {
+        if (overflowing) return current < maxCollapsed ? current + 1 : current
+        // Only re-expand with real slack, so the row cannot oscillate.
+        if (current > 0 && header.scrollWidth < header.clientWidth - 64) return current - 1
+        return current
+      })
+    }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
+    observer?.observe(header)
+    return () => { observer?.disconnect() }
+  }, [collapsed, maxCollapsed, toolbarActions.length])
+
   const rendererReload = useCallback((): void => {
     if (canRead && selected !== undefined) prepareRenderer(tab.id, signal, selected.id, meta.value?.version, true)
   }, [canRead, prepareRenderer, tab.id, signal, selected?.id, meta.value?.version])
@@ -245,41 +309,40 @@ export function TextPreview({
     return { kind: 'text', pages: loaded, text: loaded.filter(page => page.lines > 0).map(page => page.text).join('\n'), eof: current.eof }
   }, [mode, loaded, current?.complete, current?.eof, current?.loadRevision, rendererReload, actions, tab.id])
 
-  // The quick actions. Go to line and find prefer the selected renderer's own
-  // commands (the editing surface's search panel and line jump); a host-owned
-  // source view is navigated directly, by line navigation and a scrolled match.
-  const gotoLine = useCallback((): void => {
+  // Go to line: the renderer's own jump when it offers one (the editor moves
+  // its cursor), otherwise the tab's line navigation, which loads the pages
+  // the target needs on the way. The field is our popover, never a prompt.
+  const jumpToLine = useCallback((line: number): void => {
     const viaRenderer = commandsRef.current?.gotoLine
     if (viaRenderer !== undefined) {
-      viaRenderer()
+      viaRenderer(line)
       return
     }
-    const raw = window.prompt(t('gotoPrompt'), '1')
-    if (raw === null) return
-    const line = Number.parseInt(raw, 10)
-    if (!Number.isInteger(line) || line < 1) return
-    // Re-navigating the same address reveals this tab again with a line
-    // parameter, which the body's navigation effect answers — loading pages
-    // the target needs on the way.
     tab.actions.openResource(tab.contentId, { params: { line } })
-  }, [tab.actions, tab.contentId, t])
-  const findInFile = useCallback((): void => {
+  }, [tab.actions, tab.contentId])
+  // Find prefers the renderer's own surface; a host-owned source view gets the
+  // shared popover, whose matches are the loaded lines holding the query.
+  const openFind = useCallback((): void => {
     const viaRenderer = commandsRef.current?.find
     if (viaRenderer !== undefined) {
       viaRenderer()
       return
     }
-    const term = window.prompt(t('findPrompt'))
-    if (term === null || term === '') return
+    setFindQuery('')
+    setFindIndex(0)
+    setFindOpen(true)
+  }, [])
+  const findMatches = useMemo(() => findLinesOf(loaded, findQuery), [loaded, findQuery])
+
+  // Reveal the current host-owned find match whenever the query or index moves.
+  useEffect(() => {
+    if (!findOpen) return
+    const line = findMatches[findIndex]
     const body = scrollportRef.current
-    if (body === null) return
-    const line = findLineOf(loaded, term, visibleTopLine(body) + 1)
-    if (line === undefined) {
-      setFlash('findNotFound')
-      return
-    }
+    if (line === undefined || body === null) return
     if (scrollToLine(body, line)) actions.scrolled(tab.id, body.scrollTop)
-  }, [actions, loaded, tab.id, t])
+  }, [actions, findIndex, findMatches, findOpen, tab.id])
+
   const quickDownload = useCallback((): void => {
     void downloadSessionFile(file).catch(() => { setFlash('downloadFailed') })
   }, [file])
@@ -348,8 +411,83 @@ export function TextPreview({
     else if (content !== undefined && content.kind === 'renderer') content.reload()
     else rendererReload()
   }
+
+  const labelOf = (id: ToolbarActionId): string => {
+    switch (id) {
+      case 'reload': return t('reload')
+      case 'download': return t('download')
+      case 'copyPath': return t('copyPath')
+      case 'copyContent': return t('copyContent')
+      case 'gotoLine': return t('gotoLine')
+      case 'find': return t('findInFile')
+      case 'wrap': return t(state.wrap ? 'wrap.disable' : 'wrap.enable')
+    }
+  }
+  const iconOf = (id: ToolbarActionId): ReactNode => {
+    switch (id) {
+      case 'reload': return <IconRefreshOutline16 />
+      case 'download': return <IconDownloadOutline16 size={14} />
+      case 'copyPath': return <IconLinkOutline16 size={14} />
+      case 'copyContent': return <IconCopyOutline16 size={14} />
+      case 'gotoLine': return <IconListPenOutline16 size={14} />
+      case 'find': return <IconSearchOutline16 size={14} />
+      case 'wrap': return state.wrap ? <IconNowrapFill16 /> : <IconWrapFill16 />
+    }
+  }
+  const runAction = (id: ToolbarActionId): void => {
+    switch (id) {
+      case 'reload': reload(); return
+      case 'download': quickDownload(); return
+      case 'copyPath': quickCopyPath(); return
+      case 'copyContent': quickCopyContent(); return
+      case 'gotoLine': setGotoOpen(true); return
+      case 'find': openFind(); return
+      case 'wrap': actions.toggledWrap(tab.id); return
+    }
+  }
+  const toolbarButton = (id: ToolbarActionId): ReactNode => (
+    <Tooltip key={id} label={labelOf(id)} side="bottom" delayMs={500}>
+      <button
+        type="button"
+        className={css.tool}
+        aria-pressed={id === 'wrap' ? state.wrap : undefined}
+        aria-label={id === 'wrap' ? t('wrap.aria') : labelOf(id)}
+        data-textpreview-tool={TOOL_ID[id]}
+        onClick={() => { runAction(id) }}
+      >
+        {iconOf(id)}
+      </button>
+    </Tooltip>
+  )
+  /** Step the host-owned find through its matches, wrapping at either end. */
+  const stepFind = (delta: 1 | -1): void => {
+    const total = findMatches.length
+    setFindIndex(current => (total === 0 ? 0 : (current + delta + total) % total))
+  }
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (!(event.metaKey || event.ctrlKey)) return
+    const key = event.key.toLowerCase()
+    if (key === 'f' && selected?.capabilities?.search === true) {
+      event.preventDefault()
+      openFind()
+      return
+    }
+    if (key === 'g' && selected?.capabilities?.gotoLine === true) {
+      event.preventDefault()
+      setGotoOpen(true)
+    }
+  }
+  const visibleActions = toolbarActions.slice(0, toolbarActions.length - collapsedNow)
+  const hiddenActions = toolbarActions.slice(toolbarActions.length - collapsedNow)
+
   return (
-    <div className={css.preview} data-textpreview-state="text" data-textpreview-url={tab.contentId} data-document-preview={selected.id}>
+    <div
+      className={css.preview}
+      data-textpreview-state="text"
+      data-textpreview-url={tab.contentId}
+      data-document-preview={selected.id}
+      onKeyDown={handleKeyDown}
+    >
       {meta.failure !== undefined && hasContent
         ? (
           // The file's metadata failed — gone, or its workspace unknown — which
@@ -381,7 +519,7 @@ export function TextPreview({
             </button>
           </p>
         )}
-      <div className={css.header}>
+      <div className={css.header} ref={headerRef} data-textpreview-toolbar>
         <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} />
         {candidates.length > 1
           && (
@@ -405,115 +543,130 @@ export function TextPreview({
               dense
             />
           )}
-        {flash !== null && <span className={css.action} data-textpreview-flash>{t(flash)}</span>}
-        {editorCandidate !== undefined && editorCandidate.id !== selected.id && (
-          // One click from the rich view into the editing surface: the switch
-          // changes this tab's display type in place — the registered editing
-          // tab kind has no open path anymore.
-          <Tooltip label={t('editor.open')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.tool}
-              aria-label={t('editor.open')}
-              data-textpreview-tool="editor"
-              onClick={() => {
-                actions.selected(tab.id, editorCandidate.id)
-                rememberViewerByExtension(file.path, editorCandidate.id)
-              }}
-            >
-              <IconEditOutline16 size={14} />
-            </button>
-          </Tooltip>
-        )}
-        {selected?.capabilities?.gotoLine === true && (
-          <Tooltip label={t('gotoLine')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.tool}
-              aria-label={t('gotoLine')}
-              data-textpreview-tool="goto-line"
-              onClick={gotoLine}
-            >
-              <IconListPenOutline16 size={14} />
-            </button>
-          </Tooltip>
-        )}
-        {selected?.capabilities?.search === true && (
-          <Tooltip label={t('findInFile')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.tool}
-              aria-label={t('findInFile')}
-              data-textpreview-tool="find"
-              onClick={findInFile}
-            >
-              <IconSearchOutline16 size={14} />
-            </button>
-          </Tooltip>
-        )}
-        {selected?.loading !== 'bytes-complete' && (
-          <Tooltip label={t('copyContent')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.tool}
-              aria-label={t('copyContent')}
-              data-textpreview-tool="copy-content"
-              onClick={quickCopyContent}
-            >
-              <IconCopyOutline16 size={14} />
-            </button>
-          </Tooltip>
-        )}
-        <Tooltip label={t('copyPath')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={css.tool}
-            aria-label={t('copyPath')}
-            data-textpreview-tool="copy-path"
-            onClick={quickCopyPath}
-          >
-            <IconLinkOutline16 size={14} />
-          </button>
-        </Tooltip>
-        <Tooltip label={t('download')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={css.tool}
-            aria-label={t('download')}
-            data-textpreview-tool="download"
-            onClick={quickDownload}
-          >
-            <IconDownloadOutline16 size={14} />
-          </button>
-        </Tooltip>
-        {selected.wrap === true && (
-          // The tooltip names the action while the stable aria name and
-          // `aria-pressed` expose the control and its current state.
-          <Tooltip label={t(state.wrap ? 'wrap.disable' : 'wrap.enable')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.tool}
-              aria-pressed={state.wrap}
-              aria-label={t('wrap.aria')}
-              data-textpreview-tool="wrap"
-              onClick={() => { actions.toggledWrap(tab.id) }}
-            >
-              {state.wrap ? <IconNowrapFill16 /> : <IconWrapFill16 />}
-            </button>
-          </Tooltip>
-        )}
-        <Tooltip label={t('reload')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={css.tool}
-            aria-label={t('reload')}
-            data-textpreview-tool="reload"
-            onClick={reload}
-          >
-            <IconRefreshOutline16 />
-          </button>
-        </Tooltip>
+        {renderSlot('sidebar.right.tab.document.toolbar', { rendererId: selected.id, compact: collapsed > 0 }, {
+          entryKey: selected.id, hookContext: useTabInfo, fallback: null,
+        })}
+        <div className={css.tools} data-textpreview-tools>
+          {visibleActions.map(toolbarButton)}
+          {flash !== null && <span className={css.action} data-textpreview-flash>{t(flash)}</span>}
+          {hiddenActions.length > 0 && (
+            <Menu
+              open={moreOpen}
+              anchor={(
+                <button
+                  type="button"
+                  className={css.tool}
+                  aria-label={t('more')}
+                  title={t('more')}
+                  data-textpreview-more
+                  onClick={() => { setMoreOpen(value => !value) }}
+                >
+                  <IconEllipsisOutline16 size={14} />
+                </button>
+              )}
+              items={hiddenActions.map(id => ({ id, label: labelOf(id) }))}
+              onSelect={(id) => { setMoreOpen(false); runAction(id as ToolbarActionId) }}
+              onClose={() => { setMoreOpen(false) }}
+              align="end"
+              portal
+              dense
+            />
+          )}
+        </div>
       </div>
+      {gotoOpen && (
+        <div className={css.popover} role="dialog" aria-label={t('gotoLine')} data-textpreview-popover="goto">
+          <IconListPenOutline16 size={14} className={css.popoverIcon} />
+          <input
+            ref={gotoInputRef}
+            className={css.popoverInput}
+            placeholder={t('goto.placeholder')}
+            aria-label={t('goto.placeholder')}
+            autoFocus
+            inputMode="numeric"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setGotoOpen(false)
+                return
+              }
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              const line = Number.parseInt(event.currentTarget.value, 10)
+              setGotoOpen(false)
+              if (Number.isInteger(line) && line > 0) jumpToLine(line)
+            }}
+          />
+          <button
+            type="button"
+            className={css.popoverButton}
+            aria-label={t('close')}
+            data-textpreview-popover-close
+            onClick={() => { setGotoOpen(false) }}
+          >
+            <IconCloseOutline16 size={14} />
+          </button>
+        </div>
+      )}
+      {findOpen && (
+        <div className={css.popover} role="search" aria-label={t('findInFile')} data-textpreview-popover="find">
+          <IconSearchOutline16 size={14} className={css.popoverIcon} />
+          <input
+            className={css.popoverInput}
+            value={findQuery}
+            placeholder={t('find.placeholder')}
+            aria-label={t('find.placeholder')}
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(event) => { setFindQuery(event.target.value); setFindIndex(0) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setFindOpen(false)
+                return
+              }
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              stepFind(event.shiftKey ? -1 : 1)
+            }}
+          />
+          <span className={css.popoverCount} data-textpreview-find-count>
+            {findQuery === ''
+              ? ''
+              : findMatches.length === 0
+                ? t('find.noMatch')
+                : t('find.count', { index: findIndex + 1, total: findMatches.length })}
+          </span>
+          <button
+            type="button"
+            className={css.popoverButton}
+            aria-label={t('find.previous')}
+            data-textpreview-find-prev
+            onClick={() => { stepFind(-1) }}
+          >
+            <IconChevronUpOutline14 size={14} />
+          </button>
+          <button
+            type="button"
+            className={css.popoverButton}
+            aria-label={t('find.next')}
+            data-textpreview-find-next
+            onClick={() => { stepFind(1) }}
+          >
+            <IconChevronDownOutline14 size={14} />
+          </button>
+          <button
+            type="button"
+            className={css.popoverButton}
+            aria-label={t('close')}
+            data-textpreview-popover-close
+            onClick={() => { setFindOpen(false) }}
+          >
+            <IconCloseOutline16 size={14} />
+          </button>
+        </div>
+      )}
       <div
         ref={bindBody}
         className={clsx(css.body, state.wrap && css.wrap)}

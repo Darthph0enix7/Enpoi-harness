@@ -18,9 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import clsx from 'clsx'
 import type { PropsLocale, PropsStore, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconCheckOutline16, IconRefreshOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { parseFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 import type { DocumentPreviewProps } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import type { EditorStore, EditorViewState } from './store.ts'
@@ -29,7 +27,8 @@ import type { EditorLoadOutcome } from './machine.ts'
 import { completeSave, loadOnce, pollOnce, saveBesideOnce, saveOnce } from './machine.ts'
 import { CodeMirrorEditor } from './CodeMirrorEditor.tsx'
 import type { CodeMirrorHandle } from './CodeMirrorEditor.tsx'
-import { readAutosavePref, writeAutosavePref } from './prefs.ts'
+import { readAutosavePref } from './prefs.ts'
+import { EditorFindBar } from './EditorFindBar.tsx'
 import css from './EditorBody.module.css'
 
 /** How often the visible, addressed tab stats its file for external changes. */
@@ -95,12 +94,16 @@ export function EditorBody({
   const viewRef = useRef<EditorViewState | null>(null)
   if (viewRef.current === null) viewRef.current = state?.view ?? { anchor: 0, head: 0, scrollTop: 0 }
   const retryTimerRef = useRef<number | undefined>(undefined)
+  /** The last `saveRequests` value this body already honoured. */
+  const handledSaveRequestsRef = useRef<number | null>(null)
+  if (handledSaveRequestsRef.current === null) handledSaveRequestsRef.current = state?.saveRequests ?? 0
   // The auto-save I/O retry budget, one per editing stretch. Kept in a ref and
   // spent at the failure site, so the decision never reads a render-stale count.
   const retryBudgetRef = useRef(1)
   /** The confirmation row currently open, if any. */
   const [confirm, setConfirm] = useState<Confirm>(null)
-  const [autoSave, setAutoSave] = useState(readAutosavePref)
+  /** Whether the themed find bar is open over the editing surface. */
+  const [findOpen, setFindOpen] = useState(false)
   // Reading the signal through a call keeps later awaits from being narrowed
   // away by the compiler: `aborted` really can flip while a request is in flight.
   const aborted = (): boolean => tab.signal.aborted
@@ -337,12 +340,6 @@ export function EditorBody({
     else reload({ discard: true })
   }, [reload, saveBesideThenReload])
 
-  const toggleAutoSave = useCallback((): void => {
-    setAutoSave((value) => {
-      writeAutosavePref(!value)
-      return !value
-    })
-  }, [])
 
   // Auto-save: debounce from the last keystroke while the tab is editable,
   // clean of conflicts, and not already saving or within its retry pause. A
@@ -352,6 +349,23 @@ export function EditorBody({
   const truncated = state?.truncated ?? false
   const banner = state?.banner ?? null
   const saveState = state?.saveState ?? 'idle'
+  const autoSave = state?.autoSave ?? true
+
+  // Seed the persisted auto-save choice once the bucket exists; the shared
+  // toolbar toggle reads and writes the same field.
+  useEffect(() => {
+    if (state?.autoSave !== null && state?.autoSave !== undefined) return
+    actions.autoSaveSet(key, readAutosavePref())
+  }, [actions, key, state?.autoSave])
+
+  // The toolbar's save icon has no editor handle of its own; it raises a
+  // request the body consumes exactly once.
+  useEffect(() => {
+    const requests = state?.saveRequests ?? 0
+    if (requests === handledSaveRequestsRef.current) return
+    handledSaveRequestsRef.current = requests
+    saveRef.current(false, false)
+  }, [state?.saveRequests])
   useEffect(() => {
     if (!autoSave || !ready || truncated || !dirty || banner !== null) return
     if (saveState !== 'idle' && saveState !== 'saved') return
@@ -363,8 +377,8 @@ export function EditorBody({
   // editor while this surface owns the content; `null` withdraws them.
   useEffect(() => {
     commandsRef?.({
-      find: () => { editorRef.current?.find() },
-      gotoLine: () => { editorRef.current?.gotoLine() },
+      find: () => { setFindOpen(true) },
+      gotoLine: (line) => { editorRef.current?.gotoLine(line) },
     })
     return () => { commandsRef?.(null) }
   }, [commandsRef])
@@ -384,64 +398,8 @@ export function EditorBody({
   // the wiring-error backstop, not a user state.
   if (file === undefined || file.scope !== 'session') return null
 
-  const savedAt = state?.savedAt ?? null
-
   return (
     <div ref={bindRoot} className={css.root} data-enpoi-editor data-enpoi-editor-tab={tab.id}>
-      <div className={css.toolbar} data-enpoi-editor-toolbar>
-        {dirty && <span className={css.dirtyDot} title={t('dirty')} data-enpoi-editor-dirty />}
-        {ready && !truncated && (
-          <button
-            type="button"
-            className={css.tool}
-            disabled={!dirty || saveState === 'saving'}
-            aria-label={t('save')}
-            title={t('save')}
-            data-enpoi-editor-save
-            onClick={() => { saveRef.current(false, false) }}
-          >
-            <IconCheckOutline16 size={14} />
-          </button>
-        )}
-        <button
-          type="button"
-          className={clsx(css.tool, autoSave && css.toolActive)}
-          aria-pressed={autoSave}
-          aria-label={t('autosave.aria')}
-          title={autoSave ? t('autosave.disable') : t('autosave.enable')}
-          data-enpoi-editor-autosave
-          onClick={toggleAutoSave}
-        >
-          {t('autosave')}
-        </button>
-        {ready && (
-          <button
-            type="button"
-            className={css.tool}
-            aria-label={t('reload')}
-            title={t('reload')}
-            data-enpoi-editor-reload
-            onClick={() => {
-              if (stateRef.current?.dirty ?? false) setConfirm('reload')
-              else reload()
-            }}
-          >
-            <IconRefreshOutline16 size={14} />
-          </button>
-        )}
-        {saveState === 'saving' && <span className={css.status}>{t('saving')}</span>}
-        {saveState === 'saved' && (
-          <span className={css.status} data-enpoi-editor-saved>
-            {t('savedAt', {
-              time: savedAt === null ? '' : new Date(savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            })}
-          </span>
-        )}
-        {saveState === 'idle' && dirty && <span className={css.status}>{t('unsaved')}</span>}
-        {saveState === 'failed' && (
-          <span className={clsx(css.status, css.statusError)} data-enpoi-editor-save-failed>{t('saveFailed')}</span>
-        )}
-      </div>
       {confirm === 'overwrite' && (
         <div className={css.banner} role="alert" data-enpoi-editor-confirm="overwrite">
           <span className={css.bannerText}>{t('overwriteConfirm')}</span>
@@ -518,6 +476,20 @@ export function EditorBody({
         </div>
       )}
       {ready && truncated && <div className={css.notice} data-enpoi-editor-truncated>{t('truncated')}</div>}
+      {ready && findOpen && (
+        <EditorFindBar
+          t={t}
+          onQuery={(text, options) => editorRef.current?.setSearch(text, options) ?? { matches: 0, index: 0 }}
+          onStep={delta => (delta === 1 ? editorRef.current?.searchNext() : editorRef.current?.searchPrevious())
+            ?? { matches: 0, index: 0 }}
+          onSave={() => { saveRef.current(false, false) }}
+          onClose={() => {
+            setFindOpen(false)
+            editorRef.current?.clearSearch()
+            editorRef.current?.focusEditor()
+          }}
+        />
+      )}
       {ready && (
         <CodeMirrorEditor
           ref={editorRef}

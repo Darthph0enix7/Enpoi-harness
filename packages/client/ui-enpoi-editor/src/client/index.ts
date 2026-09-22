@@ -22,6 +22,7 @@ import { EDITOR_ID, editorDefinition, editorPreviewDefinition } from './definiti
 import { isEditablePath } from './definition.ts'
 import { EditorBody } from './EditorBody.tsx'
 import type { EditorInjected } from './EditorBody.tsx'
+import { EditorToolbar } from './EditorToolbar.tsx'
 import { EditorTabAlias } from './alias.tsx'
 import { createEditorStore } from './store.ts'
 import { createFsOps } from './fsops.ts'
@@ -32,6 +33,8 @@ import type { EnpoiEditorKey } from './locales.ts'
 // Values stay package-private: the plugin surface is `apply`, `inject`, and the
 // store factory the registration declares.
 export type { EditorBodyProps, EditorInjected } from './EditorBody.tsx'
+export type { EditorToolbarProps } from './EditorToolbar.tsx'
+export type { EditorFindBarProps } from './EditorFindBar.tsx'
 export type { EditorTabAliasProps, EditorAliasInjected } from './alias.tsx'
 export type { EditorFsOps, FileSnapshot, FileStat, WriteAck } from './fsops.ts'
 export type {
@@ -109,5 +112,15 @@ export function apply(ctx: ClientContext): void {
       },
       EditorBody,
     )), 'ui-enpoi-editor: document body')
+    // The editor's controls render in the pane's single toolbar row.
+    scope.effect(() => ctx.slots.inject('sidebar.right.tab.document.toolbar', () => ctx.slots.register(
+      {
+        name: 'sidebar.right.tab.document.toolbar',
+        key: EDITOR_ID,
+        locale: NS,
+        store,
+      },
+      EditorToolbar,
+    )), 'ui-enpoi-editor: document toolbar')
   })
 }
