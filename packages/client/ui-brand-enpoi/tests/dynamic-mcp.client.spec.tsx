@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 /**
  * McpPanel catalog editing: add reuses the shared `addMcpServer` writer (same
- * fenced `mcpServers.<id>` set), remove reuses `removeMcpServer` (fenced
- * unset), the enable toggle reuses `toggleCapability` on
- * `capabilities.mcp.<id>`, and an inline edit writes the whole record.
+ * fenced `mcpServers.<id>` set), remove prefers the host's atomic
+ * `enpoiCapabilities.removeMcpServer` route (falling back to the shared
+ * catalog-only `removeMcpServer` writer when the route 404s), the enable
+ * toggle reuses `toggleCapability` on `capabilities.mcp.<id>`, and an inline
+ * edit writes the whole record.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
@@ -49,8 +51,15 @@ interface PanelState {
   caps: Record<string, boolean>
 }
 
+/**
+ * How the driven gateway answers the atomic remove route: an explicit verdict,
+ * `'absent'` (404 — the host has no such Remote namespace), or a JSON failure
+ * from an existing route.
+ */
+type AtomicAnswer = { removed: boolean; rows: number } | 'absent' | 'rejected'
+
 /** Mount the panel with a driven, stateful gateway. */
-async function mountPanel(initial: Partial<PanelState>) {
+async function mountPanel(initial: Partial<PanelState>, atomicAnswer: AtomicAnswer = 'absent') {
   const state: PanelState = {
     servers: { ...(initial.servers ?? {}) },
     status: initial.status ?? {},
@@ -60,7 +69,18 @@ async function mountPanel(initial: Partial<PanelState>) {
     type MutateOp = { op: string; path: string[]; value?: unknown }
     const body = JSON.parse(String(init.body)) as {
       method: string
-      payload?: { args?: { ops?: MutateOp[] } }
+      payload?: { args?: { ops?: MutateOp[]; id?: string } }
+    }
+    if (body.method === 'enpoiCapabilities.removeMcpServer') {
+      if (atomicAnswer === 'absent') return new Response('not found', { status: 404 })
+      if (atomicAnswer === 'rejected') {
+        return jsonResponse({ result: { ok: false, error: { code: 'settings/write', message: 'atomic remove refused' } } })
+      }
+      const id = body.payload?.args?.id ?? ''
+      state.servers = Object.fromEntries(
+        Object.entries(state.servers).filter(([candidate]) => candidate !== id),
+      )
+      return jsonResponse({ result: { ok: true, value: { removed: atomicAnswer.removed, rows: atomicAnswer.rows } } })
     }
     if (body.method === 'settings.describe') {
       return describeResponse({ mcpServers: { ...state.servers }, mcpStatus: state.status, capabilities: { mcp: { ...state.caps } } }, 3)
@@ -110,7 +130,27 @@ describe('McpPanel', () => {
     }])
   })
 
-  it('remove reuses the shared fenced removeMcpServer writer', async () => {
+  it('remove prefers the atomic host route when the running host exposes it', async () => {
+    const fetchMock = await mountPanel({
+      servers: { plane: { serverName: 'plane', transport: 'streamable-http', url: 'https://plane.example/mcp' } },
+      caps: { plane: true },
+    }, { removed: true, rows: 3 })
+    fireEvent.click(await screen.findByLabelText('Remove plane'))
+    fireEvent.click(screen.getByLabelText('Confirm remove plane'))
+    await waitFor(() => { expect(screen.queryByLabelText('Remove plane')).toBeNull() })
+    const atomicCalls = fetchMock.mock.calls.filter(call => String((call as [string, RequestInit])[0]).endsWith('/api/enpoiCapabilities.removeMcpServer'))
+    expect(atomicCalls).toHaveLength(1)
+    const body = JSON.parse(String((atomicCalls[0] as [string, RequestInit])[1].body)) as {
+      method: string
+      payload: { args: { id: string } }
+    }
+    expect(body.method).toBe('enpoiCapabilities.removeMcpServer')
+    expect(body.payload.args).toEqual({ id: 'plane' })
+    // The atomic writer owns the whole removal: no catalog-only fallback write.
+    expect(mutateBodies(fetchMock)).toHaveLength(0)
+  })
+
+  it('remove falls back to the shared fenced writer when the atomic route is absent', async () => {
     const fetchMock = await mountPanel({
       servers: { plane: { serverName: 'plane', transport: 'streamable-http', url: 'https://plane.example/mcp' } },
       caps: { plane: true },
@@ -121,6 +161,20 @@ describe('McpPanel', () => {
     const body = mutateBodies(fetchMock)[0]!
     expect(body.payload.args.expectedRevision).toBe(3)
     expect(body.payload.args.ops).toEqual([{ op: 'unset', path: ['mcpServers', 'plane'] }])
+    expect(screen.queryByLabelText('Remove plane')).toBeNull()
+  })
+
+  it('a rejected atomic remove restores the row and reports without a fallback write', async () => {
+    const fetchMock = await mountPanel({
+      servers: { plane: { serverName: 'plane', transport: 'streamable-http', url: 'https://plane.example/mcp' } },
+      caps: { plane: true },
+    }, 'rejected')
+    fireEvent.click(await screen.findByLabelText('Remove plane'))
+    fireEvent.click(screen.getByLabelText('Confirm remove plane'))
+    const { getStatus } = await import('../src/client/dynamic/status.ts')
+    await waitFor(() => { expect(getStatus()).toBe('atomic remove refused') })
+    expect(await screen.findByLabelText('Remove plane')).toBeTruthy()
+    expect(mutateBodies(fetchMock)).toHaveLength(0)
   })
 
   it('enable toggle writes the capabilities.mcp path', async () => {

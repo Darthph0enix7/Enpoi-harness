@@ -4,8 +4,11 @@
  * Rows come from `enpoi-orchestration.mcpServers` in settings.describe plus the
  * host heartbeat in `mcpStatus` (state dot and mount-failure text). Enable
  * toggles reuse the shared `toggleCapability` writer (`capabilities.mcp.<id>`),
- * add and remove reuse the shared catalog writers `addMcpServer` /
- * `removeMcpServer`, and inline edits write the whole `mcpServers.<id>` record
+ * add reuses the shared catalog writer `addMcpServer`, remove prefers the
+ * host's atomic `enpoiCapabilities.removeMcpServer` route (one fenced write
+ * that also prunes the server's policy rows) and falls back to the shared
+ * catalog-only `removeMcpServer` writer when the host exposes no such Remote
+ * namespace, and inline edits write the whole `mcpServers.<id>` record
  * through a revision-fenced write with conflict retry. Every gesture lands
  * optimistically at 0ms and rolls back behind a compact error line when the
  * host rejects the write.
@@ -122,6 +125,61 @@ async function postSettingsMutation(ops: SettingsPathOp[], expectedRevision: num
     }
   } catch (err: unknown) {
     return { ok: false, conflict: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/** The atomic host removal's verdict: `removed` is false when the host stored
+ * no catalog entry (a concurrent removal) or has no writable settings service. */
+type AtomicRemoval =
+  | { ok: true; removed: boolean; rows: number }
+  | { ok: false; reason: string }
+
+/**
+ * Remove one catalog server through the host's atomic
+ * `enpoiCapabilities.removeMcpServer(id)` route. That single revision-fenced
+ * write unsets `enpoi-orchestration.mcpServers.<id>` and prunes every policy
+ * row the server owned: `permissions.tools['mcp__<server>__*']` plus exact
+ * `mcp__<server>__<tool>` rows, at the global tier and under every
+ * `permissions.agents[*]` override. A 404 means the running host exposes no
+ * such Remote namespace; `undefined` tells the caller to fall back to the
+ * catalog-only writer. Any other gateway answer is a real failure and is
+ * reported without a fallback.
+ * @param id - the `mcpServers` catalog key to remove.
+ * @returns the host verdict, or undefined when the route is absent.
+ */
+async function removeMcpServerAtomic(id: string): Promise<AtomicRemoval | undefined> {
+  try {
+    const res = await fetch('/api/enpoiCapabilities.removeMcpServer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiCapabilities.removeMcpServer',
+        rpcId: nextRpcId('mcp-atomic-remove'),
+        payload: { args: { id } },
+      }),
+    })
+    if (res.status === 404) return undefined
+    if (!res.ok) return { ok: false, reason: `gateway responded ${res.status}` }
+    const json = await res.json() as {
+      result?: {
+        ok?: boolean
+        value?: { removed?: unknown; rows?: unknown }
+        error?: { message?: unknown }
+      }
+    }
+    const result = json?.result
+    if (result?.ok !== true) {
+      const message = result?.error?.message
+      return { ok: false, reason: typeof message === 'string' && message !== '' ? message : 'atomic remove was rejected' }
+    }
+    return {
+      ok: true,
+      removed: result.value?.removed === true,
+      rows: typeof result.value?.rows === 'number' ? result.value.rows : 0,
+    }
+  } catch (err: unknown) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -316,7 +374,7 @@ export function McpPanel() {
     void refreshMcpStatus()
   }
 
-  /** Confirm-and-remove one catalog server through the shared writer. */
+  /** Confirm-and-remove one catalog server through the host writers. */
   const submitRemove = async (id: string): Promise<void> => {
     setStatus(null)
     setConfirmRemove(null)
@@ -324,6 +382,32 @@ export function McpPanel() {
     setServers(current => Object.fromEntries(
       Object.entries(current ?? {}).filter(([candidate]) => candidate !== id),
     ))
+    // Preferred route: the host's single fenced write, which also prunes the
+    // `mcp__<server>__*` / `mcp__<server>__<tool>` policy rows the server owned.
+    const atomic = await withWriteTimeout<AtomicRemoval | undefined>(
+      removeMcpServerAtomic(id),
+      { ok: false, reason: 'settings write timed out' },
+    )
+    if (atomic !== undefined) {
+      if (!atomic.ok) {
+        setServers(previous)
+        setStatus(atomic.reason)
+        return
+      }
+      if (!atomic.removed) {
+        // No entry was stored host-side: either a concurrent removal or an
+        // unwritable settings service. Confirm the key actually left the document.
+        const after = await describeOrchestration()
+        if (after === undefined || after.value?.mcpServers?.[id] !== undefined) {
+          setServers(previous)
+          setStatus(after === undefined ? 'settings service is unavailable' : `mcpServers.${id} was not removed`)
+          return
+        }
+      }
+      void refreshMcpStatus()
+      return
+    }
+    // Route absent on this host: catalog-only unset through the shared writer.
     // The shared writer skips ids its own catalog cache has not seen: sync it first.
     await refreshMcpStatus()
     const result = await withWriteTimeout(removeMcpServer(id), { ok: false, reason: 'settings write timed out' } as const)

@@ -10,8 +10,8 @@ import { MicroIcon } from './MicroIcon.tsx'
 import { WhiteboardCard, type WhiteboardPhase } from './WhiteboardCard.tsx'
 import {
   fetchWhiteboardStore,
-  resolveWhiteboard,
-  type ResolvedWhiteboardView,
+  splitWhiteboard,
+  type WhiteboardBoardSplit,
   type WhiteboardScopeFacts,
   type WhiteboardStoreView,
 } from './whiteboard-view.ts'
@@ -143,8 +143,9 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
 
   // Whiteboard: the operator-authored store is settings-backed, so the card
   // re-reads settings.describe while mounted (the capabilities panel's polling
-  // pattern) and resolves the plugin's per-session view (global → project →
-  // session, by entry id).
+  // pattern) and splits the plugin's per-session resolution into this session's
+  // own board (primary surface) and the shared project/global rest (collapsed
+  // disclosure). The agent's injected view is the union of the two.
   const [whiteboard, setWhiteboard] = useState<WhiteboardRead>({ phase: 'loading', store: null })
   useEffect(() => {
     let cancelled = false
@@ -168,9 +169,9 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
     ...(projectId === undefined ? {} : { projectId }),
   }
-  const resolvedBoard: ResolvedWhiteboardView | null = whiteboard.store === null
+  const resolvedBoard: WhiteboardBoardSplit | null = whiteboard.store === null
     ? null
-    : resolveWhiteboard(whiteboard.store, boardFacts)
+    : splitWhiteboard(whiteboard.store, boardFacts)
 
   const handleHalt = () => {
     const target = sessionId ?? session?.sessionId ?? session?.id
@@ -275,8 +276,8 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
             </div>
           )}
         </section>
-        {/* Whiteboard — the operator-authored board exactly as this session's model sees it */}
-        <WhiteboardCard doc={resolvedBoard} phase={whiteboard.phase} />
+        {/* Whiteboard — this session's own board; shared entries behind a disclosure */}
+        <WhiteboardCard board={resolvedBoard} phase={whiteboard.phase} />
       </div>
     </div>
   )

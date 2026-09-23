@@ -11,9 +11,17 @@
  *
  * The stored document is per scope: `{ version, docs: { global?, projects:
  * { <cwd> }, sessions: { <sessionId> } } }`. A legacy single-board document is
- * still read and migrates into the bucket its own scope names. A session's card
- * renders the resolved view (global → project → parent session → session, by
- * entry id), so it shows exactly what the plugin injects for that session.
+ * still read; a legacy `global` board carrying `meta.writtenBySessionId` is
+ * that session's board and is read from its session bucket (mirroring the
+ * plugin's one-time attribution migration).
+ *
+ * Two views exist over one store. The plugin injects the *resolved* view for
+ * the agent — this session's entries plus the project/global entries it
+ * explicitly shares ({@link resolveWhiteboard}). The card's primary surface is
+ * deliberately narrower: only this session's own board
+ * ({@link resolveSessionWhiteboard}), with the shared rest behind a collapsed
+ * disclosure ({@link splitWhiteboard}). One session must never read another
+ * session's board as its own whiteboard.
  *
  * @module
  */
@@ -137,8 +145,10 @@ function parseBoard(raw: unknown): WhiteboardBoardView {
 /**
  * Coerce the `enpoi-orchestration.whiteboard` value into the multi-scope store.
  * A legacy single-board document migrates into the bucket its own scope names
- * (session → `sessions[<id>]`, project → `projects[<cwd>]`, otherwise
- * `global`), mirroring the plugin's normalizeStore.
+ * (session → `sessions[<id>]`, project → `projects[<cwd>]`; a legacy `global`
+ * board carrying `meta.writtenBySessionId` becomes that session's board,
+ * leaving `global` absent; otherwise `global`), mirroring the plugin's
+ * normalizeStore.
  * @param raw - the settings value, if any.
  * @returns the normalized store.
  */
@@ -172,11 +182,17 @@ export function parseWhiteboardStore(raw: unknown): WhiteboardStoreView {
   const legacyVersion = board.version
   const sessionId = typeof source.sessionId === 'string' && source.sessionId.length > 0 ? source.sessionId : undefined
   const projectId = typeof source.projectId === 'string' && source.projectId.length > 0 ? source.projectId : undefined
+  const writtenBySessionId = isRecord(source.meta) && typeof source.meta.writtenBySessionId === 'string'
+    ? source.meta.writtenBySessionId.trim()
+    : ''
   if (scope === 'session' && sessionId !== undefined) {
     return { version: legacyVersion, docs: { projects: {}, sessions: { [sessionId]: board } } }
   }
   if (scope === 'project' && projectId !== undefined) {
     return { version: legacyVersion, docs: { projects: { [projectId]: board }, sessions: {} } }
+  }
+  if (scope === 'global' && writtenBySessionId.length > 0) {
+    return { version: legacyVersion, docs: { projects: {}, sessions: { [writtenBySessionId]: board } } }
   }
   return { version: legacyVersion, docs: { global: board, projects: {}, sessions: {} } }
 }
@@ -210,6 +226,67 @@ export function resolveWhiteboard(store: WhiteboardStoreView, facts: WhiteboardS
     for (const entry of board.entries) merged.set(entry.id, { ...entry, scope: layer.scope })
   }
   return { version: store.version, scope, entries: [...merged.values()], updatedAt }
+}
+
+/**
+ * Resolve only this session's own board: the direct parent session's entries
+ * (inheritance) then the session's own, later overriding by entry id. This is
+ * what the card presents as the session's whiteboard; project/global entries
+ * are never part of it, so one session never shows another session's content
+ * as its own.
+ * @param store - the normalized store.
+ * @param facts - the session's scope facts.
+ * @returns the session board (empty when the session has none).
+ */
+export function resolveSessionWhiteboard(store: WhiteboardStoreView, facts: WhiteboardScopeFacts): ResolvedWhiteboardView {
+  const merged = new Map<string, ResolvedWhiteboardEntryView>()
+  const sessionIds: string[] = []
+  if (facts.parentSessionId !== undefined && facts.parentSessionId !== facts.sessionId) {
+    sessionIds.push(facts.parentSessionId)
+  }
+  if (facts.sessionId !== undefined) sessionIds.push(facts.sessionId)
+  let updatedAt = 0
+  for (const sessionId of sessionIds) {
+    const board = store.docs.sessions[sessionId]
+    if (board === undefined || board.entries.length === 0) continue
+    if (board.updatedAt > updatedAt) updatedAt = board.updatedAt
+    for (const entry of board.entries) merged.set(entry.id, { ...entry, scope: 'session' })
+  }
+  return { version: store.version, scope: 'session', entries: [...merged.values()], updatedAt }
+}
+
+/** The card's three views over one store: session board, shared rest, agent view. */
+export interface WhiteboardBoardSplit {
+  /** This session's own board (own entries plus direct-parent inheritance). */
+  readonly session: ResolvedWhiteboardView
+  /** Project/global entries the agent also receives (session-overridden ids excluded). */
+  readonly shared: ResolvedWhiteboardView
+  /** The exact resolved view the plugin injects for this session's agent. */
+  readonly agent: ResolvedWhiteboardView
+}
+
+/**
+ * Split the store into the card's primary view, its collapsed shared
+ * disclosure, and the honest agent view. The shared view is the resolved view
+ * minus the session half, so an entry the session overrides by id is never
+ * presented twice, and its scope names the most specific shared layer.
+ * @param store - the normalized store.
+ * @param facts - the session's scope facts.
+ * @returns the three views (all empty when nothing matches).
+ */
+export function splitWhiteboard(store: WhiteboardStoreView, facts: WhiteboardScopeFacts): WhiteboardBoardSplit {
+  const agent = resolveWhiteboard(store, facts)
+  const session = resolveSessionWhiteboard(store, facts)
+  const sharedEntries = agent.entries.filter(entry => entry.scope !== 'session')
+  const sharedScope: WhiteboardScope = sharedEntries.some(entry => entry.scope === 'project') ? 'project' : 'global'
+  const projectUpdatedAt = facts.projectId === undefined ? 0 : store.docs.projects[facts.projectId]?.updatedAt ?? 0
+  const globalUpdatedAt = sharedEntries.some(entry => entry.scope === 'global') ? store.docs.global?.updatedAt ?? 0 : 0
+  const sharedUpdatedAt = sharedEntries.some(entry => entry.scope === 'project') ? projectUpdatedAt : globalUpdatedAt
+  return {
+    session,
+    shared: { version: store.version, scope: sharedScope, entries: sharedEntries, updatedAt: sharedUpdatedAt },
+    agent,
+  }
 }
 
 /**

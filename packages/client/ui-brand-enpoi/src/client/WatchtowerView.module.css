@@ -497,3 +497,32 @@
   color: #a5b4fc;
   border-color: rgba(165, 180, 252, 0.3);
 }
+
+.wbShared {
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  padding-top: 4px;
+}
+
+.wbSharedSummary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #7c8aa0;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 7px;
+  list-style: none;
+  user-select: none;
+}
+.wbSharedSummary::-webkit-details-marker { display: none; }
+.wbSharedSummary:hover { background: rgba(255, 255, 255, 0.05); }
+.wbShared[open] > .wbSharedSummary { color: #94a3b8; }
+
+.wbSharedNote {
+  font-size: 9px;
+  color: #64748b;
+  padding: 1px 6px 4px;
+}
+
+.wbShared .wbEntry { margin-left: 6px; }

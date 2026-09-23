@@ -7,8 +7,9 @@ import {
   parseWhiteboardStore,
   renderWhiteboardBlock,
   resolveWhiteboard,
+  splitWhiteboard,
   whiteboardTokens,
-  type ResolvedWhiteboardView,
+  type WhiteboardBoardSplit,
 } from '../src/client/whiteboard-view.ts'
 
 /** The legacy single-board document the settings file carried before per-scope storage. */
@@ -98,9 +99,14 @@ const STORE = {
   },
 }
 
-/** The resolved view for `session-test-123` in `/home/adam`. */
-function sessionResolved(): ResolvedWhiteboardView {
-  return resolveWhiteboard(parseWhiteboardStore(STORE), { sessionId: 'session-test-123', projectId: '/home/adam' })
+/** The split for `session-test-123` in `/home/adam`. */
+function sessionSplit(): WhiteboardBoardSplit {
+  return splitWhiteboard(parseWhiteboardStore(STORE), { sessionId: 'session-test-123', projectId: '/home/adam' })
+}
+
+/** The `<pre>` holding the card's primary session block, when present. */
+function primaryBlock(): HTMLElement | null {
+  return screen.queryByText((_, el) => el?.tagName === 'PRE')
 }
 
 function stubDescribe(whiteboard: unknown): void {
@@ -152,8 +158,19 @@ describe('Watchtower Whiteboard card', () => {
     expect(resolveWhiteboard(store, { sessionId: 'other' }).entries).toHaveLength(0)
   })
 
-  it('resolves global → project → session, overriding by id with per-entry scope', () => {
-    const resolved = sessionResolved()
+  it('attributes a legacy global board to its writing session (the live migration shape)', () => {
+    const sessionId = 'session-297eded4-4cd1-4d61-aacc-3190bb44b09e'
+    const store = parseWhiteboardStore({ ...LEGACY_BOARD, meta: { writtenBySessionId: sessionId } })
+    expect(store.docs.global).toBeUndefined()
+    expect(store.docs.sessions[sessionId]?.entries.map(entry => entry.id))
+      .toEqual(['wb-fact-1', 'wb-rule-1', 'wb-task-1', 'wb-path-1'])
+    expect(resolveWhiteboard(store, { sessionId }).entries).toHaveLength(4)
+    expect(resolveWhiteboard(store, { sessionId: 'session-somewhere-else' }).entries).toHaveLength(0)
+    expect(renderWhiteboardBlock(splitWhiteboard(store, { sessionId: 'session-somewhere-else' }).session)).toBe('')
+  })
+
+  it('resolves global → project → session for the agent, overriding by id with per-entry scope', () => {
+    const resolved = resolveWhiteboard(parseWhiteboardStore(STORE), { sessionId: 'session-test-123', projectId: '/home/adam' })
     expect(resolved.version).toBe(7)
     expect(resolved.scope).toBe('session')
     expect(resolved.updatedAt).toBe(333)
@@ -183,35 +200,70 @@ describe('Watchtower Whiteboard card', () => {
     expect(unrelated.scope).toBe('global')
   })
 
-  it('renders the effective version/scope line, the injected block, and per-entry scope badges', () => {
-    const resolved = sessionResolved()
-    const rendered = renderWhiteboardBlock(resolved)
-    const tokens = whiteboardTokens(rendered)
-    render(<WhiteboardCard doc={resolved} phase="ready" />)
-    expect(screen.getByText('v7')).toBeTruthy()
-    expect(screen.getAllByText('session').length).toBe(3)
-    expect(screen.getAllByText('global').length).toBe(1)
-    expect(screen.getByText('project')).toBeTruthy()
-    expect(screen.getAllByTitle('authored by the session board')).toHaveLength(2)
-    expect(screen.getAllByTitle('authored by the global board')).toHaveLength(1)
-    expect(screen.getByTitle('authored by the project board')).toBeTruthy()
-    expect(screen.getByText(`${tokens}/1500 tok`)).toBeTruthy()
-    expect(screen.getByText((_, el) => el?.tagName === 'PRE' && el.textContent === rendered)).toBeTruthy()
-    expect(screen.getByText('Entries · 4')).toBeTruthy()
-    expect(screen.getByText('SESSION-OVERRIDE')).toBeTruthy()
+  it('splits the session board from the shared rest, excluding session-overridden ids', () => {
+    const split = sessionSplit()
+    expect(split.session.entries.map(entry => entry.id)).toEqual(['wb-task-1', 'wb-rule-1'])
+    expect(split.session.entries.every(entry => entry.scope === 'session')).toBe(true)
+    expect(split.shared.entries.map(entry => [entry.id, entry.scope])).toEqual([
+      ['wb-fact-1', 'global'],
+      ['wb-plan-1', 'project'],
+    ])
+    expect(split.agent.entries).toHaveLength(4)
+    expect(split.session.updatedAt).toBe(333)
+    expect(split.shared.updatedAt).toBe(222)
+    expect(split.shared.scope).toBe('project')
   })
 
-  it('degrades to the quiet state when nothing resolves for this session', () => {
-    const empty = parseWhiteboardStore({ version: 0, scope: 'global', entries: [], updatedAt: 0 })
-    const { rerender } = render(<WhiteboardCard doc={resolveWhiteboard(empty, {})} phase="ready" />)
+  it("shows this session's board as the primary surface, shared entries in closed disclosures", () => {
+    const split = sessionSplit()
+    render(<WhiteboardCard board={split} phase="ready" />)
+    const sessionBlock = renderWhiteboardBlock(split.session)
+    const agentBlock = renderWhiteboardBlock(split.agent)
+
+    // Primary: this session's block only, never the shared entries.
+    const pre = primaryBlock()
+    expect(pre?.textContent).toBe(sessionBlock)
+    expect(pre?.textContent).not.toContain('GLOBAL-FACT')
+    expect(pre?.textContent).not.toContain('PROJECT-PLAN')
+    expect(screen.getByText('SESSION-OVERRIDE')).toBeTruthy()
+    expect(screen.getByText('SESSION-TASK')).toBeTruthy()
+    expect(screen.getByText('Entries · 2')).toBeTruthy()
+    expect(screen.getByText('v7')).toBeTruthy()
+    expect(screen.getByText(`${whiteboardTokens(agentBlock)}/1500 tok`)).toBeTruthy()
+
+    // Shared: collapsed, labelled, each entry under its own scope heading.
+    const globalDetails = screen.getByText(/Shared with all sessions/).closest('details')
+    expect(globalDetails?.open).toBe(false)
+    expect(globalDetails?.textContent).toContain('GLOBAL-FACT')
+    const projectDetails = screen.getByText(/Shared in this project/).closest('details')
+    expect(projectDetails?.open).toBe(false)
+    expect(projectDetails?.textContent).toContain('PROJECT-PLAN.md')
+    // A session override never appears as a shared entry.
+    expect(globalDetails?.textContent).not.toContain('SESSION-OVERRIDE')
+    expect(projectDetails?.textContent).not.toContain('SESSION-OVERRIDE')
+  })
+
+  it('degrades to the quiet state when the session board is empty, even with shared entries', () => {
+    const split = splitWhiteboard(parseWhiteboardStore(STORE), { sessionId: 'session-empty', projectId: '/home/adam' })
+    expect(split.session.entries).toHaveLength(0)
+    render(<WhiteboardCard board={split} phase="ready" />)
     expect(screen.getByText('no whiteboard entries')).toBeTruthy()
-    rerender(<WhiteboardCard doc={null} phase="loading" />)
+    expect(primaryBlock()).toBeNull()
+    expect(screen.getByText(/Shared with all sessions/)).toBeTruthy()
+    expect(screen.getByText(/Shared in this project/)).toBeTruthy()
+  })
+
+  it('degrades to loading/error copy and stays quiet', () => {
+    const empty = splitWhiteboard(parseWhiteboardStore({ version: 0, scope: 'global', entries: [], updatedAt: 0 }), {})
+    const { rerender } = render(<WhiteboardCard board={empty} phase="ready" />)
+    expect(screen.getByText('no whiteboard entries')).toBeTruthy()
+    rerender(<WhiteboardCard board={null} phase="loading" />)
     expect(screen.getByText('reading the board…')).toBeTruthy()
-    rerender(<WhiteboardCard doc={null} phase="error" />)
+    rerender(<WhiteboardCard board={null} phase="error" />)
     expect(screen.getByText('board unavailable')).toBeTruthy()
   })
 
-  it('reads the live store under the Watchtower and shows this session resolution', async () => {
+  it('reads the live store under the Watchtower and shows this session board only', async () => {
     stubDescribe(STORE)
     render(
       <WatchtowerView
@@ -219,26 +271,29 @@ describe('Watchtower Whiteboard card', () => {
         useSession={selector => selector({ sessionId: 'session-test-123', cwd: '/home/adam', subagent: null })}
       />,
     )
-    const expected = renderWhiteboardBlock(sessionResolved())
+    const split = sessionSplit()
     await waitFor(() => {
-      expect(screen.getByText((_, el) => el?.tagName === 'PRE' && el.textContent === expected)).toBeTruthy()
+      expect(primaryBlock()?.textContent).toBe(renderWhiteboardBlock(split.session))
     })
-    expect(screen.getByText(`${whiteboardTokens(expected)}/1500 tok`)).toBeTruthy()
     expect(screen.getByText('SESSION-TASK')).toBeTruthy()
+    expect(screen.getByText(`${whiteboardTokens(renderWhiteboardBlock(split.agent))}/1500 tok`)).toBeTruthy()
+    expect(primaryBlock()?.textContent).not.toContain('OTHER-ONLY')
+    expect(primaryBlock()?.textContent).not.toContain('GLOBAL-FACT')
   })
 
-  it('shows the quiet whiteboard state for a session nothing resolves into', async () => {
-    stubDescribe({
-      version: 5,
-      docs: { sessions: { 'session-elsewhere': { version: 1, updatedAt: 1, entries: [{ id: 'x', kind: 'fact', text: 'ELSEWHERE', version: 1 }] } } },
-    })
+  it('shows the quiet state for a session with no board of its own, keeping shared entries collapsed', async () => {
+    stubDescribe(STORE)
     render(
       <WatchtowerView
-        sessionId="session-test-123"
-        useSession={selector => selector({ sessionId: 'session-test-123', cwd: '/home/adam' })}
+        sessionId="session-empty"
+        useSession={selector => selector({ sessionId: 'session-empty', cwd: '/home/adam' })}
       />,
     )
     await waitFor(() => { expect(screen.getByText('no whiteboard entries')).toBeTruthy() })
+    const globalDetails = screen.getByText(/Shared with all sessions/).closest('details')
+    expect(globalDetails?.open).toBe(false)
+    expect(globalDetails?.textContent).toContain('GLOBAL-FACT')
     expect(screen.queryByText('ELSEWHERE')).toBeNull()
+    expect(primaryBlock()).toBeNull()
   })
 })
