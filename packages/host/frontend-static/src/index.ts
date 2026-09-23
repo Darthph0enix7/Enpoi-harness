@@ -6,15 +6,18 @@
  * unknown extensions ship as octet-stream, and non-GET/HEAD is 405. Every
  * index response first passes Connection's browser authentication, then the
  * webserver's index render (structured injection rows, then raw taps).
- * Non-index assets stay public. The dist location is workspace knowledge of
- * the composing application, so `distIndex` is typically supplied through a
- * `!!js` expression, never hardcoded by a deployment.
+ * Non-index assets stay public, and their `cache-control` follows the URL:
+ * content-hashed files under `assets/` are immutable for a year, while the
+ * index and every non-hashed path revalidate so a deploy takes effect. The
+ * dist location is workspace knowledge of the composing application, so
+ * `distIndex` is typically supplied through a `!!js` expression, never
+ * hardcoded by a deployment.
  * @module @deepseek-ai/dsh-host-frontend-static
  */
 
 import type { ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -58,6 +61,26 @@ const STATIC_MISS_CODES: ReadonlySet<string | undefined> = new Set([
   'ENOTDIR',
 ])
 
+/** Content-hashed build assets never change under their emitted URL. */
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+/** Everything else revalidates so a deploy takes effect on the next load. */
+const REVALIDATE_CACHE = 'no-cache'
+/** An emitted asset name ends in a content hash before its extension (`index-JMx0MEvU.js`, `…js.map`). */
+const HASHED_ASSET = /-[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9]+)*$/
+
+/**
+ * Cache policy for one dist-relative path. Only hashed files under `assets/`
+ * are immutable; an index response always revalidates because its injected
+ * rows are rendered per request.
+ * @param relativePath - dist-relative served path with `/` separators.
+ * @returns the `cache-control` header value.
+ */
+function cacheControlFor(relativePath: string): string {
+  return relativePath.startsWith('assets/') && HASHED_ASSET.test(basename(relativePath))
+    ? IMMUTABLE_CACHE
+    : REVALIDATE_CACHE
+}
+
 /**
  * Serve one GET/HEAD static request from the dist root.
  * @param pathname - decoded URL pathname of the request.
@@ -84,6 +107,7 @@ export async function serveStatic(
   }
   let body: string | Buffer
   let type: string
+  let cache = REVALIDATE_CACHE
   try {
     if (target === distRoot || target === distIndex) {
       if (!authorizeIndex()) return
@@ -92,6 +116,7 @@ export async function serveStatic(
     } else {
       body = await readFile(target)
       type = MIME[extname(target)] ?? 'application/octet-stream'
+      cache = cacheControlFor(relative(distRoot, target).split(sep).join('/'))
     }
   } catch (error) {
     // Only absent or non-file targets are 404; other filesystem failures reach
@@ -101,7 +126,7 @@ export async function serveStatic(
     res.end()
     return
   }
-  res.writeHead(200, { 'content-type': type })
+  res.writeHead(200, { 'content-type': type, 'cache-control': cache })
   res.end(body)
 }
 

@@ -40,6 +40,10 @@ async function loadComposition(): Promise<Context> {
   await writeFile(join(dist, 'blob.bin'), 'BLOB')
   await writeFile(join(dist, 'manifest.webmanifest'), '{}')
   await mkdir(join(dist, 'empty'))
+  await mkdir(join(dist, 'assets'))
+  await writeFile(join(dist, 'assets', 'index-Ab12Cd34.js'), 'export const hashed = true')
+  await writeFile(join(dist, 'assets', 'index-Ab12Cd34.js.map'), '{}')
+  await writeFile(join(dist, 'assets', 'unnamed.js'), 'export const plain = true')
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-credentials-local'",
@@ -93,6 +97,12 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
   }
 }
 
+/** Read one response's `cache-control` header value. */
+async function cacheControl(port: number, path: string, init?: RequestInit): Promise<string | null> {
+  const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
+  return response.headers.get('cache-control')
+}
+
 describe('real Loader composition', () => {
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
@@ -123,6 +133,14 @@ describe('real Loader composition', () => {
 
     // Real assets with their MIME types; a live rebuild is served on the next read.
     expect(await request(port, '/app.js')).toMatchObject({ status: 200, type: 'text/javascript; charset=utf-8', body: 'export {}' })
+    // Content-hashed build assets are immutable; the index and every non-hashed
+    // path revalidate so a deploy takes effect on the next load.
+    expect(await cacheControl(port, '/assets/index-Ab12Cd34.js')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl(port, '/assets/index-Ab12Cd34.js.map')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl(port, '/assets/unnamed.js')).toBe('no-cache')
+    expect(await cacheControl(port, '/app.js')).toBe('no-cache')
+    expect(await cacheControl(port, '/', authenticated())).toBe('no-cache')
+    expect(await cacheControl(port, '/index.html', authenticated())).toBe('no-cache')
     expect(await request(port, '/manifest.webmanifest')).toMatchObject({
       status: 200,
       type: 'application/manifest+json',

@@ -29,7 +29,7 @@ The shipped Web composition mounts this transport for live plugin changes. Durin
 
 ### Starting the reload chain
 
-Run `pnpm run dev:web` (or a watch process using the shared Client tsdown preset) against the same host; rebuilt plugins are then swapped into the running browser automatically, one at a time. The preset stamps `lib/client.js` after all package-local chunks are written, so a chunk-only rebuild also advances the package revision without Host-side chunk scanning.
+Run `pnpm run dev:web` (or a watch process using the shared Client tsdown preset) against the same host; rebuilt plugins are then swapped into the running browser automatically, one at a time. The preset rewrites `lib/client.js` after all package-local chunks are written, and the Host revision hashes those executable bytes, so a chunk-only rebuild also advances the package revision.
 
 ### What a reload does
 
@@ -59,7 +59,7 @@ This section explains how the reload chain is built; observable behavior is cove
 
 ### Design concept
 
-The Host half watches each package's stamped entry artifact and serves `/plugins/events`. It forwards existing graph-change and rebuilt notifications; every new connection receives the current full graph. A graph describes the browser’s desired entries and carries no Host cleanup-completion guarantee. Host activation and cleanup remain owned by the Host lifecycle. The entry bytes plus completed-build timestamp identify the revision; unchanged artifacts require no content read. The browser half delegates both frame kinds to Client Modules, which serializes entry changes and waits for browser resource cleanup.
+The Host half watches each package's stamped entry artifact and serves `/plugins/events`. It forwards existing graph-change and rebuilt notifications; every new connection receives the current full graph. A graph describes the browser’s desired entries and carries no Host cleanup-completion guarantee. Host activation and cleanup remain owned by the Host lifecycle. A package's executable bytes — entry plus sibling chunks — identify its revision, so unchanged artifacts reuse their URL across rebuilds and restarts. The browser half delegates both frame kinds to Client Modules, which serializes entry changes and waits for browser resource cleanup.
 
 ### The browser swap
 

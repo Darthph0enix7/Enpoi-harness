@@ -429,7 +429,7 @@ describe('client bundle activation', () => {
     emitLoaderEntryChange(context, packageName)
     await Promise.resolve()
     expect(service.graph().entries.map(entry => entry.id)).toEqual([packageName])
-    expect(service.graph().entries[0]!.rev).not.toBe(firstRevision)
+    expect(service.graph().entries[0]!.rev).toBe(firstRevision)
     expect(service.clientPath(packageName)).toBe(clientPath)
   })
 
@@ -665,18 +665,18 @@ describe('client bundle activation', () => {
     expect((await routeRequest(route, third)).status).toBe(200)
   })
 
-  it('assigns opaque startup revisions instead of deriving them from artifact content', () => {
+  it('derives startup revisions from artifact content so a restart reuses them', () => {
     const firstName = '@fixture/startup-revision-first'
     const secondName = '@fixture/startup-revision-second'
     writeBuiltPackage(firstName, {})
     writeBuiltPackage(secondName, {})
 
     const service = construct([firstName, secondName])
-    const [first, second] = service.graph().entries
-    const firstMatch = /^(?<nonce>[a-f\d]{16})-(?<sequence>\d+)$/.exec(first!.rev)
-    const secondMatch = /^(?<nonce>[a-f\d]{16})-(?<sequence>\d+)$/.exec(second!.rev)
-    expect(firstMatch?.groups).toMatchObject({ sequence: '0' })
-    expect(secondMatch?.groups).toMatchObject({ nonce: firstMatch?.groups?.nonce, sequence: '1' })
+    expect(construct([firstName, secondName]).graph()).toEqual(service.graph())
+    const reversed = construct([secondName, firstName]).graph()
+    for (const entry of service.graph().entries) {
+      expect(reversed.entries.find(row => row.id === entry.id)).toEqual(entry)
+    }
     const firstPath = service.clientPath(firstName)!
     const firstStat = statSync(firstPath)
     expect(service.artifactBaseline(firstName)).toEqual({
@@ -685,6 +685,52 @@ describe('client bundle activation', () => {
       size: firstStat.size,
     })
     expect(service.artifactBaseline('@fixture/unknown')).toBeUndefined()
+  })
+
+  it('keeps the revision when a completed build rewrites only the entry timestamp', async () => {
+    const packageName = '@fixture/timestamp-only-rebuild'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = { generation: 1 }\n')
+    const { service, route } = constructWithRoute([packageName])
+    const initial = service.graph()
+    const initialUrl = initial.batches[0]!.url
+
+    const entryStat = statSync(clientPath)
+    utimesSync(clientPath, entryStat.atime, new Date(entryStat.mtimeMs + 1_000))
+    expect(service.rebuilt(packageName)).toBe(initial.entries[0]!.rev)
+    expect(service.graph()).toBe(initial)
+    expect((await routeRequest(route, initialUrl)).status).toBe(200)
+
+    writeFileSync(clientPath, 'module.exports = { generation: 2 }\n')
+    const nextRev = service.rebuilt(packageName)
+    expect(nextRev).not.toBe(initial.entries[0]!.rev)
+    const nextRow = service.graph().entries[0]!
+    expect(nextRow.rev).toBe(nextRev)
+    const changed = await routeRequest(route, nextRow.url)
+    expect(changed.status).toBe(200)
+    expect(changed.body.toString('utf8')).toContain('generation: 2')
+  })
+
+  it('preloads exactly the application URLs the bundle route serves', async () => {
+    const names = ['@fixture/preload-first', '@fixture/preload-second']
+    for (const name of names) writeBuiltPackage(name, {})
+    const { service, route } = constructWithRoute(names)
+    const graph = service.graph()
+    const application = graph.batches.filter(batch => batch.phase === 'application')
+    expect(application.flatMap(batch => batch.entries)).toEqual(names)
+    const html = renderIndexInjections('<head></head>', bootInjections(graph))
+    for (const batch of application) {
+      expect(html).toContain(`<link rel="preload" as="script" href="${batch.url.replaceAll('&', '&amp;')}">`)
+      const response = await routeRequest(route, batch.url)
+      expect(response.status).toBe(200)
+      expect(response.headers?.['cache-control']).toBe('public, max-age=31536000, immutable')
+    }
+    // The injected graph carries the same single-resource companions the route serves.
+    for (const entry of graph.entries) {
+      expect(html).toContain(JSON.stringify(entry.url))
+      expect((await routeRequest(route, entry.url)).status).toBe(200)
+    }
   })
 
   it('splits startup combos before the map-form URL exceeds 3 KiB', async () => {
@@ -778,6 +824,10 @@ describe('client bundle activation', () => {
     expect((await routeRequest(route, `${row.url}&stale=1`.replace(`rev=${row.rev}`, 'rev=stale'))).status).toBe(404)
 
     writeFileSync(`${clientPath}.map`, '{"version":3,"names":[],"mappings":"AAAA","sources":["src/changed.tsx"]}\n')
+    // Debug maps are not executable bytes: a map-only rewrite keeps the rev,
+    // so the next revision arrives with the changed bundle in the same build.
+    expect(service.rebuilt(packageName)).toBe(row.rev)
+    writeFileSync(clientPath, 'module.exports = { changed: true }\n')
     const nextRev = service.rebuilt(packageName)
     expect(nextRev).not.toBe(row.rev)
     const nextRow = service.graph().entries[0]!
@@ -916,10 +966,15 @@ describe('client bundle activation', () => {
     const response = await routeRequest(route, mapUrl(service.graph().batches[0]!.url))
     const payload = JSON.parse(response.body.toString('utf8')) as ConstructorParameters<typeof SourceMap>[0]
     const consumer = new SourceMap(payload)
-    expect(consumer.findEntry(0, 0)).toMatchObject({
-      originalSource: `/plugins/${unmappedName}/client.js`,
-    })
-    expect(consumer.findEntry(2, 0)).toMatchObject({ originalSource: '/packages/demo/mapped.ts' })
+    // Composition is lexicographic (deterministic across boots), so locate each
+    // fixture's section instead of assuming which one lands first.
+    const sections = (payload as unknown as { sections: { offset: { line: number } }[] }).sections
+    const resolved = sections.map(section => consumer.findEntry(section.offset.line, 0)?.originalSource)
+    expect(resolved).toHaveLength(2)
+    expect(resolved).toEqual(expect.arrayContaining([
+      `/plugins/${unmappedName}/client.js`,
+      '/packages/demo/mapped.ts',
+    ]))
   })
 })
 

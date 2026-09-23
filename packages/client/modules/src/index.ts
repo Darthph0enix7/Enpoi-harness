@@ -23,8 +23,8 @@
  * @module @deepseek-ai/dsh-client-modules
  */
 
-import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -208,9 +208,22 @@ function framedHash(domain: string, parts: readonly Buffer[]): string {
   return hash.digest('hex').slice(0, HASH_REVISION_LENGTH)
 }
 
-/** Hash one completed build generation observed through its entry artifact. */
-function artifactRevision(bundle: Buffer, baseline: ClientArtifactBaseline): string {
-  return framedHash('plugin-artifact', [bundle, Buffer.from(String(baseline.mtimeMs))])
+/**
+ * Hash one completed build generation from its executable bytes: the entry
+ * bundle plus every sibling chunk the chunk route can serve, in name order.
+ * Equal bytes keep the same revision across restarts and unrelated rebuilds,
+ * while a chunk-only rebuild still moves it. Debug maps stay out — a map body
+ * is fixed by its first `GET`.
+ */
+function artifactRevision(bundle: Buffer, clientPath: string): string {
+  const directory = dirname(clientPath)
+  const parts: Buffer[] = [bundle]
+  const chunks = readdirSync(directory, { withFileTypes: true })
+    .filter(entry => (entry.isFile() || entry.isSymbolicLink()) && CLIENT_CHUNK.test(entry.name))
+    .map(entry => entry.name)
+    .sort()
+  for (const name of chunks) parts.push(Buffer.from(name), readFileSync(join(directory, name)))
+  return framedHash('plugin-artifact', parts)
 }
 
 /** Address one ordered plugin-file list through the shared combo route. */
@@ -563,8 +576,6 @@ export class ClientModuleRegistry extends Service {
   private readonly rebuildListeners = new Set<(id: string, rev: string) => void>()
   private readonly graphListeners = new Set<() => void>()
   private readonly dirty = new Set<string>()
-  private readonly initialRevisionNonce = randomBytes(8).toString('hex')
-  private nextInitialRevision = 0
   private responses = new Map<string, LazyResponse>()
   private batchResponses = new Map<string, LazyResponse>()
   /** One prior graph generation covers a request racing the HMR recomposition that replaced its URL. */
@@ -668,14 +679,14 @@ export class ClientModuleRegistry extends Service {
    * Publish one completed bundle generation (the HMR watch's registration
    * hook — the only entry point through which build changes reach the graph).
    * @param id - entry id (package name).
-   * @returns the new rev, or undefined for an unknown id.
+   * @returns the current rev, or undefined for an unknown id.
    */
   rebuilt(id: string): string | undefined {
     const record = this.table.get(id)
     if (record === undefined) return undefined
     const baseline = this.captureArtifactBaseline(record.meta.clientPath)
     const bundle = readFileSync(record.meta.clientPath)
-    const rev = artifactRevision(bundle, baseline)
+    const rev = artifactRevision(bundle, record.meta.clientPath)
     record.baseline = baseline
     if (rev === record.entry.rev) return rev
     record.entry = graphRow(id, rev, record.meta)
@@ -716,7 +727,14 @@ export class ClientModuleRegistry extends Service {
   }
 
   private compose(): WebBootGraph {
-    const entries = orderByModuleGraph([...this.table.values()].map(record => record.entry))
+    // The table iterates in plugin-mount order, which varies between boots: feed
+    // the graph a lexicographic input so the topological order, the combo
+    // partitioning and therefore every batch URL revision stay identical while
+    // the executable bytes are unchanged (fixes the per-restart re-download).
+    const rows = [...this.table.values()]
+      .map(record => record.entry)
+      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+    const entries = orderByModuleGraph(rows)
     const bootstrap = PARSER_PRELOAD_IDS
       .map(id => this.table.get(id))
       .filter((record): record is WebPluginRecord => record !== undefined)
@@ -903,11 +921,6 @@ export class ClientModuleRegistry extends Service {
     }
   }
 
-  /** Allocate an opaque initial row revision without inspecting artifact bytes. */
-  private allocateInitialRevision(): string {
-    return `${this.initialRevisionNonce}-${String(this.nextInitialRevision++)}`
-  }
-
   /**
    * Read the activation-time bundle snapshot.
    * @param pkgName - package that declares the client bundle.
@@ -996,10 +1009,10 @@ export class ClientModuleRegistry extends Service {
     const source = sources[0]
     if (source === undefined) return this.table.delete(packageName)
     if (this.table.get(packageName)?.sourceKey === source.sourceKey) return false
-    // The opaque initial rev rides the row until HMR observes a file change;
-    // a fiber restart from the same source reuses the existing row.
+    // Same executable bytes keep the same rev, so a restart or a source
+    // promotion from an equivalent path preserves the browser cache.
     const snapshot = this.initialBundleSnapshot(packageName, source.meta.clientPath)
-    const rev = this.allocateInitialRevision()
+    const rev = artifactRevision(snapshot.bundle, source.meta.clientPath)
     this.table.set(packageName, {
       entry: graphRow(packageName, rev, source.meta),
       loaderName: source.loaderName,
