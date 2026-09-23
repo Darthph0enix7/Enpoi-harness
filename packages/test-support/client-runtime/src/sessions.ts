@@ -11,7 +11,11 @@ import type {
   SessionSnapshot, SessionSummary, SessionTarget, SubmissionHandle,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import { scopeIdentityOf } from '@deepseek-ai/dsh-api-session-controller/src/client/scope.ts'
-import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
+import type {
+  SessionRequestId,
+  SessionRequestSnapshotRequest,
+} from '@deepseek-ai/dsh-api-session-controller/types'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -311,7 +315,8 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'create' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'refresh' | 'loadMore' | 'search' | 'fork'
+    method: 'create' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'refresh' | 'loadMore' | 'search'
+      | 'requestSnapshot' | 'fork'
       | 'selectModel' | 'revert' | 'revertRestore' | 'resolveFileConflict' | 'delete'
     args: unknown[]
   }[] = []
@@ -681,6 +686,28 @@ export class TestSessions implements ISessions {
   search(query: string, signal: AbortSignal): ReturnType<ISessions['search']> {
     this.calls.push({ method: 'search', args: [query, signal] })
     return Promise.resolve({ ok: true, value: this.searchStub?.(query, signal) ?? { items: [], hasMore: false } })
+  }
+
+  /**
+   * Recorded request-snapshot stub: fixtures hold no Host wire capture, so the
+   * default is the Session-not-found failure production reports for one.
+   * @param request - Session identity and whether bodies are requested.
+   * @param signal - cancellation for the capture read (recorded and forwarded).
+   * @returns the not-found result naming the Session.
+   */
+  requestSnapshot(
+    request: SessionRequestSnapshotRequest,
+    signal: AbortSignal,
+  ): ReturnType<ISessions['requestSnapshot']> {
+    this.calls.push({ method: 'requestSnapshot', args: [request, signal] })
+    return Promise.resolve({
+      ok: false,
+      error: new RemoteError(
+        'session/not-found',
+        `no captured model request for session "${request.sessionId}"`,
+        { sessionId: request.sessionId },
+      ),
+    })
   }
 
   /**
