@@ -66,7 +66,8 @@ describe('dsh-tool-subagent settings role registry', () => {
     }, { role: 'auditor' })
     expect(request.persona).toBe('You are the Auditor.')
     expect(request.label).toBe('Auditor: Review the parser diff')
-    expect(request.toolFilter?.allow).toEqual(['read', 'bash'])
+    // The whiteboard keep list is unioned into every explicit allow surface.
+    expect(request.toolFilter?.allow).toEqual(['read', 'bash', ...tool.SHARED_CHILD_KEEP])
     expect(request.toolFilter?.deny).toContain('subagent')
     // `tools.available` replaces the built-in role deny extras, never unions them.
     expect(request.toolFilter?.deny).not.toContain('edit')
@@ -105,6 +106,66 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(request.persona).toBeUndefined()
     expect(request.toolFilter?.deny).toContain('subagent')
     expect(request.toolFilter?.deny).not.toContain('edit')
+  })
+
+  it('marks the shipped Oracle tool-only while keeping its registry row and seat', () => {
+    const registry = tool.listRoleRegistry(undefined)
+    // The Oracle row (seat, label, persona) stays: Fleet Routing and the
+    // operator surfaces read it. Only generic delegation is closed.
+    expect(registry['oracle']).toBeDefined()
+    expect(registry['oracle']?.spawnable).toBe(false)
+    expect(registry['oracle']?.seat).toBe(true)
+    expect(registry['oracle']?.builtin).toBe(true)
+    expect(registry['fixer']?.spawnable).toBe(true)
+  })
+
+  it('refuses subagent(role=oracle) with the oracle_review pointer', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    const result = await callSubagent(ctx, { description: 'Review the parser diff', prompt: 'work', role: 'oracle' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('oracle_review')
+    expect(text(result)).toContain('not spawned as a worker')
+  })
+
+  it('never infers the tool-only Oracle from delegation text', async () => {
+    const request = await captureRequest('Oracle: architecture review', undefined)
+    expect(request.persona).toBeUndefined()
+    expect(request.label).toBe('Oracle: architecture review')
+    expect(request.toolFilter?.deny).toContain('subagent')
+    expect(request.toolFilter?.deny).not.toContain('edit')
+  })
+
+  it('does not route a text-named tool-only role through its personas route', async () => {
+    // A generic delegation that merely mentions the Oracle must not inherit
+    // the Oracle seat's model route; the route stays on the oracle_review path.
+    const request = await captureRequest('Oracle: architecture review', {
+      personas: { oracle: { provider: 'alpha', model: 'fast-model' } },
+    })
+    expect(request.agentOptions).toBeUndefined()
+  })
+
+  it('honours spawnable:false on any role and reports the marker actionably', async () => {
+    const ctx = await setup({
+      provider: 'mock',
+      settingsDocument: { roles: { auditor: { persona: 'You are the Auditor.', spawnable: false } } },
+    })
+    const result = await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work', role: 'auditor' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('spawnable: false')
+    // Text inference skips it too: no silent spawn by description.
+    const inferred = await captureRequest('Auditor: audit the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.', spawnable: false } },
+    })
+    expect(inferred.persona).toBeUndefined()
+  })
+
+  it('lets spawnable:true re-enable the Oracle (the marker is reversible data)', async () => {
+    const request = await captureRequest('Oracle: architecture review', {
+      roles: { oracle: { spawnable: true } },
+    })
+    expect(request.persona).toContain('You are the Oracle')
+    // Re-enabled Oracle keeps its delegation exception in the child filter.
+    expect(request.toolFilter?.deny).not.toContain('subagent')
   })
 
   it('rejects an unknown role argument and lists the configured ids', async () => {

@@ -17,7 +17,9 @@ import {
   buildAgentSubjects,
   buildPermissionToolRows,
   effectivePolicy,
+  fetchMcpToolNames,
   getPermissionsViewState,
+  grantScopeHint,
   mergeServerPermissionsWithPending,
   persistAgentAvailable,
   persistBashPatterns,
@@ -104,8 +106,9 @@ function PolicyRow({ row, provenance, effective, ownOverride, onCycle, available
   available?: boolean
   onToggleAvailable?: () => void
 }) {
+  const isGroup = row.kind === 'mcp-group'
   return (
-    <div className={c('row')}>
+    <div className={isGroup ? `${c('row')} ${c('rowGroup')}` : c('row')}>
       <div className={c('rowLabel')}>
         <span className={c('rowName')}>{row.name}</span>
         <span className={c('rowHint')}>{provenance}</span>
@@ -144,15 +147,13 @@ function PolicyRow({ row, provenance, effective, ownOverride, onCycle, available
   )
 }
 
-/** One standing grant row: tool · pattern · agent, with revoke. */
+/** One standing grant row: tool · pattern · scope, with revoke. */
 function GrantRow({ grant, onRevoke }: { grant: PermissionGrant; onRevoke: (grantId: string) => void }) {
   return (
     <div className={c('row')}>
       <div className={c('rowLabel')}>
         <span className={c('rowName')}>{grant.pattern !== undefined ? `${grant.tool} · ${grant.pattern}` : grant.tool}</span>
-        <span className={c('rowHint')}>
-          {grant.agent !== undefined ? `agent: ${grant.agent} · allow always` : 'all agents · allow always'}
-        </span>
+        <span className={c('rowHint')}>{grantScopeHint(grant)}</span>
       </div>
       <div className={c('rowTools')}>
         <button type="button" className={c('revokeBtn')} title="Revoke this grant" onClick={() => { onRevoke(grant.id) }}>
@@ -335,10 +336,13 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
 export function PermissionsSettings(_props: { close: () => void }): React.ReactNode {
   const [perms, setPerms] = useState<PermissionsConfig | null>(null)
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerRef>>({})
+  const [mcpToolNames, setMcpToolNames] = useState<readonly string[]>([])
   const [registry, setRegistry] = useState<RoleRegistryMap>(() => getRoleRegistry())
   const [failed, setFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [draftSubject, setDraftSubject] = useState('')
+  /** Last rendered MCP-status fingerprint; a mounted/down flip re-reads the tool list. */
+  const mcpFingerprint = useRef('')
 
   const load = useCallback(() => {
     void (async () => {
@@ -352,6 +356,8 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       setFailed(false)
       setPerms(state.view.value?.permissions ?? {})
       setMcpServers(state.view.value?.mcpServers ?? {})
+      const names = await fetchMcpToolNames()
+      if (names !== undefined) setMcpToolNames(names)
     })()
   }, [])
 
@@ -370,12 +376,24 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       : mergeServerPermissionsWithPending(state.view.value?.permissions, local))
     setMcpServers(state.view.value?.mcpServers ?? {})
     setFailed(false)
+    // Mounting/unmounting or a liveness flip changes what the registry holds;
+    // re-read the live tool list only when the mounted flags moved (the 15s
+    // heartbeat's checkedAt must not re-describe).
+    const fingerprint = JSON.stringify(
+      Object.entries(state.view.value?.mcpStatus ?? {})
+        .map(([id, status]) => [id, status?.mounted === true, status?.state ?? ''])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    )
+    if (fingerprint !== mcpFingerprint.current) {
+      mcpFingerprint.current = fingerprint
+      void fetchMcpToolNames().then((names) => { if (names !== undefined) setMcpToolNames(names) })
+    }
   }), [])
 
   // The role registry is its own store: rebuild the rail whenever it changes.
   useEffect(() => subscribeRoleRegistry(() => { setRegistry(getRoleRegistry()) }), [])
 
-  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers), [mcpServers])
+  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, mcpToolNames), [mcpServers, mcpToolNames])
   const subjects = useMemo(
     () => buildAgentSubjects(registry, AGENT_ROSTER, Object.keys(perms?.agents ?? {})),
     [registry, perms],

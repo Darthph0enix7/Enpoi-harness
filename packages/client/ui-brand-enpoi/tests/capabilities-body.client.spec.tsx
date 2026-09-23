@@ -39,7 +39,7 @@ function skillsResponse(skills: Array<{ name: string; description?: string; mode
 }
 
 /** One `enpoiRoles.list` answer. */
-function rolesResponse(roles: Array<{ id: string; label?: string; group?: string }> = []): Response {
+function rolesResponse(roles: Array<{ id: string; label?: string; group?: string; spawnable?: boolean }> = []): Response {
   return jsonResponse({ result: { ok: true, value: { roles } } })
 }
 
@@ -50,8 +50,9 @@ function councilsResponse(councils: Array<{ id: string; label?: string; seats?: 
 
 /** Two roles and one council, the registries the drawer reads live. */
 const LIVE_ROLES = [
-  { id: 'oracle', label: 'The Oracle', group: 'supervision' },
-  { id: 'fixer', label: 'Fixer', group: 'specialists' },
+  // The shipped Oracle is tool-only: no spawn affordance, shown once as a tool.
+  { id: 'oracle', label: 'The Oracle', group: 'supervision', spawnable: false },
+  { id: 'fixer', label: 'Fixer', group: 'specialists', spawnable: true },
 ]
 const LIVE_COUNCILS = [
   { id: 'roundtable', label: 'Architecture Roundtable', seats: [{ id: 'skeptic' }, { id: 'architect' }], enabled: true },
@@ -122,7 +123,7 @@ describe('CapabilitiesBody — live capability rows', () => {
           capabilities: {
             mcp: { 'plane-mcp': true, 'custom-mcp': true },
             skills: { 'tier1-workflow': false },
-            tools: { keeper: true },
+            tools: { oracle_review: true, keeper: true },
           },
         }, 4)
       }
@@ -146,9 +147,10 @@ describe('CapabilitiesBody — live capability rows', () => {
     expect(await screen.findByText('The Oracle')).toBeTruthy()
     expect(await screen.findByText('Fixer')).toBeTruthy()
     expect(await screen.findByText('Architecture Roundtable')).toBeTruthy()
-    expect(await screen.findByText('Keeper')).toBeTruthy()
+    expect(await screen.findByText('Background Context Keeper')).toBeTruthy()
 
-    // One switch per row: 3 MCP + 2 skills + 2 roles + 1 council + 1 tool flag.
+    // One switch per row: 3 MCP + 2 skills + 1 delegatable role + 1 council
+    // + 2 tool flags (oracle_review, keeper).
     expect(screen.getAllByRole('switch')).toHaveLength(9)
     // The skill catalog's user-only entry is tagged.
     expect(screen.getByText('user-only')).toBeTruthy()
@@ -157,6 +159,38 @@ describe('CapabilitiesBody — live capability rows', () => {
     expect(screen.queryByRole('checkbox')).toBeNull()
     expect(screen.queryByLabelText(/^Remove /)).toBeNull()
     expect(screen.queryByLabelText('MCP server id')).toBeNull()
+  })
+
+  it('shows the Oracle once, as a tool-only supervision tool with its guard switch', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({ capabilities: { tools: { oracle_review: true, keeper: true } } }, 5)
+      }
+      if (method === 'settings.mutate') return jsonResponse({ result: { ok: true, value: { revision: 6 } } })
+      const registry = registryResponse(method, [])
+      if (registry !== undefined) return registry
+      return jsonResponse({ result: { ok: true, value: {} } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody()
+
+    // The Oracle renders once: its role row is gone from Subagents (no spawn
+    // affordance), so only the delegatable Fixer keeps the role description.
+    expect(await screen.findByText('The Oracle')).toBeTruthy()
+    expect(screen.queryAllByText('Delegated subagent role')).toHaveLength(1)
+    expect(screen.queryByText('Fixer')).not.toBeNull()
+    expect(screen.getByText('Senior reviewer — consulted via oracle_review with source-verified verdicts')).toBeTruthy()
+    expect(screen.getByText('supervision · tool-only')).toBeTruthy()
+    expect(screen.getByText("Keeps the session's state checkpoint and durable claims current")).toBeTruthy()
+
+    // Its switch keeps the enforcement key: capabilities.tools.oracle_review.
+    fireEvent.click(screen.getByLabelText('Disable The Oracle'))
+    await waitFor(() => {
+      expect(mutateBodies(fetchMock)[0]?.payload.args.ops).toEqual([
+        { op: 'set', path: ['capabilities', 'tools', 'oracle_review'], value: false },
+      ])
+    })
   })
 
   it('shows no hardcoded capability ids when every registry is empty', async () => {

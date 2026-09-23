@@ -13,6 +13,9 @@ import {
   cyclePolicy,
   describePermissionsView,
   effectivePolicy,
+  fetchMcpToolNames,
+  grantScopeHint,
+  groupMcpToolNames,
   provenanceFor,
   roleSurfaceFor,
   setPermissionPath,
@@ -80,6 +83,21 @@ describe('registry role surfaces', () => {
   })
 })
 
+describe('grantScopeHint', () => {
+  it('reads a global grant as all-agents, keeping the asking agent as audit only', () => {
+    expect(grantScopeHint({ id: 'g1', tool: 'bash', agent: 'fixer', global: true }))
+      .toBe('all agents · allow always · requested by fixer')
+    expect(grantScopeHint({ id: 'g2', tool: 'bash', global: true }))
+      .toBe('all agents · allow always')
+  })
+
+  it('reads a grant without `global` as agent-scoped', () => {
+    expect(grantScopeHint({ id: 'g3', tool: 'bash', agent: 'fixer' })).toBe('agent: fixer · allow always')
+    // Legacy host grants carry neither flag: still all agents.
+    expect(grantScopeHint({ id: 'g4', tool: 'bash' })).toBe('all agents · allow always')
+  })
+})
+
 describe('countPermissionRules', () => {
   it('counts global and per-agent tool rules, grants separately', () => {
     const perms: PermissionsConfig = {
@@ -107,9 +125,10 @@ describe('shippedPolicyFor', () => {
 })
 
 describe('buildPermissionToolRows', () => {
-  it('lists the core tool rows, then per-server and generic MCP rows', () => {
+  it('lists the core tools, then one header + real tool row per mounted server, then the family row', () => {
     const rows = buildPermissionToolRows(
       { plane: { serverName: 'plane' } },
+      ['mcp__plane__list_projects', 'mcp__plane__create_issue'],
       [
         { id: 'bash', name: 'Bash Terminal', kind: 'tool' },
         { id: 'keeper', name: 'Keeper', kind: 'tool' },
@@ -123,19 +142,73 @@ describe('buildPermissionToolRows', () => {
     expect(ids).toContain('str_replace_editor')
     expect(ids).not.toContain('tier1-workflow')
     expect(ids[ids.length - 1]).toBe('mcp__*')
-    expect(ids).toContain('mcp__plane*')
+    // The server row is now the functional resolver wildcard, not `mcp__plane*`.
+    expect(rows.find(row => row.id === 'mcp__plane__*')).toMatchObject({ name: 'plane (MCP)', kind: 'mcp-group' })
+    expect(ids).not.toContain('mcp__plane*')
+    // The actual tool names the agent can call are rows with their own chips.
+    expect(rows.find(row => row.id === 'mcp__plane__list_projects')).toMatchObject({ kind: 'tool' })
+    expect(rows.find(row => row.id === 'mcp__plane__create_issue')).toMatchObject({ kind: 'tool' })
   })
 
-  it('falls back to the catalog id when a server entry carries no serverName', () => {
-    const ids = buildPermissionToolRows({ ue: {} }, []).map(row => row.id)
-    expect(ids).toContain('mcp__ue*')
+  it('keeps a catalog header with no live tools so the server policy is pre-settable', () => {
+    const rows = buildPermissionToolRows({ ue: {} }, [])
+    expect(rows.map(row => row.id)).toContain('mcp__ue__*')
+    expect(rows.filter(row => row.id.startsWith('mcp__ue__'))).toHaveLength(1)
   })
 
   it('always ends with the generic mcp__* row and keeps core rows when no catalog is given', () => {
     const rows = buildPermissionToolRows(undefined, [])
-    expect(rows[rows.length - 1]).toEqual({ id: 'mcp__*', name: 'All MCP tools' })
+    expect(rows[rows.length - 1]).toEqual({ id: 'mcp__*', name: 'All MCP tools', kind: 'tool' })
     expect(rows.map(row => row.id)).toContain('read')
     expect(rows.map(row => row.id)).not.toContain('mcp__x*')
+  })
+})
+
+describe('groupMcpToolNames', () => {
+  it('groups live names under their catalog server and sorts tools per group', () => {
+    const groups = groupMcpToolNames(
+      { plane: { serverName: 'plane' } },
+      ['mcp__plane__b_tool', 'mcp__plane__a_tool'],
+    )
+    expect(groups).toEqual([{ server: 'plane', wildcard: 'mcp__plane__*', tools: ['mcp__plane__a_tool', 'mcp__plane__b_tool'] }])
+  })
+
+  it('falls back to the `__` segment for a server that left the catalog', () => {
+    expect(groupMcpToolNames(undefined, ['mcp__ghost__tool']))
+      .toEqual([{ server: 'ghost', wildcard: 'mcp__ghost__*', tools: ['mcp__ghost__tool'] }])
+  })
+
+  it('drops non-MCP names and unusable `mcp__` prefixes instead of inventing a server', () => {
+    expect(groupMcpToolNames(undefined, ['bash', 'mcp__', 'mcp__ghost__tool']))
+      .toEqual([{ server: 'ghost', wildcard: 'mcp__ghost__*', tools: ['mcp__ghost__tool'] }])
+  })
+})
+
+describe('fetchMcpToolNames', () => {
+  it('reads the live registry RPC and keeps only sorted mcp__ names', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      result: { ok: true, value: { tools: ['mcp__plane__b', 'bash', 'mcp__plane__a'] } },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchMcpToolNames()).resolves.toEqual(['mcp__plane__a', 'mcp__plane__b'])
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/enpoiCapabilities.mcpTools')
+    expect(JSON.parse(String(init.body)).method).toBe('enpoiCapabilities.mcpTools')
+    vi.unstubAllGlobals()
+  })
+
+  it('answers undefined on a failed or malformed answer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('offline', { status: 500 })))
+    await expect(fetchMcpToolNames()).resolves.toBeUndefined()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ result: { ok: false } }), { status: 200 })))
+    await expect(fetchMcpToolNames()).resolves.toBeUndefined()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      result: { ok: true, value: { tools: 'not-an-array' } },
+    }), { status: 200 })))
+    await expect(fetchMcpToolNames()).resolves.toBeUndefined()
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down') }))
+    await expect(fetchMcpToolNames()).resolves.toBeUndefined()
+    vi.unstubAllGlobals()
   })
 })
 

@@ -363,3 +363,137 @@
   border-color: rgba(244, 63, 94, 0.3);
   color: #fb7185;
 }
+
+/* Whiteboard card */
+.wbMetaRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.wbChip {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #7c8aa0;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.wbMeta {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.wbCopyBtn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.wbCopyBtn:hover { background: rgba(255, 255, 255, 0.08); }
+
+.wbBlock {
+  margin: 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.wbEntries {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wbEntry {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.wbKind {
+  display: inline-flex;
+  color: #7c8aa0;
+  flex-shrink: 0;
+  transform: translateY(1px);
+}
+
+.wbPin {
+  display: inline-flex;
+  color: #fcd34d;
+  flex-shrink: 0;
+  transform: translateY(1px);
+}
+
+.wbText {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+
+.wbEntryMeta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.wbStale {
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.wbScope {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: #7c8aa0;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.wbScope[data-scope='session'] {
+  color: #7dd3fc;
+  border-color: rgba(125, 211, 252, 0.3);
+}
+
+.wbScope[data-scope='project'] {
+  color: #a5b4fc;
+  border-color: rgba(165, 180, 252, 0.3);
+}

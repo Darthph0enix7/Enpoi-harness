@@ -14,13 +14,17 @@
  *   `capabilities.skills[name] !== false` — the same rule the pre-dispatch
  *   guard applies (only an explicit false shadows a skill).
  * - Subagents: the effective role registry (`enpoiRoles.list`) with each
- *   role's label, group, and registry ordering.
+ *   DELEGATABLE role's label, group, and registry ordering. A role marked
+ *   `spawnable: false` (the Oracle) is tool-only: it has no spawn affordance
+ *   here and appears once under Tool Flags through its own tool id.
  * - Councils: the council registry (`enpoiCouncil.list`) with each council's
  *   label, seats, and retired state.
  * - Tool flags: the stored `capabilities.tools` keys not covered by a role or
  *   council row. The pre-dispatch guard and the tool-schema strip consume
  *   these flags directly, but there is no host registry that enumerates the
- *   core tool names, so only operator-stored flags are listed.
+ *   core tool names, so only operator-stored flags are listed. Rows stay
+ *   dynamic; {@link TOOL_FLAG_COPY} only upgrades the copy of a flag that
+ *   already exists (the Oracle reviewer, the background Keeper).
  *
  * Each row carries an enable/disable switch (`ui-primitives` `Switch`) that
  * writes `capabilities.<kind>.<id>` through the shared optimistic
@@ -168,6 +172,27 @@ export interface LiveRoleEntry {
   id: string
   label?: string
   group?: string
+  /** Whether the generic `subagent` tool may spawn it; `false` = tool-only. */
+  spawnable?: boolean
+}
+
+/**
+ * Operator-facing copy for tool flags whose stored id is not self-describing.
+ * Purely presentational: the row itself still exists only because the live
+ * `capabilities.tools` map stores the flag, an unknown flag keeps the generic
+ * copy, and a row the registries below already cover is never duplicated.
+ */
+const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: string; badge?: string }>> = {
+  oracle_review: {
+    name: 'The Oracle',
+    description: 'Senior reviewer — consulted via oracle_review with source-verified verdicts',
+    badge: 'supervision · tool-only',
+  },
+  keeper: {
+    name: 'Background Context Keeper',
+    description: "Keeps the session's state checkpoint and durable claims current",
+    badge: 'supervision',
+  },
 }
 
 /** One council row (`enpoiCouncil.list`) rendered by the Councils section. */
@@ -417,6 +442,7 @@ export async function refreshRoles(): Promise<void> {
         id: row.id,
         ...(typeof row.label === 'string' && row.label !== '' ? { label: row.label } : {}),
         ...(typeof row.group === 'string' && row.group !== '' ? { group: row.group } : {}),
+        ...(typeof row.spawnable === 'boolean' ? { spawnable: row.spawnable } : {}),
       })
     }
     globalRoles = roles
@@ -894,13 +920,18 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     kind: 'skill' as const,
     ...(s.modelInvocable ? {} : { badge: 'user-only' }),
   }))
-  const roleRows: LiveRow[] = view.roles.map(r => ({
-    id: r.id,
-    name: r.label ?? titleCaseId(r.id),
-    description: 'Delegated subagent role',
-    kind: 'tool' as const,
-    ...(r.group !== undefined ? { badge: r.group } : {}),
-  }))
+  // Delegatable roles only: a tool-only role (the Oracle) has no spawn
+  // affordance here — its switch lives on its tool flag below, under the tool's
+  // own enforcement key. Dynamic by data, no id list.
+  const roleRows: LiveRow[] = view.roles
+    .filter(r => r.spawnable !== false)
+    .map(r => ({
+      id: r.id,
+      name: r.label ?? titleCaseId(r.id),
+      description: 'Delegated subagent role',
+      kind: 'tool' as const,
+      ...(r.group !== undefined ? { badge: r.group } : {}),
+    }))
   const councilRows: LiveRow[] = view.councils.map(council => ({
     id: council.id,
     name: council.label ?? titleCaseId(council.id),
@@ -914,12 +945,16 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   const registryIds = new Set([...roleRows, ...councilRows].map(row => row.id))
   const toolFlagRows: LiveRow[] = Object.keys(caps.tools)
     .filter(id => !registryIds.has(id))
-    .map(id => ({
-      id,
-      name: titleCaseId(id),
-      description: 'Stored tool flag — blocks this tool at the execution guard',
-      kind: 'tool' as const,
-    }))
+    .map((id) => {
+      const copy = TOOL_FLAG_COPY[id]
+      return {
+        id,
+        name: copy?.name ?? titleCaseId(id),
+        description: copy?.description ?? 'Stored tool flag — blocks this tool at the execution guard',
+        kind: 'tool' as const,
+        ...(copy?.badge !== undefined ? { badge: copy.badge } : {}),
+      }
+    })
 
   const onToggle = (kind: LiveRow['kind'], id: string, next: boolean): void => {
     setWriteError(null)

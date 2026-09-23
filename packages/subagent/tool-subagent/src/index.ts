@@ -301,6 +301,8 @@ interface DelegationRunSpec {
  * @param role - the role selected for this delegation, if any.
  * @param description - the delegated task description.
  * @param prompt - the delegated task prompt.
+ * @param registry - the live role registry; a tool-only role's persona route is
+ *   never matched from text, so a delegation cannot silently become that role.
  * @returns the selected role's child route, or undefined when none is configured.
  */
 function resolveSubagentPersonaModel(
@@ -308,6 +310,7 @@ function resolveSubagentPersonaModel(
   role: string | undefined,
   description?: string,
   prompt?: string,
+  registry?: Record<string, ResolvedRole>,
 ): AgentOptions | undefined {
   if (personas === undefined) return undefined
   const routeFor = (candidate: string): AgentOptions | undefined => {
@@ -328,6 +331,9 @@ function resolveSubagentPersonaModel(
   const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
   for (const candidate of Object.keys(personas)) {
     if (candidate === role) continue
+    // Tool-only roles (the Oracle) are reached through their own tool with
+    // their own query-bound route, never through a generic delegation.
+    if (registry?.[candidate]?.spawnable === false) continue
     if (new RegExp(`\\b${escapeRegExp(candidate)}\\b`, 'i').test(text)) {
       const selected = routeFor(candidate)
       if (selected !== undefined) return selected
@@ -366,6 +372,30 @@ const ROLE_PERSONAS: Record<string, string> = {
     + 'You evaluate architecture, concepts, trade-offs, and code independently and deeply. '
     + 'You are an advisor, not a dictator: say plainly when something is flawed. '
     + 'You never write or edit files; you summarize, explain, and cite.',
+}
+
+/**
+ * Shipped roles the generic delegation tool must never spawn. The Oracle is a
+ * TOOL with its own protocol (`oracle_review`: query-bound lifecycle, brief
+ * injection at call #1, verdict contract, scorecard), not a worker, so a
+ * `subagent(role='oracle')` call is refused and no delegation text can infer
+ * it. Reversible by data: a settings entry with `spawnable: true` re-enables
+ * delegation for the id, and any other role can opt out with `spawnable: false`.
+ */
+const NON_SPAWNABLE_BUILTINS: readonly string[] = ['oracle']
+
+/**
+ * Optional refusal hint per tool-only role: how to reach it instead. A role
+ * without a hint gets the generic `spawnable: false` message.
+ */
+const TOOL_ONLY_ROLE_HINTS: Readonly<Record<string, string>> = {
+  oracle: 'the Oracle is consulted through the oracle_review tool, not spawned as a worker',
+}
+
+/** The refusal text for a `subagent` call naming a non-spawnable role. */
+function nonSpawnableRoleMessage(id: string): string {
+  return TOOL_ONLY_ROLE_HINTS[id]
+    ?? `role "${id}" is marked spawnable: false — it cannot be delegated; remove the marker in Settings → Dynamic → Roles to delegate it`
 }
 
 /**
@@ -410,6 +440,21 @@ const SHARED_CHILD_DENY: readonly string[] = [
 ]
 
 /**
+ * Tools every child keeps regardless of role surface: the pinned whiteboard.
+ * A delegated child may be sent precisely to read or record the board, so the
+ * keep list is unioned into every explicit allow surface (operator-configured
+ * or role-registry) and stripped from the built-in role deny maps. Only an
+ * explicit operator `deny` entry can still remove them — deny is the
+ * operator's voice and always wins in `tools.restrict()`.
+ */
+export const SHARED_CHILD_KEEP: readonly string[] = [
+  'whiteboard_read',
+  'whiteboard_write',
+  'whiteboard_pin',
+  'whiteboard_unpin',
+]
+
+/**
  * Extra tools denied per inferred specialist role, unioned with
  * {@link SHARED_CHILD_DENY}. Each role keeps only the surface its work needs:
  * explorers and librarians read and search but never mutate; fixers and
@@ -448,6 +493,13 @@ export interface RoleRegistryEntry {
   seat?: boolean
   /** Retire the role — not spawnable, absent from every surface — keeping its definition. */
   disabled?: boolean
+  /**
+   * Whether the generic delegation tool may spawn this role by name. `false`
+   * keeps the role listed (seat, permissions surface, and its own tool path
+   * stay untouched) but refuses a `subagent` spawn and removes the id from
+   * text inference. Absent → the shipped default: the Oracle is tool-only.
+   */
+  spawnable?: boolean
   /** Child tool surface for this role. */
   tools?: {
     /** Allowlist that replaces this role's built-in child deny map. */
@@ -469,6 +521,12 @@ export interface ResolvedRole {
   seat: boolean
   /** Whether this role exists in the code defaults (not only in settings). */
   builtin: boolean
+  /**
+   * Whether the generic delegation tool may spawn this role. `false` means the
+   * role is tool-only: it stays listed (seat and permissions surface intact)
+   * but `subagent` refuses it and text inference never selects it.
+   */
+  spawnable: boolean
   /**
    * Explicit child tool allowlist from `tools.available`; when present it
    * replaces {@link ResolvedRole.deny} for this role.
@@ -569,10 +627,14 @@ export function listRoleRegistry(
     const persona = typeof entry?.persona === 'string' ? entry.persona : builtinPersona
     const label = typeof entry?.label === 'string' ? entry.label : undefined
     const group = asRoleGroup(entry?.group)
+    // Spawnability is data-driven and reversible: the shipped tool-only
+    // defaults (the Oracle) apply unless the operator entry says otherwise.
+    const spawnable = entry?.spawnable ?? !NON_SPAWNABLE_BUILTINS.includes(id)
     registry[id] = {
       id,
       seat: entry?.seat !== false,
       builtin: builtinPersona !== undefined,
+      spawnable,
       deny: available === undefined ? ROLE_CHILD_DENY[id] ?? [] : [],
       ...persona !== undefined ? { persona } : {},
       ...label !== undefined ? { label } : {},
@@ -608,28 +670,32 @@ function childToolFilter(
   // The Oracle is the one child allowed to delegate (operator design: the
   // reviewer spawns its own researchers). Every other role keeps the shared
   // subagent veto.
-  const sharedDeny = role === 'oracle'
+  const keepTool = (name: string): boolean => SHARED_CHILD_KEEP.includes(name)
+  const sharedDeny = (role === 'oracle'
     ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
-    : SHARED_CHILD_DENY
+    : SHARED_CHILD_DENY).filter(name => !keepTool(name))
   // Layer precedence (doc 61 WP-S6): the permission allowlist is the operator's
   // hard gate and wins; the role registry's `tools.available` (Dynamic → Roles)
   // is the fallback that gives a user-defined role a surface; absent both, the
   // registry entry's built-in deny extras apply. The shared anti-leak floor is
-  // always unioned in.
+  // always unioned in, and the whiteboard keep list survives every surface.
   const available = roleAvailableAllowlist(document, role) ?? roleEntry?.available
   if (available !== undefined) {
-    // Operator-defined surface: allow the named tools, deny everything else
-    // except the shared anti-leak floor (never widen what SHARED_CHILD_DENY
-    // already removes).
+    // Operator-defined surface: allow the named tools plus the whiteboard
+    // keep list, deny everything else except the shared anti-leak floor
+    // (never widen what SHARED_CHILD_DENY already removes).
     return {
       ...configured,
-      allow: [...new Set([...configured?.allow ?? [], ...available])],
+      allow: [...new Set([...configured?.allow ?? [], ...available, ...SHARED_CHILD_KEEP])],
       deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
   return {
     ...configured,
-    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleEntry?.deny ?? []])],
+    ...configured?.allow !== undefined
+      ? { allow: [...new Set([...configured.allow, ...SHARED_CHILD_KEEP])] }
+      : {},
+    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...(roleEntry?.deny ?? []).filter(name => !keepTool(name))])],
   }
 }
 
@@ -674,16 +740,19 @@ function detectSubagentRole(
   prompt?: string,
 ): string | undefined {
   const text = `${description ?? ''} ${prompt ?? ''}`.toLowerCase()
-  // 1. Explicit role name wins.
+  // 1. Explicit role name wins — a tool-only role (the Oracle) is never a
+  // delegation target, so naming it must not silently spawn it.
   for (const role of Object.keys(registry)) {
+    if (registry[role]?.spawnable === false) continue
     const re = new RegExp(`\\b${escapeRegExp(role)}\\b`, 'i')
     if (re.test(text)) return role
   }
   // 2. Task-type heuristics as a fallback — the delegating model often strips
   // the role name from the prompt, so infer the specialist from the work. A
-  // retired role is never inferred.
+  // retired or tool-only role is never inferred.
   for (const [role, re] of ROLE_SIGNALS) {
-    if (registry[role] !== undefined && re.test(text)) return role
+    const candidate = registry[role]
+    if (candidate !== undefined && candidate.spawnable !== false && re.test(text)) return role
   }
   return undefined
 }
@@ -783,7 +852,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ? ' Changing the route can prevent provider-side reuse of the inherited conversation prefix.'
             : '')
       const roleDescription = ' An optional `role` names the child\'s specialist identity from the operator role registry '
-        + '(for example `librarian`, `fixer`, `explorer`); omit it to infer the role from the task.'
+        + '(for example `librarian`, `fixer`, `explorer`); omit it to infer the role from the task. '
+        + 'Tool-only roles (for example the Oracle, consulted via `oracle_review`) are refused by design.'
       const disposeTool = runtimeCtx.tools.register(defineTool({
         name: toolName,
         description: wording.description + roleDescription + (backgroundEnabled
@@ -807,8 +877,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           },
           role: {
             type: 'string' as const,
-            description: 'Optional specialist role id for the child, naming a role in the operator role registry. '
-              + 'Omit to infer the role from the description and prompt. An unknown id is rejected and lists the configured roles.',
+            description: 'Optional specialist role id for the child, naming a delegatable role in the operator role registry. '
+              + 'Omit to infer the role from the description and prompt. An unknown or tool-only id is rejected and lists the configured roles.',
           },
           ...modelSelectionEnabled ? {
             provider: {
@@ -905,6 +975,12 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           }
           const role = requestedRole ?? detectSubagentRole(registry, args.description, args.prompt)
           const roleEntry = role === undefined ? undefined : registry[role]
+          // Tool-only roles (the Oracle) keep their registry row, seat, and
+          // permissions surface, but the generic delegation tool never spawns
+          // them: their own tool owns the protocol and the route.
+          if (role !== undefined && roleEntry?.spawnable === false) {
+            throw new Error(nonSpawnableRoleMessage(role))
+          }
           const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
             || hasConfiguredLlmSelection(config.agentOptions)
           const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
@@ -915,7 +991,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             configuredChildAgentOptions,
             modelRequest,
             modelSelectionEnabled,
-          ) ?? resolveSubagentPersonaModel(document?.personas, role, args.description, args.prompt)
+          ) ?? resolveSubagentPersonaModel(document?.personas, role, args.description, args.prompt, registry)
           assertAllowedModelSelection(
             modelSelectionPolicy,
             parentOptions,

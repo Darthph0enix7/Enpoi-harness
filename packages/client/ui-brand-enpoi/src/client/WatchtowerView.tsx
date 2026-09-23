@@ -5,7 +5,16 @@
  * only what the keeper actually wrote. Session observability ONLY — global
  * persona model routing lives in the Fleet Routing rail tab.
  */
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { MicroIcon } from './MicroIcon.tsx'
+import { WhiteboardCard, type WhiteboardPhase } from './WhiteboardCard.tsx'
+import {
+  fetchWhiteboardStore,
+  resolveWhiteboard,
+  type ResolvedWhiteboardView,
+  type WhiteboardScopeFacts,
+  type WhiteboardStoreView,
+} from './whiteboard-view.ts'
 import css from './WatchtowerView.module.css'
 
 /** Structural subset of the session snapshot the view reads. */
@@ -15,6 +24,8 @@ interface SessionLike {
   readonly displayTitle?: string
   readonly title?: string
   readonly cwd?: string
+  /** Durable subagent address; carries the direct-parent session id. */
+  readonly subagent?: { readonly address?: { readonly parentSessionId?: string } | null } | null
 }
 
 interface WorkspaceLike {
@@ -52,7 +63,15 @@ interface BriefSections {
   blockers?: string[]
 }
 
-function parseBriefSections(text: string): BriefSections {
+/** First word of a line after markdown/emoji decoration, uppercased. */
+function headerWord(line: string): string {
+  const stripped = line
+    .replace(/^[\s>#*\-•\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+/u, '')
+    .trim()
+  return stripped.split(/\s+/)[0]?.toUpperCase() ?? ''
+}
+
+export function parseBriefSections(text: string): BriefSections {
   const sections: BriefSections = {}
   let currentSection = ''
   const currentLines: Record<string, string[]> = {}
@@ -60,11 +79,14 @@ function parseBriefSections(text: string): BriefSections {
   for (const line of text.split('\n')) {
     const t = line.trim()
     if (t.length === 0) continue
-    if (t.includes('GOAL') || t.startsWith('🎯')) currentSection = 'goal'
-    else if (t.includes('DOCUMENTATION') || t.includes('SPECIFICATION') || t.startsWith('📚')) currentSection = 'docs'
-    else if (t.includes('INVARIANT') || t.includes('DECISION') || t.startsWith('🏛')) currentSection = 'invariants'
-    else if (t.includes('REJECTED') || t.includes('EDGE CASE') || t.startsWith('🚫')) currentSection = 'rejected'
-    else if (t.includes('BLOCKER') || t.includes('OPEN') || t.startsWith('⚡')) currentSection = 'blockers'
+    // A section header is judged by the line's FIRST word (after decoration);
+    // matching keywords mid-sentence used to re-file ordinary prose.
+    const head = headerWord(t)
+    if (head.startsWith('GOAL') || t.startsWith('🎯')) currentSection = 'goal'
+    else if (head.startsWith('DOCUMENTATION') || head.startsWith('SPECIFICATION') || t.startsWith('📚')) currentSection = 'docs'
+    else if (head.startsWith('INVARIANT') || head.startsWith('DECISION') || t.startsWith('🏛')) currentSection = 'invariants'
+    else if (head.startsWith('REJECTED') || head.startsWith('EDGE') || t.startsWith('🚫')) currentSection = 'rejected'
+    else if (head.startsWith('BLOCKER') || head.startsWith('OPEN') || t.startsWith('⚡')) currentSection = 'blockers'
     else if (currentSection !== '') {
       const bucket = currentLines[currentSection] ?? []
       bucket.push(t.replace(/^[-•]\s*/, ''))
@@ -80,14 +102,14 @@ function parseBriefSections(text: string): BriefSections {
   return sections
 }
 
-/** Micro monochrome icon (10px, stroke currentColor). */
-function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-      <path d={d} />
-    </svg>
-  )
+/** Live whiteboard read state; the card owns the degradation copy. */
+interface WhiteboardRead {
+  phase: WhiteboardPhase
+  store: WhiteboardStoreView | null
 }
+
+/** Whiteboard re-read cadence while the Watchtower is mounted. */
+const WHITEBOARD_REFRESH_MS = 10_000
 
 function SectionBlock({ icon, label, lines }: { icon: string; label: string; lines: string[] }) {
   if (lines.length === 0) return null
@@ -118,6 +140,37 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
     () => (livingBrief?.prose?.text !== undefined ? parseBriefSections(livingBrief.prose.text) : null),
     [livingBrief?.prose?.text],
   )
+
+  // Whiteboard: the operator-authored store is settings-backed, so the card
+  // re-reads settings.describe while mounted (the capabilities panel's polling
+  // pattern) and resolves the plugin's per-session view (global → project →
+  // session, by entry id).
+  const [whiteboard, setWhiteboard] = useState<WhiteboardRead>({ phase: 'loading', store: null })
+  useEffect(() => {
+    let cancelled = false
+    const read = async (): Promise<void> => {
+      const store = await fetchWhiteboardStore()
+      if (!cancelled) setWhiteboard({ phase: store === null ? 'error' : 'ready', store })
+    }
+    void read()
+    const timer = window.setInterval(() => { void read() }, WHITEBOARD_REFRESH_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  const projectId = session?.cwd ?? workspaces?.activeWorkspace?.path
+  const boardSessionId = sessionId ?? session?.sessionId ?? session?.id
+  const parentSessionId = session?.subagent?.address?.parentSessionId
+  const boardFacts: WhiteboardScopeFacts = {
+    ...(boardSessionId === undefined ? {} : { sessionId: boardSessionId }),
+    ...(parentSessionId === undefined ? {} : { parentSessionId }),
+    ...(projectId === undefined ? {} : { projectId }),
+  }
+  const resolvedBoard: ResolvedWhiteboardView | null = whiteboard.store === null
+    ? null
+    : resolveWhiteboard(whiteboard.store, boardFacts)
 
   const handleHalt = () => {
     const target = sessionId ?? session?.sessionId ?? session?.id
@@ -222,6 +275,8 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
             </div>
           )}
         </section>
+        {/* Whiteboard — the operator-authored board exactly as this session's model sees it */}
+        <WhiteboardCard doc={resolvedBoard} phase={whiteboard.phase} />
       </div>
     </div>
   )

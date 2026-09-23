@@ -34,7 +34,16 @@ export interface PermissionGrant {
   id: string
   tool: string
   pattern?: string
+  /**
+   * The agent the grant is scoped to — or, when {@link PermissionGrant.global}
+   * is true, the agent that asked for it (audit only, never a scope).
+   */
   agent?: string
+  /**
+   * Host-written "Always allow" grants are global by design (`true`) and cover
+   * all agents; the recorded agent stays on the record for auditability.
+   */
+  global?: boolean
   createdAt?: string
 }
 
@@ -53,12 +62,19 @@ export interface McpServerRef {
   url?: string
 }
 
+/** One server liveness entry (`enpoi-orchestration.mcpStatus`), structural subset. */
+export interface McpStatusRef {
+  mounted?: boolean
+  state?: string
+}
+
 /** The settings.describe view of the enpoi-orchestration namespace the permissions UI reads. */
 export interface OrchestrationSettingsView {
   ns?: string
   value?: {
     permissions?: PermissionsConfig
     mcpServers?: Record<string, McpServerRef>
+    mcpStatus?: Record<string, McpStatusRef>
   }
 }
 
@@ -177,38 +193,153 @@ function prettyToolName(id: string): string {
     .join(' ')
 }
 
+/**
+ * The scope hint for one standing grant. A host-written grant is global even
+ * though it records the asking agent (`global: true`): it reads "all agents"
+ * with the agent kept as audit ("requested by <agent>"). A grant without
+ * `global` is scoped to the agent it names.
+ * @param grant - the standing grant.
+ * @returns the row hint, e.g. "all agents · allow always · requested by fixer"
+ *   or "agent: fixer · allow always".
+ */
+export function grantScopeHint(grant: PermissionGrant): string {
+  const agent = typeof grant.agent === 'string' && grant.agent !== '' ? grant.agent : undefined
+  if (grant.global === true) {
+    return agent === undefined ? 'all agents · allow always' : `all agents · allow always · requested by ${agent}`
+  }
+  return agent === undefined ? 'all agents · allow always' : `agent: ${agent} · allow always`
+}
+
 /** One policy row: the tools-map key plus a display label. */
 export interface PermissionToolRow {
   id: string
   name: string
+  /** `mcp-group` is the server-level header row (its id is the resolver wildcard). */
+  kind?: 'tool' | 'mcp-group'
+}
+
+/** The `enpoiCapabilities.mcpTools` answer: the live registered tool names. */
+export interface McpToolsView {
+  tools: string[]
+}
+
+/** One MCP server group: the server wildcard key plus its live public tools. */
+export interface McpToolGroup {
+  server: string
+  /** The exact key the host policy ladder matches: `mcp__<server>__*`. */
+  wildcard: string
+  tools: string[]
+}
+
+/** The server name a catalog entry mounts under (mirrors the host mount). */
+function serverNameOf(id: string, def: McpServerRef | undefined): string {
+  return typeof def?.serverName === 'string' && def.serverName !== '' ? def.serverName : id.replace(/-mcp$/, '')
 }
 
 /**
- * Build the tool-row list for one subject: the known capability tools plus the
- * static core list, then one row per mounted MCP server as `mcp__<server>*`,
- * then the generic `mcp__*` row.
+ * Group live `mcp__<server>__<tool>` names under their server. Catalog servers
+ * keep a header even with no live tools, so the server policy can be set
+ * before the first mount; a name whose server left the catalog falls back to
+ * the `__`-segment the host resolver's wildcard ladder reads.
  * @param mcpServers - the enpoi-orchestration.mcpServers describe data.
- * @param known - catalog descriptors; tool-kind rows contribute display names.
+ * @param mcpToolNames - the live names from `enpoiCapabilities.mcpTools`.
+ * @returns one group per server, catalog order first.
+ */
+export function groupMcpToolNames(
+  mcpServers: Record<string, McpServerRef> | undefined,
+  mcpToolNames: readonly string[],
+): McpToolGroup[] {
+  const known = Object.entries(mcpServers ?? {}).map(([id, def]) => serverNameOf(id, def))
+  const groups = new Map<string, string[]>()
+  for (const server of known) {
+    if (!groups.has(server)) groups.set(server, [])
+  }
+  for (const name of mcpToolNames) {
+    if (!name.startsWith('mcp__')) continue
+    const server = known
+      .filter(candidate => name.startsWith(`mcp__${candidate}__`))
+      .sort((left, right) => right.length - left.length)[0]
+      ?? name.split('__')[1]
+      ?? ''
+    if (server === '') continue
+    const tools = groups.get(server)
+    if (tools === undefined) groups.set(server, [name])
+    else tools.push(name)
+  }
+  return [...groups.entries()].map(([server, tools]) => ({
+    server,
+    wildcard: `mcp__${server}__*`,
+    tools: [...tools].sort((left, right) => left.localeCompare(right)),
+  }))
+}
+
+/**
+ * Build the tool-row list for one subject: the static core list, then one
+ * header row per MCP server keyed by the wildcard the resolver honors
+ * (`mcp__<server>__*`) followed by one row per REAL tool that server
+ * currently registers (`mcp__<server>__<tool>`), then the generic `mcp__*`
+ * family row. The MCP rows are a live projection of the tool registry, so
+ * mounting or unmounting a server changes the list with no code change.
+ * @param mcpServers - the enpoi-orchestration.mcpServers describe data.
+ * @param mcpToolNames - live names from `enpoiCapabilities.mcpTools` (empty when unavailable).
+ * @param _known - catalog descriptors; unused by the matrix row builder.
  * @returns ordered rows, `mcp__*` last.
  */
 export function buildPermissionToolRows(
   mcpServers: Record<string, McpServerRef> | undefined,
+  mcpToolNames: readonly string[] = [],
   _known: readonly { id: string; name: string; kind?: 'tool' | 'skill' | 'mcp' }[] = [],
 ): PermissionToolRow[] {
   // The matrix rows are REAL tools (doc 55 P2 redesign). Specialist names
   // (fixer/explorer/…) are ROLE SUBJECTS in the left rail, not tool rows;
   // the context keeper is a background service, not an agent-dispatchable
-  // tool; MCP servers are dynamic rows from the catalog + one family row.
+  // tool. The old `mcp__<server>*` key never matched the host resolver's
+  // ladder (`mcp__<server>__*`); the group-header key now does.
   const rows = new Map<string, PermissionToolRow>()
   for (const id of CORE_PERMISSION_TOOLS) {
-    rows.set(id, { id, name: prettyToolName(id) })
+    rows.set(id, { id, name: prettyToolName(id), kind: 'tool' })
   }
-  for (const [id, def] of Object.entries(mcpServers ?? {})) {
-    const serverName = typeof def?.serverName === 'string' && def.serverName !== '' ? def.serverName : id
-    rows.set(`mcp__${serverName}*`, { id: `mcp__${serverName}*`, name: `${serverName} (MCP)` })
+  for (const group of groupMcpToolNames(mcpServers, mcpToolNames)) {
+    rows.set(group.wildcard, { id: group.wildcard, name: `${group.server} (MCP)`, kind: 'mcp-group' })
+    for (const tool of group.tools) {
+      rows.set(tool, { id: tool, name: tool, kind: 'tool' })
+    }
   }
-  rows.set('mcp__*', { id: 'mcp__*', name: 'All MCP tools' })
+  rows.set('mcp__*', { id: 'mcp__*', name: 'All MCP tools', kind: 'tool' })
   return [...rows.values()]
+}
+
+/**
+ * Read the live MCP tool names from the host registry
+ * (`enpoiCapabilities.mcpTools`). The host projects `ctx.tools.schemas()` on
+ * every call, so the answer follows mounts; a failed read is `undefined` and
+ * the caller keeps the previous rows.
+ * @returns sorted `mcp__<server>__<tool>` names, or undefined when the RPC fails.
+ */
+export async function fetchMcpToolNames(): Promise<string[] | undefined> {
+  try {
+    const res = await fetch('/api/enpoiCapabilities.mcpTools', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiCapabilities.mcpTools',
+        rpcId: nextRpcId('mcp-tools'),
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) return undefined
+    const json = await res.json() as { result?: { ok?: boolean; value?: { tools?: unknown } } }
+    if (json.result?.ok !== true) return undefined
+    const tools = json.result.value?.tools
+    if (!Array.isArray(tools)) return undefined
+    return tools
+      .filter((name): name is string => typeof name === 'string' && name.startsWith('mcp__'))
+      .sort((left, right) => left.localeCompare(right))
+  } catch {
+    // Transport failure: the matrix falls back to header-only server rows.
+    return undefined
+  }
 }
 
 /** Which layer owns a subject's effective tool policy. */
@@ -355,6 +486,7 @@ export interface OrchestrationSettingsView {
   value?: {
     permissions?: PermissionsConfig
     mcpServers?: Record<string, McpServerRef>
+    mcpStatus?: Record<string, McpStatusRef>
   }
 }
 

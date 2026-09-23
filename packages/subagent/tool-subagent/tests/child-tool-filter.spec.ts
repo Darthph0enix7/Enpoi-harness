@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import { SHARED_CHILD_KEEP } from '../src/index.ts'
 import { callSubagent, setup, text } from './harness.ts'
 
 // The always-denied worker surface, pinned verbatim as the model-visible
@@ -63,17 +64,14 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     ['librarian', 'Librarian: research the API documentation', ROLE_EXTRAS.librarian],
     ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer],
     ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer],
-    // `oracle` is the one child allowed to delegate: the shared set minus
-    // the subagent veto (operator design — the reviewer spawns researchers).
-    ['oracle', 'Oracle: architecture review', []],
+    // The Oracle is tool-only: a description naming it is NOT a role selection,
+    // so the generic delegation keeps the full shared deny set.
+    ['none (tool-only Oracle)', 'Oracle: architecture review', []],
     // No role inferred: shared set only.
     ['unknown', 'Do the thing', []],
   ])('denies the shared worker set plus %s extras at spawn', async (_role, description, extras) => {
     const request = await captureRequest(description)
-    const expected = _role === 'oracle'
-      ? SHARED_DENY.filter(name => name !== 'subagent')
-      : [...SHARED_DENY, ...extras]
-    expect(request.toolFilter).toEqual({ deny: expected })
+    expect(request.toolFilter).toEqual({ deny: [...SHARED_DENY, ...extras] })
   })
 
   it('merges an existing configured deny list first and de-duplicates the union', async () => {
@@ -92,24 +90,37 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(new Set(deny).size).toBe(deny.length)
   })
 
+  it('keeps the whiteboard in every deny-only surface and never names it in a deny map', async () => {
+    // Structural: the pinned board is available to every delegated child, so
+    // no built-in role deny map may strip it.
+    for (const description of ['Fixer: patch the parser bug', 'Explorer: map the delegation surface', 'Oracle: architecture review']) {
+      const request = await captureRequest(description)
+      for (const tool of SHARED_CHILD_KEEP) {
+        expect(request.toolFilter?.deny ?? []).not.toContain(tool)
+      }
+    }
+  })
+
   it('preserves a configured allow list while composing the deny policy', async () => {
     const request = await captureRequest('Do the thing', {
       toolFilter: { allow: ['read'], deny: ['dangerous'] },
     })
-    expect(request.toolFilter).toEqual({ allow: ['read'], deny: ['dangerous', ...SHARED_DENY] })
+    expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
+    expect(request.toolFilter?.deny).toEqual(['dangerous', ...SHARED_DENY])
   })
 
   it('lets the permissions allowlist win over the registry tools.available', async () => {
     // Layer precedence (doc 61 WP-S6): Permissions → availability is the hard
     // gate; the Dynamic → Roles surface is the fallback; the shared anti-leak
-    // floor is always unioned in.
+    // floor is always unioned in, and the whiteboard keep list survives it.
     const request = await captureRequest('Fixer: patch the parser bug', {
       settingsDocument: {
         roles: { fixer: { tools: { available: ['read', 'grep'] } } },
         permissions: { agents: { fixer: { available: ['read'] } } },
       },
     })
-    expect(request.toolFilter?.allow).toEqual(['read'])
+    expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
+    expect(request.toolFilter?.allow).not.toContain('grep')
     expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
   })
 
@@ -117,7 +128,8 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const request = await captureRequest('Fixer: patch the parser bug', {
       settingsDocument: { roles: { fixer: { tools: { available: ['read', 'grep'] } } } },
     })
-    expect(request.toolFilter?.allow).toEqual(['read', 'grep'])
+    // Whiteboard keep list unioned in; the registry surface order is kept.
+    expect(request.toolFilter?.allow).toEqual(['read', 'grep', ...SHARED_CHILD_KEEP])
     expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
   })
 

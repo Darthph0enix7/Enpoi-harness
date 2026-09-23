@@ -155,6 +155,16 @@
   border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.04));
 }
 
+/* MCP server group header: the wildcard row (`mcp__<server>__*`) that names
+   the group AND carries the server-level policy chip. */
+.rowGroup {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.rowGroup .rowName {
+  font-weight: 600;
+}
+
 .rowLabel {
   display: flex;
   flex-direction: column;
