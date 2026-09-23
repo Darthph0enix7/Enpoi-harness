@@ -494,7 +494,12 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       expect(adapter.conversationRequests).toHaveLength(3)
       expect(adapter.summaryRequests).toHaveLength(1)
       expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry').map(event => event.data))
-        .toEqual([expect.objectContaining({ turn: 3, step: 1, retry: 1, failure: { message: 'temporary provider outage', code: 'SERVER' } })])
+        .toEqual([expect.objectContaining({
+          turn: 3,
+          step: 1,
+          retry: 1,
+          failure: { message: 'temporary provider outage', code: 'SERVER', provider: 'mock', model: 'mock' },
+        })])
       expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/start').slice(-1).map(event => event.data.turn))
         .toEqual([3])
       expect(agent.session.snapshotEvents().at(-1)).toMatchObject({

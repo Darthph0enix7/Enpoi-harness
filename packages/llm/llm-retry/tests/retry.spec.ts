@@ -204,7 +204,13 @@ describe('provider-routed retry policy', () => {
       retry: 1,
       maxRetries: 2,
       delayMs: 500,
-      failure: { message: 'busy', code: 'RATE_LIMIT', status: 429 },
+      failure: {
+        message: 'busy',
+        code: 'RATE_LIMIT',
+        status: 429,
+        provider: 'mock',
+        model: 'mock',
+      },
     })
     expect(adapter.requests).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(499)

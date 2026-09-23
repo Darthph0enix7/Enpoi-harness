@@ -5,11 +5,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
   createUserMessage,
+  LLM_ATTEMPT_FAILED_EVENT,
   LlmAdapter,
   LlmError,
   MODEL_CHAIN_EXHAUSTED_CODE,
+  resolveRetryPolicy,
+  STREAM_CLOSED_CODE,
   type GenerateOptions,
+  type LlmAttemptFailedEventData,
   type ResolvedModelChain,
+  type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 
@@ -94,6 +99,40 @@ function captureStderr(): { text: () => string } {
 
 function provideChains(ctx: Context, resolve: (id: string) => ResolvedModelChain | undefined): void {
   ctx.provide('modelChains', { resolve })
+}
+
+/** One captured durable attempt record, as the session store received it. */
+interface CapturedRecord {
+  type: string
+  data: unknown
+}
+
+/**
+ * Structural stand-in for the optional session store the seam appends attempt
+ * records to: only the live session `session-1` is addressable.
+ */
+function provideSessions(ctx: Context, records: CapturedRecord[]): void {
+  ctx.provide('sessions', {
+    get: (id: string) => id === 'session-1'
+      ? {
+        append: (type: string, data: unknown): { seq: number } => {
+          records.push({ type, data })
+          return { seq: records.length }
+        },
+      }
+      : undefined,
+  })
+}
+
+/** A session-stamped request, so the seam's attempt records have a log to enter. */
+function request(options: Omit<GenerateOptions, 'sessionId'>): GenerateOptions {
+  return { ...options, sessionId: 'session-1' } as GenerateOptions
+}
+
+/** Read one captured record as the event payload the seam wrote. */
+function attemptRecord(record: CapturedRecord): LlmAttemptFailedEventData {
+  expect(record.type).toBe(LLM_ATTEMPT_FAILED_EVENT)
+  return record.data as LlmAttemptFailedEventData
 }
 
 function group(id: string, ...links: Array<[string, string]>): ResolvedModelChain {
@@ -210,7 +249,10 @@ describe('model-group failover', () => {
 
     expect(chunks.at(-1)).toEqual({
       type: 'finish',
-      reason: { kind: 'error', failure: { message: 'bad tool schema', code: 'INVALID_REQUEST' } },
+      reason: {
+        kind: 'error',
+        failure: { message: 'bad tool schema', code: 'INVALID_REQUEST', provider: 'chain-a', model: 'm-a' },
+      },
     })
     expect(answering.calls).toHaveLength(0)
     expect(stderr.text()).not.toContain('[model-chain] fatal')
@@ -337,5 +379,211 @@ describe('model-group failover', () => {
       else process.env.DSH_WIRE_LOG = previousLog
       await rm(target, { recursive: true, force: true })
     }
+  })
+
+  it('escalates a closed stream even when the dead link policy does not list STREAM_CLOSED', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new class extends FailingAdapter {
+      override providerRetryPolicy(): ResolvedRetryPolicy {
+        // The provider policy alone would not rotate this code; the chain's
+        // own escalation set must.
+        return resolveRetryPolicy({ mode: 'normal', retryableCodes: ['RATE_LIMIT'] }, 'closed policy')
+      }
+    }(new LlmError('SSE stream ended without [DONE]', STREAM_CLOSED_CODE))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'closed' ? group('closed', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'closed',
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    expect(failing.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(1)
+    expect(stderr.text()).toContain('link 1 chain-a/m-a → RETRYABLE (STREAM_CLOSED) → link 2 chain-b/m-b')
+  })
+
+  it('names the failed link on the durable record and the chain outcome', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    ctx.llm.registerAdapter(['chain-a'], new FailingAdapter(new LlmError('a is down', 'RATE_LIMIT')))
+    ctx.llm.registerAdapter(['chain-b'], new FailingAdapter(new LlmError('b died mid-answer', 'SERVER')))
+    provideChains(ctx, id => id === 'dead' ? group('dead', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'dead',
+      messages: [],
+    })))
+
+    // The escalated attempt names the route that failed, not the route that
+    // asked for it and not the chain.
+    expect(records).toHaveLength(1)
+    expect(attemptRecord(records[0]!)).toEqual({
+      provider: 'chain-a',
+      model: 'm-a',
+      code: 'RATE_LIMIT',
+      message: 'a is down',
+      chain: 'dead',
+      link: 1,
+      next: { provider: 'chain-b', model: 'm-b' },
+    })
+    // The terminal outcome of an exhausted chain names its last failed link.
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected error finish')
+    expect(finish.reason.failure).toMatchObject({
+      code: MODEL_CHAIN_EXHAUSTED_CODE,
+      provider: 'chain-b',
+      model: 'm-b',
+    })
+  })
+
+  it('stamps the failed link route on a single-link chain outcome', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['chain-a'], new FailingAdapter(new LlmError('a is down', 'RATE_LIMIT')))
+    provideChains(ctx, id => id === 'solo-link' ? group('solo-link', ['chain-a', 'm-a']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'solo-link',
+      messages: [],
+    }))
+
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { message: 'a is down', code: 'RATE_LIMIT', provider: 'chain-a', model: 'm-a' },
+      },
+    })
+  })
+
+  it('writes one durable attempt record per escalated failure, not per chunk', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    ctx.llm.registerAdapter(['chain-a'], new FailingAdapter(new LlmError('a is down', 'RATE_LIMIT')))
+    ctx.llm.registerAdapter(['chain-b'], new FailingAdapter(new LlmError('b is down', 'TRANSPORT')))
+    let recordsWhenAnswering = -1
+    const answering = new class extends LlmAdapter {
+      override async * stream(): AsyncIterable<StreamChunk> {
+        // Both dead attempts are durable before the link that answers starts.
+        recordsWhenAnswering = records.length
+        yield* SCRIPT
+      }
+    }()
+    ctx.llm.registerAdapter(['chain-c'], answering)
+    provideChains(ctx, id => id === 'three'
+      ? group('three', ['chain-a', 'm-a'], ['chain-b', 'm-b'], ['chain-c', 'm-c'])
+      : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'three',
+      messages: [],
+    })))
+
+    expect(chunks).toEqual(answeredBy('chain-c', 'm-c'))
+    expect(recordsWhenAnswering).toBe(2)
+    expect(records.map(record => attemptRecord(record))).toEqual([
+      {
+        provider: 'chain-a',
+        model: 'm-a',
+        code: 'RATE_LIMIT',
+        message: 'a is down',
+        chain: 'three',
+        link: 1,
+        next: { provider: 'chain-b', model: 'm-b' },
+      },
+      {
+        provider: 'chain-b',
+        model: 'm-b',
+        code: 'TRANSPORT',
+        message: 'b is down',
+        chain: 'three',
+        link: 2,
+        next: { provider: 'chain-c', model: 'm-c' },
+      },
+    ])
+  })
+
+  it('writes no attempt record for a committed generation that then failed', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    const committed = new class extends LlmAdapter {
+      override async * stream(): AsyncIterable<StreamChunk> {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'partial' }
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { message: 'died mid-answer', code: 'SERVER' } },
+        }
+      }
+    }()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], committed)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'committed' ? group('committed', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'committed',
+      messages: [],
+    })))
+
+    // The generation committed before it failed: the chain never escalates,
+    // so nothing durable names it as an attempt left behind.
+    expect(records).toHaveLength(0)
+    expect(answering.calls).toHaveLength(0)
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { message: 'died mid-answer', code: 'SERVER', provider: 'chain-a', model: 'm-a' },
+      },
+    })
+  })
+
+  it('names the route on a terminal single-model failure without a chain', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    ctx.llm.registerAdapter(['solo'], new FailingAdapter(new LlmError('solo is down', 'SERVER')))
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({ provider: 'solo', model: 'm', messages: [] })))
+
+    // No chain, no escalation, and no durable record — but the common
+    // single-model failure still names the provider/model that failed.
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { message: 'solo is down', code: 'SERVER', provider: 'solo', model: 'm' },
+      },
+    })
+    expect(records).toHaveLength(0)
   })
 })

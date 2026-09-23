@@ -1729,6 +1729,8 @@ describe('agent loop', () => {
     expect((errors[0] as LlmError).failure).toEqual({
       message: 'MockAdapter: script exhausted',
       code: 'UNKNOWN',
+      provider: 'mock',
+      model: 'mock',
     })
     expect(reasons[0]).toMatchObject({ kind: 'error' })
     // The durable failure and live relay describe the same failed turn.

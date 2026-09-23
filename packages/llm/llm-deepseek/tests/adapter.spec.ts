@@ -1304,7 +1304,13 @@ describe('DeepSeekAdapter against a mock server', () => {
     const result = await assemble(ctx,{ model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toEqual({
       kind: 'error',
-      failure: { message: `failed with ${status}`, code, status },
+      failure: {
+        message: `failed with ${status}`,
+        code,
+        status,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+      },
     })
   })
 
@@ -1359,6 +1365,8 @@ describe('DeepSeekAdapter against a mock server', () => {
         status: 429,
         providerRetryAfterMs: 2_000,
         requestId: ProviderRequestId('req-429'),
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
       },
     })
   })
@@ -1386,6 +1394,8 @@ describe('DeepSeekAdapter against a mock server', () => {
           status: 503,
           providerRetryAfterMs: 3_000,
           requestId: ProviderRequestId('deepseek-503'),
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
         },
       })
     } finally {
@@ -1411,7 +1421,13 @@ describe('DeepSeekAdapter against a mock server', () => {
       const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
       expect(result.finish).toEqual({
         kind: 'error',
-        failure: { message: 'retry later', code: 'RATE_LIMIT', status: 429 },
+        failure: {
+          message: 'retry later',
+          code: 'RATE_LIMIT',
+          status: 429,
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
+        },
       })
     }
   })

@@ -2,7 +2,8 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LLM_ATTEMPT_FAILED_EVENT, LlmError } from '@deepseek-ai/dsh-llm'
+import type { AttemptRecordSink } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { resolveProfiles } from '../src/config.ts'
 import { PoolEngine } from '../src/pool.ts'
@@ -35,6 +36,7 @@ function pooledAdapter(
   providers: Record<string, unknown>,
   engine: PoolEngine,
   credentials: Record<string, string | undefined>,
+  attemptRecords?: () => AttemptRecordSink | undefined,
 ): PiAiAdapter {
   return new PiAiAdapter({
     profiles: () => resolveProfiles(providers as Parameters<typeof resolveProfiles>[0]),
@@ -42,16 +44,18 @@ function pooledAdapter(
     pool: engine,
     resolveCredential: async reference => credentials[reference],
     log: () => {},
+    ...attemptRecords === undefined ? {} : { attemptRecords },
     auth: memoryAuth(),
   })
 }
 
-async function collect(adapter: PiAiAdapter, baseURL: string): Promise<{ chunks: unknown[] }> {
+async function collect(adapter: PiAiAdapter, baseURL: string, sessionId?: string): Promise<{ chunks: unknown[] }> {
   const chunks: unknown[] = []
   const stream = adapter.stream({
     provider: 'deepseek',
     model: 'deepseek-v4-flash',
     messages: [],
+    ...sessionId === undefined ? {} : { sessionId: sessionId as never },
   })
   for await (const chunk of stream) chunks.push(chunk)
   void baseURL
@@ -83,6 +87,48 @@ describe('PiAiAdapter credential pools', () => {
     // The failed identity is cooling; the served one is clean.
     expect(engine.cooldownRemaining('deepseek', 'exhausted', 'deepseek-v4-flash')).toBeGreaterThan(0)
     expect(engine.cooldownRemaining('deepseek', 'healthy', 'deepseek-v4-flash')).toBe(0)
+  })
+
+  it('leaves one durable attempt record per rotation, naming the next identity', async () => {
+    const server = await mockServer([
+      { status: 429, body: JSON.stringify({ error: { message: 'Rate limit exceeded. Resets in 46min.' } }) },
+      { events: textEvents },
+    ])
+    const engine = await engineOf()
+    const records: { type: string; data: unknown; opts: unknown }[] = []
+    const lookedUp: string[] = []
+    const adapter = pooledAdapter(POOLED_PROVIDERS(server.url), engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    }, () => ({
+      get: (id: string) => {
+        lookedUp.push(id)
+        return {
+          append: (type: string, data: unknown, opts: unknown) => {
+            records.push({ type, data, opts })
+          },
+        }
+      },
+    }))
+
+    await collect(adapter, server.url, 'pool-session')
+
+    // One record for the one rotation, durable as `llm/attempt-failed`.
+    expect(records).toEqual([{
+      type: LLM_ATTEMPT_FAILED_EVENT,
+      data: {
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        identity: 'exhausted',
+        code: 'RATE_LIMIT',
+        message: '429: {"message":"Rate limit exceeded. Resets in 46min."}',
+        next: { identity: 'healthy' },
+      },
+      opts: { ignorable: true },
+    }])
+    // Identity ids are durable routing facts; credential values never are.
+    expect(lookedUp).toEqual(['pool-session'])
+    expect(JSON.stringify(records)).not.toContain('key-a')
   })
 
   it('surfaces transient gateway model outages without burning the pool', async () => {

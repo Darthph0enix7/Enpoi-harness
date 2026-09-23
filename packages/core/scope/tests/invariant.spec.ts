@@ -65,6 +65,7 @@ describe('scoped-dispatch invariants', () => {
           turn: 1,
           step: 1,
           provider: 'p',
+          model: 'm',
           failure: { message: 'request', code: 'UNKNOWN' },
           retryPolicy: undefined,
           signal,

@@ -319,11 +319,13 @@ describe('LlmRuntime', () => {
     }(SCRIPT))
 
     const chunks = await collect(prepared.stream({ ...prepared.config, messages: [] }))
+    // The failure names the route the prepared call dispatched on, even though
+    // the replacement adapter now owns that route.
     expect(chunks.at(-1)).toEqual({
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: 'old route failed', code: 'AUTH' },
+        failure: { message: 'old route failed', code: 'AUTH', provider: 'route', model: 'model' },
       },
     })
     expect(prepared.retryPolicy).toBe(oldPolicy)
@@ -385,7 +387,12 @@ describe('LlmRuntime', () => {
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: `${field} getter failed`, code: 'RESULT_GETTER_FAILED' },
+        failure: {
+          message: `${field} getter failed`,
+          code: 'RESULT_GETTER_FAILED',
+          provider: 'test',
+          model: 'test',
+        },
       },
     })
     expect(cleanupLookups).toBe(0)
@@ -413,7 +420,12 @@ describe('LlmRuntime', () => {
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: `${boundary} failed`, code: 'BOUNDARY_FAILED' },
+        failure: {
+          message: `${boundary} failed`,
+          code: 'BOUNDARY_FAILED',
+          provider: 'test',
+          model: 'test',
+        },
       },
     })
   })
@@ -444,6 +456,8 @@ describe('LlmRuntime', () => {
           status: 429,
           providerRetryAfterMs: 1_500,
           requestId: ProviderRequestId('req-7'),
+          provider: 'test',
+          model: 'test',
         },
       },
     })
@@ -477,7 +491,7 @@ describe('LlmRuntime', () => {
       type: 'finish',
       reason: {
         kind: 'error',
-        failure: { message: 'plain provider failure', code: 'UNKNOWN' },
+        failure: { message: 'plain provider failure', code: 'UNKNOWN', provider: 'test', model: 'test' },
       },
     })
   })
@@ -949,6 +963,9 @@ describe('LlmRuntime', () => {
         failure: {
           message: 'prepared LLM call config changed before adapter dispatch',
           code: 'INVALID_PREPARED_CALL',
+          // The drifted request's own route, which is what the refused dispatch named.
+          provider: 'route',
+          model: 'other',
         },
       },
     })
@@ -1326,9 +1343,18 @@ describe('LlmRuntime', () => {
     expect(() => new LlmError('busy', 'RATE_LIMIT', { providerRetryAfterMs: Number.NaN }))
       .toThrow(/providerRetryAfterMs/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: ProviderRequestId('') })).toThrow(/requestId/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { provider: '' })).toThrow(/provider/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { model: '' })).toThrow(/model/)
     expect(() => new LlmError(1 as never, 'RATE_LIMIT')).toThrow(/message/)
     expect(() => new LlmError('busy', 1 as never)).toThrow(/code/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: 1 as never })).toThrow(/requestId/)
+  })
+
+  it('keeps route facts when a terminal failure is re-wrapped as an LlmError', () => {
+    // The agent loop re-wraps a finish failure to keep its facts for the turn
+    // ending; the route the attempt ran on must survive that wrap.
+    const failure = { message: 'link a died', code: 'SERVER', provider: 'chain-a', model: 'm-a' }
+    expect(new LlmError(failure.message, failure.code, failure).failure).toEqual(failure)
   })
 
   it('LlmError extends the shared HarnessError base', async () => {

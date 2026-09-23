@@ -35,9 +35,11 @@ import type { ResolvedRetryPolicy } from './retry-policy.ts'
 import type { ProviderRequestId, ReasoningEffortId } from './brand.ts'
 import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
-import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
+import { HarnessError, INVALID_CREDENTIAL_CODE, STREAM_CLOSED_CODE } from './error.ts'
+import { STREAM_CUT_CODE } from './assembler.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
+import { writeSessionWireCapture } from './wire-sessions.ts'
 import {
   contentHasFile, contentHasImage, fileHandleText, projectFilesToText, projectImagesForTextModel,
 } from './content.ts'
@@ -52,6 +54,7 @@ export * from './content.ts'
 export * from './assistant-stream.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
+export * from './wire-sessions.ts'
 export { BlockAssembler, STREAM_CUT_CODE } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
@@ -87,6 +90,10 @@ export interface LlmErrorOptions extends ErrorOptions {
   providerRetryAfterMs?: number
   /** Non-empty opaque provider request id. */
   requestId?: ProviderRequestId
+  /** Registered provider route the failure came from, when the raiser knows it. */
+  provider?: string
+  /** Provider-owned model id the failure came from, when the raiser knows it. */
+  model?: string
   /** Positive count of additional oldest retained image occurrences to offload; only with `IMAGE_OFFLOAD_REQUIRED`. */
   offloadImages?: number
 }
@@ -119,6 +126,14 @@ export class LlmError extends HarnessError {
       && (typeof options.requestId !== 'string' || options.requestId.length === 0)) {
       throw new Error('LlmError requestId must be a non-empty string')
     }
+    if (options?.provider !== undefined
+      && (typeof options.provider !== 'string' || options.provider.length === 0)) {
+      throw new Error('LlmError provider must be a non-empty string')
+    }
+    if (options?.model !== undefined
+      && (typeof options.model !== 'string' || options.model.length === 0)) {
+      throw new Error('LlmError model must be a non-empty string')
+    }
     super(message, code, options)
     this.name = 'LlmError'
     this.failure = Object.freeze({
@@ -127,6 +142,8 @@ export class LlmError extends HarnessError {
       ...options?.status === undefined ? {} : { status: options.status },
       ...options?.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: options.providerRetryAfterMs },
       ...options?.requestId === undefined ? {} : { requestId: options.requestId },
+      ...options?.provider === undefined ? {} : { provider: options.provider },
+      ...options?.model === undefined ? {} : { model: options.model },
       ...options?.offloadImages === undefined ? {} : { offloadImages: options.offloadImages },
     })
   }
@@ -184,10 +201,13 @@ const CHAIN_BUDGET_MS = 60_000
  * different provider can survive (exhausted key pool, model outage, auth,
  * quota, a route with no adapter, a route whose model is not configured).
  * FATAL codes (bad request, schema, context overflow, image offload) are
- * absent on purpose: they never rotate.
+ * absent on purpose: they never rotate. A provider stream that ended without
+ * a terminal event is the same provider-side truncation as a cut, so it
+ * rotates even when the link's own policy does not list it.
  */
 const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
   'EMPTY_RESPONSE',
+  STREAM_CLOSED_CODE,
   'RATE_LIMIT',
   'SERVER',
   'TIMEOUT',
@@ -203,6 +223,121 @@ const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
 
 /** Terminal failure code for a chain whose links all failed. */
 export const MODEL_CHAIN_EXHAUSTED_CODE = 'MODEL_CHAIN_EXHAUSTED'
+
+/**
+ * Durable record appended when a request attempt fails before commit and is
+ * left behind: a chain escalates to its next link, or an adapter's credential
+ * pool rotates to its next identity. One record per failed attempt, never one
+ * per chunk, and never for a committed generation. The append carries the
+ * envelope's `ignorable` marker, so a reader that does not know the type skips
+ * it.
+ */
+export const LLM_ATTEMPT_FAILED_EVENT = 'llm/attempt-failed'
+
+/** Facts every {@link LLM_ATTEMPT_FAILED_EVENT} record carries. */
+export interface LlmAttemptFailedFacts {
+  /** Registered provider route the failed attempt ran on. */
+  readonly provider: string
+  /** Model id the failed attempt ran on. */
+  readonly model: string
+  /** Stable provider-neutral failure code. */
+  readonly code: string
+  /** Human-readable provider or transport failure. */
+  readonly message: string
+  /** HTTP status returned by the provider, when available. */
+  readonly status?: number
+  /** Opaque provider-issued request identifier, when available. */
+  readonly requestId?: ProviderRequestId
+}
+
+/** Record of one chain link that failed before commit. */
+export interface LlmChainAttemptFailedEventData extends LlmAttemptFailedFacts {
+  /** Model-group id the attempt ran under. */
+  readonly chain: string
+  /** 1-based position of the failed link in the group. */
+  readonly link: number
+  /** Link the chain escalates to after this record. */
+  readonly next: { readonly provider: string; readonly model: string }
+}
+
+/**
+ * Record of one credential-pool identity rotation caused by a failure before
+ * commit. Identity ids are durable routing facts; the credential value never
+ * enters the record. At most one record is appended per rotation, bounded by
+ * the pool's own attempt cap.
+ */
+export interface LlmPoolAttemptFailedEventData extends LlmAttemptFailedFacts {
+  /** Pool identity id whose attempt failed. */
+  readonly identity: string
+  /** Identity the pool rotates to after this record. */
+  readonly next: { readonly identity: string }
+}
+
+/** Payload of one {@link LLM_ATTEMPT_FAILED_EVENT} record. */
+export type LlmAttemptFailedEventData = LlmChainAttemptFailedEventData | LlmPoolAttemptFailedEventData
+
+/** One resolved provider/model route. */
+interface ModelRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/**
+ * The route one caller-visible attempt runs on: the single source for
+ * provenance and failure facts. A chain link and a whole request differ only
+ * in extra fields, so both resolve through this one projection.
+ */
+function linkRoute(source: { readonly provider: string; readonly model: string }): ModelRoute {
+  return { provider: source.provider, model: source.model }
+}
+
+/**
+ * Fill one failure's route facts from the seam's own resolution so a caller
+ * can act on a failure that names its route. An adapter that already named its
+ * route keeps it; only missing fields are added.
+ */
+function withRoute(failure: LlmFailure, route: ModelRoute): LlmFailure {
+  if (failure.provider !== undefined && failure.model !== undefined) return failure
+  return Object.freeze({
+    ...failure,
+    ...failure.provider === undefined ? { provider: route.provider } : {},
+    ...failure.model === undefined ? { model: route.model } : {},
+  })
+}
+
+/**
+ * Structural face of the session store: this package cannot import the
+ * session package, which already depends on it. Only the one lookup and
+ * append an attempt record needs are named. Adapters whose own pre-commit
+ * retries leave an attempt behind outside the seam's chain loop (a credential
+ * pool rotating identities) receive this face and write through
+ * {@link appendAttemptFailedRecord}.
+ */
+export interface AttemptRecordSink {
+  get(id: string): {
+    append(type: string, data: unknown, opts?: { ignorable?: true }): unknown
+  } | undefined
+}
+
+/**
+ * Append one {@link LLM_ATTEMPT_FAILED_EVENT} record best-effort. A deployment
+ * without a session store, a request without a session identity, or a refused
+ * append never changes the request's outcome.
+ * @param sessions - session-store structural face, when the composition mounts one.
+ * @param sessionId - session to append the record to.
+ * @param record - failed attempt and the attempt it makes way for.
+ */
+export function appendAttemptFailedRecord(
+  sessions: AttemptRecordSink | undefined,
+  sessionId: string,
+  record: LlmAttemptFailedEventData,
+): void {
+  try {
+    sessions?.get(sessionId)?.append(LLM_ATTEMPT_FAILED_EVENT, record, { ignorable: true })
+  } catch (_unwritableAttemptRecord) {
+    // Best-effort diagnostics never break a request.
+  }
+}
 
 /** Chain ids already warned about, so fail-open writes one stderr line per id. */
 const warnedChainIds = new Set<string>()
@@ -272,10 +407,10 @@ function chainFailureChunk(
     type: 'finish',
     reason: {
       kind: 'error',
-      failure: {
+      failure: withRoute({
         message: `model chain "${chainId}" failed after ${attempted.length} links: ${named}`,
         code: MODEL_CHAIN_EXHAUSTED_CODE,
-      },
+      }, linkRoute(last.link)),
     },
   }
 }
@@ -1262,7 +1397,7 @@ export class LlmRuntime extends TypertRemoteService {
       const stream = dispatch(this.forAdapter(projectedOptions, adapter))
       iterator = stream[Symbol.asyncIterator]()
     } catch (error: unknown) {
-      yield adapterFailureChunk(error, options.signal)
+      yield adapterFailureChunk(error, linkRoute(options), options.signal)
       return
     }
 
@@ -1277,7 +1412,7 @@ export class LlmRuntime extends TypertRemoteService {
             : { done: false, value: next.value }
         } catch (error: unknown) {
           completed = true
-          yield adapterFailureChunk(error, options.signal)
+          yield adapterFailureChunk(error, linkRoute(options), options.signal)
           return
         }
         if (item.done) {
@@ -1415,13 +1550,19 @@ export class LlmRuntime extends TypertRemoteService {
       const outcome = linkStep.done === true ? linkStep.value : undefined
       if (outcome === undefined) return
       if (outcome.kind === 'answered') return
-      attempted.push({ link, failure: outcome.failure })
+      const failure = withRoute(outcome.failure, linkRoute(link))
+      attempted.push({ link, failure })
       const next = links[index + 1]
       if (!outcome.retryable || next === undefined || budgetEnd - Date.now() <= 0) {
         yield chainFailureChunk(chain.id, attempted)
         return
       }
-      writeChainEscalation(chain.id, index + 1, link, index + 2, next, outcome.failure)
+      // Durable before the escalation: a debugger or peer can see the attempt
+      // that failed even though only the answering link's chunks reach the
+      // consumer. The record IS the escalation audit; the stderr line stays
+      // for operators tailing a log.
+      this.appendAttemptFailure(options, chain.id, index + 1, link, failure, next)
+      writeChainEscalation(chain.id, index + 1, link, index + 2, next, failure)
     }
     yield chainFailureChunk(chain.id, attempted)
   }
@@ -1458,11 +1599,16 @@ export class LlmRuntime extends TypertRemoteService {
             yield this.answeringFinish(chunk, options, link)
             return { kind: 'answered' }
           }
+          // The link that ran names the failure, whether the chain leaves it
+          // behind or the consumer sees it.
+          const failure = withRoute(chunk.reason.failure, linkRoute(link))
           const retryable = caller?.aborted !== true
             && !committed
-            && (chunk.reason.kind === 'aborted' || this.escalates(link, chunk.reason.failure))
-          if (retryable) return { kind: 'failed', failure: chunk.reason.failure, retryable: true }
-          yield chunk
+            && (chunk.reason.kind === 'aborted' || this.escalates(link, failure))
+          if (retryable) return { kind: 'failed', failure, retryable: true }
+          yield failure === chunk.reason.failure
+            ? chunk
+            : { ...chunk, reason: { ...chunk.reason, failure } }
           return { kind: 'answered' }
         }
         if (chunk.type !== 'usage') {
@@ -1475,10 +1621,10 @@ export class LlmRuntime extends TypertRemoteService {
       if (!committed && caller?.aborted !== true) {
         return {
           kind: 'failed',
-          failure: {
+          failure: withRoute({
             message: `link ${link.provider}/${link.model} ended without a terminal finish`,
-            code: 'STREAM_CUT',
-          },
+            code: STREAM_CUT_CODE,
+          }, linkRoute(link)),
           retryable: true,
         }
       }
@@ -1502,7 +1648,38 @@ export class LlmRuntime extends TypertRemoteService {
     link: ModelChainLink,
   ): StreamChunk {
     if (link.provider === options.provider && link.model === options.model) return chunk
-    return { ...chunk, answeringLink: Object.freeze({ provider: link.provider, model: link.model }) }
+    return { ...chunk, answeringLink: Object.freeze(linkRoute(link)) }
+  }
+
+  /**
+   * Append one durable record for a failed pre-commit attempt the chain is
+   * leaving behind, before the next link starts. Best-effort: a deployment
+   * without a session store, a request without a session identity, or a
+   * refused append never changes the request's outcome.
+   */
+  private appendAttemptFailure(
+    options: GenerateOptions,
+    chainId: string,
+    linkIndex: number,
+    link: ModelChainLink,
+    failure: LlmFailure,
+    next: ModelChainLink,
+  ): void {
+    const sessionId = options.sessionId
+    if (sessionId === undefined) return
+    const route = linkRoute(link)
+    const record: LlmAttemptFailedEventData = Object.freeze({
+      provider: route.provider,
+      model: route.model,
+      code: failure.code,
+      message: failure.message,
+      chain: chainId,
+      link: linkIndex,
+      next: Object.freeze(linkRoute(next)),
+      ...failure.status === undefined ? {} : { status: failure.status },
+      ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+    })
+    appendAttemptFailedRecord(this.ctx.get('sessions') as AttemptRecordSink | undefined, sessionId, record)
   }
 
   /**
@@ -1534,9 +1711,18 @@ export class LlmRuntime extends TypertRemoteService {
   }
 }
 
-/** Convert one adapter throw into the stream protocol's terminal outcome. */
-function adapterFailureChunk(error: unknown, signal?: AbortSignal): StreamChunk {
-  const failure = normalizeLlmFailure(error)
+/**
+ * Convert one adapter throw into the stream protocol's terminal outcome on the
+ * route the attempt ran on. Every failure a caller can observe names its
+ * provider and model, so a plain single-model request fails the same legible
+ * way a chain attempt does.
+ * @param error - value thrown by the adapter boundary.
+ * @param route - the resolved route this attempt dispatched on.
+ * @param signal - the request signal, classified into the aborted outcome.
+ * @returns the terminal finish chunk carrying the route-stamped failure.
+ */
+function adapterFailureChunk(error: unknown, route: ModelRoute, signal?: AbortSignal): StreamChunk {
+  const failure = withRoute(normalizeLlmFailure(error), route)
   return {
     type: 'finish',
     reason: signal?.aborted || failure.code === 'ABORTED'
@@ -1569,6 +1755,9 @@ export default LlmRuntime
  * `DSH_WIRE_LOG`) so an operator can inspect byte-for-byte what the agent
  * actually sent — and prove system-prompt stability across model switches
  * (only `config` should change; `system`/`tools` must stay identical).
+ * Main calls additionally refresh `~/.dsh/logs/wire-sessions/<sessionId>.json`
+ * so a Host API can expose one Session's most recent request read-only; see
+ * {@link writeSessionWireCapture}.
  * Fire-and-forget: a write failure must never affect the request.
  */
 // Serialized, not merely tracked: a chain dispatches several requests in
@@ -1617,6 +1806,9 @@ async function writeWireCapture(options: GenerateOptions, wireLogPath: string | 
     await writeFile(join(root, `wire-${Date.now()}.json`), serialized).then(undefined, () => undefined)
     if (options.purpose === undefined) {
       await writeFile(wireLogPath ?? join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
+      // Per-Session view beside the global files: one bounded, atomically
+      // replaced capture holding the most recent MAIN request of that Session.
+      await writeSessionWireCapture(root, options)
     }
   } catch {
     // Best-effort diagnostics never break a request.

@@ -99,28 +99,32 @@ export class SessionObservationReader {
     options: SessionObservationOptions = {},
   ): Promise<SessionObservation> {
     const { signal, projectionMode = 'all' } = options
+    // The property proxy is topology-sensitive; the strict store read is the
+    // documented accessor for scopes whose provider sits elsewhere.
+    const sessions = this.ctx.get('sessions') as typeof this.ctx.sessions | undefined
+    if (sessions === undefined) throw notFound(sessionId)
     for (;;) {
       throwIfObservationAborted(signal)
-      const live = this.ctx.sessions.get(sessionId)
+      const live = sessions.get(sessionId)
       if (live !== undefined) return this.live(live, projectionMode)
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
 
       const snapshot = await this.statSource(persistence, sessionId, signal)
-      const attachedDuringStat = this.ctx.sessions.get(sessionId)
+      const attachedDuringStat = sessions.get(sessionId)
       if (attachedDuringStat !== undefined) return this.live(attachedDuringStat, projectionMode)
       let entry = this.cachedEntry(persistence.identity, sessionId, snapshot.revision)
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
-        const attached = this.ctx.sessions.get(sessionId)
+        const attached = sessions.get(sessionId)
         if (attached !== undefined) return this.live(attached, projectionMode)
         // The handle marks persisted events as adoptable; synthetic closers
         // are owned by this read, so the combined seed needs no copy.
         const seed = loaded.events
         let session: Session
         try {
-          session = this.ctx.sessions.prepare(sessionId, {
+          session = sessions.prepare(sessionId, {
             seed,
             meta: structuredClone(loaded.header),
             inheritedEventCount: loaded.inheritedEventCount,
@@ -130,7 +134,7 @@ export class SessionObservationReader {
           // The store rejects an id with a live owner: that owner is the
           // fresher source, so retry the live path. Any other rejection means
           // the stored log failed restore validation.
-          if (this.ctx.sessions.get(sessionId) !== undefined) continue
+          if (sessions.get(sessionId) !== undefined) continue
           throw new SessionQueryError(
             `stored session "${sessionId}" is corrupt: ${errorMessage(error)}`,
             'SESSION_QUERY_CORRUPT_SESSION',

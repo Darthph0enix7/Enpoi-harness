@@ -38,6 +38,7 @@ import type {
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
 import {
+  appendAttemptFailedRecord,
   attributionHeaders,
   contentHasImage,
   LlmAdapter,
@@ -45,11 +46,13 @@ import {
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
+  AttemptRecordSink,
   GenerateOptions,
   ImageAttachmentAccess,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  LlmFailure,
   PreparedAdapterCall,
   ReasoningEffortId as ReasoningEffortIdType,
   ResolvedRetryPolicy,
@@ -102,6 +105,13 @@ export interface PiAiAdapterOptions {
   resolveCredential?: (credentialRef: string) => Promise<string | undefined>
   /** Diagnostic sink for pool decisions (skips, rotations). */
   log?: (message: string) => void
+  /**
+   * Session store the adapter appends one durable `llm/attempt-failed` record
+   * to per pre-commit pool-identity rotation. Resolved per rotation; absent (or
+   * a request without a session identity) leaves rotations unrecorded, as
+   * before. Identity ids are recorded; credential values never are.
+   */
+  attemptRecords?: () => AttemptRecordSink | undefined
   /**
    * Pool attempt wall-clock budget in milliseconds; defaults to 30_000.
    * Tests inject a smaller budget to exercise deadline paths.
@@ -484,7 +494,7 @@ export class PiAiAdapter extends LlmAdapter {
           const iterator = makeAttempt(key, attemptSignal)
           const buffered: StreamChunk[] = []
           let committed = false
-          let failureMessage: string | undefined
+          let failure: LlmFailure | undefined
           try {
             while (true) {
               const result = await watchdog.next(iterator)
@@ -498,7 +508,7 @@ export class PiAiAdapter extends LlmAdapter {
                   continue
                 }
                 if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
-                  failureMessage = chunk.reason.failure.message
+                  failure = chunk.reason.failure
                   break
                 }
                 committed = true
@@ -531,9 +541,9 @@ export class PiAiAdapter extends LlmAdapter {
             }
           }
           if (committed) return
-          const failureClass = classifyFailure(failureMessage ?? '')
-          engine.recordFailure(options.provider, identity.id, options.model, failureClass, failureMessage ?? 'unknown failure')
-          lastFailure = failureMessage ?? lastFailure
+          const failureClass = classifyFailure(failure?.message ?? '')
+          engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure?.message ?? 'unknown failure')
+          lastFailure = failure?.message ?? lastFailure
           if (!ROTATING_CLASSES.has(failureClass)) {
             // GATEWAY_OUTAGE / INVALID_REQUEST: rotating cannot help — every
             // identity hits the same gateway with the same payload.
@@ -542,10 +552,27 @@ export class PiAiAdapter extends LlmAdapter {
               failureClass === 'GATEWAY_OUTAGE' ? 'PROVIDER_MODEL_OUTAGE' : 'INVALID_REQUEST',
             )
           }
+          // A rotation the pool will actually make: another resolvable identity
+          // remains and the attempt budget has not elapsed. The record is
+          // durable before the next identity starts, so a caller sees the
+          // rotation even when a later attempt answers.
+          const nextIdentity = attempts < maxAttempts ? resolvableOrder[attempts] : undefined
+          const rotating = nextIdentity !== undefined && now() <= deadline
+          if (rotating && options.sessionId !== undefined) {
+            appendAttemptFailedRecord(this.config.attemptRecords?.(), options.sessionId, Object.freeze({
+              provider: options.provider,
+              model: options.model,
+              identity: identity.id,
+              code: failure?.code ?? 'UNKNOWN',
+              message: failure?.message ?? 'the attempt ended without a terminal failure event',
+              next: Object.freeze({ identity: nextIdentity.id }),
+              ...failure?.status === undefined ? {} : { status: failure.status },
+            }))
+          }
           attemptController.abort('llm-pi-ai pool rotated to the next identity')
           this.config.log?.(
             `llm-pi-ai: provider "${options.provider}" identity "${identity.id}" failed (${failureClass});`
-            + `${attempts < maxAttempts ? ' rotating' : ' no attempts left'}`,
+            + `${rotating ? ' rotating' : ' no attempts left'}`,
           )
           if (failureClass === 'CAPACITY' && attempts < maxAttempts) {
             const peekOrder = engine.orderFor(options.provider, profile.pool.identities, options.model, profile.pool.strategy, true)

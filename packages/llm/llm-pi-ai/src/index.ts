@@ -61,7 +61,12 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
-import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
+import type {
+  AdapterRegistrationHandle,
+  AttemptRecordSink,
+  DirectoryRegistrationHandle,
+  LlmConfigurableProvider,
+} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-settings'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
@@ -217,6 +222,9 @@ export function apply(ctx: Context, config: Config): void {
     pool: poolEngine,
     resolveCredential,
     log: message => ctx.logger.warn(message),
+    // Resolved per rotation: the session store may mount after this plugin,
+    // and a composition without one simply leaves rotations unrecorded.
+    attemptRecords: () => ctx.get('sessions') as AttemptRecordSink | undefined,
     auth,
     resolveAttachments: () => ctx.get('attachments'),
     resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
