@@ -22,6 +22,39 @@ function streamText(output: CollectedOutput): string {
   return `${output.text}\n[output truncated; full output: ${output.spillPath ?? '(unavailable)'}]`
 }
 
+/**
+ * The command outcome a completed `pwsh` result carries as tool-owned
+ * `tool/result` metadata (`meta`), so a harvester, peer agent, or UI reads the
+ * exit structurally instead of parsing the `[exit code: N]` marker out of the
+ * rendered text. `isError` keeps its tool-failure meaning: a non-zero exit is a
+ * command failure reported here, not a failed tool call.
+ */
+export type PwshOutcomeMeta = {
+  /** The process exit code; `null` when a signal terminated the process before it exited. */
+  exitCode: number | null
+  /** The terminating signal; present only when a signal killed the process. */
+  signal?: string
+  /** Present only when the executor's timeout killed the command (which may still exit 0 after trapping the signal). */
+  timedOut?: true
+}
+
+/**
+ * Project one canonical `pwsh` output value into {@link PwshOutcomeMeta}. A
+ * background acknowledgement has no process exit yet, so it projects `{}`.
+ * @param value - the canonical output value: a foreground run or a background handle.
+ * @returns `{ exitCode, signal?, timedOut? }` for a foreground run; `{}` for a background handle.
+ */
+export function execOutcomeMeta(
+  value: { kind: string; exitCode: number | null; signal: string | null; timedOut: boolean },
+): PwshOutcomeMeta | Record<string, never> {
+  if (value.kind !== 'foreground') return {}
+  return {
+    exitCode: value.exitCode,
+    ...value.signal !== null ? { signal: value.signal } : {},
+    ...value.timedOut ? { timedOut: true as const } : {},
+  }
+}
+
 /** The renderable foreground result shape (the schema-derived value, no `kind`). */
 export interface RenderablePwshResult {
   exitCode: number | null

@@ -24,7 +24,7 @@ import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { DSH_ENV_PREFIX } from '@deepseek-ai/dsh-shell'
 import type { ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { processJob } from './background.ts'
-import { parseExitStatus, renderProcessRead, renderResult } from './render.ts'
+import { execOutcomeMeta, parseExitStatus, renderProcessRead, renderResult } from './render.ts'
 
 export const name = 'tool-bash'
 export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
@@ -325,6 +325,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? `started background job ${value.jobId}`
           : renderResult(value as { kind: 'foreground' } & ShellRunResult, escalationModes),
       }],
+      // Structured command outcome for harvesters and UI: `{ exitCode, signal?, timedOut? }`.
+      presentationMeta: (_args, value) => execOutcomeMeta(value as { kind: string } & ShellRunResult),
     },
     async execute(args: BashToolArgs, exec) {
       validateBashArgs(args)

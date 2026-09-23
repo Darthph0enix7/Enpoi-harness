@@ -14,11 +14,13 @@
     "src/catalog.ts",
     "src/commands.ts",
     "src/control.ts",
+    "src/execution-state.ts",
     "src/file-references.ts",
     "src/history.ts",
     "src/list.ts",
     "src/media-references.ts",
     "src/model-selection-projection.ts",
+    "src/request-snapshot.ts",
     "src/skill-catalog.ts"
   ],
   "references": [

@@ -82,6 +82,9 @@ export interface OrchestrationSettingsView {
 const SHIPPED_ALLOW_TOOLS: readonly string[] = [
   'read', 'glob', 'grep', 'web_search', 'web_fetch',
   'subagent', 'task', 'workflow', 'job_output', 'job_list', 'job_kill',
+  // Delivery declaration only: no filesystem or network effect, and the
+  // unattended peer/driver runs must not stall on an unconfigured ask.
+  'present',
 ]
 
 /** Shipped code defaults: destructive-but-expected tools ask. */

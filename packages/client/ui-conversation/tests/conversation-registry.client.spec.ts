@@ -98,6 +98,7 @@ function fakeSessions(ctx: Context): { sessions: ISessions; binding: SessionBind
     refresh: () => Promise.reject(new Error('unused fake Sessions operation')),
     loadMore: () => Promise.reject(new Error('unused fake Sessions operation')),
     search: () => Promise.reject(new Error('unused fake Sessions operation')),
+    requestSnapshot: () => Promise.reject(new Error('unused fake Sessions operation')),
     fork: () => Promise.reject(new Error('unused fake Sessions operation')),
     selectModel: () => Promise.reject(new Error('unused fake Sessions operation')),
     revert: () => Promise.reject(new Error('unused fake Sessions operation')),

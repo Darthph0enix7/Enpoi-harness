@@ -133,7 +133,20 @@ export interface Config {
    * prompting (the deterministic CI/unattended stance).
    */
   readonly policy?: ApprovalPolicy
+  /**
+   * How long a dispatched ask may stay pending before it resolves the
+   * fail-closed `'unavailable'` outcome (default {@link DEFAULT_ANSWER_TIMEOUT_MS}).
+   * A registered answerer that never settles — an attached client that walked
+   * away — would otherwise park the turn indefinitely. `0` disables the bound.
+   */
+  readonly answerTimeoutMs?: number
 }
+
+/**
+ * Default bound on a pending ask: long enough for a human to notice and answer,
+ * short enough that an unattended turn cannot park for hours.
+ */
+export const DEFAULT_ANSWER_TIMEOUT_MS = 15 * 60 * 1000
 
 /**
  * Approval service that applies session policy before answerers and logs every
@@ -283,19 +296,46 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    if (signal === undefined) return answer
+    const bounded = this.withAnswerTimeout(answer)
+    if (signal === undefined) return await bounded
     return await new Promise<ApprovalOutcome>((resolve) => {
       const onAbort = () => {
         signal.removeEventListener('abort', onAbort)
         resolve('cancelled')
       }
       signal.addEventListener('abort', onAbort, { once: true })
-      void answer.then((outcome) => {
+      void bounded.then((outcome) => {
         signal.removeEventListener('abort', onAbort)
         // After an abort won the race this resolve is a settled-promise no-op:
         // the late answer is discarded by construction.
         resolve(outcome)
       })
+    })
+  }
+
+  /**
+   * Bound one dispatched ask's wait. The timeout resolves the documented
+   * fail-closed outcome, so the ask still lands as an `asked`/`decided` pair
+   * and the tool call fails with the approval's own reason instead of parking
+   * the turn forever behind an answerer that never settles.
+   * @param answer - the dispatched ask's outcome promise.
+   * @returns the answer, or `'unavailable'` once the configured bound elapses.
+   */
+  private withAnswerTimeout(answer: Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+    const timeoutMs = this.config.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS
+    if (timeoutMs <= 0) return answer
+    return new Promise<ApprovalOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        this.ctx.logger.warn(`approval ask left unanswered for ${timeoutMs}ms; resolving unavailable`)
+        resolve('unavailable')
+      }, timeoutMs)
+      // The bound must never hold the process open; the ask stays durable.
+      timer.unref()
+      const settle = (outcome: ApprovalOutcome): void => {
+        clearTimeout(timer)
+        resolve(outcome)
+      }
+      void answer.then(settle, () => settle('unavailable'))
     })
   }
 }

@@ -5,7 +5,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ParticipantTag } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { JobId } from '@deepseek-ai/dsh-jobs/brand'
@@ -20,6 +20,14 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     imageLimits: null
     /** Durable model selection already used by a request and still pending for a later request. */
     modelSelection: ModelSelectionProjectionState
+    /**
+     * Durable execution-latch facts folded from the Session's own log: the open
+     * turn, its terminal, the last attributed participant action, and pending
+     * approval asks. Live facts (descendants, questions, agent status) are
+     * added by `session.executionState`; this unit keeps the durable half cheap
+     * to read on every latch query.
+     */
+    executionState: ExecutionStateProjectionState
   }
   interface SessionProjectionMap {
     /** Persisted facts used to summarize a Session without activating it. */
@@ -313,6 +321,257 @@ export interface SessionSearchValue {
   readonly hasMore: boolean
 }
 
+/**
+ * Aggregate execution latch of one Session (doc 69 §8 correction 3, doc 70
+ * §4). `waiting_approval` covers pending approvals and pending user questions:
+ * either ask kind means a human must act before the turn can proceed.
+ */
+export type SessionLatch = 'running' | 'waiting_approval' | 'waiting_subagents' | 'idle'
+
+/** Structured turn failure preserved from a durable `turn/end`. */
+export interface SessionTurnError {
+  readonly code: string
+  readonly message: string
+  readonly provider?: string
+  readonly model?: string
+}
+
+/** One turn terminal with its durable reason, at the event time it committed. */
+export interface SessionTurnTerminal {
+  readonly turn: number
+  readonly reason: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted'
+  readonly at: number
+  readonly error?: SessionTurnError
+}
+
+/**
+ * One pending ask a human must settle: a durable approval ask (identified by
+ * its `approval/asked` id) or a process-local user question (identified by the
+ * id this host mints when the answerer waterfall admits it).
+ */
+export type SessionPendingAsk =
+  | {
+    readonly kind: 'approval'
+    /** The durable `approval/asked` id. */
+    readonly askId: string
+    readonly toolName: string
+    readonly callId?: string
+    readonly reason?: string
+    readonly since: number
+  }
+  | {
+    readonly kind: 'question'
+    /** Host-minted process-local question id (no durable event exists). */
+    readonly askId: string
+    readonly questions: readonly SessionQuestionItem[]
+    readonly since: number
+  }
+
+/**
+ * One displayed question, mirroring the user-questions seam's own item fields
+ * structurally. The Session Controller consumes the seam over `ctx.get`, so it
+ * does not import that package's type into its own compilation face.
+ */
+export interface SessionQuestionItem {
+  readonly id: string
+  readonly question: string
+  readonly detail?: string
+  readonly header?: string
+  readonly options?: readonly { readonly label: string; readonly description?: string }[]
+  readonly multiSelect?: boolean
+}
+
+/** One attributed human or peer action, from durable prompt and abort facts. */
+export interface SessionParticipantAction {
+  readonly action: 'prompt' | 'cancel'
+  readonly actor: ParticipantTag
+  readonly at: number
+}
+
+/** One Session's current routing selection (doc 69 §10.3). */
+export interface SessionModelSelection {
+  readonly provider: string
+  readonly model: string
+  readonly chain?: string
+}
+
+/** Durable latch facts folded from one Session's own event log. */
+export interface ExecutionStateProjectionState {
+  /** Open turn number, or null between turns. */
+  readonly openTurn: number | null
+  /** `turn/start` time of the open turn, or null. */
+  readonly openTurnSince: number | null
+  /** Most recent `turn/end`, or null while no turn has ended. */
+  readonly lastTurnEnd: SessionTurnTerminal | null
+  /** Most recent attributed participant action, or null when none is attributed. */
+  readonly lastParticipantAction: SessionParticipantAction | null
+  /** Approval asks with no matching `approval/decided`, oldest first. */
+  readonly pendingApprovals: readonly SessionPendingApproval[]
+}
+
+/** One pending approval ask inside {@link ExecutionStateProjectionState}. */
+export interface SessionPendingApproval {
+  readonly askId: string
+  readonly toolName: string
+  readonly callId?: string
+  readonly reason?: string
+  readonly since: number
+}
+
+/**
+ * Read the aggregate execution latch of one attached Session. A host latch is
+ * authoritative: it is computed from the live Agent registry, the process-local
+ * question waterfall, and the durable `executionState` projection, never by
+ * crawling child streams.
+ */
+export interface SessionExecutionStateRequest {
+  readonly sessionId: SessionId
+}
+
+/**
+ * The host-published execution state (doc 70 §4). `descendantsExact` is false
+ * when this host cannot prove the descendant count is complete (a live child or
+ * an active run whose parent chain does not resolve inside this process).
+ */
+export interface SessionExecutionStateValue {
+  readonly latch: SessionLatch
+  /** Commit time of the fact that established the current latch. */
+  readonly since: number
+  readonly source: 'host-latch'
+  /** Live children below this Session, quiet children included. */
+  readonly activeDescendants: number
+  /** Whether {@link activeDescendants} is provably complete. */
+  readonly descendantsExact: boolean
+  /** Pending approvals and questions, oldest first. */
+  readonly pendingAsks: readonly SessionPendingAsk[]
+  readonly lastTurnEnd?: SessionTurnTerminal
+  readonly lastParticipantAction?: SessionParticipantAction
+  readonly model?: SessionModelSelection
+}
+
+/** One recent tool call in a Session digest, previews bounded by the digest. */
+export interface SessionDigestToolCall {
+  readonly tool: string
+  readonly status: 'ok' | 'error' | 'running'
+  readonly error?: { readonly name: string; readonly code: string; readonly reason?: string }
+  /** Raw call arguments, truncated for display. */
+  readonly argumentPreview?: string
+  /** Result text, truncated for display. */
+  readonly resultPreview?: string
+}
+
+/** One injected context block in a Session digest, in log order. */
+export interface SessionDigestInjection {
+  /** The producing plugin's source name. */
+  readonly kind: string
+  /** Snapshot section names or notice summary, truncated. */
+  readonly label?: string
+  /** UTF-16 code units this injection contributes. */
+  readonly chars: number
+  readonly seq: number
+}
+
+/** One child in a Session digest's subagent tree. */
+export interface SessionDigestSubagent {
+  readonly childSessionId: SessionId
+  readonly mode: 'one-shot' | 'continuable' | 'unknown'
+  /** Whether the child suppresses settlement traffic to its parent. */
+  readonly quiet: boolean
+  readonly status: 'running' | 'idle' | 'inactive'
+  /** First prompt text or durable creation label, truncated. */
+  readonly queryPreview?: string
+}
+
+/** At-a-glance Session digest request (doc 69 §9.1). */
+export interface SessionDigestRequest {
+  readonly sessionId: SessionId
+  /** Recent tool calls to include; defaults to 10 and is clamped to at most 50. */
+  readonly recentTools?: number
+}
+
+/**
+ * The debug surface's one-call Session view: the execution latch, the current
+ * model, the last attributed action, recent tool traffic, the injection index,
+ * the subagent tree, and pending interactions. Every preview is truncated and
+ * the value carries no credentials or captured request bodies.
+ */
+export interface SessionDigestValue {
+  readonly sessionId: SessionId
+  readonly state: SessionExecutionStateValue
+  readonly model?: SessionModelSelection
+  readonly lastParticipantAction?: SessionParticipantAction
+  readonly recentToolCalls: readonly SessionDigestToolCall[]
+  readonly injectionIndex: readonly SessionDigestInjection[]
+  readonly subagentTree: readonly SessionDigestSubagent[]
+  readonly pendingInteractions: readonly SessionPendingAsk[]
+}
+
+/**
+ * Read one Session's most recent captured main model request from the LLM
+ * seam's per-Session wire store.
+ */
+export interface SessionRequestSnapshotRequest {
+  readonly sessionId: SessionId
+  /**
+   * Also return the secret-bearing bodies: full system text, tool schemas, and
+   * message bodies. The default summary exposes digests and sizes only.
+   */
+  readonly includeBodies?: boolean
+}
+
+/** One request message's summary row. */
+export interface SessionRequestSnapshotMessage {
+  /** Provider-neutral conversation role. */
+  readonly role: string
+  /** UTF-16 code units this message contributes to the request. */
+  readonly chars: number
+}
+
+/** Fields shared by every request-snapshot response. */
+export interface SessionRequestSnapshotBase {
+  /** Capture time in epoch milliseconds. */
+  readonly capturedAt: number
+  readonly sessionId: SessionId
+  readonly provider: string
+  readonly model: string
+  /** System-prompt size and SHA-256; null when the request carried no system prompt. */
+  readonly system: { readonly chars: number; readonly sha256: string } | null
+  /** Tool names in request order. */
+  readonly tools: readonly string[]
+  readonly messages: readonly SessionRequestSnapshotMessage[]
+  /** Whether the secret-bearing bodies are included. */
+  readonly bodiesIncluded: boolean
+}
+
+/** Summary-only response; safe to expose without the request bodies. */
+export interface SessionRequestSnapshotSummary extends SessionRequestSnapshotBase {
+  readonly bodiesIncluded: false
+  /** Present when bodies were requested but the capture is size-capped. */
+  readonly bodiesOmitted?: 'size-cap'
+}
+
+/** Secret-bearing bodies of one captured model request. */
+export interface SessionRequestSnapshotBodies {
+  /**
+   * Full system prompt. Loop-built requests carry it as the leading system
+   * message, resolved here; null when the request carried none.
+   */
+  readonly system: string | null
+  /** Tool schemas exactly as sent; secret-bearing JSON. */
+  readonly tools: readonly JsonValue[]
+  /** Message bodies exactly as sent; secret-bearing JSON. */
+  readonly messages: readonly JsonValue[]
+}
+
+/** Full response including the secret-bearing bodies (`includeBodies: true`). */
+export interface SessionRequestSnapshotFull extends SessionRequestSnapshotBase {
+  readonly bodiesIncluded: true
+  readonly bodies: SessionRequestSnapshotBodies
+}
+
+/** Response value of `session.requestSnapshot`. */
+export type SessionRequestSnapshotValue = SessionRequestSnapshotSummary | SessionRequestSnapshotFull
+
 /** Session creation or explicit-id adoption request. */
 export interface SessionCreateRequest {
   readonly workspaceId?: WorkspaceId
@@ -369,6 +628,8 @@ export interface SessionPromptRequest {
   /** At least one non-whitespace text part or attachment. */
   readonly content: readonly PromptContentPart[]
   readonly clientTimeZone?: string
+  /** Who is prompting, when the caller is a peer rather than a local browser. */
+  readonly participant?: ParticipantTag
   /** When set, this prompt commits an active revert: the new user message shadows the reverted span via surfaceOp replace. */
   readonly revertFromSeq?: number
 }
@@ -405,6 +666,8 @@ export interface SessionUpdateQueueValue {
 /** Active-turn cancellation request. */
 export interface SessionCancelRequest {
   readonly sessionId: SessionId
+  /** Who asked for the cancellation, when the caller is a peer rather than a local browser. */
+  readonly participant?: ParticipantTag
 }
 
 /** Receipt after cancellation is admitted to the live Agent. */
@@ -416,6 +679,8 @@ export interface SessionCancelValue {
 export interface SessionRevertRequest {
   readonly sessionId: SessionId
   readonly atSeq: number
+  /** Who asked for the revert, when the caller is a peer rather than a local browser. */
+  readonly participant?: ParticipantTag
 }
 
 /** Revert receipt with the reverted query text for the input card. */
@@ -477,7 +742,7 @@ export type SessionRequestId = Branded<'session-request-id'>
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Browser prompt correlation and optional Host-validated time zone. */
-    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string }
+    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string; participant?: ParticipantTag }
   }
 }
 

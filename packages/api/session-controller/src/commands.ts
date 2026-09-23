@@ -342,6 +342,7 @@ export class SessionCommandController {
       kind: 'user',
       rpcId: request.requestId,
       ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+      ...(request.participant === undefined ? {} : { participant: request.participant }),
     }
     const hasImage = request.content.some(part => part.type === 'image')
     const admit = async (): Promise<SessionPromptValue> => {
@@ -552,7 +553,10 @@ export class SessionCommandController {
     if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
       throw apiSessionSubagentOwnershipError(request.sessionId)
     }
-    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    agent.cancel(
+      { kind: 'user', ...(request.participant === undefined ? {} : { participant: request.participant }) },
+      { keepInbox: true },
+    )
     return { accepted: true }
   }
 
@@ -573,7 +577,10 @@ export class SessionCommandController {
     // If a turn is running or inbox has pending work, cancel it first so the
     // revert takes effect immediately instead of rejecting with agent-busy.
     if (agent.status === 'running' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
-      agent.cancel({ kind: 'user' }, { keepInbox: false })
+      agent.cancel(
+        { kind: 'user', ...(request.participant === undefined ? {} : { participant: request.participant }) },
+        { keepInbox: false },
+      )
     }
     const session = agent.session
     const nodes = session.surface.nodes

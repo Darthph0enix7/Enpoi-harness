@@ -1,0 +1,515 @@
+import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import { brandNumber } from '@deepseek-ai/dsh-brand'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { AttachmentAdmissionPart, AdmittedPromptContentPart, ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
+import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PeerService } from '../src/host.ts'
+import { PeerConfigError, PeerPairingsStore } from '../src/pairings.ts'
+import type { PeerFollowFrame, PeerTarget } from '../src/types.ts'
+
+const contexts: Context[] = []
+const roots: string[] = []
+
+afterEach(async () => {
+  await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+const NEVER_ABORTED = new AbortController().signal
+
+const IMAGE_LIMITS: ImageAttachmentLimits = Object.freeze({
+  maxImageBytes: 5 * 1024 * 1024,
+  maxImagesPerMessage: 20,
+  maxMessageImageBytes: 100 * 1024 * 1024,
+  maxImagePixels: 40_000_000,
+  maxImageDimension: 2000,
+  mediaTypes: Object.freeze(['image/png'] as const),
+})
+
+class TestSessionQuery extends SessionQueryEngine {
+  override searchSessions(): Promise<never> {
+    return Promise.reject(new Error('session search is not configured in this test'))
+  }
+
+  override searchEvents(): Promise<never> {
+    return Promise.reject(new Error('event search is not configured in this test'))
+  }
+}
+
+/** Scripted model that can hold its stream open so a turn stays live. */
+class ScriptedAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+  private hold = false
+  private toolCallNext = false
+  private releaseStream: (() => undefined) | undefined
+  private started: (() => undefined) | undefined
+
+  /** Make the next stream request one unknown probe tool before answering. */
+  callToolOnce(): void {
+    this.toolCallNext = true
+  }
+
+  /** Hold the next stream until `release()` is called. */
+  holdNext(): { started: Promise<undefined>; release: () => undefined } {
+    this.hold = true
+    const started = Promise.withResolvers<undefined>()
+    this.started = () => { started.resolve(undefined) }
+    return {
+      started: started.promise,
+      release: () => {
+        this.hold = false
+        this.releaseStream?.()
+      },
+    }
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    if (this.hold) {
+      const released = Promise.withResolvers<undefined>()
+      this.releaseStream = () => { released.resolve(undefined) }
+      this.started?.()
+      // Bounded hold: an unreleased stream must not keep a failed spec's fibers alive.
+      const timer = setTimeout(() => { released.resolve(undefined) }, 2_000)
+      await released.promise
+      clearTimeout(timer)
+      this.releaseStream = undefined
+      this.started = undefined
+    }
+    if (this.toolCallNext && this.calls.length === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: ToolCallId('probe-1'), name: 'peer_probe', argumentsDelta: '{}' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id: ToolCallId('probe-1'), name: 'peer_probe', arguments: '{}' },
+      }
+      yield { type: 'usage', usage: { inputTokens: 3, outputTokens: 1 } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    const text = `reply-${String(this.calls.length)}`
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'usage', usage: { inputTokens: 3, outputTokens: 2 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+interface Harness {
+  readonly ctx: Context
+  readonly peer: PeerService
+  readonly adapter: ScriptedAdapter
+  readonly root: string
+  readonly sessionId: SessionId
+  readonly target: PeerTarget
+}
+
+async function setup(options: { readonly watchdogMs?: number; readonly exposures?: readonly string[] } = {}): Promise<Harness> {
+  const root = mkdtempSync(join(tmpdir(), 'peer-host-'))
+  roots.push(root)
+  const pairingsPath = join(root, 'pairings.yaml')
+  const bindingsPath = join(root, 'peer-state.json')
+  const cwd = join(root, 'work')
+  writeFileSync(pairingsPath, [
+    'version: 1',
+    'device: serverlocal',
+    'pairings:',
+    ...(options.exposures ?? ['debug']).map(exposure => [
+      `  - alias: ${exposure}`,
+      '    peer: laptop',
+      '    exposure: ' + exposure,
+      '    create:',
+      `      cwd: ${cwd}`,
+    ]).flat(),
+  ].join('\n'))
+
+  const ctx = new Context()
+  contexts.push(ctx)
+  await mountAgentLoopTestDependencies(ctx)
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'scripted', model: 'mock' }),
+    saveSelection: async () => {},
+  } as never)
+  ctx.provide('attachments', {
+    imageLimits: IMAGE_LIMITS,
+    admitPromptContent: async (content: readonly AttachmentAdmissionPart[]): Promise<AdmittedPromptContentPart[]> => {
+      const admitted: AdmittedPromptContentPart[] = []
+      for (const part of content) {
+        if (part.type === 'image') throw new Error('test does not configure images')
+        admitted.push(part)
+      }
+      return admitted
+    },
+  } as never)
+  ctx.provide('fileUploads', {
+    registerAgentResolver: () => () => {},
+    resolve: () => undefined,
+    bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
+    retirePrompt: () => {},
+  } as never)
+  ctx.provide('typert', {
+    lookups: { configure: () => () => {} },
+    contexts: { configureHost: () => () => {} },
+  } as never)
+  new TestSessionQuery(ctx)
+  new SessionController(ctx, { listPageSize: 50 }, { wireLogRoot: join(root, 'wire') })
+  await ctx.plugin(ApprovalService)
+  await mountAgentLoopTestHarness(ctx)
+  const peer = new PeerService(ctx, {
+    pairingsPath,
+    bindingsPath,
+    watchdogMs: options.watchdogMs ?? 60_000,
+  })
+  const adapter = new ScriptedAdapter()
+  ctx.llm.registerAdapter(['scripted'], adapter)
+  const created = await peer.create({
+    alias: 'debug' as never,
+    participant: { kind: 'peer', name: 'laptop' },
+    cwd,
+  })
+  if ((options.exposures ?? ['debug']).includes('answer-only')) {
+    // Bind the second exposure to the same session through explicit adoption.
+    await peer.create({
+      alias: 'answer-only' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: created.target.sessionId,
+    })
+  }
+  return {
+    ctx,
+    peer,
+    adapter,
+    root,
+    sessionId: created.target.sessionId,
+    target: { kind: 'alias', alias: ('debug') as never },
+  }
+}
+
+async function waitFor(assertion: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await assertion()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error(`condition not met within ${String(timeoutMs)}ms`)
+}
+
+async function collectFollow(
+  peer: PeerService,
+  target: PeerTarget,
+  stop: (frames: readonly PeerFollowFrame[]) => boolean,
+  timeoutMs = 5_000,
+): Promise<PeerFollowFrame[]> {
+  const frames: PeerFollowFrame[] = []
+  const controller = new AbortController()
+  const timer = setTimeout(() => { controller.abort() }, timeoutMs)
+  try {
+    for await (const frame of peer.follow({ target }, controller.signal)) {
+      frames.push(frame)
+      if (stop(frames)) break
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) throw error
+  } finally {
+    clearTimeout(timer)
+  }
+  return frames
+}
+
+describe('peer host service', () => {
+  it('fails loud when constructed over a malformed pairing document', () => {
+    const root = mkdtempSync(join(tmpdir(), 'peer-bad-config-'))
+    roots.push(root)
+    const pairingsPath = join(root, 'pairings.yaml')
+    writeFileSync(pairingsPath, 'version: 1\ndevice: x\npairings:\n  - alias: y\n    peer: z\n    exposure: debug')
+    const ctx = new Context()
+    contexts.push(ctx)
+    expect(() => new PeerService(ctx, { pairingsPath, bindingsPath: join(root, 'peer-state.json') }))
+      .toThrow(PeerConfigError)
+  })
+
+  it('never exposes tool or step events at answer-only exposure', async () => {
+    const { isExposedEvent } = await import('../src/exposure.ts')
+    expect(isExposedEvent('tool/call', { name: 'bash' }, 'answer-only')).toBe(false)
+    expect(isExposedEvent('tool/result', {}, 'answer-only')).toBe(false)
+    expect(isExposedEvent('step/start', {}, 'answer-only')).toBe(false)
+    expect(isExposedEvent('assistant/message', {}, 'answer-only')).toBe(true)
+    expect(isExposedEvent('turn/end', { reason: { kind: 'completed' } }, 'answer-only')).toBe(true)
+    expect(isExposedEvent('user/message', { source: { kind: 'plugin', plugin: 'x' } }, 'answer-only')).toBe(false)
+    expect(isExposedEvent('user/message', { source: { kind: 'user-rpc', rpcId: 'r' } }, 'answer-only')).toBe(true)
+    expect(isExposedEvent('tool/call', {}, 'debug')).toBe(true)
+  })
+
+  it('accepts a matching handshake and rejects protocol skew', async () => {
+    const { peer } = await setup()
+    const value = peer.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    })
+    expect(value.hostDevice).toBe('serverlocal')
+    expect(value.capabilities).toContain('state-latch')
+    expect(value.pairings[0]).toMatchObject({ alias: 'debug', peer: 'laptop', exposure: 'debug' })
+    expect(() => peer.handshake({
+      protocolVersion: 9,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    })).toThrow(RemoteError)
+    try {
+      peer.handshake({ protocolVersion: 9, harnessVersion: 't', schemaDigest: 'd', device: 'laptop' })
+    } catch (error) {
+      expect((error as RemoteError).code).toBe('peer/version-skew')
+    }
+  })
+
+  it('creates, prompts, observes a completed turn, and pages history', async () => {
+    const { peer, ctx, sessionId, target } = await setup()
+    const bound = JSON.parse(readFileSync(join(peer.pairings.bindingsPath), 'utf8')) as {
+      bindings: Record<string, { sessionId: string }>
+    }
+    expect(bound.bindings.debug?.sessionId).toBe(sessionId)
+
+    const idle = await peer.state({ target })
+    expect(idle.state).toMatchObject({
+      latch: 'idle',
+      source: 'host-latch',
+      activeDescendants: 0,
+      descendantsExact: true,
+    })
+    expect(idle.state.model).toMatchObject({ provider: 'scripted', model: 'mock' })
+
+    const collected = collectFollow(peer, target, current => current.some(frame => frame.type === 'event' && frame.record.type === 'turn/end'))
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-1' as never,
+      content: [{ type: 'text', text: 'do the thing' }],
+    }, NEVER_ABORTED)
+    const frames = await collected
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle')
+    const done = await peer.state({ target })
+    expect(done.state.lastTurnEnd).toMatchObject({ turn: 1, reason: 'completed' })
+    expect((await peer.state({ target })).state.lastParticipantAction).toMatchObject({ action: 'prompt' })
+
+    // The prompt was admitted; observe it durably through page from the follow cut.
+    const cursor = frames.find(frame => frame.type === 'snapshot')
+    expect(cursor?.type).toBe('snapshot')
+    const snapshotCursor = (cursor as { cursor: number }).cursor
+    const lastEventCursor = frames
+      .flatMap(frame => frame.type === 'event' ? [frame.cursor] : [])
+      .at(-1) ?? snapshotCursor
+    const page = await peer.page({
+      target,
+      throughSeq: brandNumber<SessionSeq>(lastEventCursor),
+      maxMessages: 50,
+    }, NEVER_ABORTED)
+    expect(page.records.some(record => record.type === 'user/message')).toBe(true)
+    expect(page.records.some(record => record.type === 'assistant/message')).toBe(true)
+
+    // Adoption is idempotent and does not create a second session.
+    const adopted = await peer.create({
+      alias: 'debug' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId,
+    })
+    expect(adopted.created).toBe(false)
+    expect(adopted.target.sessionId).toBe(sessionId)
+    void ctx
+  })
+
+  it('streams latch transitions and filters tool/step internals from answer-only', async () => {
+    const { peer, adapter, target } = await setup({ exposures: ['debug', 'answer-only'] })
+    adapter.callToolOnce()
+    const quietTarget: PeerTarget = { kind: 'alias', alias: 'answer-only' as never }
+    const debugTarget: PeerTarget = { kind: 'alias', alias: 'debug' as never }
+    const debugFrames: PeerFollowFrame[] = []
+    const quietFrames: PeerFollowFrame[] = []
+    const controller = new AbortController()
+    const collect = async (streamTarget: PeerTarget, sink: PeerFollowFrame[]): Promise<void> => {
+      for await (const frame of peer.follow({ target: streamTarget }, controller.signal)) {
+        sink.push(frame)
+        if (frame.type === 'event' && frame.record.type === 'turn/end') break
+      }
+    }
+    const debugPromise = collect(debugTarget, debugFrames)
+    const quietPromise = collect(quietTarget, quietFrames)
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-2' as never,
+      content: [{ type: 'text', text: 'stream it' }],
+    }, NEVER_ABORTED)
+    await Promise.all([debugPromise, quietPromise])
+    controller.abort()
+
+    const debugTypes = debugFrames.flatMap(frame => frame.type === 'event' ? [frame.record.type] : [])
+    const quietTypes = quietFrames.flatMap(frame => frame.type === 'event' ? [frame.record.type] : [])
+    expect(debugTypes).toContain('step/start')
+    expect(quietTypes).not.toContain('step/start')
+    expect(quietTypes.every(type => !type.startsWith('tool/'))).toBe(true)
+    expect(debugTypes.some(type => type.startsWith('tool/'))).toBe(true)
+    expect(adapter.calls).toHaveLength(2)
+    const stateFrames = debugFrames.filter(frame => frame.type === 'state')
+    expect(stateFrames.length).toBeGreaterThan(0)
+    expect(debugFrames.filter(frame => frame.type === 'snapshot')).toHaveLength(1)
+  })
+
+  it('routes an approval ask to the peer, settles it, and reports a raced answer as conflict', async () => {
+    const { peer, ctx, adapter, sessionId, target } = await setup()
+    const hold = adapter.holdNext()
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-3' as never,
+      content: [{ type: 'text', text: 'ask me' }],
+    }, NEVER_ABORTED)
+    await hold.started
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'running')
+    // The live host latch is authoritative: the peer reads it verbatim instead
+    // of deriving the running state from the durable fold.
+    const hostLatched = await peer.state({ target })
+    expect(hostLatched.state).toMatchObject({
+      latch: 'running',
+      source: 'host-latch',
+      descendantsExact: true,
+      activeDescendants: 0,
+    })
+    // Stand in for the local browser answerer: it parks until a human decides,
+    // which is exactly the window the peer may answer in.
+    const localDecision = Promise.withResolvers<ApprovalOutcome>()
+    ctx.on('approval/request', () => localDecision.promise)
+    const agent = ctx.agents.get(sessionId) as Agent
+    const decision = ctx.approval.request({ agent, toolName: 'peer-test', reason: 'unit ask' })
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'waiting_approval')
+    const waiting = await peer.state({ target })
+    expect(waiting.state.pendingAsks).toHaveLength(1)
+    expect(waiting.state.pendingAsks[0]).toMatchObject({
+      kind: 'approval',
+      toolName: 'peer-test',
+      reason: 'unit ask',
+    })
+    const askId = waiting.state.pendingAsks[0]!.askId
+    const answered = peer.answer({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      askId,
+      answer: { kind: 'approval', outcome: 'allowed-once' },
+    })
+    expect(answered).toEqual({ accepted: true, settled: true })
+    await expect(decision).resolves.toBe('allowed-once')
+    expect(() => peer.answer({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      askId,
+      answer: { kind: 'approval', outcome: 'allowed-once' },
+    })).toThrow(RemoteError)
+    hold.release()
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle')
+    const finished = await peer.state({ target })
+    expect(finished.state.lastTurnEnd).toMatchObject({ turn: 1, reason: 'completed' })
+    expect(finished.state.lastParticipantAction).toMatchObject({ action: 'answer' })
+  })
+
+  it('cancels a running peer turn and reports idle cancels', async () => {
+    const { peer, adapter, target } = await setup()
+    const hold = adapter.holdNext()
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-4' as never,
+      content: [{ type: 'text', text: 'long one' }],
+    }, NEVER_ABORTED)
+    await hold.started
+    await waitFor(async () => (await peer.state({ target })).state.latch !== 'idle')
+    expect(peer.cancel({ target, participant: { kind: 'peer', name: 'laptop' } }))
+      .toMatchObject({ accepted: true, cancelled: true })
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle')
+    const terminal = await peer.state({ target })
+    expect(terminal.state.lastTurnEnd?.reason).toBe('aborted')
+    expect(terminal.state.lastParticipantAction).toMatchObject({ action: 'cancel' })
+    hold.release()
+    expect(peer.cancel({ target, participant: { kind: 'peer', name: 'laptop' } }))
+      .toMatchObject({ accepted: true, cancelled: false })
+  })
+
+  it('falls back to the derived latch when the host latch is unavailable', async () => {
+    const { ctx, peer, target } = await setup()
+    const hostLatch = vi.spyOn(ctx.sessionController, 'executionState').mockImplementation(() => {
+      throw new Error('session is not attached')
+    })
+    try {
+      const state = await peer.state({ target })
+      expect(state.state).toMatchObject({ latch: 'idle', source: 'derived', activeDescendants: 0 })
+    } finally {
+      hostLatch.mockRestore()
+    }
+  })
+
+  it('rejects unpaired targets and a hop ceiling when configured', async () => {
+    const { peer } = await setup()
+    await expect(peer.state({ target: { kind: 'session', sessionId: 'nope' as never } }))
+      .rejects.toThrow(RemoteError)
+    try {
+      await peer.state({ target: { kind: 'session', sessionId: 'nope' as never } })
+    } catch (error) {
+      expect((error as RemoteError).code).toBe('peer/not-paired')
+    }
+    // No ceiling is configured by default: a high hop count is admitted.
+    const { peer: peer2, target: target2 } = await setup()
+    const value = await peer2.prompt({
+      target: target2,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-5' as never,
+      content: [{ type: 'text', text: 'hop' }],
+      hopCount: 500,
+    }, NEVER_ABORTED)
+    expect(value.hopCount).toBe(501)
+    void peer
+  })
+
+  it('aborts an orphaned peer turn through the watchdog', async () => {
+    const { peer, adapter, target } = await setup({ watchdogMs: 120 })
+    const hold = adapter.holdNext()
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-6' as never,
+      content: [{ type: 'text', text: 'orphan me' }],
+    }, NEVER_ABORTED)
+    await hold.started
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle', 5_000)
+    const terminal = await peer.state({ target })
+    expect(terminal.state.lastTurnEnd?.reason).toBe('aborted')
+    hold.release()
+  })
+
+  it('reloads created-session bindings across a host restart', async () => {
+    const { peer, sessionId, target } = await setup()
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-7' as never,
+      content: [{ type: 'text', text: 'before restart' }],
+    }, NEVER_ABORTED)
+    // A restart re-reads the machine-written binding document and re-resolves the alias.
+    const restarted = new PeerPairingsStore(peer.pairings.pairingsPath, peer.pairings.bindingsPath)
+    expect(restarted.resolve(target)?.sessionId).toBe(sessionId)
+    void peer
+  })
+})

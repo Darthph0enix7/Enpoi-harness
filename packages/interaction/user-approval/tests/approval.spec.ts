@@ -60,6 +60,20 @@ describe('ApprovalService.request', () => {
     expect(appended).toHaveLength(0)
   })
 
+  it('bounds a pending ask: an answerer that never settles resolves unavailable', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService, { answerTimeoutMs: 5 })
+    const { agent, appended } = fakeAgent()
+    // A registered-but-silent answerer models an attached client that walked away.
+    ctx.on('approval/request', () => new Promise<ApprovalOutcome>(() => {}))
+
+    await expect(ctx.approval.request(requestOf(agent))).resolves.toBe('unavailable')
+
+    const decided = appended.find(event => event.type === 'approval/decided')
+    expect(decided?.data).toMatchObject({ outcome: 'unavailable' })
+    expect(appended.map(event => event.type)).toEqual(['approval/asked', 'approval/decided'])
+  })
+
   it('fails closed to unavailable when nobody listens, auditing the asked/decided pair', async () => {
     const ctx = await mounted()
     const { agent, appended } = fakeAgent()

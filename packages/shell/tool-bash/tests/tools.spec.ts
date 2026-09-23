@@ -454,6 +454,48 @@ describe('bash tool', () => {
   })
 })
 
+describe('tool-owned command-outcome metadata (result.meta)', () => {
+  it('carries exitCode 0 for a clean exit and leaves the text unchanged', async () => {
+    const ctx = await setup()
+    const result = await call(ctx, 'bash', { command: 'echo hi', description: 'test command' })
+    expect(result.isError).toBe(false)
+    expect(result.meta).toEqual({ exitCode: 0 })
+    expect(text(result)).toBe('hi\n')
+  })
+
+  it('carries a non-zero exit code without flipping isError, and the text keeps the marker', async () => {
+    const ctx = await setup()
+    const result = await call(ctx, 'bash', { command: 'echo failing; exit 3', description: 'test command' })
+    expect(result.isError).toBe(false)
+    expect(result.meta).toEqual({ exitCode: 3 })
+    expect(text(result)).toBe('failing\n[exit code: 3]')
+  })
+
+  it('carries exitCode null plus the signal when a signal kills the command', async () => {
+    const ctx = await setup()
+    const result = await call(ctx, 'bash', { command: 'kill -KILL $$', description: 'test command' })
+    expect(result.isError).toBe(false)
+    expect(result.meta).toEqual({ exitCode: null, signal: 'SIGKILL' })
+    expect(text(result)).toContain('[killed by signal: SIGKILL]')
+  })
+
+  it('carries timedOut and the kill signal for a timeout', async () => {
+    const ctx = await setup()
+    const result = await call(ctx, 'bash', { command: 'sleep 60', description: 'test command', timeoutMs: 100 })
+    expect(result.isError).toBe(false)
+    expect(result.meta).toEqual({ exitCode: null, signal: 'SIGTERM', timedOut: true })
+    expect(text(result)).toBe('(no output)\n[timed out after 100ms]\n[killed by signal: SIGTERM]')
+  })
+
+  it('projects {} for a background ack, which has no process exit at the call site', async () => {
+    const ctx = await setupWithJobs()
+    const started = await call(ctx, 'bash', { command: 'echo bg-ok', description: 'test command', run_in_background: true })
+    expect(started.isError).toBe(false)
+    expect(started.meta).toEqual({})
+    expect(text(started)).toBe('started background job bash-1')
+  })
+})
+
 describe('background execution through the job runtime', () => {
   it('run_in_background acks with the job id, readable through the REAL job_output tool', async () => {
     const ctx = await setupWithJobs()

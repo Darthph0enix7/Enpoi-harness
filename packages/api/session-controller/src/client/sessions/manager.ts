@@ -9,6 +9,8 @@ import type {
   SessionControlFrame,
   SessionSummary,
   SessionJob as JobView,
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotValue,
 } from '../../types.ts'
 import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
@@ -557,6 +559,19 @@ export class SessionManager {
   private missingSearchHits(items: readonly SessionSearchResultItem[]): SessionSearchResultItem[] {
     const known = new Set(this.summaries.map(summary => summary.sessionId))
     return items.filter(item => !known.has(item.sessionId))
+  }
+
+  /**
+   * Forward one read of a Session's most recent captured model request.
+   * @param request - Session identity and whether secret-bearing bodies are requested.
+   * @param signal - cancellation for the capture read.
+   * @returns the Host capture view or a folded transport error.
+   */
+  async requestSnapshot(
+    request: SessionRequestSnapshotRequest,
+    signal: AbortSignal,
+  ): Promise<RemoteResult<SessionRequestSnapshotValue>> {
+    return await this.remote.session.requestSnapshot(request, signal)
   }
 
   /**

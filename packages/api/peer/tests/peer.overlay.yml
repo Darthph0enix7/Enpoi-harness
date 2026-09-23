@@ -1,0 +1,10 @@
+# Loader overlay for the live-host peer API e2e (`dsh web --patch`): mount the
+# opt-in peer namespace over the shipped composition. Paths come from the test
+# environment so the temp harness home owns both documents.
+- insert:
+    - id: api-peer
+      name: '@deepseek-ai/dsh-api-peer'
+      config:
+        pairingsPath: !!js process.env.DSH_PEER_TEST_PAIRINGS
+        bindingsPath: !!js process.env.DSH_PEER_TEST_BINDINGS
+        watchdogMs: 60000

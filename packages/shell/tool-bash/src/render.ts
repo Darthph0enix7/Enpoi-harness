@@ -15,6 +15,39 @@ function streamText(output: CollectedOutput): string {
 }
 
 /**
+ * The command outcome a completed `bash` result carries as tool-owned
+ * `tool/result` metadata (`meta`), so a harvester, peer agent, or UI reads the
+ * exit structurally instead of parsing the `[exit code: N]` marker out of the
+ * rendered text. `isError` keeps its tool-failure meaning: a non-zero exit is a
+ * command failure reported here, not a failed tool call.
+ */
+export type ShellOutcomeMeta = {
+  /** The process exit code; `null` when a signal terminated the process before it exited. */
+  exitCode: number | null
+  /** The terminating signal; present only when a signal killed the process. */
+  signal?: string
+  /** Present only when the executor's timeout killed the command (which may still exit 0 after trapping the signal). */
+  timedOut?: true
+}
+
+/**
+ * Project one canonical `bash` output value into {@link ShellOutcomeMeta}. A
+ * background acknowledgement has no process exit yet, so it projects `{}`.
+ * @param value - the canonical output value: a foreground run or a background handle.
+ * @returns `{ exitCode, signal?, timedOut? }` for a foreground run; `{}` for a background handle.
+ */
+export function execOutcomeMeta(
+  value: { kind: string; exitCode: number | null; signal: string | null; timedOut: boolean },
+): ShellOutcomeMeta | Record<string, never> {
+  if (value.kind !== 'foreground') return {}
+  return {
+    exitCode: value.exitCode,
+    ...value.signal !== null ? { signal: value.signal } : {},
+    ...value.timedOut ? { timedOut: true as const } : {},
+  }
+}
+
+/**
  * Shape one finished run into the text the model sees: stdout, then a marked
  * stderr section, then exit-status markers. Non-zero exits are reported, not
  * errored — the model decides how to react; only infrastructure failures

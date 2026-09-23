@@ -39,6 +39,10 @@ import type {
   SessionControlFrame,
   SessionCreateRequest,
   SessionCreateValue,
+  SessionDigestRequest,
+  SessionDigestValue,
+  SessionExecutionStateRequest,
+  SessionExecutionStateValue,
   SessionForkRequest,
   SessionForkValue,
   SessionFollowFrame,
@@ -53,6 +57,8 @@ import type {
   SessionPromptValue,
   SessionRenameRequest,
   SessionRenameValue,
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotValue,
   SessionSearchRequest,
   SessionSearchValue,
   SessionSelectModelRequest,
@@ -66,7 +72,13 @@ export interface TestSessionRemote {
   canOpenWorkspacePath(): Promise<RemoteResult<boolean>>
   list(request: SessionListRequest, signal?: AbortSignal): Promise<RemoteResult<SessionListValue>>
   search(request: SessionSearchRequest, signal?: AbortSignal): Promise<RemoteResult<SessionSearchValue>>
+  requestSnapshot(
+    request: SessionRequestSnapshotRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteResult<SessionRequestSnapshotValue>>
   create(request: SessionCreateRequest): Promise<RemoteResult<SessionCreateValue>>
+  executionState(request: SessionExecutionStateRequest): Promise<RemoteResult<SessionExecutionStateValue>>
+  digest(request: SessionDigestRequest): Promise<RemoteResult<SessionDigestValue>>
   selectModel(request: SessionSelectModelRequest): Promise<RemoteResult<SessionSelectModelValue>>
   modelCatalog(): Promise<RemoteResult<ModelCatalog>>
   rename(request: SessionRenameRequest): Promise<RemoteResult<SessionRenameValue>>
@@ -94,6 +106,7 @@ export interface TestSessionRemoteDefaults {
   readonly openPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly revealPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly canOpenPath?: () => boolean
+  readonly wireLogRoot?: string
 }
 
 const installed = new WeakMap<Context, SessionController>()
@@ -289,6 +302,7 @@ function installControllers(
         ...defaults.openPath === undefined ? {} : { openPath: defaults.openPath },
         ...defaults.revealPath === undefined ? {} : { revealPath: defaults.revealPath },
         ...defaults.canOpenPath === undefined ? {} : { canOpenPath: defaults.canOpenPath },
+        ...defaults.wireLogRoot === undefined ? {} : { wireLogRoot: defaults.wireLogRoot },
       },
     )
   } finally {
@@ -342,7 +356,13 @@ export function createSessionTestRemote(
       () => direct.search(request, signal),
       signal,
     ),
+    requestSnapshot: (request, signal = new AbortController().signal) => remoteResult(
+      () => direct.requestSnapshot(request, signal),
+      signal,
+    ),
     create: request => remoteResult(() => direct.create(request)),
+    executionState: request => remoteResult(() => direct.executionState(request)),
+    digest: request => remoteResult(() => direct.digest(request)),
     selectModel: request => remoteResult(() => direct.selectModel(request)),
     modelCatalog: () => remoteResult(() => direct.modelCatalog()),
     rename: request => remoteResult(() => direct.rename(request)),

@@ -10,6 +10,8 @@ import type {
 import type {
   SessionAddress,
   SessionAssistantStreamBaseline,
+  SessionDigestValue,
+  SessionExecutionStateValue,
   SessionControlBaseline,
   SessionControlFrame,
   SessionFollowFrame,
@@ -17,6 +19,8 @@ import type {
   SessionPage,
   SessionPageRequest,
   SessionProjectionBaseline,
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotValue,
   SessionSelectModelRequest,
   SessionSelectModelValue,
   SessionRevertValue,
@@ -125,6 +129,17 @@ export class FakeApiClient {
   onList: (payload: unknown) => Promise<RemoteResult<{ items: never[] }>> = () => Promise.resolve(ok({ items: [] }))
   onSearch: (payload: unknown) => Promise<RemoteResult<{ items: SessionSearchItem[]; hasMore: boolean }>> =
     () => Promise.resolve(ok({ items: [], hasMore: false }))
+  onRequestSnapshot: (payload: SessionRequestSnapshotRequest) => Promise<RemoteResult<SessionRequestSnapshotValue>> =
+    payload => Promise.resolve(ok({
+      capturedAt: 0,
+      sessionId: payload.sessionId,
+      provider: 'fixture',
+      model: 'fixture',
+      system: null,
+      tools: [],
+      messages: [],
+      bodiesIncluded: false,
+    }))
   onCreate: (payload: unknown) => Promise<RemoteResult<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-new' as SessionId }))
   onSelectModel: (payload: SessionSelectModelRequest) => Promise<RemoteResult<SessionSelectModelValue>> =
     payload => Promise.resolve(ok({
@@ -142,6 +157,32 @@ export class FakeApiClient {
   onRevertRestore: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
   onResolveFileConflict: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
   onDelete: (payload: unknown) => Promise<RemoteResult<{ deleted: true }>> = () => Promise.resolve(ok({ deleted: true }))
+  onExecutionState: (payload: unknown) => Promise<RemoteResult<SessionExecutionStateValue>> = () => Promise.resolve(ok({
+    latch: 'idle',
+    since: 0,
+    source: 'host-latch',
+    activeDescendants: 0,
+    descendantsExact: true,
+    pendingAsks: [],
+  }))
+  onDigest: (payload: unknown) => Promise<RemoteResult<SessionDigestValue>> = (payload) => {
+    const sessionId = (payload as { readonly sessionId: SessionId }).sessionId
+    return Promise.resolve(ok({
+      sessionId,
+      state: {
+        latch: 'idle',
+        since: 0,
+        source: 'host-latch',
+        activeDescendants: 0,
+        descendantsExact: true,
+        pendingAsks: [],
+      },
+      recentToolCalls: [],
+      injectionIndex: [],
+      subagentTree: [],
+      pendingInteractions: [],
+    }))
+  }
   onHistory: (payload: { sessionId: SessionId; throughSeq?: number; beforeSeq?: number; maxMessages?: number })
   => Promise<RemoteResult<SessionPage & { readonly projections?: SessionProjectionBaseline }>> =
     () => Promise.resolve(ok({ records: [], hasMore: false }))
@@ -227,6 +268,11 @@ export class FakeApiClient {
           this.lastSearchSignal = signal
           return this.record('session.search', payload, this.onSearch(payload))
         },
+        requestSnapshot: payload => this.record(
+          'session.requestSnapshot',
+          payload,
+          this.onRequestSnapshot(payload),
+        ),
         create: payload => this.record('session.create', payload, this.onCreate(payload)),
         selectModel: payload => this.record(
           'session.selectModel',
@@ -251,6 +297,8 @@ export class FakeApiClient {
         revertRestore: payload => this.record('session.revertRestore', payload, this.onRevertRestore(payload)),
         resolveFileConflict: payload => this.record('session.resolveFileConflict', payload, this.onResolveFileConflict(payload)),
         delete: payload => this.record('session.delete', payload, this.onDelete(payload)),
+        executionState: payload => this.record('session.executionState', payload, this.onExecutionState(payload)),
+        digest: payload => this.record('session.digest', payload, this.onDigest(payload)),
       },
       subagents: {
         list: parentSessionId => this.record(

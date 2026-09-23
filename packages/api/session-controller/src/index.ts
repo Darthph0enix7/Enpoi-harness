@@ -21,9 +21,11 @@ import { SessionHistoryController } from './history.ts'
 import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog } from './catalog.ts'
+import { installExecutionStateProjection, SessionExecutionStateReader } from './execution-state.ts'
 import { installModelSelectionProjection, chainOfRequestConfig } from './model-selection-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
+import { readSessionRequestSnapshot } from './request-snapshot.ts'
 import type {
   ModelCatalog,
   SessionAttachmentRequest,
@@ -35,6 +37,10 @@ import type {
   SessionCreateValue,
   SessionDeleteRequest,
   SessionDeleteValue,
+  SessionDigestRequest,
+  SessionDigestValue,
+  SessionExecutionStateRequest,
+  SessionExecutionStateValue,
   SessionResolveFileConflictRequest,
   SessionResolveFileConflictValue,
   SessionRevertRequest,
@@ -55,6 +61,8 @@ import type {
   SessionPromptValue,
   SessionRenameRequest,
   SessionRenameValue,
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotValue,
   SessionSearchRequest,
   SessionSearchValue,
   SessionSelectModelRequest,
@@ -91,6 +99,8 @@ export interface SessionControllerInternals {
   readonly revealPath?: (path: string, signal: AbortSignal) => Promise<void>
   /** Native handoff availability probe. */
   readonly canOpenPath?: () => boolean
+  /** Override the per-Session wire-capture log root; defaults to `DSH_WIRE_LOG`'s directory or `~/.dsh/logs`. */
+  readonly wireLogRoot?: string
 }
 
 /** Host service backing the generated `ctx.remote.session` namespace. */
@@ -116,11 +126,13 @@ export class SessionController extends TypertRemoteService {
   private readonly agents: ApiSessionAgentController
   private readonly commands: SessionCommandController
   private readonly controlState: SessionControlController
+  private readonly execution: SessionExecutionStateReader
   private readonly history: SessionHistoryController
   private readonly listState: ApiSessionList
   private readonly openPath: (path: string, signal: AbortSignal) => Promise<void>
   private readonly revealPath: (path: string, signal: AbortSignal) => Promise<void>
   private readonly canOpenPath: () => boolean
+  private readonly wireLogRoot: string | undefined
   private readonly promotions = new Set<Promise<void>>()
 
   /**
@@ -131,8 +143,10 @@ export class SessionController extends TypertRemoteService {
   constructor(ctx: Context, config: Config, internals: SessionControllerInternals = {}) {
     super(ctx, 'sessionController', { namespace: 'session' })
     installModelSelectionProjection(ctx)
+    installExecutionStateProjection(ctx)
     this.agents = new ApiSessionAgentController(ctx)
     this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
+    this.execution = new SessionExecutionStateReader(ctx)
     ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
       const result = await this.agents.resolveAgent(sessionId)
       if ('error' in result) throw result.error
@@ -150,6 +164,7 @@ export class SessionController extends TypertRemoteService {
     this.revealPath = internals.revealPath ?? revealNativePath
     this.canOpenPath = internals.canOpenPath
       ?? (() => config.nativeOpen ?? (internals.openPath !== undefined || canOpenNativePath()))
+    this.wireLogRoot = internals.wireLogRoot
     ctx.plugin(SessionFileReferences)
     ctx.plugin(SessionMediaReferences)
     ctx.plugin(SessionSkillCatalog)
@@ -399,6 +414,62 @@ export class SessionController extends TypertRemoteService {
   prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue> {
     signal.throwIfAborted()
     return this.commands.prompt(request)
+  }
+
+  /**
+   * Read what the model was actually sent for one Session's most recent main
+   * request (the LLM seam's per-Session wire capture).
+   *
+   * The default summary is a digest-and-size view: `system` reports character
+   * count and SHA-256, `tools` names, and one `{role, chars}` row per message.
+   * `includeBodies: true` additionally returns the SECRET-BEARING bodies — the
+   * full system prompt, tool schemas, and message text — so callers must treat
+   * the result as sensitive. When the capture exceeded its byte cap, the bodies
+   * are unavailable and the response keeps `bodiesIncluded: false` with
+   * `bodiesOmitted: 'size-cap'`.
+   * @param request - Session identity and whether secret-bearing bodies are requested.
+   * @param signal - caller cancellation for the capture read.
+   * @returns the captured request summary, or the bodies too when requested.
+   * @throws RemoteError `gateway/bad-request` for an unaddressable Session id, `session/not-found` when no capture exists.
+   */
+  @Remote('requestSnapshot')
+  requestSnapshot(
+    request: SessionRequestSnapshotRequest,
+    signal: AbortSignal,
+  ): Promise<SessionRequestSnapshotValue> {
+    return readSessionRequestSnapshot(request, signal, this.wireLogRoot)
+  }
+
+  /**
+   * Read the aggregate execution latch of one attached Session: the
+   * `running | waiting_approval | waiting_subagents | idle` state, live
+   * descendants (quiet children included), pending approvals and questions,
+   * the last turn terminal, the last attributed participant action, and the
+   * current model selection (doc 69 §8 correction 3; doc 70 §4). Read-only:
+   * the count comes from the live Agent registry and subagent lifecycle
+   * events, never from crawling the parent log.
+   * @param request - attached Session identity.
+   * @returns the host-published latch value.
+   * @throws RemoteError `session/not-found` when no live Session owns the id.
+   */
+  @Remote('executionState')
+  executionState(request: SessionExecutionStateRequest): SessionExecutionStateValue {
+    return this.execution.executionState(request.sessionId)
+  }
+
+  /**
+   * Read the one-call Session digest for a debugging consumer: the execution
+   * latch, current model, last attributed action, recent tool calls, the
+   * injection index, the subagent tree, and pending interactions (doc 69
+   * §9.1). Every preview is bounded and no credentials or captured request
+   * bodies are included.
+   * @param request - attached Session identity and the recent-tool-call budget.
+   * @returns the bounded digest value.
+   * @throws RemoteError `session/not-found` when no live Session owns the id.
+   */
+  @Remote('digest')
+  digest(request: SessionDigestRequest): SessionDigestValue {
+    return this.execution.digest(request)
   }
 
   /**

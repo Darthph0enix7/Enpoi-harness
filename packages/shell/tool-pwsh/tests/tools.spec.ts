@@ -541,6 +541,42 @@ describe('execution through the bash seam', () => {
   })
 })
 
+describe('tool-owned command-outcome metadata (result.meta)', () => {
+  it('projects clean, non-zero, signal, and timeout outcomes without changing the text', async () => {
+    const { ctx, bash } = await setup()
+
+    bash.handler = () => runResult('ok\n')
+    const clean = await call(ctx, 'pwsh', { command: 'Write-Output ok', description: 'ok' })
+    expect(clean.isError).toBe(false)
+    expect(clean.meta).toEqual({ exitCode: 0 })
+    expect(text(clean)).toBe('ok\n')
+
+    bash.handler = () => runResult('oops\n', { exitCode: 3 })
+    const failed = await call(ctx, 'pwsh', { command: 'exit 3', description: 'fail' })
+    expect(failed.isError).toBe(false)
+    expect(failed.meta).toEqual({ exitCode: 3 })
+    expect(text(failed)).toBe('oops\n[exit code: 3]')
+
+    bash.handler = () => runResult('gone\n', { exitCode: null, signal: 'SIGKILL' })
+    const killed = await call(ctx, 'pwsh', { command: 'Stop-Process -Id $PID', description: 'kill' })
+    expect(killed.meta).toEqual({ exitCode: null, signal: 'SIGKILL' })
+    expect(text(killed)).toContain('[killed by signal: SIGKILL]')
+
+    bash.handler = () => runResult('', { timedOut: true, exitCode: null, signal: 'SIGTERM', timeoutMs: 500 })
+    const timedOut = await call(ctx, 'pwsh', { command: 'Start-Sleep -Seconds 60', description: 'slow' })
+    expect(timedOut.meta).toEqual({ exitCode: null, signal: 'SIGTERM', timedOut: true })
+    expect(text(timedOut)).toBe('(no output)\n[timed out after 500ms]\n[killed by signal: SIGTERM]')
+  })
+
+  it('projects {} for a background ack, which has no process exit at the call site', async () => {
+    const { ctx } = await setupWithJobs()
+    const started = await call(ctx, 'pwsh', { command: 'Start-Sleep -Seconds 60', description: 'bg', run_in_background: true })
+    expect(started.isError).toBe(false)
+    expect(started.meta).toEqual({})
+    expect(text(started)).toBe('started background job pwsh-1')
+  })
+})
+
 describe('per-call sandbox policy resolution', () => {
   it('stamps the CALLING SESSION\'s resolved policy onto the request (session cwd, not the server launch dir)', async () => {
     const { ctx, bash } = await setupSandboxed()

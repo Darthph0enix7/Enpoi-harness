@@ -35,7 +35,7 @@ import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import { processJob } from './background.ts'
-import { renderPwshProcessRead, renderPwshResult } from './render.ts'
+import { renderPwshProcessRead, renderPwshResult, execOutcomeMeta } from './render.ts'
 import type { RenderablePwshResult } from './render.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
@@ -341,6 +341,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? `started background job ${value.jobId}`
           : renderPwshResult(value as RenderablePwshResult, escalationModes),
       }],
+      // Structured command outcome for harvesters and UI: `{ exitCode, signal?, timedOut? }`.
+      presentationMeta: (_args, value) => execOutcomeMeta(value as { kind: string } & RenderablePwshResult),
     },
     /* jscpd:ignore-start -- the execute path mirrors dsh-tool-bash's by design (see the pwsh-tool-and-executor Agent Note). */
     async execute(args: PwshToolArgs, exec) {

@@ -145,6 +145,32 @@ describe('search', () => {
   })
 })
 
+describe('request snapshot', () => {
+  it('forwards the capture read to the Host remote unchanged', async ({ bench }) => {
+    const b = bench()
+    const value = {
+      capturedAt: 7,
+      sessionId: sid('s1'),
+      provider: 'p',
+      model: 'm',
+      system: null,
+      tools: ['read'],
+      messages: [{ role: 'user', chars: 3 }],
+      bodiesIncluded: false as const,
+    }
+    b.mock.remote.session.requestSnapshot.mockResolvedValue(ok(value))
+    const signal = new AbortController().signal
+    const call = vi.spyOn(b.mock.rpc, 'call')
+
+    await expect(b.svc.requestSnapshot({ sessionId: sid('s1') }, signal)).resolves.toEqual({
+      ok: true,
+      value,
+    })
+    expect(b.mock.remote.session.requestSnapshot).toHaveBeenCalledWith({ sessionId: 's1' })
+    expect(call.mock.calls.find(([, endpoint]) => endpoint === 'session/requestSnapshot')?.[3]).toBe(signal)
+  })
+})
+
 describe('scope tree', () => {
   it('publishes transient Assistant chunks and the named durable v2 settlement through one event source', async ({ bench }) => {
     const b = bench()

@@ -84,12 +84,14 @@ This section explains the design decisions behind the tool and points at the cod
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: tool registration, prompt section, arg validation, escalation, request assembly |
 | [`src/background.ts`](src/background.ts) | Map a settled background process onto generic job outcome vocabulary |
-| [`src/render.ts`](src/render.ts) | Model-facing result text: streams, markers, truncation notices (bash twin) |
+| [`src/render.ts`](src/render.ts) | Model-facing result text (streams, markers, truncation notices) and the tool-owned outcome `meta` projection (bash twin) |
 | — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
 
 ### Rendering and exit markers
 
 The renderer shares the bash tool's structure and the `parseExitStatus` marker contract from `dsh-shell`: a clean exit (0, no signal) produces no marker; the UI card consumes the exit marker as its exit-status pill. Windows forced termination settles as exit 1 without a signal, so `[killed by signal: …]` is POSIX-only there. The `tool:pwsh` prompt section (first-party order 1010) teaches the exit-marker convention and the Windows exit-1-after-interruption reading.
+
+A completed foreground result also carries the same outcome as tool-owned `tool/result` metadata — `{ exitCode, signal?, timedOut? }`, the bash tool's shape — so a harvester, peer agent, or UI reads the exit structurally instead of parsing the marker text; a background acknowledgement projects `{}` because no process exit exists at the call site. `isError` is unchanged: a non-zero exit is a command failure reported in the text and metadata, never a failed tool call.
 
 </details>
 

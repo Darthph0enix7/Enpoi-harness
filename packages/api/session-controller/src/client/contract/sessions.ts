@@ -12,6 +12,10 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { AgentContext } from '../scope.ts'
 import type { SessionSearchResultItem } from '../sessions/manager.ts'
 import type { SessionBinding, SessionListState } from '../sessions/service.ts'
+import type {
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotValue,
+} from '../../types.ts'
 import type { SessionFace } from './session.ts'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionReferenceSource } from '../index.ts'
@@ -129,6 +133,19 @@ export interface ISessions {
     query: string,
     signal: AbortSignal,
   ): Promise<RemoteResult<{ items: SessionSearchResultItem[]; hasMore: boolean }>>
+  /**
+   * Read what the model was actually sent for one Session's most recent main
+   * request (the LLM seam's per-Session wire capture). The default summary
+   * carries digests and sizes only; `includeBodies` also returns the
+   * secret-bearing bodies (full system prompt, tool schemas, message text).
+   * @param request - Session identity and whether bodies are requested.
+   * @param signal - cancellation for the capture read.
+   * @returns the captured request, or a business/transport failure.
+   */
+  requestSnapshot(
+    request: SessionRequestSnapshotRequest,
+    signal: AbortSignal,
+  ): Promise<RemoteResult<SessionRequestSnapshotValue>>
   /**
    * Fork a session from a completed-turn prefix of the source; on resolution
    * the child is in the catalog and may be explicitly retained.

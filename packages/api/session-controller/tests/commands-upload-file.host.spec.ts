@@ -332,6 +332,20 @@ describe('Session file uploads', () => {
     expect(second.uploads.resolve(second.agent, abandoned.receiptId)).toBeUndefined()
   })
 
+  it('carries the caller participant into the durable prompt source', async () => {
+    const { controller, followup } = await uploadHarness()
+    await controller.prompt({
+      ...promptRequest([{ type: 'text', text: 'from a peer' }]),
+      participant: { kind: 'peer', name: 'laptop-adam', device: 'laptop' },
+    })
+    expect(followup).toHaveBeenCalledOnce()
+    const message = followup.mock.calls[0]?.[0] as UserMessage | undefined
+    expect(message?.source).toMatchObject({
+      kind: 'user',
+      participant: { kind: 'peer', name: 'laptop-adam', device: 'laptop' },
+    })
+  })
+
   it('deduplicates a retried rpcId already present in the Agent inbox', async () => {
     const { controller, agent, followup } = await uploadHarness()
     const request = promptRequest([{ type: 'text', text: 'once' }])

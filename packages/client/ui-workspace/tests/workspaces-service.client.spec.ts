@@ -160,6 +160,7 @@ class FakeSessions implements ISessions {
   declare readonly refresh: ISessions['refresh']
   declare readonly loadMore: ISessions['loadMore']
   declare readonly search: ISessions['search']
+  declare readonly requestSnapshot: ISessions['requestSnapshot']
   declare readonly scope: ISessions['scope']
   declare readonly scopeOf: ISessions['scopeOf']
   declare readonly sessionOf: ISessions['sessionOf']

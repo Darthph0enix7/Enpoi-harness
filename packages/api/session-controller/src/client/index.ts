@@ -76,6 +76,14 @@ export type {
   SessionSnapshot,
 } from './contract/snapshot.ts'
 export type { RevertFileConflict, RevertFileOutcome, SessionRevertShadowRange } from '../types.ts'
+export type {
+  SessionRequestSnapshotBodies,
+  SessionRequestSnapshotFull,
+  SessionRequestSnapshotMessage,
+  SessionRequestSnapshotRequest,
+  SessionRequestSnapshotSummary,
+  SessionRequestSnapshotValue,
+} from '../types.ts'
 
 /** Consumer-owned reference labels; extend this map through the package's canonical /client entry. */
 export interface SessionReferenceSourceMap {

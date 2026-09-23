@@ -89,7 +89,7 @@ This section explains the design decisions behind the tool and points at the cod
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: tool registration, prompt section, arg validation, escalation, request assembly |
 | [`src/background.ts`](src/background.ts) | Own asynchronous shell preparation and map process settlement onto job outcomes |
-| [`src/render.ts`](src/render.ts) | Model-facing result text: streams, markers, truncation notices |
+| [`src/render.ts`](src/render.ts) | Model-facing result text (streams, markers, truncation notices) and the tool-owned outcome `meta` projection |
 | — | No runtime invariant companion is published; the environment registry validates ownership and collected values at each mutation/read; it publishes no independent snapshot that a companion could cross-check. |
 
 ### Request resolution
@@ -99,6 +99,8 @@ The tool resolves the workdir before `ctx.shell.resolve()` runs: an explicit rel
 ### Rendering story
 
 The result text is stdout, then a marked `[stderr]` section, then conditional markers: truncation notice, sandbox denial (plus the same-turn escalation hint when the composition advertises escalation), timeout, signal, and exit code — each on its own line. The exit marker doubles as the UI card's exit-status pill: the shared `parseExitStatus` from `dsh-shell` consumes it from the output body, so replay shows the pill without duplicating the marker.
+
+A completed foreground result also carries the same outcome as tool-owned `tool/result` metadata — `{ exitCode, signal?, timedOut? }` — so a harvester, peer agent, or UI reads the exit structurally instead of parsing the marker text; a background acknowledgement projects `{}` because no process exit exists at the call site. `isError` is unchanged: a non-zero exit is a command failure reported in the text and metadata, never a failed tool call.
 
 </details>
 
