@@ -57,6 +57,11 @@ export interface SessionListState {
   byId: Record<SessionId, SessionSummary>
   /** Arrival lifecycle projected 1:1 from the manager snapshot (see SessionListPhase): empty-with-ready means "truly no sessions". */
   phase: SessionListPhase
+  /**
+   * True while the Host reports older rows beyond the loaded newest-first
+   * window; absence means the window ends the list (`loadMore` then no-ops).
+   */
+  hasMore?: boolean
   /** Direct durable catalogs keyed by their selected parent address. */
   subagentsByParent: Readonly<Record<SessionId, SubagentCatalogSnapshot>>
   /**
@@ -261,7 +266,7 @@ export class ClientSessions implements ISessions {
   ) {
     this.manager = new SessionManager(remote)
     this.list = createSnapshotStore<SessionListState>({
-      ids: [], byId: {}, phase: 'pending', subagentsByParent: {}, jobsBySession: {},
+      ids: [], byId: {}, phase: 'pending', hasMore: false, subagentsByParent: {}, jobsBySession: {},
     })
     const disposeManagerProjection = this.manager.subscribe(() => { this.projectList() })
     rootCtx.effect(() => async () => {
@@ -361,11 +366,19 @@ export class ClientSessions implements ISessions {
   }
 
   /**
-   * Refresh the real Session baseline, reusing an in-flight pull.
+   * Refresh the real Session baseline window, reusing an in-flight pull.
    * @returns completion of the current or newly started baseline pull.
    */
   refresh(): Promise<void> {
     return this.manager.refreshList()
+  }
+
+  /**
+   * Append the next older window of Host Session rows, reusing an in-flight pull.
+   * @returns completion of the current or newly started next-window pull.
+   */
+  loadMore(): Promise<void> {
+    return this.manager.loadMore()
   }
 
   /**
@@ -696,7 +709,7 @@ export class ClientSessions implements ISessions {
   private projectList(): void {
     const previousById = this.list.getSnapshot().byId
     const {
-      items, phase, subagentsByParent, jobsBySession,
+      items, phase, hasMore, subagentsByParent, jobsBySession,
     } = this.manager.getListSnapshot()
     const ids: SessionId[] = []
     const byId: Record<SessionId, SessionSummary> = {}
@@ -757,7 +770,7 @@ export class ClientSessions implements ISessions {
         ...(address === undefined ? {} : { parentId: address.parentSessionId, origin: 'subagent' }),
       }
     }
-    this.list.set({ ids, byId, phase, subagentsByParent, jobsBySession })
+    this.list.set({ ids, byId, phase, hasMore, subagentsByParent, jobsBySession })
   }
 
   private startScopeDrop(

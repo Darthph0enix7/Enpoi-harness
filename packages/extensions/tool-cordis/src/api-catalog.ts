@@ -1700,10 +1700,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the current attached state or persisted header and event prefix.',
       },
       {
-        signature: '@Remote(\'list\') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
-        description: 'Read all visible Session rows without resuming an Agent.',
-        parameters: [{ name: '_request', description: 'reserved empty list request.' }, { name: 'signal', description: 'cancellation for persistence reads.' }],
-        returns: 'visible Session summaries ordered by activity.',
+        signature: '@Remote(\'list\') async list(request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
+        description: 'Read one newest-first window of visible Session rows without resuming an Agent.',
+        parameters: [{ name: 'request', description: 'optional continuation cursor and page size.' }, { name: 'signal', description: 'cancellation for persistence reads.' }],
+        returns: "the page's visible Session summaries plus a cursor when older rows remain.",
       },
       {
         signature: '@Remote(\'search\') search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue>',

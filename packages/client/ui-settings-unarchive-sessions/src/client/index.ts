@@ -1,6 +1,8 @@
 /** Archived-session Settings page, browser half. */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: pulls the `sessions` client service merge and `useSessions` types.
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -27,7 +29,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 const NS = 'settings.archivedSessions'
 
 /** Services required by the Settings registration and the archive write. */
-export const inject = ['slots', 'locale', 'uiWorkspace']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'sessions']
 
 /** Contribute the archived-session page to Settings. */
 export function apply(ctx: ClientContext): void {
@@ -36,6 +38,7 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
   const injected = (): ArchivedSessionsSectionInjected => ({
     unarchive: sessionId => ctx.uiWorkspace.unarchiveSession(sessionId),
+    loadMoreSessions: () => { void ctx.sessions.loadMore() },
   })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

@@ -22,7 +22,9 @@ async function bench() {
   ctx.provide('locale', locale)
   const unarchiveSession = vi.fn<(sessionId: SessionId) => Promise<void>>(async () => {})
   ctx.provide('uiWorkspace', { unarchiveSession })
-  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, unarchiveSession }
+  const loadMore = vi.fn(async () => {})
+  ctx.provide('sessions', { loadMore })
+  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, unarchiveSession, loadMore }
 }
 
 function declare(slots: SlotRegistry): () => void {
@@ -38,7 +40,7 @@ describe('ui-settings-unarchive-sessions browser plugin', () => {
   })
 
   it('declares only the services used by the page and the archive write', () => {
-    expect(inject).toEqual(['slots', 'locale', 'uiWorkspace'])
+    expect(inject).toEqual(['slots', 'locale', 'uiWorkspace', 'sessions'])
   })
 
   it('registers the archived-session page last with localized copy', async () => {
@@ -58,6 +60,8 @@ describe('ui-settings-unarchive-sessions browser plugin', () => {
     const injected = (entry.inject as unknown as () => ArchivedSessionsSectionInjected)()
     await expect(injected.unarchive('session-one' as SessionId)).resolves.toBeUndefined()
     expect(b.unarchiveSession).toHaveBeenCalledWith('session-one')
+    injected.loadMoreSessions()
+    expect(b.loadMore).toHaveBeenCalledOnce()
     await b.ctx.fiber.dispose()
   })
 

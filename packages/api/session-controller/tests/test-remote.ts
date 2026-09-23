@@ -89,6 +89,7 @@ export interface TestSessionRemoteDefaults {
   readonly defaultModelSelection: () => AgentModelSelection
   readonly cwd: string
   readonly nativeOpen?: boolean
+  readonly listPageSize?: number
   readonly saveDefaultModelSelection?: (selection: AgentModelSelection) => void | Promise<void>
   readonly openPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly revealPath?: (path: string, signal: AbortSignal) => Promise<void>
@@ -282,6 +283,7 @@ function installControllers(
       ctx,
       {
         ...defaults.nativeOpen === undefined ? {} : { nativeOpen: defaults.nativeOpen },
+        ...defaults.listPageSize === undefined ? {} : { listPageSize: defaults.listPageSize },
       },
       {
         ...defaults.openPath === undefined ? {} : { openPath: defaults.openPath },

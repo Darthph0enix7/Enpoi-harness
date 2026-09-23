@@ -52,10 +52,12 @@ function props(options: {
   sessions: SessionListState
   workspaces: WorkspaceSnapshot
   unarchive?: (sessionId: SessionId) => Promise<void>
+  loadMoreSessions?: () => void
 }): ArchivedSessionsSectionProps {
   return {
     t,
     unarchive: options.unarchive ?? (async () => {}),
+    loadMoreSessions: options.loadMoreSessions ?? (() => {}),
     useSessions: ((select: (state: SessionListState) => unknown) => select(options.sessions)),
     useWorkspaces: ((select: (state: WorkspaceSnapshot) => unknown) => select(options.workspaces)),
   } as unknown as ArchivedSessionsSectionProps
@@ -154,5 +156,23 @@ describe('ArchivedSessionsSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unarchive Older session' }))
     await waitFor(() => { expect(warn).toHaveBeenCalledWith('session unarchive rejected:', failure) })
     warn.mockRestore()
+  })
+
+  it('pulls older Session windows until the Host reports the list end', () => {
+    const loadMoreSessions = vi.fn()
+    const { rerender } = render(<ArchivedSessionsSection {...props({
+      sessions: { ...sessionState([summary('older', 'Older session', Date.now())]), hasMore: true },
+      workspaces: snapshot(['older']),
+      loadMoreSessions,
+    })} />)
+    expect(loadMoreSessions).toHaveBeenCalledOnce()
+
+    // The Host answered with the final window: no further pull.
+    rerender(<ArchivedSessionsSection {...props({
+      sessions: sessionState([summary('older', 'Older session', Date.now())]),
+      workspaces: snapshot(['older']),
+      loadMoreSessions,
+    })} />)
+    expect(loadMoreSessions).toHaveBeenCalledOnce()
   })
 })

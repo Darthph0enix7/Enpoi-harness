@@ -101,6 +101,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     open: vi.fn(),
     searchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     searchResultLimit: 20,
+    loadMoreSessions: vi.fn(),
     renameSession: vi.fn(async () => {}),
     forkSession: vi.fn(),
     renameWorkspace: vi.fn(async () => {}),
@@ -1848,5 +1849,44 @@ describe('Workspace tree grouping', () => {
     fireEvent.dragEnd(alpha)
     expect(b.props.insertWorkspaceBefore).toHaveBeenCalledOnce()
     expect(b.props.insertWorkspaceBefore).toHaveBeenCalledWith(wid('alpha'), wid('gamma'))
+  })
+})
+
+describe('WorkspaceBrowser session window paging', () => {
+  const listOf = (b: ReturnType<typeof mount>): HTMLElement =>
+    b.view.container.querySelector('[role="tree"]') as HTMLElement
+  // jsdom exposes scrollHeight/clientHeight as read-only getters; pin them.
+  const scrollList = (list: HTMLElement, metrics: { scrollHeight: number; scrollTop: number; clientHeight: number }): void => {
+    Object.defineProperty(list, 'scrollHeight', { value: metrics.scrollHeight, configurable: true })
+    Object.defineProperty(list, 'clientHeight', { value: metrics.clientHeight, configurable: true })
+    list.scrollTop = metrics.scrollTop
+    fireEvent.scroll(list)
+  }
+
+  it('pulls the next Session window when the list scrolls to its end', () => {
+    const loadMoreSessions = vi.fn()
+    const b = mount({
+      loadMoreSessions,
+      useSessions: hook(sessionState([summary('newest', 10)], { hasMore: true })),
+    })
+    scrollList(listOf(b), { scrollHeight: 400, scrollTop: 300, clientHeight: 50 })
+    expect(loadMoreSessions).toHaveBeenCalledOnce()
+  })
+
+  it('does not pull while the loaded window ends the list or is still far from its end', () => {
+    const loadMoreSessions = vi.fn()
+    const exhausted = mount({
+      loadMoreSessions,
+      useSessions: hook(sessionState([summary('newest', 10)])),
+    })
+    scrollList(listOf(exhausted), { scrollHeight: 400, scrollTop: 300, clientHeight: 50 })
+    expect(loadMoreSessions).not.toHaveBeenCalled()
+
+    const far = mount({
+      loadMoreSessions,
+      useSessions: hook(sessionState([summary('newest', 10)], { hasMore: true })),
+    })
+    scrollList(listOf(far), { scrollHeight: 4000, scrollTop: 0, clientHeight: 50 })
+    expect(loadMoreSessions).not.toHaveBeenCalled()
   })
 })

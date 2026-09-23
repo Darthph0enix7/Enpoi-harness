@@ -311,7 +311,7 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'create' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'refresh' | 'search' | 'fork'
+    method: 'create' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'refresh' | 'loadMore' | 'search' | 'fork'
       | 'selectModel' | 'revert' | 'revertRestore' | 'resolveFileConflict' | 'delete'
     args: unknown[]
   }[] = []
@@ -656,6 +656,12 @@ export class TestSessions implements ISessions {
     return Promise.resolve()
   }
 
+  /** Record a next-window pull; fixture callers publish list state explicitly. */
+  loadMore(): Promise<void> {
+    this.calls.push({ method: 'loadMore', args: [] })
+    return Promise.resolve()
+  }
+
   /**
    * Replace the sidebar-search result page (the call is still recorded).
    * @param impl - hits for a query, as the Host would rank them.
@@ -689,9 +695,15 @@ export class TestSessions implements ISessions {
   }
 
   /** Fixture stub: records the call and returns the accepted selection. */
-  selectModel(opts: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }> {
+  selectModel(opts: {
+    sessionId: SessionId
+    provider: string
+    model: string
+    reasoningEffort?: string
+  }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }> {
     this.calls.push({ method: 'selectModel', args: [opts] })
-    return Promise.resolve({ selected: { provider: opts.provider, model: opts.model, ...opts.reasoningEffort === undefined ? {} : { reasoningEffort: opts.reasoningEffort } } })
+    const effort = opts.reasoningEffort === undefined ? {} : { reasoningEffort: opts.reasoningEffort }
+    return Promise.resolve({ selected: { provider: opts.provider, model: opts.model, ...effort } })
   }
 
   /** Fixture stub: records the call and returns the reverted query text. */

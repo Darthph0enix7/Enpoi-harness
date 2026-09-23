@@ -25,6 +25,9 @@ import { Session } from './session.ts'
 import type { SessionRemotes } from './remotes.ts'
 import type { SessionTarget } from '../contract/sessions.ts'
 
+/** Upper bound on window pulls one content search may trigger. */
+const SEARCH_WINDOW_PULL_LIMIT = 20
+
 function sessionSeqCursor(value: number): SessionSeqCursor {
   return value === -1 ? -1 : SessionSeq(value)
 }
@@ -52,6 +55,8 @@ export interface SessionListSnapshot {
   /** Arrival lifecycle (see {@link SessionListPhase}); `state` stays the pull-activity axis. */
   phase: SessionListPhase
   error: RemoteFailure | null
+  /** Whether the loaded window ends before the oldest durable Session (`loadMore` reaches it). */
+  hasMore: boolean
   subagentsByParent: Readonly<Record<SessionId, SubagentCatalogSnapshot>>
   /** Background jobs per session; an absent key is an empty set. */
   jobsBySession: Readonly<Record<SessionId, readonly JobView[]>>
@@ -103,8 +108,14 @@ export class SessionManager {
   private listPhase: SessionListPhase = 'pending'
   private listError: RemoteFailure | null = null
   private listInflight: Promise<void> | null = null
+  /** Cursor for the next older window; absent when the loaded window ends the list. */
+  private listNextCursor: string | undefined
+  /** Window generation; a refresh or reconnect retires in-flight next-window pulls. */
+  private listGeneration = 0
   /** Active list request's mutation log; its identity also fences completion after reconnect. */
   private listMutations: SessionListMutation[] | null = null
+  /** Single-flight next-window pull; `null` between pulls. */
+  private loadMoreInflight: Promise<void> | null = null
   private readonly addresses = new Map<SessionId, SubagentAddress>()
   private readonly catalogs = new Map<SessionId, SubagentCatalogSnapshot>()
   private readonly catalogInflight = new Map<SessionId, CatalogInflight>()
@@ -395,7 +406,7 @@ export class SessionManager {
 
   // ---- List API ----
 
-  /** Full refresh via session.list (single-flight within one Host generation). */
+  /** First-window refresh via session.list (single-flight within one Host generation). */
   refreshList(): Promise<void> {
     if (this.listInflight !== null) return this.listInflight
     this.listState = 'loading'
@@ -409,12 +420,17 @@ export class SessionManager {
         const result = await this.remote.session.list({})
         if (this.listMutations !== mutations) return
         if (result.ok) {
+          // A page with a cursor is a window, not the full catalog: established
+          // rows beyond it stay until their own page or a removal frame.
+          const complete = result.value.nextCursor === undefined
           const baseline: SessionSummary[] = this.listPhase === 'pending'
             ? [...result.value.items]
-            : mergeOrderedBaseline(established, result.value.items, summary => summary.sessionId)
+            : mergeOrderedBaseline(established, result.value.items, summary => summary.sessionId, !complete)
           this.summaries = mutations.reduce(applyMutation, baseline)
           this.listState = 'idle'
           this.listPhase = 'ready'
+          this.listNextCursor = result.value.nextCursor
+          this.listGeneration++
           // Push running/blank bits down to instantiated Sessions (the list is the authoritative summary source).
           for (const s of this.summaries) {
             const session = this.sessions.get(s.sessionId)
@@ -456,8 +472,56 @@ export class SessionManager {
   }
 
   /**
+   * Append the next older window of Host Session rows. In-flight rows keep
+   * their local state: a row already known is never replaced by the page, and
+   * rows appended for the first time carry no conflicting local mutations.
+   * A failed pull leaves the loaded window untouched for a later retry.
+   * @returns completion of the current or newly started next-window pull.
+   */
+  loadMore(): Promise<void> {
+    if (this.loadMoreInflight !== null) return this.loadMoreInflight
+    const cursor = this.listNextCursor
+    if (cursor === undefined) return Promise.resolve()
+    const generation = this.listGeneration
+    const operation = (async () => {
+      try {
+        const result = await this.remote.session.list({ cursor })
+        // A page the window no longer points at would append stale rows.
+        if (this.listGeneration !== generation) return
+        if (!result.ok) return
+        const known = new Set(this.summaries.map(summary => summary.sessionId))
+        const appended = result.value.items.filter(item => !known.has(item.sessionId))
+        if (appended.length > 0) this.summaries = [...this.summaries, ...appended]
+        this.listNextCursor = result.value.nextCursor
+        for (const s of appended) {
+          const session = this.sessions.get(s.sessionId)
+          if (session !== undefined) {
+            session.handleBlank(s.blank)
+            session.handleRunning(s.running)
+          }
+          // Same per-key, higher-seq-wins seeding as the first window.
+          const block = s.projections
+          if (block === undefined) continue
+          const store = this.projectionStore(s.sessionId)
+          const values = block.values as Record<string, unknown>
+          for (const key of Object.keys(values)) store.apply(key, values[key], sessionSeqCursor(block.asOfSeq))
+        }
+      } catch (error) {
+        if (!isRemoteFailure(error)) throw error
+      } finally {
+        this.loadMoreInflight = null
+        this.notifier.markDirty()
+      }
+    })()
+    this.loadMoreInflight = operation
+    return operation
+  }
+
+  /**
    * Search visible session message content without adding transient query
-   * state to the list snapshot.
+   * state to the list snapshot. Content hits beyond the loaded window pull
+   * older windows until every hit is addressable, so result rows can render
+   * (and open) against the list snapshot.
    * @param query - non-blank literal phrase.
    * @param signal - cancellation for superseded UI queries.
    * @returns the Host result or a folded transport error.
@@ -468,6 +532,18 @@ export class SessionManager {
   ): Promise<RemoteResult<{ items: SessionSearchResultItem[]; hasMore: boolean }>> {
     const result = await this.remote.session.search({ query }, signal)
     if (!result.ok) return result
+    let pulls = 0
+    let pending = this.missingSearchHits(result.value.items)
+    while (pending.length > 0 && pulls < SEARCH_WINDOW_PULL_LIMIT && !signal.aborted) {
+      const cursor = this.listNextCursor
+      if (cursor === undefined) break
+      const generation = this.listGeneration
+      await this.loadMore()
+      // A pull that neither advanced the window nor loaded rows would loop.
+      if (this.listGeneration !== generation || this.listNextCursor === cursor) break
+      pulls++
+      pending = this.missingSearchHits(result.value.items)
+    }
     return {
       ok: true,
       value: {
@@ -475,6 +551,12 @@ export class SessionManager {
         hasMore: result.value.hasMore,
       },
     }
+  }
+
+  /** Content hits whose rows are not in the loaded window yet. */
+  private missingSearchHits(items: readonly SessionSearchResultItem[]): SessionSearchResultItem[] {
+    const known = new Set(this.summaries.map(summary => summary.sessionId))
+    return items.filter(item => !known.has(item.sessionId))
   }
 
   /**
@@ -798,6 +880,9 @@ export class SessionManager {
     for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null
+    this.loadMoreInflight = null
+    this.listNextCursor = undefined
+    this.listGeneration++
     void this.refreshList()
     const parents = new Set(this.openCatalogs)
     for (const id of this.sessions.keys()) {
@@ -921,6 +1006,7 @@ export class SessionManager {
       state: this.listState,
       phase: this.listPhase,
       error: this.listError,
+      hasMore: this.listNextCursor !== undefined,
       subagentsByParent: Object.fromEntries(this.catalogs),
       jobsBySession: Object.fromEntries(this.jobsBySession),
     }

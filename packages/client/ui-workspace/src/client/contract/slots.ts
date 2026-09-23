@@ -115,6 +115,11 @@ export type WorkspaceBrowserInjected = {
   ) => Promise<{ items: readonly SessionSearchResultItem[]; hasMore: boolean }>
   /** Maximum number of merged rows rendered for one search. */
   searchResultLimit: number
+  /**
+   * Append the next older Session window when the browsing list scrolls past
+   * the loaded newest-first page; no-op once the window ends the list.
+   */
+  loadMoreSessions: () => void
   /** Rename a Session (explicit user title; resolves on host acceptance). */
   renameSession: (sessionId: SessionId, title: string) => Promise<void>
   /** Fork a Session at its last completed turn and open the child. */

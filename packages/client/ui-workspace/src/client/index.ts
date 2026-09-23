@@ -114,6 +114,7 @@ export function apply(ctx: Context): void {
     open: openSession,
     searchSessions,
     searchResultLimit: sessions.searchResultLimit,
+    loadMoreSessions: () => { void sessions.loadMore() },
     renameSession: async (sessionId, title) => {
       const result = await sessions.using(
         sessionId,

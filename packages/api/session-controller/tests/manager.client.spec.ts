@@ -7,7 +7,7 @@ import { describe, expect, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionControlFrame } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { SessionControlFrame, SessionProjectionHints } from '@deepseek-ai/dsh-api-session-controller/types'
 import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
 import {
   createClientTest, type ClientTestFixtures, webApp,
@@ -33,6 +33,7 @@ type SummaryOver = Partial<{
   cwd: string
   parentSessionId: SessionId
   origin: 'subagent'
+  projections: SessionProjectionHints
 }>
 
 function summary(sessionId: SessionId, over: SummaryOver = {}) {
@@ -305,6 +306,26 @@ describe('list lifecycle', () => {
 })
 
 describe('search', () => {
+  it('pulls older windows until every content hit is addressable', async ({ mock, remote }) => {
+    remote.session.list
+      .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })], nextCursor: '1' } as never))
+      .mockResolvedValueOnce(ok({ items: [summary(S1)] } as never))
+    remote.session.search.mockResolvedValue(ok({
+      items: [{ sessionId: S1, snippet: 'older excerpt' }],
+      hasMore: false,
+    }))
+    const manager = makeManager(mock, remote)
+    await manager.refreshList()
+    await expect(manager.search('older', new AbortController().signal)).resolves.toEqual({
+      ok: true,
+      value: { items: [{ sessionId: S1, snippet: 'older excerpt' }], hasMore: false },
+    })
+    // The hit's row is now in the window, so presentation can render and open it.
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S2, S1])
+    expect(remote.session.list).toHaveBeenNthCalledWith(2, { cursor: '1' })
+    await manager.dispose()
+  })
+
   it('returns bounded Host results and forwards the caller signal', async ({ mock, remote }) => {
     remote.session.search.mockResolvedValue(ok({
       items: [{ sessionId: S1, snippet: 'matching excerpt' }],
@@ -334,6 +355,88 @@ describe('search', () => {
 
     remote.session.search.mockRejectedValue(new Error('wire down'))
     await expect(manager.search('second', signal)).rejects.toThrow('wire down')
+  })
+})
+
+describe('list window paging', () => {
+  it('appends older windows on demand and stops once the Host ends the list', async ({ mock, remote }) => {
+    const S3 = 'fk-m3' as SessionId
+    remote.session.list
+      .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })], nextCursor: '1' } as never))
+      .mockResolvedValueOnce(ok({
+        items: [summary(S1, { updatedAt: 100, running: true, projections: { asOfSeq: -1, values: { title: 'Older' } } })] as never,
+        nextCursor: '2',
+      }))
+      .mockResolvedValueOnce(ok({ items: [summary(S3)] } as never))
+    const manager = makeManager(mock, remote)
+    await manager.refreshList()
+    expect(manager.getListSnapshot().hasMore).toBe(true)
+    // A resident instance adopts the appended row's state and projection.
+    const resident = manager.get(S1)
+
+    await manager.loadMore()
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S2, S1])
+    expect(manager.getListSnapshot().hasMore).toBe(true)
+    expect(remote.session.list).toHaveBeenNthCalledWith(2, { cursor: '1' })
+    expect(manager.getListSnapshot().items[1]?.title).toBe('Older')
+    expect(resident.getSnapshot().running).toBe(true)
+
+    await manager.loadMore()
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S2, S1, S3])
+    expect(manager.getListSnapshot().hasMore).toBe(false)
+
+    await manager.loadMore() // exhausted: no further pull
+    expect(remote.session.list).toHaveBeenCalledTimes(3)
+    await manager.dispose()
+  })
+
+  it('discards a next-window page overtaken by a refresh', async ({ mock, remote }) => {
+    const gate = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    remote.session.list
+      .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })], nextCursor: '1' } as never))
+      .mockReturnValueOnce(gate.promise)
+      .mockResolvedValueOnce(ok({ items: [summary(S1, { updatedAt: 300 })], nextCursor: '1' } as never))
+    const manager = makeManager(mock, remote)
+    await manager.refreshList()
+    const loading = manager.loadMore()
+    await manager.refreshList() // cursor moved to the refreshed window
+    gate.resolve(ok({ items: [summary(S2, { updatedAt: 200 })] } as never))
+    await loading
+    // The refreshed window is the authority: S2 stays exactly once (the
+    // overtaken page is discarded, not appended as a duplicate).
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S2, S1])
+    await manager.dispose()
+  })
+
+  it('keeps older established rows across a partial refresh window', async ({ mock, remote }) => {
+    const S3 = 'fk-m3' as SessionId
+    remote.session.list
+      .mockResolvedValueOnce(ok({ items: [summary(S3, { updatedAt: 300 })], nextCursor: '1' } as never))
+      .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })] } as never))
+      .mockResolvedValueOnce(ok({ items: [summary(S3, { updatedAt: 350 })], nextCursor: '1' } as never))
+    const manager = makeManager(mock, remote)
+    await manager.refreshList()
+    await manager.loadMore()
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S3, S2])
+
+    // The refreshed window is partial, so the older row survives (only the
+    // newest row's value moves).
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S3, S2])
+    expect(manager.getListSnapshot().items[0]?.updatedAt).toBe(350)
+    await manager.dispose()
+  })
+
+  it('leaves the loaded window untouched when a next-window pull fails', async ({ mock, remote }) => {
+    remote.session.list
+      .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })], nextCursor: '1' } as never))
+      .mockResolvedValueOnce(err(new RemoteError('gateway/internal', 'window down', {})))
+    const manager = makeManager(mock, remote)
+    await manager.refreshList()
+    await expect(manager.loadMore()).resolves.toBeUndefined()
+    expect(manager.getListSnapshot()).toMatchObject({ state: 'idle', hasMore: true })
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S2])
+    await manager.dispose()
   })
 })
 

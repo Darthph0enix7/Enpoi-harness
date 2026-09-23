@@ -15,13 +15,38 @@ import {
   SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS,
 } from './types.ts'
 import type {
-  SessionListMetadata, SessionProjectionHints, SessionProjectionValues, SessionSearchItem,
-  SessionSearchValue, SessionSummary,
+  SessionListMetadata, SessionListRequest, SessionListValue, SessionProjectionHints,
+  SessionProjectionValues, SessionSearchItem, SessionSearchValue, SessionSummary,
 } from './types.ts'
 
 const SEARCH_PROVIDER_CALL_LIMIT = 100
 const SESSION_SEARCH_QUERY_MAX_CHARS = 500
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
+
+/**
+ * Per-Session projection keys excluded from list rows. A list page carries
+ * every row's title and small routing facts; these values are per-Session
+ * workspace payloads (context-lens timelines, generated-title input) whose
+ * measured wire size dominated the cold list (tens of KB per Session). They
+ * arrive with the Session's own history opening or control frames instead.
+ */
+const LIST_EXCLUDED_PROJECTION_KEYS: ReadonlySet<string> = new Set([
+  'contextLens',
+  'contextTimeline',
+  'contextHeaders',
+  'titleInput',
+])
+
+/** Largest accepted page size; a client may ask for any window up to the full catalog. */
+const SESSION_LIST_PAGE_SIZE_MAX = 500
+
+/** One catalog row before the page's wire values are materialized. */
+interface ListOrderRow {
+  readonly header: SessionHeader
+  /** Attached Session when live; absent for persisted rows. */
+  readonly session: Session | undefined
+  readonly updatedAt: number
+}
 
 const sessionListMetadataSchema: z.ZodType<SessionListMetadata> = z.object({
   blank: z.boolean(),
@@ -75,8 +100,14 @@ export function truncateUnicodeCodePoints(value: string, maximum: number): strin
 
 /** Owns list projection registration, bounded cold summaries, and authorized search. */
 export class ApiSessionList {
-  /** @param ctx - Host context carrying Session, query, persistence, and projection services. */
-  constructor(private readonly ctx: Context) {
+  /**
+   * @param ctx - Host context carrying Session, query, persistence, and projection services.
+   * @param pageSize - default rows per list page, from the deployment's `listPageSize`.
+   */
+  constructor(
+    private readonly ctx: Context,
+    private readonly pageSize: number,
+  ) {
     ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
       stateSchema: sessionListMetadataSchema,
@@ -119,28 +150,83 @@ export class ApiSessionList {
   }
 
   /**
-   * Read every visible attached and persisted Session without activating an Agent.
+   * Read one newest-first window of visible attached and persisted Sessions
+   * without activating an Agent. Heavy per-Session projections are excluded
+   * from rows (see {@link LIST_EXCLUDED_PROJECTION_KEYS}); the cursor offsets
+   * into the ordered catalog.
+   * @param request - optional continuation cursor and page size.
    * @param signal - optional cancellation for persistence reads.
-   * @returns visible Session summaries ordered by activity.
+   * @returns the page's Session summaries plus a cursor when older rows remain.
    */
-  async list(signal?: AbortSignal): Promise<SessionSummary[]> {
+  async list(request: SessionListRequest, signal?: AbortSignal): Promise<SessionListValue> {
+    const offset = listOffset(request.cursor)
+    const limit = listLimit(request.limit, this.pageSize)
     signal?.throwIfAborted()
     const records = await this.ctx.sessionQuery.listSessions(signal)
     signal?.throwIfAborted()
-    const items: SessionSummary[] = []
-    const cold: SessionHeader[] = []
+    // Ordering reads only the list-metadata cut; full wire values are
+    // materialized for the page's rows alone (validating every cached value of
+    // every Session made cold listing CPU-bound, not wire-bound).
+    const ordered: ListOrderRow[] = []
     for (const record of records) {
       const live = this.ctx.sessions.get(record.header.id)
       if (live !== undefined) {
-        items.push(this.summaryFor(live))
+        ordered.push({
+          header: live.header,
+          session: live,
+          updatedAt: updatedAt(live.header, this.liveListMetadata(live)),
+        })
         continue
       }
       if (record.header.cwd === undefined) continue
-      cold.push(record.header)
+      ordered.push({
+        header: record.header,
+        session: undefined,
+        updatedAt: updatedAt(record.header, this.coldListMetadata(record.header)),
+      })
     }
-    for (const header of cold) items.push(this.summarizeCold(header))
-    items.sort((left, right) => right.updatedAt - left.updatedAt)
-    return items
+    ordered.sort((left, right) => right.updatedAt - left.updatedAt)
+    const window = ordered.slice(offset, offset + limit).map((row) => {
+      const summary = row.session === undefined
+        ? this.summarizeCold(row.header)
+        : this.summaryFor(row.session)
+      return listRow(summary)
+    })
+    const nextOffset = offset + window.length
+    return {
+      items: window,
+      ...(nextOffset < ordered.length ? { nextCursor: String(nextOffset) } : {}),
+    }
+  }
+
+  /** List-metadata cut for one attached Session (ordering reads no other key). */
+  private liveListMetadata(session: Session): SessionListMetadata | undefined {
+    try {
+      return this.ctx.sessionProjections
+        .cachedSnapshot(session, ['sessionListMetadata'])
+        ?.values.sessionListMetadata as SessionListMetadata | undefined
+    } catch (error) {
+      this.ctx.logger.warn(
+        `api-session.list: list metadata for "${session.id}" failed; ordering by creation time: ${String(error)}`,
+      )
+      return undefined
+    }
+  }
+
+  /** List-metadata cut for one persisted Session (ordering reads no other key). */
+  private coldListMetadata(header: SessionHeader): SessionListMetadata | undefined {
+    try {
+      const cache = this.ctx.get('sessionProjectionCache')
+      if (cache === undefined || header.isSeeded) return undefined
+      const block = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])
+        ?? cache.cachedPredecessorTitle(header, SessionLogOffset(0))
+      return block?.values.sessionListMetadata as SessionListMetadata | undefined
+    } catch (error) {
+      this.ctx.logger.warn(
+        `api-session.list: list metadata for "${header.id}" failed; ordering by creation time: ${String(error)}`,
+      )
+      return undefined
+    }
   }
 
   private summarizeCold(header: SessionHeader): SessionSummary {
@@ -314,6 +400,54 @@ function normalizeSearchQuery(query: string): string {
 
 function updatedAt(header: SessionHeader, metadata: SessionListMetadata | undefined): number {
   return Math.max(header.createdAt, metadata?.lastPromptAt ?? 0)
+}
+
+/**
+ * Strip heavy per-Session projection values from one page row while preserving
+ * every other field and the row's asOfSeq watermark.
+ * @param summary - Host summary built for the full catalog.
+ * @returns the row with {@link LIST_EXCLUDED_PROJECTION_KEYS} removed.
+ */
+function listRow(summary: SessionSummary): SessionSummary {
+  const { projections, ...rest } = summary
+  if (projections === undefined) return summary
+  const values = Object.fromEntries(
+    Object.entries(projections.values).filter(([key]) => !LIST_EXCLUDED_PROJECTION_KEYS.has(key)),
+  ) as SessionProjectionValues
+  return Object.keys(values).length === 0
+    ? rest
+    : { ...rest, projections: { asOfSeq: projections.asOfSeq, values } }
+}
+
+/**
+ * Parse a list cursor into a catalog offset.
+ * @param cursor - opaque cursor from a previous page; absent starts at zero.
+ * @returns the non-negative offset.
+ */
+function listOffset(cursor: string | undefined): number {
+  if (cursor === undefined) return 0
+  if (!/^(0|[1-9]\d*)$/.test(cursor)) {
+    throw new RemoteError('gateway/bad-request', 'session list cursor must be a non-negative integer offset', {})
+  }
+  return Number(cursor)
+}
+
+/**
+ * Resolve one page size against the deployment default and the wire bound.
+ * @param limit - requested page size; absent uses the deployment default.
+ * @param pageSize - deployment default.
+ * @returns the accepted page size.
+ */
+function listLimit(limit: number | undefined, pageSize: number): number {
+  if (limit === undefined) return pageSize
+  if (!Number.isInteger(limit) || limit < 1 || limit > SESSION_LIST_PAGE_SIZE_MAX) {
+    throw new RemoteError(
+      'gateway/bad-request',
+      `session list limit must be an integer between 1 and ${String(SESSION_LIST_PAGE_SIZE_MAX)}`,
+      {},
+    )
+  }
+  return limit
 }
 
 function listFields(header: SessionHeader): {

@@ -9,7 +9,7 @@
  * menu in between; the flow and its error dialog live in WorkspacePicker
  * (same package — direct composition, no slot between them).
  */
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, type UIEvent, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   Button, IconCloseFill14, IconPersonalizationOutline16,
@@ -173,13 +173,32 @@ function pinnedFirst(sessionIds: readonly SessionId[], pinned: ReadonlySet<strin
   return [...sessionIds].sort((a, b) => (pinned.has(a) ? 0 : 1) - (pinned.has(b) ? 0 : 1))
 }
 
+/**
+ * Append the next older Session window when the scrollport nears its end.
+ * @param hasMore - whether the Host reported older rows beyond the loaded window.
+ * @param loadMore - injected next-window pull (no-op once the window ends the list).
+ * @returns the list scroll handler.
+ */
+function loadMoreOnEnd(hasMore: boolean, loadMore: () => void): (event: UIEvent<HTMLDivElement>) => void {
+  return (event) => {
+    if (!hasMore) return
+    const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
+    if (scrollHeight - scrollTop - clientHeight < END_LOAD_THRESHOLD_PX) loadMore()
+  }
+}
+
+/** Distance from the list end that triggers the next-window pull. */
+const END_LOAD_THRESHOLD_PX = 240
+
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
   'useSessionStatus' | 'startSession' | 'open' | 'forkSession'
-  | 'insertWorkspaceBefore' | 't' | 'usePanelInfo'
+  | 'insertWorkspaceBefore' | 't' | 'usePanelInfo' | 'loadMoreSessions'
 > & {
   /** Always-mounted Session list snapshot. */
   list: SessionListState
+  /** Whether older Session windows remain beyond the loaded rows. */
+  hasMoreSessions: boolean
   /** Host account home for POSIX hover-path abbreviation. */
   home?: string | undefined
   /** Workspaces in Host group order with browser-projected Session order. */
@@ -235,7 +254,7 @@ function SessionTree({
   onCopyId, onTogglePin, pinnedSessionIds, onExportMarkdown, onMoveToFolder, onDelete,
   insertWorkspaceBefore,
   nestWorkspaces, groupExpansion, setGroupExpanded,
-  setSessionOrder, home, t,
+  setSessionOrder, home, t, hasMoreSessions, loadMoreSessions,
   revealSessionId, onSessionRevealed,
 }: SessionTreeProps) {
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
@@ -581,6 +600,7 @@ function SessionTree({
         className={clsx(css.list, workspaceDropAtListStart && css.listTopDropActive)}
         role="tree"
         aria-label={t('section.sessions')}
+        onScroll={loadMoreOnEnd(hasMoreSessions, loadMoreSessions)}
       >
         {groups.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
@@ -598,6 +618,7 @@ function FlatList({
   onCopyId, onTogglePin, pinnedSessionIds, onExportMarkdown, onMoveToFolder, onDelete,
   usePanelInfo, setSessionOrder,
   revealSessionId, onSessionRevealed, t,
+  hasMoreSessions, loadMoreSessions,
 }: Pick<
   SessionTreeProps,
   | 'useSessionStatus'
@@ -616,6 +637,8 @@ function FlatList({
   | 'setSessionOrder'
   | 'revealSessionId'
   | 'onSessionRevealed'
+  | 'hasMoreSessions'
+  | 'loadMoreSessions'
   | 't'
 > & {
   list: SessionListState
@@ -653,7 +676,12 @@ function FlatList({
   const now = Date.now()
   return (
     <div className={clsx(css.treeBody, css.wide)}>
-      <div className={clsx(css.list, css.flatList)} role="tree" aria-label={t('section.sessions')}>
+      <div
+        className={clsx(css.list, css.flatList)}
+        role="tree"
+        aria-label={t('section.sessions')}
+        onScroll={loadMoreOnEnd(hasMoreSessions, loadMoreSessions)}
+      >
         {rows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
@@ -827,6 +855,7 @@ export function WorkspaceBrowser({
   deleteSession,
   searchSessions,
   searchResultLimit,
+  loadMoreSessions,
   useDirectoryFlow,
   useHostInfo,
   renderSlot,
@@ -1395,6 +1424,8 @@ export function WorkspaceBrowser({
                 setSessionOrder={saveSessionOrder}
                 revealSessionId={revealSessionId}
                 onSessionRevealed={acknowledgeSessionReveal}
+                hasMoreSessions={list.hasMore === true}
+                loadMoreSessions={loadMoreSessions}
                 t={t}
               />
             )
@@ -1426,6 +1457,8 @@ export function WorkspaceBrowser({
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 revealSessionId={revealSessionId}
                 onSessionRevealed={acknowledgeSessionReveal}
+                hasMoreSessions={list.hasMore === true}
+                loadMoreSessions={loadMoreSessions}
                 home={home}
                 t={t}
                 onRenameRequest={(workspaceId, currentTitle) => {

@@ -4,7 +4,7 @@
  * box, with one Unarchive action per row. An archive entry whose Session is
  * gone has no row and no action; the set itself stays host-owned.
  */
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16, relativeTime } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -17,6 +17,8 @@ export interface ArchivedSessionsSectionInjected {
    * @param sessionId - Session to unarchive.
    */
   unarchive: (sessionId: SessionId) => Promise<void>
+  /** Append the next older Session window so archives outside it become addressable. */
+  loadMoreSessions: () => void
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -55,13 +57,22 @@ function matches(row: ArchivedRow, normalizedQuery: string): boolean {
  * @returns the settings page element tree.
  */
 export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): ReactNode {
-  const { t, unarchive, useSessions, useWorkspaces } = props
+  const { t, unarchive, loadMoreSessions, useSessions, useWorkspaces } = props
   const sessions = useSessions(state => state)
   const workspaces = useWorkspaces(state => state.items)
   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
   const [query, setQuery] = useState('')
   const ungrouped = t('ungrouped')
   const summaries = sessions.byId
+  const hasMoreSessions = sessions.hasMore === true
+
+  // The page lists every archived Session; the list window is newest-first, so
+  // pull older windows until the Host reports none left. Each pull flips
+  // hasMore, which re-runs this effect for the next window.
+  useEffect(() => {
+    if (sessions.phase !== 'ready' || !hasMoreSessions) return
+    loadMoreSessions()
+  }, [sessions.phase, hasMoreSessions, loadMoreSessions])
 
   // Archive order is oldest first; the page lists the most recently archived
   // Session first. A member with no loaded summary is not addressable here.

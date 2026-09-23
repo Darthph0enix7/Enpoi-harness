@@ -289,12 +289,17 @@ export interface SkillListValue {
 
 /** Session list request. */
 export interface SessionListRequest {
+  /** Opaque continuation cursor from a previous page; omitted starts at the newest row. */
   readonly cursor?: string
+  /** Requested rows for this page; omitted uses the deployment page size. */
+  readonly limit?: number
 }
 
-/** Session list response value. */
+/** Session list response value: one bounded window of the newest-first rows. */
 export interface SessionListValue {
   readonly items: readonly SessionSummary[]
+  /** Opaque cursor for the next older window; absent when this page ends the list. */
+  readonly nextCursor?: string
 }
 
 /** Session search request. */

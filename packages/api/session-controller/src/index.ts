@@ -79,6 +79,8 @@ declare module '@deepseek-ai/cordis' {
 export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Default rows in one `session.list` page (the client loads further pages on demand). */
+  readonly listPageSize?: number
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -108,6 +110,7 @@ export class SessionController extends TypertRemoteService {
 
   static Config: z<Config> = z.object({
     nativeOpen: z.boolean(),
+    listPageSize: z.number().step(1).min(1).max(500).default(50),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -142,7 +145,7 @@ export class SessionController extends TypertRemoteService {
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
     this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) })
-    this.listState = new ApiSessionList(ctx)
+    this.listState = new ApiSessionList(ctx, config.listPageSize ?? 50)
     this.openPath = internals.openPath ?? openNativePath
     this.revealPath = internals.revealPath ?? revealNativePath
     this.canOpenPath = internals.canOpenPath
@@ -224,14 +227,14 @@ export class SessionController extends TypertRemoteService {
   }
 
   /**
-   * Read all visible Session rows without resuming an Agent.
-   * @param _request - reserved empty list request.
+   * Read one newest-first window of visible Session rows without resuming an Agent.
+   * @param request - optional continuation cursor and page size.
    * @param signal - cancellation for persistence reads.
-   * @returns visible Session summaries ordered by activity.
+   * @returns the page's visible Session summaries plus a cursor when older rows remain.
    */
   @Remote('list')
-  async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue> {
-    return { items: await this.listState.list(signal) }
+  async list(request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue> {
+    return await this.listState.list(request, signal)
   }
 
   /**

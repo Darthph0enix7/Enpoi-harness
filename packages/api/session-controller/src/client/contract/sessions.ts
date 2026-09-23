@@ -108,10 +108,16 @@ export interface ISessions {
   refreshSubagents(parentSessionId: SessionId): Promise<void>
 
   /**
-   * Refresh the Host-authoritative Session list.
+   * Refresh the Host-authoritative Session list window.
    * @returns completion of the current or newly started Session-list refresh.
    */
   refresh(): Promise<void>
+  /**
+   * Append the next older window of Host Session rows for consumers that need
+   * beyond the newest-first window (scroll, search, archived views).
+   * @returns completion of the current or newly started next-window pull.
+   */
+  loadMore(): Promise<void>
   /**
    * Search the Host's visible message-content index. Results stay
    * request-local; the list snapshot remains the metadata authority.
@@ -139,7 +145,12 @@ export interface ISessions {
    * @param opts - session and the provider/model/effort selection.
    * @returns the accepted selection after Host resolution.
    */
-  selectModel(opts: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }>
+  selectModel(opts: {
+    sessionId: SessionId
+    provider: string
+    model: string
+    reasoningEffort?: string
+  }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }>
   /**
    * Revert the conversation from a user message: everything after `atSeq`
    * becomes reverted (hidden from the transcript and the model surface on the
