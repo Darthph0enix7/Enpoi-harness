@@ -31,6 +31,7 @@ import { notifySubscribers } from '@deepseek-ai/dsh-client-store'
 // The POSIX build: the browser bundle must not reach for node's `path`, and
 // addresses are `/`-separated regardless of the host platform.
 import picomatch from 'picomatch/posix'
+import { isSidebarRightKindHidden } from './hidden-surfaces.ts'
 
 /**
  * How strongly a type wants an address it recognizes, as one of three literal
@@ -346,6 +347,7 @@ export class SidebarRightTabRegistry {
 
   /**
    * Every type in force's guide entries, in `order`, each naming the kind it opens.
+   * Hidden kinds contribute no entry.
    * @returns reference-stable entries.
    */
   guide(): readonly SidebarRightGuideBox[] {
@@ -356,7 +358,7 @@ export class SidebarRightTabRegistry {
   /**
    * One rail icon per page kind that offers a guide box, in the same order as
    * the boxes. The first box wins a kind's icon and title; a kind with no box
-   * is a viewer, not a page the rail stands for.
+   * is a viewer, not a page the rail stands for, and a hidden kind is absent.
    * @returns reference-stable items.
    */
   rail(): readonly SidebarRightRailItem[] {
@@ -437,10 +439,20 @@ export class SidebarRightTabRegistry {
     return () => { this.listeners.delete(listener) }
   }
 
-  private refresh(): void {
+  /**
+   * Re-derive the published faces after a registration or a hidden-surfaces
+   * preference change (the guide boxes, the rail, and the icon list all derive
+   * here). Called by `register`, `leave`, and the plugin's preference sync.
+   */
+  refresh(): void {
     this.cached = this.active().map(entry => entry.definition)
+    // enpoi: a hidden kind leaves every enumeration point at once — the guide
+    // page's capsules and, because the rail derives from them, the icon rail
+    // and the mobile surface bar. Hidden kinds cannot be opened either
+    // (`service.placeTab` refuses), so no surface renders for one.
     this.guideEntries = this.cached
       .flatMap(definition => (definition.guide ?? []).map(entry => ({ ...entry, kind: definition.kind, providerId: definition.id })))
+      .filter(entry => !isSidebarRightKindHidden(entry.kind))
       .sort((left, right) => left.order - right.order)
     // enpoi: one rail item per kind, first guide box wins.
     const byKind = new Map<string, SidebarRightRailItem>()

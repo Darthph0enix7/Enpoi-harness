@@ -469,6 +469,17 @@
   left: 0;
 }
 
+/* Non-Chat Views own their full-bleed scrollers (Trajectory, Request Context,
+   Context Lens), so a composer stuck under or floated over them only covers
+   their content. Hide the seat there — but never a seat carrying a pending
+   approval, question, or plan review: those panels must stay reachable from
+   every View (the same exception dsh-context's own sheet already applies). A
+   session with no resolved View keeps the composer, since the attribute is
+   absent then. */
+.scrollBody:has(> :global([data-slot='conversation.session']) .viewArea[data-active-view]:not([data-active-view='chat'])) > .composerSeat:not(:has([data-approval-key], [data-question-key], [data-plan-review-key])) {
+  display: none;
+}
+
 /* Hero phase: the composer stack (hero chrome + workspace row + card) is
    flex-centered in the column; composer phase docks it at the bottom. Flex,
    NOT absolute+transform: a transform would make this box the containing

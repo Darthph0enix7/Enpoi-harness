@@ -9,6 +9,7 @@
  * that write settles.
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
+import { getRoleRegistry, isKnownFleetSeat } from './role-registry.ts'
 
 /** Persona id → explicit model selection (null = inherit); the page's snapshot value. */
 export type PersonaMap = Record<string, ModelSelection | null>
@@ -66,14 +67,19 @@ async function describeOrchestration(): Promise<OrchestrationNamespaceView | und
  * @param serverPersonas - the personas map the host just reported.
  */
 function applyServerPersonas(serverPersonas: PersonaMap): void {
-  const merged: PersonaMap = { ...serverPersonas }
-  for (const key of pendingPersonaKeys) {
-    if (!Object.hasOwn(currentPersonas, key)) {
-      delete merged[key]
-      continue
+  const merged: PersonaMap = {}
+  for (const [key, value] of Object.entries(serverPersonas)) {
+    if (pendingPersonaKeys.has(key)) {
+      // An in-flight local clear drops the server's row; a local optimistic
+      // value wins over it.
+      if (!Object.hasOwn(currentPersonas, key)) continue
+      const local = currentPersonas[key]
+      if (local !== undefined) {
+        merged[key] = local
+        continue
+      }
     }
-    const local = currentPersonas[key]
-    if (local !== undefined) merged[key] = local
+    merged[key] = value
   }
   currentPersonas = merged
   notify()
@@ -156,7 +162,11 @@ export function setPersonaAssignment(personaId: string, selection: ModelSelectio
 
 /**
  * Optimistically clear an explicit assignment, reverting the persona back to
- * "Inherit" (0ms update) and persisting the leaf write in the background.
+ * its fallback route (0ms update) and persisting the leaf write in the
+ * background. A registry seat keeps its fleet row after the clear, so its key
+ * stays as an explicit `null`; a persona id with no registry row exists only
+ * as this assignment (a stray left by an older fleet), so the clear removes
+ * the key itself — a `null` would leave the seat lingering as a "Custom" row.
  * @param personaId - display persona id.
  * @returns whether the mutation was persisted.
  */
@@ -172,6 +182,10 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
   notify()
   pendingPersonaKeys.add(key)
 
+  const op = Object.hasOwn(getRoleRegistry(), key) || isKnownFleetSeat(key)
+    ? { op: 'set' as const, path: ['personas', key], value: null }
+    : { op: 'unset' as const, path: ['personas', key] }
+
   return fetch('/api/settings.mutate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -182,7 +196,7 @@ export function clearPersonaAssignment(personaId: string): Promise<boolean> {
       payload: {
         args: {
           ns: 'enpoi-orchestration',
-          ops: [{ op: 'set', path: ['personas', key], value: null }],
+          ops: [op],
         },
       },
     }),

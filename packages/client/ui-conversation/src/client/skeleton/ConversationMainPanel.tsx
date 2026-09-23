@@ -18,22 +18,20 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
   const openState = session?.openState
   const summaryBlank = useSessions(s => sessionId === undefined ? undefined : s.byId[sessionId]?.blank)
 
-  // While a session is still replaying (loading + blank) the hero/docked
-  // choice is unknowable — render the composer hidden instead of flashing
-  // the centered hero and snapping to the docked bar (or vice versa).
-  // Exemption: a session the list summary already proves blank can only
-  // land on the hero, so hiding would blank the column for the whole
-  // history round-trip (the startup auto-selection flash) for nothing.
-  // The exemption is deliberately open-state-wide, not loading-only: a
-  // summary-blank session is the hero before its open starts (`cold`) and
-  // after one fails (`error`) for the same reason — there is no history.
+  // While a session is still replaying and the summary cannot say whether the
+  // log is blank, the hero/docked choice is unknowable — render the composer
+  // hidden instead of flashing the centered hero and snapping to the docked
+  // bar (or vice versa). A summary that already answers settles the choice:
+  // blank → hero (`openState` irrelevant), non-blank → docked, so the composer
+  // and its model seat become usable as soon as the list window carries the
+  // row rather than after the history round-trip.
   // A restored continuable subagent also stays settled until its eagerly
   // loaded parent catalog establishes availability. This keeps the composer
   // hidden instead of briefly rendering the parent-offline takeover.
   const parentAvailabilityPending = session?.subagent?.address.mode === 'continuable'
     && session.subagent.parentAvailable === undefined
   const settling = sessionId !== undefined && (
-    (shellPhase === 'blank' && openState === 'loading' && summaryBlank !== true)
+    (shellPhase === 'blank' && openState === 'loading' && summaryBlank === undefined)
     || parentAvailabilityPending
   )
   const hero = sessionId === undefined

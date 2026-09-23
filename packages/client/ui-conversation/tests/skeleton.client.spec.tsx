@@ -562,10 +562,12 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.queryByText('探索未至之境')).toBeNull()
   })
 
-  it('settling phase: a summary that does not prove the session blank hides the composer while it opens', () => {
+  it('a summary that proves the session non-blank docks the composer while it opens', () => {
+    // The list row already answers the hero/docked question, so the composer
+    // (and its model seat) must be usable before the history round-trip ends.
     const b = mount(sessionSnapshotOf({ blank: true, openState: 'loading' }))
     const root = b.view.container.querySelector('[data-phase]')
-    expect(root?.getAttribute('data-phase')).toBe('settling')
+    expect(root?.getAttribute('data-phase')).toBe('active')
     expect(b.view.queryByTestId('hero-headline')).toBeNull()
   })
 

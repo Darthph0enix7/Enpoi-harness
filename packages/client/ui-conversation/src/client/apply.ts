@@ -32,6 +32,7 @@ import { ConversationSession, ConversationSessionHeader } from './skeleton/Conve
 import { InputBar } from './skeleton/InputBar.tsx'
 import { todoDockEntry } from './skeleton/TodoPanel.tsx'
 import { resolveActiveView } from './view-selection.ts'
+import { isConversationViewHidden, refreshHiddenSurfaces, subscribeHiddenSurfaces } from './hidden-surfaces.ts'
 import { en, NS, zh, type ConversationKey } from './locales.ts'
 import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
 
@@ -155,6 +156,11 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     for (const entry of slots.entries('conversation.view')) {
       /* v8 ignore next -- list registration validates id at load. */
       if (entry.options.id === undefined) continue
+      // enpoi: hidden surfaces (Adam's duplicate-surface decision). The filter
+      // sits at the roster every consumer reads (the tab bar and the active-view
+      // resolution), so a hidden view never renders; a stored selection of one
+      // no longer resolves and `resolveActiveView` falls back to Chat.
+      if (isConversationViewHidden(entry.options.id)) continue
       tabs.push({
         id: entry.options.id,
         label: resolveSlotLabel(entry.options.label) ?? entry.options.id,
@@ -197,6 +203,34 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       disposeViews()
     }
   }, 'ui-conversation: View selection')
+
+  // enpoi: hidden-surface preference sync. The local cache serves the first
+  // paint; the boot read and every `settings/document-updated` push (any client
+  // wrote `enpoi-orchestration`) re-derive the roster. `refreshViews` also
+  // re-activates every binding, so a session whose stored selection named a
+  // just-hidden view resolves to Chat in the same step.
+  ctx.effect(() => subscribeHiddenSurfaces(refreshViews), 'ui-conversation: hidden views')
+  ctx.inject(['remote'], (scope) => {
+    const remote = scope.get('remote') as {
+      $on?: (event: string, listener: (ns?: string) => void) => () => void
+    } | undefined
+    if (remote?.$on === undefined) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    scope.effect(() => {
+      const dispose = remote.$on?.('settings/document-updated', (ns) => {
+        if (ns !== 'enpoi-orchestration') return
+        if (timer !== undefined) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = undefined
+          void refreshHiddenSurfaces()
+        }, 250)
+      })
+      return () => {
+        if (timer !== undefined) clearTimeout(timer)
+        dispose?.()
+      }
+    }, 'ui-conversation: hidden-view settings push')
+  })
 
   const inputHub = new InputHub(ctx, t)
   const composerBlocks = new ComposerBlockRegistry()

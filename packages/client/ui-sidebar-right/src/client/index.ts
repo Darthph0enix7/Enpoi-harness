@@ -35,6 +35,7 @@ import { MobileSurfaces, type MobileSurfacesInjected } from './shell/MobileSurfa
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
 import { SidebarRightRail } from './rail.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
+import { isSidebarRightKindHidden, refreshHiddenSurfaces, subscribeHiddenSurfaces } from './hidden-surfaces.ts'
 import { bindSurfacePersistence, createSidebarRightStore } from './stores.ts'
 import { SurfaceStorage } from './surface-storage.ts'
 import { en, zh } from './locales.ts'
@@ -104,8 +105,14 @@ export function apply(ctx: ClientContext): void {
   const tabs = new SidebarRightTabRegistry(ctx)
   // enpoi: one global rail per browser, restored from localStorage.
   const rail = new SidebarRightRail()
+  // enpoi: hidden surfaces (Adam's duplicate-surface decision). A hidden page
+  // kind leaves the rail, the mobile bar, and the guide; a persisted column or
+  // lit kind that names one is dropped before it can render, and a named open
+  // is refused. The default hides dsh-context's Context page; writing
+  // `uiPreferences.hiddenSurfaces` (an empty list) restores it with no code change.
+  rail.clearKindIfHidden(isSidebarRightKindHidden)
   // enpoi: per-session column surfaces, restored from localStorage on reload.
-  const surfaces = new SurfaceStorage(kind => tabs.get(kind) !== undefined)
+  const surfaces = new SurfaceStorage(kind => tabs.get(kind) !== undefined && !isSidebarRightKindHidden(kind))
   const { controller, adopt, forget } = createSidebarRightController(
     tabs,
     (address, signal) => { ctx.resources.pin(address, signal) },
@@ -125,6 +132,36 @@ export function apply(ctx: ClientContext): void {
   }, 'ui-sidebar-right: service faces')
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar-right: dictionaries')
+
+  // enpoi: hidden-surface preference sync. The local cache serves the first
+  // paint; the boot read and every `settings/document-updated` push (any client
+  // wrote `enpoi-orchestration`) re-read the namespace, then re-derive the
+  // registry and drop a lit kind that just became hidden.
+  ctx.effect(() => subscribeHiddenSurfaces(() => {
+    tabs.refresh()
+    rail.clearKindIfHidden(isSidebarRightKindHidden)
+  }), 'ui-sidebar-right: hidden surfaces')
+  ctx.inject(['remote'], (scope) => {
+    const remote = scope.get('remote') as {
+      $on?: (event: string, listener: (ns?: string) => void) => () => void
+    } | undefined
+    if (remote?.$on === undefined) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    scope.effect(() => {
+      const dispose = remote.$on?.('settings/document-updated', (ns) => {
+        if (ns !== 'enpoi-orchestration') return
+        if (timer !== undefined) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = undefined
+          void refreshHiddenSurfaces()
+        }, 250)
+      })
+      return () => {
+        if (timer !== undefined) clearTimeout(timer)
+        dispose?.()
+      }
+    }, 'ui-sidebar-right: hidden-surface settings push')
+  })
 
   ctx.effect(() => {
     const handle = createSidebarRightStore(() => defaultSeed(tabs))

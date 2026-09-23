@@ -40,7 +40,6 @@ function personaIconD(persona: string): string {
   if (p.includes('skeptic')) return 'M12 4l-8 8m0-8l8 8'
   if (p.includes('architect')) return 'M3 13V8m3 5V5m3 8V3m3 10V7'
   if (p.includes('pragmatist')) return 'M3 8h10M10 4l3 4-3 4'
-  if (p.includes('critic')) return 'M8 2a6 6 0 100 12A6 6 0 008 2zm0 3v4l3 2'
   return 'M8 3l3 3-3 3M5 8h6'
 }
 

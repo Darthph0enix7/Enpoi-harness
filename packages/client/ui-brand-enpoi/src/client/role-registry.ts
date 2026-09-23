@@ -118,6 +118,20 @@ const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
   curator: { name: 'Curator', icon: DEFAULT_SEAT_ICON, group: 'council' },
 }
 
+/**
+ * Whether a persona id is a fleet seat the operator is expected to see — a
+ * registry role (built-in or server) OR one of the legacy persona-only seats
+ * the councils and the keeper use. Clearing an assignment on such a seat keeps
+ * its fleet row (the key stays as an explicit `null`); clearing an id that is
+ * neither removes the stray key entirely.
+ * @param id - persona id as typed or stored.
+ * @returns true when the seat should survive a cleared assignment.
+ */
+export function isKnownFleetSeat(id: string): boolean {
+  const key = normalizeRoleId(id)
+  return Object.hasOwn(BUILT_IN_ROLES, key) || Object.hasOwn(LEGACY_SEAT_META, key)
+}
+
 /** Normalize an operator-typed role id (lowercase, no leading article). */
 export function normalizeRoleId(id: string): string {
   return id.trim().toLowerCase().replace(/^the\s+/, '')

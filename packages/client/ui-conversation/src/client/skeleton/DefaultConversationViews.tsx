@@ -39,8 +39,10 @@ export function DefaultConversationViews({
 
   if (session.blank && conversationPhase(session, conversation) === 'blank') return null
   const viewId = view ?? active?.id
+  // The active View identity rides the DOM so the skeleton's CSS can react to
+  // who owns the scrollport (the composer seat hides on non-Chat Views).
   return (
-    <div className={css.viewArea}>
+    <div className={css.viewArea} data-active-view={viewId}>
       {viewId !== undefined && renderSlot('conversation.view', {
         viewRequest,
         openView,

@@ -94,6 +94,72 @@ describe('persona-store live sync', () => {
     releaseMutate?.(mutateOk())
     await expect(write).resolves.toBe(true)
   })
+
+  it('clears a registry seat with an explicit null so its fleet row stays', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') {
+        return describeResponse({ personas: { fixer: { provider: 'deepseek-official', model: 'old' } } }, 1)
+      }
+      return mutateOk()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().fixer).toBeDefined()
+    })
+
+    await expect(store.clearPersonaAssignment('Fixer')).resolves.toBe(true)
+
+    expect(store.getPersonaAssignments().fixer).toBeUndefined()
+    expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
+      { op: 'set', path: ['personas', 'fixer'], value: null },
+    ])
+  })
+
+  it('keeps a legacy persona-only seat as an explicit null so its fleet row survives', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') {
+        return describeResponse({ personas: { keeper: { provider: 'freellmapi', model: 'auto' } } }, 1)
+      }
+      return mutateOk()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().keeper).toBeDefined()
+    })
+
+    await expect(store.clearPersonaAssignment('Keeper')).resolves.toBe(true)
+
+    expect(store.getPersonaAssignments().keeper).toBeUndefined()
+    expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
+      { op: 'set', path: ['personas', 'keeper'], value: null },
+    ])
+  })
+
+  it('unsets a stray persona key with no registry row instead of nulling it', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') {
+        return describeResponse({ personas: { critic: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' } } }, 1)
+      }
+      return mutateOk()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().critic).toBeDefined()
+    })
+
+    await expect(store.clearPersonaAssignment('critic')).resolves.toBe(true)
+
+    expect(store.getPersonaAssignments().critic).toBeUndefined()
+    expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
+      { op: 'unset', path: ['personas', 'critic'] },
+    ])
+  })
 })
 
 describe('params-store live sync', () => {

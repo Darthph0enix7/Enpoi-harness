@@ -35,6 +35,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightTabParamsFor } from './contract/params.ts'
 import { pageAddress } from './contract/seed.ts'
 import type { SidebarRightTabClaim, SidebarRightTabRegistry } from './tab-registry.ts'
+import { isSidebarRightKindHidden } from './hidden-surfaces.ts'
 import { SidebarRightRail } from './rail.ts'
 import { canCloseTab, type SidebarRightState, type SurfaceState } from './stores.ts'
 import type { createSidebarRightStore } from './stores.ts'
@@ -387,13 +388,16 @@ export class SidebarRightController implements ISidebarRight {
     this.place(sessionId, actions, claim, address, options, options.params, editor)
   }
 
-  /** Place a page type in one session at the address pages are recorded under; an unregistered kind throws. */
+  /** Place a page type in one session at the address pages are recorded under; an unregistered or hidden kind throws. */
   private placeTab<K extends string>(
     sessionId: SessionId,
     actions: SurfaceActions,
     kind: K,
     options: SidebarRightOpenTabOptions<K>,
   ): void {
+    if (isSidebarRightKindHidden(kind)) {
+      throw new Error(`sidebarRight: tab type "${kind}" is hidden by operator preference`)
+    }
     const definition = this.tabs.get(kind)
     if (definition === undefined) throw new Error(`sidebarRight: no tab type is registered as "${kind}"`)
     const address = definition.multiple === true ? `${pageAddress(kind)}/${randomUUID()}` : pageAddress(kind)

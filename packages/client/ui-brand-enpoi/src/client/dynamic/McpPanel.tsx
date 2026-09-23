@@ -427,7 +427,8 @@ export function McpPanel() {
                   >
                     {editing ? 'Close' : 'Edit'}
                   </button>
-                  {confirmRemove === row.id ? (
+                  {/* A catalog row with no stored record has nothing to unset. */}
+                  {entry !== undefined && (confirmRemove === row.id ? (
                     <>
                       <span className={css.confirmText}>Remove?</span>
                       <button type="button" className={css.confirmBtn} aria-label={`Confirm remove ${row.name}`} onClick={() => { void submitRemove(row.id) }}>
@@ -445,7 +446,7 @@ export function McpPanel() {
                     >
                       ×
                     </button>
-                  )}
+                  ))}
                 </div>
               </div>
               {editing && (

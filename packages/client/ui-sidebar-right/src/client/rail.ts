@@ -82,6 +82,17 @@ export class SidebarRightRail {
   }
 
   /**
+   * Forget a lit kind that is no longer an available page, without touching
+   * the panel's open intent; `null` lets the first remaining rail item resolve.
+   * @param isHidden - whether a kind must not be lit.
+   */
+  clearKindIfHidden(isHidden: (kind: string) => boolean): void {
+    const snapshot = this.state.getSnapshot()
+    if (snapshot.kind === null || !isHidden(snapshot.kind)) return
+    this.state.set({ ...snapshot, kind: null })
+  }
+
+  /**
    * Record the editor pane's width.
    * @param px - the dragged width.
    */

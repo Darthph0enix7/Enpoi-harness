@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 /**
- * MCP server authoring in the Capabilities Control Center: catalog rows can be
- * added and removed through revision-fenced `settings.mutate` calls, the add
- * row shows optimistically before the write settles, mount failures from the
- * host heartbeat render per row, and invalid input never reaches the wire.
+ * Capabilities Control Center — read-only status drawer. Rows render
+ * enabled/disabled/mounted state chips with no switches, no add form, and no
+ * per-row remove control; the one management link opens Settings → Dynamic.
+ * The shared writers (`addMcpServer`, `removeMcpServer`, `toggleCapability`)
+ * stay exported for the Settings → Dynamic page and are driven directly here.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -69,136 +70,59 @@ afterEach(() => {
   vi.resetModules()
 })
 
-/** Open the add form and fill the four fields. */
-function fillAddForm(fields: { id: string; url: string; apiKeyEnv?: string; headers?: string }): void {
-  fireEvent.click(screen.getByText('+ Add MCP server'))
-  fireEvent.change(screen.getByLabelText('MCP server id'), { target: { value: fields.id } })
-  fireEvent.change(screen.getByLabelText('MCP server URL'), { target: { value: fields.url } })
-  if (fields.apiKeyEnv !== undefined) {
-    fireEvent.change(screen.getByLabelText('MCP server API key env'), { target: { value: fields.apiKeyEnv } })
-  }
-  if (fields.headers !== undefined) {
-    fireEvent.change(screen.getByLabelText('MCP server headers JSON'), { target: { value: fields.headers } })
-  }
-  fireEvent.click(screen.getByText('Add server'))
-}
-
-describe('CapabilitiesBody — MCP server authoring', () => {
-  it('adds a server optimistically and writes it with the revision fence', async () => {
-    const mutations: MutateBody[] = []
-    let releaseMutate: ((res: Response) => void) | undefined
-    const mutateGate = new Promise<Response>((resolve) => { releaseMutate = resolve })
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const method = methodOf(init)
-      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, 7)
-      if (method === 'skills.list') return skillsResponse()
-      mutations.push(JSON.parse(String(init.body)) as MutateBody)
-      return mutateGate
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    await mountBody()
-
-    fillAddForm({
-      id: 'new-mcp',
-      url: 'https://mcp.example.com/mcp',
-      apiKeyEnv: 'NEW_MCP_TOKEN',
-      headers: '{"x-workspace-slug":"main_base"}',
-    })
-
-    // 0ms optimistic row: the catalog row exists before the write settles.
-    expect(await screen.findByText('New-mcp MCP')).toBeTruthy()
-
-    releaseMutate?.(jsonResponse({ result: { ok: true, value: { revision: 8 } } }))
-    await waitFor(() => { expect(mutations).toHaveLength(1) })
-    expect(mutations[0]?.payload.args).toEqual({
-      ns: 'enpoi-orchestration',
-      expectedRevision: 7,
-      ops: [{
-        op: 'set',
-        path: ['mcpServers', 'new-mcp'],
-        value: {
-          serverName: 'new-mcp',
-          transport: 'streamable-http',
-          url: 'https://mcp.example.com/mcp',
-          apiKeyEnv: 'NEW_MCP_TOKEN',
-          headers: { 'x-workspace-slug': 'main_base' },
-        },
-      }],
-    })
-  })
-
-  it('rolls the optimistic row back and surfaces the failure when the write is rejected', async () => {
-    let releaseMutate: ((res: Response) => void) | undefined
-    const mutateGate = new Promise<Response>((resolve) => { releaseMutate = resolve })
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const method = methodOf(init)
-      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, 1)
-      if (method === 'skills.list') return skillsResponse()
-      return mutateGate
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    await mountBody()
-
-    fillAddForm({ id: 'rejected-mcp', url: 'https://rejected.example.com/mcp' })
-    expect(await screen.findByText('Rejected-mcp MCP')).toBeTruthy()
-
-    releaseMutate?.(jsonResponse({ result: { ok: false, error: { code: 'settings/rejected', message: 'read-only provider' } } }))
-    expect(await screen.findByText('settings write was rejected')).toBeTruthy()
-    await waitFor(() => { expect(screen.queryByText('Rejected-mcp MCP')).toBeNull() })
-  })
-
-  it('re-reads the namespace and retries a conflicted write with the fresh revision', async () => {
-    let revision = 1
-    let mutateCount = 0
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const method = methodOf(init)
-      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, revision)
-      if (method === 'skills.list') return skillsResponse()
-      mutateCount += 1
-      if (mutateCount === 1) {
-        revision = 2
-        return jsonResponse({ result: { ok: false, error: { code: 'settings/conflict', message: 'stale', details: {} } } })
-      }
-      return jsonResponse({ result: { ok: true, value: { revision: 3 } } })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    await mountBody()
-
-    fillAddForm({ id: 'racy-mcp', url: 'https://racy.example.com/mcp' })
-    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(2) })
-    const mutations = mutateBodies(fetchMock)
-    expect(mutations[0]?.payload.args.expectedRevision).toBe(1)
-    expect(mutations[1]?.payload.args.expectedRevision).toBe(2)
-    expect(mutations[1]?.payload.args.ops[0]?.path).toEqual(['mcpServers', 'racy-mcp'])
-  })
-
-  it('removes a catalog server through a fenced unset only after confirmation', async () => {
+describe('CapabilitiesBody — read-only status', () => {
+  it('renders state chips and no authoring controls', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = methodOf(init)
       if (method === 'settings.describe') {
         return describeResponse({
-          mcpServers: { 'custom-mcp': { serverName: 'custom', transport: 'streamable-http', url: 'http://127.0.0.1:8211/mcp', apiKeyEnv: 'CUSTOM_MCP_TOKEN' } },
-          mcpStatus: { 'custom-mcp': { state: 'online', mounted: true, checkedAt: Date.now() } },
+          mcpServers: {
+            'custom-mcp': { serverName: 'custom', transport: 'streamable-http', url: 'http://127.0.0.1:8211/mcp' },
+            'off-mcp': { serverName: 'off', transport: 'streamable-http', url: 'http://127.0.0.1:8212/mcp' },
+          },
+          mcpStatus: {
+            'plane-mcp': { state: 'online', mounted: true, checkedAt: Date.now() },
+            'custom-mcp': { state: 'online', mounted: false, checkedAt: Date.now() },
+          },
+          capabilities: { mcp: { 'plane-mcp': true, 'custom-mcp': true } },
         }, 4)
       }
       if (method === 'skills.list') return skillsResponse()
-      return jsonResponse({ result: { ok: true, value: { revision: 5 } } })
+      return jsonResponse({ result: { ok: true, value: {} } })
     })
     vi.stubGlobal('fetch', fetchMock)
     await mountBody()
 
-    fireEvent.click(await screen.findByLabelText('Remove Custom MCP'))
-    // First click only arms the confirm step — nothing is written yet.
-    expect(mutateBodies(fetchMock)).toHaveLength(0)
-    fireEvent.click(screen.getByText('Remove'))
+    expect(await screen.findByText('Plane MCP')).toBeTruthy()
+    expect(await screen.findByText('Custom MCP')).toBeTruthy()
+    // Plane is enabled by its mounted heartbeat; custom is toggled on but not mounted.
+    expect(screen.getAllByText('Mounted').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Enabled').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Disabled').length).toBeGreaterThan(0)
+    // No authoring surface: no add form, no checkboxes, no remove control.
+    expect(screen.queryByText('+ Add MCP server')).toBeNull()
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByLabelText(/^Remove /)).toBeNull()
+    expect(screen.queryByLabelText('MCP server id')).toBeNull()
+  })
 
-    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
-    expect(mutateBodies(fetchMock)[0]?.payload.args).toEqual({
-      ns: 'enpoi-orchestration',
-      expectedRevision: 4,
-      ops: [{ op: 'unset', path: ['mcpServers', 'custom-mcp'] }],
+  it('deep-links the single Manage in Settings control to the Dynamic section', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, 1)
+      if (method === 'skills.list') return skillsResponse()
+      return jsonResponse({ result: { ok: true, value: {} } })
     })
-    await waitFor(() => { expect(screen.queryByText('Custom MCP')).toBeNull() })
+    vi.stubGlobal('fetch', fetchMock)
+    const { mod } = await mountBody()
+    await screen.findByText('Plane MCP')
+
+    const open = vi.fn()
+    mod.setOpenSettingsHandler(open)
+    fireEvent.click(screen.getByText('Manage in Settings'))
+    expect(open).toHaveBeenCalledWith('dynamic')
+    expect(open).toHaveBeenCalledTimes(1)
+    mod.setOpenSettingsHandler(null)
   })
 
   it('renders the host mount failure per row and keeps it outranking reachability', async () => {
@@ -217,12 +141,72 @@ describe('CapabilitiesBody — MCP server authoring', () => {
     await mountBody()
 
     expect(await screen.findByText('mount failed: connect ECONNREFUSED 127.0.0.1:9999')).toBeTruthy()
-    await waitFor(() => {
-      expect(document.querySelector('[title="Mount failed — connect ECONNREFUSED 127.0.0.1:9999"]')).not.toBeNull()
+    expect(document.querySelector('[title="Mount failed — connect ECONNREFUSED 127.0.0.1:9999"]')).not.toBeNull()
+  })
+})
+
+describe('CapabilitiesBody — shared capability writers', () => {
+  it('addMcpServer writes the fenced mcpServers set', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, 7)
+      return jsonResponse({ result: { ok: true, value: { revision: 8 } } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const mod = await import('../src/client/CapabilitiesBody.tsx')
+
+    const result = await mod.addMcpServer({
+      serverName: 'new-mcp',
+      url: 'https://mcp.example.com/mcp',
+      apiKeyEnv: 'NEW_MCP_TOKEN',
+      headers: { 'x-workspace-slug': 'main_base' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(mutateBodies(fetchMock)[0]?.payload.args).toEqual({
+      ns: 'enpoi-orchestration',
+      expectedRevision: 7,
+      ops: [{
+        op: 'set',
+        path: ['mcpServers', 'new-mcp'],
+        value: {
+          serverName: 'new-mcp',
+          transport: 'streamable-http',
+          url: 'https://mcp.example.com/mcp',
+          apiKeyEnv: 'NEW_MCP_TOKEN',
+          headers: { 'x-workspace-slug': 'main_base' },
+        },
+      }],
     })
   })
 
-  it('rejects an invalid url, a malformed headers payload, and a duplicate id without writing', async () => {
+  it('addMcpServer re-reads and retries a conflicted write with the fresh revision', async () => {
+    let revision = 1
+    let mutateCount = 0
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') return describeResponse({ mcpServers: {} }, revision)
+      mutateCount += 1
+      if (mutateCount === 1) {
+        revision = 2
+        return jsonResponse({ result: { ok: false, error: { code: 'settings/conflict', message: 'stale', details: {} } } })
+      }
+      return jsonResponse({ result: { ok: true, value: { revision: 3 } } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const mod = await import('../src/client/CapabilitiesBody.tsx')
+
+    const result = await mod.addMcpServer({ serverName: 'racy-mcp', url: 'https://racy.example.com/mcp' })
+
+    expect(result).toEqual({ ok: true })
+    const mutations = mutateBodies(fetchMock)
+    expect(mutations).toHaveLength(2)
+    expect(mutations[0]?.payload.args.expectedRevision).toBe(1)
+    expect(mutations[1]?.payload.args.expectedRevision).toBe(2)
+    expect(mutations[1]?.payload.args.ops[0]?.path).toEqual(['mcpServers', 'racy-mcp'])
+  })
+
+  it('addMcpServer rejects invalid input and duplicate ids without writing', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = methodOf(init)
       if (method === 'settings.describe') {
@@ -230,26 +214,60 @@ describe('CapabilitiesBody — MCP server authoring', () => {
           mcpServers: { 'plane-mcp': { serverName: 'plane', url: 'http://127.0.0.1:8211/mcp' } },
         }, 1)
       }
-      if (method === 'skills.list') return skillsResponse()
       return jsonResponse({ result: { ok: true, value: {} } })
     })
     vi.stubGlobal('fetch', fetchMock)
-    await mountBody()
-    await screen.findByText('Plane MCP')
+    const mod = await import('../src/client/CapabilitiesBody.tsx')
 
-    fillAddForm({ id: 'ftp-mcp', url: 'ftp://example.com/mcp' })
-    expect(await screen.findByText('url must be an http(s) address')).toBeTruthy()
-
-    fireEvent.change(screen.getByLabelText('MCP server URL'), { target: { value: 'https://example.com/mcp' } })
-    fireEvent.change(screen.getByLabelText('MCP server headers JSON'), { target: { value: 'not json' } })
-    fireEvent.click(screen.getByText('Add server'))
-    expect(await screen.findByText(/headers must be a JSON object|Unexpected token/)).toBeTruthy()
-
-    fireEvent.change(screen.getByLabelText('MCP server headers JSON'), { target: { value: '' } })
-    fireEvent.change(screen.getByLabelText('MCP server id'), { target: { value: 'plane-mcp' } })
-    fireEvent.click(screen.getByText('Add server'))
-    expect(await screen.findByText('server id "plane-mcp" already exists')).toBeTruthy()
-
+    expect(await mod.addMcpServer({ serverName: '', url: 'https://example.com/mcp' }))
+      .toEqual({ ok: false, reason: 'server id is required' })
+    expect(await mod.addMcpServer({ serverName: 'ftp-mcp', url: 'ftp://example.com/mcp' }))
+      .toEqual({ ok: false, reason: 'url must be an http(s) address' })
+    expect(await mod.addMcpServer({ serverName: 'plane-mcp', url: 'https://example.com/mcp' }))
+      .toEqual({ ok: false, reason: 'server id "plane-mcp" already exists' })
     expect(mutateBodies(fetchMock)).toHaveLength(0)
+  })
+
+  it('removeMcpServer writes a fenced unset and reports a cache miss', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({
+          mcpServers: { 'custom-mcp': { serverName: 'custom', transport: 'streamable-http', url: 'http://127.0.0.1:8211/mcp' } },
+        }, 4)
+      }
+      return jsonResponse({ result: { ok: true, value: { revision: 5 } } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const mod = await import('../src/client/CapabilitiesBody.tsx')
+
+    expect(await mod.removeMcpServer('ghost-mcp'))
+      .toEqual({ ok: false, reason: 'no stored mcpServers.ghost-mcp record to remove' })
+
+    await mod.refreshMcpStatus()
+    expect(await mod.removeMcpServer('custom-mcp')).toEqual({ ok: true })
+    expect(mutateBodies(fetchMock)[0]?.payload.args).toEqual({
+      ns: 'enpoi-orchestration',
+      expectedRevision: 4,
+      ops: [{ op: 'unset', path: ['mcpServers', 'custom-mcp'] }],
+    })
+  })
+
+  it('toggleCapability writes capabilities.mcp.<id> and refuses protected tools', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') return describeResponse({}, 2)
+      return jsonResponse({ result: { ok: true, value: { revision: 3 } } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const mod = await import('../src/client/CapabilitiesBody.tsx')
+
+    expect(await mod.toggleCapability('mcp', 'plane-mcp', true)).toBe(true)
+    expect(mutateBodies(fetchMock)[0]?.payload.args.ops).toEqual([
+      { op: 'set', path: ['capabilities', 'mcp', 'plane-mcp'], value: true },
+    ])
+
+    expect(await mod.toggleCapability('tool', 'read', false)).toBe(false)
+    expect(mutateBodies(fetchMock)).toHaveLength(1)
   })
 })

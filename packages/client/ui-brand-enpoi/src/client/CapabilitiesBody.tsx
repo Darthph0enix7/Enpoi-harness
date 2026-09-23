@@ -7,13 +7,13 @@
  * ones: `skills.list` takes `args.request.sessionId` (the addressed session
  * resolves cwd host-side) and `settings.describe` / `settings.mutate` address
  * the `enpoi-orchestration` namespace. MCP rows show the host heartbeat
- * (`enpoi-orchestration.mcpStatus`) instead of the enable dot; the heartbeat
- * and server catalog re-poll every 15s while the tab is visible. Toggles
- * persist to `enpoi-orchestration.capabilities.{tools,skills,mcp}` and are
- * staged — they apply from the next query onward. Server catalog authoring
- * (add / confirm-remove) writes `enpoi-orchestration.mcpServers` through
- * revision-fenced `settings.mutate` calls; a mount failure reported by the
- * host lands in `mcpStatus[id].error` and renders per row.
+ * (`enpoi-orchestration.mcpStatus`) alongside a read-only state chip; the
+ * heartbeat and server catalog re-poll every 15s while the tab is visible.
+ * This drawer reports status only — catalog authoring and capability toggles
+ * live on the Settings → Dynamic page, linked from the header. The shared
+ * writers below stay exported for that page (`McpPanel` / `SkillsPanel`); a
+ * mount failure reported by the host lands in `mcpStatus[id].error` and
+ * renders per row.
  *
  * Skill catalog addressing: the tab's own `sessionId` is the first candidate;
  * when the host refuses to inspect it (legacy v0/v1 session logs), the newest
@@ -137,9 +137,11 @@ function openSettings(section: string): void {
 }
 
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF)
+  // MCP Servers (Default OFF). Plane is the only shipped MCP default; every
+  // other MCP row comes from a stored `enpoi-orchestration.mcpServers.<id>`
+  // record. A descriptor with no record and no live server is a phantom row,
+  // so the catalog carries no such entries.
   { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
-  { id: 'ue-mcp', name: 'Unreal Engine MCP', kind: 'mcp', category: 'mcp', description: 'Unreal Engine editor automation and actor controls', defaultEnabled: false },
 
   // Skills (Default ON)
   { id: 'project-management', name: 'Project Management', kind: 'skill', category: 'skills', description: 'Plane documentation and progress journaling', defaultEnabled: true },
@@ -607,12 +609,15 @@ export async function addMcpServer(input: McpServerInput): Promise<McpWriteResul
  * `enpoi-orchestration.mcpServers.<id>` key), fenced by the namespace revision
  * read from describe with the same conflict retry as {@link addMcpServer}.
  * The row disappears optimistically and returns when the write does not persist.
+ * A cache miss — the id has no stored record in the local catalog view — is
+ * reported instead of answering ok, so a caller never treats a no-op as a
+ * removal.
  * @param id - catalog key to remove.
  * @returns whether the removal persisted, or the reason it did not.
  */
 export async function removeMcpServer(id: string): Promise<McpWriteResult> {
   const previous = globalMcpServers
-  if (previous[id] === undefined) return { ok: true }
+  if (previous[id] === undefined) return { ok: false, reason: `no stored mcpServers.${id} record to remove` }
   const next = Object.fromEntries(
     Object.entries(previous).filter(([key]) => key !== id),
   ) as typeof previous
@@ -695,17 +700,6 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   const visible = tab.visible
   const sessionIds = useSessions(state => state.ids)
 
-  // Add-server form + per-row remove confirmation (MCP catalog edits).
-  const [addOpen, setAddOpen] = useState(false)
-  const [addName, setAddName] = useState('')
-  const [addUrl, setAddUrl] = useState('')
-  const [addApiKeyEnv, setAddApiKeyEnv] = useState('')
-  const [addHeaders, setAddHeaders] = useState('')
-  const [addError, setAddError] = useState<string | null>(null)
-  const [addBusy, setAddBusy] = useState(false)
-  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
-  const [mcpActionError, setMcpActionError] = useState<string | null>(null)
-
   // Candidate chain: the tab's own session first, then the newest sessions the
   // list carries. Bounded so an old session never costs a long retry walk.
   const candidates = useMemo(() => {
@@ -735,59 +729,6 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     const iv = window.setInterval(() => { void refreshMcpStatus() }, 15_000)
     return () => { window.clearInterval(iv) }
   }, [visible])
-
-  /** Parse the optional headers textarea into a flat string map (undefined when blank). */
-  const parseHeadersField = (text: string): Record<string, string> | undefined => {
-    const trimmed = text.trim()
-    if (trimmed === '') return undefined
-    const parsed = JSON.parse(trimmed) as unknown
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('headers must be a JSON object')
-    }
-    const headers: Record<string, string> = {}
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value !== 'string') throw new Error(`header "${key}" must be a string`)
-      headers[key] = value
-    }
-    return headers
-  }
-
-  /** Submit the add-server form; failures render inline, never as a silent no-op. */
-  const submitAddServer = async (): Promise<void> => {
-    setAddError(null)
-    let headers: Record<string, string> | undefined
-    try {
-      headers = parseHeadersField(addHeaders)
-    } catch (err: unknown) {
-      setAddError(err instanceof Error ? err.message : String(err))
-      return
-    }
-    setAddBusy(true)
-    const result = await addMcpServer({
-      serverName: addName,
-      url: addUrl,
-      apiKeyEnv: addApiKeyEnv,
-      ...(headers !== undefined ? { headers } : {}),
-    })
-    setAddBusy(false)
-    if (!result.ok) {
-      setAddError(result.reason)
-      return
-    }
-    setAddName('')
-    setAddUrl('')
-    setAddApiKeyEnv('')
-    setAddHeaders('')
-    setAddOpen(false)
-  }
-
-  /** Confirm-and-remove one catalog server. */
-  const submitRemoveServer = async (id: string): Promise<void> => {
-    setMcpActionError(null)
-    const result = await removeMcpServer(id)
-    setConfirmRemove(null)
-    if (!result.ok) setMcpActionError(result.reason)
-  }
 
   const mcpList: CapabilityDescriptor[] = (() => {
     const rows = new Map<string, CapabilityDescriptor>()
@@ -828,7 +769,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     )
     : undefined
 
-  const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', banner?: ReactNode, footer?: ReactNode) => {
+  const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', banner?: ReactNode) => {
     const activeCount = items.filter((item) => {
       if (kind === 'tool') return caps.tools[item.id] !== false
       if (kind === 'skill') return caps.skills[item.id] !== false
@@ -882,7 +823,10 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                 connTitle = st.authError === true ? 'Server running · auth rejected' : 'Server running · toggled off'
               }
             }
-            const removable = kind === 'mcp' && view.mcpServers[item.id] !== undefined
+            // Read-only state chip: the drawer reports, Settings → Dynamic edits.
+            const mounted = kind === 'mcp' && st !== undefined && stFresh && st.mounted
+            const chipLabel = mounted ? 'Mounted' : isEnabled ? 'Enabled' : 'Disabled'
+            const chipColor = isEnabled ? '#34d399' : '#64748b'
 
             return (
               <div className={c('row')} key={`${kind}:${item.id}`}>
@@ -905,130 +849,20 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                     <div className={c('rowError')} title={st.error}>mount failed: {st.error}</div>
                   )}
                 </div>
-                {confirmRemove === item.id ? (
-                  <div className={c('rowActions')}>
-                    <span className={c('confirmText')}>Remove?</span>
-                    <button
-                      type="button"
-                      className={c('confirmBtn')}
-                      onClick={() => { void submitRemoveServer(item.id) }}
-                    >
-                      Remove
-                    </button>
-                    <button type="button" className={c('retryBtn')} onClick={() => { setConfirmRemove(null) }}>
-                      Cancel
-                    </button>
-                  </div>
-                ) : (
-                  <div className={c('rowActions')}>
-                    <label
-                      className={c('switch')}
-                      style={{ cursor: isProtected ? 'not-allowed' : 'pointer', opacity: isProtected ? 0.5 : 1 }}
-                    >
-                      <input
-                        className={c('switchInput')}
-                        type="checkbox"
-                        checked={isEnabled}
-                        disabled={isProtected}
-                        onChange={(e) => {
-                          const nextEnabled = e.target.checked
-                          void toggleCapability(kind, item.id, nextEnabled).then((accepted) => {
-                            // Re-read the host catalog after a persisted skill change.
-                            if (accepted && kind === 'skill') void refreshSkills(candidates)
-                          })
-                        }}
-                      />
-                      <span className={`${c('switchTrack')}${isEnabled ? ` ${c('switchOn')}` : ''}`}>
-                        <span className={`${c('switchKnob')}${isEnabled ? ` ${c('switchKnobOn')}` : ''}`} />
-                      </span>
-                    </label>
-                    {removable && (
-                      <button
-                        type="button"
-                        className={c('removeBtn')}
-                        aria-label={`Remove ${item.name}`}
-                        title={`Remove ${item.name}`}
-                        onClick={() => { setMcpActionError(null); setConfirmRemove(item.id) }}
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                )}
+                <span
+                  className={c('countBadge')}
+                  style={{ color: chipColor }}
+                  title={kind === 'mcp' ? connTitle : undefined}
+                >
+                  {chipLabel}
+                </span>
               </div>
             )
           })}
         </div>
-        {footer}
       </section>
     )
   }
-
-  /** Catalog editor: add-server form (collapsed by default) + action failures. */
-  const mcpFooter = (
-    <div className={c('addWrap')}>
-      {mcpActionError !== null && <div className={c('rowError')}>{mcpActionError}</div>}
-      {addOpen ? (
-        <div className={c('addForm')}>
-          <input
-            className={c('addInput')}
-            aria-label="MCP server id"
-            placeholder="server-id"
-            value={addName}
-            onChange={(e) => { setAddName(e.target.value) }}
-          />
-          <input
-            className={c('addInput')}
-            aria-label="MCP server URL"
-            placeholder="https://host/mcp"
-            value={addUrl}
-            onChange={(e) => { setAddUrl(e.target.value) }}
-          />
-          <input
-            className={c('addInput')}
-            aria-label="MCP server API key env"
-            placeholder="API key env (optional)"
-            value={addApiKeyEnv}
-            onChange={(e) => { setAddApiKeyEnv(e.target.value) }}
-          />
-          <textarea
-            className={c('addInput')}
-            aria-label="MCP server headers JSON"
-            placeholder='Headers JSON (optional), e.g. {"x-workspace-slug":"main"}'
-            rows={2}
-            value={addHeaders}
-            onChange={(e) => { setAddHeaders(e.target.value) }}
-          />
-          {addError !== null && <div className={c('rowError')}>{addError}</div>}
-          <div className={c('addActions')}>
-            <button
-              type="button"
-              className={c('addBtn')}
-              disabled={addBusy}
-              onClick={() => { void submitAddServer() }}
-            >
-              {addBusy ? 'Adding…' : 'Add server'}
-            </button>
-            <button
-              type="button"
-              className={c('retryBtn')}
-              onClick={() => { setAddOpen(false); setAddError(null) }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className={c('addBtn')}
-          onClick={() => { setAddOpen(true); setAddError(null) }}
-        >
-          + Add MCP server
-        </button>
-      )}
-    </div>
-  )
 
   const skillsSection = skillList.length > 0
     ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill', errorBanner)
@@ -1056,7 +890,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       <header className={c('head')}>
         <h3 className={c('headTitle')}>Capabilities Control Center</h3>
         <p className={c('headSub')}>
-          Toggle MCPs, Skills &amp; Subagents in real time
+          Read-only status for MCP servers, Skills &amp; Subagents
           {' · '}
           <button type="button" className={c('footLink')} onClick={() => { openSettings('dynamic') }}>
             Manage in Settings
@@ -1066,14 +900,14 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
 
       <div className={c('groups')}>
         <PermissionsSection />
-        {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpList, 'mcp', undefined, mcpFooter)}
+        {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpList, 'mcp')}
         {skillsSection}
         {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}
         {renderGroup('Core System Tools', iconTerminal(), coreToolList, 'tool')}
       </div>
 
       <footer className={c('foot')}>
-        <span>Toggles persist to <code>enpoi-orchestration</code> settings and are staged until the next query.</span>
+        <span>Add, remove, and toggles live in Settings → Dynamic and apply from the next query.</span>
         <button
           type="button"
           className={c('footLink')}
