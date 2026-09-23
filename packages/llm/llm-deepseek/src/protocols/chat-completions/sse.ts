@@ -12,7 +12,7 @@
  */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { STREAM_CLOSED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 
 /** The terminal payload DeepSeek (and OpenAI) send after the last chunk. */
 export const DONE = '[DONE]'
@@ -36,5 +36,5 @@ export async function* parseSse(
     yield data
     if (data === DONE) return
   }
-  throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
+  throw new LlmError('SSE stream ended without [DONE]', STREAM_CLOSED_CODE)
 }

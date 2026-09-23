@@ -49,6 +49,16 @@ export interface LlmFailure {
   /** Opaque provider-issued request identifier for diagnostics. */
   readonly requestId?: ProviderRequestId
   /**
+   * Registered provider route the failure came from, when the raiser knows it.
+   * Set by the LLM seam, which resolves the route every attempt runs on.
+   */
+  readonly provider?: string
+  /**
+   * Provider-owned model id the failure came from, when the raiser knows it.
+   * Set by the LLM seam, after model-group escalation has picked the link.
+   */
+  readonly model?: string
+  /**
    * With code `IMAGE_OFFLOAD_REQUIRED`: how many more of the oldest retained
    * image occurrences the route needs offloaded before the same request fits
    * its exact byte accounting. `dsh-compaction-image-offload` records the

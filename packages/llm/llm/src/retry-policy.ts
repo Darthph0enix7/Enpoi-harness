@@ -10,7 +10,7 @@
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { STREAM_CUT_CODE } from './assembler.ts'
-import { EMPTY_RESPONSE_CODE } from './error.ts'
+import { EMPTY_RESPONSE_CODE, STREAM_CLOSED_CODE } from './error.ts'
 
 const DEFAULT_MAX_RETRIES = 5
 const DEFAULT_INITIAL_DELAY_MS = 500
@@ -21,6 +21,9 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
   // A stream cut (truncated tool-call arguments, or a truncated answer) is a
   // provider-side failure, so a retried step restarts cleanly on the next link.
   STREAM_CUT_CODE,
+  // A provider stream that ends without a terminal event is the same
+  // provider-side truncation as a committed cut: retry the step.
+  STREAM_CLOSED_CODE,
   'RATE_LIMIT',
   'SERVER',
   'TIMEOUT',

@@ -1,0 +1,549 @@
+{
+  "formatVersion": 1,
+  "roots": [
+    {
+      "key": "event:revert/file-conflict",
+      "kind": "event",
+      "event": "revert/file-conflict",
+      "surface": false,
+      "digest": "0dd5d9778443f63729df9c252fdf3e476c6725b59d277cb257c3679de7f64142",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 15,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 16,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "boundarySeq",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "conflictId",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "currentSha",
+                "type": 6,
+                "optional": false
+              },
+              {
+                "name": "displayPath",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "mode",
+                "type": 7,
+                "optional": true
+              },
+              {
+                "name": "postSha",
+                "type": 6,
+                "optional": false
+              },
+              {
+                "name": "preSha",
+                "type": 6,
+                "optional": false
+              },
+              {
+                "name": "reason",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "sessionCreated",
+                "type": 10,
+                "optional": true
+              },
+              {
+                "name": "spanPreExisted",
+                "type": 10,
+                "optional": true
+              },
+              {
+                "name": "spanStartSeq",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "state",
+                "type": 11,
+                "optional": false
+              },
+              {
+                "name": "targetAbsent",
+                "type": 10,
+                "optional": true
+              },
+              {
+                "name": "targetBlobSha",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "targetKey",
+                "type": 5,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              4
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              5
+            ]
+          },
+          {
+            "kind": "union",
+            "types": [
+              8,
+              9
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "revert"
+          },
+          {
+            "kind": "literal",
+            "value": "restore"
+          },
+          {
+            "kind": "primitive",
+            "type": "boolean"
+          },
+          {
+            "kind": "union",
+            "types": [
+              12,
+              13,
+              14
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "conflict"
+          },
+          {
+            "kind": "literal",
+            "value": "missing"
+          },
+          {
+            "kind": "literal",
+            "value": "unavailable"
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/file-conflict"
+          }
+        ]
+      }
+    },
+    {
+      "key": "event:revert/file-intent",
+      "kind": "event",
+      "event": "revert/file-intent",
+      "surface": false,
+      "digest": "61a1ef6dfd7fa95da9e6023325c83c07d981a1e241a04a47e4a66d9f3e28729c",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 8,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 9,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "plan",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "revertSeq",
+                "type": 7,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [],
+            "indices": [
+              {
+                "key": 3,
+                "value": 4
+              }
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "action",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "expectedDiskSha",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "targetBlobSha",
+                "type": 5,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              6
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/file-intent"
+          }
+        ]
+      }
+    },
+    {
+      "key": "event:revert/file-result",
+      "kind": "event",
+      "event": "revert/file-result",
+      "surface": false,
+      "digest": "c41ca325c68f183c2c9f30184966d4982a672e442ffb1462d2476d689482982a",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 8,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 9,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "outcomes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "revertSeq",
+                "type": 7,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [],
+            "indices": [
+              {
+                "key": 3,
+                "value": 4
+              }
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "dest",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "fromSha",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "reason",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "toSha",
+                "type": 5,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              6
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/file-result"
+          }
+        ]
+      }
+    },
+    {
+      "key": "event:revert/state",
+      "kind": "event",
+      "event": "revert/state",
+      "surface": false,
+      "digest": "93a0e2ed44bc50262e59abbf13cbe484b965a0d2d9b9f716ec38e4dc6425f186",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 9,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 8,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 8,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 10,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "cause",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "fromSeq",
+                "type": 6,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              4,
+              5
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "commit"
+          },
+          {
+            "kind": "literal",
+            "value": "restore"
+          },
+          {
+            "kind": "literal",
+            "value": "revert"
+          },
+          {
+            "kind": "union",
+            "types": [
+              7,
+              8
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/state"
+          }
+        ]
+      }
+    }
+  ],
+  "types": []
+}

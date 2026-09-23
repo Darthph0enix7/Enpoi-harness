@@ -6,6 +6,7 @@ import type {
   LlmCallConfig,
   LlmCallConfigAdapterDefaults,
   LlmFailure,
+  ParticipantTag,
   SystemMessage,
   SystemPromptUpdate,
   TokenUsage,
@@ -186,7 +187,7 @@ export type PrepareSessionOptions =
 
 /** Why an active agent driver was cancelled. */
 export type AgentCancelCause =
-  | { readonly kind: 'user' }
+  | { readonly kind: 'user'; readonly participant?: ParticipantTag }
   | { readonly kind: 'parent' }
   | { readonly kind: 'hook'; readonly reason: string }
   | { readonly kind: 'disposed' }
@@ -199,8 +200,13 @@ export type TurnEndCancelCause = AgentCancelCause | { readonly kind: 'legacy' }
  */
 export interface TurnEndReasonMap {
   completed: { kind: 'completed' }
-  /** A cancellation request interrupted the live turn. */
-  aborted: { kind: 'aborted'; reason: TurnEndCancelCause }
+  /**
+   * A cancellation request interrupted the live turn. `error` carries the
+   * terminal provider failure when the stream died before the cancellation
+   * reached the loop, so an observer can tell a user-initiated stop from a
+   * provider failure that coincided with one.
+   */
+  aborted: { kind: 'aborted'; reason: TurnEndCancelCause; error?: LlmFailure }
 
   blocked: { kind: 'blocked' }
   /**

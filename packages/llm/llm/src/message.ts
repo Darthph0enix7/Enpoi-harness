@@ -105,8 +105,22 @@ export type ContextFormed =
  * Where a message (or injected content) came from.
  * Merge-extensible sum type — plugins add their own `kind`s.
  */
+/**
+ * Who produced an inbound message when the producer is more specific than its
+ * kind: a local human, a human on a paired device, or a peer agent. Attribution
+ * only — it never carries authority, and producers that cannot name an actor omit it.
+ */
+export interface ParticipantTag {
+  /** Whether the actor is a person or another agent. */
+  readonly kind: 'human' | 'peer'
+  /** Stable actor name, unique per device, e.g. `adam` or `serverlocal-orchestrator`. */
+  readonly name: string
+  /** Device the actor acted from, when the producer knows it. */
+  readonly device?: string
+}
+
 export interface MessageSourceMap {
-  user: { kind: 'user' }
+  user: { kind: 'user'; participant?: ParticipantTag }
   plugin: { kind: 'plugin'; plugin: string } & ContextFormed
   model: ModelMessageSource
   tool: ToolMessageSource

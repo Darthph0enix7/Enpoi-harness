@@ -1,6 +1,6 @@
 /** Translate Messages events while preserving block order and cumulative usage. */
 
-import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { STREAM_CLOSED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { object, replayState } from './replay.ts'
 import type { ReplayBlock } from './replay.ts'
@@ -162,5 +162,5 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
       return
     }
   }
-  throw new LlmError('DeepSeek Messages stream ended before message_stop', 'STREAM_CLOSED')
+  throw new LlmError('DeepSeek Messages stream ended before message_stop', STREAM_CLOSED_CODE)
 }

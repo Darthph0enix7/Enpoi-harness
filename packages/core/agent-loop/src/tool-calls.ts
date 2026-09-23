@@ -17,6 +17,20 @@ import type { Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 
+/**
+ * Stamp a tool-scheduler failure with its layer code so the turn ending names
+ * the tool layer instead of flattening to `UNKNOWN`.
+ * @param error - the thrown scheduler error, preserved as the cause.
+ * @returns the error to rethrow, carrying `code: 'TOOL_FAILED'`.
+ */
+function toolExecutionFailure(error: unknown): Error {
+  const wrapped = new Error(`tool execution failed: ${error instanceof Error ? error.message : String(error)}`, {
+    cause: error,
+  }) as Error & { code: string }
+  wrapped.code = 'TOOL_FAILED'
+  return wrapped
+}
+
 /** One tool call after argument parsing, ready to schedule. */
 interface PlannedCall {
   block: ToolCallBlock
@@ -230,7 +244,7 @@ async function runGroup(
       await fillPool()
     }
   } catch (error: unknown) {
-    schedulerFailure ??= { error }
+    schedulerFailure ??= { error: toolExecutionFailure(error) }
     await Promise.allSettled(inFlight.values())
     throw schedulerFailure.error
   }

@@ -19,13 +19,7 @@ import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type {
   AnsweringLink, GenerateOptions, LlmCallConfig, Message, ModelChainLink, ModelChainResolver, PreparedLlmCall,
 } from '@deepseek-ai/dsh-llm'
-import {
-  LlmError,
-  ReasoningEffortId,
-  createAssistantMessage,
-  errorChain,
-  markAgentLoopRequest,
-} from '@deepseek-ai/dsh-llm'
+import { LlmError, ReasoningEffortId, createAssistantMessage, errorChain, markAgentLoopRequest, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -111,6 +105,28 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
 }
 
 /** Drives one session through turn and step boundaries. */
+/**
+ * The durable failure for a thrown error: an `LlmError` contributes its own
+ * facts, any other error keeps a producer-stamped string `code` (e.g. the tool
+ * scheduler's `TOOL_FAILED`) and otherwise flattens under `UNKNOWN`.
+ * @param error - the thrown value.
+ * @returns the structured failure recorded in the turn ending.
+ */
+function failureOf(error: unknown): LlmFailure {
+  if (error instanceof LlmError) return error.failure
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  return {
+    message: errorChain(error),
+    code: typeof code === 'string' && code.length > 0 ? code : 'UNKNOWN',
+  }
+}
+
+/**
+ * Failure codes produced by the cancellation path itself: recording one in an
+ * aborted turn ending would describe the cancel, not the reason for it.
+ */
+const CANCELLATION_FAILURE_CODES: ReadonlySet<string> = new Set(['ABORTED'])
+
 export class ReactLoopAgent implements Agent {
   readonly inbox: ReactLoopInbox
   private phase: Phase
@@ -121,6 +137,9 @@ export class ReactLoopAgent implements Agent {
   readonly ctx: Context
 
   /** Fused dispatcher, built once in the constructor so hot-path dispatches never allocate. */
+  /** Terminal provider failure seen by this turn's last request attempt, for the abort path. */
+  private lastRequestFailure: LlmFailure | undefined
+
   private readonly dispatch: AgentEventDispatch
 
   /**
@@ -351,6 +370,7 @@ export class ReactLoopAgent implements Agent {
       this.throwError(error)
     }
     phase.turn = turn
+    this.lastRequestFailure = undefined
     let turnEnds: TurnEndReason | null = null
     let target: InboxTarget = 'next-turn'
     try {
@@ -392,17 +412,20 @@ export class ReactLoopAgent implements Agent {
       }
     } catch (error: unknown) {
       if (signal.aborted) {
-        turnEnds = { kind: 'aborted', reason: signal.reason as AgentCancelCause }
+        // The provider failure that preceded the cancellation is durable in the
+        // turn ending: a peer must be able to tell a quota stop from a plain stop.
+        const failure = error instanceof LlmError ? error.failure : this.lastRequestFailure
+        turnEnds = {
+          kind: 'aborted',
+          reason: signal.reason as AgentCancelCause,
+          ...(failure === undefined ? {} : { error: failure }),
+        }
         throw error
       }
-      // Every failure is structured: an `LlmError` keeps its facts, anything
-      // else flattens to `errorChain` text under the `UNKNOWN` code.
-      turnEnds = {
-        kind: 'error',
-        error: error instanceof LlmError
-          ? error.failure
-          : { message: errorChain(error), code: 'UNKNOWN' },
-      }
+      // Every failure is structured: an `LlmError` keeps its facts, a producer
+      // that stamped its own `code` keeps it, anything else flattens to
+      // `errorChain` text under the `UNKNOWN` code.
+      turnEnds = { kind: 'error', error: failureOf(error) }
       this.throwError(error)
     } finally {
       try {
@@ -551,6 +574,9 @@ export class ReactLoopAgent implements Agent {
       try {
         const finish = live.finish
         if (finish.kind === 'error' || finish.kind === 'aborted') {
+          // A cancellation artifact says nothing about why the turn stopped; keep
+          // only provider facts so an aborted turn's ending stays informative.
+          if (!CANCELLATION_FAILURE_CODES.has(finish.failure.code)) this.lastRequestFailure = finish.failure
           live.settle(
             'assistant/attempt',
             () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
@@ -560,6 +586,7 @@ export class ReactLoopAgent implements Agent {
               turn,
               step,
               provider: request.provider,
+              model: request.model,
               failure: finish.failure,
               retryPolicy: preparedCall?.retryPolicy,
               signal,

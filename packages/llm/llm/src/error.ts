@@ -39,6 +39,13 @@ export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 export const EMPTY_RESPONSE_CODE = 'EMPTY_RESPONSE'
 
 /**
+ * Code carried by every adapter whose provider stream ended without a terminal
+ * event. A truncated stream is a provider-side failure, so retry and model-chain
+ * escalation treat this code like {@link ../assembler.ts STREAM_CUT_CODE}.
+ */
+export const STREAM_CLOSED_CODE = 'STREAM_CLOSED'
+
+/**
  * Canonical provider-neutral code for a credential that was supplied but
  * cannot be used — malformed rather than absent. Distinct from
  * `MISSING_CREDENTIAL` because the fix differs: correct the stored value

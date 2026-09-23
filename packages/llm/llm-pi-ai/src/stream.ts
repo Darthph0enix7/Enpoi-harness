@@ -9,7 +9,7 @@
  */
 
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -230,5 +230,5 @@ export async function* toStreamChunks(
       // when one is added (switch covers all current variants).
     }
   }
-  throw new LlmError('pi-ai event stream ended without done/error', 'STREAM_CLOSED')
+  throw new LlmError('pi-ai event stream ended without done/error', STREAM_CLOSED_CODE)
 }
