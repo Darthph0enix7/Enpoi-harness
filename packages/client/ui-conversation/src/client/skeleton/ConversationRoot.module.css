@@ -517,6 +517,25 @@
   overflow-y: auto;
 }
 
+/* Soft keyboard (coarse pointer): dock the hero stack to the visible band's
+   bottom and reserve the classifier's keyboard lift as the stack's own
+   margin, so the whole stack (hero chrome + card) sits on the keyboard —
+   centering alone leaves it behind the keyboard, and centering plus a lift
+   pushes it off the top. The margin is used, not scrollport padding: the
+   active skin neutralizes [data-conversation-scroll] padding with
+   !important. The lift is 0 once the browser resized the content for the
+   keyboard, so the dock alone handles that case. `.viewArea` stays
+   shrinkable here, so the stack fits the reduced band; when a very short
+   band still overflows, the composer (the stack's last row) stays visible. */
+:global(:root[data-pointer='coarse'][data-keyboard='open']) .root[data-phase='hero'] .scrollBody,
+:global(:root[data-pointer='coarse'][data-keyboard='open']) .embeddedBody[data-content-phase='hero'] .scrollBody {
+  justify-content: flex-end;
+}
+
+:global(:root[data-pointer='coarse'][data-keyboard='open']) .composerHero {
+  margin-bottom: var(--dsh-keyboard-inset, 0px);
+}
+
 /* Settling (session replaying, hero/docked unknown): keep the composer seat
    mounted but invisible so no wrong layout flashes before the phase lands. */
 .root[data-phase='settling'] .composerSeat,

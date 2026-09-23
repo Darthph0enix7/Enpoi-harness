@@ -401,9 +401,13 @@
 
 /* ── Phone composer ──
    Rider row above the card (model + agent), the card keeps the footer
-   (attach · permission · plan | send/stop), the stack clears the safe area
-   and lifts by the classifier's keyboard occlusion on iOS-style viewports
-   whose layout height does not shrink. */
+   (attach · permission · plan | send/stop), the stack clears the safe area.
+   The classifier's `--dsh-keyboard-inset` is the lift the keyboard adds
+   beyond the layout viewport: nonzero only while the browser keeps the layout
+   height and occludes the visual viewport (iOS), zero once the browser
+   resized the content for the keyboard (Android resizes-content). The docked
+   composer rides it so it stays above the keyboard; the hero composer is
+   docked above the keyboard by ConversationRoot instead (see there). */
 
 .rider {
   display: flex;
@@ -423,7 +427,10 @@
   padding-bottom: calc(4px + var(--dsh-safe-area-inset-bottom, 0px));
 }
 
-:root[data-device='phone'][data-keyboard='open'] .root {
+/* Docked composer only: the hero variant is centered in the visible band by
+   ConversationRoot's hero padding, so lifting it as well would push it off
+   the top. */
+:root[data-pointer='coarse'][data-keyboard='open'] .root:not(.hero) {
   /* No morph animation: the lift is a state change, not a transition. */
   transform: translateY(calc(-1 * var(--dsh-keyboard-inset, 0px)));
   transition: none;

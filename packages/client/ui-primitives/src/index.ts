@@ -25,7 +25,7 @@ export { Modal } from './Modal.tsx'
 export { Sheet, useSheetPresentation, SHEET_MAX_WIDTH } from './Sheet.tsx'
 export {
   classifyDevice, getDeviceRuntime, getDeviceSnapshot, startDeviceRuntime, useDevice, DeviceRuntime,
-  KEYBOARD_MIN_INSET, KEYBOARD_SETTLE_MS, PHONE_MAX_WIDTH, TABLET_MAX_WIDTH,
+  KEYBOARD_MIN_INSET, KEYBOARD_ROTATION_GUARD_MS, KEYBOARD_SETTLE_MS, PHONE_MAX_WIDTH, TABLET_MAX_WIDTH,
 } from './device.ts'
 export type { DeviceClassification, DeviceKind, DeviceReading, DeviceSnapshot, DeviceSource, PointerKind } from './device.ts'
 export {

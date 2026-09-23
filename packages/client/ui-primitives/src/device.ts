@@ -9,6 +9,15 @@ import { useSyncExternalStore } from 'react'
  * `data-keyboard`, and the `--dsh-keyboard-inset` / `--dsh-visual-viewport-height`
  * variables the mobile stylesheets consume.
  *
+ * The keyboard has two browser shapes, and the runtime publishes them apart:
+ * where the browser resizes the layout viewport for the keyboard (Android
+ * Chrome under `interactive-widget=resizes-content`) the frame shrinks on its
+ * own and `keyboardInset` stays 0; where the keyboard only occludes the visual
+ * viewport (iOS) the layout keeps its height and `keyboardInset` is the lift
+ * the shell must apply. Detecting open uses both signals, but only the
+ * occlusion is ever a lift — applying the layout shrink as a lift as well
+ * displaces the composer by the keyboard height twice.
+ *
  * The singleton lives in this package's platform-module entry, so every client
  * bundle shares one instance; use `startDeviceRuntime()` to install listeners
  * and `getDeviceSnapshot()` for an unsolicited read.
@@ -32,6 +41,14 @@ export const KEYBOARD_MIN_INSET = 120
 
 /** Milliseconds the keyboard inset must persist before the state flips open (iOS lag guard). */
 export const KEYBOARD_SETTLE_MS = 120
+
+/**
+ * Milliseconds a display rotation is given to settle. The display swap itself
+ * changes the viewport height, so the layout-shrink signal is held this long
+ * before it is trusted again; misreading the swap as a keyboard would strand
+ * the pre-rotation state.
+ */
+export const KEYBOARD_ROTATION_GUARD_MS = 400
 
 /** One classification reading: viewport width plus the pointer capabilities. */
 export interface DeviceReading {
@@ -71,7 +88,11 @@ export interface DeviceSnapshot extends DeviceClassification {
   readonly width: number
   /** Whether the soft keyboard currently occludes the layout viewport. */
   readonly keyboardOpen: boolean
-  /** Occluded height in px at the bottom of the visual viewport (0 when closed). */
+  /**
+   * Lift in px the keyboard adds beyond the layout viewport (0 when closed).
+   * Zero while the browser already resized the layout viewport for the
+   * keyboard, so consumers apply it without a second offset.
+   */
   readonly keyboardInset: number
 }
 
@@ -94,7 +115,9 @@ export class DeviceRuntime implements DeviceSource {
   private installed = false
   private frame: number | null = null
   private settle: ReturnType<typeof setTimeout> | null = null
+  private rotationTimer: ReturnType<typeof setTimeout> | null = null
   private restingViewport = 0
+  private displaySignature = ''
   private media: MediaQueryList[] = []
   private cleanups: Array<() => void> = []
 
@@ -142,10 +165,11 @@ export class DeviceRuntime implements DeviceSource {
     }
     this.installed = true
     this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
+    this.displaySignature = readDisplaySignature()
     const onResize = (): void => { this.scheduleMeasure() }
     const onViewport = (): void => { this.scheduleKeyboard() }
     const onOrientation = (): void => {
-      this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
+      this.adoptRotatedViewport()
       this.scheduleKeyboard()
     }
     window.addEventListener('resize', onResize)
@@ -191,6 +215,7 @@ export class DeviceRuntime implements DeviceSource {
     this.installed = false
     if (this.frame !== null) { cancelAnimationFrame(this.frame); this.frame = null }
     if (this.settle !== null) { clearTimeout(this.settle); this.settle = null }
+    if (this.rotationTimer !== null) { clearTimeout(this.rotationTimer); this.rotationTimer = null }
     for (const cleanup of this.cleanups.splice(0)) cleanup()
     this.media = []
     // Installed implies the DOM existed when install() succeeded.
@@ -230,14 +255,18 @@ export class DeviceRuntime implements DeviceSource {
    * Read the keyboard candidate and commit it: opening settles for
    * {@link KEYBOARD_SETTLE_MS} so the iOS ~300ms visual-viewport animation
    * cannot flip the state on intermediate frames, closing is immediate so the
-   * shell never sticks behind a dismissed keyboard.
+   * shell never sticks behind a dismissed keyboard. Samples during a display
+   * rotation are dropped: the swap drives the viewport height, and the guard's
+   * own sample re-adopts the resting height once it has settled.
    */
   private sampleKeyboard(): void {
+    this.adoptRotatedViewport()
+    if (this.rotationTimer !== null) return
     const inset = this.readKeyboardCandidate()
     if (inset >= KEYBOARD_MIN_INSET) {
       this.settle ??= setTimeout(() => {
         this.settle = null
-        this.commitKeyboard(this.readKeyboardCandidate() >= KEYBOARD_MIN_INSET)
+        this.commitKeyboard(this.rotationTimer === null && this.readKeyboardCandidate() >= KEYBOARD_MIN_INSET)
       }, KEYBOARD_SETTLE_MS)
       return
     }
@@ -246,25 +275,62 @@ export class DeviceRuntime implements DeviceSource {
   }
 
   /**
-   * @returns the current occlusion in px: the visual viewport's occluded strip
-   * (iOS, where the layout viewport keeps its height) or the layout viewport's
-   * own shrink (Android `interactive-widget=resizes-content`), whichever is
-   * larger. Desktop devices report 0 unless the pointer is coarse.
+   * Re-adopt the resting viewport after the display rotated. The keyboard
+   * cannot change the screen dimensions, so only a changed display signature
+   * is a rotation: the previous orientation's resting height no longer
+   * applies, the viewport animates across the swap, and samples are held for
+   * {@link KEYBOARD_ROTATION_GUARD_MS} until the guard's own sample re-reads
+   * the settled height.
    */
-  private readKeyboardCandidate(): number {
-    if (this.snapshot.pointer !== 'coarse') return 0
-    const layoutHeight = window.innerHeight
-    const visual = readVisualViewport()
-    const occluded = visual === undefined
-      ? 0
-      : Math.max(0, Math.round(layoutHeight - visual.height - visual.offsetTop))
-    const shrink = Math.max(0, Math.round(this.restingViewport - (visual?.height ?? layoutHeight)))
-    return Math.max(occluded, shrink)
+  private adoptRotatedViewport(): void {
+    const signature = readDisplaySignature()
+    if (signature === '' || signature === this.displaySignature) return
+    this.displaySignature = signature
+    if (this.rotationTimer !== null) clearTimeout(this.rotationTimer)
+    this.rotationTimer = setTimeout(() => {
+      this.rotationTimer = null
+      this.restingViewport = Math.max(readVisualViewportHeight() ?? 0, readDisplayHeight())
+      this.scheduleKeyboard()
+    }, KEYBOARD_ROTATION_GUARD_MS)
+    this.restingViewport = Math.max(readVisualViewportHeight() ?? 0, readDisplayHeight())
   }
 
-  /** Commit one keyboard reading, adopting the current height as resting while closed. */
+  /**
+   * @returns the current occlusion in px: how far the visual viewport's bottom
+   * edge sits above the layout viewport's bottom. This is the only value the
+   * shell may apply as a lift — it is 0 while the browser already resized the
+   * layout viewport for the keyboard (Android `resizes-content`), and it
+   * follows the visual viewport when the platform pans it. Desktop devices
+   * report 0 unless the pointer is coarse.
+   */
+  private readKeyboardOcclusion(): number {
+    if (this.snapshot.pointer !== 'coarse') return 0
+    const visual = readVisualViewport()
+    if (visual === undefined) return 0
+    return Math.max(0, Math.round(window.innerHeight - visual.offsetTop - visual.height))
+  }
+
+  /**
+   * @returns the keyboard candidate in px: the visual occlusion, or the
+   * layout viewport's own shrink below the resting height (Android
+   * `interactive-widget=resizes-content`, where the occlusion stays 0),
+   * whichever is larger.
+   */
+  private readKeyboardCandidate(): number {
+    const occluded = this.readKeyboardOcclusion()
+    if (this.snapshot.pointer !== 'coarse') return 0
+    const layoutHeight = window.innerHeight
+    const height = readVisualViewportHeight() ?? layoutHeight
+    return Math.max(occluded, Math.max(0, Math.round(this.restingViewport - height)))
+  }
+
+  /**
+   * Commit one keyboard reading, adopting the current height as resting while
+   * closed. The published inset is the occlusion alone; the layout-shrink
+   * candidate only decides whether the keyboard is open.
+   */
   private commitKeyboard(open: boolean): void {
-    const inset = open ? this.readKeyboardCandidate() : 0
+    const inset = open ? this.readKeyboardOcclusion() : 0
     if (!open) this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
     if (this.snapshot.keyboardOpen === open && this.snapshot.keyboardInset === inset) return
     this.commit({ ...this.measure(), keyboardOpen: open, keyboardInset: inset })
@@ -326,6 +392,23 @@ function readVisualViewport(): VisualViewport | undefined {
 function readVisualViewportHeight(): number | null {
   const visual = readVisualViewport()
   return visual === undefined ? null : visual.height
+}
+
+/**
+ * @returns the display's `widthxheight` signature, or '' where the Screen API
+ * is unavailable. The keyboard never changes it; a rotation always does.
+ */
+function readDisplaySignature(): string {
+  /* v8 ignore next -- browser capability module: every caller runs after install()'s DOM guard. */
+  if (typeof window === 'undefined' || window.screen === undefined) return ''
+  return `${String(window.screen.width)}x${String(window.screen.height)}`
+}
+
+/** @returns the display height in px, or 0 where the Screen API is unavailable. */
+function readDisplayHeight(): number {
+  /* v8 ignore next -- browser capability module: every caller runs after install()'s DOM guard. */
+  if (typeof window === 'undefined' || window.screen === undefined) return 0
+  return window.screen.height
 }
 
 /**

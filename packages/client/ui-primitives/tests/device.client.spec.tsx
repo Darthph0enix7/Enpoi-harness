@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  DeviceRuntime, classifyDevice, getDeviceSnapshot, startDeviceRuntime, useDevice, KEYBOARD_SETTLE_MS,
+  DeviceRuntime, KEYBOARD_ROTATION_GUARD_MS, classifyDevice, getDeviceSnapshot, startDeviceRuntime, useDevice, KEYBOARD_SETTLE_MS,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** One controllable visual-viewport stand-in. */
@@ -59,6 +59,11 @@ function installViewportWidth(width: number): void {
   vi.stubGlobal('innerHeight', 844)
 }
 
+function installScreenSize(width: number, height: number): void {
+  Object.defineProperty(window.screen, 'width', { configurable: true, value: width })
+  Object.defineProperty(window.screen, 'height', { configurable: true, value: height })
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   installAnimationFrames()
@@ -74,6 +79,8 @@ afterEach(() => {
   Reflect.deleteProperty(window, 'visualViewport')
   Reflect.deleteProperty(navigator, 'maxTouchPoints')
   Reflect.deleteProperty(window.screen, 'orientation')
+  Reflect.deleteProperty(window.screen, 'width')
+  Reflect.deleteProperty(window.screen, 'height')
 })
 
 describe('classifyDevice', () => {
@@ -186,7 +193,7 @@ describe('DeviceRuntime', () => {
     stop()
   })
 
-  it('reports a resized layout viewport as an open keyboard too', () => {
+  it('reports a resized layout viewport as an open keyboard with no lift', () => {
     installTouch(1, true)
     installViewportWidth(390)
     const runtime = new DeviceRuntime()
@@ -196,10 +203,49 @@ describe('DeviceRuntime', () => {
     flushFrames()
     vi.advanceTimersByTime(120)
     expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    // The layout viewport already shrank, so the shell must not lift again.
+    expect(runtime.getSnapshot().keyboardInset).toBe(0)
+    expect(document.documentElement.style.getPropertyValue('--dsh-keyboard-inset')).toBe('0px')
     vi.stubGlobal('innerHeight', 844)
     window.dispatchEvent(new Event('resize'))
     flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+  })
+
+  it('reports an occlusion-free visual viewport as a keyboard without a lift', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    const viewport = installVisualViewport(844)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    viewport.height = 444
+    vi.stubGlobal('innerHeight', 444)
+    viewport.emit()
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().keyboardInset).toBe(0)
+    viewport.height = 844
+    viewport.emit()
+    flushFrames()
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+  })
+
+  it('drops the lift to zero when the platform pans the visual viewport to its bottom', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    const viewport = installVisualViewport(844)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    viewport.height = 444
+    viewport.offsetTop = 400
+    viewport.emit()
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().keyboardInset).toBe(0)
     stop()
   })
 
@@ -279,6 +325,7 @@ describe('DeviceRuntime', () => {
   it('listens to screen.orientation changes when the API exists', () => {
     installTouch(1, true)
     installViewportWidth(390)
+    installScreenSize(390, 844)
     const viewport = installVisualViewport(844)
     const listeners = new Set<() => void>()
     // window.screen, not the testing-library `screen` import this spec also uses.
@@ -294,10 +341,13 @@ describe('DeviceRuntime', () => {
     const stop = runtime.install()
     expect(listeners.size).toBe(1)
     viewport.height = 390
+    viewport.offsetTop = 0
     vi.stubGlobal('innerHeight', 390)
+    installScreenSize(844, 390)
     for (const listener of [...listeners]) listener()
     flushFrames()
-    vi.advanceTimersByTime(1000)
+    vi.advanceTimersByTime(KEYBOARD_ROTATION_GUARD_MS)
+    flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
     stop()
     expect(listeners.size).toBe(0)
@@ -306,14 +356,66 @@ describe('DeviceRuntime', () => {
   it('resets the resting viewport from the window orientationchange event', () => {
     installTouch(1, true)
     installViewportWidth(390)
+    installScreenSize(390, 844)
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
     viewport.height = 390
     vi.stubGlobal('innerHeight', 390)
+    installScreenSize(844, 390)
     window.dispatchEvent(new Event('orientationchange'))
     flushFrames()
-    vi.advanceTimersByTime(1000)
+    vi.advanceTimersByTime(KEYBOARD_ROTATION_GUARD_MS)
+    flushFrames()
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+  })
+
+  it('ignores an orientation event whose display did not change', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    installScreenSize(390, 844)
+    const viewport = installVisualViewport(844)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    // A resizes-content keyboard shrinks the viewport without touching the
+    // display: the orientation event must not reset the resting height.
+    viewport.height = 444
+    vi.stubGlobal('innerHeight', 444)
+    window.dispatchEvent(new Event('orientationchange'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    stop()
+  })
+
+  it('holds an occluding keyboard across a display rotation', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    installScreenSize(390, 844)
+    const viewport = installVisualViewport(844)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    viewport.height = 444
+    viewport.emit()
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().keyboardInset).toBe(400)
+    installScreenSize(844, 390)
+    viewport.height = 200
+    vi.stubGlobal('innerHeight', 390)
+    window.dispatchEvent(new Event('orientationchange'))
+    flushFrames()
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    vi.advanceTimersByTime(KEYBOARD_ROTATION_GUARD_MS)
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().keyboardInset).toBe(190)
+    viewport.height = 390
+    viewport.emit()
+    flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
     stop()
   })
@@ -321,12 +423,15 @@ describe('DeviceRuntime', () => {
   it('resets the resting viewport without a visual viewport API', () => {
     installTouch(1, true)
     installViewportWidth(844)
+    installScreenSize(390, 844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
     vi.stubGlobal('innerHeight', 390)
+    installScreenSize(844, 390)
     window.dispatchEvent(new Event('orientationchange'))
     flushFrames()
-    vi.advanceTimersByTime(1000)
+    vi.advanceTimersByTime(KEYBOARD_ROTATION_GUARD_MS)
+    flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
     expect(runtime.getSnapshot().keyboardInset).toBe(0)
     stop()

@@ -13,7 +13,9 @@
   --dsh-safe-area-inset-right: env(safe-area-inset-right, 0px);
   --dsh-safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
   --dsh-safe-area-inset-left: env(safe-area-inset-left, 0px);
-  /* Projected by the device classifier: 0 while the soft keyboard is closed. */
+  /* Projected by the device classifier: the lift the keyboard adds beyond the
+     layout viewport; 0 while closed and 0 where the browser already resized
+     the content for the keyboard. */
   --dsh-keyboard-inset: 0px;
   /* Projected by the device classifier: visual viewport height, else the dvh. */
   --dsh-visual-viewport-height: 100dvh;
