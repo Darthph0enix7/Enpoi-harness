@@ -969,7 +969,10 @@ describe('client bundle activation', () => {
     // Composition is lexicographic (deterministic across boots), so locate each
     // fixture's section instead of assuming which one lands first.
     const sections = (payload as unknown as { sections: { offset: { line: number } }[] }).sections
-    const resolved = sections.map(section => consumer.findEntry(section.offset.line, 0)?.originalSource)
+    const resolved = sections.map((section) => {
+      const entry = consumer.findEntry(section.offset.line, 0) as { originalSource?: string } | undefined
+      return entry?.originalSource
+    })
     expect(resolved).toHaveLength(2)
     expect(resolved).toEqual(expect.arrayContaining([
       `/plugins/${unmappedName}/client.js`,
