@@ -85,6 +85,9 @@ export const SESSION_QUERY_SQLITE_SNIPPET_CHARS = 240
 // One transient source change gets a retry; repeated churn fails rather than monopolizing the queue.
 const STABLE_OBSERVATION_ATTEMPTS = 2
 
+/** Bound on per-reconciliation `index repaired` log lines; the remainder is summarized. */
+const REPAIR_LOG_LIMIT = 32
+
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
 export type OpenAt = 'startup' | 'first-search' | 'never'
 
@@ -485,6 +488,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       }
     }
 
+    if (hasWrites) this._logRepairs(persistentChanges, persistedById)
+
     if (hasWrites || pointerChanged) this._globalGeneration += 1
     if (pointerChanged) this._persistenceEpoch += 1
     this._localGeneration = nextLocalGeneration
@@ -559,6 +564,31 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       'session-search persistence observation did not stabilize after one retry',
       'SESSION_QUERY_PERSISTENCE_FAILED',
     )
+  }
+
+  /**
+   * Report stored sessions whose durable index row this reconciliation created,
+   * including a rebuilt index that previously only failed to reconcile. One line
+   * per repaired session up to {@link REPAIR_LOG_LIMIT}, then one summary line.
+   * @param changed - persisted sessions written by this reconciliation.
+   * @param indexed - `persisted_sessions` rows that existed before this reconciliation.
+   */
+  private _logRepairs(
+    changed: readonly ObservedPersistedSession[],
+    indexed: ReadonlyMap<SessionId, IndexedPersistedRow>,
+  ): void {
+    const repaired = changed.filter(entry => indexed.get(entry.header.id) === undefined)
+    for (const [position, entry] of repaired.entries()) {
+      if (position === REPAIR_LOG_LIMIT) {
+        this.ctx.logger.info(
+          `session-search index repaired ${repaired.length - position} more sessions`,
+        )
+        break
+      }
+      this.ctx.logger.info(
+        `session-search index repaired session "${entry.header.id}" (${entry.loaded?.documents.length ?? 0} documents)`,
+      )
+    }
   }
 
   private _mainGeneration(): number {

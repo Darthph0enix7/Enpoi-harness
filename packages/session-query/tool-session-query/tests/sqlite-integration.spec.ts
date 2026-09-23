@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ToolCallId  } from '@deepseek-ai/dsh-llm'
 import SessionStore, {
@@ -18,6 +18,7 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
+import { generationLogPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/format.ts'
 
 const temporaryDirectories: string[] = []
 const contexts: Context[] = []
@@ -241,5 +242,102 @@ describe('tool-session-query with the real SQLite provider', () => {
       .map(block => block.type === 'text' ? block.text : '').join('\n')
     expect(preEpochUpperText).toContain('seq 2')
     expect(preEpochUpperText).not.toContain('seq 3')
+  })
+
+  it('indexes and searches fork-era v0 and v1 logs beside a current log', { timeout: 20_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-tool-session-query-historical-'))
+    temporaryDirectories.push(root)
+
+    // A released v0 Session carrying the fork's retired v2 descriptor payload
+    // and its quiet member, plus a released v1 Session with the same retired
+    // descriptor. Both must migrate into the durable index, not fail the search.
+    const historical = (version: 0 | 1, id: string, text: string): readonly unknown[] => [
+      { type: 'session', version, id, createdAt: 1, cwd: '/work', delegationDepth: 0 },
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 } },
+      {
+        type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+        data: { id: 'historical-message', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+      },
+      {
+        type: 'subagent/descriptor', seq: 3, time: 4,
+        data: { version: 2, mode: 'continuable', provider: 'standard', label: 'legacy child', quiet: true },
+      },
+      { type: 'step/end', seq: 4, time: 5, data: { turn: 1, step: 1 } },
+      { type: 'turn/end', seq: 5, time: 6, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const writeHistorical = async (version: 0 | 1, id: string, text: string): Promise<void> => {
+      const path = generationLogPath(root, '/work', SessionId(id), version, 'none')
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, historical(version, id, text).map(row => JSON.stringify(row)).join('\n') + '\n')
+    }
+    await writeHistorical(0, 'historical-v0', 'retired descriptor v0 needle')
+    await writeHistorical(1, 'historical-v1', 'retired descriptor v1 needle')
+
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    registerTurnBoundary(ctx)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx.plugin(SqliteSessionQueryEngine, { path: join(root, 'session-query.db') })
+    await ctx.plugin(ToolSessionQuery)
+
+    const current = SessionId('historical-current')
+    const writer = await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: current,
+      createdAt: 10,
+      cwd: '/work',
+      isSeeded: false,
+    })
+    await writer.append([{
+      type: 'user/message',
+      seq: SessionSeq(0),
+      time: 11,
+      data: createUserMessage({
+        content: [{ type: 'text', text: 'current log needle' }],
+        source: { kind: 'user' },
+      }),
+      surfaceOp: 'append',
+    }])
+    await writer.close()
+
+    const caller = ctx.sessions.create(SessionId('historical-caller'), {
+      meta: { createdAt: 20, cwd: '/work' },
+    })
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => undefined)
+    const search = (query: string) => ctx.tools.execute({
+      name: 'session_search',
+      arguments: { query },
+      callId: ToolCallId('historical-search'),
+      signal: new AbortController().signal,
+      agent: fakeAgent(caller),
+    })
+
+    const v0 = await search('retired descriptor v0 needle')
+    expect(v0.isError).toBe(false)
+    expect(v0.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+      .toContain('Session historical-v0')
+
+    const v1 = await search('retired descriptor v1 needle')
+    expect(v1.isError).toBe(false)
+    expect(v1.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+      .toContain('Session historical-v1')
+
+    const fresh = await search('current log needle')
+    expect(fresh.isError).toBe(false)
+    expect(fresh.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+      .toContain('Session historical-current')
+
+    // The indexer reports each repaired (previously unindexed) Session, one line each.
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('session-search index repaired session "historical-v0"'),
+    )
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('session-search index repaired session "historical-v1"'),
+    )
   })
 })

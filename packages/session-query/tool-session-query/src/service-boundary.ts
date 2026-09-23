@@ -128,7 +128,7 @@ function sanitizeError(
         ? SAFE_SESSION_QUERY_FAILURES[code as SessionQueryErrorCode]
         : undefined
       if (failure !== undefined && failure.code !== 'SESSION_QUERY_TOOL_FAILED') {
-        return new SessionQueryError(failure.message, failure.code)
+        return new SessionQueryError(withReason(failure.message, failure.code, error), failure.code)
       }
     }
     if (error instanceof HarnessError && error.code === 'SESSION_QUERY_TOOL_UNAUTHORIZED') {
@@ -145,6 +145,30 @@ function genericFailure(): HarnessError {
     'session query operation failed',
     'SESSION_QUERY_TOOL_FAILED',
   )
+}
+
+/**
+ * Infrastructure failures keep their fixed model-safe summary and append the
+ * bounded reason from the rejection's own chained cause, so an unavailable
+ * index or store reports what actually failed instead of a bare state. The
+ * reason is one line and never the diagnostic stack; a rejection without an
+ * `Error` cause keeps the fixed summary unchanged.
+ * @param message - fixed model-safe failure summary.
+ * @param code - translated session-query failure code.
+ * @param error - the rejected `SessionQueryError` whose `cause` carries the underlying failure.
+ * @returns the summary, with a bounded reason suffix for infrastructure failures.
+ */
+function withReason(message: string, code: SessionQueryErrorCode, error: SessionQueryError): string {
+  if (code !== 'SESSION_QUERY_INDEX_FAILED' && code !== 'SESSION_QUERY_PERSISTENCE_FAILED') return message
+  let reason = ''
+  try {
+    reason = error.cause instanceof Error ? error.cause.message : ''
+  } catch {
+    // Probing an exotic cause's prototype can throw; the fixed summary stays.
+    return message
+  }
+  const line = reason.split('\n', 1)[0]?.trim().slice(0, 300) ?? ''
+  return line.length === 0 ? message : `${message}: ${line}`
 }
 
 function fullError(error: unknown): string {

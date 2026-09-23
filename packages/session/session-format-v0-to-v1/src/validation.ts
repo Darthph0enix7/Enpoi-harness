@@ -198,7 +198,11 @@ export function assertReleasedEventPayload(event: SessionFormatEvent, version: 0
     )
   }
   const data = releasedV0Record(event.data, `${event.type} ${event.seq} data`)
-  if (event.type === 'subagent/descriptor' && data['version'] !== 3) {
+  // Retired descriptor v2 payloads are upgraded by the installed subagent
+  // reader; v0 admits them the same way instead of refusing the whole Session.
+  const retiredDescriptorVersion = event.type === 'subagent/descriptor'
+    && (data['version'] === 2 || data['version'] === 3)
+  if (event.type === 'subagent/descriptor' && !retiredDescriptorVersion) {
     const descriptorVersion = sessionFormatCount(data['version'], `${event.type} ${event.seq} version`)
     if (version === 0) {
       throw new SessionFormatUnsupportedMigrationError(

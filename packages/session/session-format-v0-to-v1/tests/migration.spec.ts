@@ -413,3 +413,78 @@ describe('released Session format v0 to v1', () => {
     expect(() => restoreReleasedV1Artifact(extendedKnownPayload, generatedCurrentTypes)).not.toThrow()
   })
 })
+
+describe('Enpoi-fork v0 payload admission', () => {
+  const header = (id: string) => ({ type: 'session', version: 0, id, createdAt: 1, cwd: '/work', delegationDepth: 0 })
+  const prefix = [
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 } },
+  ]
+  const suffix = [
+    { type: 'step/end', seq: 3, time: 5, data: { turn: 1, step: 1 } },
+    { type: 'turn/end', seq: 4, time: 6, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+
+  it('admits a retired descriptor v2 payload and upgrades it like the installed reader', () => {
+    const descriptor = {
+      type: 'subagent/descriptor', seq: 2, time: 3,
+      data: { version: 2, mode: 'continuable', provider: 'standard', label: 'child', quiet: true },
+    }
+    const migrated = restoreV0ToV1(header('descriptor-v2'), [...prefix, descriptor, ...suffix])
+    expect(migrated.events[2]).toEqual(descriptor)
+  })
+
+  it('admits a current descriptor carrying the fork quiet member', () => {
+    const descriptor = {
+      type: 'subagent/descriptor', seq: 2, time: 3,
+      data: { version: 3, mode: 'continuable', provider: 'standard', label: 'child', quiet: false },
+    }
+    const migrated = restoreV0ToV1(header('descriptor-quiet'), [...prefix, descriptor, ...suffix])
+    expect(migrated.events[2]).toEqual(descriptor)
+  })
+
+  it('still refuses a descriptor version the installed reader cannot interpret', () => {
+    const descriptor = {
+      type: 'subagent/descriptor', seq: 2, time: 3,
+      data: { version: 5, mode: 'one-shot', provider: 'standard' },
+    }
+    expect(() => restoreV0ToV1(header('descriptor-v5'), [...prefix, descriptor, ...suffix]))
+      .toThrow(/unsupported descriptor version 5/)
+  })
+
+  it('marks installed-fork vocabulary as ignorable so a reader keeps the Session', () => {
+    const verdict = {
+      type: 'oracle/verdict-committed', seq: 2, time: 3,
+      data: { childId: 'child-1', approved: false, concernCount: 0 },
+    }
+    const migrated = restoreV0ToV1(header('fork-verdict'), [...prefix, verdict, ...suffix])
+    expect(migrated.events[2]).toEqual({ ...verdict, ignorable: true })
+  })
+
+  it('maps the retired request/header reason "custom" onto the current union', () => {
+    const requestHeader = {
+      type: 'request/header', seq: 2, time: 3,
+      data: { header: { config: { provider: 'p', model: 'm' } }, reason: 'custom' },
+    }
+    const migrated = restoreV0ToV1(header('request-header-custom'), [...prefix, requestHeader, ...suffix])
+    expect(migrated.events[2]?.data).toMatchObject({ reason: 'change' })
+  })
+
+  it('rebuilds a fork splice entry written as an index-keyed character map', () => {
+    const splice = {
+      type: 'agent/inbox/spliced', seq: 2, time: 3,
+      data: { target: 'next-step', start: 0, inserted: [{ id: 'spliced-1', role: 'user', 0: 'h', 1: 'i' }] },
+    }
+    const migrated = restoreV0ToV1(header('splice-repair'), [...prefix, splice, ...suffix])
+    expect(migrated.events[2]?.data).toEqual({
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        id: 'spliced-1',
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'hi' }],
+      }],
+    })
+  })
+})

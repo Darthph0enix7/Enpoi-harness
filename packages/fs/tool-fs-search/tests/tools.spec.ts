@@ -492,6 +492,72 @@ describe('workdir derivation and signal forwarding', () => {
     expect(text(result)).not.toContain('could not start')
   })
 
+  it('retries one EAGAIN spawn failure with --threads 1 and succeeds', async () => {
+    // The host can momentarily refuse a thread/process spawn under load; the
+    // tool retries once with ripgrep's worker pool reduced instead of failing
+    // the search. A second failure still reports the clear SEARCH_FAILED.
+    const { ctx, subprocess } = await setup()
+    let attempts = 0
+    subprocess.handler = () => {
+      attempts += 1
+      return attempts === 1
+        ? { reject: Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }) }
+        : runResult('a.ts\n')
+    }
+    const result = await call(ctx, 'glob', { pattern: '*' })
+    expect(result.isError).toBe(false)
+    expect(text(result)).toContain('a.ts')
+    expect(subprocess.spawns).toHaveLength(2)
+    expect(subprocess.spawns[0]?.argv).not.toContain('--threads')
+    expect(subprocess.spawns[1]?.argv).toContain('--threads')
+    expect(subprocess.spawns[1]?.argv).toContain('1')
+
+    // A model path follows `--`; the fallback flag must stay in flag position.
+    const withPath = await setup()
+    let pathAttempts = 0
+    withPath.subprocess.handler = () => {
+      pathAttempts += 1
+      return pathAttempts === 1
+        ? { reject: Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }) }
+        : runResult('a.ts\n')
+    }
+    await call(withPath.ctx, 'glob', { pattern: '*', path: '/tmp' })
+    const retryArgv = withPath.subprocess.spawns[1]?.argv ?? []
+    expect(retryArgv.indexOf('--threads')).toBeLessThan(retryArgv.lastIndexOf('--'))
+    expect(retryArgv.at(-1)).toBe('/tmp')
+  })
+
+  it('retries the observed rg exit-2 EAGAIN shape once, then reports SEARCH_FAILED', async () => {
+    // The live failure was ripgrep itself exiting 2 with
+    // "rg: Resource temporarily unavailable (os error 11)" on stderr.
+    const { ctx, subprocess } = await setup()
+    let attempts = 0
+    subprocess.handler = () => {
+      attempts += 1
+      if (attempts === 1) {
+        return runResult('', {
+          exitCode: 2,
+          stderr: { text: 'rg: Resource temporarily unavailable (os error 11)\n' },
+        })
+      }
+      return runResult('a.ts\n')
+    }
+    const retried = await call(ctx, 'glob', { pattern: '*' })
+    expect(retried.isError).toBe(false)
+    expect(subprocess.spawns).toHaveLength(2)
+
+    // A retry that also fails EAGAIN keeps the bounded two-attempt behavior.
+    const persistent = await setup()
+    persistent.subprocess.handler = () => runResult('', {
+      exitCode: 2,
+      stderr: { text: 'rg: Resource temporarily unavailable (os error 11)\n' },
+    })
+    const failed = await call(persistent.ctx, 'glob', { pattern: '*' })
+    expect(failed.isError).toBe(true)
+    expect(failed.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+    expect(persistent.subprocess.spawns).toHaveLength(2)
+  })
+
   it('classifies a synchronous spawn-creation throw as SEARCH_FAILED', async () => {
     // Node's spawn() throws synchronously for a NUL in argv, and the local
     // impl can throw synchronously for other invalid specs. Creation-time

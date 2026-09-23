@@ -1497,6 +1497,26 @@ describe('search paging, prior-history bounds, titles, and cancellation', () => 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('[unprintable session query failure]'))
   })
 
+  it('surfaces the reason when the search index is truly unavailable', async () => {
+    const mounted = await mount()
+    const cause = new Error('SQLITE_CANTOPEN: unable to open database file')
+    FakeQuery.sessionSearch = () => Promise.reject(
+      new SessionQueryError(
+        'session-search SQLite index failed to open: SQLITE_CANTOPEN',
+        'SESSION_QUERY_INDEX_FAILED',
+        { cause },
+      ),
+    )
+    vi.spyOn(mounted.ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    const result = await mounted.call('session_search', { query: 'needle' })
+
+    expect(errorCode(result)).toBe('SESSION_QUERY_INDEX_FAILED')
+    expect(text(result)).toBe(
+      'Error: session search index is unavailable: SQLITE_CANTOPEN: unable to open database file',
+    )
+  })
+
   it('logs an inspectable cyclic cause chain without exposing it', async () => {
     const mounted = await mount()
     const outer = new Error('cyclic outer secret')

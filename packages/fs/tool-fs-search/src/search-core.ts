@@ -21,6 +21,7 @@
 
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, parse, relative, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { ItemRetainer, TextRetainer } from '@deepseek-ai/dsh-output-retention'
@@ -51,6 +52,15 @@ export const SEARCH_STDERR_MAX_BYTES = 64 * 1024
 
 /** Default terminate grace period for a search process (ms). */
 export const SEARCH_GRACE_MS = 3_000
+
+/**
+ * Retry policy for a transient ripgrep thread-spawn failure (`EAGAIN`): one
+ * reduced-thread attempt after a short backoff. Kept internal because the
+ * values trade a bounded delay against failing under momentary host pressure;
+ * they are not deployment-varying configuration.
+ */
+const EAGAIN_RETRY_DELAY_MS = 100
+const EAGAIN_REDUCED_THREAD_ARGS = ['--threads', '1'] as const
 
 /**
  * Default cap in bytes on one search's serialized `presentationMeta` (the
@@ -208,7 +218,10 @@ export function resolveRgPath(): Promise<string> {
  * the command could not start, while a rejection of `handle.done` reports a
  * provider failure without claiming whether execution began. Both become
  * `SEARCH_FAILED` with the original as `cause`; an abort already observed by
- * creation time becomes `SEARCH_ABORTED` instead.
+ * creation time becomes `SEARCH_ABORTED` instead. A failure whose message or
+ * cause chain names `EAGAIN` is retried once after a short backoff with
+ * ripgrep's worker pool reduced (`--threads 1`); every other failure keeps its
+ * first-error classification.
  *
  * @param ctx - the plugin context; execution uses its `subprocess` service.
  * @param exec - the tool-execution context; supplies the session cwd and the abort signal.
@@ -233,6 +246,103 @@ export async function runRipgrep(
   }
   const cwd = exec.agent?.session.header.cwd
   const workdir = cwd ?? process.cwd()
+  try {
+    return await runRipgrepAttempt(
+      ctx, exec, toolName, argv, rawOutputMaxBytes, graceMs, stderrMaxBytes, workdir,
+    )
+  } catch (error: unknown) {
+    if (!isThreadSpawnFailure(error)) throw error
+    try {
+      await delay(EAGAIN_RETRY_DELAY_MS, undefined, { signal: exec.signal })
+    } catch (delayError: unknown) {
+      throw new SearchError(
+        `${toolName} was aborted before completion (tool timeout or caller cancellation)`,
+        'SEARCH_ABORTED',
+        { cause: delayError },
+      )
+    }
+    // A momentary thread/process shortage (EAGAIN) is retried once with
+    // ripgrep's own worker pool reduced to one thread, which needs no
+    // additional thread spawns; any other failure keeps its first-error path.
+    return await runRipgrepAttempt(
+      ctx, exec, toolName, reducedThreadArgv(argv), rawOutputMaxBytes, graceMs, stderrMaxBytes, workdir,
+    )
+  }
+}
+
+/**
+ * Insert the reduced-thread fallback flags before any `--` option terminator so
+ * a model path after it keeps its positional meaning.
+ * @param argv - the original ripgrep arguments.
+ * @returns the arguments with `--threads 1` added in flag position.
+ */
+function reducedThreadArgv(argv: readonly string[]): string[] {
+  const separator = argv.lastIndexOf('--')
+  if (separator === -1) return [...argv, ...EAGAIN_REDUCED_THREAD_ARGS]
+  return [
+    ...argv.slice(0, separator),
+    ...EAGAIN_REDUCED_THREAD_ARGS,
+    ...argv.slice(separator),
+  ]
+}
+
+/**
+ * Whether a search failure is a transient `EAGAIN` thread/process shortage.
+ * The failure can arrive as a spawn-creation throw, a provider rejection, or
+ * ripgrep's own nonzero exit after it failed to spawn a worker thread.
+ * @param error - the failure thrown by one attempt.
+ * @returns true when the message or cause chain names `EAGAIN`.
+ */
+function isThreadSpawnFailure(error: unknown): boolean {
+  const seen = new Set<unknown>()
+  let current: unknown = error
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current)
+    if ((current as NodeJS.ErrnoException).code === 'EAGAIN') return true
+    if (THREAD_SPAWN_FAILURE_PATTERN.test(current.message)) return true
+    current = current.cause
+  }
+  return false
+}
+
+const THREAD_SPAWN_FAILURE_PATTERN = /EAGAIN|Resource temporarily unavailable|os error 11/u
+
+/**
+ * Render one bounded one-line reason for a failing search command, so the
+ * model-safe error names what failed instead of only its category.
+ * @param error - the underlying failure.
+ * @returns the first message line, or a fixed fallback for non-Error values.
+ */
+function failureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'unknown error'
+  return message.split('\n', 1)[0]?.trim().slice(0, 300) ?? ''
+}
+
+/**
+ * Run one ripgrep attempt with a plain argv vector and return its complete raw
+ * stdout. The working directory is the resolved caller workdir, `exec.signal`
+ * is forwarded so the cooperative tool timeout terminates the process tree, and
+ * `--no-config` is prepended so a host ripgrep config cannot inject `--pre`.
+ * @param ctx - the plugin context; execution uses its `subprocess` service.
+ * @param exec - the tool-execution context; supplies the abort signal.
+ * @param toolName - `glob` or `grep`, used in error messages.
+ * @param argv - the ripgrep arguments, already including any reduced-thread fallback.
+ * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
+ * @param graceMs - the seam's terminate-escalation grace period.
+ * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
+ * @param workdir - the resolved working directory the command runs in.
+ * @returns the complete stdout, the zero-result flag, and the resolved workdir.
+ */
+async function runRipgrepAttempt(
+  ctx: Context,
+  exec: ToolExecution,
+  toolName: string,
+  argv: readonly string[],
+  rawOutputMaxBytes: number,
+  graceMs: number,
+  stderrMaxBytes: number,
+  workdir: string,
+): Promise<RipgrepRun> {
   let handle: SubprocessHandle
   try {
     handle = ctx.subprocess.spawn({
@@ -248,30 +358,34 @@ export async function runRipgrep(
     } satisfies SubprocessSpawnSpec)
   } catch (error: unknown) {
     // Node's spawn() throws synchronously for a NUL in argv, and the local
-    // impl can throw synchronously when the signal aborts between the check
-    // above and this call (or when the platform-package resolution rejects).
-    // The static narrowing that proves this re-check "always false" cannot
-    // see AbortSignal state changes.
-    // oxlint-disable-next-line typescript/no-unnecessary-condition
+    // impl can throw synchronously when the signal aborts after the caller's
+    // pre-check but before this call (or when the platform-package resolution
+    // rejects).
     if (exec.signal.aborted) {
       throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
     }
-    throw new SearchError(`${toolName} could not start its search command (ripgrep launch failed)`, 'SEARCH_FAILED', { cause: error })
+    throw new SearchError(
+      `${toolName} could not start its search command (ripgrep launch failed): ${failureReason(error)}`,
+      'SEARCH_FAILED',
+      { cause: error },
+    )
   }
   let outcome: SubprocessOutcome
   try {
     outcome = await handle.done
   } catch (error: unknown) {
-    throw new SearchError(`${toolName} subprocess failed before reporting an outcome (ripgrep provider failure)`, 'SEARCH_FAILED', { cause: error })
+    throw new SearchError(
+      `${toolName} subprocess failed before reporting an outcome (ripgrep provider failure): ${failureReason(error)}`,
+      'SEARCH_FAILED',
+      { cause: error },
+    )
   }
   const stdout = handle.collected.stdout?.readFrom(0)
   const stderr = handle.collected.stderr?.readFrom(0)
   if (stdout === undefined || stderr === undefined) {
     throw new SearchError(`${toolName} search command produced no collected output streams`, 'SEARCH_FAILED')
   }
-  // The signal can abort while the spawn is awaited; the static narrowing that
-  // proves this re-check "always false" cannot see AbortSignal state changes.
-  // oxlint-disable-next-line typescript/no-unnecessary-condition
+  // The signal can abort while the spawn is awaited.
   if (exec.signal.aborted) {
     throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
   }

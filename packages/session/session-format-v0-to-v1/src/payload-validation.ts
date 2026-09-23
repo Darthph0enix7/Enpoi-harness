@@ -955,7 +955,9 @@ function modelRouteValue(value: SessionFormatJsonValue | undefined, label: strin
 }
 
 function subagentDescriptorValue(data: JsonRecord, label: string): void {
-  literalValue(data['version'], [3], `${label} version`)
+  // The installed subagent reader accepts the retired v2 payload and upgrades it
+  // to v3; migration admits the same retired versions instead of refusing the log.
+  literalValue(data['version'], [2, 3], `${label} version`)
   nonEmptyString(data['provider'], `${label} provider`)
   if (data['mode'] === 'one-shot') {
     assertReleasedV0Keys(data, ['mode', 'version', 'provider'], ['label'], `${label} data`)
@@ -967,6 +969,7 @@ function subagentDescriptorValue(data: JsonRecord, label: string): void {
   for (const key of ['agentProvider', 'agentModel', 'agentReasoningEffort', 'persona'] as const) {
     if (data[key] !== undefined) nonEmptyString(data[key], `${label} ${key}`)
   }
+  if (data['quiet'] !== undefined) booleanValue(data['quiet'], `${label} quiet`)
   if ((data['agentProvider'] === undefined) !== (data['agentModel'] === undefined)) {
     throw new SessionFormatError(`${label} agentProvider and agentModel must be paired`)
   }

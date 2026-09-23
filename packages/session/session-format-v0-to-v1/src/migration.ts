@@ -15,6 +15,7 @@ import type {
   SessionFormatMigrationStageInput,
 } from '@deepseek-ai/dsh-session-format'
 import { isReleasedAssistantChunkRun } from './codec.ts'
+import { OPAQUE_FORK_V0_EVENT_TYPES } from './dispositions.ts'
 import {
   assertReleasedEventPayload,
   assertReleasedV1Header,
@@ -96,11 +97,112 @@ function normalizeReleasedV0Event(
   const retry = normalizeLegacyRetry(steering, sessionId, state.retryIds)
   const compaction = normalizeLegacyCompaction(retry, sessionId, state)
   const message = normalizeLegacyMessage(compaction, sessionId, state.messageIds)
-  if (message.type !== 'assistant/chunk') assertReleasedEventPayload(message, 0)
-  const messageId = eventMessageId(message)
-  if (messageId !== undefined) state.messageIds.set(message.seq, messageId)
-  return message
+  const spliced = normalizeLegacyInboxSplice(message, sessionId)
+  const marked = markOpaqueForkEvent(spliced)
+  if (marked.type !== 'assistant/chunk') assertReleasedEventPayload(marked, 0)
+  const messageId = eventMessageId(marked)
+  if (messageId !== undefined) state.messageIds.set(marked.seq, messageId)
+  return marked
 }
+
+/**
+ * Stamp the persistence compatibility marker on installed-fork vocabulary that
+ * predates this build's event catalog. The marker lets a reader keep the event
+ * as opaque metadata instead of refusing the entire stored Session; the
+ * identity edge preserves the payload verbatim either way.
+ * @param event - normalized event about to leave the identity edge.
+ * @returns the event with `ignorable: true` when it is opaque fork vocabulary
+ *   without an explicit marker.
+ */
+function markOpaqueForkEvent(event: SessionFormatEvent): SessionFormatEvent {
+  if (!OPAQUE_FORK_V0_EVENT_TYPES.has(event.type)) return event
+  if (event['ignorable'] === true) return event
+  return { ...event, ignorable: true }
+}
+
+/**
+ * Repair the retired fork shape of one `agent/inbox/spliced` payload whose
+ * inserted message text was spread into an index-keyed character map. The
+ * intended message identity, when present, is retained; text is reassembled in
+ * index order and wrapped in the canonical user-message shape the current
+ * vocabulary requires.
+ * @param event - normalized event about to leave the identity edge.
+ * @param sessionId - owning Session, used for synthesized message identity.
+ * @returns the event with recoverable inserted entries rebuilt.
+ */
+function normalizeLegacyInboxSplice(
+  event: SessionFormatEvent,
+  sessionId: string,
+): SessionFormatEvent {
+  if (event.type !== 'agent/inbox/spliced') return event
+  const data = releasedV0Record(event.data, `${event.type} ${event.seq} data`)
+  const inserted = data['inserted']
+  if (!Array.isArray(inserted)) return event
+  const entries = inserted as readonly SessionFormatJsonValue[]
+  const rebuilt = entries.map((entry, index) => {
+    const text = legacySplicedText(entry)
+    if (text === undefined) return entry
+    return recoveredSplicedMessage(entry, sessionId, event.seq, index, text)
+  })
+  if (rebuilt.every((entry, index) => entry === entries[index])) return event
+  return { ...event, data: { ...data, inserted: rebuilt } }
+}
+
+/**
+ * Recover text from a legacy fork splice entry written as `{0: 'a', 1: 'b'}`.
+ * @param entry - one `inserted` member.
+ * @returns the reassembled text, or `undefined` when the entry is not that shape.
+ */
+function legacySplicedText(entry: SessionFormatJsonValue): string | undefined {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined
+  const record = entry as Record<string, SessionFormatJsonValue>
+  const keys = Object.keys(record)
+  const numeric = keys.filter(key => LEGACY_INDEX_KEY.test(key))
+  if (numeric.length === 0) return undefined
+  const extras = keys.filter(key => !LEGACY_INDEX_KEY.test(key))
+  if (extras.some(key => key !== 'id' && key !== 'role' && key !== 'source' && key !== 'content')) return undefined
+  const max = numeric.reduce((largest, key) => Math.max(largest, Number(key)), -1)
+  if (max !== numeric.length - 1) return undefined
+  let text = ''
+  for (let index = 0; index <= max; index += 1) {
+    const value = record[String(index)]
+    // Character maps store one UTF-16 code unit per index, including halves of
+    // surrogate pairs; a longer value is not that shape.
+    if (typeof value !== 'string' || value.length !== 1) return undefined
+    text += value
+  }
+  return text.length === 0 ? undefined : text
+}
+
+/**
+ * Rebuild one recovered splice entry as a canonical user message.
+ * @param entry - the legacy index-keyed entry.
+ * @param sessionId - owning Session.
+ * @param seq - splice event sequence.
+ * @param index - inserted position, used to keep synthesized identities unique.
+ * @param text - reassembled message text.
+ * @returns a current-vocabulary user message carrying the recovered text.
+ */
+function recoveredSplicedMessage(
+  entry: SessionFormatJsonValue,
+  sessionId: string,
+  seq: number,
+  index: number,
+  text: string,
+): SessionFormatJsonObject {
+  const record = (typeof entry === 'object' && entry !== null && !Array.isArray(entry))
+    ? entry as Record<string, SessionFormatJsonValue>
+    : {}
+  const id = typeof record['id'] === 'string' && record['id'].length > 0 ? record['id'] : undefined
+  return {
+    id: id ?? `${legacyMessageId(sessionId, seq)}:splice:${index}`,
+    role: 'user',
+    source: { kind: 'user' },
+    content: [{ type: 'text', text }],
+  }
+}
+
+const LEGACY_INDEX_KEY = /^(0|[1-9]\d*)$/u
 
 function normalizeLegacyCompactionType(event: SessionFormatEvent): SessionFormatEvent {
   const type: string = event.type
@@ -211,14 +313,36 @@ function normalizeLegacyRequestHeader(event: SessionFormatEvent, sessionId: stri
   if (event.type !== 'request/header') return event
   const data = releasedV0Record(event.data, `request/header ${event.seq} data`)
   const header = releasedV0Record(data['header'], `request/header ${event.seq} header`)
-  if (!Object.hasOwn(header, 'messagePrefix')) return event
-  if (!Array.isArray(header['messagePrefix'])) {
-    throw new SessionFormatError(
-      `session ${JSON.stringify(sessionId)} contains malformed request/header messagePrefix at seq ${event.seq}`,
-    )
+  const reason = legacyRequestHeaderReason(data['reason'])
+  const hasMessagePrefix = Object.hasOwn(header, 'messagePrefix')
+  if (!hasMessagePrefix && reason === undefined) return event
+  let currentHeader = header
+  if (hasMessagePrefix) {
+    if (!Array.isArray(header['messagePrefix'])) {
+      throw new SessionFormatError(
+        `session ${JSON.stringify(sessionId)} contains malformed request/header messagePrefix at seq ${event.seq}`,
+      )
+    }
+    const { messagePrefix: _messagePrefix, ...rest } = header
+    currentHeader = rest
   }
-  const { messagePrefix: _messagePrefix, ...currentHeader } = header
-  return { ...event, data: { ...data, header: currentHeader } }
+  return {
+    ...event,
+    data: {
+      ...data,
+      header: currentHeader,
+      ...reason === undefined ? {} : { reason },
+    },
+  }
+}
+
+/**
+ * Map the fork's retired request/header reason vocabulary to the current union.
+ * @param reason - released-v0 reason value.
+ * @returns the current reason when the retired value is recognized, else `undefined`.
+ */
+function legacyRequestHeaderReason(reason: SessionFormatJsonValue | undefined): string | undefined {
+  return reason === 'custom' ? 'change' : undefined
 }
 
 function assertSupportedLegacyType(event: SessionFormatEvent, sessionId: string): void {

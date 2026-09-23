@@ -58,6 +58,7 @@ export const OPAQUE_FORK_V0_EVENT_TYPES: ReadonlySet<string> = new Set([
   'revert/file-intent',
   'revert/file-result',
   'revert/file-conflict',
+  'oracle/verdict-committed',
 ])
 
 export const RELEASED_V0_EVENT_DISPOSITIONS: Readonly<Record<string, ReleasedV0PayloadDisposition>> = Object.freeze({
@@ -117,7 +118,7 @@ export const RELEASED_V0_EVENT_DISPOSITIONS: Readonly<Record<string, ReleasedV0P
   'step/start': disposition(['turn', 'step']),
   'subagent/descriptor': disposition(
     ['mode', 'version', 'provider'],
-    ['label', 'agentProvider', 'agentModel', 'agentReasoningEffort', 'persona', 'toolFilter'],
+    ['label', 'agentProvider', 'agentModel', 'agentReasoningEffort', 'persona', 'toolFilter', 'quiet'],
   ),
   'subagent/model-selection-policy': disposition(['allowedModels']),
   'team/member': disposition(['version', 'teamId', 'member']),
