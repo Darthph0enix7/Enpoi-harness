@@ -11,8 +11,8 @@
  * host rejects the write.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { KNOWN_CAPABILITIES } from '../capability-catalog.ts'
 import {
-  KNOWN_CAPABILITIES,
   addMcpServer,
   removeMcpServer,
   refreshMcpStatus,

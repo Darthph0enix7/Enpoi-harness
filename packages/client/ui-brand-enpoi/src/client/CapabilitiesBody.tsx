@@ -2,34 +2,50 @@
  * Capabilities Control Center — the global capabilities tab body
  * (`sidebar.right.pane.tab` key `enpoi-capabilities`, kind `capabilities`).
  *
- * Restored to where the original Enpoi sidebar hosted it: a first-class right
- * Sidebar tab beside Files/Terminal. Raw gateway envelopes are the CURRENT
- * ones: `skills.list` takes `args.request.sessionId` (the addressed session
- * resolves cwd host-side) and `settings.describe` / `settings.mutate` address
- * the `enpoi-orchestration` namespace. MCP rows show the host heartbeat
- * (`enpoi-orchestration.mcpStatus`) alongside a read-only state chip; the
- * heartbeat and server catalog re-poll every 15s while the tab is visible.
- * This drawer reports status only — catalog authoring and capability toggles
- * live on the Settings → Dynamic page, linked from the header. The shared
- * writers below stay exported for that page (`McpPanel` / `SkillsPanel`); a
- * mount failure reported by the host lands in `mcpStatus[id].error` and
- * renders per row.
+ * Every row is derived from a live host source, so the drawer can only show a
+ * capability the deployment actually has, and a new entry appears with no code
+ * change:
+ *
+ * - MCP servers: `enpoi-orchestration.mcpServers` (id + serverName/url) with
+ *   the host heartbeat in `enpoi-orchestration.mcpStatus`; enabled state is
+ *   `capabilities.mcp[id] === true` — the same predicate the mount path uses
+ *   (the fiber only spawns on an explicit true).
+ * - Skills: the session-addressed `skills.list` catalog; enabled state is
+ *   `capabilities.skills[name] !== false` — the same rule the pre-dispatch
+ *   guard applies (only an explicit false shadows a skill).
+ * - Subagents: the effective role registry (`enpoiRoles.list`) with each
+ *   role's label, group, and registry ordering.
+ * - Councils: the council registry (`enpoiCouncil.list`) with each council's
+ *   label, seats, and retired state.
+ * - Tool flags: the stored `capabilities.tools` keys not covered by a role or
+ *   council row. The pre-dispatch guard and the tool-schema strip consume
+ *   these flags directly, but there is no host registry that enumerates the
+ *   core tool names, so only operator-stored flags are listed.
+ *
+ * Each row carries an enable/disable switch (`ui-primitives` `Switch`) that
+ * writes `capabilities.<kind>.<id>` through the shared optimistic
+ * {@link toggleCapability} writer: 0ms local flip, rollback on a rejected
+ * write. Catalog authoring — add, remove, edit — stays on the Settings →
+ * Dynamic page, linked from the header; the shared writers below stay exported
+ * for that page (`McpPanel` / `SkillsPanel`). A mount failure reported by the
+ * host lands in `mcpStatus[id].error` and renders per row.
  *
  * Skill catalog addressing: the tab's own `sessionId` is the first candidate;
  * when the host refuses to inspect it (legacy v0/v1 session logs), the newest
  * session ids follow, up to five, before the page reports an explicit
  * "skill catalog unavailable" error with a Retry instead of pretending the
- * catalog is empty. The catalog re-reads when the tab becomes visible and
- * after a successful skill toggle.
+ * catalog is empty. The catalog re-reads when the tab becomes visible.
  *
  * The module-level cache is the page's state channel (same discipline as the
  * persona/params stores): synchronous 0ms snapshot on mount, optimistic local
  * toggles with rollback, background persistence.
  */
 import { useState, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
+import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { AGENT_MODELS_KIND } from './kinds.ts'
 import { countPermissionRules, type PermissionsConfig } from './permissions-model.ts'
+import { PROTECTED_CAPABILITIES } from './capability-catalog.ts'
 import css from './CapabilitiesBody.module.css'
 
 /** How many session ids the skill catalog tries before reporting unavailable. */
@@ -99,26 +115,6 @@ export interface CapabilitiesState {
   mcp: Record<string, boolean>
 }
 
-export interface CapabilityDescriptor {
-  id: string
-  name: string
-  kind: 'tool' | 'skill' | 'mcp'
-  description: string
-  category: 'mcp' | 'skills' | 'supervision' | 'council' | 'workers' | 'core-tools'
-  defaultEnabled: boolean
-  protected?: boolean
-}
-
-export const PROTECTED_CAPABILITIES = new Set<string>([
-  'enpoi-contracts',
-  'enpoi-context-keeper',
-  'enpoi-cascade',
-  'enpoi-living-brief',
-  'read',
-  'glob',
-  'grep',
-])
-
 /**
  * Cross-plugin door into the Settings panel (wired from `apply` through the
  * `settingsUi` service). A module-level slot keeps this pure-presentation
@@ -136,53 +132,10 @@ function openSettings(section: string): void {
   openSettingsHandler?.(section)
 }
 
-export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF). Plane is the only shipped MCP default; every
-  // other MCP row comes from a stored `enpoi-orchestration.mcpServers.<id>`
-  // record. A descriptor with no record and no live server is a phantom row,
-  // so the catalog carries no such entries.
-  { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
-
-  // Skills (Default ON)
-  { id: 'project-management', name: 'Project Management', kind: 'skill', category: 'skills', description: 'Plane documentation and progress journaling', defaultEnabled: true },
-  { id: 'ue-mcp', name: 'UE5 Automation Skill', kind: 'skill', category: 'skills', description: 'Unreal Engine 5 MCP workflows', defaultEnabled: true },
-  { id: 'tier1-workflow', name: 'Tier 1 Guided Workflow', kind: 'skill', category: 'skills', description: 'Guided planning with Oracle supervision', defaultEnabled: true },
-  { id: 'tier2-workflow', name: 'Tier 2 Ideation Workflow', kind: 'skill', category: 'skills', description: 'Ideation and Roundtable debate planning', defaultEnabled: true },
-  { id: 'tier3-workflow', name: 'Tier 3 Full Workflow', kind: 'skill', category: 'skills', description: 'Complex implementation with continuous supervision', defaultEnabled: true },
-
-  // Subagents & Debaters (Default ON)
-  { id: 'keeper', name: 'Context Keeper (Background)', kind: 'tool', category: 'supervision', description: 'Background Living Brief distillation and CBDC memory claims extraction', defaultEnabled: true },
-  { id: 'oracle_review', name: 'The Oracle (Supervisor)', kind: 'tool', category: 'supervision', description: 'Senior supervisor for architectural reviews and plan verification', defaultEnabled: true },
-  { id: 'roundtable', name: 'Roundtable Debate', kind: 'tool', category: 'council', description: 'Colosseum dialectic 3-way debate across Skeptic, Architect & Pragmatist', defaultEnabled: true },
-  { id: 'chorus', name: 'Chorus Brainstorm', kind: 'tool', category: 'council', description: 'Polyphonic brainstorming across Visionary, Experiencer & Integrator', defaultEnabled: true },
-  { id: 'fixer', name: 'Fixer Worker', kind: 'tool', category: 'workers', description: 'Bounded code implementation and localized bug detection', defaultEnabled: true },
-  { id: 'explorer', name: 'Explorer Worker', kind: 'tool', category: 'workers', description: 'Codebase mapping and structural pattern discovery', defaultEnabled: true },
-  { id: 'librarian', name: 'Librarian Worker', kind: 'tool', category: 'workers', description: 'External documentation research and web fetching', defaultEnabled: true },
-  { id: 'designer', name: 'Designer Worker', kind: 'tool', category: 'workers', description: 'UI/UX design systems, layout, and visual polish', defaultEnabled: true },
-
-  // Core System Tools (Default ON)
-  { id: 'edit', name: 'File Editor', kind: 'tool', category: 'core-tools', description: 'Direct filesystem edits and string replacements', defaultEnabled: true },
-  { id: 'write', name: 'File Writer', kind: 'tool', category: 'core-tools', description: 'File creation and overwrite capabilities', defaultEnabled: true },
-  { id: 'bash', name: 'Bash Terminal', kind: 'tool', category: 'core-tools', description: 'Terminal command execution in persistent session', defaultEnabled: true },
-  { id: 'memory_save', name: 'Memory Save', kind: 'tool', category: 'core-tools', description: 'Store durable facts into CBDC memory.db', defaultEnabled: true },
-  { id: 'memory_search', name: 'Memory Search', kind: 'tool', category: 'core-tools', description: 'Semantic recall across SQLite memory.db', defaultEnabled: true },
-] as const
-
-function initialCaps(): CapabilitiesState {
-  const tools: Record<string, boolean> = {}
-  const skills: Record<string, boolean> = {}
-  const mcp: Record<string, boolean> = {}
-  for (const cap of KNOWN_CAPABILITIES) {
-    if (cap.kind === 'tool') tools[cap.id] = cap.defaultEnabled
-    if (cap.kind === 'skill') skills[cap.id] = cap.defaultEnabled
-    if (cap.kind === 'mcp') mcp[cap.id] = cap.defaultEnabled
-  }
-  for (const p of PROTECTED_CAPABILITIES) tools[p] = true
-  return { tools, skills, mcp }
+/** Title-case one capability id for a row with no registry label. */
+function titleCaseId(id: string): string {
+  return id.split(/[-_]+/).filter(Boolean).map(word => (word.length <= 3 ? word.toUpperCase() : word.charAt(0).toUpperCase() + word.slice(1))).join(' ')
 }
-
-let globalCapsState: CapabilitiesState = initialCaps()
-const listeners = new Set<() => void>()
 
 /** Live skill rows discovered host-side via skills.list (OpenCode-parity dynamics). */
 export interface DynamicSkillEntry {
@@ -190,10 +143,6 @@ export interface DynamicSkillEntry {
   description: string
   modelInvocable: boolean
 }
-
-let globalSkills: DynamicSkillEntry[] = []
-let globalSkillsError: string | null = null
-let globalSkillsLoading = false
 
 /** Host-side MCP reachability heartbeat (enpoi-capabilities writes enpoi-orchestration.mcpStatus). */
 export interface McpStatusEntry {
@@ -214,8 +163,33 @@ export interface McpServerEntry {
   headers?: Record<string, string>
 }
 
+/** One effective role row (`enpoiRoles.list`) rendered by the Subagents section. */
+export interface LiveRoleEntry {
+  id: string
+  label?: string
+  group?: string
+}
+
+/** One council row (`enpoiCouncil.list`) rendered by the Councils section. */
+export interface LiveCouncilEntry {
+  id: string
+  label?: string
+  /** Seat count when the registry reports one. */
+  seats?: number
+  /** Whether the council itself is enabled (a retired council stays listed). */
+  enabled?: boolean
+}
+
+let globalCapsState: CapabilitiesState = { tools: {}, skills: {}, mcp: {} }
+let globalSkills: DynamicSkillEntry[] = []
+let globalSkillsError: string | null = null
+let globalSkillsLoading = false
 let globalMcpStatus: Record<string, McpStatusEntry> = {}
 let globalMcpServers: Record<string, McpServerEntry> = {}
+let globalRoles: LiveRoleEntry[] = []
+let globalRolesError: string | null = null
+let globalCouncils: LiveCouncilEntry[] = []
+let globalCouncilsError: string | null = null
 
 let snapshotCache: {
   caps: CapabilitiesState
@@ -224,6 +198,10 @@ let snapshotCache: {
   skillsLoading: boolean
   mcpStatus: Record<string, McpStatusEntry>
   mcpServers: Record<string, McpServerEntry>
+  roles: LiveRoleEntry[]
+  rolesError: string | null
+  councils: LiveCouncilEntry[]
+  councilsError: string | null
 } = {
   caps: globalCapsState,
   skills: globalSkills,
@@ -231,7 +209,13 @@ let snapshotCache: {
   skillsLoading: globalSkillsLoading,
   mcpStatus: globalMcpStatus,
   mcpServers: globalMcpServers,
+  roles: globalRoles,
+  rolesError: globalRolesError,
+  councils: globalCouncils,
+  councilsError: globalCouncilsError,
 }
+
+const listeners = new Set<() => void>()
 
 function subscribe(fn: () => void): () => void {
   listeners.add(fn)
@@ -246,6 +230,10 @@ function notify(): void {
     skillsLoading: globalSkillsLoading,
     mcpStatus: globalMcpStatus,
     mcpServers: globalMcpServers,
+    roles: globalRoles,
+    rolesError: globalRolesError,
+    councils: globalCouncils,
+    councilsError: globalCouncilsError,
   }
   for (const fn of listeners) fn()
 }
@@ -394,17 +382,112 @@ export async function refreshMcpStatus(): Promise<void> {
   }
 }
 
+/** Read the effective role registry (`enpoiRoles.list`). */
+export async function refreshRoles(): Promise<void> {
+  try {
+    const res = await fetch('/api/enpoiRoles.list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiRoles.list',
+        rpcId: nextRpcId('caps-roles'),
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) {
+      globalRolesError = `gateway responded ${res.status}`
+      notify()
+      return
+    }
+    const json = await res.json() as { result?: { ok?: boolean; value?: { roles?: unknown }; error?: { message?: unknown } } }
+    const result = json?.result
+    if (result?.ok !== true || !Array.isArray(result.value?.roles)) {
+      const message = result?.error?.message
+      globalRolesError = typeof message === 'string' && message !== '' ? message : 'role registry unavailable'
+      notify()
+      return
+    }
+    const roles: LiveRoleEntry[] = []
+    for (const raw of result.value.roles) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+      const row = raw as Record<string, unknown>
+      if (typeof row.id !== 'string' || row.id === '') continue
+      roles.push({
+        id: row.id,
+        ...(typeof row.label === 'string' && row.label !== '' ? { label: row.label } : {}),
+        ...(typeof row.group === 'string' && row.group !== '' ? { group: row.group } : {}),
+      })
+    }
+    globalRoles = roles
+    globalRolesError = null
+    notify()
+  } catch (err: unknown) {
+    globalRolesError = err instanceof Error ? err.message : String(err)
+    notify()
+  }
+}
+
+/** Read the council registry (`enpoiCouncil.list`). */
+export async function refreshCouncils(): Promise<void> {
+  try {
+    const res = await fetch('/api/enpoiCouncil.list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiCouncil.list',
+        rpcId: nextRpcId('caps-councils'),
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) {
+      globalCouncilsError = `gateway responded ${res.status}`
+      notify()
+      return
+    }
+    const json = await res.json() as { result?: { ok?: boolean; value?: { councils?: unknown }; error?: { message?: unknown } } }
+    const result = json?.result
+    if (result?.ok !== true || !Array.isArray(result.value?.councils)) {
+      const message = result?.error?.message
+      globalCouncilsError = typeof message === 'string' && message !== '' ? message : 'council registry unavailable'
+      notify()
+      return
+    }
+    const councils: LiveCouncilEntry[] = []
+    for (const raw of result.value.councils) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+      const row = raw as Record<string, unknown>
+      if (typeof row.id !== 'string' || row.id === '') continue
+      const seats = Array.isArray(row.seats)
+        ? row.seats.length
+        : typeof row.seatCount === 'number' ? row.seatCount : undefined
+      councils.push({
+        id: row.id,
+        ...(typeof row.label === 'string' && row.label !== '' ? { label: row.label } : {}),
+        ...(seats !== undefined ? { seats } : {}),
+        ...(typeof row.enabled === 'boolean' ? { enabled: row.enabled } : {}),
+      })
+    }
+    globalCouncils = councils
+    globalCouncilsError = null
+    notify()
+  } catch (err: unknown) {
+    globalCouncilsError = err instanceof Error ? err.message : String(err)
+    notify()
+  }
+}
+
 let capabilitiesPrimed = false
 
 /** Prime the capability map + MCP state once when the first tab mounts. */
 function applyOrchestration(orch: Awaited<ReturnType<typeof describeOrchestration>>): void {
   const serverCaps = orch?.value?.capabilities
   if (serverCaps !== undefined) {
-    const next = initialCaps()
+    const next: CapabilitiesState = { tools: {}, skills: {}, mcp: {} }
     if (serverCaps.tools !== undefined) Object.assign(next.tools, serverCaps.tools)
     if (serverCaps.skills !== undefined) Object.assign(next.skills, serverCaps.skills)
     if (serverCaps.mcp !== undefined) Object.assign(next.mcp, serverCaps.mcp)
-    for (const p of PROTECTED_CAPABILITIES) next.tools[p] = true
     globalCapsState = next
     notify()
   }
@@ -440,10 +523,53 @@ export async function primeCapabilities(): Promise<void> {
   }
 }
 
+/** Per-key toggle generations: a stale failure never rolls back a newer write. */
+const toggleGenerations = new Map<string, number>()
+
+/**
+ * Restore one capability's previous value after a failed write. A newer toggle
+ * for the same key (already optimistically applied) is left untouched, and a
+ * key that did not exist before is removed without a dynamic delete.
+ * @param kind - capability family.
+ * @param id - capability id.
+ * @param generation - the toggle generation that attempted the write.
+ * @param had - whether the key existed before that attempt.
+ * @param previousValue - the value before that attempt.
+ */
+function rollbackCapability(
+  kind: 'tool' | 'skill' | 'mcp',
+  id: string,
+  generation: number,
+  had: boolean,
+  previousValue: boolean | undefined,
+): void {
+  if (toggleGenerations.get(`${kind}:${id}`) !== generation) return
+  const next: CapabilitiesState = {
+    tools: { ...globalCapsState.tools },
+    skills: { ...globalCapsState.skills },
+    mcp: { ...globalCapsState.mcp },
+  }
+  const family = kind === 'tool' ? next.tools : kind === 'skill' ? next.skills : next.mcp
+  const repaired: Record<string, boolean> = {}
+  for (const [key, value] of Object.entries(family)) {
+    if (key !== id) repaired[key] = value
+  }
+  if (had) repaired[id] = previousValue === true
+  if (kind === 'tool') next.tools = repaired
+  else if (kind === 'skill') next.skills = repaired
+  else next.mcp = repaired
+  globalCapsState = next
+  notify()
+}
+
 export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: string, enabled: boolean): Promise<boolean> {
   if (PROTECTED_CAPABILITIES.has(id) && !enabled) return false
 
-  const previous = { ...globalCapsState }
+  const generation = (toggleGenerations.get(`${kind}:${id}`) ?? 0) + 1
+  toggleGenerations.set(`${kind}:${id}`, generation)
+  const source = kind === 'tool' ? globalCapsState.tools : kind === 'skill' ? globalCapsState.skills : globalCapsState.mcp
+  const had = Object.hasOwn(source, id)
+  const previousValue = source[id]
   const next: CapabilitiesState = {
     tools: { ...globalCapsState.tools },
     skills: { ...globalCapsState.skills },
@@ -456,6 +582,10 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
 
   globalCapsState = next
   notify()
+  const failed = (): false => {
+    rollbackCapability(kind, id, generation, had, previousValue)
+    return false
+  }
 
   try {
     const res = await fetch('/api/settings.mutate', {
@@ -473,24 +603,14 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
         },
       }),
     })
-    if (!res.ok) {
-      globalCapsState = previous
-      notify()
-      return false
-    }
+    if (!res.ok) return failed()
     // The gateway answers HTTP 200 for business failures too; only an explicit
     // `ok: true` result counts as persisted.
     const json = await res.json() as { result?: { ok?: boolean } }
-    if (json?.result?.ok !== true) {
-      globalCapsState = previous
-      notify()
-      return false
-    }
+    if (json?.result?.ok !== true) return failed()
     return true
   } catch {
-    globalCapsState = previous
-    notify()
-    return false
+    return failed()
   }
 }
 
@@ -693,12 +813,31 @@ function PermissionsSection() {
   )
 }
 
+/** One drawer row: a live capability with the kind whose state key it writes. */
+interface LiveRow {
+  id: string
+  name: string
+  description: string
+  kind: 'tool' | 'skill' | 'mcp'
+  /** Small trailing tag: registry group, 'retired', 'user-only', … */
+  badge?: string
+}
+
+/** Whether one row reads as enabled under the same rule the enforcement applies. */
+function rowEnabled(row: LiveRow, caps: CapabilitiesState): boolean {
+  if (row.kind === 'mcp') return caps.mcp[row.id] === true
+  if (row.kind === 'skill') return caps.skills[row.id] !== false
+  return caps.tools[row.id] !== false
+}
+
 export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: CapabilitiesBodyProps) {
   const { tab } = useTabInfo()
   const view = useSyncExternalStore(subscribe, () => snapshotCache)
   const caps = view.caps
   const visible = tab.visible
   const sessionIds = useSessions(state => state.ids)
+  const [pending, setPending] = useState<Record<string, boolean>>({})
+  const [writeError, setWriteError] = useState<string | null>(null)
 
   // Candidate chain: the tab's own session first, then the newest sessions the
   // list carries. Bounded so an old session never costs a long retry walk.
@@ -717,10 +856,14 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   useEffect(() => {
     void primeCapabilities()
   }, [])
-  // Catalog refreshes when the tab becomes visible and when its address chain changes.
+  // Every live source refreshes when the tab becomes visible and when its
+  // address chain changes, so a settings write or a new skill/server shows up
+  // without a reload.
   useEffect(() => {
-    if (!visible || candidates.length === 0) return
-    void refreshSkills(candidates)
+    if (!visible) return
+    if (candidates.length > 0) void refreshSkills(candidates)
+    void refreshRoles()
+    void refreshCouncils()
   }, [visible, candidates])
   // MCP heartbeat + server catalog re-poll every 15s while the tab is visible.
   useEffect(() => {
@@ -730,31 +873,63 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     return () => { window.clearInterval(iv) }
   }, [visible])
 
-  const mcpList: CapabilityDescriptor[] = (() => {
-    const rows = new Map<string, CapabilityDescriptor>()
-    for (const cap of KNOWN_CAPABILITIES.filter(k => k.kind === 'mcp')) rows.set(cap.id, { ...cap })
-    for (const [id, def] of Object.entries(view.mcpServers)) {
-      if (!rows.has(id)) {
-        const friendly = def.serverName !== undefined && def.serverName !== ''
-          ? def.serverName.charAt(0).toUpperCase() + def.serverName.slice(1)
-          : id.replace(/-mcp$/, '').split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
-        let desc = 'MCP server'
-        try { desc = new URL(def.url ?? '').host } catch { /* keep default */ }
-        rows.set(id, { id, name: `${friendly} MCP`, kind: 'mcp', category: 'mcp', description: desc, defaultEnabled: false })
-      }
+  // Live rows, in each registry's own order. No entry is listed that the host
+  // does not report, and a new entry needs no code change.
+  const mcpRows: LiveRow[] = Object.entries(view.mcpServers).map(([id, def]) => {
+    const friendly = def.serverName !== undefined && def.serverName !== ''
+      ? def.serverName.charAt(0).toUpperCase() + def.serverName.slice(1)
+      : titleCaseId(id.replace(/-mcp$/, ''))
+    let desc = def.transport !== undefined && def.transport !== ''
+      ? def.transport
+      : 'MCP server'
+    if (def.url !== undefined) {
+      try { desc = new URL(def.url).host } catch { /* keep transport label */ }
     }
-    return [...rows.values()]
-  })()
-  const skillList: CapabilityDescriptor[] = view.skills.map(s => ({
+    return { id, name: `${friendly} MCP`, description: desc, kind: 'mcp' as const }
+  })
+  const skillRows: LiveRow[] = view.skills.map(s => ({
     id: s.name,
-    name: s.name.split('-').map(w => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' '),
-    kind: 'skill',
-    category: 'skills',
+    name: titleCaseId(s.name),
     description: s.description,
-    defaultEnabled: true,
+    kind: 'skill' as const,
+    ...(s.modelInvocable ? {} : { badge: 'user-only' }),
   }))
-  const subagentList = KNOWN_CAPABILITIES.filter(k => k.kind === 'tool' && (k.category === 'supervision' || k.category === 'council' || k.category === 'workers'))
-  const coreToolList = KNOWN_CAPABILITIES.filter(k => k.kind === 'tool' && k.category === 'core-tools')
+  const roleRows: LiveRow[] = view.roles.map(r => ({
+    id: r.id,
+    name: r.label ?? titleCaseId(r.id),
+    description: 'Delegated subagent role',
+    kind: 'tool' as const,
+    ...(r.group !== undefined ? { badge: r.group } : {}),
+  }))
+  const councilRows: LiveRow[] = view.councils.map(council => ({
+    id: council.id,
+    name: council.label ?? titleCaseId(council.id),
+    description: council.seats !== undefined ? `${council.seats} seats` : 'Debate council',
+    kind: 'tool' as const,
+    badge: council.enabled === false ? 'retired' : 'council',
+  }))
+  // Stored tool flags the registries above do not already cover: the guard's
+  // direct tool vocabulary has no enumeration RPC, so the operator's stored
+  // keys are the live source.
+  const registryIds = new Set([...roleRows, ...councilRows].map(row => row.id))
+  const toolFlagRows: LiveRow[] = Object.keys(caps.tools)
+    .filter(id => !registryIds.has(id))
+    .map(id => ({
+      id,
+      name: titleCaseId(id),
+      description: 'Stored tool flag — blocks this tool at the execution guard',
+      kind: 'tool' as const,
+    }))
+
+  const onToggle = (kind: LiveRow['kind'], id: string, next: boolean): void => {
+    setWriteError(null)
+    const key = `${kind}:${id}`
+    setPending(current => ({ ...current, [key]: true }))
+    void toggleCapability(kind, id, next).then((accepted) => {
+      setPending(current => ({ ...current, [key]: false }))
+      if (!accepted) setWriteError(`Could not persist ${id} — the toggle was rolled back.`)
+    })
+  }
 
   const errorBanner = view.skillsError !== null
     ? (
@@ -769,13 +944,17 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     )
     : undefined
 
-  const renderGroup = (title: string, icon: ReactNode, items: readonly CapabilityDescriptor[], kind: 'tool' | 'skill' | 'mcp', banner?: ReactNode) => {
-    const activeCount = items.filter((item) => {
-      if (kind === 'tool') return caps.tools[item.id] !== false
-      if (kind === 'skill') return caps.skills[item.id] !== false
-      if (kind === 'mcp') return caps.mcp[item.id] === true
-      return true
-    }).length
+  const registryError = (reason: string | null, retry: () => void) => reason !== null
+    ? (
+      <div className={c('skillError')}>
+        <span className={c('errorLine')} title={reason}>{reason}</span>
+        <button type="button" className={c('retryBtn')} onClick={retry}>Retry</button>
+      </div>
+    )
+    : undefined
+
+  const renderGroup = (title: string, icon: ReactNode, rows: readonly LiveRow[], banner?: ReactNode) => {
+    const activeCount = rows.filter(row => rowEnabled(row, caps)).length
 
     return (
       <section className={c('group')} key={title}>
@@ -784,28 +963,23 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
             <span className={c('groupIcon')}>{icon}</span>
             <span className={c('groupTitle')}>{title}</span>
           </div>
-          <span className={c('countBadge')}>{activeCount} / {items.length}</span>
+          <span className={c('countBadge')}>{activeCount} / {rows.length}</span>
         </div>
         {banner}
         <div className={c('list')}>
-          {items.map((item) => {
-            const isProtected = PROTECTED_CAPABILITIES.has(item.id)
-            const isEnabled = isProtected
-              ? true
-              : kind === 'tool'
-                ? (caps.tools[item.id] !== false)
-                : kind === 'skill'
-                  ? (caps.skills[item.id] !== false)
-                  : (caps.mcp[item.id] === true)
+          {rows.map((row) => {
+            const isProtected = PROTECTED_CAPABILITIES.has(row.id)
+            const enabled = isProtected ? true : rowEnabled(row, caps)
+            const key = `${row.kind}:${row.id}`
 
-            // MCP rows: connection heartbeat instead of enable-dot. The host's
+            // MCP rows: connection heartbeat beside the switch. The host's
             // last mount failure outranks online/down while it is fresh.
-            const st = kind === 'mcp' ? view.mcpStatus[item.id] : undefined
+            const st = row.kind === 'mcp' ? view.mcpStatus[row.id] : undefined
             const stFresh = st !== undefined && Date.now() - st.checkedAt <= 45_000
-            let dotColor = isEnabled ? '#34d399' : '#64748b'
-            let dotGlow = isEnabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none'
+            let dotColor = enabled ? '#34d399' : '#64748b'
+            let dotGlow = enabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none'
             let connTitle = ''
-            if (kind === 'mcp' && st !== undefined) {
+            if (row.kind === 'mcp' && st !== undefined) {
               if (!stFresh) {
                 dotColor = '#475569'; dotGlow = 'none'
                 connTitle = 'Checking availability…'
@@ -823,39 +997,36 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                 connTitle = st.authError === true ? 'Server running · auth rejected' : 'Server running · toggled off'
               }
             }
-            // Read-only state chip: the drawer reports, Settings → Dynamic edits.
-            const mounted = kind === 'mcp' && st !== undefined && stFresh && st.mounted
-            const chipLabel = mounted ? 'Mounted' : isEnabled ? 'Enabled' : 'Disabled'
-            const chipColor = isEnabled ? '#34d399' : '#64748b'
 
             return (
-              <div className={c('row')} key={`${kind}:${item.id}`}>
+              <div className={c('row')} key={key}>
                 <div className={c('rowInfo')}>
                   <div className={c('rowName')}>
                     <span
                       className={c('dot')}
-                      title={kind === 'mcp' ? connTitle : undefined}
+                      title={row.kind === 'mcp' ? connTitle : undefined}
                       style={{
                         background: dotColor,
                         boxShadow: dotGlow,
-                        cursor: kind === 'mcp' ? 'help' : undefined,
+                        cursor: row.kind === 'mcp' ? 'help' : undefined,
                       }}
                     />
-                    <span>{item.name}</span>
+                    <span>{row.name}</span>
                     {isProtected && <span className={c('coreBadge')}>Core</span>}
+                    {row.badge !== undefined && <span className={c('coreBadge')}>{row.badge}</span>}
                   </div>
-                  <div className={c('rowDesc')}>{item.description}</div>
-                  {kind === 'mcp' && stFresh && st?.error !== undefined && (
+                  <div className={c('rowDesc')}>{row.description}</div>
+                  {row.kind === 'mcp' && stFresh && st.error !== undefined && (
                     <div className={c('rowError')} title={st.error}>mount failed: {st.error}</div>
                   )}
                 </div>
-                <span
-                  className={c('countBadge')}
-                  style={{ color: chipColor }}
-                  title={kind === 'mcp' ? connTitle : undefined}
-                >
-                  {chipLabel}
-                </span>
+                <Switch
+                  checked={enabled}
+                  onChange={(next) => { onToggle(row.kind, row.id, next) }}
+                  label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
+                  disabled={isProtected || pending[key] === true}
+                  title={isProtected ? 'Protected infrastructure capability' : undefined}
+                />
               </div>
             )
           })}
@@ -864,33 +1035,29 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     )
   }
 
-  const skillsSection = skillList.length > 0
-    ? renderGroup('Specialist Skills', iconSparkle(), skillList, 'skill', errorBanner)
-    : (
-      <section className={c('group')} key="skills-fallback">
-        <div className={c('groupHead')}>
-          <div className={c('groupHeadLeft')}>
-            <span className={c('groupIcon')}>{iconSparkle()}</span>
-            <span className={c('groupTitle')}>Specialist Skills</span>
-          </div>
-          <span className={c('countBadge')}>0 / 0</span>
-        </div>
-        {view.skillsLoading
-          ? <div className={c('empty')}>Loading skill catalog…</div>
-          : errorBanner ?? (
+  const skillsSection = renderGroup(
+    'Specialist Skills',
+    iconSparkle(),
+    skillRows,
+    view.skillsError !== null
+      ? errorBanner
+      : view.skillsLoading && skillRows.length === 0
+        ? <div className={c('empty')}>Loading skill catalog…</div>
+        : skillRows.length === 0
+          ? (
             <div className={c('empty')}>
               No skills discovered yet. Drop a folder with a SKILL.md into ~/.dsh/skills/ to add one.
             </div>
-          )}
-      </section>
-    )
+          )
+          : undefined,
+  )
 
   return (
     <div className={c('container')}>
       <header className={c('head')}>
         <h3 className={c('headTitle')}>Capabilities Control Center</h3>
         <p className={c('headSub')}>
-          Read-only status for MCP servers, Skills &amp; Subagents
+          Live toggles for MCP servers, Skills, Subagents &amp; Councils
           {' · '}
           <button type="button" className={c('footLink')} onClick={() => { openSettings('dynamic') }}>
             Manage in Settings
@@ -898,16 +1065,28 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
         </p>
       </header>
 
+      {writeError !== null && (
+        <div className={c('skillError')}>
+          <span className={c('errorLine')} title={writeError}>{writeError}</span>
+        </div>
+      )}
+
       <div className={c('groups')}>
         <PermissionsSection />
-        {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpList, 'mcp')}
+        {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpRows,
+          mcpRows.length === 0
+            ? <div className={c('empty')}>No MCP servers configured. Add one in Settings → Dynamic.</div>
+            : undefined)}
         {skillsSection}
-        {renderGroup('Subagents & Debaters', iconCouncil(), subagentList, 'tool')}
-        {renderGroup('Core System Tools', iconTerminal(), coreToolList, 'tool')}
+        {renderGroup('Subagents', iconCouncil(), roleRows,
+          registryError(view.rolesError, () => { void refreshRoles() }))}
+        {renderGroup('Councils', iconCouncil(), councilRows,
+          registryError(view.councilsError, () => { void refreshCouncils() }))}
+        {renderGroup('Tool Flags', iconTerminal(), toolFlagRows)}
       </div>
 
       <footer className={c('foot')}>
-        <span>Add, remove, and toggles live in Settings → Dynamic and apply from the next query.</span>
+        <span>Switches write capabilities.* and apply from the next query. Add, remove, and edit live in Settings → Dynamic.</span>
         <button
           type="button"
           className={c('footLink')}

@@ -13,11 +13,8 @@
  * is owned by the Permissions settings page.
  */
 import { useEffect, useState } from 'react'
-import {
-  KNOWN_CAPABILITIES,
-  PROTECTED_CAPABILITIES,
-  refreshCapabilities,
-} from '../CapabilitiesBody.tsx'
+import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from '../capability-catalog.ts'
+import { refreshCapabilities } from '../CapabilitiesBody.tsx'
 import css from './SkillsPanel.module.css'
 import { setStatus } from './status.ts'
 import { withWriteTimeout } from './write-timeout.ts'
@@ -139,7 +136,7 @@ async function fetchSessionIds(): Promise<{ ok: true; ids: string[] } | { ok: fa
         type: 'client-request',
         method: 'session.list',
         rpcId: nextRpcId('skills-sessions'),
-        payload: { args: { _request: {} } },
+        payload: { args: { request: {} } },
       }),
     })
     if (!res.ok) return { ok: false, reason: `gateway responded ${res.status}` }
