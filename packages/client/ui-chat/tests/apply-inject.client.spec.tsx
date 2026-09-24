@@ -153,6 +153,14 @@ describe('Chat inject API', () => {
     // A line travels as the `file` type's navigation parameter, not in the address.
     await injected.openFile('src/a.ts', { line: 7 })
     expect(b.sidebarRight.openResource).toHaveBeenLastCalledWith('dsh-resource://file/session/root-1/src/a.ts', { params: { line: 7 } })
+
+    // A comparison request rides the same params channel as the changed-files
+    // card's rows, selecting the diff renderer for the addressed file.
+    await injected.openFile('src/a.ts', { diff: { seq: 5, index: 1, turn: 3 } })
+    expect(b.sidebarRight.openResource).toHaveBeenLastCalledWith(
+      'dsh-resource://file/session/root-1/src/a.ts',
+      { params: { diff: { seq: 5, index: 1, turn: 3 } } },
+    )
     await b.runtime.dispose()
   })
 

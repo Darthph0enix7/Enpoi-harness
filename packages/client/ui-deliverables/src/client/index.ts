@@ -1,8 +1,8 @@
 /**
  * Deliverables plugin, browser half: registers the changed-files card and
- * delivery cards into the chat view's turn-tail list, the `changes-review`
- * right-Sidebar tab type that reviews one turn's changed files one comparison
- * at a time, and provides the `chatFileMentions` service that links
+ * delivery cards into the chat view's turn-tail list, the file-diff document
+ * renderer every changed-file open selects through the file resource's `diff`
+ * parameters, and provides the `chatFileMentions` service that links
  * inline-code mentions of produced or delivered files in the closing prose.
  * All policy lives here — the supported mutation calls, mention matching, row
  * cap, and copy — so composing this plugin out of cordis.yml removes every
@@ -66,7 +66,6 @@ export function apply(ctx: ClientContext): void {
         reloadPresentedHost: () => opener.loadHost(),
         loadChangesSummary: (sessionId, seq) => summaries.load(sessionId, seq),
         openPresented: (sessionId, seq, index, action) => opener.open(sessionId, seq, index, action),
-        openChanged: (sessionId, seq, index) => opener.openChanged(sessionId, seq, index),
         openChangedDiff: (sessionId, cwd, path, seq, index, turn) => {
           ctx.sidebarRight.openResource(fileAddressFor(sessionId, cwd, path), {
             params: { diff: { seq, index, turn } },
@@ -80,8 +79,7 @@ export function apply(ctx: ClientContext): void {
   ))
   const t = ctx.locale.bind(NS)
   // The comparison renderer belongs to the document pane's registry: it is the
-  // one surface a changed file's diff opens in (the detached changes-review
-  // route is retired).
+  // one surface a changed file's diff opens in.
   ctx.inject(['documentPreviews'], (scope) => {
     scope.effect(
       () => scope.documentPreviews.register(changesDiffPreviewDefinition(() => t('diffView.title'))),

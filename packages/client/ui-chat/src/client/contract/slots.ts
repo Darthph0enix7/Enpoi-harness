@@ -11,6 +11,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { DocumentDiffParams } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { createChatStore } from '../stores.ts'
 import type { ToolCallId } from './store.ts'
@@ -34,6 +35,11 @@ export type UseChatNodeProcess = KeyedSnapshotSelectorHook<ChatTurnProcessPresen
 export interface OpenFileOptions {
   /** 1-based line to reveal; absent = the file's beginning. */
   readonly line?: number
+  /**
+   * Turn-comparison coordinates that select the diff renderer for the file,
+   * through the same `params.diff` a changed-files card row passes.
+   */
+  readonly diff?: DocumentDiffParams
 }
 
 /** Owner currency of the completed-Turn extension chain. */

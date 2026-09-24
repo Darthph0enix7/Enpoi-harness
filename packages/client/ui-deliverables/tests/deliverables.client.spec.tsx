@@ -49,7 +49,6 @@ function openProps(controller = new PresentedOpenController(), summaries = new C
     usePresentedHost: <T,>(select: (state: ReturnType<typeof controller.host.getSnapshot>) => T): T =>
       select(controller.host.getSnapshot()),
     openPresented: vi.fn((...args: Parameters<PresentedOpenController['open']>) => controller.open(...args)),
-    openChanged: vi.fn((...args: Parameters<PresentedOpenController['openChanged']>) => controller.openChanged(...args)),
     openChangedDiff: vi.fn<DeliverablesInjected['openChangedDiff']>(),
     usePresentedOpen: <T,>(select: (state: ReturnType<typeof controller.state.getSnapshot>) => T): T =>
       select(controller.state.getSnapshot()),
@@ -489,7 +488,6 @@ describe('ChangedFiles card', () => {
     controller = new PresentedOpenController(), locale = en, matched = { changes, presented: [] as never[] }, summaries = servedStore(),
   ) {
     const props = openProps(controller, summaries)
-    props.openChanged.mockResolvedValue(undefined)
     const openFile = vi.fn<(path: string) => void>()
     const view = render(<Deliverables {...props} matched={matched} openFile={openFile} sessionId={SessionId('child-session')} t={makeTranslate(locale)} />)
     return { props, openFile, view }
@@ -581,7 +579,6 @@ describe('ChangedFiles card', () => {
     expect(within(card).queryByText('src/index.ts')).toBeNull()
     fireEvent.click(within(card).getByRole('button', { name: 'View changes to config/feature-flags.json' }))
     expect(props.openChangedDiff).toHaveBeenLastCalledWith('child-session', undefined, 'config/feature-flags.json', 5, 1, 1)
-    expect(props.openChanged).not.toHaveBeenCalled()
     const expand = within(card).getByRole('button', { name: 'Show all 5 changed files' })
     expect(expand.getAttribute('aria-expanded')).toBe('false')
     expect(expand.textContent).toContain('All 5 files')
@@ -622,7 +619,6 @@ describe('ChangedFiles card', () => {
     // The header (first match) and the first row share one opener and one name.
     fireEvent.click(view.getAllByRole('button', { name: '查看 config/design-token 的改动' })[0]!)
     expect(props.openChangedDiff).toHaveBeenLastCalledWith('child-session', undefined, 'config/design-token', 5, 0, 1)
-    expect(props.openChanged).not.toHaveBeenCalled()
     expect(view.getByRole('button', { name: '展开全部 5 个改动文件' }).textContent).toContain('全部 5 个文件')
   })
 
@@ -769,8 +765,6 @@ describe('plugin registration', () => {
     expect(face.hooks.changesSummary.getSnapshot()).toEqual({})
     await face.openPresented(SessionId('child-session'), 2, 0)
     expect(face.hooks.presentedOpen.getSnapshot()['/api/present.open?sessionId=child-session&seq=2&index=0']).toBe('opened')
-    await face.openChanged(SessionId('child-session'), 5, 0)
-    expect(face.hooks.presentedOpen.getSnapshot()['/api/changes.open?sessionId=child-session&seq=5&index=0']).toBe('opened')
     // A row and the header both reach the comparison through the file address.
     face.openChangedDiff(SessionId('child-session'), undefined, 'src/a.ts', 5, 1, 3)
     expect(openResource).toHaveBeenCalledWith(

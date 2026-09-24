@@ -321,6 +321,21 @@ describe('DiffBlock served comparisons', () => {
     expect(screen.getByRole('button', { name: '收起差异' }).getAttribute('aria-expanded')).toBe('true')
   })
 
+  it('caps the split served body by whole paired rows and expands it in place', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} maxLines={2} view="split" />)
+    // The context row and the paired deletion/addition row fit; the trailing
+    // context folds, and the pair stays on one row.
+    expect(container.querySelectorAll('[data-diff-line]')).toHaveLength(2)
+    const paired = container.querySelector('[data-diff-line="del"]')
+    expect(paired?.textContent).toContain('const b = 2')
+    expect(paired?.textContent).toContain('const b = 3')
+    const toggle = screen.getByRole('button', { name: /展开其余/ })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(toggle)
+    expect(container.querySelectorAll('[data-diff-line]')).toHaveLength(3)
+    expect(screen.getByRole('button', { name: '收起差异' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
   it('renders nothing for an empty served comparison', () => {
     const { container } = render(<DiffBlock diffs={[]} served={[]} />)
     expect(container.firstChild).toBeNull()

@@ -1,10 +1,13 @@
-/** A turn that edits, creates, and shell-appends files in a git workspace ends with the changed-files card; its rows open the review. */
+/**
+ * A turn that edits, creates, and shell-appends files in a git workspace ends with the
+ * changed-files card; its header and rows open each file's diff in the editor pane.
+ */
 import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { chromium, type Browser, type Page } from 'playwright'
+import { chromium, type Browser, type Locator, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type {} from '@deepseek-ai/dsh-workspace-changes'
 import { deriveReplayScript, parseSessionLog } from '@deepseek-ai/dsh-llm-replay'
@@ -110,46 +113,53 @@ describe('web e2e: a git workspace turn ends with its changed files', () => {
     expect(await card.getByText('已编辑 4 个文件', { exact: true }).count()).toBe(1)
     expect(await card.getByRole('listitem').count()).toBe(3)
     expect(await card.getByRole('button', { name: '展开全部 4 个改动文件' }).count()).toBe(1)
-    // The header and every row open the turn's review in the Sidebar, with or without a Host desktop.
-    expect(await card.getByRole('button', { name: '在侧边栏查看本轮改动' }).count()).toBe(1)
+    // The card header opens the first listed file's comparison and each row its
+    // own; app.local is first, so its opener names the header and the first row.
+    expect(await card.getByRole('button', { name: '查看 app.local 的改动' }).count()).toBe(2)
     expect(await card.getByRole('button', { name: '查看 notes.txt 的改动' }).count()).toBe(1)
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
   })
 
-  it('reviews a shell-appended file from the snapshots and an ignored file from its captured copies in one tab', async () => {
+  it('opens each changed file’s diff in the editor pane beside the Files tree, and the pane follows the rail', async () => {
     const card = page.locator('[data-changed-files]')
     const column = page.locator('[data-rightbar-col]')
-    const drawn = (root: ReturnType<typeof column.locator>) =>
+    const pane = column.locator('[data-sidebar-right-editor]')
+    const diff = pane.locator('[data-document-diff]')
+    const drawn = (root: Locator) =>
       root.locator('[data-diff-line]').evaluateAll(lines => lines.map(line => `${line.getAttribute('data-diff-line')}:${line.textContent}`))
-    const review = column.locator('[data-changes-review]')
-    // The header lands on the first listed file; a row lands on its own.
-    await card.getByRole('button', { name: '在侧边栏查看本轮改动' }).click()
-    await review.locator('[data-review-file="app.local"]').waitFor({ state: 'visible' })
+    // The header lands on the first listed file — the ignored app.local, whose
+    // comparison comes from the copies captured around the write call because
+    // git holds no snapshot for it. The retired review pane's file picker is
+    // gone; the header and rows are the only entry, so the ignored comparison
+    // is reached through the header itself.
+    await card.getByRole('button', { name: '查看 app.local 的改动' }).first().click()
+    await diff.waitFor({ state: 'visible' })
+    await expect.poll(() => diff.locator('[data-diff-file]').getAttribute('data-diff-file')).toBe('app.local')
+    await expect.poll(() => drawn(diff)).toEqual(['add:1+mode=demo'])
+    expect(await diff.getByText('本轮新建的文件').count()).toBe(1)
+    // The Files tree stays visible beside the editor pane, which carries the
+    // unified default, the comparison's own toolbar, and the pane's close.
+    expect(await column.locator('[data-files-state="tree"]').isVisible()).toBe(true)
+    expect(await diff.getAttribute('data-document-diff-view')).toBe('unified')
+    expect(await diff.locator('[data-diff-actions]').count()).toBe(1)
+    expect(await pane.locator('[data-textpreview-close]').count()).toBe(1)
+    // A row opens its own file's comparison through the same opener.
     await card.getByRole('button', { name: '查看 notes.txt 的改动' }).click()
-    await review.locator('[data-review-file="notes.txt"]').waitFor({ state: 'visible' })
-    expect(await column.locator('[data-dockkit-tab]').filter({ hasText: '第 1 轮改动' }).count()).toBe(1)
-    await expect.poll(() => drawn(review)).toEqual(['context:11 start', 'add:2+done'])
-    // The ignored file has no snapshot; its comparison comes from the copies captured around the write call.
-    await review.getByRole('button', { name: '选择要查看的文件' }).click()
-    await page.getByRole('menuitem').filter({ hasText: 'app.local' }).click()
-    await review.locator('[data-review-file="app.local"]').waitFor({ state: 'visible' })
-    await expect.poll(() => drawn(review)).toEqual(['add:1+mode=demo'])
-    expect(await review.getByText('本轮新建的文件').count()).toBe(1)
-    // A card row opens the same tab on another file; the split and wrap choices switch the drawing.
-    await card.getByRole('button', { name: '查看 intro.md 的改动' }).click()
-    await review.locator('[data-review-file="intro.md"]').waitFor({ state: 'visible' })
-    expect(await column.locator('[data-dockkit-tab]').filter({ hasText: '第 1 轮改动' }).count()).toBe(1)
-    await review.getByRole('button', { name: '左右对比' }).click()
-    await review.locator('[data-review-view="split"]').waitFor({ state: 'visible' })
-    await expect.poll(() => drawn(review.locator('[data-diff-side="left"]'))).toEqual(['del:1# 示例项目', 'context:2', 'context:3一个用于演示的仓库。'])
-    expect(await drawn(review.locator('[data-diff-side="right"]'))).toEqual(['del:1# 项目说明', 'context:2', 'context:3一个用于演示的仓库。'])
-    await review.getByRole('button', { name: '自动换行' }).click()
-    await review.locator('[data-review-view][data-review-wrap]').waitFor({ state: 'visible' })
-    await expect.poll(() => drawn(review)).toEqual(['del:1# 示例项目1# 项目说明', 'context:22', 'context:3一个用于演示的仓库。3一个用于演示的仓库。'])
-    // No desktop, so the tools offer the sidebar file but no native open.
-    expect(await review.locator('[data-review-tool="open-file"]').count()).toBe(1)
-    expect(await review.locator('[data-review-tool="open-native"]').count()).toBe(0)
+    await expect.poll(() => diff.locator('[data-diff-file]').getAttribute('data-diff-file')).toBe('notes.txt')
+    await expect.poll(() => drawn(diff)).toEqual(['context:11 start', 'add:2+done'])
+    // The rail's own icon is the pane's lifetime: switching to another page
+    // collapses the record, and Files re-reveals the same comparison.
+    await column.locator('[data-sidebar-right-rail-item="capabilities"]').click()
+    await expect.poll(() => column.locator('[data-sidebar-right-editor-open]').count()).toBe(0)
+    await expect.poll(() => diff.count()).toBe(0)
+    await column.locator('[data-sidebar-right-rail-item="files"]').click()
+    await diff.waitFor({ state: 'visible' })
+    await expect.poll(() => drawn(diff)).toEqual(['context:11 start', 'add:2+done'])
+    // The old review tab's split and wrap toggles are gone with it; the wrap
+    // choice has no successor, and the split view now belongs to the diff
+    // pane's own view switch, offered only above 720px (covered by the
+    // DiffBlock and diff-preview unit suites).
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
   })

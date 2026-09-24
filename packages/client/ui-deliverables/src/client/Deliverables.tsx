@@ -29,7 +29,6 @@ export interface DeliverablesInjected {
   reloadPresentedHost: PresentedOpenController['loadHost']
   loadChangesSummary: ChangesSummaryStore['load']
   openPresented: PresentedOpenController['open']
-  openChanged: PresentedOpenController['openChanged']
   /**
    * Open one changed file's served comparison in the document pane, through
    * the file resource's `diff` navigation parameters.

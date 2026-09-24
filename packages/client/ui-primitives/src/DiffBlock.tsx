@@ -360,6 +360,56 @@ function LineText({ line }: { line: ServedLine }): ReactNode {
     : <span key={at} className={part.mark === 'add' ? css.wordAdd : css.wordDel}>{part.text}</span>)
 }
 
+/** Lines one split row carries: one for a context pair, up to two for a paired change. */
+function splitRowLines(row: ServedSplitRow): number {
+  if (row.left === row.right) return row.left === undefined ? 0 : 1
+  return (row.left === undefined ? 0 : 1) + (row.right === undefined ? 0 : 1)
+}
+
+/** Lines the split rows of one hunk carry. */
+function splitHunkLines(hunk: ServedHunkModel): number {
+  return hunk.splitRows.reduce((sum, row) => sum + splitRowLines(row), 0)
+}
+
+/**
+ * Keep the leading split rows within a row budget and count the dropped lines.
+ * The cap slices whole rows, so a paired row's two sides stay on one line.
+ * @param files - the served files.
+ * @param budget - rows that fit.
+ * @returns the kept files and how many lines were dropped.
+ */
+function capSplit(files: readonly ServedFileModel[], budget: number): { files: ServedFileModel[]; hidden: number } {
+  const kept: ServedFileModel[] = []
+  let remaining = budget
+  let hidden = 0
+  for (const file of files) {
+    if (remaining <= 0) {
+      hidden += file.hunks.reduce((sum, hunk) => sum + splitHunkLines(hunk), 0)
+      continue
+    }
+    const hunks: ServedHunkModel[] = []
+    for (const hunk of file.hunks) {
+      if (remaining <= 0) {
+        hidden += splitHunkLines(hunk)
+        continue
+      }
+      if (hunk.splitRows.length <= remaining) {
+        hunks.push(hunk)
+        remaining -= hunk.splitRows.length
+        continue
+      }
+      const rows = hunk.splitRows.slice(0, remaining)
+      hidden += hunk.splitRows.slice(remaining).reduce((sum, row) => sum + splitRowLines(row), 0)
+      // The split presentation reads only `splitRows`; the uncapped model still
+      // carries every line for the copy action and the footer counts.
+      hunks.push({ header: hunk.header, lines: [], splitRows: rows })
+      remaining = 0
+    }
+    kept.push({ path: file.path, hunks })
+  }
+  return { files: kept, hidden }
+}
+
 /**
  * Keep the leading served lines within a budget and count the rest as hidden.
  * @param files - the served files.
@@ -504,20 +554,22 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
   if (model.mode === 'cards' && model.rows.length === 0) return null
   if (model.mode === 'served' && model.files.length === 0) return null
 
-  // The split view is never capped: slicing one side of a paired row would
-  // break the alignment the presentation exists for.
+  // Both served presentations cap their visible body; the split view caps whole
+  // paired rows so a huge comparison cannot hang the pane without breaking the
+  // left/right alignment the presentation exists for.
   const rowCount = model.mode === 'cards'
     ? model.rows.length
     : model.files.reduce((total, file) => total + file.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0), 0)
-  const hidden = model.mode === 'cards'
-    ? rowCount - maxLines
-    : view === 'unified' ? rowCount - maxLines : 0
+  const servedCap = model.mode === 'served' && rowCount > maxLines
+    ? view === 'split' ? capSplit(model.files, maxLines) : capServed(model.files, maxLines)
+    : undefined
+  const hidden = model.mode === 'cards' ? rowCount - maxLines : servedCap?.hidden ?? 0
   const capped = hidden > 0 && !expanded
   // Same split arithmetic as TerminalBlock and the TUI transcript's collapsed
   // card, so a body's head and tail slices agree across the front ends.
   const headLines = Math.ceil(maxLines / 2)
   const tailLines = maxLines - headLines
-  const servedView = model.mode === 'served' && capped ? capServed(model.files, maxLines) : undefined
+  const servedView = capped ? servedCap : undefined
 
   return (
     <div className={clsx(css.block, className)} data-diff="">
@@ -546,7 +598,7 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
             </>
           )
           : view === 'split'
-            ? <SplitServed files={model.files} />
+            ? <SplitServed files={servedView?.files ?? model.files} />
             : <UnifiedServed files={servedView?.files ?? model.files} />}
         {model.mode === 'served' && hidden > 0 && (
           <FoldToggle

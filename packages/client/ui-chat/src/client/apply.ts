@@ -5,10 +5,11 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { SidebarRightResourceParamsMap } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-browser/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
-// The `file` entry of `SidebarRightResourceParamsMap`, which types `{ params: { line } }` below.
+// The documentpreview's declaration merge adds `diff` to the `file` entry of
+// `SidebarRightResourceParamsMap`, the params `openFile` builds below.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
 // Type-only service and declaration merges used by the apply world.
@@ -93,8 +94,14 @@ export function apply(ctx: Context): void {
   const openFile = async (sessionId: SessionId, path: string, options?: OpenFileOptions): Promise<void> => {
     const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
     const url = fileAddressFor(sessionId, cwd, path)
-    if (options?.line === undefined) ctx.sidebarRight.openResource(url)
-    else ctx.sidebarRight.openResource(url, { params: { line: options.line } })
+    // Line navigation and the diff request ride the file resource's params; a
+    // plain open carries none, so the file's remembered display type applies.
+    const params: SidebarRightResourceParamsMap['file'] = {
+      ...options?.line === undefined ? {} : { line: options.line },
+      ...options?.diff === undefined ? {} : { diff: options.diff },
+    }
+    if (Object.keys(params).length === 0) ctx.sidebarRight.openResource(url)
+    else ctx.sidebarRight.openResource(url, { params })
     await Promise.resolve()
   }
 
