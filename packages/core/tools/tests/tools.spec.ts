@@ -771,7 +771,12 @@ describe('ToolRuntime', () => {
       expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
       expect(seen).toHaveLength(1)
       expect(seen[0]).toMatchObject({ agent, toolName: 'echo', callId: 'c1', reason: 'hook wants a human' })
-      expect(seen[0]?.signal).toBe(controller.signal)
+      // The bounded ask dispatches with an ask-scoped expiry signal, so the
+      // forwarded signal is equivalent to the caller's rather than identical:
+      // aborting the caller still aborts what the ask forwarded.
+      expect(seen[0]?.signal?.aborted).toBe(false)
+      controller.abort()
+      expect(seen[0]?.signal?.aborted).toBe(true)
     })
 
     it('denies with the user-rejection reason on rejected', async () => {
