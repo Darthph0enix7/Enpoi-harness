@@ -5,6 +5,8 @@
 - text: 不用先查看目录，直接做四件事：把 intro.md 里的标题「示例项目」改成「项目说明」，新建 src/util.ts 导出一个两数相加的 add 函数，新建 app.local 写一行 mode=demo，最后用 bash 在 notes.txt 末尾追加一行 done。 {{clock}}
 - button "复制":
   - img
+- button "从此处回退":
+  - img
 - button "7 次工具调用" [expanded]:
   - text: 7 次工具调用
   - img
@@ -102,7 +104,7 @@
   - code:
     - button "在侧边栏打开 notes.txt": notes.txt
   - text: 的追加则完全走 bash。
-- button "在侧边栏查看本轮改动": 已编辑 4 个文件 +6 -1
+- button "查看 app.local 的改动": 已编辑 4 个文件 +6 -1
 - list:
   - listitem:
     - button "查看 app.local 的改动": app.local +1 -0
@@ -148,4 +150,4 @@
 - button "用时 {{duration}}":
   - img
   - text: 用时 {{duration}}
-- text: {{clock}}
+- text: {{clock}} deepseek-v4-flash
