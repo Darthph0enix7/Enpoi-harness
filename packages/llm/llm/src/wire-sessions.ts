@@ -11,7 +11,7 @@
 
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import type { ContentBlock, GenerateOptions, ToolSchema } from './types.ts'
+import type { ContentBlock, GenerateOptions, RequestMessage, ToolSchema } from './types.ts'
 import type { Message } from './message.ts'
 
 /** Sub-directory of the wire log root holding one JSON capture per Session. */
@@ -68,7 +68,7 @@ type StoredSummary = Omit<SessionWireCaptureSummary, 'capturedAt' | 'sessionId' 
 /** Request subset the summary is computed from. */
 interface SummarizedRequest {
   readonly system?: string
-  readonly messages: readonly Message[]
+  readonly messages: readonly RequestMessage[]
   readonly tools?: readonly ToolSchema[]
 }
 
@@ -259,7 +259,7 @@ async function summarizeRequest(request: SummarizedRequest): Promise<StoredSumma
 }
 
 /** Resolve the system prompt from the explicit field or the leading system message. */
-function resolveSystemText(system: string | null, messages: readonly Message[]): string | null {
+function resolveSystemText(system: string | null, messages: readonly RequestMessage[]): string | null {
   if (system !== null && system.length > 0) return system
   const first = messages[0]
   if (first === undefined || first.role !== 'system') return null
@@ -270,7 +270,7 @@ function resolveSystemText(system: string | null, messages: readonly Message[]):
 }
 
 /** UTF-16 code units one message contributes to the wire request. */
-function messageChars(message: Message): number {
+function messageChars(message: RequestMessage): number {
   let total = 0
   for (const block of message.content) total += blockChars(block)
   return total

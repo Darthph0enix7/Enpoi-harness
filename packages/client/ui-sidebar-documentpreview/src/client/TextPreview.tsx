@@ -21,9 +21,9 @@ import clsx from 'clsx'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  FileTypeIcon, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconCopyOutline16,
-  IconDownloadOutline16, IconEllipsisOutline16, IconLinkOutline16, IconListPenOutline16,
-  IconRefreshOutline16, IconSearchOutline16, Menu, Tooltip, classifyFileType,
+  FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineMedium, IconCopyOutlineMedium,
+  IconDownloadOutlineMedium, IconEllipsisOutlineMedium, IconLinkOutlineMedium, IconListPenOutlineMedium,
+  IconRefreshOutlineMedium, IconSearchOutlineMedium, Menu, Tooltip, classifyFileType,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { pathPartsOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { TextInjected } from './face.ts'
@@ -117,7 +117,7 @@ export interface TextPreviewInjected extends TextInjected {
 /** The body's composed props: the tab, its navigation, the shared store and face, and copy. */
 export type TextPreviewProps =
   & PropsRuntime<'sidebar.right.pane.tab'>
-  & PropsRenderSlots<'sidebar.right.tab.document' | 'sidebar.right.tab.document.toolbar'>
+  & PropsRenderSlots<'sidebar.right.tab.document' | 'sidebar.right.tab.document.action' | 'sidebar.right.tab.document.actions' | 'sidebar.right.tab.document.unpreviewable' | 'sidebar.right.tab.document.toolbar'>
   & PropsStore<TextStore>
   & InjectFace<TextPreviewInjected>
   & PropsLocale<'sidebarDocumentPreview'>
@@ -130,6 +130,7 @@ export type TextPreviewProps =
 export function TextPreview({
   useTabInfo, useResource, useStore, actions, loadPage, reloadPages,
   loadAll, reloadAll, prepareRenderer, useDocumentPreviews, renderSlot, readAllText, t,
+  addResource, setResources,
 }: TextPreviewProps): ReactNode {
   const { tab } = useTabInfo()
   const { navigation, signal } = tab
@@ -347,6 +348,19 @@ export function TextPreview({
   const rendererReload = useCallback((): void => {
     if (canRead && selected !== undefined) prepareRenderer(tab.id, signal, selected.id, meta.value?.version, true)
   }, [canRead, prepareRenderer, tab.id, signal, selected?.id, meta.value?.version])
+  // Every resource this body reads travels through the owner's resource
+  // registry, so the Sidebar can show the file's contribution and drop it
+  // with the tab.
+  const add = useCallback((address: string) => {
+    addResource(tab.id, address, signal)
+  }, [addResource, tab.id, signal])
+  const set = useCallback((addresses: readonly string[]) => {
+    setResources(tab.id, [tab.contentId, ...addresses], signal)
+  }, [setResources, tab.id, tab.contentId, signal])
+  useEffect(() => {
+    set([])
+  }, [set, selected?.id])
+
   const content = useMemo((): DocumentContent | undefined => {
     if (mode === 'renderer') {
       if (current === undefined) return undefined
@@ -479,12 +493,12 @@ export function TextPreview({
   }
   const iconOf = (id: ToolbarActionId): ReactNode => {
     switch (id) {
-      case 'reload': return <IconRefreshOutline16 />
-      case 'download': return <IconDownloadOutline16 size={14} />
-      case 'copyPath': return <IconLinkOutline16 size={14} />
-      case 'copyContent': return <IconCopyOutline16 size={14} />
-      case 'gotoLine': return <IconListPenOutline16 size={14} />
-      case 'find': return <IconSearchOutline16 size={14} />
+      case 'reload': return <IconRefreshOutlineMedium />
+      case 'download': return <IconDownloadOutlineMedium size={14} />
+      case 'copyPath': return <IconLinkOutlineMedium size={14} />
+      case 'copyContent': return <IconCopyOutlineMedium size={14} />
+      case 'gotoLine': return <IconListPenOutlineMedium size={14} />
+      case 'find': return <IconSearchOutlineMedium size={14} />
       case 'wrap': return state.wrap ? <IconNowrapFill16 /> : <IconWrapFill16 />
     }
   }
@@ -624,7 +638,7 @@ export function TextPreview({
                   data-textpreview-more
                   onClick={() => { setMoreOpen(value => !value) }}
                 >
-                  <IconEllipsisOutline16 size={14} />
+                  <IconEllipsisOutlineMedium size={14} />
                 </button>
               )}
               items={hiddenActions.map(id => ({ id, label: labelOf(id) }))}
@@ -648,12 +662,12 @@ export function TextPreview({
           data-textpreview-close
           onClick={() => { tab.actions.close() }}
         >
-          <IconCloseOutline16 size={14} />
+          <IconCloseOutlineMedium size={14} />
         </button>
       </div>
       {gotoOpen && (
         <div className={css.popover} role="dialog" aria-label={t('gotoLine')} data-textpreview-popover="goto">
-          <IconListPenOutline16 size={14} className={css.popoverIcon} />
+          <IconListPenOutlineMedium size={14} className={css.popoverIcon} />
           <input
             ref={gotoInputRef}
             className={css.popoverInput}
@@ -681,13 +695,13 @@ export function TextPreview({
             data-textpreview-popover-close
             onClick={() => { setGotoOpen(false) }}
           >
-            <IconCloseOutline16 size={14} />
+            <IconCloseOutlineMedium size={14} />
           </button>
         </div>
       )}
       {findOpen && (
         <div className={css.popover} role="search" aria-label={t('findInFile')} data-textpreview-popover="find">
-          <IconSearchOutline16 size={14} className={css.popoverIcon} />
+          <IconSearchOutlineMedium size={14} className={css.popoverIcon} />
           <input
             className={css.popoverInput}
             value={findQuery}
@@ -722,7 +736,7 @@ export function TextPreview({
             data-textpreview-find-prev
             onClick={() => { stepFind(-1) }}
           >
-            <IconChevronUpOutline14 size={14} />
+            <IconChevronUpOutlineRegular size={14} />
           </button>
           <button
             type="button"
@@ -731,7 +745,7 @@ export function TextPreview({
             data-textpreview-find-next
             onClick={() => { stepFind(1) }}
           >
-            <IconChevronDownOutline14 size={14} />
+            <IconChevronDownOutlineRegular size={14} />
           </button>
           <button
             type="button"
@@ -740,7 +754,7 @@ export function TextPreview({
             data-textpreview-popover-close
             onClick={() => { setFindOpen(false) }}
           >
-            <IconCloseOutline16 size={14} />
+            <IconCloseOutlineMedium size={14} />
           </button>
         </div>
       )}
@@ -764,7 +778,7 @@ export function TextPreview({
         )}
         {content !== undefined && renderSlot('sidebar.right.tab.document', {
           resourceAddress: tab.contentId, content, wrap: state.wrap, scrollportRef: bindScrollport,
-          commandsRef: bindCommands,
+          commandsRef: bindCommands, addResource: add, setResources: set,
         }, {
           entryKey: selected.id, hookContext: useTabInfo,
           fallback: <p className={css.statusLine}>{t('rendererUnavailable', { name: selected.title() })}</p>,
@@ -795,7 +809,7 @@ export function TextPreview({
                 data-textpreview-retry
                 onClick={reload}
               >
-                <IconRefreshOutline16 size={14} />
+                <IconRefreshOutlineMedium size={14} />
                 {t('retry')}
               </button>
             </div>

@@ -23,7 +23,8 @@ import clsx from 'clsx'
 import type { RemoteFailure } from '@deepseek-ai/dsh-api-remotes/client'
 import type { PropsLocale, PropsRuntime, PropsStore, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  FileTypeIcon, IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16, IconPlusOutline16, IconRefreshOutline16, classifyFileType,
+  FileTypeIcon, IconEllipsisOutlineMedium, IconFolderCloseMedium, IconFolderOpenMedium,
+  IconPlusOutlineMedium, IconRefreshOutlineMedium, classifyFileType,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fileAddressFor, pathPartsOf, relativizeToCwd } from '@deepseek-ai/dsh-util-workspace-path'
 import type { WorkspaceDirectoryEntry } from '@deepseek-ai/dsh-api-workspace-files/types'
@@ -195,7 +196,7 @@ function CreateRow({ creating, tree }: { creating: CreateState; tree: TreeContex
   return (
     <li className={css.item} data-files-row="create">
       <div className={clsx(css.row, css.rowEditing)}>
-        <span className={css.icon}>{creating.kind === 'directory' ? <IconFolderClose16 /> : <IconPlusOutline16 />}</span>
+        <span className={css.icon}>{creating.kind === 'directory' ? <IconFolderCloseMedium /> : <IconPlusOutlineMedium />}</span>
         <input
           className={css.editInput}
           value={creating.value}
@@ -235,7 +236,7 @@ function RowActionButton({ path, target, tree }: { path: string; target: RowTarg
       data-files-actions
       onClick={(event) => { tree.onDotsMenu(event, target) }}
     >
-      <IconEllipsisOutline16 />
+      <IconEllipsisOutlineMedium />
     </button>
   )
 }
@@ -257,13 +258,13 @@ function Entry({ parent, entry, tree }: { parent: string; entry: WorkspaceDirect
         {editing !== null
           ? (
             <div className={clsx(css.row, css.rowEditing)}>
-              {expanded ? <IconFolderOpen16 className={css.icon} /> : <IconFolderClose16 className={css.icon} />}
+              {expanded ? <IconFolderOpenMedium className={css.icon} /> : <IconFolderCloseMedium className={css.icon} />}
               <RenameInput editing={editing} tree={tree} />
             </div>
           )
           : (
             <button type="button" className={css.row} aria-expanded={expanded} onClick={() => { tree.onToggle(path) }}>
-              {expanded ? <IconFolderOpen16 className={css.icon} /> : <IconFolderClose16 className={css.icon} />}
+              {expanded ? <IconFolderOpenMedium className={css.icon} /> : <IconFolderCloseMedium className={css.icon} />}
               <span className={css.name}>{entry.name}</span>
             </button>
           )}
@@ -610,7 +611,7 @@ export function FilesBody({
           data-files-reload
           onClick={reload}
         >
-          <IconRefreshOutline16 />
+          <IconRefreshOutlineMedium />
         </button>
       </div>
       {/* jscpd:ignore-end */}

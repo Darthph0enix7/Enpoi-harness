@@ -14,6 +14,8 @@ import type { WorkspaceId } from './types.ts'
 /** Workspace id schema at the durable boundary; branding has no runtime representation. */
 const workspaceId = z.string().transform(value => value as WorkspaceId)
 
+const sessionId = z.string().transform(value => brandString<SessionId>(value))
+
 /**
  * Durable shape of one workspace record. `path` is the `fs.realpath` canon
  * stamped at create; `sessionIds` is the ordered ownership account (array
@@ -22,7 +24,7 @@ const workspaceId = z.string().transform(value => value as WorkspaceId)
 export const workspaceRecord = z.object({
   path: z.string(),
   title: z.string(),
-  sessionIds: z.array(z.string().transform(value => brandString<SessionId>(value))),
+  sessionIds: z.array(sessionId),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -51,17 +53,23 @@ const workspacePendingMutation = z.discriminatedUnion('operation', [
  * whose cwd belongs to one workspace can be displayed under another
  * workspace without touching the cwd accounting — the overlay entry claims
  * the session for display, and the wire projection excludes overlay-claimed
- * ids from their cwd workspace's list. Defaulted so records written before
- * the field parse unchanged.
+ * ids from their cwd workspace's list. `pinnedSessionIds` is the
+ * registry-global pin set in pin order (most recently pinned first);
+ * pinning and archival are mutually exclusive, so archiving drops the
+ * session's pin. All session sets are defaulted so records written before
+ * the fields parse unchanged.
  */
 export const workspaceDomainState = z.object({
   initialized: z.boolean(),
+  /** First-use Workspace identity, retained after its registration is deleted. */
+  defaultWorkspaceId: workspaceId.optional(),
   workspaceIds: z.array(workspaceId),
-  archivedSessionIds: z.array(z.string().transform(value => brandString<SessionId>(value))).default([]),
+  archivedSessionIds: z.array(sessionId).default([]),
   movedSessions: z.array(z.object({
     sessionId: z.string().transform(value => brandString<SessionId>(value)),
     workspaceId,
   })).default([]),
+  pinnedSessionIds: z.array(sessionId).default([]),
   pendingMutation: workspacePendingMutation.optional(),
 })
 
@@ -79,7 +87,7 @@ export const workspaceDomainSpec = defineDomain({
   version: 2,
   global: {
     schema: workspaceDomainState,
-    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [], movedSessions: [] },
+    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [], movedSessions: [], pinnedSessionIds: [] },
   },
   tables: { workspaces: domainTable<WorkspaceId, WorkspaceRecord>(workspaceRecord) },
 })

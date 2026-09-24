@@ -16,7 +16,7 @@
 
 import { useState, useMemo, useEffect } from 'react'
 import type { ReactNode } from 'react'
-import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconPlusOutlineRegular, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the model namespace merge for the shared picker's copy seat.
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
@@ -285,7 +285,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
               onClick={() => setAddModalOpen(true)}
               disabled={!state.writable}
             >
-              <IconPlusOutline16 size={14} />
+              <IconPlusOutlineRegular size={14} />
               {t('addProviderAction')}
             </Button>
           </div>

@@ -1,8 +1,11 @@
 /**
- * Settings domain base plugin, browser half. Provides `ctx.settingsScope`, the
- * settings-namespace scope service every preference row binds its durable
- * section through, and owns the one `settings.describe` reader in the browser:
- * the describe mirror, whose invalidation subscriptions
+ * Settings domain base plugin, browser half. Provides the settings-domain
+ * services — `ctx.settingsScope`, the settings-namespace scope service the
+ * fork's preference rows still bind their durable section through, and
+ * `ctx.configForms`, the shared configuration forms the merged upstream
+ * features inject (the `settingsScope` callers migrate to `configForms` in a
+ * follow-up lane) — and owns the one `settings.describe` reader in the
+ * browser: the describe mirror, whose invalidation subscriptions
  * (`settings/document-updated`, `connection/reset`) live here so every derived
  * surface refreshes from a single wire read. It depends on no `ui-*`
  * presentation package, so any feature that owns a preference can reach it:
@@ -20,6 +23,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // settings-scope.ts).
 import type {} from '@deepseek-ai/dsh-api-remotes/types'
 import type {} from '@deepseek-ai/dsh-settings/types'
+import { ConfigForms } from './config-form.ts'
 import { SettingsSchemaService } from './schema.ts'
 import { SettingsScopeBinder } from './settings-scope.ts'
 import { SettingsDescribeMirror } from './settings-mirror.ts'
@@ -31,15 +35,18 @@ function isPrivilegedHostname(hostname: string): boolean {
   if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
   if (host.startsWith('100.')) {
     const octets = host.split('.').map(Number)
-    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+    const cgnatSecond = octets[1]
+    if (octets.length === 4 && octets[0] === 100 && cgnatSecond !== undefined
+      && Number.isInteger(cgnatSecond) && cgnatSecond >= 64 && cgnatSecond <= 127) return true
   }
   const parts = host.split('.')
   return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
 export type {
-  SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsOnboardingOwnerProps,
-  SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
+  SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsLauncherOwnerProps,
+  SettingsOnboardingOwnerProps, SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps,
+  SettingsTriggerOwnerProps,
 } from './contract/slots.ts'
 export type { SettingsScopeController, SettingsScopeBinder } from './settings-scope.ts'
 export type { SettingsScope, SettingsScopeSnapshot, SettingsScopeSpec } from './settings-contract.ts'
@@ -48,6 +55,8 @@ export type { SchemaNode } from './schema.ts'
 export type {
   SettingsDescribeFace, SettingsDescribeView, SettingsMirrorSnapshot,
 } from './settings-mirror.ts'
+export type { ConfigForms } from './config-form.ts'
+export type { ConfigForm, ConfigFormSnapshot } from './config-form-types.ts'
 
 /**
  * Required services: the Remote namespace the mirror reads through and the
@@ -56,11 +65,11 @@ export type {
 export const inject = ['remote', 'remote.settings']
 
 /**
- * Provide the settings-namespace scope service over one shared describe
- * mirror, and keep that mirror fresh on the two signals that can move the
- * settings document: a document commit and a (re)connect.
+ * Provide the settings-domain services over one shared describe mirror, and
+ * keep that mirror fresh on the two signals that can move the settings
+ * document: a document commit and a (re)connect.
  *
- * Constructing the service in this plugin's fiber keeps its traced methods
+ * Constructing the services in this plugin's fiber keeps their traced methods
  * bound to each consuming plugin's context.
  * @param ctx - client root context.
  */
@@ -88,5 +97,6 @@ export function apply(ctx: Context): void {
     void mirror.ensure()
     return () => { for (const dispose of disposers) dispose() }
   }, 'ui-settings: describe mirror invalidations')
+  new ConfigForms(ctx, { mirror, schema, persistence })
   new SettingsScopeBinder(ctx, { mirror, schema, persistence })
 }

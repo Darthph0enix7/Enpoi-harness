@@ -4,6 +4,9 @@ import clsx from 'clsx'
 import { diffWordsWithSpace, structuredPatch } from 'diff'
 import { FoldToggle } from './FoldToggle.tsx'
 import { writeClipboard } from './clipboard.ts'
+import { CodeToolbar, type CodeToolbarLabels } from './CodeToolbar.tsx'
+import { languageForPath } from './code-highlighting.ts'
+import cardCss from './CodeCard.module.css'
 import css from './DiffBlock.module.css'
 
 /** Output lines shown before the height cap collapses the middle. */
@@ -64,15 +67,19 @@ export interface DiffBlockProps {
   className?: string | undefined
 }
 
-/** Localized chrome for {@link DiffBlock}. */
-export interface DiffBlockLabels {
+/**
+ * Localized chrome for {@link DiffBlock}: the shared code-card toolbar plus the
+ * fold controls. `files` is the fork footer summary and stays optional so
+ * upstream call sites that only pass toolbar and fold copy keep compiling.
+ */
+export interface DiffBlockLabels extends CodeToolbarLabels {
   copy: string
   copied: string
   collapseAria: string
   expandAria: (hidden: number) => string
   collapse: string
   expand: (hidden: number) => string
-  files: (count: number) => string
+  files?: ((count: number) => string) | undefined
 }
 
 /** A single rendered body line and its role, so the height cap slices a flat list. */
@@ -165,18 +172,16 @@ export function diffTotals(diffs: readonly DiffHunk[]): { added: number; removed
 }
 
 /**
- * Flatten local patches into rows and count only added and removed lines.
+ * Flatten local patches into rows.
  * A path header opens each new file. A `⋯` gap separates consecutive same-file
- * fragments and distant patches within a fragment. File counts use distinct paths.
+ * fragments and distant patches within a fragment.
  * @param diffs - the hunks to render.
- * @returns the body rows, the +/- totals, and the distinct-file count.
+ * @returns the body rows.
  */
-function buildRows(diffs: readonly DiffHunk[]): { rows: DiffRow[]; added: number; removed: number; files: number } {
+function buildRows(diffs: readonly DiffHunk[]): DiffRow[] {
   const rows: DiffRow[] = []
-  const paths = new Set<string>()
   let prevPath: string | undefined
   for (const diff of diffs) {
-    paths.add(diff.path)
     if (diff.path !== prevPath) rows.push({ kind: 'path', text: diff.path })
     else rows.push({ kind: 'gap', text: '⋯' })
     prevPath = diff.path
@@ -188,12 +193,7 @@ function buildRows(diffs: readonly DiffHunk[]): { rows: DiffRow[]; added: number
       }
     }
   }
-  return {
-    rows,
-    added: rows.filter(row => row.kind === 'add').length,
-    removed: rows.filter(row => row.kind === 'del').length,
-    files: paths.size,
-  }
+  return rows
 }
 
 /**
@@ -514,7 +514,7 @@ function UnifiedServed({ files }: { files: readonly ServedFileModel[] }): ReactN
  */
 export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, labels, maxLines = DEFAULT_DIFF_MAX_LINES, className }: DiffBlockProps) {
   const model = useMemo((): DiffModel => served === undefined
-    ? { mode: 'cards', rows: buildRows(diffs).rows }
+    ? { mode: 'cards', rows: buildRows(diffs) }
     : { mode: 'served', files: buildServed(served, wordLevel) }, [diffs, served, wordLevel])
   const counts = useMemo(() => {
     if (model.mode === 'cards') {
@@ -538,6 +538,12 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
   }, [model])
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [wrapped, setWrapped] = useState(false)
+  const firstPath = model.mode === 'cards' ? model.rows.find(row => row.kind === 'path')?.text : model.files[0]?.path
+  const firstLanguage = firstPath === undefined ? undefined : languageForPath(firstPath)
+  const language = model.mode === 'cards'
+    ? (diffs.every(diff => languageForPath(diff.path) === firstLanguage) ? firstLanguage : undefined)
+    : firstLanguage
 
   const onCopy = useCallback(() => {
     if (copied) return
@@ -572,10 +578,17 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
   const servedView = capped ? servedCap : undefined
 
   return (
-    <div className={clsx(css.block, className)} data-diff="">
-      <button type="button" className={css.copyButton} onClick={onCopy}>
-        {copied ? labels.copied : labels.copy}
-      </button>
+    <div className={clsx(cardCss.card, css.block, className)} data-diff="" data-code-wrap={wrapped}>
+      <CodeToolbar
+        lang={language}
+        labels={labels}
+        copyLabel={labels.copy}
+        copiedLabel={labels.copied}
+        copied={copied}
+        wrapped={wrapped}
+        onCopy={onCopy}
+        onWrap={() => { setWrapped(value => !value) }}
+      />
       <div className={css.body}>
         {model.mode === 'cards'
           ? (
@@ -610,7 +623,9 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
           />
         )}
       </div>
-      <div className={css.footer}>└ +{counts.added} -{counts.removed} · {labels.files(counts.files)}</div>
+      {labels.files !== undefined && (
+        <div className={css.footer}>└ +{counts.added} -{counts.removed} · {labels.files(counts.files)}</div>
+      )}
     </div>
   )
 }

@@ -5,7 +5,7 @@
  */
 import type { ReactNode } from 'react'
 import { useEffect, useMemo, useRef } from 'react'
-import { IconCloseFill14, IconPlusOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseFillRegular, IconPlusOutlineMedium, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { TerminalInjected } from './contract.ts'
@@ -55,7 +55,7 @@ export function TerminalTabStrip({
                 data-enpoi-terminal-close={tab.id}
                 onClick={() => { onClose(tab.id) }}
               >
-                <IconCloseFill14 size={12} />
+                <IconCloseFillRegular size={12} />
               </button>
             </div>
           )
@@ -69,7 +69,7 @@ export function TerminalTabStrip({
           data-enpoi-terminal-new={place}
           onClick={onOpen}
         >
-          <IconPlusOutline16 size={14} />
+          <IconPlusOutlineMedium size={14} />
         </button>
       </Tooltip>
       {extra}

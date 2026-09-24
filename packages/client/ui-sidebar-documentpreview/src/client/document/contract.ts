@@ -11,20 +11,6 @@ export interface DocumentTextPage {
 }
 
 /**
- * Navigation parameters that ask the pane to open a file as its served
- * comparison: the coordinates the change routes and the review pane address
- * the comparison by.
- */
-export interface DocumentDiffParams {
-  /** Sequence of the `workspace/changes` event that announced the turn. */
-  readonly seq: number
-  /** The file's index in that turn's summary. */
-  readonly index: number
-  /** The summarized turn, carried so the body can reach the aggregate review. */
-  readonly turn?: number
-}
-
-/**
  * Ordinary file contents, or a request for the selected renderer to load its content.
  * Byte arrays are transient UI input, never persisted layout or Session data.
  */
@@ -37,9 +23,25 @@ export type DocumentContent =
     readonly revision: number
     /** Report the displayed source version; stale revisions cannot update the owner. @param version - loaded source version. */
     readonly loaded: (version: string) => void
+    /** End a failed load; a later file change can start another revision. */
+    readonly failed: () => void
     /** Cancel the current load and start a new revision. */
     readonly reload: () => void
   }
+
+/**
+ * Navigation parameters that ask the pane to open a file as its served
+ * comparison: the coordinates the change routes and the review pane address
+ * the comparison by.
+ */
+export interface DocumentDiffParams {
+  /** Sequence of the `workspace/changes` event that announced the turn. */
+  readonly seq: number
+  /** The file's index in that turn's summary. */
+  readonly index: number
+  /** The summarized turn, carried so the body can reach the aggregate review. */
+  readonly turn?: number
+}
 
 /**
  * The commands a renderer-owned body offers the shared toolbar. Static
@@ -64,6 +66,10 @@ export interface DocumentToolbarOwnerProps {
 
 /** Content and viewing inputs shared by document bodies and nested PDF presentation. */
 export interface DocumentBodyOwner {
+  /** Observe a file read by this renderer. @param address - complete file resource address. */
+  readonly addResource: (address: string) => void
+  /** Replace this renderer's dependencies. @param addresses - complete file resource addresses. */
+  readonly setResources: (addresses: readonly string[]) => void
   /** Original file address, also readable through the standard useResource hook. */
   readonly resourceAddress: string
   /** Ordinary file content or a renderer-owned loading request; text accumulates until eof. */
@@ -89,6 +95,38 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
           tabInfo: SlotHookFactory<'sidebar.right.tab.document', UseSidebarRightTabInfo>
         }
       }
+    }
+    /**
+     * Header toolbar contributions acting on the previewed file, rendered
+     * after the preview's own controls once the file's Host path is known.
+     */
+    'sidebar.right.tab.document.actions': {
+      kind: 'list'
+      scope: 'session'
+      owner: {
+        /** Absolute path in the file's execution environment; native actions must verify a Host mapping. */
+        readonly absolutePath: string
+      }
+    }
+    /**
+     * Empty-state contributions for a file this preview cannot render,
+     * offered where Retry would stand once the file's Host path is known.
+     */
+    'sidebar.right.tab.document.unpreviewable': {
+      kind: 'list'
+      scope: 'session'
+      owner: {
+        /** Absolute path in the file's execution environment; native actions must verify a Host mapping. */
+        readonly absolutePath: string
+      }
+    }
+    /** Renderer-specific controls before the document toolbar's reload button. */
+    'sidebar.right.tab.document.action': {
+      kind: 'keyed'
+      scope: 'session'
+      owner: { readonly content: DocumentContent }
+      hookContext: UseSidebarRightTabInfo
+      inject: { hooks: { tabInfo: SlotHookFactory<'sidebar.right.tab.document', UseSidebarRightTabInfo> } }
     }
     /**
      * The renderer-contributed segment of the pane's single toolbar row: a

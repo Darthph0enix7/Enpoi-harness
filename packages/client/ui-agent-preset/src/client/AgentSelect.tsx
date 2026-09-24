@@ -15,7 +15,7 @@ import { useEffect, useState } from 'react'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  IconAgentPresetOutline16, IconCheckOutline16, IconChevronDownOutline14, Menu, Sheet, useSheetPresentation,
+  IconAgentPresetOutlineMedium, IconCheckOutlineMedium, IconChevronDownOutlineRegular, Menu, Sheet, useSheetPresentation,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { AgentPresetSeatState } from './seat-store.ts'
@@ -81,9 +81,9 @@ export function AgentSelect({ load, select, useAgentPresetSeat, t }: AgentSelect
       data-agent-trigger
       onClick={() => { setOpen(value => !value) }}
     >
-      <IconAgentPresetOutline16 className={css.triggerIcon} />
+      <IconAgentPresetOutlineMedium className={css.triggerIcon} />
       <span className={css.triggerLabel}>{label?.name ?? live}</span>
-      <IconChevronDownOutline14 className={css.chevron} />
+      <IconChevronDownOutlineRegular className={css.chevron} />
     </button>
   )
 
@@ -119,7 +119,7 @@ export function AgentSelect({ load, select, useAgentPresetSeat, t }: AgentSelect
                   <span className={css.itemName}>{option.name}</span>
                   <span className={css.itemDesc}>{option.description}</span>
                 </span>
-                {option.selected && <IconCheckOutline16 className={css.check} />}
+                {option.selected && <IconCheckOutlineMedium className={css.check} />}
               </button>
             ))}
           </div>

@@ -9,9 +9,9 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
-  HoverCard, IconAlarmClockOutline16, IconArchiveOutline20, IconBranchOutline16, IconCopyOutline16,
-  IconDownloadOutline16, IconEditOutline16, IconEllipsisOutline16, IconFolderClose16, IconFolderOpen16,
-  IconPinOutline16, IconPlusOutline16, IconTrashOutline16, IconTriangleRightFill14, Menu, relativeTime,
+  HoverCard, IconAlarmClockOutlineMedium, IconArchiveOutlineMedium, IconBranchOutlineMedium, IconCopyOutlineMedium,
+  IconDownloadOutlineMedium, IconEditOutlineMedium, IconEllipsisOutlineMedium, IconFolderCloseMedium, IconFolderOpenMedium,
+  IconPinOutlineMedium, IconPlusOutlineMedium, IconTrashOutlineMedium, IconTriangleRightFillRegular, Menu, relativeTime,
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -154,8 +154,8 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   const active = containsCurrentDescendant || (group.expanded && group.containsCurrent)
   const [menuOpen, setMenuOpen] = useState(false)
   const workspaceMenuItems = [
-    { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
-    { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutline16 />, danger: true },
+    { id: 'rename', label: t('rename'), icon: <IconEditOutlineMedium /> },
+    { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutlineMedium />, danger: true },
   ]
   const ownRow = (
     <div
@@ -174,10 +174,10 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
       onDragEnd={drag?.end}
     >
       <span className={clsx(css.slot, css.folder, active && css.folderActive)}>
-        {row.expanded ? <IconFolderOpen16 /> : <IconFolderClose16 />}
+        {row.expanded ? <IconFolderOpenMedium /> : <IconFolderCloseMedium />}
       </span>
       <span className={clsx(css.slot, css.chevron)}>
-        <IconTriangleRightFill14 className={clsx(css.arrow, row.expanded && css.arrowOpen)} />
+        <IconTriangleRightFillRegular className={clsx(css.arrow, row.expanded && css.arrowOpen)} />
       </span>
       <span className={css.projectText}>
         <span className={css.title}>{label}</span>
@@ -206,7 +206,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
                 aria-label={t('actions.workspace.aria', { name: label })}
                 onClick={(e) => { e.stopPropagation(); setMenuOpen(v => !v) }}
               >
-                <IconEllipsisOutline16 />
+                <IconEllipsisOutlineMedium />
               </button>
             )}
           />
@@ -217,7 +217,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
           aria-label={t('actions.newSession.aria', { name: label })}
           onClick={(e) => { e.stopPropagation(); onCreate() }}
         >
-          <IconPlusOutline16 />
+          <IconPlusOutlineMedium />
         </button>
       </span>
     </div>
@@ -317,7 +317,7 @@ function ActiveScheduleIndicator({ t, search = false }: { t: RowTranslate; searc
       aria-label={label}
       title={label}
     >
-      <IconAlarmClockOutline16 />
+      <IconAlarmClockOutlineMedium />
     </span>
   )
 }
@@ -461,25 +461,24 @@ export function SessionNodeItem({
   // touches the session log, so it is not styled as destructive and needs no
   // confirmation dialog. Delete is destructive and opens a confirmation.
   const sessionMenuItems = [
-    { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
+    { id: 'rename', label: t('rename'), icon: <IconEditOutlineMedium /> },
     ...(onCopyId !== undefined
-      ? [{ id: 'copy-id', label: t('menu.copyId'), icon: <IconCopyOutline16 /> }]
+      ? [{ id: 'copy-id', label: t('menu.copyId'), icon: <IconCopyOutlineMedium /> }]
       : []),
     ...(onTogglePin !== undefined
-      ? [{ id: 'pin', label: pinned === true ? t('menu.unpin') : t('menu.pin'), icon: <IconPinOutline16 /> }]
+      ? [{ id: 'pin', label: pinned === true ? t('menu.unpin') : t('menu.pin'), icon: <IconPinOutlineMedium /> }]
       : []),
     ...(onExportMarkdown !== undefined
-      ? [{ id: 'export-markdown', label: t('menu.exportMarkdown'), icon: <IconDownloadOutline16 /> }]
+      ? [{ id: 'export-markdown', label: t('menu.exportMarkdown'), icon: <IconDownloadOutlineMedium /> }]
       : []),
     ...(onMoveToFolder !== undefined
-      ? [{ id: 'move-to-folder', label: t('menu.moveToFolder'), icon: <IconFolderOpen16 /> }]
+      ? [{ id: 'move-to-folder', label: t('menu.moveToFolder'), icon: <IconFolderOpenMedium /> }]
       : []),
-    { id: 'fork', label: t('menu.fork'), icon: <IconBranchOutline16 /> },
-    { id: 'download', label: t('menu.downloadLog'), icon: <IconDownloadOutline16 /> },
-    // 20-native glyph in the menu's 16px icon slot (Menu.module.css .itemIcon).
-    { id: 'archive', label: t('menu.archiveSession'), icon: <IconArchiveOutline20 size={16} /> },
+    { id: 'fork', label: t('menu.fork'), icon: <IconBranchOutlineMedium /> },
+    { id: 'download', label: t('menu.downloadLog'), icon: <IconDownloadOutlineMedium /> },
+    { id: 'archive', label: t('menu.archiveSession'), icon: <IconArchiveOutlineMedium size={16} /> },
     ...(onDelete !== undefined
-      ? [{ id: 'delete', label: t('menu.deleteSession'), icon: <IconTrashOutline16 />, danger: true }]
+      ? [{ id: 'delete', label: t('menu.deleteSession'), icon: <IconTrashOutlineMedium />, danger: true }]
       : []),
   ]
   const openMenuAt = (x: number, y: number): void => {
@@ -544,7 +543,7 @@ export function SessionNodeItem({
         </span>
       )}
       <span ref={titleRef} className={css.title}>{title}</span>
-      {pinned === true && <IconPinOutline16 size={12} className={css.pinIndicator} />}
+      {pinned === true && <IconPinOutlineMedium size={12} className={css.pinIndicator} />}
       {row.hasActiveSchedule && <ActiveScheduleIndicator t={t} />}
       {/* A blank New Session row is a provisional placeholder: nothing has
           happened in it yet, so a "now" timestamp and the row verbs
@@ -585,7 +584,7 @@ export function SessionNodeItem({
                   openMenuAt(rect.left, rect.bottom + 4)
                 }}
               >
-                <IconEllipsisOutline16 />
+                <IconEllipsisOutlineMedium />
               </button>
             )}
           />

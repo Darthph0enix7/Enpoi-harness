@@ -45,8 +45,8 @@ function mount(
   const openSession = vi.fn()
   const openChild = vi.fn()
   const refreshSessions = vi.fn(async () => {})
-  const useSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; subagentsByParent: unknown }) => unknown) =>
-    selector({ byId: byIdOf(rows), phase, subagentsByParent: catalogs })
+  const useSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; projectionsBySession: unknown }) => unknown) =>
+    selector({ byId: byIdOf(rows), phase, projectionsBySession: catalogs })
   const useRoleRegistry = (selector: (value: RoleRegistryMap) => unknown) => selector(registry)
   // Presentation props only: the component never reads the standard seats the
   // renderer would bind (session lifecycle, projections, tab info).
@@ -63,8 +63,8 @@ function mount(
 
   /** Re-render the same instance with new props, as a session switch does. */
   const rerender = (next: { sessionId?: string; rows?: Row[]; phase?: Phase } = {}): void => {
-    const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; subagentsByParent: unknown }) => unknown) =>
-      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase, subagentsByParent: catalogs })
+    const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; projectionsBySession: unknown }) => unknown) =>
+      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase, projectionsBySession: catalogs })
     const nextProps = {
       ...props,
       sessionId: next.sessionId ?? sessionId,
@@ -123,7 +123,7 @@ describe('SubagentSessionsBody — lineage tree', () => {
 
   it('opens a catalog child through its durable parent address', () => {
     const catalogs = {
-      main: { state: 'ready', error: null, entries: [childEntry('child')] },
+      main: { values: { subagentCatalog: [childEntry('child')] } },
     }
     const { openChild, openSession, list } = mount([
       row('main', 'Main Session'),

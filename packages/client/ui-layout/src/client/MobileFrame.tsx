@@ -15,8 +15,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import {
-  IconChevronLeftOutline14, IconEllipsisOutline16, IconFullscreenOutline16,
-  IconPanelLeftOutline16, Sheet, useBackHandler,
+  IconChevronLeftOutlineRegular, IconEllipsisOutlineMedium, IconFullscreenOutlineMedium,
+  IconPanelLeftOutlineMedium, Sheet, useBackHandler,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AppFrameProps } from './AppFrame.tsx'
 import css from './MobileFrame.module.css'
@@ -158,7 +158,7 @@ export function MobileFrame({
           data-mobile-nav-toggle=""
           onClick={() => { setDrawerOpen(true) }}
         >
-          <IconPanelLeftOutline16 size={18} />
+          <IconPanelLeftOutlineMedium size={18} />
         </button>
         <div className={css.title} data-mobile-title="">{globalPanel ? productTitle : title ?? productTitle}</div>
         <div className={css.headerSeat} data-mobile-header-seat="">
@@ -171,7 +171,7 @@ export function MobileFrame({
           data-mobile-overflow-toggle=""
           onClick={() => { setOverflowOpen(true) }}
         >
-          <IconEllipsisOutline16 size={16} />
+          <IconEllipsisOutlineMedium size={16} />
         </button>
         {hasSurface && (
           <button
@@ -181,7 +181,7 @@ export function MobileFrame({
             data-mobile-back=""
             onClick={() => { dismissBack() }}
           >
-            <IconChevronLeftOutline14 size={16} />
+            <IconChevronLeftOutlineRegular size={16} />
           </button>
         )}
       </header>
@@ -195,7 +195,7 @@ export function MobileFrame({
           data-mobile-immersive-toggle=""
           onClick={() => { setImmersive(true) }}
         >
-          <IconFullscreenOutline16 size={16} />
+          <IconFullscreenOutlineMedium size={16} />
         </button>
       </nav>
       {immersive && (

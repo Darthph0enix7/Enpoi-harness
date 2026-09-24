@@ -22,9 +22,9 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
-  ConnectionIndicator, IconArchiveOutline20, IconChevronLeftOutline14, IconChevronRightOutline14,
-  IconCloseOutline16, IconDataOutline16,
-  IconPersonalizationOutline16, IconSettingsOutline16, useBackHandler,
+  ConnectionIndicator, IconArchiveOutlineMedium, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular,
+  IconCloseOutlineMedium, IconDataOutlineMedium,
+  IconPersonalizationOutlineMedium, IconSettingsOutlineMedium, useBackHandler,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConnectionIndicatorState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
@@ -44,15 +44,14 @@ const CONNECTING_MIN_VISIBLE_MS = 800
 
 /** Nav glyph by section id; unknown ids fall back to the settings gear. */
 function navIcon(id: string) {
-  if (id === 'models') return <IconDataOutline16 className={css.navIcon} size={16} />
+  if (id === 'models') return <IconDataOutlineMedium className={css.navIcon} size={16} />
   if (id === 'agent-presets') return <IconAgentPresetStroke16 className={css.navIcon} size={16} />
   if (id === 'orchestration') return <IconOrchestrationStroke16 className={css.navIcon} size={16} />
   if (id === 'permissions') return <IconPermissionsStroke16 className={css.navIcon} size={16} />
   if (id === 'dynamic') return <IconDynamicStroke16 className={css.navIcon} size={16} />
-  if (id === 'plugins') return <IconPersonalizationOutline16 className={css.navIcon} size={16} />
-  // 20-native glyph in the rail's 16px icon slot, as on the Session row menu.
-  if (id === 'archived-sessions') return <IconArchiveOutline20 className={css.navIcon} size={16} />
-  return <IconSettingsOutline16 className={css.navIcon} size={16} />
+  if (id === 'plugins') return <IconPersonalizationOutlineMedium className={css.navIcon} size={16} />
+  if (id === 'archived-sessions') return <IconArchiveOutlineMedium className={css.navIcon} size={16} />
+  return <IconSettingsOutlineMedium className={css.navIcon} size={16} />
 }
 
 type PanelProps = {
@@ -111,7 +110,7 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
           <div className={css.header}>
             <div className={css.actions}>{renderSlot('settings.action', {})}</div>
             <button ref={closeButton} type="button" className={css.close} onClick={onClose}>
-              <IconCloseOutline16 size={14} />
+              <IconCloseOutlineMedium size={14} />
               <span className={css.hiddenLabel}>{renderSlot('settings.close', {})}</span>
             </button>
           </div>
@@ -152,7 +151,7 @@ function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onCl
           data-settings-mobile-control=""
           onClick={active === undefined ? onClose : onBack}
         >
-          {active === undefined ? <IconCloseOutline16 size={16} /> : <IconChevronLeftOutline14 size={16} />}
+          {active === undefined ? <IconCloseOutlineMedium size={16} /> : <IconChevronLeftOutlineRegular size={16} />}
         </button>
         <div className={css.mobileTitle}>{active === undefined ? renderSlot('settings.header', {}) : active.label}</div>
         <div className={css.mobileActions}>{renderSlot('settings.action', {})}</div>
@@ -170,7 +169,7 @@ function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onCl
               >
                 {navIcon(row.id)}
                 <span className={css.mobileRowLabel}>{row.label}</span>
-                <IconChevronRightOutline14 size={14} />
+                <IconChevronRightOutlineRegular size={14} />
               </button>
             ))}
           </div>

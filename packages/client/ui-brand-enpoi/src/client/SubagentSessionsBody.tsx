@@ -26,7 +26,6 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { registryRoleLabel, type RoleRegistryMap } from './role-registry.ts'
@@ -316,10 +315,12 @@ export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsI
   )
 }
 
-export function SubagentSessionsBody({ sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions }: SubagentSessionsBodyProps) {
+export function SubagentSessionsBody({
+  sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions,
+}: SubagentSessionsBodyProps) {
   const byId = useSessions(state => state.byId)
   const phase = useSessions(state => state.phase)
-  const catalogs = useSessions(state => (state as SessionListState).subagentsByParent)
+  const projections = useSessions(state => state.projectionsBySession)
   const registry = useRoleRegistry(snapshot => snapshot)
   const [refreshing, setRefreshing] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -335,14 +336,13 @@ export function SubagentSessionsBody({ sessionId, useSessions, useRoleRegistry, 
   // address first and falls back to the ordinary path for real sessions.
   const addresses = useMemo(() => {
     const map = new Map<SessionId, SubagentAddress>()
-    for (const [parentSessionId, catalog] of Object.entries(catalogs ?? {})) {
-      for (const entry of catalog.entries) {
-        if (entry.kind !== 'child') continue
+    for (const [parentSessionId, projection] of Object.entries(projections)) {
+      for (const entry of projection.values.subagentCatalog ?? []) {
         map.set(entry.id, { parentSessionId: parentSessionId as SessionId, childSessionId: entry.id, mode: entry.mode })
       }
     }
     return map
-  }, [catalogs])
+  }, [projections])
 
   /** A child whose parent catalog is still loading: select the parent, then open the child. */
   const [deferred, setDeferred] = useState<{ childId: SessionId; parentId: SessionId; deadline: number } | null>(null)

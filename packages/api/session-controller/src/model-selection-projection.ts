@@ -32,12 +32,12 @@ export function chainOfRequestConfig(config: LlmCallConfig): string | undefined 
 const modelSelectionProjectionStateSchema = z.object({
   lastUsed: modelSelectionSchema.nullable(),
   pending: modelSelectionSchema.nullable(),
-}) as unknown as z.ZodType<ModelSelectionProjectionState>
+}) as z.ZodType<ModelSelectionProjectionState>
 
 const modelSelectionProjectionSchema = z.object({
   lastUsed: modelSelectionSchema.nullable(),
   next: modelSelectionSchema.nullable(),
-}) as unknown as z.ZodType<ModelSelectionProjection>
+}) as z.ZodType<ModelSelectionProjection>
 
 /**
  * Advance durable model-selection state by one Session event.

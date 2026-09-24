@@ -39,7 +39,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { IconChevronLeftOutline14, Tooltip, useBackHandler } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronLeftOutlineRegular, Tooltip, useBackHandler } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -468,7 +468,7 @@ function SidebarPanel(panel: PanelProps & {
               data-sidebar-right-file-back
               onClick={() => { actions.clearEditor(sessionId) }}
             >
-              <IconChevronLeftOutline14 size={16} />
+              <IconChevronLeftOutlineRegular size={16} />
             </button>
             <span className={css.filePushTitle} data-sidebar-right-file-title>
               {titlesFor(panel)(editor.tab)}

@@ -6,7 +6,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { IconChevronDownOutline14, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { TerminalInjected } from './contract.ts'
@@ -212,7 +212,7 @@ export function BottomTerminalDock({
             data-enpoi-bottom-dock-collapse
             onClick={toggleTerminalDock}
           >
-            <IconChevronDownOutline14 size={14} />
+            <IconChevronDownOutlineRegular size={14} />
           </button>
         </Tooltip>
       </div>

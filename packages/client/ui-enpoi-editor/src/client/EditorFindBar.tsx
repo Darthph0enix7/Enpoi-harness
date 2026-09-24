@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconSearchOutline16, Tooltip,
+  IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineMedium, IconSearchOutlineMedium, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCase16, IconRegex16 } from './icons.tsx'
@@ -56,7 +56,7 @@ export function EditorFindBar({ onQuery, onStep, onClose, onSave, t }: EditorFin
 
   return (
     <div className={css.bar} data-enpoi-editor-find role="search">
-      <IconSearchOutline16 size={14} className={css.icon} />
+      <IconSearchOutlineMedium size={14} className={css.icon} />
       <input
         ref={inputRef}
         className={css.input}
@@ -83,7 +83,7 @@ export function EditorFindBar({ onQuery, onStep, onClose, onSave, t }: EditorFin
           data-enpoi-editor-find-prev
           onClick={() => { setResult(onStep(-1)) }}
         >
-          <IconChevronUpOutline14 size={14} />
+          <IconChevronUpOutlineRegular size={14} />
         </button>
       </Tooltip>
       <Tooltip label={t('find.next')} side="bottom" delayMs={400}>
@@ -94,7 +94,7 @@ export function EditorFindBar({ onQuery, onStep, onClose, onSave, t }: EditorFin
           data-enpoi-editor-find-next
           onClick={() => { setResult(onStep(1)) }}
         >
-          <IconChevronDownOutline14 size={14} />
+          <IconChevronDownOutlineRegular size={14} />
         </button>
       </Tooltip>
       <Tooltip label={t('find.case')} side="bottom" delayMs={400}>
@@ -129,7 +129,7 @@ export function EditorFindBar({ onQuery, onStep, onClose, onSave, t }: EditorFin
           data-enpoi-editor-find-close
           onClick={onClose}
         >
-          <IconCloseOutline16 size={14} />
+          <IconCloseOutlineMedium size={14} />
         </button>
       </Tooltip>
     </div>

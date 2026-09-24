@@ -2,14 +2,14 @@
   "id": "/",
   "name": "DeepSeek Harness",
   "short_name": "DSH",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "theme_color": "#151517",
   "background_color": "#151517",
   "icons": [
     {
-      "src": "/favicon.svg",
+      "src": "favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"

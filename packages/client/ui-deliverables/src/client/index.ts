@@ -8,6 +8,7 @@
  * cap, and copy — so composing this plugin out of cordis.yml removes every
  * surface; the owning view renders an empty list and inert prose at zero cost.
  */
+import './file-actions.ts'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
@@ -31,7 +32,7 @@ import {
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Changed-files card, review tab, delivery card, and file-mention copy. */
+    /** Changed-files card, comparison renderer, delivery card, and file-mention copy. */
     'deliverables': DeliverablesKey
   }
 }
@@ -40,7 +41,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const inject = ['slots', 'locale', 'uiConversation', 'remote', 'remote.session', 'sidebarRight']
 
 /**
- * Client plugin body: register the dictionaries, the turn-tail entry, and the comparison tab type.
+ * Client plugin body: register the dictionaries, the turn-tail entry, and the comparison renderer.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
@@ -61,8 +62,12 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.chat.turnTail',
       id: '@deepseek-ai/dsh-client-ui-deliverables',
       locale: NS,
+      children: { 'deliverables.file.actions': { kind: 'list', scope: 'session' } },
       inject: (): DeliverablesInjected => ({
-        hooks: { presentedOpen: opener.state, presentedHost: opener.host, changesSummary: summaries.state },
+        hooks: {
+          changesDiff: diffs.state, presentedOpen: opener.state, presentedHost: opener.host, changesSummary: summaries.state,
+        },
+        loadChangesDiff: (sessionId, seq, index) => diffs.load(sessionId, seq, index),
         reloadPresentedHost: () => opener.loadHost(),
         loadChangesSummary: (sessionId, seq) => summaries.load(sessionId, seq),
         openPresented: (sessionId, seq, index, action) => opener.open(sessionId, seq, index, action),

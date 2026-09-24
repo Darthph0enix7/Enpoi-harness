@@ -17,6 +17,20 @@ export class WorkspaceCreateError extends Error {
   }
 }
 
+/**
+ * Archive failed on the Host. `rpcError.code` distinguishes the active-session
+ * refusal (`workspace/session-active`, whose details name what still runs)
+ * from a missing session or a carrier fault.
+ */
+export class WorkspaceArchiveError extends Error {
+  override readonly name = 'WorkspaceArchiveError'
+
+  /** @param rpcError - Host business or folded carrier failure. */
+  constructor(readonly rpcError: RemoteFailure) {
+    super(`workspace session archive failed: ${rpcError.code}: ${rpcError.message}`)
+  }
+}
+
 /** Bare observable source for the Workspace Controller snapshot. */
 export interface WorkspaceSource {
   /** Read the identity-stable current snapshot. */
@@ -40,6 +54,12 @@ export interface IWorkspaces {
    */
   create(input: { path: string }): Promise<WorkspaceView>
   /**
+   * Initialize or reuse the default Workspace.
+   * @param signal - caller lifetime.
+   * @returns the prepared Workspace, or undefined when first-use initialization is ineligible; rejects on preparation failure.
+   */
+  initializeDefault(signal?: AbortSignal): Promise<WorkspaceView | undefined>
+  /**
    * Rename a Workspace.
    * @param workspaceId - target Workspace.
    * @param title - new display title.
@@ -60,8 +80,11 @@ export interface IWorkspaces {
   /**
    * Archive a Session from Workspace grouping surfaces.
    * @param sessionId - Session to archive.
+   * @param options - `stopActivity` asks the Host to stop the Session's running work instead of refusing.
+   * @throws {WorkspaceArchiveError} when the Host refuses; without `stopActivity` a Session with
+   *   running work fails as `workspace/session-active`, its details naming what runs.
    */
-  archiveSession(sessionId: SessionId): Promise<void>
+  archiveSession(sessionId: SessionId, options?: { readonly stopActivity?: boolean }): Promise<void>
   /**
    * Move one Session to a target Workspace (display-only registry overlay).
    * @param sessionId - Session to move.
@@ -73,6 +96,16 @@ export interface IWorkspaces {
    * @param sessionId - Session to unarchive.
    */
   unarchiveSession(sessionId: SessionId): Promise<void>
+  /**
+   * Pin a Session ahead of unpinned Sessions on Workspace grouping surfaces.
+   * @param sessionId - Session to pin.
+   */
+  pinSession(sessionId: SessionId): Promise<void>
+  /**
+   * Remove a Session's pin without changing its saved Session order.
+   * @param sessionId - Session to unpin.
+   */
+  unpinSession(sessionId: SessionId): Promise<void>
   /**
    * Move a Session within one Workspace account.
    * @param workspaceId - owning Workspace.
@@ -106,6 +139,12 @@ export class WorkspaceController extends Service implements IWorkspaces {
     return result.value.workspace
   }
 
+  async initializeDefault(signal?: AbortSignal): Promise<WorkspaceView | undefined> {
+    const result = await this.model.initializeDefault(signal)
+    if (!result.ok) throw new WorkspaceCreateError(result.error)
+    return result.value?.workspace
+  }
+
   async rename(workspaceId: WorkspaceId, title: string): Promise<WorkspaceView> {
     const result = await this.model.rename(workspaceId, title)
     if (!result.ok) throw commandError('rename', result.error)
@@ -122,9 +161,9 @@ export class WorkspaceController extends Service implements IWorkspaces {
     if (!result.ok) throw commandError('reorder', result.error)
   }
 
-  async archiveSession(sessionId: SessionId): Promise<void> {
-    const result = await this.model.archiveSession(sessionId)
-    if (!result.ok) throw commandError('session archive', result.error)
+  async archiveSession(sessionId: SessionId, options: { readonly stopActivity?: boolean } = {}): Promise<void> {
+    const result = await this.model.archiveSession(sessionId, options)
+    if (!result.ok) throw new WorkspaceArchiveError(result.error)
   }
 
   async moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void> {
@@ -135,6 +174,16 @@ export class WorkspaceController extends Service implements IWorkspaces {
   async unarchiveSession(sessionId: SessionId): Promise<void> {
     const result = await this.model.unarchiveSession(sessionId)
     if (!result.ok) throw commandError('session unarchive', result.error)
+  }
+
+  async pinSession(sessionId: SessionId): Promise<void> {
+    const result = await this.model.pinSession(sessionId)
+    if (!result.ok) throw commandError('session pin', result.error)
+  }
+
+  async unpinSession(sessionId: SessionId): Promise<void> {
+    const result = await this.model.unpinSession(sessionId)
+    if (!result.ok) throw commandError('session unpin', result.error)
   }
 
   async insertSessionBefore(

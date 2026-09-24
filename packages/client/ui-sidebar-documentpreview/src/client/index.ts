@@ -26,7 +26,7 @@ import type { TextPreviewInjected } from './TextPreview.tsx'
 import { TextTitle } from './TextTitle.tsx'
 import { TEXTPREVIEW_ID, textDefinition } from './definition.ts'
 import { textFace } from './face.ts'
-import { createReadPage, documentFileBytes } from './rpc.ts'
+import { createReadPage } from './rpc.ts'
 import { createTextStore } from './store.ts'
 import { en, zh } from './locales.ts'
 import { DocumentPreviewRegistry } from './document/registry.ts'
@@ -83,7 +83,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * Required browser services: the tab registry, the slot registry, copy, and the
  * Remote carrier with its `workspaceFiles` namespace.
  */
-export const inject = ['slots', 'locale', 'sidebarRightTabs', 'remote', 'remote.workspaceFiles']
+export const inject = ['slots', 'locale', 'sidebarRightTabs', 'remote', 'remote.workspaceFiles', 'resources']
 
 /**
  * Client plugin body: register the type, its dictionaries, its body, and its chip title.
@@ -100,10 +100,8 @@ export function apply(ctx: ClientContext): void {
   const store = createTextStore()
   const face = textFace(
     createReadPage(ctx.remote),
-    async (file, signal) => {
-      const result = await ctx.remote.workspaceFiles.readAll(file.sessionId, file.path, signal)
-      return result.ok ? { ok: true, value: documentFileBytes(result.value) } : result
-    },
+    (file, signal) => ctx.remote.workspaceFiles.readBytes(file.sessionId, file.path, {}, signal),
+    ctx.resources,
   )
   const source = { getSnapshot: previews.getSnapshot, subscribe: previews.subscribe }
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
@@ -122,9 +120,9 @@ export function apply(ctx: ClientContext): void {
         // copy-failure flash.
         readAllText: async (file) => {
           // The address is a string boundary: its id segment is the Session id it names.
-          const result = await ctx.remote.workspaceFiles.readAll(file.sessionId as SessionId, file.path)
+          const result = await ctx.remote.workspaceFiles.readBytes(file.sessionId as SessionId, file.path, {})
           if (!result.ok) throw new Error(result.error.code)
-          return new TextDecoder().decode(documentFileBytes(result.value).data)
+          return new TextDecoder().decode(result.value.data)
         },
       }),
     },

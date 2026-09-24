@@ -81,7 +81,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('compaction: a long session compa
     const summaries = events.filter(e => e.type === 'compaction/summary')
     expect(summaries.length, JSON.stringify(ends.map(event => event.data.error))).toBeGreaterThan(0)
     const replaceNode = events.find((e) => {
-      const se = e as unknown as { type: string; surfaceOp?: unknown }
+      const se = e as { type: string; surfaceOp?: unknown }
       return se.type === 'user/message' && typeof se.surfaceOp === 'object' && se.surfaceOp !== null
     })
     expect(replaceNode).toBeDefined()
@@ -92,7 +92,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('compaction: a long session compa
     expect(summaryData.shadowedSeqs.length).toBeGreaterThan(0)
     expect(events.some(event => event.type === 'tool/result'
       && summaryData.shadowedSeqs.includes(event.seq)
-      && event.data.message.content[0].content.some(block => block.type === 'text'
+      && event.data.message.content.some(block => block.type === 'text'
         && block.text.includes('This is file number')))).toBe(true)
 
     // The conversation survived compaction: the agent produced a final answer

@@ -1,11 +1,12 @@
 /** The changed-files card, shown only while the Host serves the turn's summary, and explicitly declared files for a closing turn. */
 import { useEffect, useState } from 'react'
 import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { Button, IconChevronDownOutline14, IconChevronUpOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { GlobalStandardProps, InjectFace, PropsLocale, PropsRuntime, SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
+import { Button, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { GlobalStandardProps, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PresentedOpenController } from './present-open.ts'
+import type { ChangesDiffStore } from './changes-diff.ts'
 import type { ChangesSummaryStore } from './changes-summary.ts'
 import { ChangedFiles } from './ChangedFiles.tsx'
 import { changesForClosing, presentedForClosing, type ChangesTurnData, type PresentedPath } from './turn-deliverables.ts'
@@ -22,11 +23,13 @@ const COLLAPSED_PRESENTED_COUNT = 4
 /** Summary reads, native-open callbacks, and shared gesture status supplied by the plugin. */
 export interface DeliverablesInjected {
   hooks: {
+    changesDiff: ObservableSnapshot<ReturnType<ChangesDiffStore['state']['getSnapshot']>>
     presentedOpen: ObservableSnapshot<ReturnType<PresentedOpenController['state']['getSnapshot']>>
     presentedHost: ObservableSnapshot<ReturnType<PresentedOpenController['host']['getSnapshot']>>
     changesSummary: ObservableSnapshot<ReturnType<ChangesSummaryStore['state']['getSnapshot']>>
   }
   reloadPresentedHost: PresentedOpenController['loadHost']
+  loadChangesDiff: ChangesDiffStore['load']
   loadChangesSummary: ChangesSummaryStore['load']
   openPresented: PresentedOpenController['open']
   /**
@@ -52,24 +55,24 @@ export function selectDeliverables(owner: TurnTailOwnerProps): DeliverablesMatch
  * @param props - closing Turn, file actions, and localized copy.
  * @returns file rows, or null when the Turn declares none.
  */
-export function DeliverablesTail(props: PropsRuntime<'conversation.chat.turnTail'> & PropsLocale<typeof NS> & InjectFace<DeliverablesInjected>) {
+export function DeliverablesTail(props: PropsRuntime<'conversation.chat.turnTail'> & PropsLocale<typeof NS> & InjectFace<DeliverablesInjected> & PropsRenderSlots<'deliverables.file.actions'>) {
   const matched = selectDeliverables(props)
   return matched === null ? null : <Deliverables {...props} matched={matched} />
 }
 
 /**
  * Render the changed-files card, once the Host has served the announced
- * summary and it lists a file, and default-application buttons for declared
+ * summary and it lists a file, and shared native opening controls for declared
  * files. A summary the Host no longer serves leaves no card.
  * @param props - matched announcement and files, workspace opener, and localized copy.
  * @returns the closing turn's file rows.
  */
 export function Deliverables({
   matched, openFile, t, sessionId, useSessions, openPresented, openChangedDiff, usePresentedOpen, usePresentedHost,
-  useChangesSummary, reloadPresentedHost, loadChangesSummary,
+  useChangesDiff, loadChangesDiff, useChangesSummary, reloadPresentedHost, loadChangesSummary, renderSlot,
 }: Pick<TurnTailOwnerProps, 'openFile'> & {
   matched: DeliverablesMatch
-} & PropsLocale<typeof NS> & Pick<SessionStandardProps, 'sessionId'> & Pick<GlobalStandardProps, 'useSessions'> & InjectFace<DeliverablesInjected>) {
+} & PropsLocale<typeof NS> & Pick<SessionStandardProps, 'sessionId'> & Pick<GlobalStandardProps, 'useSessions'> & InjectFace<DeliverablesInjected> & PropsRenderSlots<'deliverables.file.actions'>) {
   const [expanded, setExpanded] = useState(false)
   const cwd = useSessions(state => state.byId[sessionId]?.cwd)
   const states = usePresentedOpen(value => value)
@@ -91,6 +94,7 @@ export function Deliverables({
   }, [host, reloadPresentedHost])
   return <>
     {changes !== null && <ChangedFiles changes={changes} cwd={cwd} t={t}
+      sessionId={sessionId} useChangesDiff={useChangesDiff} loadChangesDiff={loadChangesDiff}
       openDiff={(index) => {
         const file = changes.files[index]
         if (file === undefined) return
@@ -110,14 +114,20 @@ export function Deliverables({
           phase={states[presentedFileUrl(sessionId, file.seq, file.index)]}
           host={host === 'error' ? null : host} t={t}
           onPreview={() => { openFile(file.path) }}
-          onAction={(action) => { void openPresented(sessionId, file.seq, file.index, action) }} />)}
+          actions={renderSlot('deliverables.file.actions', {
+            actionUrl: presentedFileUrl(sessionId, file.seq, file.index),
+            available: host !== null && host !== 'error' && host.available,
+            pending: states[presentedFileUrl(sessionId, file.seq, file.index)] === 'opening'
+              || states[presentedFileUrl(sessionId, file.seq, file.index)] === 'revealing',
+            onAction: (action, application) => openPresented(sessionId, file.seq, file.index, action, application),
+          })} />)}
       </div>
       {collapsible && <button type="button" className={css.toggle}
         aria-expanded={expanded}
         aria-label={t(expanded ? 'presented.collapseAria' : 'presented.expandAria', { count: matched.presented.length })}
         onClick={() => { setExpanded(value => !value) }}>
         <span>{t(expanded ? 'presented.collapse' : 'presented.all', { count: matched.presented.length })}</span>
-        {expanded ? <IconChevronUpOutline14 /> : <IconChevronDownOutline14 />}
+        {expanded ? <IconChevronUpOutlineRegular /> : <IconChevronDownOutlineRegular />}
       </button>}
     </div>}
   </>
