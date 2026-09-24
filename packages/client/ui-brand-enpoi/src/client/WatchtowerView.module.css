@@ -526,3 +526,173 @@
 }
 
 .wbShared .wbEntry { margin-left: 6px; }
+
+/* ── Live Debug (doc 69 §9.1 read surface) ───────────────────────────────── */
+
+.debugSpacer { flex: 1; }
+
+.debugMuted {
+  font-size: 10px;
+  color: #7c8aa0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.debugCopy {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #7dd3fc;
+  background: rgba(125, 211, 252, 0.08);
+  border: 1px solid rgba(125, 211, 252, 0.25);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: background 120ms ease;
+  text-transform: none;
+}
+.debugCopy:hover { background: rgba(125, 211, 252, 0.18); }
+
+.debugUnavailable {
+  font-size: 11px;
+  color: #fca5a5;
+  background: rgba(244, 63, 94, 0.06);
+  border: 1px solid rgba(244, 63, 94, 0.18);
+  border-radius: 8px;
+  padding: 6px 9px;
+  overflow-wrap: anywhere;
+}
+
+.debugRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #94a3b8;
+  min-width: 0;
+}
+
+.debugLabel {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.debugLatch {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+.debugLatch[data-state='running'] {
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.3);
+  color: #6ee7b7;
+}
+.debugLatch[data-state='waiting_approval'] {
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.3);
+  color: #fcd34d;
+}
+.debugLatch[data-state='waiting_subagents'] {
+  background: rgba(165, 180, 252, 0.1);
+  border-color: rgba(165, 180, 252, 0.3);
+  color: #a5b4fc;
+}
+
+.debugError {
+  color: #fca5a5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.debugAsk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 3px 0;
+}
+
+.debugAskKind {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #fcd34d;
+  flex-shrink: 0;
+}
+
+.debugAskBody {
+  font-size: 11px;
+  color: #cbd5e1;
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.debugActions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.debugAction {
+  font-size: 9px;
+  font-weight: 600;
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.debugAction:hover { background: rgba(148, 163, 184, 0.22); }
+
+.debugToolRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.debugDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #475569;
+  flex-shrink: 0;
+}
+.debugDot[data-state='live'] { background: #34d399; }
+.debugDot[data-state='error'] { background: #fb7185; }
+.debugDot[data-state='cooling'] { background: #fbbf24; }
+
+.debugToolName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #94a3b8;
+  flex-shrink: 0;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debugToolDetail {
+  font-size: 10px;
+  color: #7c8aa0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

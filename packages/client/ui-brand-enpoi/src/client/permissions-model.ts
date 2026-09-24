@@ -85,6 +85,11 @@ const SHIPPED_ALLOW_TOOLS: readonly string[] = [
   // Delivery declaration only: no filesystem or network effect, and the
   // unattended peer/driver runs must not stall on an unconfigured ask.
   'present',
+  // Read-only introspection, mirroring the enforcement table: these read a
+  // session, its history, diagnostics, or the board and never write.
+  'session_debug', 'diagnostics_report', 'fast_report',
+  'session_search', 'session_trace', 'session_event_search', 'session_event_read', 'session_event_trace',
+  'council_list', 'whiteboard_read',
 ]
 
 /** Shipped code defaults: destructive-but-expected tools ask. */

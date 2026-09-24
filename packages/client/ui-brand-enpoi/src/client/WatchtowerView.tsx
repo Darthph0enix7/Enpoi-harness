@@ -5,9 +5,23 @@
  * only what the keeper actually wrote. Session observability ONLY — global
  * persona model routing lives in the Fleet Routing rail tab.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+// Type-only: the framework's standard session-status hook face.
+import type { UseSessionStatus } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { MicroIcon } from './MicroIcon.tsx'
 import { WhiteboardCard, type WhiteboardPhase } from './WhiteboardCard.tsx'
+import { DebugCard, type AnswerableInteraction, type DebugState } from './DebugCard.tsx'
+import {
+  buildDebugReportMarkdown,
+  debugError,
+  readDiagnosticsIncidents,
+  readRequestSnapshot,
+  readSessionDigest,
+  type DebugDigest,
+  type DebugIncidentList,
+  type DebugSnapshot,
+} from './debug-view.ts'
 import {
   fetchWhiteboardStore,
   splitWhiteboard,
@@ -24,9 +38,12 @@ interface SessionLike {
   readonly displayTitle?: string
   readonly title?: string
   readonly cwd?: string
+  /** Live turn state; drives the debug card's event refresh. */
+  readonly running?: boolean
   /** Durable subagent address; carries the direct-parent session id. */
   readonly subagent?: { readonly address?: { readonly parentSessionId?: string } | null } | null
 }
+
 
 interface WorkspaceLike {
   readonly activeWorkspace?: { readonly path?: string } | null
@@ -52,6 +69,8 @@ export interface WatchtowerViewProps {
   sessionId?: string
   useProjection?: <T>(key: string, selector?: (v: unknown) => T) => T
   useWorkspaces?: <S>(selector: (w: WorkspaceLike) => S) => S
+  /** Unified session UI status; supplies the live answer path for pending asks. */
+  useSessionStatus?: UseSessionStatus
 }
 
 /** Parsed sections of the keeper's structured prose brief (no invented data). */
@@ -111,6 +130,11 @@ interface WhiteboardRead {
 /** Whiteboard re-read cadence while the Watchtower is mounted. */
 const WHITEBOARD_REFRESH_MS = 10_000
 
+/** Debug re-read cadence; live events trigger earlier refreshes. */
+const DEBUG_REFRESH_MS = 10_000
+
+const EMPTY_DEBUG: DebugState = { phase: 'idle', digest: null, snapshot: null, incidents: null }
+
 function SectionBlock({ icon, label, lines }: { icon: string; label: string; lines: string[] }) {
   if (lines.length === 0) return null
   return (
@@ -126,7 +150,7 @@ function SectionBlock({ icon, label, lines }: { icon: string; label: string; lin
   )
 }
 
-export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces }: WatchtowerViewProps) {
+export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, useSessionStatus }: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
 
@@ -135,6 +159,102 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
   const oracle = hasProjection ? useProjection<OracleLike>('oracleScorecard') : undefined
   const council = hasProjection ? useProjection<CouncilLike>('councilState') : undefined
   const memory = hasProjection ? useProjection<MemoryLedgerLike>('memoryLedger') : undefined
+  const contextPressure = hasProjection ? useProjection<{ pressureTokens?: number }>('contextPressure') : undefined
+
+  // Live Debug (doc 69 §9.1): digest + request summary + incident tail, read
+  // through the same Remote RPCs `dsh-debug` calls. Refresh rides the session's
+  // live facts — turn running state, the per-step context pressure projection,
+  // and the pending-interaction identity — plus one interval as a safety net
+  // (the whiteboard card's polling pattern). No new global store.
+  const debugTarget = sessionId ?? session?.sessionId ?? session?.id
+  const pendingInteraction = typeof useSessionStatus === 'function'
+    ? useSessionStatus(
+      statuses => (debugTarget === undefined ? undefined : statuses.get(debugTarget as SessionId)?.pendingInteraction),
+    ) as AnswerableInteraction | undefined
+    : undefined
+  const debugRefreshKey = [
+    session?.running === true ? 'running' : 'idle',
+    contextPressure?.pressureTokens ?? '',
+    pendingInteraction?.key ?? '',
+  ].join('|')
+
+  const [debug, setDebug] = useState<DebugState>(EMPTY_DEBUG)
+  const debugGeneration = useRef(0)
+  const readDebug = useCallback(async (target: string): Promise<void> => {
+    const generation = debugGeneration.current + 1
+    debugGeneration.current = generation
+    setDebug(previous => ({ ...previous, phase: 'loading' }))
+    const [digest, snapshot, incidents] = await Promise.allSettled([
+      readSessionDigest(target),
+      readRequestSnapshot(target),
+      readDiagnosticsIncidents(10),
+    ])
+    if (generation !== debugGeneration.current) return
+    setDebug({
+      phase: 'ready',
+      digest: digest.status === 'fulfilled'
+        ? { phase: 'ready', value: digest.value }
+        : { phase: 'error', ...debugError(digest.reason) },
+      snapshot: snapshot.status === 'fulfilled'
+        ? { phase: 'ready', value: snapshot.value }
+        : { phase: 'error', ...debugError(snapshot.reason) },
+      incidents: incidents.status === 'fulfilled'
+        ? { phase: 'ready', value: incidents.value }
+        : { phase: 'error', ...debugError(incidents.reason) },
+    })
+  }, [])
+
+  useEffect(() => {
+    if (debugTarget === undefined) {
+      debugGeneration.current += 1
+      setDebug(EMPTY_DEBUG)
+      return
+    }
+    void readDebug(debugTarget)
+    const timer = window.setInterval(() => { void readDebug(debugTarget) }, DEBUG_REFRESH_MS)
+    return () => {
+      window.clearInterval(timer)
+      // Invalidate an in-flight read so a late answer cannot land after unmount.
+      debugGeneration.current += 1
+    }
+  }, [debugTarget, debugRefreshKey, readDebug])
+
+  /** Copy the exact markdown `dsh-debug report` writes, from a fresh read. */
+  const copyDebugReport = useCallback(async (): Promise<'copied' | 'failed'> => {
+    if (debugTarget === undefined) return 'failed'
+    try {
+      const [digest, snapshot, incidents] = await Promise.allSettled([
+        readSessionDigest(debugTarget),
+        readRequestSnapshot(debugTarget),
+        readDiagnosticsIncidents(15),
+      ])
+      const errors: string[] = []
+      if (digest.status === 'rejected') {
+        const detail = debugError(digest.reason)
+        errors.push(`session/digest failed: ${detail.code}: ${detail.message}`)
+      }
+      if (snapshot.status === 'rejected') {
+        const detail = debugError(snapshot.reason)
+        errors.push(`session/requestSnapshot failed: ${detail.code}: ${detail.message}`)
+      }
+      if (incidents.status === 'rejected') {
+        const detail = debugError(incidents.reason)
+        errors.push(`diagnostics/list failed: ${detail.code}: ${detail.message}`)
+      }
+      const markdown = buildDebugReportMarkdown({
+        sessionId: debugTarget,
+        generatedAt: Date.now(),
+        digest: digest.status === 'fulfilled' ? digest.value as DebugDigest : null,
+        snapshot: snapshot.status === 'fulfilled' ? snapshot.value as DebugSnapshot : null,
+        incidents: incidents.status === 'fulfilled' ? incidents.value as DebugIncidentList : null,
+        errors,
+      })
+      await navigator.clipboard.writeText(markdown)
+      return 'copied'
+    } catch {
+      return 'failed'
+    }
+  }, [debugTarget])
 
   const sections = useMemo(
     () => (livingBrief?.prose?.text !== undefined ? parseBriefSections(livingBrief.prose.text) : null),
@@ -192,6 +312,10 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
 
   const title = session?.displayTitle ?? session?.title
   const cwd = session?.cwd ?? workspaces?.activeWorkspace?.path
+  const keeperState = freshness === 'live'
+    ? 'Live (synced)'
+    : freshness === 'cooling' ? 'Ready (recent)' : freshness === 'stale' ? 'Stale' : 'Idle'
+  const keeperTitle = `Context Keeper: ${keeperState} (as of seq ${livingBrief?.asOfSeq ?? 0})`
 
   return (
     <div className={css.container}>
@@ -200,7 +324,7 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
           <div
             className={css.freshnessBadge}
             data-state={freshness ?? 'none'}
-            title={`Context Keeper: ${freshness === 'live' ? 'Live (synced)' : freshness === 'cooling' ? 'Ready (recent)' : freshness === 'stale' ? 'Stale' : 'Idle'} (as of seq ${livingBrief?.asOfSeq ?? 0})`}
+            title={keeperTitle}
           >
             <span className={css.freshnessDot} data-state={freshness ?? 'none'} />
             <span className={css.freshnessText}>
@@ -278,6 +402,13 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
         </section>
         {/* Whiteboard — this session's own board; shared entries behind a disclosure */}
         <WhiteboardCard board={resolvedBoard} phase={whiteboard.phase} />
+        {/* Live Debug — latch, asks, tools, injections, subagents, request/incidents */}
+        <DebugCard
+          state={debug}
+          sessionId={debugTarget}
+          pendingInteraction={pendingInteraction}
+          onCopyReport={copyDebugReport}
+        />
       </div>
     </div>
   )
