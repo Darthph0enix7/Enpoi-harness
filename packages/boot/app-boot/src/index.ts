@@ -17,6 +17,7 @@ import Include, { applyEntryPatches, entryListSchema, type PatchOptions } from '
 import Group from '@deepseek-ai/cordis-plugin-group'
 import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createLaunchEnvironmentSnapshot, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+import { checkProfileBundleResolution, createProfileFallbackInclude } from './profile-fallback.ts'
 export { readProfilePatches, resolveTelemetryPatch, type ProfileContext, type ProfilePnpmInvocation } from './profile-context.ts'
 export { sanitizeProfile } from './profile-sanitize.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -65,6 +66,14 @@ export {
   type PluginPackage,
   type PluginPackagesConfig,
 } from './profile-resolution/service.ts'
+export {
+  checkProfileBundleResolution,
+  createProfileFallbackInclude,
+  type ProfileBundleCheckOptions,
+  type ProfileBundleResolution,
+  type ProfileFallbackGuardOptions,
+  type ProfileFallbackLocation,
+} from './profile-fallback.ts'
 
 /**
  * Resolve the config to boot. Replay swaps a `cordis.yml` basename for
@@ -513,19 +522,15 @@ export async function mountRootInclude(
   patches: readonly PatchOptions[] = [],
   bareModuleBaseUrl?: string,
 ): Promise<Entry | undefined> {
-  ctx.loader.builtins.include = bareModuleBaseUrl === undefined
-    ? Include
-    : class HostResolvedRootInclude extends Include {
-      override import(name: string, getOuterStack?: () => string[]): unknown {
-        const specifier = isAbsolute(name) ? pathToFileURL(name).href : name
-        if (name.startsWith('.') || name.startsWith('cordis:')) return super.import(specifier, getOuterStack)
-        const internal = this.ctx.loader.internal
-        /* v8 ignore next -- Node supplies the internal loader; this preserves the
-           original diagnostic for hypothetical embedders without it. */
-        if (internal === undefined) return super.import(specifier, getOuterStack)
-        return internal.import(specifier, bareModuleBaseUrl, {})
-      }
-    }
+  const profile = ctx.get('profileContext')
+  ctx.loader.builtins.include = createProfileFallbackInclude(
+    profile === undefined ? undefined : {
+      installAnchor: profile.installAnchor,
+      profileDir: profile.dir,
+      home: profile.home,
+    },
+    bareModuleBaseUrl,
+  )
   // `cordis:group` alongside it: a group row is how a composition gives one
   // `isolate` realm to a provider and its consumers together, and an agent
   // preset living outside this workspace cannot resolve `@deepseek-ai/cordis-plugin-group`
@@ -946,6 +951,7 @@ export async function boot(
     await ctx.plugin(Loader)
     await prepare?.(ctx)
     stage = 'plugin tree failed to load'
+    await checkBootProfileFallback(ctx, binName)
     await mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl)
     // A surface can finish and dispose the whole tree while startup is still
     // in flight, before the last entry settles. The Loader service goes with
@@ -980,6 +986,32 @@ export async function boot(
   } finally {
     await diagnostics.fiber.dispose()
   }
+}
+
+/**
+ * Verify a launched profile's configured bundles and fallback packages before
+ * any plugin row mounts, healing pruned fallback state once. Profiles booted
+ * without `ctx.profileContext` and profiles that never materialized fallback
+ * state (runtime resolution only) have nothing to repair. The summary is a
+ * default-visible `info` line only when the check repaired or found a gap; a
+ * clean profile reports the same line at `debug`.
+ * @param ctx - the host context whose `profileContext` names the launched profile.
+ * @param binName - the diagnostic prefix on profile manifest errors.
+ */
+async function checkBootProfileFallback(ctx: Context, binName: string): Promise<void> {
+  const context = ctx.get('profileContext')
+  if (context === undefined) return
+  const report = await checkProfileBundleResolution({
+    binName,
+    installAnchor: context.installAnchor,
+    profileDir: context.dir,
+    home: context.home,
+  })
+  const summary = `profile bundles: ${report.checked - report.missing.length} resolvable, `
+    + `${report.repaired} repaired, ${report.missing.length} missing`
+  if (report.repaired > 0 || report.missing.length > 0) ctx.logger.info(summary)
+  else ctx.logger.debug(summary)
+  for (const name of report.missing) ctx.logger.warn(`profile bundle missing: ${name}`)
 }
 
 /** Prompt-section name for the harness-source location line an app bin adds after boot. */

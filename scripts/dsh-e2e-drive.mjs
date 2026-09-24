@@ -31,16 +31,29 @@
  *   --approve MODE        answer approval/request waterfalls: once|always|reject|off
  *                         (default off: approvals are printed and may park)
  *   --answer TEXT         answer user-questions/request with TEXT as free-form input
+ *   --answer-questions M  answer user-questions/request: off|auto|<path-to-json>
+ *                         off (default) leaves questions for a human; auto selects
+ *                         the first option of every question; a JSON path is an
+ *                         object mapping question text (exact or substring) to a
+ *                         label, label[], or {selected?, custom?}. Passing the
+ *                         flag at all attaches a passive observer, so even `off`
+ *                         records every question seen as unanswered.
  *   --summarize FILE      rebuild <sessionId>.summary.md from a transcript.json
  *   --quiet               suppress the live event log
+ *
+ * Every question seen is appended to <out>/<sessionId>.questions.jsonl, with the
+ * chosen answer when one was sent and `answered:false` plus a reason when not.
+ * A request is answered only when every question in it is answerable; otherwise
+ * the whole request is left unanswered and fails closed as before.
  *
  * Exit codes: 0 terminal turn observed; 3 timeout without terminal; 1 hard failure.
  */
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const DEFAULT_URL = 'http://127.0.0.1:3080'
 const RPC_TIMEOUT_MS = 30_000
@@ -65,6 +78,13 @@ const HELP = `dsh-e2e-drive.mjs — drive one DSH session from the command line.
   --approve MODE        answer approval/request waterfalls: once|always|reject|off
                         (default off: approvals are printed and may park)
   --answer TEXT         answer user-questions/request with TEXT as free-form input
+  --answer-questions M  answer user-questions/request: off|auto|<path-to-json>
+                        off (default) leaves questions for a human; auto selects
+                        the first option of every question; a JSON path maps
+                        question text (exact or substring) to a label, label[],
+                        or {selected?, custom?}; passing the flag at all attaches
+                        a passive observer, so even "off" records questions seen
+                        as unanswered
   --summarize FILE      rebuild <sessionId>.summary.md from a transcript.json and exit
   --quiet               suppress the live event log
   --help                this text
@@ -85,6 +105,7 @@ function parseArgs(argv) {
     url: DEFAULT_URL,
     unit: 'dsh-web.service',
     approve: 'off',
+    answerQuestions: 'off',
   }
   const take = (name, inline, args, index) => {
     if (inline !== undefined) return inline
@@ -113,12 +134,13 @@ function parseArgs(argv) {
       case '--summarize': opts.summarize = take(name, inline, argv, index); break
       case '--approve': opts.approve = take(name, inline, argv, index); break
       case '--answer': opts.answer = take(name, inline, argv, index); break
+      case '--answer-questions': opts.answerQuestions = take(name, inline, argv, index); opts.answerQuestionsGiven = true; break
       case '--quiet': opts.quiet = true; break
       case '--help': case '-h': console.log(HELP); process.exit(0)
       default: fail(`unknown argument ${arg}`)
     }
     if (inline !== undefined) continue
-    if (['--cwd', '--task', '--agent-preset', '--model', '--timeout', '--cancel-after', '--out', '--url', '--unit', '--cookie', '--session-id', '--approve', '--answer', '--summarize'].includes(name)) index++
+    if (['--cwd', '--task', '--agent-preset', '--model', '--timeout', '--cancel-after', '--out', '--url', '--unit', '--cookie', '--session-id', '--approve', '--answer', '--answer-questions', '--summarize'].includes(name)) index++
   }
   if (opts.summarize !== undefined) return opts
   if (opts.cwd === undefined) fail('--cwd is required')
@@ -127,7 +149,63 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.cancelAfter) || opts.cancelAfter < 0) fail('--cancel-after must be >= 0')
   if (opts.model !== undefined && !/^[^/]+\/.+$/.test(opts.model)) fail('--model must be provider/model')
   if (!['once', 'always', 'reject', 'off'].includes(opts.approve)) fail('--approve must be once|always|reject|off')
+  if (opts.answerQuestions === 'off' || opts.answerQuestions === 'auto') {
+    opts.questionMode = { mode: opts.answerQuestions }
+  } else {
+    opts.questionMode = { mode: 'map', entries: loadQuestionMap(resolve(opts.answerQuestions)) }
+  }
   return opts
+}
+
+/** Read the `--answer-questions <path>` JSON map into ordered match entries. */
+function loadQuestionMap(path) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    fail(`--answer-questions map ${path} is not readable JSON: ${error.message}`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    fail(`--answer-questions map ${path} must be a JSON object of question text → label(s)`)
+  }
+  const entries = []
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key.trim() === '') fail(`--answer-questions map ${path} has an empty question key`)
+    let selected = []
+    let custom
+    if (typeof value === 'string') {
+      selected = [value]
+    } else if (Array.isArray(value) && value.every(item => typeof item === 'string')) {
+      selected = value
+    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      if (value.selected !== undefined) {
+        if (!Array.isArray(value.selected) || !value.selected.every(item => typeof item === 'string')) {
+          fail(`--answer-questions map ${path} entry ${JSON.stringify(key)} .selected must be a string[]`)
+        }
+        selected = value.selected
+      }
+      if (value.custom !== undefined) {
+        if (typeof value.custom !== 'string') fail(`--answer-questions map ${path} entry ${JSON.stringify(key)} .custom must be a string`)
+        custom = value.custom
+      }
+    } else {
+      fail(`--answer-questions map ${path} entry ${JSON.stringify(key)} must be a string, string[], or {selected?, custom?}`)
+    }
+    if (selected.length === 0 && custom === undefined) fail(`--answer-questions map ${path} entry ${JSON.stringify(key)} chooses nothing`)
+    entries.push({ key, selected, custom })
+  }
+  if (entries.length === 0) fail(`--answer-questions map ${path} is empty`)
+  return entries
+}
+
+/** Exact question-text match wins; otherwise the longest substring key. */
+function matchQuestionMap(entries, text) {
+  let best
+  for (const entry of entries) {
+    if (text === entry.key) return entry
+    if (text.includes(entry.key) && (best === undefined || entry.key.length > best.key.length)) best = entry
+  }
+  return best
 }
 
 /** Extract the first dsh-auth cookie from a cookie/header file. */
@@ -411,12 +489,20 @@ function sleep(ms) {
  * Optional `$events` client that answers approval/user-question waterfalls.
  * There is no respond RPC: the Host forwards the waterfall over the same mux
  * (`endpoint: '$events'`) and accepts a unary `$events/result` reply.
+ *
+ * `answerQuestions` is `{mode:'off'|'auto'}` or `{mode:'map', entries}` from
+ * `loadQuestionMap`. Every question is appended to
+ * `<out>/<sessionId>.questions.jsonl`; a request is answered only when every
+ * question in it has an answer, so a partially answerable request fails closed
+ * whole and every line records `answered:false` with the reason.
  */
 class EventAnswerer {
-  constructor(state, { approve, answer }) {
+  constructor(state, { approve, answer, answerQuestions, outDir }) {
     this.state = state
     this.approve = approve
     this.answer = answer
+    this.answerQuestions = answerQuestions
+    this.questionsPath = join(outDir, `${state.sessionId}.questions.jsonl`)
     this.clientId = undefined
     this.socket = undefined
     this.proxy = undefined
@@ -466,17 +552,106 @@ class EventAnswerer {
       return
     }
     if (frame.event === 'user-questions/request') {
-      if (this.answer === undefined) {
-        note(this.state, 'answerer: user-questions/request left for a human')
+      const questions = Array.isArray(frame.request?.questions) ? frame.request.questions : []
+      if (questions.length === 0) {
+        note(this.state, 'answerer: user-questions/request with no questions')
         return
       }
-      const questions = Array.isArray(frame.request?.questions) ? frame.request.questions : []
-      const value = { answers: questions.map(question => ({ id: question?.id ?? '?', selected: [], custom: this.answer })) }
-      note(this.state, `answerer: user-questions/request → custom answer`)
+      const plans = questions.map(question => this.questionPlan(question))
+      const blocked = plans.find(plan => !plan.answered)
+      if (blocked !== undefined) {
+        const reason = `request left unanswered because question ${blocked.questionId} ${blocked.reason}`
+        for (const plan of plans) {
+          if (plan.answered) {
+            plan.answered = false
+            plan.reason = reason
+          }
+          this.logQuestion(frame, plan)
+        }
+        note(this.state, `answerer: user-questions/request left unanswered (${blocked.reason})`)
+        return
+      }
+      for (const plan of plans) this.logQuestion(frame, plan)
+      const value = {
+        answers: plans.map(plan => ({
+          id: plan.questionId,
+          selected: plan.selected,
+          ...plan.custom === undefined ? {} : { custom: plan.custom },
+        })),
+      }
+      const summary = plans.map(plan => plan.selected.join('/') || plan.custom || '?').join(', ')
+      note(this.state, `answerer: user-questions/request → ${plans.length} answer(s) [${summary}] (mode ${this.answerQuestions.mode})`)
       this.reply(frame, value)
       return
     }
     note(this.state, `answerer: unhandled waterfall ${frame.event}`)
+  }
+
+  /** Decide one question under the configured mode, without side effects. */
+  questionPlan(question) {
+    const options = (Array.isArray(question?.options) ? question.options : [])
+      .map(option => option !== null && typeof option === 'object' ? String(option.label ?? '') : '')
+      .filter(label => label !== '')
+    const plan = {
+      questionId: String(question?.id ?? '?'),
+      question: String(question?.question ?? ''),
+      options,
+      selected: [],
+      custom: undefined,
+      answered: false,
+      reason: undefined,
+      mode: this.answerQuestions.mode,
+    }
+    if (this.answerQuestions.mode === 'auto') {
+      if (options.length === 0) {
+        plan.reason = 'offers no options for auto to choose'
+        return plan
+      }
+      plan.selected = [options[0]]
+      plan.answered = true
+      return plan
+    }
+    if (this.answerQuestions.mode === 'map') {
+      const entry = matchQuestionMap(this.answerQuestions.entries, plan.question)
+      if (entry === undefined) {
+        plan.reason = 'matched no entry of the answer map'
+        return plan
+      }
+      plan.selected = [...entry.selected]
+      plan.custom = entry.custom
+      plan.answered = true
+      return plan
+    }
+    if (this.answer !== undefined) {
+      plan.mode = 'custom'
+      plan.custom = this.answer
+      plan.answered = true
+      return plan
+    }
+    plan.reason = 'answer-questions is off and no --answer text was given'
+    return plan
+  }
+
+  /** Append one `<sessionId>.questions.jsonl` line for a seen question. */
+  logQuestion(frame, plan) {
+    const line = {
+      timestamp: new Date().toISOString(),
+      sessionId: this.state.sessionId,
+      eventId: frame.eventId,
+      questionId: plan.questionId,
+      question: plan.question,
+      options: plan.options,
+      selected: plan.selected,
+      custom: plan.custom ?? null,
+      answered: plan.answered,
+      mode: plan.mode,
+      reason: plan.reason ?? null,
+    }
+    try {
+      appendFileSync(this.questionsPath, `${JSON.stringify(line)}\n`)
+    } catch (error) {
+      note(this.state, `answerer: question log append failed: ${error.message}`)
+    }
   }
 
   reply(frame, value) {
@@ -635,8 +810,13 @@ async function run(opts) {
   }
 
   await ensureOpen()
-  const answerer = new EventAnswerer(state, { approve: opts.approve, answer: opts.answer })
-  if (opts.approve !== 'off' || opts.answer !== undefined) {
+  const answerer = new EventAnswerer(state, {
+    approve: opts.approve,
+    answer: opts.answer,
+    answerQuestions: opts.questionMode,
+    outDir,
+  })
+  if (opts.approve !== 'off' || opts.answer !== undefined || opts.questionMode.mode !== 'off' || opts.answerQuestionsGiven === true) {
     try {
       await answerer.connect()
     } catch (error) {
@@ -893,19 +1073,25 @@ function summarize(transcriptPath) {
   return path
 }
 
-try {
-  const opts = parseArgs(process.argv.slice(2))
-  if (opts.summarize !== undefined) {
-    console.log(summarize(opts.summarize))
-    process.exit(0)
-  }
-  const code = await run(opts)
-  process.exit(code)
-} catch (error) {
-  if (error instanceof DriverError) {
-    console.error(`dsh-e2e-drive: ${error.message}`)
+const invokedAsScript = process.argv[1] !== undefined
+  && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (invokedAsScript) {
+  try {
+    const opts = parseArgs(process.argv.slice(2))
+    if (opts.summarize !== undefined) {
+      console.log(summarize(opts.summarize))
+      process.exit(0)
+    }
+    const code = await run(opts)
+    process.exit(code)
+  } catch (error) {
+    if (error instanceof DriverError) {
+      console.error(`dsh-e2e-drive: ${error.message}`)
+      process.exit(1)
+    }
+    console.error(`dsh-e2e-drive: unexpected failure\n${error?.stack ?? String(error)}`)
     process.exit(1)
   }
-  console.error(`dsh-e2e-drive: unexpected failure\n${error?.stack ?? String(error)}`)
-  process.exit(1)
 }
+
+export { cookieFromFile, mintCookie, rpc }

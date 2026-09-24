@@ -644,6 +644,47 @@ export function healIsolatedProfileModuleFallback(options: { installAnchor: stri
   healProfileModuleFallback(options.profile, new Set(installationLinks.keys()), true, undefined, undefined, installationLinks)
 }
 
+/** Package state missing for one computed profile resolution generation. */
+export interface ProfileModuleFallbackAudit {
+  /** Number of package names examined. */
+  readonly checked: number
+  /** Package names that do not resolve to an installed package for this profile. */
+  readonly missing: readonly string[]
+}
+
+/**
+ * Report the computed generation's packages that do not resolve to an
+ * installed package from the profile directory. Node checks the profile's own
+ * `node_modules` first and the shared `$DSH_HOME/profiles/node_modules`
+ * fallback next, so a package satisfied by either position is present; only a
+ * name Node cannot resolve is missing. Without a loaded profile, the shared
+ * fallback position alone is examined.
+ * @param options - installation anchor, optional loaded profile, and Harness home.
+ * @returns the examined package count and the names that do not resolve.
+ */
+export function auditProfileModuleFallback(
+  options: ProfileModuleFallbackOptions,
+): ProfileModuleFallbackAudit {
+  const { installAnchor, profile, home = resolveDshHome() } = options
+  const { entries, packageNames } = resolveModuleFallbackEntries(installAnchor, true)
+  if (profile === undefined) {
+    const modulesDir = join(home, PROFILES_DIR, 'node_modules')
+    return {
+      checked: entries.length,
+      missing: entries
+        .filter(entry => !existsSync(join(modulesDir, entry.packageName, 'package.json')))
+        .map(entry => entry.packageName),
+    }
+  }
+  const names = new Set(entries.map(entry => entry.packageName))
+  for (const name of healProfileModuleFallback(profile, packageNames, false).keys()) names.add(name)
+  const anchor = join(profile.dir, 'package.json')
+  return {
+    checked: names.size,
+    missing: [...names].filter(name => packageDirFromAnchor(anchor, name) === undefined),
+  }
+}
+
 /**
  * Detach this profile's fallback links before a package-manager mutation.
  * Installed packages and links replaced by pnpm remain untouched; the next profile launch restores fallbacks.

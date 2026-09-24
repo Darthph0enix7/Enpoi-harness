@@ -62,6 +62,18 @@ profile 是同一套 dsh 安装提供不同应用界面的方式：`web`、`head
 
 `sanitizeProfile(binName, profileDir, bundles)` 提供文件恢复，无需加载插件或解析 patch。Desktop 在原生致命错误恢复中调用它。调用前必须停止 profile 并排除并发 profile 写入。它将 profile 的 `cordis.patch.yml` 重命名为带唯一 `.bak-<timestamp>` 后缀的同目录备份，并恢复调用方指定的 bundle 列表，保留已安装包和其他 manifest 字段。时间戳为 Unix 毫秒数；同名备份已存在时追加序号（`-1`、`-2`、……），时间戳保持不变。返回值为备份路径；patch 不存在时返回 `undefined`，缺失的 profile 不会被创建。下次启动的 profile 初始化会重新创建空 patch。home 级 patch 不变。无效 profile JSON 在修改前报错；后续错误向调用方抛出，保留已完成的修改供重试。
 
+### Profile fallback 修复
+
+在 profile 目录内执行包管理器（`pnpm install`，或 `pnpm <script>` 之前的隐式安装）会按 lockfile 重建 profile 的 `node_modules`，并清除 app-boot 管理的 fallback 链接：安装依赖闭包，以及仅由所选组合包携带、profile manifest 并未直接依赖的包。链接被清除后，需要它的条目会导入失败（`<id>: failed to import`），直到下一次 link 模式启动；之后的 HMR 重载也会重复该失败。
+
+App boot 在两个时刻提供防护。挂载 profile 条目前，它会校验每个配置的组合包；当 profile 已带有物化的 fallback 状态时，还会校验计算出的 fallback generation 中的每个包；缺失状态只修复一次，并报告 `profile bundles: N resolvable, M repaired, K missing`，对每个仍然缺失的配置名称输出一条 `warn`。在启动期间及后续配置重载中，若某个导入因模块解析错误失败，它会为每个失败包在每进程内修复 profile fallback 一次，并重试导入一次，报告 `profile-heal: repaired N links; retrying <package>` 或 `profile-heal: retry failed: <reason>`；其他失败和重复失败都会原样抛出，teardown 期间绝不写入链接。没有 fallback 状态的 runtime 解析 profile 只检查其组合包，不写入任何链接。
+
+`checkProfileBundleResolution({ installAnchor, profileDir, home?, repair? })` 以单次调用完成同样的检查与修复，返回 `{ checked, repaired, missing }`；`createProfileFallbackInclude` 构建在 bundle 导入失败后重试的 root include。launcher 命令无需启动应用即可打印该报告：
+
+```sh
+cd ~/deepseek-harness && node --import tsx/esm --input-type=module -e "const {checkProfileBundleResolution}=await import('./packages/boot/app-boot/src/index.ts'); const home=process.env.DSH_HOME||process.env.HOME+'/.dsh'; console.log(JSON.stringify(await checkProfileBundleResolution({installAnchor:process.cwd()+'/apps/cli/package.json',profileDir:home+'/profiles/web',home}),null,2))"
+```
+
 ### 预览生效配置
 
 启动前，你可以打印应用将挂载的确切配置：dump 会以 `!!js` 表达式原样展示组合后的条目列表，并按注释分组标明每个源文件及其 patch 层，输出是一份可加载的 YAML 文档。未匹配到任何行的 patch 会连同其层标签一起报告；配置缺失、无法解析或字段无效都会使 dump 失败。
@@ -133,6 +145,7 @@ Loader 结算后，app-boot 在仅 optional 条目未激活时输出警告。如
 | [`src/index.ts`](src/index.ts) | 启动 helper：配置解析、环境加载、会明确报错的保护机制、激活审计、patch 解析、配置 dump、harness 源码段落 |
 | [`src/profile.ts`](src/profile.ts) | profile 发现、初始化、组合包解析、模块后备机制 |
 | [`src/profile-plugins.ts`](src/profile-plugins.ts) | 已安装依赖、bundle 启用策略与 manifest 更新 |
+| [`src/profile-fallback.ts`](src/profile-fallback.ts) | bundle 解析检查与修复，以及 root include 导入防护 |
 | [`src/profile-sanitize.ts`](src/profile-sanitize.ts) | profile patch 备份与恢复 bundle 启用状态 |
 | [`src/profile-resolution/`](src/profile-resolution/) | 运行时 resolver、package metadata 服务与构建后 Worker bootstrap |
 | — | 不发布运行时不变式伴生入口；每个 resolver generation 只有一个 registration 所有，dual 模式在解析时比较独立物化的结果。 |

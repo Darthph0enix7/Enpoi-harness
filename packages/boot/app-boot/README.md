@@ -62,6 +62,18 @@ Before mounting profile rows, the `dsh` launcher computes one immutable package-
 
 `sanitizeProfile(binName, profileDir, bundles)` provides filesystem recovery without loading plugins or parsing patches. Desktop uses it for native fatal recovery. Call it only after stopping the profile and excluding concurrent profile writes. It renames the profile’s `cordis.patch.yml` to a unique `.bak-<timestamp>` sibling and restores the supplied bundle list, preserving installed packages and other manifest fields. The timestamp is Unix time in milliseconds; collisions append an ordinal (`-1`, `-2`, …) without changing it. It returns the backup path, or `undefined` when no patch exists; missing profiles remain absent. Profile initialization recreates an empty patch on the next launch. The home-level patch is unchanged. Invalid profile JSON fails before mutation; later errors propagate and retain completed changes for retry.
 
+### Profile fallback repair
+
+A package-manager run inside the profile directory (`pnpm install`, or an implicit install before a `pnpm <script>`) rebuilds the profile’s `node_modules` from its lockfile and prunes the fallback links app-boot manages: the installation dependency closure and the packages carried only by selected bundles, which the profile manifest does not depend on directly. A pruned link makes the row that needs it fail to import (`<id>: failed to import`) until the next link-mode launch, and later HMR reloads repeat the failure.
+
+App boot guards both moments. Before profile rows mount, it verifies every configured bundle and, when the profile carries materialized fallback state, every package of the computed fallback generation; missing state is repaired once and the run reports `profile bundles: N resolvable, M repaired, K missing`, with one `warn` per configured name still missing. During boot and later configuration reloads, an import that fails with a module-resolution error repairs the profile fallback once per failing package per process and retries the import once, reporting `profile-heal: repaired N links; retrying <package>` or `profile-heal: retry failed: <reason>`; any other failure and every repeat is rethrown untouched, and teardown never writes links. A runtime-resolution profile with no fallback state examines only its bundles and writes no links.
+
+`checkProfileBundleResolution({ installAnchor, profileDir, home?, repair? })` performs the same check and repair as one call and returns `{ checked, repaired, missing }`; `createProfileFallbackInclude` builds the root include that retries a failed bundle import. A launcher command can print the report without starting the app:
+
+```sh
+cd ~/deepseek-harness && node --import tsx/esm --input-type=module -e "const {checkProfileBundleResolution}=await import('./packages/boot/app-boot/src/index.ts'); const home=process.env.DSH_HOME||process.env.HOME+'/.dsh'; console.log(JSON.stringify(await checkProfileBundleResolution({installAnchor:process.cwd()+'/apps/cli/package.json',profileDir:home+'/profiles/web',home}),null,2))"
+```
+
 ### Previewing the effective configuration
 
 Before you boot, you can print the exact configuration the app will mount: the dump shows the composed entry list with `!!js` expressions verbatim, grouped under comments naming each source file and the patch layers that changed it, as one loadable YAML document. Patches that match no row are reported with their layer label; a missing, unparsable, or invalid config fails the dump.
@@ -133,6 +145,7 @@ The exports each own one stage of the boot: config resolution and snapshot repla
 | [`src/index.ts`](src/index.ts) | Boot helpers: config resolution, environment loading, fail-loud guard, activation audit, patch parsing, config dump, harness-source section |
 | [`src/profile.ts`](src/profile.ts) | Profile discovery, initialization, bundle resolution, module fallback |
 | [`src/profile-plugins.ts`](src/profile-plugins.ts) | Installed dependencies, bundle activation policy, and manifest updates |
+| [`src/profile-fallback.ts`](src/profile-fallback.ts) | Bundle-resolution check and repair, and the root-include import guard |
 | [`src/profile-sanitize.ts`](src/profile-sanitize.ts) | Profile patch backup and recovery bundle activation |
 | [`src/profile-resolution/`](src/profile-resolution/) | Runtime resolver, package-metadata service, and built Worker bootstrap |
 | — | No runtime invariant companion is published; one registration owns each resolver generation, and dual mode compares the independently materialized result at resolution time. |
