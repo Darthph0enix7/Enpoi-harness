@@ -177,6 +177,7 @@ export class FakeApiClient {
         descendantsExact: true,
         pendingAsks: [],
       },
+      recentFailures: [],
       recentToolCalls: [],
       injectionIndex: [],
       subagentTree: [],
