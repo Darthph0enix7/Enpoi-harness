@@ -589,8 +589,25 @@ export class PeerService extends TypertRemoteService {
 
   private decrementFollowers(sessionId: SessionId): void {
     const next = (this.followers.get(sessionId) ?? 1) - 1
-    if (next <= 0) this.followers.delete(sessionId)
-    else this.followers.set(sessionId, next)
+    if (next > 0) {
+      this.followers.set(sessionId, next)
+      return
+    }
+    this.followers.delete(sessionId)
+    // The last follower left: an open turn with no observer is exactly what the
+    // orphan watchdog exists for, so a peer that prompts and drops still gets
+    // its turn bounded. Nothing to arm for an unpaired or idle session.
+    let resolved: ResolvedPeerPairing | undefined
+    try {
+      resolved = this.resolveTarget({ kind: 'session', sessionId })
+    } catch {
+      // An unpaired session has no watchdog to arm; the resolve failure is the
+      // signal here, not a condition to surface.
+      resolved = undefined
+    }
+    if (resolved !== undefined && this.ctx.agents.get(sessionId)?.status === 'running') {
+      this.scheduleWatchdog(resolved)
+    }
   }
 
   private scheduleWatchdog(resolved: ResolvedPeerPairing): void {

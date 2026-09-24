@@ -60,18 +60,41 @@ describe('ApprovalService.request', () => {
     expect(appended).toHaveLength(0)
   })
 
-  it('bounds a pending ask: an answerer that never settles resolves unavailable', async () => {
+  it('bounds a pending ask: an answerer that never settles resolves unavailable and cancels the ask', async () => {
     const ctx = new Context()
     await ctx.plugin(ApprovalService, { answerTimeoutMs: 5 })
     const { agent, appended } = fakeAgent()
     // A registered-but-silent answerer models an attached client that walked away.
-    ctx.on('approval/request', () => new Promise<ApprovalOutcome>(() => {}))
+    let dispatched: { readonly signal?: AbortSignal } | undefined
+    ctx.on('approval/request', (request) => {
+      dispatched = request
+      return new Promise<ApprovalOutcome>(() => {})
+    })
 
     await expect(ctx.approval.request(requestOf(agent))).resolves.toBe('unavailable')
 
     const decided = appended.find(event => event.type === 'approval/decided')
     expect(decided?.data).toMatchObject({ outcome: 'unavailable' })
     expect(appended.map(event => event.type)).toEqual(['approval/asked', 'approval/decided'])
+    // A settled ask must not stay answerable: the dispatch signal aborts so a
+    // forwarded presentation (the browser's approval card) is cancelled too.
+    expect(dispatched?.signal?.aborted).toBe(true)
+  })
+
+  it('keeps the caller request object exact when the bounded wait is disabled', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService, { answerTimeoutMs: 0 })
+    const { agent } = fakeAgent()
+    let received: ApprovalRequest | undefined
+    ctx.on('approval/request', (request) => {
+      received = request
+      return Promise.resolve<ApprovalOutcome>('allowed-once')
+    })
+    const request = requestOf(agent)
+
+    await expect(ctx.approval.request(request)).resolves.toBe('allowed-once')
+
+    expect(received).toBe(request)
   })
 
   it('fails closed to unavailable when nobody listens, auditing the asked/decided pair', async () => {
@@ -97,7 +120,7 @@ describe('ApprovalService.request', () => {
     expect(Object.keys(appended[0]?.data ?? {}).sort()).toEqual(['id', 'toolName'])
   })
 
-  it('borrows the exact readonly request for scoped dispatch and audit', async () => {
+  it('borrows the caller fields for scoped dispatch and never mutates the request', async () => {
     const ctx = await mounted()
     const { agent, appended } = fakeAgent()
     let scope!: Scope
@@ -119,7 +142,16 @@ describe('ApprovalService.request', () => {
 
     await expect(ctx.approval.request(request)).resolves.toBe('allowed-once')
     expect(carrier).toBe(agent)
-    expect(received).toBe(request)
+    expect(received).toMatchObject({
+      agent,
+      toolName: 'scoped-tool',
+      callId: 'scoped-call',
+      reason: 'scoped reason',
+    })
+    // The dispatched request carries the ask's own cancellation signal; the
+    // caller's object is never mutated.
+    expect(received?.signal).toBeInstanceOf(AbortSignal)
+    expect(request.signal).toBeUndefined()
     expect(appended).toHaveLength(2)
     expect(appended[0]?.data).toMatchObject({
       toolName: 'scoped-tool',

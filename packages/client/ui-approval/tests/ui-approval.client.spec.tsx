@@ -264,6 +264,30 @@ describe('approval Remote Event consumer', () => {
     await scope.fiber.dispose()
   })
 
+  it('returns the composer to no takeover when the host cancels a bounded-wait ask', async () => {
+    const bench = setupPlugin()
+    const scope = createScope(bench.ctx, id('s1'))
+    await scope.fiber.await()
+    const controller = new AbortController()
+    const { options } = bench.registration()
+    const result = bench.listener.call(scope.ctx, {
+      toolName: 'bash',
+      signal: controller.signal,
+    }, () => Promise.resolve('unavailable'))
+    const pending = bench.pending.getSnapshot()[0]!
+    expect(options.select({ pendingInteraction: pending })).toBe(pending)
+
+    // The Host's bounded wait ends the ask and cancels the forwarded request:
+    // the card must vanish so a human cannot click Allow on a dead ask.
+    controller.abort(new Error('approval ask exceeded its bounded wait'))
+
+    await expect(result).rejects.toThrow('approval ask exceeded its bounded wait')
+    // No published interaction remains, so the composer resolves no takeover.
+    expect(bench.pending.getSnapshot()).toEqual([])
+    expect(options.select({ pendingInteraction: bench.pending.getSnapshot()[0] })).toBeNull()
+    await scope.fiber.dispose()
+  })
+
   it('delegates an active request when its interaction domain unloads', async () => {
     const bench = setupPlugin()
     const scope = createScope(bench.ctx, id('s1'))

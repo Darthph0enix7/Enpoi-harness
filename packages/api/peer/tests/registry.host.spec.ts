@@ -153,6 +153,26 @@ describe('ask registry race', () => {
       .toThrow(/no pending ask/u)
   })
 
+  it('retires an ask whose local chain rejects', async () => {
+    const { ctx, registry, agents } = harness(['root'])
+    const agent = fakeAgent('root')
+    agents.set(agent.id, agent)
+    const pending = ctx.waterfall(
+      scopeTarget(agent, agent),
+      'approval/request',
+      approvalRequest(agent),
+      () => Promise.reject(new Error('forwarded ask was cancelled')),
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(registry.pendingFor('root' as SessionId)).toHaveLength(1)
+
+    await expect(pending).rejects.toThrow('forwarded ask was cancelled')
+
+    // The settled rejection must not leave an answerable entry behind.
+    expect(registry.pendingFor('root' as SessionId)).toHaveLength(0)
+  })
+
   it('never exposes an ask for an unpaired session', async () => {
     const { ctx, registry, agents } = harness(['root'])
     const agent = fakeAgent('other')

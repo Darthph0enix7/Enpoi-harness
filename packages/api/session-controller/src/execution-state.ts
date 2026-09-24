@@ -467,10 +467,13 @@ export class SessionExecutionStateReader {
   }
 
   /**
-   * Live descendants: every Agent whose durable parent chain reaches this
-   * Session, plus every active subagent run whose delegating parent does.
-   * Quiet children are resident Agents like any other, so they are included;
-   * `exact` is false when any candidate's chain cannot be resolved here.
+   * Live descendants: every *working* Agent whose durable parent chain reaches
+   * this Session, plus every active subagent run whose delegating parent does.
+   * A resident-but-idle child (parked between turns, or a child that finished
+   * earlier) does not hold the latch: counting it would pin every parent that
+   * ever spawned one to `waiting_subagents`. Quiet children work like any
+   * other, so a working quiet child counts; `exact` is false when any
+   * candidate's chain cannot be resolved here.
    */
   private descendants(sessionId: SessionId): { ids: ReadonlySet<SessionId>; exact: boolean } {
     const ids = new Set<SessionId>()
@@ -482,7 +485,7 @@ export class SessionExecutionStateReader {
         exact = false
         continue
       }
-      if (root === sessionId) ids.add(agent.id)
+      if (root === sessionId && agent.status === 'running') ids.add(agent.id)
     }
     for (const run of this.activeRuns.values()) {
       if (run.childId === sessionId || ids.has(run.childId)) continue

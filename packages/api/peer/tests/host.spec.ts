@@ -499,6 +499,38 @@ describe('peer host service', () => {
     hold.release()
   })
 
+  it('re-arms the orphan watchdog when the last follower drops mid-turn', async () => {
+    const { peer, adapter, target } = await setup({ watchdogMs: 120 })
+    // Attach a follower first, then drop it while the turn runs: the drop must
+    // re-arm the watchdog it disarmed on attach, or the turn runs unbounded.
+    const controller = new AbortController()
+    const iterator = peer.follow({ target }, controller.signal)[Symbol.asyncIterator]()
+    await iterator.next()
+
+    const hold = adapter.holdNext()
+    await peer.prompt({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-drop' as never,
+      content: [{ type: 'text', text: 'drop me' }],
+    }, NEVER_ABORTED)
+    await hold.started
+    // Outlive the watchdog armed at prompt admission: it fires while the
+    // follower is still attached, sees followers > 0, and disarms itself. Only
+    // dropping the follower now must re-arm the watchdog.
+    await new Promise(resolve => setTimeout(resolve, 200))
+    // Dropping the follower mirrors the caller's `for await` loop leaving on
+    // abort: the terminal `end` frame arrives, then `return()` runs the
+    // generator's `finally`, which is what releases the follower count.
+    controller.abort()
+    await iterator.next().catch(() => undefined)
+    await iterator.return?.(undefined).catch(() => undefined)
+
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle', 5_000)
+    expect((await peer.state({ target })).state.lastTurnEnd?.reason).toBe('aborted')
+    hold.release()
+  })
+
   it('reloads created-session bindings across a host restart', async () => {
     const { peer, sessionId, target } = await setup()
     await peer.prompt({

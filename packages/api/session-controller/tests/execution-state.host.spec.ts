@@ -1,7 +1,7 @@
 /**
  * Host execution-latch and Session-digest behavior: the latch priority order
- * (pending ask → open turn with live descendants → open turn → idle) with a
- * real Session and live child Agents, and the digest's bounded previews,
+ * (pending ask → open turn with working descendants → open turn → idle) with a
+ * real Session and real child Agents, and the digest's bounded previews,
  * injection index, subagent tree, and pending interactions.
  */
 
@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -36,23 +36,29 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-/** Scripted model that can hold its stream open so a turn stays live. */
+/** One held stream: resolves `started` when the stream begins, `release()` ends the hold. */
+interface HeldStream {
+  readonly started: Promise<undefined>
+  release(): undefined
+}
+
+/**
+ * Scripted model that holds individual streams open so several turns can stay
+ * live at once (a parent and its child), each on its own gate.
+ */
 class ScriptedAdapter extends LlmAdapter {
   readonly calls: GenerateOptions[] = []
-  private hold = false
-  private releaseStream: (() => undefined) | undefined
-  private started: (() => undefined) | undefined
+  private readonly holds: { readonly gate: PromiseWithResolvers<undefined>; readonly started: PromiseWithResolvers<undefined> }[] = []
 
-  /** Hold the next stream until `release()` is called. */
-  holdNext(): { started: Promise<undefined>; release: () => undefined } {
-    this.hold = true
+  /** Hold the next stream call until its `release()` is called. */
+  holdNext(): HeldStream {
+    const gate = Promise.withResolvers<undefined>()
     const started = Promise.withResolvers<undefined>()
-    this.started = () => { started.resolve(undefined) }
+    this.holds.push({ gate, started })
     return {
       started: started.promise,
       release: () => {
-        this.hold = false
-        this.releaseStream?.()
+        gate.resolve(undefined)
         return undefined
       },
     }
@@ -60,16 +66,14 @@ class ScriptedAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls.push(options)
-    if (this.hold) {
-      const released = Promise.withResolvers<undefined>()
-      this.releaseStream = () => { released.resolve(undefined) }
-      this.started?.()
+    const hold = this.holds.shift()
+    if (hold !== undefined) {
+      hold.started.resolve(undefined)
       // Bounded hold: an unreleased stream must not keep a failed spec's fibers alive.
-      const timer = setTimeout(() => { released.resolve(undefined) }, 2_000)
-      await released.promise
+      const timer = setTimeout(() => { hold.gate.resolve(undefined) }, 2_000)
+      timer.unref()
+      await hold.gate.promise
       clearTimeout(timer)
-      this.releaseStream = undefined
-      this.started = undefined
     }
     const text = `reply-${String(this.calls.length)}`
     yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -84,6 +88,7 @@ interface Harness {
   readonly ctx: Context
   readonly remote: TestSessionRemote
   readonly adapter: ScriptedAdapter
+  readonly parent: Agent
   readonly sessionId: SessionId
   readonly root: string
 }
@@ -106,7 +111,41 @@ async function harness(): Promise<Harness> {
   await mountAgentLoopTestHarness(ctx)
   ctx.llm.registerAdapter(['scripted'], adapter)
   const created = await remote.create({ cwd: root })
-  return { ctx, remote, adapter, sessionId: valueOf(created).sessionId, root }
+  const sessionId = valueOf(created).sessionId
+  return { ctx, remote, adapter, parent: ctx.agents.get(sessionId) as Agent, sessionId, root }
+}
+
+/**
+ * Create one resident child Agent under the parent and make it genuinely
+ * working: a host-side followup starts its own turn, and the adapter holds
+ * that turn's stream open until the caller releases it.
+ */
+async function startWorkingChild(
+  test: Harness,
+  childId: string,
+  prompt: string,
+): Promise<{ readonly child: AgentHandle; readonly hold: HeldStream }> {
+  const child = await test.ctx.agents.create({
+    sessionId: brandString<SessionId>(childId),
+    parentAgent: test.parent,
+    agentOptions: { provider: 'scripted', model: 'mock' },
+    meta: { parentSession: test.sessionId, origin: 'subagent', delegationDepth: 1, cwd: test.root },
+  })
+  child.agent.session.append('subagent/descriptor', {
+    version: 3,
+    mode: 'continuable',
+    provider: 'spawn',
+    label: childId,
+    quiet: true,
+  })
+  const hold = test.adapter.holdNext()
+  child.agent.followup(createUserMessage({
+    content: [{ type: 'text', text: prompt }],
+    source: { kind: 'user' },
+  }))
+  await hold.started
+  await waitFor(() => child.agent.status === 'running')
+  return { child, hold }
 }
 
 /** Unwrap one Remote result or fail the test with its structured error. */
@@ -124,8 +163,8 @@ async function waitFor(assertion: () => boolean | Promise<boolean>, timeoutMs = 
   throw new Error(`condition not met within ${String(timeoutMs)}ms`)
 }
 
-function latchOf(harness: Harness): Promise<RemoteResult<SessionExecutionStateValue>> {
-  return harness.remote.executionState({ sessionId: harness.sessionId })
+function latchOf(test: Harness): Promise<RemoteResult<SessionExecutionStateValue>> {
+  return test.remote.executionState({ sessionId: test.sessionId })
 }
 
 /** One prompt request body with a fresh identity. */
@@ -140,9 +179,9 @@ function promptBody(sessionId: SessionId, text: string): SessionPromptRequest {
 }
 
 describe('session execution latch', () => {
-  it('follows idle → running → waiting_subagents (quiet child) → waiting_approval → idle', async () => {
+  it('follows idle → running → waiting_subagents (working quiet child) → waiting_approval → idle', async () => {
     const test = await harness()
-    const { ctx, remote, adapter, sessionId, root } = test
+    const { ctx, remote, adapter, parent, sessionId } = test
     await ctx.plugin(ApprovalService)
 
     const idle = valueOf(await latchOf(test))
@@ -164,21 +203,9 @@ describe('session execution latch', () => {
     expect(running.activeDescendants).toBe(0)
     expect(running.since).toBeGreaterThan(0)
 
-    // A live quiet child: resident in the Agent registry with a quiet
-    // descriptor and no parent-catalog or settlement record.
-    const agent = ctx.agents.get(sessionId) as Agent
-    const child = await ctx.agents.create({
-      sessionId: brandString<SessionId>('exec-state-child'),
-      parentAgent: agent,
-      meta: { parentSession: sessionId, origin: 'subagent', delegationDepth: 1, cwd: root },
-    })
-    child.agent.session.append('subagent/descriptor', {
-      version: 3,
-      mode: 'continuable',
-      provider: 'spawn',
-      label: 'quiet-child',
-      quiet: true,
-    })
+    // A genuinely working quiet child: a resident child Agent with its own held
+    // turn and a quiet descriptor, and no parent-catalog record.
+    const { child, hold: childHold } = await startWorkingChild(test, 'exec-state-child', 'child work')
     const session = ctx.sessions.get(sessionId)
     expect(session).toBeDefined()
     // The descendant count is registry-derived: the parent log holds no
@@ -189,12 +216,12 @@ describe('session execution latch', () => {
     const waitingSubagents = valueOf(await latchOf(test))
     expect(waitingSubagents).toMatchObject({ activeDescendants: 1, descendantsExact: true })
 
-    // A pending approval wins over the open turn with a live descendant.
+    // A pending approval wins over the open turn with a working descendant.
     const parked = Promise.withResolvers<ApprovalOutcome>()
     ctx.on('approval/request', () => parked.promise)
     const approvalAbort = new AbortController()
     const deciding = ctx.approval.request({
-      agent,
+      agent: parent,
       toolName: 'bash',
       callId: ToolCallId('exec-state-ask'),
       reason: 'needs a human',
@@ -214,7 +241,7 @@ describe('session execution latch', () => {
 
     // A pending question joins the same list while the approval stays pending.
     const questionAbort = new AbortController()
-    const asking = waterfallQuestion(ctx, agent, questionAbort.signal, [
+    const asking = waterfallQuestion(ctx, parent, questionAbort.signal, [
       { id: 'q1', question: 'Deploy where?' },
     ])
     void asking.catch(() => undefined)
@@ -224,7 +251,7 @@ describe('session execution latch', () => {
     const question = withQuestion.pendingAsks.find(ask => ask.kind === 'question')
     expect(question?.kind === 'question' ? question.questions[0]?.question : undefined).toBe('Deploy where?')
 
-    // Settling both asks returns the latch to the open turn with its live child.
+    // Settling both asks returns the latch to the open turn with its working child.
     approvalAbort.abort()
     await expect(deciding).resolves.toBe('cancelled')
     questionAbort.abort()
@@ -232,7 +259,7 @@ describe('session execution latch', () => {
     await waitFor(async () => valueOf(await latchOf(test)).latch === 'waiting_subagents')
     expect(valueOf(await latchOf(test)).pendingAsks).toEqual([])
 
-    // No open turn: idle even while the child stays live.
+    // No open parent turn: idle, while the still-working child keeps the count.
     hold.release()
     await waitFor(async () => valueOf(await latchOf(test)).latch === 'idle')
     const finished = valueOf(await latchOf(test))
@@ -242,13 +269,39 @@ describe('session execution latch', () => {
     const missing = await remote.executionState({ sessionId: 'missing' as never })
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.error.code).toBe('session/not-found')
+
+    // Park the child before teardown so its held stream does not linger.
+    child.agent.cancel({ kind: 'user' })
+    childHold.release()
+    await waitFor(() => child.agent.status === 'idle')
+  })
+
+  it('does not hold waiting_subagents for a resident but idle child', async () => {
+    const test = await harness()
+    const { remote, adapter, sessionId } = test
+    const hold = adapter.holdNext()
+    expect(valueOf(await remote.prompt(promptBody(sessionId, 'parent turn'))).accepted).toBe(true)
+    await hold.started
+
+    const { child, hold: childHold } = await startWorkingChild(test, 'exec-state-idle-child', 'child work')
+    await waitFor(async () => valueOf(await latchOf(test)).latch === 'waiting_subagents')
+    expect(valueOf(await latchOf(test)).activeDescendants).toBe(1)
+
+    // Parking the child returns the parent to running: a resident agent that is
+    // no longer working must not pin the latch.
+    child.agent.cancel({ kind: 'user' })
+    childHold.release()
+    await waitFor(() => child.agent.status === 'idle')
+    await waitFor(async () => valueOf(await latchOf(test)).latch === 'running', 1_000)
+    expect(valueOf(await latchOf(test)).activeDescendants).toBe(0)
+    hold.release()
   })
 })
 
 describe('session digest', () => {
   it('bounds tool previews, injections, the tree, and pending interactions', async () => {
     const test = await harness()
-    const { ctx, remote, sessionId, root } = test
+    const { ctx, adapter, remote, sessionId } = test
     const session = ctx.sessions.get(sessionId)
     expect(session).toBeDefined()
     if (session === undefined) return
@@ -304,24 +357,9 @@ describe('session digest', () => {
       },
     }), { surfaceOp: 'append' }).seq
 
-    // A live child with its descriptor and first prompt.
-    const agent = ctx.agents.get(sessionId) as Agent
-    const child = await ctx.agents.create({
-      sessionId: brandString<SessionId>('digest-child'),
-      parentAgent: agent,
-      meta: { parentSession: sessionId, origin: 'subagent', delegationDepth: 1, cwd: root },
-    })
-    child.agent.session.append('subagent/descriptor', {
-      version: 3,
-      mode: 'continuable',
-      provider: 'spawn',
-      label: 'digest-child-label',
-      quiet: true,
-    })
-    child.agent.session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text: 'do the child task' }],
-      source: { kind: 'user' },
-    }), { surfaceOp: 'append' })
+    // A genuinely working child: its own held turn, its descriptor, and its
+    // first prompt, which the tree reports as a running child.
+    const { hold: childHold } = await startWorkingChild(test, 'digest-child', 'do the child task')
 
     const digest = valueOf(await remote.digest({ sessionId, recentTools: 5 }))
     expect(digest.state).toMatchObject({ latch: 'idle', activeDescendants: 1, descendantsExact: true })
@@ -350,7 +388,7 @@ describe('session digest', () => {
         childSessionId: 'digest-child',
         mode: 'continuable',
         quiet: true,
-        status: 'idle',
+        status: 'running',
         queryPreview: 'do the child task',
       },
     ])
@@ -362,6 +400,9 @@ describe('session digest', () => {
     const none = valueOf(await remote.digest({ sessionId, recentTools: 0 }))
     expect(none.recentToolCalls).toEqual([])
     expect((await remote.digest({ sessionId: 'missing' as never, recentTools: 1 })).ok).toBe(false)
+
+    childHold.release()
+    void adapter
   })
 })
 

@@ -219,8 +219,12 @@ export class PeerAskRegistry {
     const outcome = await Promise.race([
       settled.promise.then(value => ({ from: 'peer' as const, value })),
       local.then(value => ({ from: 'local' as const, value })),
-    ])
-    this.retire(ask)
+    ]).finally(() => {
+      // Retire on a rejected local chain too: a forwarded ask cancelled by the
+      // host settles this race with a rejection, and a kept entry would keep
+      // advertising an ask that can no longer be answered.
+      this.retire(ask)
+    })
     return outcome.value
   }
 

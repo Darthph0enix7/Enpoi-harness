@@ -137,7 +137,9 @@ export interface Config {
    * How long a dispatched ask may stay pending before it resolves the
    * fail-closed `'unavailable'` outcome (default {@link DEFAULT_ANSWER_TIMEOUT_MS}).
    * A registered answerer that never settles — an attached client that walked
-   * away — would otherwise park the turn indefinitely. `0` disables the bound.
+   * away — would otherwise park the turn indefinitely. Expiry also aborts the
+   * ask's dispatch signal, so forwarded presentations (the browser's approval
+   * card) are cancelled with it. `0` disables the bound.
    */
   readonly answerTimeoutMs?: number
 }
@@ -279,13 +281,27 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
+    // The bounded wait ends the whole ask, not only the caller's wait: when
+    // the timer wins, aborting this controller aborts the signal the dispatch
+    // carries, so a forwarded presentation (a browser's approval card) is
+    // cancelled instead of staying answerable behind a settled ask. A
+    // disabled bound (`answerTimeoutMs <= 0`) keeps the caller's exact object.
+    const expiry = this.answerTimeoutMs() > 0 ? new AbortController() : undefined
+    const dispatch: ApprovalRequest = expiry === undefined
+      ? req
+      : {
+        ...req,
+        signal: req.signal === undefined
+          ? expiry.signal
+          : AbortSignal.any([req.signal, expiry.signal]),
+      }
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
     // path as an async one — `Promise.resolve(call())` would let it escape
     // the containment into the caller.
     const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
       () => this.ctx.waterfall(
-        scopeTarget(req.agent, req.agent), 'approval/request', req,
+        scopeTarget(req.agent, req.agent), 'approval/request', dispatch,
         () => Promise.resolve<ApprovalOutcome>('unavailable'),
       ),
     ).then(
@@ -296,7 +312,9 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    const bounded = this.withAnswerTimeout(answer)
+    const bounded = this.withAnswerTimeout(answer, expiry === undefined ? undefined : () => {
+      expiry.abort(new Error('approval ask exceeded its bounded wait'))
+    })
     if (signal === undefined) return await bounded
     return await new Promise<ApprovalOutcome>((resolve) => {
       const onAbort = () => {
@@ -313,20 +331,27 @@ export class ApprovalService extends Service {
     })
   }
 
+  /** The configured bounded wait for one dispatched ask; `<= 0` disables the bound. */
+  private answerTimeoutMs(): number {
+    return this.config.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS
+  }
+
   /**
    * Bound one dispatched ask's wait. The timeout resolves the documented
    * fail-closed outcome, so the ask still lands as an `asked`/`decided` pair
    * and the tool call fails with the approval's own reason instead of parking
    * the turn forever behind an answerer that never settles.
    * @param answer - the dispatched ask's outcome promise.
+   * @param onExpire - optional cancellation of the dispatched ask's own signal.
    * @returns the answer, or `'unavailable'` once the configured bound elapses.
    */
-  private withAnswerTimeout(answer: Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
-    const timeoutMs = this.config.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS
+  private withAnswerTimeout(answer: Promise<ApprovalOutcome>, onExpire?: () => void): Promise<ApprovalOutcome> {
+    const timeoutMs = this.answerTimeoutMs()
     if (timeoutMs <= 0) return answer
     return new Promise<ApprovalOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.ctx.logger.warn(`approval ask left unanswered for ${timeoutMs}ms; resolving unavailable`)
+        onExpire?.()
         resolve('unavailable')
       }, timeoutMs)
       // The bound must never hold the process open; the ask stays durable.
@@ -335,7 +360,7 @@ export class ApprovalService extends Service {
         clearTimeout(timer)
         resolve(outcome)
       }
-      void answer.then(settle, () => settle('unavailable'))
+      void answer.then(settle, () => { settle('unavailable') })
     })
   }
 }
