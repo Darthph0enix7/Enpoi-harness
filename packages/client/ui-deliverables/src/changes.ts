@@ -11,22 +11,11 @@ export const CHANGES_DIFF_PATH = '/api/changes.diff'
 /** Authenticated POST route for opening a changed file on the Host desktop. */
 export const CHANGES_OPEN_PATH = '/api/changes.open'
 
-/** Resource-address prefix of a turn's review tab in the right Sidebar. */
-export const CHANGES_REVIEW_ADDRESS = 'dsh-resource://changes-review/session/'
-
 /** The summary fields the route serves; the Host keeps the working directory and snapshot ids to itself. */
 export type ChangesSummary = Pick<WorkspaceChangesSummary, 'turn' | 'files' | 'total' | 'added' | 'deleted'>
 
 /** The comparison the route serves, as the Host computed it. */
 export type ChangesDiff = WorkspaceFileDiff
-
-/** Coordinates of one turn's review: the viewed Session, the announcing event, and the turn it summarized. */
-export interface ChangesReviewCoordinates {
-  sessionId: SessionId
-  seq: number
-  /** The summarized turn, carried for the tab title. */
-  turn: number
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -120,34 +109,4 @@ export function changesDiffUrl(sessionId: SessionId, seq: number, index: number)
  */
 export function changedFileUrl(sessionId: SessionId, seq: number, index: number): string {
   return `${CHANGES_OPEN_PATH}?${new URLSearchParams({ sessionId, seq: String(seq), index: String(index) })}`
-}
-
-/**
- * The right-Sidebar address of one turn's review. The Session and the event
- * sequence identify the content; the turn rides along for the tab title.
- * @param coordinates - viewed Session, announcing event, and turn.
- * @returns a `dsh-resource://changes-review/session/…` address.
- */
-export function changesReviewAddress(coordinates: ChangesReviewCoordinates): string {
-  const { sessionId, seq, turn } = coordinates
-  return `${CHANGES_REVIEW_ADDRESS}${encodeURIComponent(sessionId)}/${seq}/${turn}`
-}
-
-/**
- * Read the coordinates back out of a review address.
- * @param address - a resource address.
- * @returns the coordinates, or undefined for any other address.
- */
-export function parseChangesReviewAddress(address: string): ChangesReviewCoordinates | undefined {
-  if (!address.startsWith(CHANGES_REVIEW_ADDRESS)) return undefined
-  const parts = address.slice(CHANGES_REVIEW_ADDRESS.length).split('/')
-  if (parts.length !== 3) return undefined
-  const [sessionId, seq, turn] = parts as [string, string, string]
-  if (sessionId === '' || !/^\d+$/.test(seq) || !/^[1-9]\d*$/.test(turn)) return undefined
-  try {
-    return { sessionId: decodeURIComponent(sessionId) as SessionId, seq: Number(seq), turn: Number(turn) }
-  } catch {
-    // A malformed percent sequence is not an address this package minted.
-    return undefined
-  }
 }

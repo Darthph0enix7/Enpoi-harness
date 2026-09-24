@@ -101,16 +101,31 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0, m
       title: address => address.slice(address.lastIndexOf('/') + 1),
       guide: Array.from({ length: entryCount }, (_, order) => ({ id: String(order), order, title: () => 'Test', description: () => 'Test page' })),
     })
+    // The files page carries no guide entry: it is the anchor a file open
+    // lights, not a rail icon of its own (ui-sidebar-files owns it in the
+    // shipped composition).
+    runtime.ctx.sidebarRightTabs.register({
+      id: 'test/files', kind: 'files', priority: 'builtin', patterns: ['sidebar://files'],
+      title: () => 'Files',
+    })
     runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/text' }, Body)
     runtime.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'test/text' }, Title)
+    runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/files' }, Body)
+    runtime.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'test/files' }, Title)
   })
   const view = runtime.renderSlot('rightbar', { width: 420, viewportWidth, canShow, mobile })
   const instance = runtime.storeOf('rightbar.session', reference) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
   const controller = runtime.ctx.sidebarRight
   const layout = () => instance.getSnapshot().bySession[SESSION]!.layout
+  const editorRecord = () => {
+    const id = instance.getSnapshot().bySession[SESSION]?.editorTabId
+    return id === undefined ? undefined : layout().tabs[id]
+  }
   const open = (name = 'a.txt', options?: Parameters<typeof controller.openResource>[1]) => {
     act(() => { controller.openResource(`dsh-resource://file/session/s-test/${name}`, options) })
-    return controller.active()!
+    // The file lands in the editor record; the files page takes the dock's
+    // active slot (the anchor), so callers want the record, not `active()`.
+    return editorRecord() ?? controller.active()!
   }
   const selectSession = (id: SessionId): SessionReference => {
     const next = runtime.sessions.retainFor(runtime.ctx, id, { source: 'mainView' })
@@ -119,7 +134,7 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0, m
     return next
   }
   return {
-    runtime, feature, controller, instance, actions: instance.actions, layout,
+    runtime, feature, controller, instance, actions: instance.actions, layout, editorRecord,
     open, selectSession, frame, pin, bodies, titles, hooks, view,
   }
 }
@@ -206,12 +221,11 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout().tabs[preview.id]).toBeUndefined()
   })
 
-  it('offers close for a floating tab while the docked pane keeps its sole tab', async () => {
+  it('offers close for a floating tab and docks it back into the pane', async () => {
     const h = await mountSeat()
     const floating = h.open('floating.txt')
     act(() => { h.controller.float(floating.id) })
     const paneId = getPane(h.layout(), h.layout().floats[0]!).id
-    expect(h.view.container.querySelector('[data-dockkit-tab-close]')).toBeNull()
     const close = document.querySelector<HTMLButtonElement>(`[data-dockkit-float-close="${paneId}"]`)
     expect(close).not.toBeNull()
 
@@ -219,7 +233,9 @@ describe('RightbarSeat presentation', () => {
 
     expect(h.layout().tabs[floating.id]).toBeUndefined()
     expect(h.layout().floats).toHaveLength(0)
+    // The files anchor keeps the docked pane occupied.
     expect(getPane(h.layout(), h.layout().rootId).tabs).toHaveLength(1)
+    expect(h.layout().tabs[getPane(h.layout(), h.layout().rootId).tabs[0]!]?.kind).toBe('files')
   })
 
   it('keeps the panel mounted while collapsed and releases the frame on unmount', async () => {
@@ -235,26 +251,27 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.closeRightbar).toHaveBeenCalled()
   })
 
-  it('mounts the editor pane at zero width for its close and lights it on the files page', async () => {
+  it('mounts the editor pane at zero width before its first record and opens it on a file', async () => {
     const h = await mountSeat()
     // No editor tab: the pane is not mounted on a page that never shows it.
     expect(h.view.container.querySelector('[data-sidebar-right-editor]')).toBeNull()
     h.open()
-    // The pane exists while closed, so opening and collapsing can transition
-    // its width instead of mounting and unmounting in one frame.
+    // The visible editor is exactly expanded && files && record.
     const editor = element(h.view.container, '[data-sidebar-right-editor]')
-    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
-    expect(parseFloat(editor.style.width)).toBe(0)
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
+    expect(editor.querySelector('[data-tab-body]')).not.toBeNull()
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
     // The panel box is the column's whole share; the pane and the tree split
     // it, so the box width is the same whether or not the preview is open.
     expect(parseFloat(panel.style.width)).toBe(420 - 44)
-    act(() => { h.actions.setExpanded(SESSION, false) })
+    // The operator's collapse closes the pane in the same commit; the pane
+    // stays mounted so the reopen has a zero-width state to grow from.
+    act(() => { h.controller.toggleExpanded() })
     expect(element(h.view.container, '[data-sidebar-right-editor]')).toBe(editor)
-    // The files page lights the pane: the open marker flips and the pane takes
-    // its share while the tree keeps the remainder.
-    act(() => { h.actions.setExpanded(SESSION, true) })
-    act(() => { h.controller.selectKind(GUIDE_KIND) })
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+    expect(parseFloat(editor.style.width)).toBe(0)
+    act(() => { h.controller.toggleExpanded() })
     expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
     expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
     expect(parseFloat(panel.style.width)).toBe(420 - 44)
@@ -282,6 +299,25 @@ describe('RightbarSeat presentation', () => {
     expect(element(h.view.container, '[data-sidebar-right-body]')).not.toBe(editor)
   })
 
+  it('focuses the files tab in the rail for any file open, whatever page was lit', async () => {
+    const h = await mountSeat(1440, true, 1)
+    // One guide entry made the viewer page the lit one before the file open.
+    const page = Object.values(h.layout().tabs).find(tab => tab.kind === 'text')!
+    expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(page.id)
+    h.open('b.txt')
+    expect(h.controller.rail.state.getSnapshot().kind).toBe('files')
+    expect(h.layout().expanded).toBe(true)
+    // The tree (the files page) is the visible anchor; the file draws beside it.
+    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
+    expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(files.id)
+    const file = h.editorRecord()!
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(element(editor, '[data-tab-body]').dataset['tabBody']).toBe(file.id)
+    // The dock's own pane never mounts a second copy of the record.
+    expect(element(h.view.container, '[data-sidebar-right-body]').querySelector(`[data-tab-body="${file.id}"]`)).toBeNull()
+  })
+
   it('opens a panel-placement resource as the panel page with no editor pane', async () => {
     const h = await mountSeat(1440, true, 0)
     await act(async () => {
@@ -298,41 +334,41 @@ describe('RightbarSeat presentation', () => {
     expect(element(h.view.container, '[data-sidebar-right-editor]').hasAttribute('data-sidebar-right-editor-open')).toBe(false)
   })
 
-  it('keeps the preview drawn through a collapse, slid out with the panel', async () => {
-    const h = await mountSeat()
-    h.open()
-    act(() => { h.controller.selectKind(GUIDE_KIND) })
+  it('collapses the editor pane when the rail switches away from files and re-reveals it on return', async () => {
+    const h = await mountSeat(1440, true, 1)
+    h.open('a.txt')
     const editor = element(h.view.container, '[data-sidebar-right-editor]')
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
     expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
-    // Collapsing leaves the pane open inside the off-edge box: the slide
-    // carries the preview instead of unmounting it or shrinking it into a gap.
-    act(() => { h.controller.toggleExpanded() })
-    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
     expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
-    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
-    act(() => { h.controller.toggleExpanded() })
-    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    // Any other rail tab closes the pane in the same commit; the tree stays.
+    act(() => { h.controller.selectKind('text') })
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
+    expect(parseFloat(editor.style.width)).toBe(0)
+    expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    // Returning to files re-reveals the same record.
+    act(() => { h.controller.selectKind('files') })
+    const reopened = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(reopened.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(reopened.style.width)).toBeGreaterThan(0)
     expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
   })
 
-  it('keeps the editor divider interactive only while the pane is open and on screen', async () => {
+  it('keeps the editor divider interactive only while the pane is open', async () => {
     const h = await mountSeat()
     expect(h.view.container.querySelector('[data-sidebar-right-editor-divider]')).toBeNull()
     h.open()
     const divider = element(h.view.container, '[data-sidebar-right-editor-divider]')
-    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
-    expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(false)
-    act(() => { h.controller.selectKind(GUIDE_KIND) })
-    expect(element(h.view.container, '[data-sidebar-right-editor-divider]')).toBe(divider)
     expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
     expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(true)
-    // The pane stays drawn while the panel collapses, but its seam is not a
-    // drag target on a moving off-edge box.
+    // Collapsing the column closes the pane; its seam is no longer a drag target.
     act(() => { h.controller.toggleExpanded() })
-    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-editor-divider]')).toBe(divider)
+    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(false)
     expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(false)
     act(() => { h.controller.toggleExpanded() })
+    expect(divider.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
     expect(divider.hasAttribute('data-sidebar-right-editor-live')).toBe(true)
   })
 
@@ -387,30 +423,32 @@ describe('RightbarSeat presentation', () => {
 
   it('derives narrow fullscreen without recording mode and returns to normal when widened', async () => {
     const h = await mountSeat(767, false)
-    h.open()
+    const record = h.open()
     expect(h.layout().mode).toBe('push')
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
-    const stored = h.instance.getSnapshot()
-    const body = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
+    // The narrow frame cannot show, so the lit files page waited; widening
+    // seats it beside the document record, which survives untouched.
     h.view.update({ width: 420, viewportWidth: 768, canShow: true, mobile: false })
-    expect(h.instance.getSnapshot()).toBe(stored)
-    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
+    expect(h.layout().tabs[record.id]).toBeDefined()
+    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
   })
 
-  it('closes on automatic fullscreen exit and stays closed after widening', async () => {
+  it('closes on automatic fullscreen exit and re-seats the lit files page when widened', async () => {
     const h = await mountSeat(500, false)
-    const tab = h.open()
-    const signal = h.bodies.get(tab.id)!.tab.signal
+    const record = h.open()
+    const signal = h.bodies.get(record.id)!.tab.signal
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(h.layout().expanded).toBe(false)
     expect(h.layout().mode).toBe('push')
-    const stored = h.instance.getSnapshot()
     h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
-    expect(h.instance.getSnapshot()).toBe(stored)
-    expect(h.layout().tabs[tab.id]).toBeDefined()
+    // The rail still records the open intent: widening seats the lit files page.
+    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
+    expect(h.layout().expanded).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
+    expect(h.layout().tabs[record.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
-    expect(h.layout().expanded).toBe(false)
   })
 
   it('preserves manual fullscreen through narrow and wide viewport changes', async () => {
@@ -425,18 +463,21 @@ describe('RightbarSeat presentation', () => {
     expect(h.instance.getSnapshot()).toBe(stored)
   })
 
-  it('collapses a normal panel that cannot fit without clearing records or reopening on growth', async () => {
+  it('collapses a normal panel that cannot fit, keeps its records, and re-seats the lit page on growth', async () => {
     const h = await mountSeat()
-    const tab = h.open()
-    const signal = h.bodies.get(tab.id)!.tab.signal
+    const record = h.open()
+    const signal = h.bodies.get(record.id)!.tab.signal
     h.view.update({ width: 420, viewportWidth: 900, canShow: false, mobile: false })
     expect(h.layout().expanded).toBe(false)
-    expect(h.layout().tabs[tab.id]).toBeDefined()
+    expect(h.layout().tabs[record.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
-    const stored = h.instance.getSnapshot()
     h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
-    expect(h.instance.getSnapshot()).toBe(stored)
-    expect(h.layout().expanded).toBe(false)
+    // The rail's open intent still stands: growth re-seats the lit files page
+    // without touching the document record.
+    expect(h.layout().expanded).toBe(true)
+    expect(h.layout().tabs[record.id]).toBeDefined()
+    expect(Object.values(h.layout().tabs).some(tab => tab.kind === 'files')).toBe(true)
+    expect(signal.aborted).toBe(false)
   })
 })
 
@@ -470,7 +511,9 @@ describe('RightbarSeat fullscreen entry', () => {
     vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations')
       .mockReturnValue([unrelated.animation, ended.animation])
     h.open()
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, true)
+    // The file record and the lit files page commit separately, so the report
+    // lands at least once without waiting for any transition.
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
     unrelated.finish()
   })
 
@@ -537,7 +580,7 @@ describe('RightbarSeat fullscreen entry', () => {
     const animations = vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations')
       .mockReturnValue([slide.animation])
     h.open()
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
     expect(animations).not.toHaveBeenCalled()
     slide.finish()
   })
@@ -562,30 +605,33 @@ describe('slot-owned useTabInfo', () => {
   it('isolates same-kind record state and reports inactive titles, hiding, floating and docking', async () => {
     const h = await mountSeat()
     const a = h.open('a.txt')
-    // The editor's newest open does not steal the panel's active tab.
+    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
+    // The editor's newest open does not steal the panel's anchor page.
     h.open('b.txt')
-    const b = Object.values(h.layout().tabs).find(tab => tab.title === 'b.txt')!
-    const bodyA = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
+    const b = h.editorRecord()!
+    const bodyPanel = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
     const bodyB = element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')
-    expect(bodyA.dataset['tabBody']).toBe(a.id)
+    expect(bodyPanel.dataset['tabBody']).toBe(files.id)
     expect(bodyB.dataset['tabBody']).toBe(b.id)
-    expect(bodyA.dataset['instance']).not.toBe(bodyB.dataset['instance'])
-    expect(h.bodies.get(a.id)?.tab.visible).toBe(true)
-    expect(h.bodies.get(b.id)?.tab.visible).toBe(false)
+    expect(bodyPanel.dataset['instance']).not.toBe(bodyB.dataset['instance'])
+    // The first record is dormant behind the editor's newest open: it draws
+    // nowhere, while its title still reports it.
+    expect(h.view.container.querySelector(`[data-tab-body="${a.id}"]`)).toBeNull()
     expect(h.titles.get(b.id)?.tab.visible).toBe(true)
-    const signal = h.bodies.get(a.id)!.tab.signal
-    act(() => { h.actions.setExpanded(SESSION, false) })
-    expect(h.bodies.get(a.id)?.tab.visible).toBe(false)
-    expect(h.titles.get(a.id)?.tab.visible).toBe(false)
-    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(bodyA)
+    const signal = h.bodies.get(files.id)!.tab.signal
+    act(() => { h.controller.toggleExpanded() })
+    expect(h.titles.get(files.id)?.tab.visible).toBe(false)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(bodyPanel)
     expect(signal.aborted).toBe(false)
+    // Floating the dormant record gives it a surface of its own, isolated from
+    // the panel's drawn page.
     act(() => { h.controller.float(a.id) })
     expect(h.bodies.get(a.id)?.tab.visible).toBe(true)
     const paneId = h.bodies.get(a.id)!.panel.id
     expect(h.layout().floats).toContain(paneId)
     act(() => { h.controller.dock(paneId) })
     expect(h.layout().floats).toHaveLength(0)
-    expect(h.bodies.get(a.id)?.tab.signal).toBe(signal)
+    expect(h.bodies.get(files.id)?.tab.signal).toBe(signal)
   })
 
   it('keeps session records and navigation while unmounted, aborting only removal and plugin unload', async () => {
@@ -596,20 +642,24 @@ describe('slot-owned useTabInfo', () => {
     await h.runtime.sessions.add({ id: OTHER })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(info.tab.signal.aborted).toBe(false)
-    act(() => { h.selectSession(OTHER) })
+    let otherRef!: SessionReference
+    act(() => { otherRef = h.selectSession(OTHER) })
     act(() => { h.controller.openResource('dsh-resource://file/session/s-other/other.txt', { params: { line: 9 } }) })
-    const otherTab = h.controller.active()!
-    expect(otherTab.id).toBe(own.id)
+    const otherStore = h.runtime.storeOf('rightbar.session', otherRef) as ReturnType<ReturnType<typeof createSidebarRightStore>['create']>
+    const otherSurface = otherStore.getSnapshot().bySession[OTHER]!
+    const otherTab = otherSurface.layout.tabs[otherSurface.editorTabId!]!
+    expect(otherTab.title).toBe('other.txt')
     const otherInfo = h.bodies.get(otherTab.id)!
     expect(otherInfo.tab.signal).not.toBe(info.tab.signal)
     act(() => { info.tab.actions.openResource('dsh-resource://file/session/s-test/b.txt') })
     expect(Object.values(h.layout().tabs).map(tab => tab.title)).toContain('b.txt')
-    expect(h.controller.active()?.contentId).toBe(otherTab.contentId)
+    // The other session's record kept its navigation while this one opened.
+    expect(otherStore.getSnapshot().bySession[OTHER]!.editorTabId).toBe(otherTab.id)
     expect(h.bodies.get(otherTab.id)?.tab.navigation.params).toEqual({ line: 9 })
     act(() => { info.tab.actions.close() })
     expect(info.tab.signal.aborted).toBe(true)
     expect(otherInfo.tab.signal.aborted).toBe(false)
-    const remaining = h.bodies.get(h.controller.active()!.id)!
+    const remaining = h.bodies.get(otherTab.id)!
     expect(remaining.tab.navigation.revision).toBe(1)
     await h.feature.dispose()
     expect(remaining.tab.signal.aborted).toBe(true)
@@ -648,11 +698,11 @@ describe('slot-owned useTabInfo', () => {
     // the rail opens that page.
     await act(async () => {
       h.runtime.ctx.sidebarRightTabs.register({
-        id: 'test/files', kind: 'files', title: () => 'Files',
-        guide: [{ id: 'files', order: 1, title: () => 'Files' }],
+        id: 'test/archive', kind: 'archive', title: () => 'Archive',
+        guide: [{ id: 'archive', order: 1, title: () => 'Archive' }],
       })
     })
-    expect(h.view.container.querySelector('[data-sidebar-right-rail-item="files"]')).not.toBeNull()
+    expect(h.view.container.querySelector('[data-sidebar-right-rail-item="archive"]')).not.toBeNull()
   })
 
   it('follows type replacement and returns to the builtin when it leaves', async () => {
@@ -807,6 +857,22 @@ describe('RightbarSeat on the mobile container', () => {
     expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
     // The document tab itself stays open: reopening from the tree reveals it again.
     expect(h.layout().tabs[editorTabId!]).toBeDefined()
+  })
+
+  it('keeps the editor pane split beside the tree on a narrow desktop frame, never a push', async () => {
+    // 420px is a desktop device by pointer and the column is fullscreen, but
+    // the pane still splits beside the tree: the push is the mobile container's
+    // presentation only.
+    const h = await mountSeat(420, true, 1)
+    expect(h.view.container.querySelector('[data-sidebar-right-rail]')).not.toBeNull()
+    h.open('a.txt')
+    const editorTabId = h.instance.getSnapshot().bySession[SESSION]?.editorTabId
+    expect(editorTabId).toBeDefined()
+    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
+    expect(element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]').dataset['tabBody']).toBe(editorTabId)
+    expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
+    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
+    expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(files.id)
   })
 
   it('keeps the merged tree and pane on a desktop seat', async () => {

@@ -6,9 +6,14 @@
  * updates with background persistence to `enpoi-orchestration.parameters`.
  * Every change is hot-swapped — the backend resolvers read the namespace
  * fresh per use, so no restart is ever needed. `refreshFromServer` re-reads
- * the namespace for cross-client live sync; parameter keys with a local write
- * in flight keep their optimistic value until that write settles.
+ * through the package's shared coalesced describe (settings-refresh.ts: one
+ * request per burst, scheduled by a push, a transport reconnect, the tab
+ * becoming visible, or a stale mount); parameter keys with a local write in
+ * flight keep their optimistic value until that write settles, and a read
+ * answering the revision this store last applied notifies nobody.
  */
+import { readEnpoiNamespace } from './settings-refresh.ts'
+
 export interface OrchestrationParams {
   council: {
     maxDebateTokens: number
@@ -84,51 +89,33 @@ function notify(): void {
   }
 }
 
-/** One describe view of the enpoi-orchestration namespace, structural subset. */
-interface OrchestrationNamespaceView {
-  ns?: string
-  value?: { parameters?: Partial<OrchestrationParams> }
-  user?: { parameters?: Partial<OrchestrationParams> }
-}
-
-/** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */
-let describeSeq = 0
-
-/** Read the enpoi-orchestration namespace through the live gateway. */
-async function describeOrchestration(): Promise<OrchestrationNamespaceView | undefined> {
-  describeSeq += 1
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: `param-describe-${describeSeq}`,
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json: unknown = await res.json()
-  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-  return Array.isArray(namespaces)
-    ? (namespaces as OrchestrationNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
-    : undefined
-}
+/**
+ * Revision this store last applied. A later read that answers the same
+ * revision carries the document this snapshot already holds, so it is skipped
+ * without a notify (the snapshot identity, and every subscriber, stays put).
+ */
+let lastAppliedRevision: number | undefined
 
 /** Re-read the namespace and merge it into the snapshot (cross-client live sync). */
 export async function refreshFromServer(): Promise<void> {
   try {
-    const view = await describeOrchestration()
+    const view = await readEnpoiNamespace()
     if (view === undefined) return
-    const parameters = view.value?.parameters ?? view.user?.parameters
+    if (view.revision !== undefined && view.revision === lastAppliedRevision) return
+    const parameters = (view.value?.parameters ?? view.user?.parameters) as Partial<OrchestrationParams> | undefined
     if (parameters === undefined || typeof parameters !== 'object') return
+    lastAppliedRevision = view.revision
     const merged = mergeParams(PARAM_DEFAULTS, parameters)
     for (const marker of pendingParamPaths) {
       const [group, key] = splitParamMarker(marker)
       const target = merged as unknown as Record<string, unknown>
       const local = currentParams as unknown as Record<string, unknown>
       if (key === undefined) target[group] = structuredClone(local[group])
-      else (target[group] as Record<string, number | boolean>)[key] = (local[group] as Record<string, number | boolean>)[key] as number | boolean
+      else {
+        const targetGroup = target[group] as Record<string, number | boolean>
+        const localGroup = local[group] as Record<string, number | boolean>
+        targetGroup[key] = localGroup[key] as number | boolean
+      }
     }
     currentParams = merged
     notify()

@@ -57,8 +57,10 @@
 
 /* The diff's own meaning-carrying colors: removed on the error token, added on
    the success token. A `- `/`+ ` prefix is drawn here so a copied line and the
-   shown line agree, and so the sign reads without relying on color alone. */
-.del::before {
+   shown line agree, and so the sign reads without relying on color alone. Only
+   the card rows carry the prefix: a served line draws its own sign column
+   beside the two line numbers, and a generic `.del` reach would draw both. */
+.line.del::before {
   content: '- ';
   color: var(--dsw-alias-state-error-primary);
 }
@@ -67,7 +69,7 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
-.add::before {
+.line.add::before {
   content: '+ ';
   color: var(--dsw-alias-state-success-primary);
 }
@@ -80,7 +82,7 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-.context::before {
+.line.context::before {
   content: '  ';
 }
 
@@ -106,4 +108,107 @@
   padding: 0 14px 12px;
   font: var(--dsw-font-markdown-code-block);
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── Served comparisons (the change routes' hunks) ─────────────────────────
+   The Host computes the line alignment; these rules only draw it. The body
+   reads as primary text on a transparent ground: additions and deletions are
+   ~10% tokenised washes of the success/error state colours and never repaint
+   the text, so a diff is legible in both themes. Each line carries a fixed
+   three-column gutter — old number, new number, sign — in the tertiary tone,
+   right-aligned and out of text selection. A hunk header rides the raised
+   surface token. The word-level pass marks the moved tokens with a ~26% wash
+   of the same colours, strong enough to find inside a long line. */
+
+.hunkHeader {
+  background: var(--dsw-alias-bg-raised, var(--dsw-alias-bg-layer-2));
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 400;
+}
+
+/* A numbered comparison line: the sign is its own gutter column, so no
+   `::before` prefix is drawn here. */
+.servedLine {
+  display: grid;
+  grid-template-columns: 4ch 4ch 1.5ch minmax(0, max-content);
+  min-height: var(--dsl-diff-line-height);
+  color: var(--dsw-alias-label-primary);
+  white-space: pre;
+}
+
+.servedLine.del,
+.cellDel {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);
+}
+
+.servedLine.add,
+.cellAdd {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+}
+
+/* Context is the page's own ground, and its text the primary tone. */
+.servedLine.context,
+.cellContext {
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+
+.number {
+  min-width: 3.5ch;
+  padding-right: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.sign {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The word-level pass marks the tokens that moved; a stronger wash than the
+   line tint, so an edit inside a long line is visible without hover. */
+.wordAdd {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 26%, transparent);
+}
+
+.wordDel {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 26%, transparent);
+}
+
+/* Side by side: two equal columns, one fixed-height row per paired line, so
+   the sides stay aligned line for line. Each column scrolls horizontally on
+   its own, so a long line is never clipped to its column. */
+.split {
+  min-width: 100%;
+}
+
+.splitPath {
+  padding-right: 0;
+}
+
+.splitRow {
+  display: flex;
+  align-items: stretch;
+  min-height: var(--dsl-diff-line-height);
+}
+
+.cell {
+  display: inline-flex;
+  flex: 1 1 50%;
+  min-width: 0;
+  padding-right: 8px;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.empty {
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 6%, transparent);
+}
+
+.servedText {
+  white-space: pre;
 }

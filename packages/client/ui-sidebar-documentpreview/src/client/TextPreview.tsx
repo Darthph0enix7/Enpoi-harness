@@ -32,7 +32,7 @@ import { IconNowrapFill16, IconWrapFill16 } from './icons.tsx'
 import { LoadingIndicator } from './LoadingIndicator.tsx'
 import { hostFileOf } from './rpc.ts'
 import type { TextStore } from './store.ts'
-import type { DocumentContent, DocumentRendererCommands } from './document/contract.ts'
+import type { DocumentContent, DocumentDiffParams, DocumentRendererCommands } from './document/contract.ts'
 import { binaryDocumentPath, matchingDocumentPreviews } from './document/registry.ts'
 import type { DocumentPreviewDefinition } from './document/registry.ts'
 import { unviewableBinaryPath } from './document/unviewable.ts'
@@ -150,7 +150,17 @@ export function TextPreview({
   // path, then by suffix, then the automatic candidate.
   const prefs = useMemo(() => readViewerPrefs(), [])
   const extension = extensionOf(file.path)
-  const selected = candidates.find(candidate => candidate.id === state?.rendererId)
+  // A navigation that asked for the comparison wins over every remembered
+  // display choice; the renderer declaring the `diff` capability is selected
+  // even though its empty extension list never matches a filename.
+  const diffRequested = navigation.params !== undefined && 'diff' in navigation.params
+    ? navigation.params.diff as DocumentDiffParams | undefined
+    : undefined
+  const diffCandidate = diffRequested === undefined
+    ? undefined
+    : definitions.find(definition => definition.capabilities?.diff === true)
+  const selected = diffCandidate
+    ?? candidates.find(candidate => candidate.id === state?.rendererId)
     ?? candidates.find(candidate => candidate.id === prefs.byPath[file.path])
     ?? candidates.find(candidate => candidate.id === prefs.byExtension[extension])
     ?? candidates[0]
@@ -161,10 +171,24 @@ export function TextPreview({
   const scrollportRef = useRef<HTMLElement | null>(null)
   const storedScrollTopRef = useRef(0)
   // The selected renderer's toolbar commands (find, go to line), filled by the
-  // body when it mounts and withdrawn when it unmounts.
+  // body when it mounts and withdrawn when it unmounts. `commandsReady` is the
+  // reactive mirror: the navigation effect re-runs when the bridge arrives or
+  // leaves, so a line waiting for a still-mounting renderer is not dropped.
   const commandsRef = useRef<DocumentRendererCommands | null>(null)
+  const commandsReadyRef = useRef(false)
+  const [commandsReady, setCommandsReady] = useState(false)
   const bindCommands = useCallback((value: DocumentRendererCommands | null): void => {
+    const bound = value !== null
+    // Only the bridge's arrival or departure is a state change. A body that
+    // rebinds on every render (a fresh commands object) must not schedule a
+    // render-phase update each time: React would re-render until its loop cap.
+    if (commandsReadyRef.current === bound) {
+      commandsRef.current = value
+      return
+    }
+    commandsReadyRef.current = bound
     commandsRef.current = value
+    setCommandsReady(bound)
   }, [])
   const pathRef = useRef<HTMLDivElement | null>(null)
   const pathTextRef = useRef<HTMLSpanElement | null>(null)
@@ -176,6 +200,8 @@ export function TextPreview({
   const [menuOpen, setMenuOpen] = useState(false)
   /** Whether the themed go-to-line popover is open. */
   const [gotoOpen, setGotoOpen] = useState(false)
+  /** The line a renderer could not land on, shown as a hint instead of dropped. */
+  const [lineHint, setLineHint] = useState<number | null>(null)
   /** Whether the host-owned find popover is open (renderer-owned find uses its own surface). */
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -229,15 +255,43 @@ export function TextPreview({
 
   // Answer a navigation once: a line the pages do not reach yet loads the next
   // page (again, until the pages cover it or the file ends); a line they hold
-  // is scrolled to and marked. The store remembers the answer, so a remount
-  // restores the reader's place instead.
+  // is scrolled to and marked. A renderer that offers `gotoLine` is told where
+  // to land once it declared content loaded; one that does not still opens,
+  // with the line surfaced as a hint instead of being silently dropped. The
+  // store remembers the answer, so a remount restores the reader's place.
   useEffect(() => {
     const body = scrollportRef.current
     if (current === undefined || body === null || current.revision === navigation.revision) return
-    if (line === undefined || mode !== 'text-pages') {
+    if (line === undefined) {
+      setLineHint(null)
       actions.navigated(tab.id, navigation.revision)
       return
     }
+    if (mode === 'renderer') {
+      const commands = commandsRef.current
+      if (selected?.capabilities?.gotoLine === true) {
+        if (commands?.gotoLine !== undefined) {
+          // The body streams its own content into the store; wait for the
+          // loaded revision so the editor has a document to move inside.
+          if (current.version === undefined) return
+          commands.gotoLine(line)
+          setLineHint(null)
+          actions.navigated(tab.id, navigation.revision)
+          return
+        }
+        // No bridge yet and no content either: the body may still be mounting.
+        if (!commandsReady && current.version === undefined) return
+      }
+      setLineHint(line)
+      actions.navigated(tab.id, navigation.revision)
+      return
+    }
+    if (mode !== 'text-pages') {
+      setLineHint(line)
+      actions.navigated(tab.id, navigation.revision)
+      return
+    }
+    setLineHint(null)
     if (line > loadedThrough && !current.eof) {
       if (!current.loading && current.failure === undefined && canRead) {
         loadPage(tab.id, file, loadedThrough + 1, signal, meta.value?.version)
@@ -251,8 +305,8 @@ export function TextPreview({
     // landing before any later navigation reads it.
     actions.scrolled(tab.id, body.scrollTop)
   }, [
-    navigation.revision, line, loadedThrough, current?.eof, current?.loading, current?.failure, started,
-    selected?.id, mode, file, canRead, meta.value?.version,
+    navigation.revision, line, loadedThrough, current?.eof, current?.loading, current?.failure, current?.version,
+    started, selected?.id, selected?.capabilities?.gotoLine, mode, file, canRead, meta.value?.version, commandsReady,
   ])
 
   // Which shared controls this display type offers, in rendered order. The
@@ -467,12 +521,12 @@ export function TextPreview({
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (!(event.metaKey || event.ctrlKey)) return
     const key = event.key.toLowerCase()
-    if (key === 'f' && selected?.capabilities?.search === true) {
+    if (key === 'f' && selected.capabilities?.search === true) {
       event.preventDefault()
       openFind()
       return
     }
-    if (key === 'g' && selected?.capabilities?.gotoLine === true) {
+    if (key === 'g' && selected.capabilities?.gotoLine === true) {
       event.preventDefault()
       setGotoOpen(true)
     }
@@ -519,6 +573,11 @@ export function TextPreview({
             </button>
           </p>
         )}
+      {lineHint !== null && (
+        <p className={css.changed} data-textpreview-line-hint={lineHint}>
+          <span>{t('lineHint', { line: String(lineHint) })}</span>
+        </p>
+      )}
       <div className={css.header} ref={headerRef} data-textpreview-toolbar>
         <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} />
         {candidates.length > 1
@@ -533,6 +592,10 @@ export function TextPreview({
               items={candidates.map(candidate => ({ id: candidate.id, label: candidate.title() }))}
               selectedId={selected.id}
               onSelect={(id) => {
+                // Leaving the comparison is an explicit display choice: the
+                // navigation that requested it is cleared in the same gesture,
+                // so the picked renderer is what the pane shows.
+                if (diffRequested !== undefined) tab.actions.openResource(tab.contentId, { params: {} })
                 actions.selected(tab.id, id)
                 rememberViewerByExtension(file.path, id)
                 setMenuOpen(false)
@@ -573,6 +636,20 @@ export function TextPreview({
             />
           )}
         </div>
+        {/* The pane's own dismiss route: the dock's tab strip is hidden in the
+            product, so a preview opened beside a page (the editor pane) would
+            otherwise have no close anywhere. Closing the record closes the
+            pane and its parked tab together. */}
+        <button
+          type="button"
+          className={css.tool}
+          aria-label={t('close')}
+          title={t('close')}
+          data-textpreview-close
+          onClick={() => { tab.actions.close() }}
+        >
+          <IconCloseOutline16 size={14} />
+        </button>
       </div>
       {gotoOpen && (
         <div className={css.popover} role="dialog" aria-label={t('gotoLine')} data-textpreview-popover="goto">

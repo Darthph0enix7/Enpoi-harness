@@ -16,15 +16,14 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import { changesReviewAddress } from '../changes.ts'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
+import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
 import { ChangesDiffStore } from './changes-diff.ts'
 import { ChangesSummaryStore } from './changes-summary.ts'
 import { PresentedOpenController } from './present-open.ts'
 import { PresentRow } from './PresentRow.tsx'
 import { DeliverablesTail, type DeliverablesInjected } from './Deliverables.tsx'
-import { ReviewTab, type ReviewInjected } from './ReviewTab.tsx'
-import { CHANGES_REVIEW_ID, changesReviewDefinition } from './review-definition.ts'
-import { createReviewStore } from './review-store.ts'
+import { CHANGES_DIFF_ID, DiffPreview, changesDiffPreviewDefinition, type DiffPreviewInjected } from './diff-preview.tsx'
 import { en, NS, zh, type DeliverablesKey } from './locales.ts'
 import {
   deliverablesDefinition, presentedForClosing, producedFileMentions, selectProducedFiles,
@@ -37,8 +36,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Required services for the tail-slot and tab-type registrations and their dictionaries. */
-export const inject = ['slots', 'locale', 'uiConversation', 'remote', 'remote.session', 'sidebarRightTabs', 'sidebarRight']
+/** Required services for the tail-slot and comparison-renderer registrations and their dictionaries. */
+export const inject = ['slots', 'locale', 'uiConversation', 'remote', 'remote.session', 'sidebarRight']
 
 /**
  * Client plugin body: register the dictionaries, the turn-tail entry, and the comparison tab type.
@@ -68,8 +67,10 @@ export function apply(ctx: ClientContext): void {
         loadChangesSummary: (sessionId, seq) => summaries.load(sessionId, seq),
         openPresented: (sessionId, seq, index, action) => opener.open(sessionId, seq, index, action),
         openChanged: (sessionId, seq, index) => opener.openChanged(sessionId, seq, index),
-        openChangesReview: (coordinates, index) => {
-          ctx.sidebarRight.openResource(changesReviewAddress(coordinates), { params: { index } })
+        openChangedDiff: (sessionId, cwd, path, seq, index, turn) => {
+          ctx.sidebarRight.openResource(fileAddressFor(sessionId, cwd, path), {
+            params: { diff: { seq, index, turn } },
+          })
         },
       }),
     }, DeliverablesTail),
@@ -78,20 +79,25 @@ export function apply(ctx: ClientContext): void {
     { name: 'tool.call.toolview', key: 'present', locale: NS }, PresentRow,
   ))
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.sidebarRightTabs.register(changesReviewDefinition(t)), 'ui-deliverables: changes-review type')
-  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
-    {
-      name: 'sidebar.right.pane.tab', key: CHANGES_REVIEW_ID, locale: NS, store: createReviewStore(),
-      inject: (): ReviewInjected => ({
-        hooks: { changesSummary: summaries.state, changesDiff: diffs.state, presentedOpen: opener.state, presentedHost: opener.host },
-        loadChangesSummary: (sessionId, seq) => summaries.load(sessionId, seq),
-        loadChangesDiff: (sessionId, seq, index) => diffs.load(sessionId, seq, index),
-        reloadPresentedHost: () => opener.loadHost(),
-        openChanged: (sessionId, seq, index) => opener.openChanged(sessionId, seq, index),
-      }),
-    },
-    ReviewTab,
-  )), 'ui-deliverables: changes-review body')
+  // The comparison renderer belongs to the document pane's registry: it is the
+  // one surface a changed file's diff opens in (the detached changes-review
+  // route is retired).
+  ctx.inject(['documentPreviews'], (scope) => {
+    scope.effect(
+      () => scope.documentPreviews.register(changesDiffPreviewDefinition(() => t('diffView.title'))),
+      'ui-deliverables: diff preview metadata',
+    )
+    scope.effect(() => ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register(
+      {
+        name: 'sidebar.right.tab.document', key: CHANGES_DIFF_ID, locale: NS,
+        inject: (): DiffPreviewInjected => ({
+          hooks: { changesDiff: diffs.state },
+          loadChangesDiff: (sessionId, seq, index) => diffs.load(sessionId, seq, index),
+        }),
+      },
+      DiffPreview,
+    )), 'ui-deliverables: diff preview body')
+  })
   // The prose side of the same vocabulary: the chat view reaches this face
   // via ctx.get, so its absence — this plugin composed out — is the off state.
   const mentions: ChatFileMentions = {

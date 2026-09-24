@@ -18,7 +18,7 @@ import {
   type AgentModelsDirectoryFace,
   type AgentModelsInjected,
 } from './AgentModelsBody.tsx'
-import { CapabilitiesBody, CapabilitiesIcon, refreshCapabilities, setOpenSettingsHandler } from './CapabilitiesBody.tsx'
+import { CapabilitiesBody, CapabilitiesIcon, ensureCouncilsFresh, getCouncilRegistry, refreshCapabilities, refreshCouncils, setOpenSettingsHandler, subscribeCouncilRegistry } from './CapabilitiesBody.tsx'
 import { setOpenSettingsSection } from './settings-nav.ts'
 import {
   SubagentSessionsBody,
@@ -61,9 +61,17 @@ import { refreshFromServer as refreshOrchestrationParams } from './params-store.
 import { refreshFromServer as refreshPermissionsView } from './permissions-model.ts'
 import { refreshEffectiveRoles } from './role-effective.ts'
 import {
+  handleSettingsReconnect,
+  installSettingsVisibilityListener,
+  registerSettingsRefresh,
+  requestSettingsRefresh,
+  SETTINGS_MOUNT_STALE_MS,
+} from './settings-refresh.ts'
+import {
   getRoleRegistry,
   refreshFromServer as refreshRoleRegistry,
   subscribeRoleRegistry,
+  type FleetCouncil,
   type RoleRegistryMap,
 } from './role-registry.ts'
 
@@ -151,32 +159,35 @@ function resolveAgentModelsDirectory(
  */
 export function apply(ctx: Context): void {
   // enpoi: cross-client live settings sync. A commit in the
-  // enpoi-orchestration namespace by ANY open client is debounced, then the
-  // persona, orchestration-parameter, and permissions stores re-read the
-  // namespace; each store ignores server values for paths with a local write
-  // still in flight, so optimistic edits are never clobbered.
+  // enpoi-orchestration namespace by ANY open client, a transport reconnect,
+  // or the tab becoming visible schedules one debounced fan-out; the stores
+  // share a single coalesced settings.describe per burst, and each store
+  // ignores server values for paths with a local write still in flight, so
+  // optimistic edits are never clobbered.
   ctx.effect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const scheduleRefresh = (): void => {
-      if (timer !== undefined) clearTimeout(timer)
-      timer = setTimeout(() => {
-        timer = undefined
-        void refreshPersonaAssignments()
-        void refreshOrchestrationParams()
-        void refreshPermissionsView()
-        void refreshRoleRegistry()
-        void refreshCapabilities()
-        void refreshEffectiveRoles()
-      }, 250)
-    }
-    const dispose = ctx.remote.$on('settings/document-updated', (ns) => {
-      if (ns === 'enpoi-orchestration') scheduleRefresh()
+    const unregister = [
+      registerSettingsRefresh('persona', refreshPersonaAssignments),
+      registerSettingsRefresh('params', refreshOrchestrationParams),
+      registerSettingsRefresh('permissions', refreshPermissionsView),
+      registerSettingsRefresh('roles', refreshRoleRegistry),
+      registerSettingsRefresh('capabilities', refreshCapabilities),
+      registerSettingsRefresh('councils', refreshCouncils),
+      registerSettingsRefresh('effective-roles', refreshEffectiveRoles),
+    ]
+    // A push can be missed while the socket is down (a reconnected page keeps
+    // its stale snapshot otherwise) or while the tab is backgrounded.
+    const disposeReset = ctx.on('connection/reset', () => { handleSettingsReconnect() })
+    const disposeVisibility = installSettingsVisibilityListener()
+    const disposeUpdates = ctx.remote.$on('settings/document-updated', (ns) => {
+      if (ns === 'enpoi-orchestration') requestSettingsRefresh()
     })
     return () => {
-      if (timer !== undefined) clearTimeout(timer)
-      dispose()
+      for (const dispose of unregister) dispose()
+      disposeReset()
+      disposeVisibility()
+      disposeUpdates()
     }
-  }, 'enpoi: cross-client settings refresh')
+  }, 'enpoi: settings refresh triggers')
 
   // 1. Brand marks in sidebar & conversation hero
   ctx.slots.inject('sidebar.brand.mark', () =>
@@ -358,8 +369,13 @@ export function apply(ctx: Context): void {
             getSnapshot: getRoleRegistry,
             subscribe: subscribeRoleRegistry,
           } satisfies HostObservable<RoleRegistryMap>,
+          councilRegistry: {
+            getSnapshot: getCouncilRegistry,
+            subscribe: subscribeCouncilRegistry,
+          } satisfies HostObservable<readonly FleetCouncil[]>,
         },
         resolveDirectory: sessionId => resolveAgentModelsDirectory(ctx, fallbackDirectory, sessionId),
+        ensureCouncils: () => { ensureCouncilsFresh(SETTINGS_MOUNT_STALE_MS) },
         assignPersona: (personaId, selection) => { void setPersonaAssignment(personaId, selection) },
         clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
         // The embedded picker renders in the shared `model` namespace, so its

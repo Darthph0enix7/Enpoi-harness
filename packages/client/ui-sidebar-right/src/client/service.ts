@@ -159,6 +159,12 @@ export interface SidebarRightOpenTabOptions<K extends string = string> extends S
 /** The scheme every resource address carries; anything else is not a resource this face opens. */
 const RESOURCE_SCHEME = 'dsh-resource://'
 
+/** The file viewer family; every `dsh-resource://file/**` open anchors the files page. */
+const FILE_RESOURCE_PREFIX = 'dsh-resource://file/'
+
+/** The files page kind the rail lights while a file is open (ui-sidebar-files owns the page). */
+const FILES_KIND = 'files'
+
 /** Synchronous close/replacement hook; resource owners retain any background cleanup. */
 export type SidebarRightCloseHandler = (sessionId: SessionId, tab: TabRecord) => void
 
@@ -385,7 +391,8 @@ export class SidebarRightController implements ISidebarRight {
     const claim = this.tabs.claim(address, options.kind)
     const editor = options.preferNewPane !== true && options.replaceTab === undefined
       && (this.tabs.get(claim.kind)?.opensIn ?? 'editor') === 'editor'
-    this.place(sessionId, actions, claim, address, options, options.params, editor)
+    this.place(sessionId, actions, claim, address, options, options.params, editor,
+      address.startsWith(FILE_RESOURCE_PREFIX) && this.tabs.get(FILES_KIND) !== undefined)
   }
 
   /** Place a page type in one session at the address pages are recorded under; an unregistered or hidden kind throws. */
@@ -413,6 +420,7 @@ export class SidebarRightController implements ISidebarRight {
     placement: SidebarRightPlacement,
     params: SidebarRightNavigationParams,
     editor = false,
+    filesAnchor = false,
   ): void {
     const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
       ?? (this.binding?.sessionId === sessionId ? this.binding.surfaces[sessionId] : undefined)
@@ -440,13 +448,16 @@ export class SidebarRightController implements ISidebarRight {
     }, (tabId) => {
       this.tabDomain.navigate(sessionId, tabId, { address, params })
       // enpoi: the rail is global state: any open of the column opens the panel,
-      // and a page open is the rail's new lit kind. A resource placed in the
-      // panel leaves the lit page alone — the rail still stands for the page.
-      // A kind that allows multiple pages records each one under its own
-      // `sidebar://<kind>/<uuid>` address, so the lit check accepts the whole
-      // address family and not only the bare page address.
+      // and a page open is the rail's new lit kind. A file resource lights the
+      // files page instead: the tree is the anchor every file open lands beside
+      // (the pane's own `editorOpen` gate keys on that lit kind). A resource
+      // placed in the panel leaves the lit page alone — the rail still stands
+      // for the page. A kind that allows multiple pages records each one under
+      // its own `sidebar://<kind>/<uuid>` address, so the lit check accepts the
+      // whole address family and not only the bare page address.
       const page = pageAddress(claim.kind)
-      if (address === page || address.startsWith(`${page}/`)) this.rail.setKind(claim.kind)
+      if (filesAnchor) this.rail.setKind(FILES_KIND)
+      else if (address === page || address.startsWith(`${page}/`)) this.rail.setKind(claim.kind)
       else this.rail.setOpen(true)
     }) }
     // Replacing a tab runs the replaced record's close handler in the same

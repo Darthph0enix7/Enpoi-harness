@@ -47,6 +47,8 @@ In Windows Electron, `html[data-windows-titlebar]` keeps fullscreen panels below
 
 The seat reports presentation through `ctx.layout.openRightbar(track, fullscreen)` / `closeRightbar()`; the frame does not inject this package. Switching fullscreen on a wide viewport leaves the center width unchanged, and the width handle appears only in expanded normal mode. Independent floating panels and `float`/`dock` operations remain available.
 
+Every `dsh-resource://file/**` open lights the files page in the rail and expands the column, whatever tab was in front: the tree is the anchor every file view sits beside. The editor pane is visible exactly while the column is expanded, the files page is the lit rail tab, and a document is selected — switching the rail anywhere else collapses it to zero width and coming back re-reveals the same record. Only the mobile container, whose narrow layout has no column to split, draws an opened document as a full-screen push: a back control returns to the page the panel was showing and the document's own toolbar, close included, rides inside the push.
+
 The panel has no header row. Its two controls — the presentation switch and the collapse button — ride the kit's chrome seat at the far end of the top-right pane's tab strip, so the strip is the panel's whole top edge. Each strip reads, left to right: the tab capsules with close controls where allowed, the add control (drawn only while that pane holds no guide tab; it opens the guide there through `ctx.sidebarRight.openTab`), the pane's split control, and in the top-right pane the two panel controls. Only the chips give way in a narrow pane; the controls after them never shrink or clip.
 
 <a id="the-expand-button"></a>

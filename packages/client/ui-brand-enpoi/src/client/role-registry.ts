@@ -9,9 +9,13 @@
  *
  * Same store discipline as persona-store: eager boot priming, synchronous
  * snapshots (bound into components through the inject `hooks` compartment and
- * read directly by the settings page), and `refreshFromServer` for cross-client
- * live sync driven by `settings/document-updated`.
+ * read directly by the settings page), and `refreshFromServer` through the
+ * package's shared coalesced describe (settings-refresh.ts: one request per
+ * burst, scheduled by a push, a transport reconnect, the tab becoming visible,
+ * or a stale mount). A read answering the revision this store last applied
+ * notifies nobody.
  */
+import { readEnpoiNamespace } from './settings-refresh.ts'
 
 /** Fleet group a registry role belongs to. */
 export type RoleGroup = 'supervision' | 'specialists' | 'council' | 'custom'
@@ -70,10 +74,35 @@ export interface FleetSeat {
 
 /** One rendered fleet group. */
 export interface FleetCategory {
-  group: RoleGroup
+  /** Stable identity: a fixed group id, `council:<id>`, or `ungrouped`. */
+  key: string
   title: string
   seats: FleetSeat[]
 }
+
+/** One seat a council registry row declares (`enpoiCouncil.list`). */
+export interface FleetCouncilSeat {
+  /** Seat id; the persona assignment key. */
+  id: string
+  /** Council-declared display label, when the registry carries one. */
+  label?: string
+  /** Council-declared seat family (informational). */
+  family?: string
+}
+
+/** One registered council as the fleet grouping reads it. */
+export interface FleetCouncil {
+  id: string
+  /** Operator-facing council name; falls back to the title-cased id. */
+  label?: string
+  /** Seats the council debates with. */
+  seats?: readonly FleetCouncilSeat[]
+  /** Arbiters serving every council; rendered in the shared group. */
+  arbiters?: readonly string[]
+}
+
+/** Title of the group for persona-only seats no registry or council claims. */
+export const UNGROUPED_GROUP_LABEL = 'UNGROUPED'
 
 /**
  * Shipped code-default roles: overridden per id by the settings registry.
@@ -212,33 +241,97 @@ export function coerceRoleRegistry(raw: unknown): RoleRegistryMap {
 
 /**
  * Build the Fleet Routing groups: registry roles with `seat !== false` in
- * registry order, then persona-assigned ids with no registry entry (sorted) so
- * existing arbiters/keeper/debaters keep their rows.
+ * registry order, one group per registered council titled by the council's own
+ * label, the shared arbiter group, then persona-only seats no registry or
+ * council claims. Council seats are claimed by normalized id — the first
+ * council that lists an id owns its row, so a duplicate appears once; a council
+ * with zero seats renders no group; a role hidden with `seat: false` stays
+ * hidden even when a council lists it. The shipped pre-registry seat metadata
+ * (keeper, arbiters, legacy debaters) counts as a registry claim.
  * @param registry - the effective role registry.
  * @param personaKeys - keys of the persona assignment map.
+ * @param councils - the live council registry (`enpoiCouncil.list`).
  * @returns non-empty groups in render order.
  */
-export function buildFleetCategories(registry: RoleRegistryMap, personaKeys: Iterable<string>): FleetCategory[] {
+export function buildFleetCategories(
+  registry: RoleRegistryMap,
+  personaKeys: Iterable<string>,
+  councils: readonly FleetCouncil[],
+): FleetCategory[] {
   const byGroup = new Map<RoleGroup, FleetSeat[]>()
+  const ungrouped: FleetSeat[] = []
   const seen = new Set<string>()
+  const emitted = new Set<string>()
+  const councilRows = new Map<number, FleetSeat[]>()
+  const rowFor = (index: number): FleetSeat[] => {
+    let row = councilRows.get(index)
+    if (row === undefined) {
+      row = []
+      councilRows.set(index, row)
+    }
+    return row
+  }
+
+  // Council ownership: normalized seat id → first council index that lists it.
+  const ownership = new Map<string, number>()
+  const declaredSeats = new Map<string, FleetCouncilSeat>()
+  councils.forEach((council, index) => {
+    for (const raw of council.seats ?? []) {
+      const id = normalizeRoleId(raw.id)
+      if (id === '') continue
+      if (!declaredSeats.has(id)) declaredSeats.set(id, raw)
+      if (!ownership.has(id)) ownership.set(id, index)
+    }
+  })
+  const arbiters = new Set<string>()
+  for (const council of councils) {
+    for (const raw of council.arbiters ?? []) {
+      const id = normalizeRoleId(raw)
+      if (id !== '') arbiters.add(id)
+    }
+  }
+
   const push = (group: RoleGroup, seat: FleetSeat): void => {
     const seats = byGroup.get(group)
     if (seats === undefined) byGroup.set(group, [seat])
     else seats.push(seat)
   }
 
-  for (const [id, entry] of Object.entries(registry)) {
-    seen.add(id)
-    if (entry.seat === false) continue
+  /** Resolve one row: registry label, then the council's seat label, then shipped metadata. */
+  const resolveSeat = (id: string, registryLabel: string | undefined): FleetSeat => {
     const legacy = LEGACY_SEAT_META[id]
     const seat: FleetSeat = {
       id,
-      name: entry.label ?? legacy?.name ?? titleCaseRoleId(id),
+      name: registryLabel ?? declaredSeats.get(id)?.label ?? legacy?.name ?? titleCaseRoleId(id),
       icon: legacy?.icon ?? DEFAULT_SEAT_ICON,
     }
     if (legacy?.defaultLabel !== undefined) seat.defaultLabel = legacy.defaultLabel
     if (legacy?.defaultHint !== undefined) seat.defaultHint = legacy.defaultHint
-    push(entry.group ?? legacy?.group ?? 'custom', seat)
+    return seat
+  }
+
+  // Council rows first: every listed seat renders even with no persona
+  // assignment, in the council's own seat order. A registry role the operator
+  // hid with `seat: false` stays hidden; the first listing council owns the row.
+  councils.forEach((council, index) => {
+    for (const raw of council.seats ?? []) {
+      const id = normalizeRoleId(raw.id)
+      if (id === '' || ownership.get(id) !== index || emitted.has(id)) continue
+      if (registry[id]?.seat === false) continue
+      emitted.add(id)
+      seen.add(id)
+      rowFor(index).push(resolveSeat(id, registry[id]?.label))
+    }
+  })
+
+  for (const [id, entry] of Object.entries(registry)) {
+    seen.add(id)
+    if (entry.seat === false || emitted.has(id)) continue
+    if (arbiters.has(id) || (entry.group ?? LEGACY_SEAT_META[id]?.group ?? 'custom') === 'council') {
+      push('council', resolveSeat(id, entry.label))
+      continue
+    }
+    push(entry.group ?? LEGACY_SEAT_META[id]?.group ?? 'custom', resolveSeat(id, entry.label))
   }
 
   const extras = [...new Set(personaKeys)]
@@ -248,19 +341,40 @@ export function buildFleetCategories(registry: RoleRegistryMap, personaKeys: Ite
   for (const id of extras) {
     seen.add(id)
     const legacy = LEGACY_SEAT_META[id]
-    const seat: FleetSeat = {
-      id,
-      name: legacy?.name ?? titleCaseRoleId(id),
-      icon: legacy?.icon ?? DEFAULT_SEAT_ICON,
+    if (arbiters.has(id) || (legacy?.group ?? 'custom') === 'council') {
+      push('council', resolveSeat(id, undefined))
+      continue
     }
-    if (legacy?.defaultLabel !== undefined) seat.defaultLabel = legacy.defaultLabel
-    if (legacy?.defaultHint !== undefined) seat.defaultHint = legacy.defaultHint
-    push(legacy?.group ?? 'custom', seat)
+    if (legacy?.group !== undefined) {
+      push(legacy.group, resolveSeat(id, undefined))
+      continue
+    }
+    ungrouped.push(resolveSeat(id, undefined))
   }
 
-  return ROLE_GROUP_ORDER
-    .map(group => ({ group, title: ROLE_GROUP_LABELS[group], seats: byGroup.get(group) ?? [] }))
-    .filter(category => category.seats.length > 0)
+  const categories: FleetCategory[] = []
+  for (const group of ROLE_GROUP_ORDER) {
+    if (group === 'council') continue
+    const seats = byGroup.get(group)
+    if (seats !== undefined && seats.length > 0) categories.push({ key: group, title: ROLE_GROUP_LABELS[group], seats })
+  }
+  councils.forEach((council, index) => {
+    const seats = councilRows.get(index)
+    if (seats === undefined || seats.length === 0) return
+    categories.push({
+      key: `council:${council.id}`,
+      title: council.label !== undefined && council.label !== '' ? council.label : titleCaseRoleId(council.id),
+      seats,
+    })
+  })
+  const shared = byGroup.get('council')
+  if (shared !== undefined && shared.length > 0) {
+    categories.push({ key: 'council', title: ROLE_GROUP_LABELS.council, seats: shared })
+  }
+  if (ungrouped.length > 0) {
+    categories.push({ key: 'ungrouped', title: UNGROUPED_GROUP_LABEL, seats: ungrouped })
+  }
+  return categories
 }
 
 // --- cross-client live view -------------------------------------------------
@@ -268,6 +382,8 @@ export function buildFleetCategories(registry: RoleRegistryMap, personaKeys: Ite
 /** One describe view of the enpoi-orchestration namespace, structural subset. */
 interface OrchestrationRolesView {
   ns?: string
+  /** Monotonic revision the namespace was read at. */
+  revision?: number
   value?: { roles?: unknown; councils?: unknown; mcpServers?: unknown }
   user?: { roles?: unknown; councils?: unknown; mcpServers?: unknown }
 }
@@ -295,37 +411,22 @@ function notify(): void {
   }
 }
 
-/** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */
-let describeSeq = 0
-
-/** Read the enpoi-orchestration namespace through the live gateway. */
-async function describeOrchestration(): Promise<OrchestrationRolesView | undefined> {
-  describeSeq += 1
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: `role-describe-${describeSeq}`,
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json: unknown = await res.json()
-  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-  return Array.isArray(namespaces)
-    ? (namespaces as OrchestrationRolesView[]).find(n => n.ns === 'enpoi-orchestration')
-    : undefined
-}
+/**
+ * Revision this store last applied. A later read that answers the same
+ * revision carries the document this snapshot already holds, so it is skipped
+ * without a notify.
+ */
+let lastAppliedRevision: number | undefined
 
 /** Re-read the namespace and merge it into the snapshot (cross-client live sync). */
 export async function refreshFromServer(): Promise<void> {
   try {
-    const view = await describeOrchestration()
+    const view = await readEnpoiNamespace() as OrchestrationRolesView | undefined
     if (view === undefined) return
+    if (view.revision !== undefined && view.revision === lastAppliedRevision) return
     const roles = view.value?.roles ?? view.user?.roles
     if (roles === undefined) return
+    lastAppliedRevision = view.revision
     // The panels' change gate: config slices only, so status heartbeats are inert.
     orchestrationConfigFingerprint = JSON.stringify({
       roles: roles ?? null,

@@ -1,4 +1,4 @@
-/** The changed-files card: a header and per-file rows that open the turn's review, and a three-row fold. */
+/** The changed-files card: a header and per-file rows that open each file's diff, and a three-row fold. */
 import { useState } from 'react'
 import { resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import { IconChevronDownOutline14, IconChevronUpOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -22,23 +22,25 @@ function Counts({ added, deleted, t }: { added: number; deleted: number } & Prop
 }
 
 /**
- * Render one turn's changed files. The header opens the turn's review in the
- * right Sidebar on its first file; each row opens it on that row's file.
- * @param props - the recorded summary, the review opener, and localized copy.
+ * Render one turn's changed files. The header opens the first changed file's
+ * comparison, through the same opener as every row; each row opens its own
+ * file's comparison in the document pane as a diff.
+ * @param props - the recorded summary, the comparison opener, and localized copy.
  * @returns the card.
  */
-export function ChangedFiles({ changes, cwd, openReview, t }: {
+export function ChangedFiles({ changes, cwd, openDiff, t }: {
   /** The served summary with the sequence of the event that announced it. */
   changes: Pick<ChangesSummary, 'files' | 'total' | 'added' | 'deleted'> & { seq: number }
   cwd: string | undefined
-  /** Open the turn's review on the file at an original summary index. */
-  openReview: (index: number) => void
+  /** Open one changed file as a diff, by its index in the summary's files array. */
+  openDiff: (index: number) => void
 } & PropsLocale<typeof NS>) {
   const [expanded, setExpanded] = useState(false)
   const foldable = changes.files.length > COLLAPSED_ROWS
   const rows = foldable && !expanded ? changes.files.slice(0, COLLAPSED_ROWS) : changes.files
   return <div className={css.card} data-changed-files>
-    <button type="button" className={css.header} aria-label={t('changes.openReview')} onClick={() => { openReview(0) }}>
+    <button type="button" className={css.header} aria-label={t('changes.openDiff', { name: changes.files[0]?.display ?? '' })}
+      title={t('changes.openDiff', { name: changes.files[0]?.display ?? '' })} onClick={() => { openDiff(0) }}>
       <span className={css.tile}><IconCodeBracketsOutline16 size={18} /></span>
       <span className={css.titles}>
         <span className={css.title}>{t('changes.title', { count: String(changes.total) })}</span>
@@ -49,8 +51,8 @@ export function ChangedFiles({ changes, cwd, openReview, t }: {
       {rows.map((file, index) => (
         <li key={file.display}>
           <button type="button" className={css.row} title={resolveWorkspacePath(cwd, file.path)}
-            aria-label={t('changes.viewDiff', { name: file.display })}
-            onClick={() => { openReview(index) }}>
+            aria-label={t('changes.openDiff', { name: file.display })}
+            onClick={() => { openDiff(index) }}>
             <span className={css.path}>{file.display}</span>
             <span className={css.counts}>
               {file.binary === true ? t('changes.binary')

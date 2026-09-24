@@ -45,6 +45,7 @@ import {
   subscribeRoleRegistry,
   type RoleRegistryMap,
 } from './role-registry.ts'
+import { isSettingsCacheFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { openSettingsSection } from './settings-nav.ts'
 import css from './PermissionsSettings.module.css'
 
@@ -346,7 +347,11 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
 
   const load = useCallback(() => {
     void (async () => {
-      await Promise.all([refreshFromServer(), refreshRoleRegistry()])
+      // Mount re-reads only when this store never loaded or the shared cache
+      // aged past the window; a fresh cache paints without a request.
+      if (getPermissionsViewState().view === undefined || !isSettingsCacheFresh(SETTINGS_MOUNT_STALE_MS)) {
+        await Promise.all([refreshFromServer(), refreshRoleRegistry()])
+      }
       setRegistry(getRoleRegistry())
       const state = getPermissionsViewState()
       if (state.view === undefined) {

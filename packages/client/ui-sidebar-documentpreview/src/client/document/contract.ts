@@ -11,6 +11,20 @@ export interface DocumentTextPage {
 }
 
 /**
+ * Navigation parameters that ask the pane to open a file as its served
+ * comparison: the coordinates the change routes and the review pane address
+ * the comparison by.
+ */
+export interface DocumentDiffParams {
+  /** Sequence of the `workspace/changes` event that announced the turn. */
+  readonly seq: number
+  /** The file's index in that turn's summary. */
+  readonly index: number
+  /** The summarized turn, carried so the body can reach the aggregate review. */
+  readonly turn?: number
+}
+
+/**
  * Ordinary file contents, or a request for the selected renderer to load its content.
  * Byte arrays are transient UI input, never persisted layout or Session data.
  */

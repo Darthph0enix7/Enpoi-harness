@@ -9,7 +9,7 @@ import { fireEvent, render, screen, cleanup, waitFor } from '@testing-library/re
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { AgentModelsBody } from '../src/client/AgentModelsBody.tsx'
-import { mergeRoleRegistry, type RoleRegistryMap } from '../src/client/role-registry.ts'
+import { mergeRoleRegistry, type FleetCouncil, type RoleRegistryMap } from '../src/client/role-registry.ts'
 import type { PersonaMap } from '../src/client/persona-store.ts'
 
 /** One live model directory face over a single-provider catalog. */
@@ -37,13 +37,16 @@ function mount(
   personas: PersonaMap = {},
   face: ReturnType<typeof directoryFace> | null = null,
   t: (key: string, params?: Record<string, unknown>) => string = key => key,
+  councils: readonly FleetCouncil[] = [],
 ): void {
   const props = {
     sessionId: 'session-1',
     useTabInfo: () => ({ tab: { actions: { openTab: vi.fn() } } }),
     usePersonaAssignments: (selector: (value: PersonaMap) => unknown) => selector(personas),
     useRoleRegistry: (selector: (value: RoleRegistryMap) => unknown) => selector(registry),
+    useCouncilRegistry: (selector: (value: readonly FleetCouncil[]) => unknown) => selector(councils),
     resolveDirectory: () => face,
+    ensureCouncils: vi.fn(),
     assignPersona: vi.fn(),
     clearPersona: vi.fn(),
     t,
@@ -83,6 +86,60 @@ describe('AgentModelsBody — dynamic fleet', () => {
     // An unknown persona-assigned id is title-cased into a seat.
     expect(screen.getByText('My Role')).toBeTruthy()
     expect(screen.getByText('8 seats')).toBeTruthy()
+  })
+
+  it('renders one group per live council under its own label, arbiters shared', () => {
+    const councils: FleetCouncil[] = [
+      {
+        id: 'roundtable',
+        label: 'Architecture Roundtable',
+        seats: [
+          { id: 'skeptic', label: 'Skeptic' },
+          { id: 'architect', label: 'Architect' },
+          { id: 'pragmatist', label: 'Pragmatist' },
+        ],
+        arbiters: ['referee', 'chair'],
+      },
+      {
+        id: 'chorus',
+        label: 'Idea Chorus',
+        seats: [
+          { id: 'visionary', label: 'Visionary' },
+          { id: 'experiencer', label: 'Experiencer' },
+          { id: 'integrator', label: 'Integrator' },
+        ],
+        arbiters: ['referee', 'chair'],
+      },
+    ]
+    mount(mergeRoleRegistry(undefined), { referee: null, chair: null }, null, undefined, councils)
+
+    expect(screen.getByText('Architecture Roundtable')).toBeTruthy()
+    expect(screen.getByText('Idea Chorus')).toBeTruthy()
+    expect(screen.getByText('COUNCIL')).toBeTruthy()
+    expect(screen.getByText('Skeptic')).toBeTruthy()
+    expect(screen.getByText('Integrator')).toBeTruthy()
+    // Arbiters serve both councils but render once each, in the shared group.
+    expect(screen.getAllByText('Referee')).toHaveLength(1)
+    expect(screen.getAllByText('Chair')).toHaveLength(1)
+    // 5 registry seats + 6 council seats + 2 arbiters.
+    expect(screen.getByText('13 seats')).toBeTruthy()
+  })
+
+  it('renders a seat two councils list once and skips a council with zero seats', () => {
+    const councils: FleetCouncil[] = [
+      { id: 'alpha', label: 'Alpha Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }] },
+      { id: 'beta', label: 'Beta Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }] },
+      { id: 'empty', label: 'Empty Council', seats: [], arbiters: [] },
+    ]
+    mount(mergeRoleRegistry(undefined), { 'stray-seat': null }, directoryFace(), undefined, councils)
+
+    expect(screen.getAllByText('Shared Seat')).toHaveLength(1)
+    // The duplicate row is still a real assignment row with its picker.
+    expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBeGreaterThan(0)
+    expect(screen.queryByText('Empty Council')).toBeNull()
+    // A persona-only seat no council or registry claims lands in Ungrouped.
+    expect(screen.getByText('UNGROUPED')).toBeTruthy()
+    expect(screen.getByText('Stray Seat')).toBeTruthy()
   })
 
   it('renders the embedded picker through the injected model translator, not raw keys', async () => {

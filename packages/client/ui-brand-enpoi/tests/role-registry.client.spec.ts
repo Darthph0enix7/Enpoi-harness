@@ -7,9 +7,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /** One `settings.describe` envelope carrying the enpoi-orchestration namespace. */
-function describeResponse(value: unknown): Response {
+function describeResponse(value: unknown, revision = 1): Response {
   return new Response(JSON.stringify({
-    result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 1, value }] } },
+    result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision, value }] } },
   }), { status: 200 })
 }
 
@@ -60,23 +60,26 @@ describe('role registry helpers', () => {
     expect(coerceRoleRegistry([])).toEqual({})
   })
 
-  it('hides seat:false roles and appends persona-only ids to their shipped group', async () => {
+  it('hides seat:false roles, groups registry council roles, and ungroups unknown persona ids', async () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const registry = mergeRoleRegistry({
       ghost: { label: 'Ghost', seat: false },
       muse: { label: 'The Muse', group: 'council' },
     })
-    const categories = buildFleetCategories(registry, ['keeper', 'unknown-role'])
+    const categories = buildFleetCategories(registry, ['keeper', 'unknown-role'], [])
     const seats = categories.flatMap(category => category.seats.map(seat => seat.id))
 
     expect(seats).not.toContain('ghost')
     expect(seats).toContain('muse')
     expect(seats).toContain('keeper')
     expect(seats).toContain('unknown-role')
-    const keeper = categories.find(category => category.group === 'supervision')?.seats.find(seat => seat.id === 'keeper')
+    const keeper = categories.find(category => category.key === 'supervision')?.seats.find(seat => seat.id === 'keeper')
     expect(keeper?.name).toBe('Context Keeper')
     expect(keeper?.defaultLabel).toBe('Default')
-    expect(categories.find(category => category.group === 'custom')?.seats.map(seat => seat.id)).toEqual(['unknown-role'])
+    // A registry role declared with group `council` keeps the shared group;
+    // a persona-only id no registry claims lands in Ungrouped.
+    expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['muse'])
+    expect(categories.find(category => category.key === 'ungrouped')?.seats.map(seat => seat.id)).toEqual(['unknown-role'])
   })
 
   it('retires a role with disabled:true — built-in and user-defined alike', async () => {
@@ -88,7 +91,7 @@ describe('role registry helpers', () => {
     expect(registry['designer']).toBeUndefined()
     expect(registry['ghost']).toBeUndefined()
     expect(registry['librarian']).toBeDefined()
-    const seats = buildFleetCategories(registry, []).flatMap(category => category.seats.map(seat => seat.id))
+    const seats = buildFleetCategories(registry, [], []).flatMap(category => category.seats.map(seat => seat.id))
     expect(seats).not.toContain('designer')
     expect(seats).not.toContain('ghost')
   })
@@ -101,6 +104,142 @@ describe('role registry helpers', () => {
     expect(registryRoleLabel(registry, 'blank')).toBe('Blank')
     expect(normalizeRoleId('  The Muse ')).toBe('muse')
     expect(titleCaseRoleId('my_role')).toBe('My Role')
+  })
+})
+
+describe('fleet council grouping', () => {
+  /** The live two-council shape: distinct seats, both served by the same arbiters. */
+  const LIVE_COUNCILS = [
+    {
+      id: 'roundtable',
+      label: 'Architecture Roundtable',
+      seats: [
+        { id: 'skeptic', label: 'Skeptic' },
+        { id: 'architect', label: 'Architect' },
+        { id: 'pragmatist', label: 'Pragmatist' },
+      ],
+      arbiters: ['referee', 'chair'],
+    },
+    {
+      id: 'chorus',
+      label: 'Idea Chorus',
+      seats: [
+        { id: 'visionary', label: 'Visionary' },
+        { id: 'experiencer', label: 'Experiencer' },
+        { id: 'integrator', label: 'Integrator' },
+      ],
+      arbiters: ['referee', 'chair'],
+    },
+  ]
+
+  it('renders one group per council and one shared arbiter group, in registry order', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(
+      mergeRoleRegistry(undefined),
+      ['skeptic', 'architect', 'pragmatist', 'visionary', 'experiencer', 'integrator', 'referee', 'chair'],
+      LIVE_COUNCILS,
+    )
+
+    expect(categories.map(category => category.title)).toEqual([
+      'BACKGROUND & SUPERVISION',
+      'SPECIALIST WORKERS',
+      'Architecture Roundtable',
+      'Idea Chorus',
+      'COUNCIL',
+    ])
+    expect(categories.map(category => category.key)).toEqual([
+      'supervision',
+      'specialists',
+      'council:roundtable',
+      'council:chorus',
+      'council',
+    ])
+    expect(categories.find(category => category.key === 'council:roundtable')?.seats.map(seat => seat.id))
+      .toEqual(['skeptic', 'architect', 'pragmatist'])
+    expect(categories.find(category => category.key === 'council:chorus')?.seats.map(seat => seat.id))
+      .toEqual(['visionary', 'experiencer', 'integrator'])
+    // Both councils share the same arbiters; each renders once, in the shared group.
+    expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id))
+      .toEqual(['chair', 'referee'])
+  })
+
+  it('gives a newly registered council its own group with no code change', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['ops-auditor'], [
+      ...LIVE_COUNCILS,
+      { id: 'ops-review', label: 'Ops Review', seats: [{ id: 'ops-auditor', label: 'Ops Auditor' }], arbiters: [] },
+    ])
+
+    expect(categories.map(category => category.title)).toContain('Ops Review')
+    expect(categories.find(category => category.key === 'council:ops-review')?.seats.map(seat => seat.id))
+      .toEqual(['ops-auditor'])
+    // Council seats render with no persona assignment at all, under their own label.
+    expect(categories.find(category => category.key === 'council:roundtable')?.seats.map(seat => seat.id))
+      .toEqual(['skeptic', 'architect', 'pragmatist'])
+  })
+
+  it('renders a seat two councils list exactly once, under the first council', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['shared-seat'], [
+      { id: 'alpha', label: 'Alpha Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }] },
+      { id: 'beta', label: 'Beta Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }, { id: 'beta-only', label: 'Beta Only' }] },
+    ])
+
+    const ids = categories.flatMap(category => category.seats.map(seat => seat.id))
+    expect(ids.filter(id => id === 'shared-seat')).toHaveLength(1)
+    expect(categories.find(category => category.key === 'council:alpha')?.seats.map(seat => seat.id)).toEqual(['shared-seat'])
+    expect(categories.find(category => category.key === 'council:beta')?.seats.map(seat => seat.id)).toEqual(['beta-only'])
+  })
+
+  it('renders no group for a council with zero seats', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [
+      { id: 'empty', label: 'Empty Council', seats: [], arbiters: [] },
+    ])
+
+    expect(categories.map(category => category.key)).not.toContain('council:empty')
+    expect(categories.map(category => category.title)).not.toContain('Empty Council')
+  })
+
+  it('groups a persona-only seat its council claims and ungroups one nothing claims', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['ops-auditor', 'stray-seat'], [
+      { id: 'ops-review', label: 'Ops Review', seats: [{ id: 'ops-auditor', label: 'Ops Auditor' }] },
+    ])
+
+    expect(categories.find(category => category.key === 'council:ops-review')?.seats.map(seat => seat.id))
+      .toEqual(['ops-auditor'])
+    expect(categories.find(category => category.key === 'ungrouped')?.seats.map(seat => seat.id))
+      .toEqual(['stray-seat'])
+  })
+
+  it('routes a registry arbiter into the shared group, ungroups no seats, and falls back to the id title', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const registry = mergeRoleRegistry({ chair: { label: 'Chair' }, scribe: {} })
+    const categories = buildFleetCategories(registry, [], [
+      // No label and a malformed seat/arbiter: the id titles the group, blanks are dropped.
+      { id: 'ops-review', seats: [{ id: 'ops-auditor' }, { id: '' }], arbiters: ['chair', ''] },
+      // No seats array and no label: no group, no crash.
+      { id: 'silent' },
+    ])
+
+    expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['chair'])
+    expect(categories.find(category => category.key === 'custom')?.seats.map(seat => seat.id)).toEqual(['scribe'])
+    expect(categories.find(category => category.key === 'council:ops-review')).toEqual({
+      key: 'council:ops-review',
+      title: 'Ops Review',
+      seats: [expect.objectContaining({ id: 'ops-auditor' })],
+    })
+    expect(categories.map(category => category.key)).not.toContain('council:silent')
+  })
+
+  it('hides a seat the operator marked seat:false even when a council lists it', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const registry = mergeRoleRegistry({ skeptic: { seat: false } })
+    const categories = buildFleetCategories(registry, [], LIVE_COUNCILS)
+
+    expect(categories.find(category => category.key === 'council:roundtable')?.seats.map(seat => seat.id))
+      .toEqual(['architect', 'pragmatist'])
   })
 })
 
@@ -118,7 +257,9 @@ describe('role registry store', () => {
 
     const listener = vi.fn()
     const unsubscribe = store.subscribeRoleRegistry(listener)
-    fetchMock.mockImplementation(async () => describeResponse({ roles: { muse: null, oracle: { label: 'Oracle Prime' } } }))
+    // The pushed change carries a bumped namespace revision; a same-revision
+    // read is the unchanged document and must not notify.
+    fetchMock.mockImplementation(async () => describeResponse({ roles: { muse: null, oracle: { label: 'Oracle Prime' } } }, 2))
     await store.refreshFromServer()
 
     expect(store.getRoleRegistry().muse).toBeUndefined()

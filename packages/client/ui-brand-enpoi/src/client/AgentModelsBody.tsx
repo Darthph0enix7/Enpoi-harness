@@ -6,10 +6,12 @@
  * Sidebar tab beside Files/Terminal, not a main-column page. Persona
  * assignments persist to `enpoi-orchestration.personas` in settings.yaml and
  * apply to every session. Seats are built from the settings-backed role
- * registry (`enpoi-orchestration.roles`) plus every persona-assigned id with no
- * registry entry, so the fleet grows and shrinks with the operator's roles. The
- * keeper seat shows "Default" (its plugin Config route) instead of "Inherit" —
- * the keeper has no parent turn to inherit from.
+ * registry (`enpoi-orchestration.roles`), the live council registry
+ * (`enpoiCouncil.list`, one group per council under its own label), and every
+ * persona-assigned id neither claims, so the fleet grows and shrinks with the
+ * operator's roles and councils. The keeper seat shows "Default" (its plugin
+ * Config route) instead of "Inherit" — the keeper has no parent turn to
+ * inherit from.
  *
  * The tab's own `sessionId` addresses the model directory; the injected face
  * carries the persona assignment hook plus the assignment callbacks, and the
@@ -21,7 +23,8 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { HostObservable, InjectFace, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PersonaMap } from './persona-store.ts'
-import { buildFleetCategories, type RoleRegistryMap } from './role-registry.ts'
+import { buildFleetCategories, type FleetCouncil, type RoleRegistryMap } from './role-registry.ts'
+import { ensureSettingsFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { CAPABILITIES_KIND } from './kinds.ts'
 import css from './AgentModelsBody.module.css'
 
@@ -64,11 +67,13 @@ export interface AgentModelsDirectoryFace {
 export interface AgentModelsInjected {
   /**
    * The live persona assignment cache as a bound `usePersonaAssignments` hook,
-   * plus the settings-backed role registry as `useRoleRegistry`.
+   * the settings-backed role registry as `useRoleRegistry`, and the live
+   * council registry (`enpoiCouncil.list`) as `useCouncilRegistry`.
    */
   hooks: {
     personaAssignments: HostObservable<PersonaMap>
     roleRegistry: HostObservable<RoleRegistryMap>
+    councilRegistry: HostObservable<readonly FleetCouncil[]>
   }
   /**
    * Resolve the model directory for the tab's session (catalog fallback when
@@ -77,6 +82,8 @@ export interface AgentModelsInjected {
    * @returns the stable directory face, or null when model data is unavailable.
    */
   resolveDirectory: (sessionId: string | undefined) => AgentModelsDirectoryFace | null
+  /** Read the council registry when its cache is missing or older than the mount window. */
+  ensureCouncils: () => void
   /** Assign an explicit model to a persona globally. */
   assignPersona: (personaId: string, selection: ModelSelection) => void
   /** Clear an explicit assignment, reverting the persona to its fallback route. */
@@ -92,7 +99,9 @@ export function AgentModelsBody({
   useTabInfo,
   usePersonaAssignments,
   useRoleRegistry,
+  useCouncilRegistry,
   resolveDirectory,
+  ensureCouncils,
   assignPersona,
   clearPersona,
   t,
@@ -100,12 +109,14 @@ export function AgentModelsBody({
   const { tab } = useTabInfo()
   const assignments = usePersonaAssignments(snapshot => snapshot)
   const registry = useRoleRegistry(snapshot => snapshot)
+  const councils = useCouncilRegistry(snapshot => snapshot)
 
-  // Seats come from the role registry; persona-assigned ids with no registry
-  // entry keep their rows (the pre-registry arbiters, keeper, and debaters).
+  // Seats come from the role registry plus the live council registry: each
+  // council renders its own seats under its own label, arbiters share their
+  // group, and persona-assigned ids neither registry claims keep rows.
   const categories = useMemo(
-    () => buildFleetCategories(registry, Object.keys(assignments)),
-    [registry, assignments],
+    () => buildFleetCategories(registry, Object.keys(assignments), councils),
+    [registry, assignments, councils],
   )
   const totalSeats = useMemo(
     () => categories.reduce((count, category) => count + category.seats.length, 0),
@@ -122,6 +133,15 @@ export function AgentModelsBody({
     if (face !== null && face.available) face.load()
   }, [face])
 
+  // A mount can be the first look after a missed push (reconnect, backgrounded
+  // tab): re-read the shared settings cache when it aged past the window, and
+  // the council registry under the same mount-staleness rule (it has its own
+  // RPC and is re-read on the same pushes/reconnects through the store path).
+  useEffect(() => {
+    ensureSettingsFresh(SETTINGS_MOUNT_STALE_MS)
+    ensureCouncils()
+  }, [ensureCouncils])
+
   return (
     <div className={css.container}>
       <header className={css.head}>
@@ -130,7 +150,7 @@ export function AgentModelsBody({
       </header>
       <div className={css.groups}>
         {categories.map(category => (
-          <div key={category.title} className={css.group}>
+          <div key={category.key} className={css.group}>
             <div className={css.groupTitle}>{category.title}</div>
             <div className={css.rows}>
               {category.seats.map((seat) => {

@@ -261,7 +261,11 @@
 }
 
 .editor[data-sidebar-right-editor-open] {
-  visibility: visible;
+  /* The pane stays open while the panel collapses so the slide carries it, so
+     its own visibility must follow the panel's: `visible` here would override
+     the hidden box and leave the pane lit behind the rail. Inherit flips back
+     on the opening slide's first frame and off on the closing slide's last. */
+  visibility: inherit;
   opacity: 1;
   pointer-events: auto;
   transition:

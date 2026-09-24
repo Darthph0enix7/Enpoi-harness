@@ -103,7 +103,9 @@ export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
   if (intended === null) return null
   if (!('kind' in block)) return { card: { diffs: [intended.diff] } }
   if (intended.tool === 'str_replace_editor') return null
-  if (block.isError) return null
+  // Success facts only: a failed or interrupted result must not draw a diff for
+  // a change that never landed, whatever the call's arguments intended.
+  if (block.isError || block.error !== undefined) return null
   const applied = appliedDiffs(block.meta)
   if (applied === null || applied === 'empty') {
     return intended.tool === 'write' ? { card: { diffs: [intended.diff] } } : null

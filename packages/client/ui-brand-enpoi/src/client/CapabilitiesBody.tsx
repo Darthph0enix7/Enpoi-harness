@@ -48,8 +48,16 @@ import { useState, useEffect, useMemo, useSyncExternalStore, type ReactNode } fr
 import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { AGENT_MODELS_KIND } from './kinds.ts'
-import { countPermissionRules, type PermissionsConfig } from './permissions-model.ts'
+import {
+  countPermissionRules,
+  getPermissionsViewState,
+  refreshFromServer as refreshPermissionsView,
+  subscribePermissionsView,
+  type PermissionsConfig,
+} from './permissions-model.ts'
+import { ensureSettingsFresh, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { PROTECTED_CAPABILITIES } from './capability-catalog.ts'
+import type { FleetCouncil, FleetCouncilSeat } from './role-registry.ts'
 import css from './CapabilitiesBody.module.css'
 
 /** How many session ids the skill catalog tries before reporting unavailable. */
@@ -195,12 +203,13 @@ const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: strin
   },
 }
 
-/** One council row (`enpoiCouncil.list`) rendered by the Councils section. */
-export interface LiveCouncilEntry {
-  id: string
-  label?: string
-  /** Seat count when the registry reports one. */
-  seats?: number
+/**
+ * One council row (`enpoiCouncil.list`) rendered by the Councils section and
+ * consumed by the Agent Models fleet grouping.
+ */
+export interface LiveCouncilEntry extends FleetCouncil {
+  /** Seat count when the registry reports only a count (a `seats` array wins). */
+  seatCount?: number
   /** Whether the council itself is enabled (a retired council stays listed). */
   enabled?: boolean
 }
@@ -286,22 +295,14 @@ interface OrchestrationNamespaceView {
 
 /** Doc 55 permission policy wire types live in permissions-model.ts. */
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
+/**
+ * Read the enpoi-orchestration namespace through the package's shared
+ * coalesced read: concurrent callers (the other stores included) share one
+ * settings.describe.
+ * @returns the namespace view, or undefined on a failed or malformed answer.
+ */
 async function describeOrchestration(): Promise<OrchestrationNamespaceView | undefined> {
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: nextRpcId('caps-describe'),
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json = await res.json() as { result?: { ok?: boolean; value?: { namespaces?: OrchestrationNamespaceView[] } } }
-  const namespaces = json?.result?.value?.namespaces
-  return Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
+  return await readEnpoiNamespace() as unknown as OrchestrationNamespaceView | undefined
 }
 
 /** One skills.list attempt; success carries the catalog, failure the reason to show. */
@@ -454,8 +455,50 @@ export async function refreshRoles(): Promise<void> {
   }
 }
 
-/** Read the council registry (`enpoiCouncil.list`). */
-export async function refreshCouncils(): Promise<void> {
+/** Parse one council seat out of the registry answer, dropping rows without an id. */
+function parseCouncilSeat(raw: unknown): FleetCouncilSeat | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const rec = raw as Record<string, unknown>
+  if (typeof rec.id !== 'string' || rec.id === '') return undefined
+  const seat: FleetCouncilSeat = { id: rec.id }
+  if (typeof rec.label === 'string' && rec.label !== '') seat.label = rec.label
+  if (typeof rec.family === 'string' && rec.family !== '') seat.family = rec.family
+  return seat
+}
+
+/** One in-flight council read; concurrent callers share it. */
+let councilsInFlight: Promise<void> | undefined
+
+/** A call that arrived during the in-flight read, so it gets a trailing read. */
+let councilsQueued = false
+
+/** When the last council read succeeded (0 = never); a mount inside the window reuses it. */
+let councilsLoadedAt = 0
+
+/**
+ * Read the council registry (`enpoiCouncil.list`). Concurrent callers share one
+ * request; a caller that arrives during a read gets a trailing read, so a
+ * trigger is never swallowed.
+ * @returns a promise settled when this call's read (or the trailing one) finishes.
+ */
+export function refreshCouncils(): Promise<void> {
+  if (councilsInFlight !== undefined) {
+    councilsQueued = true
+    return councilsInFlight
+  }
+  const run = async (): Promise<void> => {
+    do {
+      councilsQueued = false
+      await readCouncils()
+    } while (councilsQueued)
+    councilsInFlight = undefined
+  }
+  councilsInFlight = run()
+  return councilsInFlight
+}
+
+/** One read of the council registry into the module snapshot. */
+async function readCouncils(): Promise<void> {
   try {
     const res = await fetch('/api/enpoiCouncil.list', {
       method: 'POST',
@@ -473,7 +516,7 @@ export async function refreshCouncils(): Promise<void> {
       return
     }
     const json = await res.json() as { result?: { ok?: boolean; value?: { councils?: unknown }; error?: { message?: unknown } } }
-    const result = json?.result
+    const result = json.result
     if (result?.ok !== true || !Array.isArray(result.value?.councils)) {
       const message = result?.error?.message
       globalCouncilsError = typeof message === 'string' && message !== '' ? message : 'council registry unavailable'
@@ -485,18 +528,22 @@ export async function refreshCouncils(): Promise<void> {
       if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
       const row = raw as Record<string, unknown>
       if (typeof row.id !== 'string' || row.id === '') continue
-      const seats = Array.isArray(row.seats)
-        ? row.seats.length
-        : typeof row.seatCount === 'number' ? row.seatCount : undefined
-      councils.push({
-        id: row.id,
-        ...(typeof row.label === 'string' && row.label !== '' ? { label: row.label } : {}),
-        ...(seats !== undefined ? { seats } : {}),
-        ...(typeof row.enabled === 'boolean' ? { enabled: row.enabled } : {}),
-      })
+      const entry: LiveCouncilEntry = { id: row.id }
+      if (typeof row.label === 'string' && row.label !== '') entry.label = row.label
+      if (Array.isArray(row.seats)) {
+        entry.seats = row.seats.map(parseCouncilSeat).filter((seat): seat is FleetCouncilSeat => seat !== undefined)
+      } else if (typeof row.seatCount === 'number') {
+        entry.seatCount = row.seatCount
+      }
+      if (Array.isArray(row.arbiters)) {
+        entry.arbiters = row.arbiters.filter((id): id is string => typeof id === 'string' && id !== '')
+      }
+      if (typeof row.enabled === 'boolean') entry.enabled = row.enabled
+      councils.push(entry)
     }
     globalCouncils = councils
     globalCouncilsError = null
+    councilsLoadedAt = Date.now()
     notify()
   } catch (err: unknown) {
     globalCouncilsError = err instanceof Error ? err.message : String(err)
@@ -504,10 +551,44 @@ export async function refreshCouncils(): Promise<void> {
   }
 }
 
+/**
+ * View-mount path: a council read within `maxAgeMs` paints without a request;
+ * an older or missing one starts the shared re-read.
+ * @param maxAgeMs - the freshness window in milliseconds.
+ */
+export function ensureCouncilsFresh(maxAgeMs: number): void {
+  if (councilsLoadedAt !== 0 && Date.now() - councilsLoadedAt < maxAgeMs) return
+  void refreshCouncils()
+}
+
+/** Synchronous council-registry snapshot reader for the fleet grouping (stable between notifies). */
+export function getCouncilRegistry(): readonly LiveCouncilEntry[] {
+  return snapshotCache.councils
+}
+
+/**
+ * Subscribe to council-registry changes (boot reads, pushes, reconnects).
+ * @param listener - called after each council snapshot change.
+ * @returns unsubscribe function.
+ */
+export function subscribeCouncilRegistry(listener: () => void): () => void {
+  return subscribe(listener)
+}
+
 let capabilitiesPrimed = false
+
+/**
+ * Revision last applied to the capability snapshot. A read answering the same
+ * revision carries the document this snapshot already holds, so it is skipped
+ * without a notify.
+ */
+let appliedOrchestrationRevision: number | undefined
 
 /** Prime the capability map + MCP state once when the first tab mounts. */
 function applyOrchestration(orch: Awaited<ReturnType<typeof describeOrchestration>>): void {
+  if (orch === undefined) return
+  if (orch.revision !== undefined && orch.revision === appliedOrchestrationRevision) return
+  appliedOrchestrationRevision = orch.revision
   const serverCaps = orch?.value?.capabilities
   if (serverCaps !== undefined) {
     const next: CapabilitiesState = { tools: {}, skills: {}, mcp: {} }
@@ -799,16 +880,24 @@ function PermissionsSection() {
   const [counts, setCounts] = useState<{ rules: number; grants: number } | null>(null)
   const [failed, setFailed] = useState(false)
 
+  // Counts come from the permissions store, not a private fetch: the strip
+  // paints the shared 0ms cache, follows every pushed refresh, and a mount
+  // that finds the cache cold or stale re-reads through the same coalescing.
   useEffect(() => {
-    void (async () => {
-      const ns = await describeOrchestration()
-      if (ns === undefined) {
+    const paint = (): void => {
+      const state = getPermissionsViewState()
+      if (state.view === undefined) {
         setFailed(true)
         return
       }
       setFailed(false)
-      setCounts(countPermissionRules(ns.value?.permissions))
-    })()
+      setCounts(countPermissionRules(state.view.value?.permissions))
+    }
+    paint()
+    if (getPermissionsViewState().view === undefined || !isSettingsCacheFresh(SETTINGS_MOUNT_STALE_MS)) {
+      void refreshPermissionsView().then(paint)
+    }
+    return subscribePermissionsView(paint)
   }, [])
 
   return (
@@ -878,9 +967,11 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     return list
   }, [sessionId, sessionIds])
 
-  // Prime the persisted capability map once.
+  // Prime the persisted capability map on the first mount; a tab reopened
+  // later re-reads only when the shared cache aged past the mount window.
   useEffect(() => {
-    void primeCapabilities()
+    if (capabilitiesPrimed) ensureSettingsFresh(SETTINGS_MOUNT_STALE_MS)
+    else void primeCapabilities()
   }, [])
   // Every live source refreshes when the tab becomes visible and when its
   // address chain changes, so a settings write or a new skill/server shows up
@@ -932,13 +1023,16 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       kind: 'tool' as const,
       ...(r.group !== undefined ? { badge: r.group } : {}),
     }))
-  const councilRows: LiveRow[] = view.councils.map(council => ({
-    id: council.id,
-    name: council.label ?? titleCaseId(council.id),
-    description: council.seats !== undefined ? `${council.seats} seats` : 'Debate council',
-    kind: 'tool' as const,
-    badge: council.enabled === false ? 'retired' : 'council',
-  }))
+  const councilRows: LiveRow[] = view.councils.map((council) => {
+    const seatCount = council.seats?.length ?? council.seatCount
+    return {
+      id: council.id,
+      name: council.label ?? titleCaseId(council.id),
+      description: seatCount !== undefined ? `${seatCount} seats` : 'Debate council',
+      kind: 'tool' as const,
+      badge: council.enabled === false ? 'retired' : 'council',
+    }
+  })
   // Stored tool flags the registries above do not already cover: the guard's
   // direct tool vocabulary has no enumeration RPC, so the operator's stored
   // keys are the live source.

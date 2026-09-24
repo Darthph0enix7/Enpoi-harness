@@ -11,6 +11,14 @@ export interface DocumentPreviewCapabilities {
   readonly search?: boolean
   /** The renderer answers the toolbar's go-to-line command. */
   readonly gotoLine?: boolean
+  /**
+   * The renderer draws a served comparison. The pane selects the definition
+   * carrying this flag when the file's navigation parameters request a diff
+   * (`{ diff: … }`), instead of deriving candidates from the file's suffix.
+   * The renderer owns its content channel: the comparison is fetched by the
+   * body, never paged in by the pane.
+   */
+  readonly diff?: boolean
 }
 
 /** One renderer implementation, independent of its component registration. */

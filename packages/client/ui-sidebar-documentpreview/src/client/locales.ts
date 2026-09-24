@@ -26,6 +26,9 @@ export const zh = {
   downloadFailed: '下载失败',
   copyFailed: '复制失败',
   gotoLine: '跳转到行',
+  /* A viewer that cannot land on a line still opens and says which line the
+     card asked for, so the reference is not silently dropped. */
+  lineHint: '第 {line} 行',
   findInFile: '在文件中查找',
   more: '更多操作',
   close: '关闭',
@@ -69,6 +72,7 @@ export const en = {
   downloadFailed: 'Download failed',
   copyFailed: 'Copy failed',
   gotoLine: 'Go to line',
+  lineHint: 'Line {line}',
   findInFile: 'Find in file',
   more: 'More actions',
   close: 'Close',

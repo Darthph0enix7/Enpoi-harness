@@ -48,7 +48,7 @@ export type { TextPreviewProps } from './TextPreview.tsx'
 export type { TextInjected } from './face.ts'
 export type { ReadDocumentBytes, DocumentFileBytes, ReadWorkspaceFilePage, SessionFile, WorkspaceFilesReadRemote } from './rpc.ts'
 export type { TextPage, TextState, TextStore, TextTabState } from './store.ts'
-export type { DocumentContent, DocumentPreviewProps, DocumentRendererCommands, DocumentTextPage } from './document/contract.ts'
+export type { DocumentContent, DocumentDiffParams, DocumentPreviewProps, DocumentRendererCommands, DocumentTextPage } from './document/contract.ts'
 export type { DocumentLoadMode, DocumentPreviewCapabilities, DocumentPreviewDefinition } from './document/registry.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -63,8 +63,12 @@ const NS = 'sidebarDocumentPreview'
 
 declare module '@deepseek-ai/dsh-client-ui-sidebar-right/client' {
   interface SidebarRightResourceParamsMap {
-    /** File line navigation supported by the text preview. */
-    file: WorkspaceFileParams
+    /**
+     * File line navigation supported by the text preview, plus the comparison
+     * coordinates that select the diff renderer instead of the suffix-derived
+     * one.
+     */
+    file: WorkspaceFileParams & { diff?: import('./document/contract.ts').DocumentDiffParams }
   }
 }
 

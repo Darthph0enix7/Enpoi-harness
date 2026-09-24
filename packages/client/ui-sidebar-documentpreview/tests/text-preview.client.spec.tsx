@@ -9,6 +9,7 @@
  * set to. Both are the browser's job; the specs assert the body's arithmetic
  * over them.
  */
+import { useEffect } from 'react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
@@ -17,6 +18,7 @@ import type { OwnerOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { TextPreview } from '../src/client/TextPreview.tsx'
 import type { TextPreviewProps } from '../src/client/TextPreview.tsx'
 import { CodeBody } from '../src/client/code/CodeBody.tsx'
+import type { DocumentContent, DocumentRendererCommands } from '../src/client/document/contract.ts'
 import type { DocumentPreviewDefinition } from '../src/client/document/registry.ts'
 import { TextBody } from '../src/client/text/TextBody.tsx'
 import { PLAIN_BODY_ID } from '../src/client/text/index.ts'
@@ -565,7 +567,92 @@ describe('TextPreview — navigation and view', () => {
     act(() => { h.instance.actions.toggledWrap(TAB_ID) })
     expect(body(view.container).hasAttribute('data-textpreview-wrap')).toBe(false)
   })
+
+  it('lands a renderer that offers gotoLine on the navigated line once its content loads', async () => {
+    probeChannel = null
+    const h = harness()
+    const goto = vi.fn<(line: number) => void>()
+    const view = render(<TextPreview {...rendererProps(h, { params: { line: 7 }, revision: 1 }, { gotoLine: goto })} />)
+    await settle()
+    // The bridge is bound, but no loaded revision: the line waits instead of dropping.
+    expect(view.container.querySelector('[data-document-preview="probe-renderer"]')).not.toBeNull()
+    expect(goto).not.toHaveBeenCalled()
+    expect(h.instance.getSnapshot().byTab[TAB_ID]?.revision).toBeUndefined()
+    expect(view.container.querySelector('[data-textpreview-line-hint]')).toBeNull()
+    act(() => { probeChannel?.loaded('v1') })
+    await settle()
+    expect(goto).toHaveBeenCalledTimes(1)
+    expect(goto).toHaveBeenCalledWith(7)
+    expect(h.instance.getSnapshot().byTab[TAB_ID]?.revision).toBe(1)
+  })
+
+  it('opens a renderer without gotoLine and surfaces the line as a hint instead of losing it', async () => {
+    probeChannel = null
+    const h = harness()
+    const goto = vi.fn<(line: number) => void>()
+    const view = render(<TextPreview {...rendererProps(h, { params: { line: 12 }, revision: 1 }, { find: () => {} })} />)
+    await settle()
+    const hint = view.container.querySelector('[data-textpreview-line-hint]')
+    expect(hint?.getAttribute('data-textpreview-line-hint')).toBe('12')
+    expect(hint?.textContent).toContain('lineHint(line=12)')
+    expect(goto).not.toHaveBeenCalled()
+    expect(h.instance.getSnapshot().byTab[TAB_ID]?.revision).toBe(1)
+    view.rerender(<TextPreview {...rendererProps(h, { params: {}, revision: 2 }, { find: () => {} })} />)
+    expect(view.container.querySelector('[data-textpreview-line-hint]')).toBeNull()
+  })
 })
+
+/** The renderer-owned content channel the probe body last received. */
+let probeChannel: Extract<DocumentContent, { kind: 'renderer' }> | null = null
+
+/**
+ * A renderer-owned body that binds the command bridge and captures its content
+ * channel, so the specs can drive the load that precedes the line landing.
+ * @param props - the document owner's content channel, command bridge, and commands.
+ * @returns a marker element for the keyed renderer.
+ */
+function RendererProbe({ content, commandsRef, commands }: {
+  content: DocumentContent
+  commandsRef: ((commands: DocumentRendererCommands | null) => void) | undefined
+  commands: DocumentRendererCommands
+}) {
+  useEffect(() => {
+    if (content.kind === 'renderer') probeChannel = content
+  }, [content])
+  useEffect(() => {
+    commandsRef?.(commands)
+    return () => { commandsRef?.(null) }
+  }, [commandsRef, commands])
+  return <div data-probe-renderer />
+}
+
+/**
+ * Props for one renderer-owned display type: the harness record plus a keyed
+ * body that binds `commands`.
+ * @param h - the tab record's harness.
+ * @param navigation - the navigation state under test.
+ * @param commands - the bridge the probe body binds.
+ * @returns composed props with the renderer definition selected.
+ */
+function rendererProps(
+  h: ReturnType<typeof harness>,
+  navigation: { params?: unknown; revision: number },
+  commands: DocumentRendererCommands,
+): TextPreviewProps {
+  const props = h.props(navigation)
+  const definition: DocumentPreviewDefinition = {
+    id: 'probe-renderer', extensions: ['md'], title: () => 'Probe', loading: 'renderer',
+    capabilities: { gotoLine: commands.gotoLine !== undefined, search: commands.find !== undefined },
+  }
+  return {
+    ...props,
+    useDocumentPreviews: selector => selector([definition]),
+    renderSlot: documentSlots((_key, owner) => {
+      const body = owner as unknown as OwnerOf<'sidebar.right.tab.document'>
+      return <RendererProbe content={body.content} commandsRef={body.commandsRef} commands={commands} />
+    }),
+  }
+}
 
 describe('TextPreview — header controls', () => {
   it('toggles wrap off from the header, reporting the pressed state', async () => {
@@ -593,6 +680,17 @@ describe('TextPreview — header controls', () => {
     await settle()
     expect(h.read).toHaveBeenLastCalledWith(SESSION, PATH, 1, h.controller.signal)
     expect(lines(view.container)).toEqual(['uno\n'])
+  })
+
+  it('dismisses the pane through the toolbar close control', async () => {
+    const h = harness({ 1: page(1, ['one'], true) })
+    const view = render(<TextPreview {...h.props()} />)
+    await settle()
+    const close = view.container.querySelector<HTMLButtonElement>('[data-textpreview-close]')
+    if (close === null) throw new Error('expected the close control')
+    expect(close.getAttribute('aria-label')).toBe('close')
+    fireEvent.click(close)
+    expect(h.props().useTabInfo().tab.actions.close).toHaveBeenCalledTimes(1)
   })
 
   it('forgets at once when mounted for a record that has already ended', async () => {

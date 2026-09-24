@@ -122,6 +122,21 @@ describe('diffCardModel', () => {
     expect(diffCardModel(settled({ parentCallId: 'parent' }))).toBeNull()
   })
 
+  it('shows no diff for a failed or interrupted mutation, even with a non-error flag', () => {
+    // An interrupted result can carry error facts without the isError flag: the
+    // change never landed, so no diff may be drawn whatever the metadata holds.
+    expect(diffCardModel(settled({
+      isError: false,
+      error: { name: 'ToolError', code: 'interrupted' },
+      meta: { diffs: DIFFS },
+    }))).toBeNull()
+    expect(diffCardModel(settled({
+      isError: false,
+      error: { name: 'ToolError', code: 'write_failed' },
+      meta: { diffs: DIFFS },
+    }))).toBeNull()
+  })
+
   it('keeps edit generic for missing or malformed applied metadata', () => {
     expect(diffCardModel(settled({ meta: undefined }))).toBeNull()
     expect(diffCardModel(settled({ meta: null }))).toBeNull()
@@ -256,6 +271,19 @@ describe('FileMutationRow diff card', () => {
     cleanup()
     const errorView = render(<FileMutationRow {...rowProps(settled({ isError: true }))} />)
     expect(errorView.container.querySelector('[data-state="error"]')).not.toBeNull()
+  })
+
+  it('a failed edit shows no diff affordance, whatever its metadata holds', () => {
+    const view = render(<FileMutationRow {...rowProps(settled({
+      isError: false,
+      error: { name: 'ToolError', code: 'interrupted' },
+      meta: { diffs: DIFFS },
+    }))} />)
+    expect(view.container.querySelector('[data-diff]')).toBeNull()
+    toggleRow(view)
+    expect(view.container.querySelector('[data-diff]')).toBeNull()
+    // No card means no +/- stat on the collapsed row either.
+    expect(view.queryByText('+1 -1')).toBeNull()
   })
 
   it('a mutation result with no metadata renders the summary row alone', () => {

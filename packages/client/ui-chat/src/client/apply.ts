@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {
-  ChatNodeTurnDataInjected, ChatScrollPosition, ChatViewInjected,
+  ChatNodeTurnDataInjected, ChatScrollPosition, ChatViewInjected, OpenFileOptions,
   TurnTailOwnerProps,
 } from './contract/slots.ts'
 import type { ChatSnapshot } from './contract/snapshot.ts'
@@ -86,6 +86,18 @@ export function apply(ctx: Context): void {
     ctx.settingsScope.bind<ChatSettings>({ namespace: CHAT_SETTINGS_NAMESPACE }),
   )
 
+  // The one way a file opens from the chat side: the same file address and the
+  // same navigation parameters for every entry point (a prose mention, a tool
+  // row, the revert tray), so they can never disagree about where the file
+  // lands. The Sidebar's registry decides which surface claims the address.
+  const openFile = async (sessionId: SessionId, path: string, options?: OpenFileOptions): Promise<void> => {
+    const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
+    const url = fileAddressFor(sessionId, cwd, path)
+    if (options?.line === undefined) ctx.sidebarRight.openResource(url)
+    else ctx.sidebarRight.openResource(url, { params: { line: options.line } })
+    await Promise.resolve()
+  }
+
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item',
     id: 'transcript-view',
@@ -123,23 +135,9 @@ export function apply(ctx: Context): void {
           fileMentions: (owner: TurnTailOwnerProps) => ctx.get('chatFileMentions')?.forClosing(owner, sessionId),
           // Files open in the right Sidebar, not in a desktop application: the
           // content stays in the product, beside the conversation that produced
-          // it. A relative path, or an absolute one inside the session's
-          // workspace, is addressed under this session's scope,
-          // `dsh-resource://file/session/<id>/<path>`; an absolute path
-          // elsewhere keeps its absolute spelling in the same Session's address.
-          // Which tab type claims the
-          // address is the Sidebar's decision, not this call site's.
-          // A line travels as a navigation parameter, not as part of the
-          // address: the file is one piece of content whether it is opened at
-          // its top or at line 400, so the same tab is revealed and told where
-          // to land.
-          openFile: async (path, options) => {
-            const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
-            const url = fileAddressFor(sessionId, cwd, path)
-            if (options?.line === undefined) ctx.sidebarRight.openResource(url)
-            else ctx.sidebarRight.openResource(url, { params: { line: options.line } })
-            await Promise.resolve()
-          },
+          // it. The canonical opener carries the file address and its
+          // navigation parameters; the Sidebar decides which surface claims it.
+          openFile: (path, options) => openFile(sessionId, path, options),
           openSkill: (name) => {
             const scope = ctx.sessions.scope(sessionId)
             if (scope === undefined) return
@@ -214,12 +212,7 @@ export function apply(ctx: Context): void {
             .then((childId) => { ctx.uiWorkspace.openSession(childId) })
             .catch(() => { /* Fork failure leaves the source view unchanged. */ })
         },
-        openFile: async (path) => {
-          const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
-          const url = fileAddressFor(sessionId, cwd, path)
-          ctx.sidebarRight.openResource(url)
-          await Promise.resolve()
-        },
+        openFile: path => openFile(sessionId, path),
         resolveFileConflict: async (conflictId, resolution) => {
           await ctx.sessions.resolveFileConflict({ sessionId, conflictId, resolution })
         },

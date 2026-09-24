@@ -23,7 +23,8 @@ import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-c
 import type { ChatFileMentions, TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { makeTranslate, stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { Deliverables, DeliverablesTail, selectDeliverables, type DeliverablesInjected } from '../src/client/Deliverables.tsx'
-import type { ReviewInjected } from '../src/client/ReviewTab.tsx'
+import type { DiffPreviewInjected } from '../src/client/diff-preview.tsx'
+
 import { ChangesSummaryStore } from '../src/client/changes-summary.ts'
 import { changesSummaryUrl, type ChangesSummary } from '../src/changes.ts'
 import { PresentedOpenController } from '../src/client/present-open.ts'
@@ -49,7 +50,7 @@ function openProps(controller = new PresentedOpenController(), summaries = new C
       select(controller.host.getSnapshot()),
     openPresented: vi.fn((...args: Parameters<PresentedOpenController['open']>) => controller.open(...args)),
     openChanged: vi.fn((...args: Parameters<PresentedOpenController['openChanged']>) => controller.openChanged(...args)),
-    openChangesReview: vi.fn<DeliverablesInjected['openChangesReview']>(),
+    openChangedDiff: vi.fn<DeliverablesInjected['openChangedDiff']>(),
     usePresentedOpen: <T,>(select: (state: ReturnType<typeof controller.state.getSnapshot>) => T): T =>
       select(controller.state.getSnapshot()),
   }
@@ -567,8 +568,8 @@ describe('ChangedFiles card', () => {
     expect(summaries.state.getSnapshot()[changesSummaryUrl(SessionId('child-session'), 5)]).toBe('loading')
   })
 
-  it('summarizes the turn, folds after three rows, and opens the review from the header and each row', () => {
-    const { props, openFile, view } = renderCard()
+  it('summarizes the turn, folds after three rows, and opens a diff from the header and each row', () => {
+    const { props, view } = renderCard()
     const card = view.container.querySelector('[data-changed-files]')
     if (!(card instanceof HTMLElement)) throw new Error('changed-files card missing')
     expect(within(card).getByText('Edited 11 files')).toBeTruthy()
@@ -579,11 +580,8 @@ describe('ChangedFiles card', () => {
     expect(within(card).getByText('+42')).toBeTruthy()
     expect(within(card).queryByText('src/index.ts')).toBeNull()
     fireEvent.click(within(card).getByRole('button', { name: 'View changes to config/feature-flags.json' }))
-    expect(props.openChangesReview).toHaveBeenLastCalledWith({ sessionId: 'child-session', seq: 5, turn: 1 }, 1)
+    expect(props.openChangedDiff).toHaveBeenLastCalledWith('child-session', undefined, 'config/feature-flags.json', 5, 1, 1)
     expect(props.openChanged).not.toHaveBeenCalled()
-    fireEvent.click(within(card).getByRole('button', { name: 'Review this turn’s changes in the sidebar' }))
-    expect(props.openChangesReview).toHaveBeenLastCalledWith({ sessionId: 'child-session', seq: 5, turn: 1 }, 0)
-    expect(openFile).not.toHaveBeenCalled()
     const expand = within(card).getByRole('button', { name: 'Show all 5 changed files' })
     expect(expand.getAttribute('aria-expanded')).toBe('false')
     expect(expand.textContent).toContain('All 5 files')
@@ -592,7 +590,7 @@ describe('ChangedFiles card', () => {
     expect(within(card).getByText('binary')).toBeTruthy()
     expect(within(card).getByRole('button', { name: 'View changes to ~/.zshrc' }).getAttribute('title')).toBe('/home/u/.zshrc')
     fireEvent.click(within(card).getByRole('button', { name: 'View changes to ~/.zshrc' }))
-    expect(props.openChangesReview).toHaveBeenLastCalledWith({ sessionId: 'child-session', seq: 5, turn: 1 }, 4)
+    expect(props.openChangedDiff).toHaveBeenLastCalledWith('child-session', undefined, '/home/u/.zshrc', 5, 4, 1)
     const collapse = within(card).getByRole('button', { name: 'Collapse changed files' })
     expect(collapse.getAttribute('aria-expanded')).toBe('true')
     expect(card.lastElementChild).toBe(collapse)
@@ -600,20 +598,30 @@ describe('ChangedFiles card', () => {
     expect(within(card).getAllByRole('listitem')).toHaveLength(3)
   })
 
-  it('opens the review the same way without a desktop', () => {
+  it('dispatches the first changed file’s diff from the card header', () => {
+    const { props, view } = renderCard()
+    const card = view.container.querySelector('[data-changed-files]')
+    if (!(card instanceof HTMLElement)) throw new Error('changed-files card missing')
+    // The header carries the first file's own accessible name — the same
+    // opener as the row, so no detached review route stands between the card
+    // and the comparison. The header is the first match.
+    fireEvent.click(within(card).getAllByRole('button', { name: 'View changes to config/design-token' })[0]!)
+    expect(props.openChangedDiff).toHaveBeenCalledTimes(1)
+    expect(props.openChangedDiff).toHaveBeenCalledWith('child-session', undefined, 'config/design-token', 5, 0, 1)
+  })
+
+  it('opens the same diffs without a desktop, header included', () => {
     const controller = new PresentedOpenController()
-    const { openFile, props, view } = renderCard(controller, zh)
+    const { props, view } = renderCard(controller, zh)
     controller.host.set('error')
-    view.rerender(<Deliverables {...props} matched={{ changes, presented: [] }} openFile={openFile} sessionId={SessionId('child-session')} t={makeTranslate(zh)} />)
-    expect(view.getByRole('button', { name: '在侧边栏查看本轮改动' })).toBeTruthy()
+    view.rerender(<Deliverables {...props} matched={{ changes, presented: [] }} openFile={() => {}} sessionId={SessionId('child-session')} t={makeTranslate(zh)} />)
+    expect(view.getAllByRole('button', { name: '查看 config/design-token 的改动' })).toHaveLength(2)
     controller.host.set({ name: 'server', available: false, fileManager: null })
-    view.rerender(<Deliverables {...props} matched={{ changes, presented: [] }} openFile={openFile} sessionId={SessionId('child-session')} t={makeTranslate(zh)} />)
+    view.rerender(<Deliverables {...props} matched={{ changes, presented: [] }} openFile={() => {}} sessionId={SessionId('child-session')} t={makeTranslate(zh)} />)
     expect(view.getByText('已编辑 11 个文件')).toBeTruthy()
-    fireEvent.click(view.getByRole('button', { name: '在侧边栏查看本轮改动' }))
-    expect(props.openChangesReview).toHaveBeenLastCalledWith({ sessionId: 'child-session', seq: 5, turn: 1 }, 0)
-    fireEvent.click(view.getByRole('button', { name: '查看 config/design-token 的改动' }))
-    expect(props.openChangesReview).toHaveBeenLastCalledWith({ sessionId: 'child-session', seq: 5, turn: 1 }, 0)
-    expect(openFile).not.toHaveBeenCalled()
+    // The header (first match) and the first row share one opener and one name.
+    fireEvent.click(view.getAllByRole('button', { name: '查看 config/design-token 的改动' })[0]!)
+    expect(props.openChangedDiff).toHaveBeenLastCalledWith('child-session', undefined, 'config/design-token', 5, 0, 1)
     expect(props.openChanged).not.toHaveBeenCalled()
     expect(view.getByRole('button', { name: '展开全部 5 个改动文件' }).textContent).toContain('全部 5 个文件')
   })
@@ -683,12 +691,13 @@ describe('plugin registration', () => {
       children: {
         'conversation.chat.turnTail': { kind: 'list', scope: 'session' },
         'tool.call.toolview': { kind: 'keyed', scope: 'session' },
-        'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' },
+        'sidebar.right.tab.document': { kind: 'keyed', scope: 'session' },
       },
     } as never, () => null)
-    const registerTab = vi.fn(() => () => { registered = undefined })
     let registered: unknown
-    ctx.provide('sidebarRightTabs', { register: (definition: unknown) => { registered = definition; return registerTab() } } as never)
+    ctx.provide('documentPreviews', {
+      register: (definition: unknown) => { registered = definition; return () => { registered = undefined } },
+    } as never)
     const openResource = vi.fn()
     ctx.provide('sidebarRight', { openResource } as never)
     // ui-theme's Appearance row binds a durable scope through these two.
@@ -710,9 +719,15 @@ describe('plugin registration', () => {
     expect(entry).toBeDefined()
     expect(ctx.slots.entries('tool.call.toolview')).toHaveLength(1)
     expect(entry?.inject).toBeDefined()
-    expect(registered).toMatchObject({ kind: 'changes-review', patterns: ['dsh-resource://changes-review/**'] })
-    const [tabEntry] = ctx.slots.entries('sidebar.right.pane.tab')
-    expect(tabEntry?.options.key).toBe('@deepseek-ai/dsh-client-ui-deliverables')
+    // The comparison renderer claims only the `diff` navigation request.
+    expect(registered).toMatchObject({
+      id: '@deepseek-ai/dsh-client-ui-deliverables/diff',
+      extensions: [],
+      priority: 'editor',
+      capabilities: { diff: true },
+    })
+    const [tabEntry] = ctx.slots.entries('sidebar.right.tab.document')
+    expect(tabEntry?.options.key).toBe('@deepseek-ai/dsh-client-ui-deliverables/diff')
 
     // The prose face is live while the plugin is: a produced turn yields a
     // resolver whose matches open through the owner-supplied opener.
@@ -756,22 +771,16 @@ describe('plugin registration', () => {
     expect(face.hooks.presentedOpen.getSnapshot()['/api/present.open?sessionId=child-session&seq=2&index=0']).toBe('opened')
     await face.openChanged(SessionId('child-session'), 5, 0)
     expect(face.hooks.presentedOpen.getSnapshot()['/api/changes.open?sessionId=child-session&seq=5&index=0']).toBe('opened')
-    face.openChangesReview({ sessionId: SessionId('child-session'), seq: 5, turn: 3 }, 1)
-    expect(openResource).toHaveBeenCalledWith('dsh-resource://changes-review/session/child-session/5/3', { params: { index: 1 } })
-    expect((registered as { title(address: string): string }).title('dsh-resource://changes-review/session/child-session/5/3')).toBe('Review · turn 3')
-    const tabFace = tabEntry!.inject!(SessionId('child-session') as never) as unknown as ReviewInjected
-    fetcher.mockResolvedValueOnce(Response.json({ turn: 3, files: [], total: 0, added: 0, deleted: 0 }))
-    await tabFace.loadChangesSummary(SessionId('child-session'), 6)
-    expect(tabFace.hooks.changesSummary.getSnapshot()['/api/changes.summary?sessionId=child-session&seq=6']).toEqual({ turn: 3, files: [], total: 0, added: 0, deleted: 0 })
+    // A row and the header both reach the comparison through the file address.
+    face.openChangedDiff(SessionId('child-session'), undefined, 'src/a.ts', 5, 1, 3)
+    expect(openResource).toHaveBeenCalledWith(
+      'dsh-resource://file/session/child-session/src/a.ts',
+      { params: { diff: { seq: 5, index: 1, turn: 3 } } },
+    )
+    const tabFace = tabEntry!.inject!(SessionId('child-session') as never) as unknown as DiffPreviewInjected
     fetcher.mockResolvedValueOnce(Response.json({ kind: 'binary', path: 'src/a.ts', display: 'src/a.ts' }))
     await tabFace.loadChangesDiff(SessionId('child-session'), 5, 1)
     expect(tabFace.hooks.changesDiff.getSnapshot()['/api/changes.diff?sessionId=child-session&seq=5&index=1']).toEqual({ kind: 'binary', path: 'src/a.ts', display: 'src/a.ts' })
-    expect(tabFace.hooks.presentedHost).toBe(face.hooks.presentedHost)
-    fetcher.mockResolvedValueOnce(Response.json({ name: 'desktop', available: true, fileManager: 'finder' }))
-    await tabFace.reloadPresentedHost()
-    fetcher.mockResolvedValueOnce(new Response(null, { status: 204 }))
-    await tabFace.openChanged(SessionId('child-session'), 5, 1)
-    expect(tabFace.hooks.presentedOpen.getSnapshot()['/api/changes.open?sessionId=child-session&seq=5&index=1']).toBe('opened')
     ctx.emit('connection/reset')
     expect(tabFace.hooks.changesDiff.getSnapshot()).toEqual({})
     // A turn that produced nothing yields no vocabulary at all.

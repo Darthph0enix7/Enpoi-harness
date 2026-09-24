@@ -170,14 +170,16 @@ describe('params-store live sync', () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = (JSON.parse(String(init.body)) as { method: string }).method
       if (method === 'settings.describe') {
-        return describeResponse({ parameters: { keeper: { leaseMs: 45_000, claimsBatchSize: 8 } } }, 1)
+        return describeResponse({ parameters: { keeper: { leaseMs: 45_000, claimsBatchSize: 8, negativeCacheMs: 111_111 } } }, 1)
       }
       return hanging ? mutateGate : mutateOk()
     })
     vi.stubGlobal('fetch', fetchMock)
     const store = await import('../src/client/params-store.ts')
+    // A boot value distinct from the 120s default proves the first read applied
+    // before the refresh below, so the two reads are not coalesced.
     await vi.waitFor(() => {
-      expect(store.getOrchestrationParams().keeper.claimsBatchSize).toBe(8)
+      expect(store.getOrchestrationParams().keeper.negativeCacheMs).toBe(111_111)
     })
 
     hanging = true

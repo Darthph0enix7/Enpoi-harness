@@ -7,11 +7,15 @@
  * Writes are atomic per-path leaf ops (one `settings.mutate` call per rule,
  * `ns` + `args` wrapper mandatory). Whole-array keys (bashPatterns,
  * agents[name].available) go through the fenced writers below: every attempt
- * re-reads the live document, re-applies the operator's change onto that fresh
- * value, and carries the read revision as `expectedRevision`; a
- * `settings/conflict` answer re-reads and retries.
+ * re-reads the live document (through the package's shared coalesced describe),
+ * re-applies the operator's change onto that fresh value, and carries the read
+ * revision as `expectedRevision`; a `settings/conflict` answer re-reads and
+ * retries. The published view follows pushed `settings/document-updated`
+ * refreshes plus the reconnect / visibility / stale-mount triggers, and a read
+ * answering the published revision notifies nobody.
  */
 import type { RoleRegistryMap } from './role-registry.ts'
+import { readEnpoiNamespace } from './settings-refresh.ts'
 
 export type PolicyValue = 'allow' | 'ask' | 'deny'
 
@@ -498,22 +502,13 @@ export interface OrchestrationSettingsView {
   }
 }
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
+/**
+ * Read the enpoi-orchestration namespace through the shared coalesced read:
+ * concurrent callers (the other stores included) share one settings.describe.
+ * @returns the namespace view, or undefined on a failed or malformed answer.
+ */
 export async function describePermissionsView(): Promise<OrchestrationSettingsView | undefined> {
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: nextRpcId('perm-describe'),
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json = await res.json() as { result?: { value?: { namespaces?: OrchestrationSettingsView[] } } }
-  const namespaces = json?.result?.value?.namespaces
-  return Array.isArray(namespaces) ? namespaces.find(n => n.ns === 'enpoi-orchestration') : undefined
+  return await readEnpoiNamespace() as unknown as OrchestrationSettingsView | undefined
 }
 
 // --- cross-client live view -------------------------------------------------
@@ -522,6 +517,11 @@ export async function describePermissionsView(): Promise<OrchestrationSettingsVi
 let latestView: OrchestrationSettingsView | undefined
 /** True when no read has succeeded yet and the gateway is unreachable. */
 let latestFailed = false
+/**
+ * Revision last published. A read answering the same revision carries the
+ * document this view already holds, so it is skipped without a notify.
+ */
+let lastAppliedRevision: number | undefined
 const viewListeners = new Set<() => void>()
 /**
  * Paths (relative to the permissions section) with a local write in flight.
@@ -576,6 +576,8 @@ export async function refreshFromServer(): Promise<void> {
     }
     return
   }
+  if (view.revision !== undefined && view.revision === lastAppliedRevision) return
+  lastAppliedRevision = view.revision
   latestView = view
   latestFailed = false
   notifyView()

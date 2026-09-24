@@ -4,12 +4,16 @@
  * Ensures synchronous 0ms render on tab switch or session switch (zero delay,
  * zero reloading, zero 2-second fallback jumps), and hot-syncs changes to
  * the server's `enpoi-orchestration` settings namespace in the background.
- * `refreshFromServer` re-reads the namespace for cross-client live sync; a
- * persona key with a local write in flight keeps its optimistic value until
- * that write settles.
+ * `refreshFromServer` re-reads through the package's shared coalesced describe
+ * (settings-refresh.ts: one request per burst, scheduled by the pushed
+ * `settings/document-updated`, a transport reconnect, the tab becoming
+ * visible, or a stale mount); a read answering the revision this store last
+ * applied notifies nobody, and a persona key with a local write in flight
+ * keeps its optimistic value until that write settles.
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 import { getRoleRegistry, isKnownFleetSeat } from './role-registry.ts'
+import { readEnpoiNamespace } from './settings-refresh.ts'
 
 /** Persona id → explicit model selection (null = inherit); the page's snapshot value. */
 export type PersonaMap = Record<string, ModelSelection | null>
@@ -26,39 +30,15 @@ function notify(): void {
   }
 }
 
-/** One describe view of the enpoi-orchestration namespace, structural subset. */
-interface OrchestrationNamespaceView {
-  ns?: string
-  value?: { personas?: PersonaMap }
-  user?: { personas?: PersonaMap }
-}
-
-/** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */
-let describeSeq = 0
-
-/** Monotonic write rpcIds for the same reason. */
+/** Monotonic write rpcIds: the gateway echoes the id and duplicates race. */
 let writeSeq = 0
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
-async function describeOrchestration(): Promise<OrchestrationNamespaceView | undefined> {
-  describeSeq += 1
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: `persona-describe-${describeSeq}`,
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json: unknown = await res.json()
-  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-  return Array.isArray(namespaces)
-    ? (namespaces as OrchestrationNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
-    : undefined
-}
+/**
+ * Revision this store last applied. A later read that answers the same
+ * revision carries the document this snapshot already holds, so it is skipped
+ * without a notify (the snapshot identity, and every subscriber, stays put).
+ */
+let lastAppliedRevision: number | undefined
 
 /**
  * Replace the snapshot from one server read. Keys with an in-flight local write
@@ -88,11 +68,13 @@ function applyServerPersonas(serverPersonas: PersonaMap): void {
 /** Re-read the namespace and merge it into the snapshot (cross-client live sync). */
 export async function refreshFromServer(): Promise<void> {
   try {
-    const view = await describeOrchestration()
+    const view = await readEnpoiNamespace()
     if (view === undefined) return
+    if (view.revision !== undefined && view.revision === lastAppliedRevision) return
     const personas = view.value?.personas ?? view.user?.personas
     if (personas !== undefined && typeof personas === 'object') {
-      applyServerPersonas({ ...personas })
+      lastAppliedRevision = view.revision
+      applyServerPersonas({ ...(personas as PersonaMap) })
     }
   } catch {
     // Offline or malformed answer: the last snapshot stays until the next push.

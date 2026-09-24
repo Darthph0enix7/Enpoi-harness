@@ -4,12 +4,13 @@ import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { Button, IconChevronDownOutline14, IconChevronUpOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { GlobalStandardProps, InjectFace, PropsLocale, PropsRuntime, SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PresentedOpenController } from './present-open.ts'
 import type { ChangesSummaryStore } from './changes-summary.ts'
 import { ChangedFiles } from './ChangedFiles.tsx'
 import { changesForClosing, presentedForClosing, type ChangesTurnData, type PresentedPath } from './turn-deliverables.ts'
 import type { NS } from './locales.ts'
-import { changesSummaryUrl, type ChangesReviewCoordinates } from '../changes.ts'
+import { changesSummaryUrl } from '../changes.ts'
 import { presentedFileUrl } from '../presented.ts'
 import { PresentedFileCard } from './PresentedFileCard.tsx'
 import css from './Deliverables.module.css'
@@ -29,8 +30,11 @@ export interface DeliverablesInjected {
   loadChangesSummary: ChangesSummaryStore['load']
   openPresented: PresentedOpenController['open']
   openChanged: PresentedOpenController['openChanged']
-  /** Open one turn's review in the right Sidebar on the file at an index. */
-  openChangesReview: (coordinates: ChangesReviewCoordinates, index: number) => void
+  /**
+   * Open one changed file's served comparison in the document pane, through
+   * the file resource's `diff` navigation parameters.
+   */
+  openChangedDiff: (sessionId: SessionId, cwd: string | undefined, path: string, seq: number, index: number, turn: number) => void
 }
 
 /**
@@ -62,7 +66,7 @@ export function DeliverablesTail(props: PropsRuntime<'conversation.chat.turnTail
  * @returns the closing turn's file rows.
  */
 export function Deliverables({
-  matched, openFile, t, sessionId, useSessions, openPresented, openChangesReview, usePresentedOpen, usePresentedHost,
+  matched, openFile, t, sessionId, useSessions, openPresented, openChangedDiff, usePresentedOpen, usePresentedHost,
   useChangesSummary, reloadPresentedHost, loadChangesSummary,
 }: Pick<TurnTailOwnerProps, 'openFile'> & {
   matched: DeliverablesMatch
@@ -88,7 +92,11 @@ export function Deliverables({
   }, [host, reloadPresentedHost])
   return <>
     {changes !== null && <ChangedFiles changes={changes} cwd={cwd} t={t}
-      openReview={(index) => { openChangesReview({ sessionId, seq: changes.seq, turn: changes.turn }, index) }} />}
+      openDiff={(index) => {
+        const file = changes.files[index]
+        if (file === undefined) return
+        openChangedDiff(sessionId, cwd, file.path, changes.seq, index, changes.turn)
+      }} />}
     {matched.presented.length > 0 && <div
       className={css.root}
       data-after-changes={changes !== null || undefined}

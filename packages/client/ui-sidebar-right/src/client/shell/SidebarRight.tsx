@@ -45,7 +45,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '../contract/slots.ts'
 import type { DockIntents, DockMode, FloatRect, TabId, TabRecord, TabRenderer } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { canSplit, dockPaneIds, DockSurface, findContentTab, findPaneContentTab, FloatLayer, activeDockPaneId, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
+import { canSplit, dockPaneIds, DockSurface, findContentTab, findPaneContentTab, FloatLayer, getPane } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { HalvesFit, LayoutState, PaneId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { GUIDE_KIND, pageAddress } from '../contract/seed.ts'
@@ -438,11 +438,14 @@ function SidebarPanel(panel: PanelProps & {
   readonly panelRef: RefObject<HTMLDivElement>
   readonly editor: EditorSplit
 }): ReactNode {
-  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, mobile, panelRef, editor } = panel
+  const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, panelRef, editor } = panel
   const { expanded } = surface.layout
-  // The file push is the panel's whole content while a document is open on a
-  // phone; the dock surface (the tree) waits one back step behind it.
-  const filePush = mobile && editor.tab !== undefined
+  // The file push is the panel's whole content only on the mobile container,
+  // whose narrow layout has no column to split: the dock surface (the tree)
+  // waits one back step behind it, instead of leaving the record with no
+  // surface at all. A desktop frame — fullscreen included — always splits the
+  // editor pane beside the tree, so a push there would read as a mode switch.
+  const filePush = panel.mobile && editor.open && editor.tab !== undefined
   return (
     <div
       ref={panelRef}
@@ -468,11 +471,11 @@ function SidebarPanel(panel: PanelProps & {
               <IconChevronLeftOutline14 size={16} />
             </button>
             <span className={css.filePushTitle} data-sidebar-right-file-title>
-              {editor.tab ? titlesFor(panel)(editor.tab) : null}
+              {titlesFor(panel)(editor.tab)}
             </span>
           </div>
           <div className={css.filePushBody} data-sidebar-right-file-body>
-            {editor.tab ? bodiesFor(panel)(editor.tab) : null}
+            {bodiesFor(panel)(editor.tab)}
           </div>
         </div>
       ) : (
@@ -538,7 +541,10 @@ function EditorPane({ panel, tab, width, open }: {
       data-sidebar-right-editor-open={open || undefined}
       aria-hidden={!open || undefined}
     >
-      {tab !== undefined && bodiesFor(panel)(tab)}
+      {/* The body exists only while the pane is open: a closed pane that still
+          mounted its record would run that record's effects twice when the
+          dock draws the same tab, and would keep a hidden copy alive. */}
+      {open && tab !== undefined && bodiesFor(panel)(tab)}
     </div>
   )
 }
@@ -802,34 +808,38 @@ export function RightbarSeat({
   // enpoi: the editor pane's live width while its divider drags; the committed
   // value is the rail's persisted preference.
   const [previewWidth, setPreviewWidth] = useState<number | undefined>(undefined)
+  // enpoi: the files page is the editor pane's anchor. A file resource open
+  // lights `files` in the rail (service.ts), so the pane is visible exactly
+  // while that anchor is in front: switching the rail away closes it, coming
+  // back re-reveals the active record.
   const isFilesActive = litKind === 'files' || litKind === GUIDE_KIND
   const editorTab = surface?.editorTabId === undefined ? undefined : surface.layout.tabs[surface.editorTabId]
-  // enpoi: the kit already draws the pane's active tab: rendering the same
-  // record in the editor would mount its body twice. The editor pane exists beside the
-  // panel's page, so it simply waits until a page is back in front.
-  const activeDockTab = surface === undefined
-    ? undefined
-    : getPane(surface.layout, activeDockPaneId(surface.layout)).activeTabId
-  // The pane's open state does not depend on the panel's own expansion: while
-  // the column is collapsed the pane rides out with the panel instead of
-  // shrinking into it, so reopening is one slide and the preview never pops in
-  // after the tree. Only a grabbable pointer needs the panel on screen.
+  // enpoi: the kit draws every pane's active tab: rendering the same record in
+  // the editor would mount its body twice. A record dragged into a pane is
+  // therefore left to the dock.
+  const shownByDock = surface !== undefined && surface.editorTabId !== undefined
+    && [...dockPaneIds(surface.layout), ...surface.layout.floats]
+      .some(paneId => getPane(surface.layout, paneId).activeTabId === surface.editorTabId)
+  // The pane is visible iff the column is expanded, the files page is the lit
+  // rail tab, and a record is selected: the tree is always the visible anchor
+  // beside it, and switching away collapses the pane in the same commit.
   const editorOpen = surface !== undefined
+    && surface.layout.expanded
     && isFilesActive
     && editorTab !== undefined
-    && editorTab.id !== activeDockTab
-  const editorLive = editorOpen && surface.layout.expanded
+    && !shownByDock
+  const editorLive = editorOpen
   // The pane outlives its shown state by exactly the states that need a
   // zero-width end: the files page carries an empty pane so the first open has
   // something to grow from, and an editor tab keeps one so leaving the page or
   // closing the tab has something to shrink.
-  const editorMounted = surface !== undefined && !mobile && !fullscreen && (isFilesActive || editorTab !== undefined)
+  const editorMounted = surface !== undefined && !mobile && (isFilesActive || editorTab !== undefined)
 
-  // enpoi: the mobile file push. A document open lands in the editor record,
-  // which has no pane on a phone, so the panel draws the record itself as a
-  // full-screen push: the tree stays one back step behind it and the toolbar
-  // rides inside the tab body it always did.
-  const filePush = mobile && shown && editorTab !== undefined
+  // enpoi: the file push is the mobile container's presentation of the record:
+  // no rail column exists there, so the panel draws the document itself and the
+  // tree waits one back step behind it. Desktop frames always split the pane
+  // beside the tree.
+  const filePush = mobile && shown && editorOpen
   useBackHandler('sidebar-right:file-push', () => { actions.clearEditor(sessionId) }, filePush)
 
   // enpoi: auto-widen rightbar column on file open so preview and tree both fit comfortably!

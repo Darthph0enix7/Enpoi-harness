@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
-import { DEFAULT_DIFF_MAX_LINES, DiffBlock as LocalizedDiffBlock, type DiffHunk } from '../src/index.ts'
+import { DEFAULT_DIFF_MAX_LINES, DiffBlock as LocalizedDiffBlock, type DiffHunk, type DiffServedFile } from '../src/index.ts'
 import { diffBlockLabels } from './labels.client.ts'
 import { diffTotals } from '../src/DiffBlock.tsx'
 
@@ -249,5 +249,80 @@ describe('DiffBlock copy', () => {
     await act(async () => { fireEvent.click(copy) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '复制成功' })) })
     expect(writeText).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DiffBlock served comparisons', () => {
+  const served: DiffServedFile[] = [{
+    path: 'src/a.ts',
+    hunks: [{
+      oldStart: 3,
+      newStart: 3,
+      lines: [' const a = 1', '-const b = 2', '+const b = 3', ' const c = 4'],
+    }],
+  }]
+
+  it('draws the served hunks with a header, both line numbers, and one sign column', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} wordLevel />)
+    expect(screen.getByText('src/a.ts')).toBeTruthy()
+    expect(screen.getByText('@@ -3,3 +3,3 @@')).toBeTruthy()
+    expect(container.querySelector('[data-diff-hunk="@@ -3,3 +3,3 @@"]')).not.toBeNull()
+    const rows = [...container.querySelectorAll('[data-diff-line]')]
+    expect(rows.map(row => row.getAttribute('data-diff-line'))).toEqual(['context', 'del', 'add', 'context'])
+    // The paired change carries line 4 on the old side and 4 on the new side.
+    expect(rows[1]?.textContent).toContain('4')
+    expect(rows[2]?.textContent).toContain('4')
+    expect(rows[1]?.textContent).toContain('-const b = 2')
+    expect(rows[2]?.textContent).toContain('+const b = 3')
+    expect(screen.getByText('└ +1 -1 · 1 file')).toBeTruthy()
+  })
+
+  it('marks the words that moved on both sides of a paired change', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} wordLevel />)
+    const removed = [...container.querySelectorAll('[class*="_wordDel_"]')].map(node => node.textContent)
+    const added = [...container.querySelectorAll('[class*="_wordAdd_"]')].map(node => node.textContent)
+    expect(removed).toEqual(['2'])
+    expect(added).toEqual(['3'])
+  })
+
+  it('leaves changed lines unmarked without the word-level pass', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} />)
+    expect(container.querySelectorAll('[class*="_wordDel_"], [class*="_wordAdd_"]').length).toBe(0)
+  })
+
+  it('pairs the change run into two columns under the split view', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} wordLevel view="split" />)
+    const rows = [...container.querySelectorAll('[data-diff-line]')]
+    // Context, the paired deletion/addition run, context: one fixed row each.
+    expect(rows).toHaveLength(3)
+    const paired = rows.find(row => row.getAttribute('data-diff-line') === 'del')
+    expect(paired?.textContent).toContain('const b = 2')
+    expect(paired?.textContent).toContain('const b = 3')
+    expect(paired?.textContent).toContain('4')
+  })
+
+  it('copies the served comparison with headers and prefixes', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<DiffBlock diffs={[]} served={served} />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '复制' })) })
+    expect(writeText).toHaveBeenCalledWith([
+      'src/a.ts', '@@ -3,3 +3,3 @@', '  const a = 1', '- const b = 2', '+ const b = 3', '  const c = 4',
+    ].join('\n'))
+  })
+
+  it('caps the unified served body and expands it in place', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={served} maxLines={3} />)
+    expect(container.querySelectorAll('[data-diff-line]')).toHaveLength(3)
+    const toggle = screen.getByRole('button', { name: /展开其余/ })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(toggle)
+    expect(container.querySelectorAll('[data-diff-line]')).toHaveLength(4)
+    expect(screen.getByRole('button', { name: '收起差异' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('renders nothing for an empty served comparison', () => {
+    const { container } = render(<DiffBlock diffs={[]} served={[]} />)
+    expect(container.firstChild).toBeNull()
   })
 })
