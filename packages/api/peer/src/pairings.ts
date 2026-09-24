@@ -284,9 +284,11 @@ export function parsePairingsDocument(raw: string, path: string): PeerPairingsFi
   const seen = new Set<string>()
   for (const [index, entry] of parsed.pairings.entries()) {
     const pairing = parsePairing(entry, `${path}#pairings[${index}]`)
-    const key = `${pairing.alias}\u0000${pairing.peer}`
-    if (seen.has(key)) throw new PeerConfigError(`peer pairings ${path} repeats alias ${JSON.stringify(pairing.alias)} for peer ${JSON.stringify(pairing.peer)}`)
-    seen.add(key)
+    // The wire `PeerTarget` carries no peer discriminator, so a duplicated
+    // alias would let one device's `create` hijack the session another device
+    // resolves (doc 72 G8); reject it at load instead.
+    if (seen.has(pairing.alias)) throw new PeerConfigError(`peer pairings ${path} repeats alias ${JSON.stringify(pairing.alias)}; aliases must be unique per host`)
+    seen.add(pairing.alias)
     pairings.push(pairing)
   }
   return {

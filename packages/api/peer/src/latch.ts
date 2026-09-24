@@ -224,7 +224,7 @@ export class PeerLatchFold {
     }
   }
 
-  /** Record a host-local peer action (in-memory attribution until the durable path lands). */
+  /** Record a host-local peer action; supplemental to the durable participant attribution written into the session log. */
   recordPeerAction(action: PeerExecutionState['lastParticipantAction']): void {
     if (action !== undefined) this.lastPeerAction = action
   }

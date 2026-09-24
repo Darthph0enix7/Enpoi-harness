@@ -60,6 +60,7 @@ export class PeerAskRegistry {
   private readonly pending = new Map<string, PendingAsk>()
   private readonly bySession = new Map<SessionId, Set<string>>()
   private readonly settled = new Map<string, number>()
+  private readonly changeListeners = new Set<(sessionId: SessionId) => void>()
 
   /**
    * @param ctx - host context owning the waterfall listeners.
@@ -84,6 +85,22 @@ export class PeerAskRegistry {
         disposeQuestion()
       }
     }, 'peer-api: ask registry')
+  }
+
+  /**
+   * Observe pending-ask membership changes (mint and settle). An ask minted
+   * mid-tool-call has no durable event, so a `peer.follow` generation uses this
+   * push to re-read the state instead of waiting for the next durable event.
+   * The listener runs synchronously on the mutating call and must not call back
+   * into the registry.
+   * @param listener - called with the Session whose pending-ask set changed.
+   * @returns disposer removing the listener.
+   */
+  onChange(listener: (sessionId: SessionId) => void): () => void {
+    this.changeListeners.add(listener)
+    return () => {
+      this.changeListeners.delete(listener)
+    }
   }
 
   /** Pending asks currently exposed for one Session, oldest first. */
@@ -253,19 +270,28 @@ export class PeerAskRegistry {
     const ids = this.bySession.get(ask.sessionId) ?? new Set<string>()
     ids.add(ask.askId)
     this.bySession.set(ask.sessionId, ids)
+    this.notify(ask.sessionId)
   }
 
   private retire(ask: PendingAsk): void {
-    this.pending.delete(ask.askId)
+    // `race` retires after `answer` already did; only an actual membership
+    // change is a change a follow generation must observe.
+    const wasPending = this.pending.delete(ask.askId)
     this.settled.set(ask.askId, Date.now())
     if (this.settled.size > SETTLED_TOMBSTONE_LIMIT) {
       const oldest = this.settled.keys().next().value
       if (oldest !== undefined) this.settled.delete(oldest)
     }
     const ids = this.bySession.get(ask.sessionId)
-    if (ids === undefined) return
-    ids.delete(ask.askId)
-    if (ids.size === 0) this.bySession.delete(ask.sessionId)
+    if (ids !== undefined) {
+      ids.delete(ask.askId)
+      if (ids.size === 0) this.bySession.delete(ask.sessionId)
+    }
+    if (wasPending) this.notify(ask.sessionId)
+  }
+
+  private notify(sessionId: SessionId): void {
+    for (const listener of this.changeListeners) listener(sessionId)
   }
 }
 

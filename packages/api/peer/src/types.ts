@@ -403,7 +403,7 @@ export interface PeerPairing {
   readonly remoteSessionId?: SessionId
   /** Base URL of `peer`'s peer surface; caller-role addressing. */
   readonly endpoint?: string
-  /** Reserved for doc 69 §8 correction 1; when set, `Authorization: Bearer` must match. */
+  /** Reserved for doc 69 §8 correction 1; never verified on the host yet (the peer path reads no request headers). */
   readonly token?: string
   /** Optional emergency stop (doc 69 §9.3); absent means unbounded agent-to-agent exchange. */
   readonly runawayCeiling?: number

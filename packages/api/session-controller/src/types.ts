@@ -611,6 +611,12 @@ export interface SessionCreateValue {
 /** Session model-selection request. */
 export interface SessionSelectModelRequest extends ModelSelection {
   readonly sessionId: SessionId
+  /**
+   * Whether the selection also becomes the deployment default. Callers that
+   * route one Session without touching every later Session (peer-originated
+   * creates) pass `false`; omitted means `true` and the default is saved.
+   */
+  readonly persistDefault?: boolean
 }
 
 /** Accepted model selection after Host resolution. */

@@ -62,7 +62,7 @@ pairings:
     ['an unknown exposure', 'version: 1\ndevice: a\npairings:\n  - alias: x\n    peer: b\n    exposure: loud\n    sessionId: s'],
     ['an unreachable entry', 'version: 1\ndevice: a\npairings:\n  - alias: x\n    peer: b\n    exposure: debug'],
     ['a bad alias', 'version: 1\ndevice: a\npairings:\n  - alias: "x:y"\n    peer: b\n    exposure: debug\n    sessionId: s'],
-    ['a repeated alias and peer', 'version: 1\ndevice: a\npairings:\n  - alias: x\n    peer: b\n    exposure: debug\n    sessionId: s\n  - alias: x\n    peer: b\n    exposure: debug\n    sessionId: t'],
+    ['a repeated alias across peers', 'version: 1\ndevice: a\npairings:\n  - alias: x\n    peer: b\n    exposure: debug\n    sessionId: s\n  - alias: x\n    peer: c\n    exposure: debug\n    sessionId: t'],
     ['a non-positive ceiling', 'version: 1\ndevice: a\npairings:\n  - alias: x\n    peer: b\n    exposure: debug\n    sessionId: s\n    runawayCeiling: 0'],
   ])('rejects %s', (_label, yaml) => {
     expect(() => parsePairingsDocument(yaml, '/tmp/pairings.yaml')).toThrow(PeerConfigError)

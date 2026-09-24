@@ -271,17 +271,8 @@ export class PeerService extends TypertRemoteService {
       }
       sessionId = (await this.ctx.sessionController.create(createRequest)).sessionId
     }
-    if (created && routingRequested) {
-      if (request.provider === undefined || request.model === undefined) {
-        throw new RemoteError('gateway/bad-request', 'provider and model must be provided together', {})
-      }
-      await this.ctx.sessionController.selectModel({
-        sessionId,
-        provider: request.provider,
-        model: request.model,
-        ...(request.chain === undefined ? {} : { chain: request.chain }),
-        ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
-      })
+    if (routingRequested) {
+      await this.applySessionRouting(sessionId, request)
     }
     await this.pairings.bind(pairing.alias, pairing.peer, sessionId)
     this.recordPeerAction(sessionId, { action: 'create', actor: participant, at: Date.now() })
@@ -411,41 +402,94 @@ export class PeerService extends TypertRemoteService {
     const hostLatch = readHostLatch(observation.projections)
     const target = this.pairings.describe(resolved)
     let stateKey = latchKey(this.snapshotState(resolved.sessionId, fold, hostLatch, observation.projections))
+    // Ask membership has no durable event, so the registry pushes a wakeup on
+    // mint and settle; the loop turns each key change into at most one frame.
+    const askChanges = new AskChangeSignal()
+    const unsubscribe = this.registry.onChange((sessionId) => {
+      if (sessionId === resolved.sessionId) askChanges.notify()
+    })
+    const onAbort = (): void => { askChanges.notify() }
+    signal.addEventListener('abort', onAbort, { once: true })
+    const stream = this.ctx.sessionController.follow({
+      address: { kind: 'session', sessionId: resolved.sessionId },
+      maxMessages: request.maxMessages ?? FOLLOW_SNAPSHOT_MAX_MESSAGES,
+      ...(request.assistantStream === true ? { assistantStream: true as const } : {}),
+    }, signal)
+    const durable = stream[Symbol.asyncIterator]()
     this.incrementFollowers(resolved.sessionId)
     try {
-      const stream = this.ctx.sessionController.follow({
-        address: { kind: 'session', sessionId: resolved.sessionId },
-        maxMessages: request.maxMessages ?? FOLLOW_SNAPSHOT_MAX_MESSAGES,
-        ...(request.assistantStream === true ? { assistantStream: true as const } : {}),
-      }, signal)
+      type DurableResult = Awaited<ReturnType<typeof durable.next>>
+      type Wake =
+        | { readonly kind: 'durable'; readonly result: DurableResult }
+        | { readonly kind: 'durable-error'; readonly error: unknown }
+        | { readonly kind: 'change' }
+      let durableWake: Promise<Wake> | undefined
+      let changeWake: Promise<Wake> | undefined
       let expectedSeq: number | undefined
-      for await (const frame of stream) {
-        if (frame.type === 'snapshot') {
-          expectedSeq = frame.cursor + 1
+      // Durable position the generation has scanned; a pushed state frame
+      // carries it so repair from any frame cut stays contiguous.
+      let scanned = -1
+      let opened = false
+      for (;;) {
+        if (signal.aborted) break
+        // Arm each source once and keep the loser pending: re-issuing `next()`
+        // after a race would drop the frame that made the loser resolve.
+        durableWake ??= durable.next().then(
+          result => ({ kind: 'durable' as const, result }),
+          (error: unknown) => ({ kind: 'durable-error' as const, error }),
+        )
+        // Changes stay unarmed until the opening snapshot has fixed the key,
+        // so no state frame can precede it.
+        if (opened && changeWake === undefined) {
+          changeWake = askChanges.next().then(() => ({ kind: 'change' as const }))
+        }
+        const wake = changeWake === undefined
+          ? await durableWake
+          : await Promise.race([durableWake, changeWake])
+        if (wake.kind === 'change') {
+          changeWake = undefined
+          const state = this.snapshotState(resolved.sessionId, fold, hostLatch, observation.projections)
+          const nextKey = latchKey(state)
+          if (nextKey === stateKey) continue
+          stateKey = nextKey
+          yield { type: 'state', state, cursor: brandNumber<SessionSeq>(scanned) }
+          continue
+        }
+        durableWake = undefined
+        if (wake.kind === 'durable-error') throw wake.error
+        const frame = wake.result
+        if (frame.done === true) break
+        const current = frame.value
+        if (current.type === 'snapshot') {
+          expectedSeq = current.cursor + 1
+          scanned = current.cursor
+          const state = this.snapshotState(resolved.sessionId, fold, hostLatch, observation.projections)
+          stateKey = latchKey(state)
           yield {
             type: 'snapshot',
             target,
             header: {
-              id: frame.header.id,
-              version: frame.header.version,
-              createdAt: frame.header.createdAt,
-              ...(frame.header.cwd === undefined ? {} : { cwd: frame.header.cwd }),
-              ...(frame.header.agentPreset === undefined ? {} : { agentPreset: frame.header.agentPreset }),
+              id: current.header.id,
+              version: current.header.version,
+              createdAt: current.header.createdAt,
+              ...(current.header.cwd === undefined ? {} : { cwd: current.header.cwd }),
+              ...(current.header.agentPreset === undefined ? {} : { agentPreset: current.header.agentPreset }),
             },
-            cursor: brandNumber<SessionSeq>(frame.cursor),
-            state: this.snapshotState(resolved.sessionId, fold, hostLatch, observation.projections),
-            records: frame.records
+            cursor: brandNumber<SessionSeq>(current.cursor),
+            state,
+            records: current.records
               .map(record => toPeerRecord(record.event, resolved.exposure))
               .filter((record): record is NonNullable<typeof record> => record !== undefined),
-            hasMore: frame.hasMore,
+            hasMore: current.hasMore,
           }
+          opened = true
           continue
         }
-        if (frame.type === 'assistant-stream') {
-          yield { type: 'assistant-stream', frame: frame.frame }
+        if (current.type === 'assistant-stream') {
+          yield { type: 'assistant-stream', frame: current.frame }
           continue
         }
-        const entry: SessionHistoryRecord = frame
+        const entry: SessionHistoryRecord = current
         if (expectedSeq === undefined) continue
         if (entry.event.seq !== expectedSeq) {
           throw new RemoteError(
@@ -456,6 +500,7 @@ export class PeerService extends TypertRemoteService {
         }
         expectedSeq += 1
         fold.apply(entry.event)
+        scanned = entry.event.seq
         const cursor = brandNumber<SessionSeq>(entry.event.seq)
         const record = toPeerRecord(entry.event, resolved.exposure)
         if (record !== undefined) yield { type: 'event', record, cursor }
@@ -474,6 +519,10 @@ export class PeerService extends TypertRemoteService {
       }
       throw error
     } finally {
+      signal.removeEventListener('abort', onAbort)
+      unsubscribe()
+      askChanges.dispose()
+      void durable.return?.()
       this.decrementFollowers(resolved.sessionId)
     }
   }
@@ -578,6 +627,33 @@ export class PeerService extends TypertRemoteService {
     }
   }
 
+  /**
+   * Install routing on one Session without touching the deployment default. A
+   * peer's create-time routing must affect this Session and nothing else, so
+   * the selection is threaded through `session.selectModel` with
+   * `persistDefault: false` (doc 70 §6, doc 72 G6); the controller's own
+   * validation/normalization (resolve, append, pending-for-next-request) is
+   * otherwise unchanged.
+   * @param sessionId - Session the routing applies to.
+   * @param request - create request carrying the routing fields.
+   * @throws {@link RemoteError} `gateway/bad-request` when provider/model are incomplete.
+   */
+  private async applySessionRouting(sessionId: SessionId, request: PeerCreateRequest): Promise<void> {
+    const provider = request.provider
+    const model = request.model
+    if (provider === undefined || model === undefined) {
+      throw new RemoteError('gateway/bad-request', 'provider and model must be provided together', {})
+    }
+    await this.ctx.sessionController.selectModel({
+      sessionId,
+      provider,
+      model,
+      ...(request.chain === undefined ? {} : { chain: request.chain }),
+      ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+      persistDefault: false,
+    })
+  }
+
   private recordPeerAction(sessionId: SessionId, action: PeerParticipantAction): void {
     this.peerActions.set(sessionId, action)
   }
@@ -638,11 +714,55 @@ function latchKey(state: PeerExecutionState): string {
   return JSON.stringify([
     state.latch,
     state.activeDescendants,
-    state.pendingAsks.map(ask => ask.askId),
+    // Compact ask fingerprint (id, kind, since); question payloads stay out of
+    // the key, and a mint or settle is a change even with no durable event.
+    state.pendingAsks.map(ask => [ask.askId, ask.kind, ask.since]),
     state.lastTurnEnd?.turn ?? null,
     state.lastTurnEnd?.reason ?? null,
     state.lastParticipantAction?.at ?? null,
   ])
+}
+
+/**
+ * Coalescing wakeup for ask-registry pushes. A notification with a waiter
+ * parked resolves it; notifications arriving before the next `next()` collapse
+ * into one pending wake, so a follow loop re-reads the state at most once per
+ * observation and key equality suppresses the frame when nothing changed.
+ */
+class AskChangeSignal {
+  private armed = false
+  private readonly waiters = new Set<() => void>()
+
+  /** Record a change; wake the parked waiter when one exists. */
+  notify(): void {
+    if (this.waiters.size === 0) {
+      this.armed = true
+      return
+    }
+    for (const wake of [...this.waiters]) wake()
+  }
+
+  /** Resolve when a change arrives, or immediately when one is already pending. */
+  async next(): Promise<void> {
+    if (this.armed) {
+      this.armed = false
+      return
+    }
+    await new Promise<void>((resolve) => {
+      const wake = (): void => {
+        this.waiters.delete(wake)
+        resolve()
+      }
+      this.waiters.add(wake)
+    })
+  }
+
+  /** Release every waiter; the stream loop calls this on teardown. */
+  dispose(): void {
+    this.armed = false
+    for (const wake of [...this.waiters]) wake()
+    this.waiters.clear()
+  }
 }
 
 function requireParticipant(value: unknown): PeerParticipant {

@@ -11,6 +11,7 @@ import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
@@ -116,33 +117,50 @@ interface Harness {
   readonly root: string
   readonly sessionId: SessionId
   readonly target: PeerTarget
+  /** Every selection the deployment default was asked to persist. */
+  readonly savedDefaults: Array<{ readonly provider: string; readonly model: string }>
 }
 
-async function setup(options: { readonly watchdogMs?: number; readonly exposures?: readonly string[] } = {}): Promise<Harness> {
+async function setup(options: {
+  readonly watchdogMs?: number
+  readonly exposures?: readonly string[]
+  readonly extraAliases?: readonly string[]
+} = {}): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), 'peer-host-'))
   roots.push(root)
   const pairingsPath = join(root, 'pairings.yaml')
   const bindingsPath = join(root, 'peer-state.json')
   const cwd = join(root, 'work')
-  writeFileSync(pairingsPath, [
-    'version: 1',
-    'device: serverlocal',
-    'pairings:',
+  const pairingBlocks = [
     ...(options.exposures ?? ['debug']).map(exposure => [
       `  - alias: ${exposure}`,
       '    peer: laptop',
       '    exposure: ' + exposure,
       '    create:',
       `      cwd: ${cwd}`,
-    ]).flat(),
+    ]),
+    ...(options.extraAliases ?? []).map(alias => [
+      `  - alias: ${alias}`,
+      '    peer: laptop',
+      '    exposure: debug',
+      '    create:',
+      `      cwd: ${cwd}`,
+    ]),
+  ]
+  writeFileSync(pairingsPath, [
+    'version: 1',
+    'device: serverlocal',
+    'pairings:',
+    ...pairingBlocks.flat(),
   ].join('\n'))
 
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
+  const savedDefaults: Array<{ readonly provider: string; readonly model: string }> = []
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'scripted', model: 'mock' }),
-    saveSelection: async () => {},
+    saveSelection: async (selection: { readonly provider: string; readonly model: string }) => { savedDefaults.push(selection) },
   } as never)
   ctx.provide('attachments', {
     imageLimits: IMAGE_LIMITS,
@@ -196,6 +214,7 @@ async function setup(options: { readonly watchdogMs?: number; readonly exposures
     root,
     sessionId: created.target.sessionId,
     target: { kind: 'alias', alias: ('debug') as never },
+    savedDefaults,
   }
 }
 
@@ -206,6 +225,106 @@ async function waitFor(assertion: () => Promise<boolean>, timeoutMs = 5_000): Pr
     await new Promise(resolve => setTimeout(resolve, 5))
   }
   throw new Error(`condition not met within ${String(timeoutMs)}ms`)
+}
+
+/**
+ * Drives one follow generation from the test side: a pump keeps a `next()`
+ * pending so every frame lands in `frames` and can be awaited by predicate.
+ */
+class FollowReader {
+  readonly frames: PeerFollowFrame[] = []
+  private readonly waiters = new Set<() => void>()
+  private closed = false
+  private failure: unknown
+
+  constructor(private readonly iterator: AsyncIterator<PeerFollowFrame>) {
+    void this.pump()
+  }
+
+  private async pump(): Promise<void> {
+    try {
+      for (;;) {
+        const result = await this.iterator.next()
+        if (result.done === true) break
+        this.frames.push(result.value)
+        for (const wake of [...this.waiters]) wake()
+      }
+    } catch (error) {
+      this.failure = error
+    } finally {
+      this.closed = true
+      for (const wake of [...this.waiters]) wake()
+    }
+  }
+
+  async waitFor(
+    predicate: (frame: PeerFollowFrame) => boolean,
+    options: { readonly from?: number; readonly timeoutMs?: number } = {},
+  ): Promise<{ readonly frame: PeerFollowFrame; readonly index: number }> {
+    const from = options.from ?? 0
+    const deadline = Date.now() + (options.timeoutMs ?? 5_000)
+    for (;;) {
+      for (let index = from; index < this.frames.length; index += 1) {
+        const frame = this.frames[index]!
+        if (predicate(frame)) return { frame, index }
+      }
+      if (this.failure !== undefined) throw this.failure
+      if (this.closed) throw new Error('follow ended before the expected frame')
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        throw new Error(`expected follow frame not observed; saw ${this.frames.map(frame => frame.type).join(',')}`)
+      }
+      await this.wait(remaining)
+    }
+  }
+
+  async quiet(ms = 200): Promise<void> {
+    const before = this.frames.length
+    await new Promise(resolve => setTimeout(resolve, ms))
+    if (this.frames.length > before) {
+      throw new Error(`unexpected follow frames: ${this.frames.slice(before).map(frame => frame.type).join(',')}`)
+    }
+  }
+
+  /** Wait until no frame arrives for `idleMs`, absorbing a slow event backlog. */
+  async drainIdle(idleMs = 300, maxMs = 5_000): Promise<void> {
+    const deadline = Date.now() + maxMs
+    for (;;) {
+      const before = this.frames.length
+      await new Promise(resolve => setTimeout(resolve, idleMs))
+      if (this.frames.length === before) return
+      if (Date.now() > deadline) throw new Error('follow never went quiet')
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.iterator.return?.()
+  }
+
+  private wait(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer)
+        this.waiters.delete(wake)
+        resolve()
+      }
+      const timer = setTimeout(wake, ms)
+      this.waiters.add(wake)
+    })
+  }
+}
+
+/** Mint a parked question ask through the scoped waterfall the registry owns. */
+function mintQuestionAsk(ctx: Context, agent: Agent): void {
+  void ctx.waterfall(
+    scopeTarget(agent, agent),
+    'user-questions/request',
+    {
+      agent,
+      questions: [{ id: 'colour', question: 'Which colour?', options: [{ label: 'red' }, { label: 'blue' }] }],
+    },
+    () => new Promise<never>(() => { /* the local answerer parks; the peer answers */ }),
+  )
 }
 
 async function collectFollow(
@@ -331,6 +450,24 @@ describe('peer host service', () => {
     expect(adopted.created).toBe(false)
     expect(adopted.target.sessionId).toBe(sessionId)
     void ctx
+  })
+
+  it('applies create-time routing to that Session only and leaves the default model untouched', async () => {
+    const { peer, savedDefaults, sessionId } = await setup({ extraAliases: ['routed'] })
+    const before = (await peer.state({ target: { kind: 'session', sessionId } })).state.model
+    const created = await peer.create({
+      alias: 'routed' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      provider: 'scripted',
+      model: 'routed',
+    })
+    expect(created.created).toBe(true)
+    expect(created.target.sessionId).not.toBe(sessionId)
+    expect(savedDefaults).toEqual([])
+    const routed = await peer.state({ target: { kind: 'session', sessionId: created.target.sessionId } })
+    expect(routed.state.model).toMatchObject({ provider: 'scripted', model: 'routed' })
+    const after = (await peer.state({ target: { kind: 'session', sessionId } })).state.model
+    expect(after).toEqual(before)
   })
 
   it('streams latch transitions and filters tool/step internals from answer-only', async () => {
@@ -459,6 +596,160 @@ describe('peer host service', () => {
     } finally {
       hostLatch.mockRestore()
     }
+  })
+
+  it('pushes an ask minted mid-tool-call to a follower that started before it', async () => {
+    const { peer, ctx, adapter, sessionId, target } = await setup()
+    const agent = ctx.agents.get(sessionId) as Agent
+    const controller = new AbortController()
+    const reader = new FollowReader(peer.follow({ target }, controller.signal)[Symbol.asyncIterator]())
+    try {
+      await reader.waitFor(frame => frame.type === 'snapshot')
+      // A turn runs with its model stream held: no durable event can land while
+      // the ask is minted, which is exactly the mid-tool-call window.
+      const hold = adapter.holdNext()
+      await peer.prompt({
+        target,
+        participant: { kind: 'peer', name: 'laptop' },
+        requestId: 'req-push' as never,
+        content: [{ type: 'text', text: 'ask mid-tool' }],
+      }, NEVER_ABORTED)
+      await hold.started
+      await reader.drainIdle()
+      const baseline = reader.frames.length
+      const mintedAt = Date.now()
+      mintQuestionAsk(ctx, agent)
+      const pushed = await reader.waitFor(
+        frame => frame.type === 'state' && frame.state.pendingAsks.length > 0,
+        { from: baseline },
+      )
+      // Promptly means the registry push, not the next durable event.
+      expect(Date.now() - mintedAt).toBeLessThan(1_000)
+      expect(reader.frames.slice(baseline, pushed.index + 1).some(frame => frame.type === 'event')).toBe(false)
+      if (pushed.frame.type === 'state') {
+        expect(pushed.frame.state.pendingAsks[0]).toMatchObject({ kind: 'question', since: expect.any(Number) })
+        // A pushed frame carries the last scanned durable position, so repair
+        // from any frame cut stays contiguous.
+        const priorCursors = reader.frames.slice(0, pushed.index).flatMap(frame =>
+          frame.type === 'snapshot' || frame.type === 'event' || frame.type === 'state' ? [frame.cursor as number] : [])
+        expect(pushed.frame.cursor).toBe(Math.max(...priorCursors))
+      }
+      hold.release()
+    } finally {
+      controller.abort()
+      await reader.close()
+    }
+  })
+
+  it('emits exactly one further state frame when a pushed ask settles', async () => {
+    const { peer, ctx, adapter, sessionId, target } = await setup()
+    const agent = ctx.agents.get(sessionId) as Agent
+    const controller = new AbortController()
+    const reader = new FollowReader(peer.follow({ target }, controller.signal)[Symbol.asyncIterator]())
+    try {
+      await reader.waitFor(frame => frame.type === 'snapshot')
+      const hold = adapter.holdNext()
+      await peer.prompt({
+        target,
+        participant: { kind: 'peer', name: 'laptop' },
+        requestId: 'req-settle' as never,
+        content: [{ type: 'text', text: 'ask then settle' }],
+      }, NEVER_ABORTED)
+      await hold.started
+      await reader.drainIdle()
+      const baseline = reader.frames.length
+      mintQuestionAsk(ctx, agent)
+      const pushed = await reader.waitFor(
+        frame => frame.type === 'state' && frame.state.pendingAsks.length > 0,
+        { from: baseline },
+      )
+      const askId = pushed.frame.type === 'state' ? pushed.frame.state.pendingAsks[0]!.askId : undefined
+      if (askId === undefined) throw new Error('no pushed ask to settle')
+      expect(peer.answer({
+        target,
+        participant: { kind: 'peer', name: 'laptop' },
+        askId,
+        answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
+      })).toEqual({ accepted: true, settled: true })
+      const settled = await reader.waitFor(
+        frame => frame.type === 'state' && frame.state.pendingAsks.length === 0,
+        { from: pushed.index + 1 },
+      )
+      const between = reader.frames.slice(pushed.index + 1, settled.index + 1)
+      expect(between.filter(frame => frame.type === 'state')).toHaveLength(1)
+      expect(between.some(frame => frame.type === 'event')).toBe(false)
+      // The raced settle (registry answer then race finally) must not push again.
+      await reader.quiet(200)
+      hold.release()
+    } finally {
+      controller.abort()
+      await reader.close()
+    }
+  })
+
+  it('emits no frame when a mint and settle land before the next read', async () => {
+    const { peer, ctx, sessionId, target } = await setup()
+    const agent = ctx.agents.get(sessionId) as Agent
+    const controller = new AbortController()
+    const iterator = peer.follow({ target }, controller.signal)[Symbol.asyncIterator]()
+    try {
+      const snapshot = await iterator.next()
+      expect(snapshot.value).toMatchObject({ type: 'snapshot' })
+      // The generator is parked at the snapshot yield, so both notifications
+      // coalesce into one wake that finds the snapshot's ask set unchanged.
+      mintQuestionAsk(ctx, agent)
+      await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+      const askId = peer.registry.pendingFor(sessionId)[0]!.askId
+      expect(peer.answer({
+        target,
+        participant: { kind: 'peer', name: 'laptop' },
+        askId,
+        answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
+      })).toEqual({ accepted: true, settled: true })
+      expect(peer.registry.pendingFor(sessionId)).toHaveLength(0)
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<'quiet'>(resolve => setTimeout(() => resolve('quiet'), 200)),
+      ])
+      expect(next).toBe('quiet')
+    } finally {
+      controller.abort()
+      await iterator.return?.()
+    }
+  })
+
+  it('carries a pre-existing ask in the opening snapshot', async () => {
+    const { peer, ctx, sessionId, target } = await setup()
+    const agent = ctx.agents.get(sessionId) as Agent
+    mintQuestionAsk(ctx, agent)
+    await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+    const controller = new AbortController()
+    const reader = new FollowReader(peer.follow({ target }, controller.signal)[Symbol.asyncIterator]())
+    try {
+      const snapshot = await reader.waitFor(frame => frame.type === 'snapshot')
+      if (snapshot.frame.type !== 'snapshot') throw new Error('no opening snapshot')
+      expect(snapshot.frame.state.pendingAsks).toHaveLength(1)
+      expect(snapshot.frame.state.pendingAsks[0]).toMatchObject({ kind: 'question' })
+    } finally {
+      controller.abort()
+      await reader.close()
+    }
+  })
+
+  it('ends the generation with target-detached when the durable stream loses the session', async () => {
+    const { ctx, peer, target } = await setup()
+    vi.spyOn(ctx.sessionController, 'follow').mockImplementation((() => {
+      return (async function* () {
+        throw new RemoteError('peer/not-found', 'session gone', {})
+      })()
+    }) as never)
+    const frames: PeerFollowFrame[] = []
+    const controller = new AbortController()
+    for await (const frame of peer.follow({ target }, controller.signal)) {
+      frames.push(frame)
+      if (frame.type === 'end') break
+    }
+    expect(frames.at(-1)).toMatchObject({ type: 'end', reason: 'target-detached' })
   })
 
   it('rejects unpaired targets and a hop ceiling when configured', async () => {
