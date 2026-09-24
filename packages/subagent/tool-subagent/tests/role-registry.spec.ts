@@ -7,7 +7,7 @@ import { callSubagent, setup, text } from './harness.ts'
 
 /** Settings handle serving one `enpoi-orchestration` document through the tool's read seam. */
 function settingsHandle(document: Record<string, unknown>): tool.OrchestrationSettingsHandle {
-  return { get: (namespace: string) => namespace === 'enpoi-orchestration' ? document : undefined }
+  return { describe: () => [{ ns: 'enpoi-orchestration', value: document }] }
 }
 
 /** Spawn one foreground delegation and return the request the provider saw. */
@@ -178,5 +178,50 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(text(result)).toContain('unknown subagent role "ghost"')
     expect(text(result)).toContain('librarian')
     expect(text(result)).toContain('auditor')
+  })
+
+  it('reads the orchestration document once per delegation', async () => {
+    let describes = 0
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      {
+        provider: 'mock',
+        settingsHandle: {
+          describe: () => {
+            describes += 1
+            return [{ ns: 'enpoi-orchestration', value: { roles: { auditor: { persona: 'You are the Auditor.' } } } }]
+          },
+        },
+      },
+      { onStart: (request) => { seen = request } },
+    )
+    await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work', role: 'auditor' })
+    expect(seen?.persona).toBe('You are the Auditor.')
+    expect(describes).toBe(1)
+  })
+
+  it('warns once per entry change when the entry has no volatile form', async () => {
+    let configurable = true
+    let describes = 0
+    const warnings: string[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      settingsHandle: {
+        describe: () => {
+          describes += 1
+          return configurable ? [{ ns: 'enpoi-orchestration', value: {} }] : []
+        },
+      },
+    })
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work' })
+    configurable = false
+    await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work' })
+    await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work' })
+    // Still one describe() per delegation even while falling back to defaults.
+    expect(describes).toBe(3)
+    const volatileWarnings = warnings.filter(message => message.includes('no volatile form'))
+    expect(volatileWarnings).toHaveLength(1)
+    expect(volatileWarnings[0]).toContain('tool-subagent: enpoi-orchestration')
   })
 })

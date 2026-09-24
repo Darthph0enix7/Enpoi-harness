@@ -537,8 +537,8 @@ export interface ResolvedRole {
 
 /** The Settings service handle this tool reads through (`ctx.get('settings')`). */
 export interface OrchestrationSettingsHandle {
-  /** Read one namespace's resolved document; `undefined` while unregistered. */
-  get?: (namespace: string) => unknown
+  /** Describe every configurable profile entry; the shared document rides the matching `ns`. */
+  describe?: () => ReadonlyArray<{ ns: string; value?: unknown }>
 }
 
 /** Structural view of the `enpoi-orchestration` document this tool consumes. */
@@ -571,19 +571,48 @@ function asRoleGroup(value: unknown): RoleGroup | undefined {
   return ROLE_GROUPS.includes(value as RoleGroup) ? value as RoleGroup : undefined
 }
 
+/** The profile entry id owning the orchestration document this tool consumes. */
+const ORCHESTRATION_ENTRY_ID = 'enpoi-orchestration'
+
 /**
- * Read the live `enpoi-orchestration` document through the Settings service.
- * A missing service, an unregistered namespace, or a failed read yields
- * `undefined`, so delegation keeps its code defaults instead of failing.
+ * Entry ids the last completed read found without a configurable form, so the
+ * warning fires once per entry change instead of once per delegation.
+ */
+const entryWithoutVolatileForm = new Set<string>()
+
+/** One completed `enpoi-orchestration` read, carried into {@link listRoleRegistry}. */
+export interface OrchestrationDocumentRead {
+  /** The described document, or `undefined` when no configurable entry exists. */
+  readonly document: OrchestrationSettingsDocument | undefined
+}
+
+/**
+ * Read the live `enpoi-orchestration` document through the Settings service's
+ * `describe()` descriptors (the profile entry of the same id owns the document
+ * after the settings→Config migration). A missing service, an entry without a
+ * configurable form, or a failed read yields `undefined`, so delegation keeps
+ * its code defaults instead of failing. The engine omits entries whose Config
+ * declares no volatile field, so an absent entry warns once per entry change
+ * through `warn` when the caller can report it.
  * @param settings - the Settings service handle (`ctx.get('settings')`).
+ * @param warn - sink for the once-per-entry-change no-volatile-form warning.
  * @returns the document, or `undefined` when it is unavailable.
  */
 export function readOrchestrationDocument(
   settings: OrchestrationSettingsHandle | undefined,
+  warn?: (message: string) => void,
 ): OrchestrationSettingsDocument | undefined {
   try {
-    const document = settings?.get?.('enpoi-orchestration')
-    if (typeof document !== 'object' || document === null) return undefined
+    if (settings?.describe === undefined) return undefined
+    const document = settings.describe().find(entry => entry.ns === ORCHESTRATION_ENTRY_ID)?.value
+    if (typeof document !== 'object' || document === null) {
+      if (warn !== undefined && !entryWithoutVolatileForm.has(ORCHESTRATION_ENTRY_ID)) {
+        entryWithoutVolatileForm.add(ORCHESTRATION_ENTRY_ID)
+        warn(`tool-subagent: ${ORCHESTRATION_ENTRY_ID} has no volatile form; consumers fall back to defaults`)
+      }
+      return undefined
+    }
+    entryWithoutVolatileForm.delete(ORCHESTRATION_ENTRY_ID)
     return document
   } catch {
     // A settings read is best-effort: a provider fault must not fail delegation.
@@ -599,12 +628,15 @@ export function readOrchestrationDocument(
  * surface, while `seat: false` only hides its Fleet row. Read fresh per spawn,
  * so settings edits apply on the next dispatch.
  * @param settings - the Settings service handle; omit for the code defaults.
+ * @param read - a completed {@link readOrchestrationDocument} result; omit to read here.
  * @returns every active role keyed by its id.
  */
 export function listRoleRegistry(
   settings?: OrchestrationSettingsHandle,
+  read?: OrchestrationDocumentRead,
 ): Record<string, ResolvedRole> {
-  const configured: unknown = readOrchestrationDocument(settings)?.roles
+  const document = read === undefined ? readOrchestrationDocument(settings) : read.document
+  const configured: unknown = document?.roles
   const overrides = new Map<string, RoleRegistryEntry>()
   const retired = new Set<string>()
   if (typeof configured === 'object' && configured !== null && !Array.isArray(configured)) {
@@ -963,8 +995,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           // registry supplies explicit names, personas, and tool surfaces, and
           // an explicit `role` argument is validated before any child starts.
           const settingsHandle = runtimeCtx.get('settings') as OrchestrationSettingsHandle | undefined
-          const document = readOrchestrationDocument(settingsHandle)
-          const registry = listRoleRegistry(settingsHandle)
+          const document = readOrchestrationDocument(settingsHandle, message => runtimeCtx.logger.warn(message))
+          const registry = listRoleRegistry(settingsHandle, { document })
           const requestedRole = args.role
           if (requestedRole !== undefined && registry[requestedRole] === undefined) {
             const availableRoles = Object.keys(registry)

@@ -32,6 +32,8 @@ type SetupConfig = tool.Config & {
   parentAgentOptions?: AgentOptions
   /** Test-only `enpoi-orchestration` document served through a stub Settings handle. */
   settingsDocument?: Record<string, unknown>
+  /** Test-only stub Settings handle; takes precedence over {@link settingsDocument}. */
+  settingsHandle?: tool.OrchestrationSettingsHandle
 }
 
 const TEST_ALLOWED_MODELS = [
@@ -45,12 +47,14 @@ const TEST_ALLOWED_MODELS = [
 
 export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Config> = {}): Promise<Context> {
   const ctx = new Context()
-  const { withModelSelection, parentAgentOptions, settingsDocument, ...config } = toolConfig
-  if (settingsDocument !== undefined) {
+  const { withModelSelection, parentAgentOptions, settingsDocument, settingsHandle, ...config } = toolConfig
+  if (settingsHandle !== undefined) {
+    ctx.reflect.provide('settings', settingsHandle)
+  } else if (settingsDocument !== undefined) {
     // Reproduce the settings seam the tool reads (`ctx.get('settings')`) without
-    // mounting a Settings provider.
+    // mounting a Settings provider: the merged `describe()` descriptor list.
     ctx.reflect.provide('settings', {
-      get: (namespace: string) => namespace === 'enpoi-orchestration' ? settingsDocument : undefined,
+      describe: () => [{ ns: 'enpoi-orchestration', value: settingsDocument }],
     })
   }
   if (withModelSelection === true) {
