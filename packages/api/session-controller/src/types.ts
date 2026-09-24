@@ -450,6 +450,26 @@ export interface SessionExecutionStateValue {
 }
 
 /** One recent tool call in a Session digest, previews bounded by the digest. */
+/**
+ * One durable attempt failure from the LLM seam (`llm/attempt-failed`): a
+ * request attempt that failed before commit and was replaced by another model
+ * link or key-pool identity. Bounded previews only — never a full payload.
+ */
+export interface SessionDigestFailure {
+  readonly seq: number
+  readonly provider: string
+  readonly model: string
+  readonly code: string
+  /** Bounded, single-line preview of the provider failure message. */
+  readonly message: string
+  /** 1-based link index inside a model group, when the failure came from one. */
+  readonly link?: number
+  /** Key-pool identity that failed, when the failure came from a rotation. */
+  readonly identity?: string
+  /** The link or identity that answered next, when the record names one. */
+  readonly next?: { readonly provider: string; readonly model: string }
+}
+
 export interface SessionDigestToolCall {
   readonly tool: string
   readonly status: 'ok' | 'error' | 'running'
@@ -500,6 +520,8 @@ export interface SessionDigestValue {
   readonly state: SessionExecutionStateValue
   readonly model?: SessionModelSelection
   readonly lastParticipantAction?: SessionParticipantAction
+  /** Durable pre-commit attempt failures (model-group links, pool identities), newest first. */
+  readonly recentFailures: readonly SessionDigestFailure[]
   readonly recentToolCalls: readonly SessionDigestToolCall[]
   readonly injectionIndex: readonly SessionDigestInjection[]
   readonly subagentTree: readonly SessionDigestSubagent[]

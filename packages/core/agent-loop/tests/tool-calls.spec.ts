@@ -778,3 +778,47 @@ describe('PTC mode native-tool denial through the agent loop', () => {
     })
   })
 })
+
+describe('tool-call scheduler: registry module duplication', () => {
+  it('runs a call through an equivalent scheduler key when the registry carries another module copy view', async () => {
+    const adapter = new MockAdapter([
+      multiCall([{ id: 'c1', name: 'p', args: { id: '1' } }]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    const gated = gatedParallelTool('p')
+    ctx.tools.register(gated.tool)
+    // Simulate the registry instance coming from a second copy of the tools
+    // module: the instance's own scheduled view is keyed by that copy's
+    // same-named symbol, not by this process's imported one.
+    const registry = ctx.get('tools') as unknown as Record<PropertyKey, unknown>
+    const scheduler = registry[TOOL_RUNTIME_SCHEDULER]
+    Object.defineProperty(registry, Symbol(TOOL_RUNTIME_SCHEDULER.description), { value: scheduler })
+    Reflect.deleteProperty(registry, TOOL_RUNTIME_SCHEDULER)
+    const agent = await ctx.agentLoop.create(SessionId('duplicate-module'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await until(() => gated.started.length === 1)
+    gated.release('1')
+    await waitForIdle(ctx, agent)
+
+    expect(events(agent).find(e => e.type === 'tool/result')?.data)
+      .toMatchObject({ message: { content: [{ isError: false }] } })
+  })
+
+  it('fails the turn loud when no module copy exposes a scheduler key', async () => {
+    const adapter = new MockAdapter([multiCall([{ id: 'c1', name: 'p', args: { id: '1' } }])])
+    const ctx = await harness(adapter)
+    ctx.tools.register(gatedParallelTool('p').tool)
+    const registry = ctx.get('tools') as unknown as Record<PropertyKey, unknown>
+    Reflect.deleteProperty(registry, TOOL_RUNTIME_SCHEDULER)
+    const agent = await ctx.agentLoop.create(SessionId('no-scheduler'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(events(agent).findLast(event => event.type === 'turn/end')).toMatchObject({
+      data: { reason: { kind: 'error', error: { message: 'tool registry does not expose its scheduler view' } } },
+    })
+  })
+})

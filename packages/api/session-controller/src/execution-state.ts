@@ -27,22 +27,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type { SubagentRunEndInfo, SubagentRunId, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
-import type {
-  ExecutionStateProjectionState,
-  SessionDigestInjection,
-  SessionDigestRequest,
-  SessionDigestSubagent,
-  SessionDigestToolCall,
-  SessionDigestValue,
-  SessionExecutionStateValue,
-  SessionLatch,
-  SessionModelSelection,
-  SessionParticipantAction,
-  SessionPendingApproval,
-  SessionPendingAsk,
-  SessionQuestionItem,
-  SessionTurnTerminal,
-} from './types.ts'
+import type { ExecutionStateProjectionState, SessionDigestFailure, SessionDigestInjection, SessionDigestRequest, SessionDigestSubagent, SessionDigestToolCall, SessionDigestValue, SessionExecutionStateValue, SessionLatch, SessionModelSelection, SessionParticipantAction, SessionPendingApproval, SessionPendingAsk, SessionQuestionItem, SessionTurnTerminal } from './types.ts'
 
 /** Bounded reverse window the digest scans for tool traffic, injections, and the spawn catalog. */
 const DIGEST_SCAN_EVENTS = 1000
@@ -280,6 +265,7 @@ interface ScannedCatalogEntry {
 
 /** Everything the digest's one bounded reverse pass collects. */
 interface ScannedTail {
+  readonly failures: readonly SessionDigestFailure[]
   readonly calls: Map<string, ScannedToolCall>
   readonly results: readonly ScannedToolResult[]
   /** Every call id with a result inside the scan window, including rows past the tool budget. */
@@ -372,6 +358,7 @@ export class SessionExecutionStateReader {
       state,
       ...state.model === undefined ? {} : { model: state.model },
       ...state.lastParticipantAction === undefined ? {} : { lastParticipantAction: state.lastParticipantAction },
+      recentFailures: tail.failures.slice(0, maxTools),
       recentToolCalls: this.recentToolCalls(tail, maxTools),
       injectionIndex: tail.injections,
       subagentTree: this.subagentTree(tail.catalog, ids),
@@ -528,6 +515,7 @@ export class SessionExecutionStateReader {
     const results: ScannedToolResult[] = []
     const answered = new Set<string>()
     const injections: SessionDigestInjection[] = []
+    const failures: SessionDigestFailure[] = []
     const catalog = new Map<SessionId, ScannedCatalogEntry>()
     const end = Number(session.seq) - 1
     const floor = Math.max(0, end - DIGEST_SCAN_EVENTS + 1)
@@ -535,6 +523,12 @@ export class SessionExecutionStateReader {
       // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = session.eventAt(SessionSeq(seq))
       if (event === undefined) continue
+      // Fork vocabulary: durable pre-commit attempt failures from the LLM seam.
+      if ((event.type as string) === 'llm/attempt-failed') {
+        const failure = digestFailure(seq, event.data)
+        if (failure !== undefined) failures.push(failure)
+        continue
+      }
       switch (event.type) {
         case 'tool/call': {
           const argumentPreview = preview(event.data.arguments)
@@ -587,6 +581,8 @@ export class SessionExecutionStateReader {
       }
     }
     return {
+      // Newest first: the descending scan already yields that order.
+      failures,
       calls,
       results,
       answered,
@@ -807,3 +803,45 @@ function selectionOf(selection: { readonly provider: string; readonly model: str
 function bound(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
 }
+
+/**
+ * Read one `llm/attempt-failed` record into its bounded digest row. The fork
+ * vocabulary is not declared in the Session event map, so the payload is read
+ * defensively: a malformed record contributes nothing rather than a wrong row.
+ * @param seq - durable sequence of the record.
+ * @param data - the record payload as stored.
+ * @returns the bounded row, or `undefined` when the payload is unusable.
+ */
+function digestFailure(seq: number, data: unknown): SessionDigestFailure | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const record = data as Record<string, unknown>
+  const provider = record['provider']
+  const model = record['model']
+  const code = record['code']
+  const message = record['message']
+  if (typeof provider !== 'string' || typeof model !== 'string') return undefined
+  if (typeof code !== 'string' || typeof message !== 'string') return undefined
+  const link = typeof record['link'] === 'number' ? record['link'] : undefined
+  const identity = typeof record['identity'] === 'string' ? record['identity'] : undefined
+  const nextRecord = typeof record['next'] === 'object' && record['next'] !== null
+    ? record['next'] as Record<string, unknown>
+    : undefined
+  const nextProvider = nextRecord?.['provider']
+  const nextModel = nextRecord?.['model'] ?? nextRecord?.['identity']
+  const next = typeof nextProvider === 'string' && typeof nextModel === 'string'
+    ? { provider: nextProvider, model: nextModel }
+    : undefined
+  return {
+    seq,
+    provider,
+    model,
+    code,
+    message: preview(message) ?? message.slice(0, FAILURE_MESSAGE_LIMIT),
+    ...link === undefined ? {} : { link },
+    ...identity === undefined ? {} : { identity },
+    ...next === undefined ? {} : { next },
+  }
+}
+
+/** Upper bound for a failure message that previews unavailability must still respect. */
+const FAILURE_MESSAGE_LIMIT = 200

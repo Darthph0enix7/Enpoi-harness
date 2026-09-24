@@ -83,15 +83,20 @@ pairings:
 <a id="model-experience"></a>
 ## Model Experience
 
-**Prompt effect:** the host injects no prompt text. Peer prompts are ordinary model-visible user turns in the target session; the peer stream is a read surface, so it adds no tokens.
+### Peer-originated turns
+
+#### What the model sees
+
+A `peer.prompt` enters the target session as an ordinary attributed `user/message`; the host injects no prompt text, and the peer stream, latch frames, and ask traffic never reach a model request.
+
+#### Token effect
+
+One admitted peer prompt costs its message content plus the session's normal request envelope. An adopted session keeps its routing unless `allowModelChange` permits a model change.
 
 #### KV Cache effect
 
-None from the peer API itself. A peer prompt follows the target session's normal append path, so it caches exactly like any other user turn; an adopted session keeps its routing unless `allowModelChange` allows a change.
+A peer prompt appends at the normal user-turn boundary and preserves the reusable prefix; changing the model through `peer.create` changes the route and therefore the cache identity.
 
-*No snapshot test:* the package adds no prompt or tool surface; the live-host e2e and host specs own its behavior.
-
-<a id="known-limitations-and-deferred-work"></a>
 ## Known Limitations and Deferred Work
 
 - **Peer attribution is durable for prompt and cancel only.** `peer.prompt` writes the peer tag into the target `user/message` source and `peer.cancel` into the abort cause, so the host latch reports them; `peer.create` and `peer.answer` remain visible through `peer.state`/`peer.follow` only.
@@ -104,6 +109,6 @@ None from the peer API itself. A peer prompt follows the target session's normal
 - README translation (`README.zh.md`, `README.i18n.yaml`) and the `api/` group README row are deferred to the translation tooling.
 
 <a id="dev-note"></a>
-## Dev Note
+### Dev Note
 
 `src/latch.ts` and `src/exposure.ts` are pure; `src/pairings.ts` is filesystem-bound; `src/host.ts` owns the namespace, dispatch, attribution, and watchdog; `src/client.ts` owns the caller transport. Tests: `tests/pairings.spec.ts`, `tests/latch.spec.ts`, `tests/registry.host.spec.ts`, `tests/host.spec.ts` (real agent loop), `tests/client.spec.ts`, and `tests/live-host.e2e.ts` (real `dsh web` + `tests/peer.overlay.yml`).

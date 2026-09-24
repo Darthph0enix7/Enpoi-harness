@@ -16,6 +16,8 @@
  *   --session ID          session id to harvest (repeatable)
  *   --all-since TS        harvest every session whose log was written at/after TS
  *   --out DIR             output directory (default cwd)
+ *   --lessons FILE        append each run's harvest inventory (one JSON object per
+ *                         line) to FILE; dsh-lessons.mjs fold reads the result
  *   --sessions-root DIR   session store root (default ~/.dsh/sessions)
  *   --diagnostics-db FILE incidents sqlite (default ~/.dsh/diagnostics/incidents.sqlite)
  *   --no-diagnostics      skip the diagnostics merge
@@ -25,9 +27,9 @@
  * Exit codes: 0 success; 1 usage or total failure.
  */
 import { execFileSync } from 'node:child_process'
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 class HarvestError extends Error {}
 
@@ -39,6 +41,8 @@ const HELP = `dsh-e2e-harvest.mjs — harvest error signals from DSH session log
   --session ID          session id to harvest (repeatable)
   --all-since TS        harvest every session whose log was written at/after TS
   --out DIR             output directory (default cwd)
+  --lessons FILE        append each run's harvest inventory (one JSON object per
+                        line) to FILE; dsh-lessons.mjs fold reads the result
   --sessions-root DIR   session store root (default ~/.dsh/sessions)
   --diagnostics-db FILE incidents sqlite
                         (default ~/.dsh/diagnostics/incidents.sqlite)
@@ -66,7 +70,7 @@ function parseArgs(argv) {
     if (value === undefined) fail(`missing value for ${name}`)
     return value
   }
-  const valueFlags = new Set(['--session', '--all-since', '--out', '--sessions-root', '--diagnostics-db', '--window-pad'])
+  const valueFlags = new Set(['--session', '--all-since', '--out', '--lessons', '--sessions-root', '--diagnostics-db', '--window-pad'])
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
     const eq = arg.indexOf('=')
@@ -76,6 +80,7 @@ function parseArgs(argv) {
       case '--session': opts.sessions.push(take(name, inline, argv, index)); break
       case '--all-since': opts.allSince = take(name, inline, argv, index); break
       case '--out': opts.out = take(name, inline, argv, index); break
+      case '--lessons': opts.lessons = take(name, inline, argv, index); break
       case '--sessions-root': opts.sessionsRoot = take(name, inline, argv, index); break
       case '--diagnostics-db': opts.diagnosticsDb = take(name, inline, argv, index); break
       case '--window-pad': opts.windowPadSec = Number(take(name, inline, argv, index)); break
@@ -507,10 +512,15 @@ async function harvestOne(entry, opts, outDir) {
   const mdPath = join(outDir, `${sessionId}.harvest.md`)
   writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`)
   writeFileSync(mdPath, buildMarkdown(report))
+  if (opts.lessons !== undefined) {
+    appendFileSync(opts.lessons, `${JSON.stringify(report)}\n`)
+  }
   return { sessionId, entry, report, jsonPath, mdPath }
 }
 
 async function main(opts) {
+  mkdirSync(opts.out, { recursive: true })
+  if (opts.lessons !== undefined) mkdirSync(dirname(opts.lessons), { recursive: true })
   const logs = listLogs(opts.sessionsRoot)
   const results = []
   if (opts.sessions.length > 0) {

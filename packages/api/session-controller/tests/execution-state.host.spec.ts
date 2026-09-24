@@ -178,6 +178,24 @@ function promptBody(sessionId: SessionId, text: string): SessionPromptRequest {
   }
 }
 
+/**
+ * Append a fork event the typed event map does not declare. The runtime log
+ * vocabulary is open (the reader validates it separately), so the cast is
+ * deliberate and confined to this one seam.
+ * @param session - the session to append to.
+ * @param type - the fork event type.
+ * @param data - the event payload.
+ */
+function appendForkEvent(
+  session: { append: (...args: never[]) => unknown } | undefined,
+  type: string,
+  data: Record<string, unknown>,
+): void {
+  if (session === undefined) throw new Error('appendForkEvent: session is undefined')
+  const append = session.append.bind(session) as unknown as (type: string, data: Record<string, unknown>) => unknown
+  append(type, data)
+}
+
 describe('session execution latch', () => {
   it('follows idle → running → waiting_subagents (working quiet child) → waiting_approval → idle', async () => {
     const test = await harness()
@@ -364,6 +382,41 @@ describe('session digest', () => {
     const digest = valueOf(await remote.digest({ sessionId, recentTools: 5 }))
     expect(digest.state).toMatchObject({ latch: 'idle', activeDescendants: 1, descendantsExact: true })
     expect(digest.pendingInteractions).toEqual([])
+
+    // Durable pre-commit attempt failures surface as bounded rows (the fork's
+    // llm/attempt-failed vocabulary is read defensively, never trusted blindly).
+    const sessionForFailures = ctx.sessions.get(sessionId)
+    expect(sessionForFailures).toBeDefined()
+    appendForkEvent(sessionForFailures, 'llm/attempt-failed', {
+      provider: 'primary',
+      model: 'big-model',
+      code: 'INSUFFICIENT_BALANCE',
+      message: 'x'.repeat(400),
+      chain: 'scratch',
+      link: 1,
+      next: { provider: 'fallback', model: 'small-model' },
+    })
+    appendForkEvent(sessionForFailures, 'llm/attempt-failed', {
+      provider: 'fallback',
+      model: 'small-model',
+      code: 'POOL_EXHAUSTED',
+      message: 'no identity left',
+      identity: 'p1',
+      next: { identity: 'p2' },
+    })
+    const withFailures = valueOf(await remote.digest({ sessionId, recentTools: 5 }))
+    expect(withFailures.recentFailures).toHaveLength(2)
+    expect(withFailures.recentFailures[1]).toMatchObject({
+      provider: 'primary',
+      model: 'big-model',
+      code: 'INSUFFICIENT_BALANCE',
+      link: 1,
+      next: { provider: 'fallback', model: 'small-model' },
+    })
+    expect(withFailures.recentFailures[1]?.message.length).toBeLessThanOrEqual(200)
+    expect(withFailures.recentFailures[0]).toMatchObject({ provider: 'fallback', identity: 'p1' })
+    // A `next` that names no provider/model is dropped rather than guessed.
+    expect(withFailures.recentFailures[0]?.next).toBeUndefined()
 
     const ok = digest.recentToolCalls.find(call => call.tool === 'probe')
     expect(ok).toMatchObject({ status: 'ok' })

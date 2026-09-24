@@ -119,6 +119,12 @@
     - id: session-controller
       name: '@deepseek-ai/dsh-api-session-controller'
 
+    # Device-to-device peer API: a narrow, pairing-gated session surface.
+    # Every call resolves through ~/.dsh/pairings.yaml, so the namespace is
+    # inert until a pairing entry exists.
+    - id: peer-api
+      name: '@deepseek-ai/dsh-api-peer'
+
     # Workspace file service: bounded read, directory listing, and the
     # agent-write change feed inside the session workspace root.
     - id: terminal-controller

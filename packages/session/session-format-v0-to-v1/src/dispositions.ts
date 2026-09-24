@@ -35,11 +35,13 @@ const disposition = defineReleasedPayloadDisposition
  * unknown variants as owner-opaque JSON.
  */
 /**
- * Installed Enpoi-fork event vocabulary that was written during the released-v0
- * era. These types are outside the upstream frozen inventory, so no released-v0
- * payload disposition governs them: every member is preserved verbatim by the
- * identity edge and treated as owner-opaque by each migration's payload
- * validator. Genuinely unknown types still refuse.
+ * Installed Enpoi-fork event vocabulary that lives outside every frozen released
+ * inventory: orchestration events written during the released-v0 era plus later
+ * owner-emitted records the session vocabulary deliberately does not declare,
+ * such as the LLM seam's `llm/attempt-failed`. Every migration stage admits
+ * these types with envelope-only checks and preserves each payload member
+ * verbatim (owner-opaque); the identity edge stamps `ignorable: true` when a
+ * record lacks it. Genuinely unknown types still refuse.
  */
 export const OPAQUE_FORK_V0_EVENT_TYPES: ReadonlySet<string> = new Set([
   'brief/prose-updated',
@@ -54,6 +56,7 @@ export const OPAQUE_FORK_V0_EVENT_TYPES: ReadonlySet<string> = new Set([
   'council/started',
   'council/round',
   'council/finished',
+  'llm/attempt-failed',
   'revert/state',
   'revert/file-intent',
   'revert/file-result',

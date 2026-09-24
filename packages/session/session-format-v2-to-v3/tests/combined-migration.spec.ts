@@ -155,6 +155,47 @@ describe('combined structural, canonical-envelope and PTC catalog migration', ()
     expect(reopened.finish()).toEqual(target)
   })
 
+  it('carries both durable llm/attempt-failed variants through the full v0 chain and raw V3 reading', () => {
+    const legacyHeader = { type: 'session', version: 0, id: 'attempt-failed', createdAt: 1, cwd: '/work', delegationDepth: 0 }
+    const chainFailure = {
+      provider: 'deepseek', model: 'deepseek-v4-flash', code: 'RATE_LIMIT',
+      message: '429: rate limit exceeded', chain: 'primary', link: 1,
+      next: { provider: 'deepseek', model: 'deepseek-v4-pro' }, status: 429, requestId: 'req-1',
+    }
+    const poolFailure = {
+      provider: 'deepseek', model: 'deepseek-v4-flash', code: 'RATE_LIMIT',
+      message: '429: rate limit exceeded', identity: 'exhausted',
+      next: { identity: 'healthy' }, status: 429,
+    }
+    const durable = [
+      event('llm/attempt-failed', 2, chainFailure, { ignorable: true }),
+      event('llm/attempt-failed', 3, poolFailure, { ignorable: true }),
+    ]
+    const rows = [
+      event('turn/start', 0, { turn: 1 }),
+      event('step/start', 1, { turn: 1, step: 1 }),
+      ...durable,
+      event('step/end', 4, { turn: 1, step: 1 }),
+      event('turn/end', 5, { turn: 1, reason: { kind: 'completed' } }),
+    ]
+    const payloads = (events: readonly SessionFormatEvent[]) => events
+      .filter(row => row.type === 'llm/attempt-failed')
+      .map(row => ({ type: row.type, data: row.data }))
+    const reader = sessionFormatCatalog.createRestore(legacyHeader, { recovery: 'strict', validation: 'current' })
+    for (const row of rows) reader.decodeRow(row)
+    const target = reader.finish()
+    expect(target.header.version).toBe(3)
+    expect(payloads(target.events)).toEqual(payloads(durable))
+    expect(restoreReleasedV3Artifact(target, new Set())).toBe(target)
+    const raw = releasedV3SessionFormatCodec.createDecoder(
+      releasedV3SessionFormatCodec.encodeHeader(target.header, target.inheritedEventCount), 'strict',
+    )
+    const seen = new SessionFormatEventCollector()
+    for (const row of target.events) raw.decodeRow(releasedV3SessionFormatCodec.encodeEvent(row), seen)
+    expect(raw.finish(seen)).toBe(target.inheritedEventCount)
+    expect(payloads(seen.values)).toEqual(payloads(durable))
+  })
+
   it('refuses target V3 delivery activation after replacement and PTC migration', () => {
     const reader = sessionFormatCatalog.createRestore(header, { recovery: 'strict', validation: 'current' })
     for (const row of source) reader.decodeRow(row)

@@ -14,7 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
-import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext, type ToolRuntime, type ToolRuntimeScheduler } from '@deepseek-ai/dsh-tools'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 
 /**
@@ -29,6 +29,30 @@ function toolExecutionFailure(error: unknown): Error {
   }) as Error & { code: string }
   wrapped.code = 'TOOL_FAILED'
   return wrapped
+}
+
+/**
+ * Resolve the live registry's staged scheduler view.
+ *
+ * The view is keyed by the registry package's module-local
+ * {@link TOOL_RUNTIME_SCHEDULER}. A composed boot can instantiate the registry
+ * and this loop from separate module copies — the snapshot harness resolves
+ * profile plugins through the built `lib/` plane while their imports resolve
+ * through the source plane — so the live instance then carries its own copy's
+ * key. Fall back to the key the instance actually carries and fail loud when
+ * neither view exists: an undefined scheduler would strand every tool call.
+ * @param registry - the live tool registry service this loop executes against.
+ * @returns the registry instance's own scheduler view.
+ */
+function toolScheduler(registry: ToolRuntime): ToolRuntimeScheduler {
+  const view = registry as unknown as Record<PropertyKey, unknown>
+  const direct = view[TOOL_RUNTIME_SCHEDULER]
+  if (direct) return direct as ToolRuntimeScheduler
+  const instanceKey = Object.getOwnPropertySymbols(registry)
+    .find(symbol => symbol.description === TOOL_RUNTIME_SCHEDULER.description)
+  const scheduler = instanceKey === undefined ? undefined : view[instanceKey]
+  if (!scheduler) throw new Error('tool registry does not expose its scheduler view')
+  return scheduler as ToolRuntimeScheduler
 }
 
 /** One tool call after argument parsing, ready to schedule. */
@@ -144,6 +168,7 @@ async function runGroup(
 ): Promise<GroupOutcome> {
   const { session } = ctx.agents.requireInitiator()
   const { maxParallelToolCalls } = ctx.agentLoop.config
+  const scheduler = toolScheduler(ctx.tools)
   const slots: (Slot | undefined)[] = group.map(() => undefined)
   // Started slots retain their `tool/call` seq so the result can cite it.
   const callSeqs: Array<SessionSeq | undefined> = group.map(() => undefined)
@@ -164,8 +189,8 @@ async function runGroup(
       if (slot === undefined) break
       const call = group[committed]
       const result = slot.needsPost
-        ? await ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
-        : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
+        ? await scheduler.finalize(slot.exec, slot.result)
+        : scheduler.finish(slot.exec, slot.result)
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
       appendToolResult(session, turn, step, call!.block, result, callSeqs[committed]!)
       for (const context of result.additionalContexts ?? []) acceptContext(context)
@@ -181,11 +206,11 @@ async function runGroup(
     const call = group[index]!
     callSeqs[index] = appendToolCall(session, turn, step, call.block)
     started++
-    const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(call.exec)
+    const prepared = await scheduler.prepare(call.exec)
     throwSchedulerFailure()
     switch (prepared.kind) {
       case 'dispatch': {
-        const promise = ctx.tools[TOOL_RUNTIME_SCHEDULER].dispatch(prepared.exec).then(
+        const promise = scheduler.dispatch(prepared.exec).then(
           (outcome) => {
             slots[index] = { exec: prepared.exec, result: outcome.result, needsPost: outcome.kind === 'post-result' }
             return index
