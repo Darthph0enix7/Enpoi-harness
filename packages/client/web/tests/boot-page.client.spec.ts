@@ -14,8 +14,17 @@ describe('BootPage', () => {
   it('draws the loading skeleton before any plugin state arrives', () => {
     const { el } = mount()
     expect(el.firstElementChild?.getAttribute('data-dsh-boot')).toBe('')
-    expect(el.textContent).toContain('HARNESS')
+    expect(el.textContent).toContain('ENPOI')
     expect(el.textContent).toContain('Loading plugins…')
+  })
+
+  it('replaces the status line for the reveal gate without touching the wordmark', () => {
+    const { el, page } = mount()
+    page.setHint('Preparing workspace…')
+    expect(el.textContent).toContain('Preparing workspace…')
+    expect(el.textContent).not.toContain('Loading plugins…')
+    expect(el.textContent).toContain('ENPOI')
+    expect(el.querySelector('[data-dsh-boot-spinner]')).not.toBeNull()
   })
 
   it('keeps loading while entries are active or loading', () => {

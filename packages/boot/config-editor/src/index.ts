@@ -7,7 +7,7 @@ import { entryListSchema, type PatchOptions } from '@deepseek-ai/cordis-plugin-i
 import yaml from 'js-yaml'
 import type { Entry, EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-hmr'
-import { composeEntries, loadProfileDirectory, readProfilePatches, reconcileProfilePatches } from '@deepseek-ai/dsh-app-boot'
+import { composeEntries, loadProfileDirectory, readProfilePatches, reconcileProfilePatches, type Profile } from '@deepseek-ai/dsh-app-boot'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { isMap, isSeq, parseDocument, Scalar, visit } from 'yaml'
 
@@ -25,6 +25,22 @@ function flatten(rows: EntryOptions[]): EntryOptions[] {
 /** Persist complete raw configs and apply them through the normal Loader path. */
 export class ConfigEditor extends Service {
   static inject = ['loader', 'profileContext']
+  /**
+   * Inherited and override values per entry id, keyed by the composed profile
+   * they were derived from. The profile object is replaced whenever any patch
+   * source changes, so stale entries become unreachable with it.
+   */
+  private readonly valuesByProfile = new WeakMap<Profile, Map<string, {
+    inherited: Record<string, unknown>
+    override: Record<string, unknown>
+  }>>()
+  /**
+   * Composed inherited config per entry id for one profile generation. A
+   * profile's user configs target their own id, so dropping every user config
+   * in one composition yields the same inherited row per id as dropping only
+   * the requested entry's config once per entry.
+   */
+  private readonly inheritedRowsByProfile = new WeakMap<Profile, Map<string, Record<string, unknown>>>()
 
   constructor(private readonly ownerContext: Context) {
     super(ownerContext, 'configEditor')
@@ -44,27 +60,63 @@ export class ConfigEditor extends Service {
   }
 
   /** Read inherited and explicit profile values for the active entries.
+   * Both values depend only on the composed profile and the entry id, so each
+   * id is composed once per profile generation and cloned per read.
    * @returns Detached layer values alongside their Loader entries.
    */
   configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }> {
     const profile = this.ownerContext.profileContext
     const loaded = loadProfileDirectory('dsh', profile.dir, profile.installAnchor)
-    return this.entries().map(entry => ({
-      entry, inherited: this.inherited(entry, loaded),
-      override: structuredClone((loaded.patches.findLast(
-        row => row.id === entry.options.id && row.config !== undefined,
-      )?.config ?? {}) as Record<string, unknown>),
-    }))
+    let values = this.valuesByProfile.get(loaded)
+    if (values === undefined) {
+      values = new Map()
+      this.valuesByProfile.set(loaded, values)
+    }
+    return this.entries().map((entry) => {
+      const id = entry.options.id
+      let entryValues = values.get(id)
+      if (entryValues === undefined) {
+        entryValues = {
+          inherited: this.inherited(entry, loaded),
+          override: structuredClone((loaded.patches.findLast(
+            row => row.id === id && row.config !== undefined,
+          )?.config ?? {}) as Record<string, unknown>),
+        }
+        values.set(id, entryValues)
+      }
+      return {
+        entry,
+        inherited: structuredClone(entryValues.inherited),
+        override: structuredClone(entryValues.override),
+      }
+    })
   }
 
-  private inherited(entry: Entry, loaded: ReturnType<typeof loadProfileDirectory>): Record<string, unknown> {
+  private inherited(entry: Entry, loaded: Profile): Record<string, unknown> {
+    const rows = this.inheritedRows(loaded)
+    return structuredClone(rows.get(entry.options.id) ?? {})
+  }
+
+  /** Compose one profile's inherited rows once, then serve every entry id from it. */
+  private inheritedRows(loaded: Profile): Map<string, Record<string, unknown>> {
+    let rows = this.inheritedRowsByProfile.get(loaded)
+    if (rows !== undefined) return rows
     const patches = loaded.patches.map((patch) => {
-      if (patch.id !== entry.options.id || patch.insert !== undefined) return patch
-      const rest = { ...patch }; Reflect.deleteProperty(rest, 'config')
+      if (patch.config === undefined || patch.insert !== undefined) return patch
+      const rest = { ...patch }
+      Reflect.deleteProperty(rest, 'config')
       return rest
     })
-    const row = flatten(composeEntries([...loaded.layers.map(layer => layer.patches), patches])).find(row => row.id === entry.options.id)
-    return structuredClone((row?.config ?? {}) as Record<string, unknown>)
+    rows = new Map()
+    for (const row of flatten(composeEntries([...loaded.layers.map(layer => layer.patches), patches]))) {
+      // `.find` in the per-entry composition returned the first flattened
+      // occurrence, so a repeated id keeps that first row's inherited config.
+      if (!rows.has(row.id)) {
+        rows.set(row.id, structuredClone((row.config ?? {}) as Record<string, unknown>))
+      }
+    }
+    this.inheritedRowsByProfile.set(loaded, rows)
+    return rows
   }
 
   /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.

@@ -410,7 +410,7 @@ export class SessionManager {
     const mutations: SessionListMutation[] = []
     this.listMutations = mutations
     this.notifier.markDirty()
-    this.listInflight = (async () => {
+    const inflight = (async () => {
       try {
         const result = await this.remote.session.list({})
         if (this.listMutations !== mutations) return
@@ -469,7 +469,12 @@ export class SessionManager {
         }
       }
     })()
-    return this.listInflight
+    this.listInflight = inflight
+    // The web boot gate holds the first reveal until this window lands.
+    ;(globalThis as {
+      __dshBootGate?: { register?: (name: string, promise: Promise<unknown>) => void }
+    }).__dshBootGate?.register?.('sessions', inflight)
+    return inflight
   }
 
   /**

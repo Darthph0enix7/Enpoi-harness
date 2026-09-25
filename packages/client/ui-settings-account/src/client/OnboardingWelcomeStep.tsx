@@ -2,12 +2,21 @@
 import type { RefObject } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DesktopOnboardingProps } from './onboarding-contract.ts'
-import { OnboardingIllustration } from './OnboardingIllustration.tsx'
-import art from './assets/onboarding-welcome.png'
-import artDark from './assets/onboarding-welcome-dark.png'
-import artZh from './assets/onboarding-welcome-zh.png'
-import artZhDark from './assets/onboarding-welcome-zh-dark.png'
+import { OnboardingIllustration, type OnboardingArtLoaders } from './OnboardingIllustration.tsx'
 import css from './DesktopOnboarding.module.css'
+
+// The welcome artwork is ~2.5 MB of base64 PNG; the step loads its pair from a
+// package-local chunk on first render instead of the eager application combo.
+const WELCOME_ART: Readonly<Record<'en' | 'zh', OnboardingArtLoaders>> = {
+  en: {
+    light: () => import('./assets/onboarding-welcome.png'),
+    dark: () => import('./assets/onboarding-welcome-dark.png'),
+  },
+  zh: {
+    light: () => import('./assets/onboarding-welcome-zh.png'),
+    dark: () => import('./assets/onboarding-welcome-zh-dark.png'),
+  },
+}
 
 /** @param props - localized content, focus target and navigation. @returns the welcome step. */
 export function OnboardingWelcomeStep({ t, locale, heading, busy, onStart }: Pick<DesktopOnboardingProps, 't' | 'locale'> & {
@@ -22,7 +31,7 @@ export function OnboardingWelcomeStep({ t, locale, heading, busy, onStart }: Pic
       <Button variant="primary" className={`${css.action} ${css.start}`} disabled={busy} onClick={onStart}>{t('onboardingStart')}</Button>
     </div>
     <div className={css.welcomeIllustration} aria-hidden="true">
-      <OnboardingIllustration className={css.welcomeArtwork} src={locale === 'zh' ? artZh : art} darkSrc={locale === 'zh' ? artZhDark : artDark} />
+      <OnboardingIllustration className={css.welcomeArtwork} art={locale === 'zh' ? WELCOME_ART.zh : WELCOME_ART.en} />
     </div>
   </div>
 }

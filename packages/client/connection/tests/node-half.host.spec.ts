@@ -593,6 +593,61 @@ describe('connection node half', () => {
     await remove()
     await fiber.dispose()
   })
+
+  it('validates successful RPC results and answers matching conditional reads without a body', async () => {
+    const { connection, dispose } = await mounted()
+    let calls = 0
+    const remove = connection.rpc.intercept(
+      '/api',
+      endpoint => endpoint === 'goals/list',
+      async (_endpoint, payload) => {
+        calls += 1
+        return { ok: true, value: { n: (payload as { args?: { n?: number } }).args?.n ?? 1 } }
+      },
+    )
+    const shared = connection.createSharedFetchHandler('/api')
+    const post = async (rpcId: string, args: Record<string, unknown>, headers: Record<string, string> = {}): Promise<Response> =>
+      shared.fetch(new Request('http://127.0.0.1:3080/api/goals/list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ type: 'client-request', rpcId, method: 'goals/list', payload: { args } }),
+      }))
+
+    const first = await post('rpc-etag-1', { n: 1 })
+    expect(first.status).toBe(200)
+    const etag = first.headers.get('etag')
+    expect(etag).toMatch(/^"[A-Za-z0-9_-]+"$/)
+    expect(first.headers.get('cache-control')).toBe('no-cache')
+    const modified = first.headers.get('last-modified')
+    expect(modified).not.toBeNull()
+
+    const revalidated = await post('rpc-etag-2', { n: 1 }, { 'if-none-match': etag! })
+    expect(revalidated.status).toBe(304)
+    expect(revalidated.headers.get('x-dsh-rpc-id')).toBe('rpc-etag-2')
+    expect(await revalidated.text()).toBe('')
+    expect((await post('rpc-etag-3', { n: 1 }, { 'if-none-match': '*' })).status).toBe(304)
+    expect((await post('rpc-etag-4', { n: 1 }, { 'if-none-match': `W/${etag!}` })).status).toBe(304)
+    expect((await post('rpc-etag-5', { n: 1 }, { 'if-none-match': '"other"' })).status).toBe(200)
+    expect((await post('rpc-etag-6', { n: 1 }, { 'if-modified-since': modified! })).status).toBe(304)
+    expect((await post('rpc-etag-7', { n: 1 }, { 'if-modified-since': 'not a date' })).status).toBe(200)
+
+    // A different result is a new validator even when the client presents the old one.
+    const changed = await post('rpc-etag-8', { n: 2 }, { 'if-none-match': etag! })
+    expect(changed.status).toBe(200)
+    expect(changed.headers.get('etag')).not.toBe(etag)
+    expect((await post('rpc-etag-9', { n: 2 }, { 'if-modified-since': 'Thu, 01 Jan 1970 00:00:00 GMT' })).status).toBe(200)
+    // A first read for an argument key has no stored validator to compare against.
+    expect((await post('rpc-etag-10', { n: 3 }, { 'if-modified-since': modified! })).status).toBe(200)
+    expect(calls).toBe(10)
+
+    // Validator retention is bounded; distinct argument keys evict the oldest entry.
+    for (let index = 0; index < 257; index++) {
+      expect((await post(`rpc-bound-${String(index)}`, { n: index })).status).toBe(200)
+    }
+    expect((await post('rpc-bound-replay', { n: 0 }, { 'if-none-match': etag! })).status).toBe(200)
+    await remove()
+    await dispose()
+  })
 })
 
 describe('connection node half over a real HTTP server', () => {

@@ -6,7 +6,7 @@
  * state line.
  */
 import { describe, expect, it } from 'vitest'
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 import type { FileSnapshot } from '../src/client/fsops.ts'
 import type { EditorFsOps } from '../src/client/fsops.ts'
@@ -119,7 +119,7 @@ describe('editor body surfaces', () => {
     cleanup()
   })
 
-  it('carries a dirty buffer around a clean display-type switch through the store', () => {
+  it('carries a dirty buffer around a clean display-type switch through the store', async () => {
     const store = createEditorStore().create()
     store.actions.attach(ADDRESS, TAB)
     store.actions.synced(ADDRESS, snapshot('hello'))
@@ -129,7 +129,8 @@ describe('editor body surfaces', () => {
     // The bucket is keyed by the address, not the tab id, and survives the body.
     expect(store.getSnapshot().byAddress[ADDRESS]?.draft).toBe('my buffer')
     const second = render(<EditorBody {...propsFor(store)} />)
-    expect(second.container.querySelector('[data-enpoi-editor-cm]')).not.toBeNull()
+    // The editor engine arrives as a deferred chunk, so the mount is asynchronous.
+    await waitFor(() => { expect(second.container.querySelector('[data-enpoi-editor-cm]')).not.toBeNull() })
     cleanup()
   })
 

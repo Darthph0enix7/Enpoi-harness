@@ -74,8 +74,16 @@ function publish(list: readonly string[]): void {
   for (const listener of listeners) listener()
 }
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
+/** Read the enpoi-orchestration namespace through the shared coalesced describe when the wire root installed it. */
 async function describeNamespace(): Promise<HiddenSurfacesNamespaceView | undefined> {
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  if (typeof shared === 'function') {
+    const value = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
+    const namespaces = value?.namespaces
+    return Array.isArray(namespaces)
+      ? (namespaces as HiddenSurfacesNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
+      : undefined
+  }
   const res = await fetch('/api/settings.describe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

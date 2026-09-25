@@ -226,6 +226,22 @@ export class SettingsForms extends Service {
   private closed = false
   private scheduled = false
   private readonly presentations = new Map<Fiber, { auto?: boolean }>()
+  /**
+   * Generation of the descriptor set and the last described values per
+   * redaction mode. Any composition reload, presentation change, or observed
+   * entry change moves the generation, so repeat readers (every
+   * `readOrchestrationDocument`, every settings page) share one projection.
+   */
+  private generation = 0
+  private described: {
+    generation: number
+    /** Active-entry identities and lifecycle states the projections were built from. */
+    entryKey: string
+    /** Redacted projections for this generation, absent until a redacted read. */
+    redacted: SettingsDescriptor[] | undefined
+    /** Unredacted projections for this generation, absent until a raw read. */
+    raw: SettingsDescriptor[] | undefined
+  } | undefined
 
   constructor(private readonly ownerContext: Context) {
     super(ownerContext, 'settings')
@@ -277,6 +293,7 @@ export class SettingsForms extends Service {
   }
 
   private invalidate(): void {
+    this.generation += 1
     if (this.scheduled || this.closed) return
     this.scheduled = true
     queueMicrotask(() => {
@@ -300,6 +317,14 @@ export class SettingsForms extends Service {
    * @returns Forms keyed by unique profile entry ids.
    */
   describe(options?: SettingsDescribeOptions): SettingsDescriptor[] {
+    const withRedaction = options?.redactSecrets === true
+    const entryKey = this.entrySignature()
+    const cached = this.described
+    if (cached !== undefined && cached.generation === this.generation && cached.entryKey === entryKey) {
+      const hit = withRedaction ? cached.redacted : cached.raw
+      if (hit !== undefined) return [...hit]
+    }
+    let changed = false
     const active = new Set<string>()
     const descriptors = this.ownerContext.configEditor.configuration().flatMap(({ entry, inherited, override }) => {
       const schema = this.schema(entry)
@@ -314,6 +339,7 @@ export class SettingsForms extends Service {
       const revision = previous === undefined ? 0 : previous.revision + Number(previous.raw !== raw)
       this.revisions.set(entry.id, { raw, revision, ns: entry.options.id as SettingsNamespace, autoGenerate })
       if (previous?.raw !== raw || previous.autoGenerate !== autoGenerate) {
+        changed = true
         this.ownerContext.emit('settings/document-updated', entry.options.id as SettingsNamespace, revision)
       }
       const value = projectForm(form, plainConfig(entry.fiber.config))
@@ -332,11 +358,29 @@ export class SettingsForms extends Service {
     })
     for (const [id, previous] of this.revisions) {
       if (active.has(id) || previous.raw === undefined) continue
+      changed = true
       const revision = previous.revision + 1
       this.revisions.set(id, { ...previous, raw: undefined, revision })
       this.ownerContext.emit('settings/document-updated', previous.ns, revision)
     }
-    return descriptors
+    if (changed) this.generation += 1
+    const previous = this.described !== undefined && this.described.generation === this.generation
+      ? this.described
+      : undefined
+    this.described = {
+      generation: this.generation,
+      entryKey,
+      redacted: withRedaction ? descriptors : previous?.redacted,
+      raw: withRedaction ? previous?.raw : descriptors,
+    }
+    return [...descriptors]
+  }
+
+  /** Active-entry identities and lifecycle states; a change invalidates cached projections. */
+  private entrySignature(): string {
+    return this.ownerContext.configEditor.entries()
+      .map(entry => `${entry.options.id}:${String(entry.fiber?.uid)}:${String(entry.fiber?.state)}`)
+      .join('|')
   }
 
   /** Merge editable fields into an entry's config.

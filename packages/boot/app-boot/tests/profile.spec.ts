@@ -463,6 +463,90 @@ describe('loadProfile', () => {
   })
 })
 
+describe('profile directory composition cache', () => {
+  it('reuses one composition until a bundle patch file changes', () => {
+    const anchor = stageInstallation({ alpha: { patch: '- insert: [{ id: a, name: pkg-a, config: { value: "before" } }]\n' } })
+    const dir = resolveProfileDir('demo', tmp())
+    initProfile(dir, ['alpha'])
+
+    const first = loadProfileDirectory('dsh', dir, anchor)
+    expect(first.layers[0]?.patches)
+      .toEqual([{ insert: [{ id: 'a', name: 'pkg-a', config: { value: 'before' } }] }])
+    expect(loadProfileDirectory('dsh', dir, anchor)).toBe(first)
+
+    const patchPath = join(dirname(anchor), 'node_modules', 'alpha', 'cordis.patch.yml')
+    writeFileSync(patchPath, '- insert: [{ id: a, name: pkg-a, config: { value: "after-edited" } }]\n')
+    const second = loadProfileDirectory('dsh', dir, anchor)
+    expect(second).not.toBe(first)
+    expect(second.layers[0]?.patches)
+      .toEqual([{ insert: [{ id: 'a', name: 'pkg-a', config: { value: 'after-edited' } }] }])
+  })
+
+  it('recomposes when the profile user patch changes, and keeps the bundles-only read cached', () => {
+    const anchor = stageInstallation({ alpha: { patch: '[]\n' } })
+    const dir = resolveProfileDir('demo', tmp())
+    initProfile(dir, ['alpha'])
+    writeFileSync(join(dir, PROFILE_PATCH_FILENAME), '- insert: [{ id: user, name: pkg-user }]\n')
+
+    const first = loadProfileDirectory('dsh', dir, anchor)
+    expect(first.patches).toEqual([{ insert: [{ id: 'user', name: 'pkg-user' }] }])
+    const bundlesOnly = loadProfileDirectory('dsh', dir, anchor, { userLayer: false })
+    expect(bundlesOnly.patches).toEqual([])
+
+    writeFileSync(join(dir, PROFILE_PATCH_FILENAME), '- insert: [{ id: user2, name: pkg-user2 }]\n')
+    const second = loadProfileDirectory('dsh', dir, anchor)
+    expect(second).not.toBe(first)
+    expect(second.patches).toEqual([{ insert: [{ id: 'user2', name: 'pkg-user2' }] }])
+    expect(loadProfileDirectory('dsh', dir, anchor, { userLayer: false })).toBe(bundlesOnly)
+  })
+
+  it('watches a bundle whose name has no resolution candidates', () => {
+    const anchor = stageInstallation({})
+    const dir = resolveProfileDir('demo', tmp())
+    initProfile(dir, ['fs'])
+    const profile = loadProfileDirectory('dsh', dir, anchor)
+    expect(profile.layers).toEqual([])
+    expect(profile.skippedBundles.map(skipped => skipped.packageName)).toEqual(['fs'])
+  })
+
+  it('evicts the oldest composition once a process holds many profiles', () => {
+    const anchor = stageInstallation({ alpha: { patch: '[]\n' } })
+    const root = tmp()
+    const dirs = Array.from({ length: 66 }, (_, index) => join(root, 'profiles', `p${String(index)}`))
+    for (const dir of dirs) initProfile(dir, ['alpha'])
+    const first = loadProfileDirectory('dsh', dirs[0]!, anchor)
+    expect(loadProfileDirectory('dsh', dirs[0]!, anchor)).toBe(first)
+    for (const dir of dirs.slice(1)) loadProfileDirectory('dsh', dir, anchor)
+    // The 66th distinct profile pushes the oldest watched composition out.
+    loadProfileDirectory('dsh', dirs[65]!, anchor)
+    expect(loadProfileDirectory('dsh', dirs[0]!, anchor)).not.toBe(first)
+  })
+
+  it('recomposes when a previously skipped bundle becomes resolvable at the installation anchor', () => {
+    const anchor = stageInstallation({})
+    const dir = resolveProfileDir('demo', tmp())
+    initProfile(dir, ['late'])
+
+    const first = loadProfileDirectory('dsh', dir, anchor)
+    expect(first.layers).toEqual([])
+    expect(first.skippedBundles.map(skipped => skipped.packageName)).toEqual(['late'])
+
+    const bundleDir = join(dirname(anchor), 'node_modules', 'late')
+    mkdirSync(bundleDir, { recursive: true })
+    writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+      name: 'late', version: '0.0.0', type: 'module', main: './index.js',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }))
+    writeFileSync(join(bundleDir, 'index.js'), 'export const packageName = "late"\n')
+    writeFileSync(join(bundleDir, 'cordis.patch.yml'), '- insert: [{ id: late, name: pkg-late }]\n')
+
+    const second = loadProfileDirectory('dsh', dir, anchor)
+    expect(second).not.toBe(first)
+    expect(second.layers.map(layer => layer.packageName)).toEqual(['late'])
+    expect(second.skippedBundles).toEqual([])
+  })
+})
+
 describe('composeEntries', () => {
   it('applies layers over an empty root and reports skipped patches', () => {
     const warnings: string[] = []

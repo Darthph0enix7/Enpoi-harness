@@ -42,8 +42,16 @@ function readStore(): HiddenMap {
 /** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */
 let describeSeq = 0
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
+/** Read the enpoi-orchestration namespace through the wire root's shared coalesced describe when present. */
 async function describeHiddenModels(): Promise<HiddenModelsNamespaceView | undefined> {
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  if (typeof shared === 'function') {
+    const value = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
+    const namespaces = value?.namespaces
+    return Array.isArray(namespaces)
+      ? (namespaces as HiddenModelsNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
+      : undefined
+  }
   describeSeq += 1
   const res = await fetch('/api/settings.describe', {
     method: 'POST',

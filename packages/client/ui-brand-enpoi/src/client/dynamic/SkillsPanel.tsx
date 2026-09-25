@@ -71,6 +71,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Read the enpoi-orchestration namespace through the live gateway. */
 async function describeOrchestration(): Promise<OrchestrationView | undefined> {
   try {
+    const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+    if (typeof shared === 'function') {
+      const namespaces = (await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)())?.namespaces
+      return Array.isArray(namespaces)
+        ? (namespaces as OrchestrationView[]).find(n => (n as { ns?: string }).ns === 'enpoi-orchestration')
+        : undefined
+    }
     const res = await fetch('/api/settings.describe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

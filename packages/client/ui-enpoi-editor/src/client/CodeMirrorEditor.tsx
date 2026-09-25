@@ -22,7 +22,6 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { SearchQuery, search, setSearchQuery } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import { languageForPath } from './languages.ts'
-import css from './EditorBody.module.css'
 
 /** The imperative surface the body uses to sync the view with the store. */
 export interface CodeMirrorHandle {
@@ -79,6 +78,8 @@ export interface CodeMirrorEditorProps {
   readonly onChange: (text: string) => void
   /** Called when the editor's Mod-S binding fires. */
   readonly onSave: () => void
+  /** Host class names from the mounting body; this chunk owns no stylesheet. */
+  readonly className?: string | undefined
 }
 
 /** The read-only extensions of the editor's `readOnly` compartment. */
@@ -377,6 +378,6 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
       }
     }, [])
 
-    return <div ref={hostRef} className={css.editor} data-enpoi-editor-cm />
+    return <div ref={hostRef} className={props.className} data-enpoi-editor-cm />
   },
 )

@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
+import { installDocumentBrand } from './document-brand.ts'
 import { WatchtowerView } from './WatchtowerView.tsx'
 import {
   AgentModelsBody,
@@ -190,7 +191,11 @@ export function apply(ctx: Context): void {
     }
   }, 'enpoi: settings refresh triggers')
 
-  // 1. Brand marks in sidebar & conversation hero
+  // 1. Tab identity: the merged shell owns the title and icon links now, so
+  // keep the fork product title and monogram applied through later writes.
+  ctx.effect(() => installDocumentBrand(), 'enpoi: document title and favicon')
+
+  // 1b. Brand marks in sidebar & conversation hero
   ctx.slots.inject('sidebar.brand.mark', () =>
     ctx.slots.inject('sidebar.brand.name', () =>
       ctx.slots.inject('conversation.hero.brand.mark', function* () {

@@ -86,10 +86,13 @@ export function isEditablePath(path: string): boolean {
 /**
  * The in-pane editor's document-renderer registration.
  *
- * It sits in the `editor` priority tier, so it is listed among a file's viewer
- * candidates but never chosen automatically: the rich renderer keeps the default
- * and the reader picks CodeMirror explicitly. `loading: 'renderer'` tells the
- * document owner the editor loads its own bytes through `fsops`.
+ * It marks itself `preferred`, so an editable text file opens straight into the
+ * workbench (CodeMirror with the save state, auto-save toggle, save, wrap, find,
+ * and go-to-line controls) instead of a read-only renderer; a remembered display
+ * pick, an in-memory tab pick, and a requested comparison still win. The entry
+ * keeps the `editor` band so the display-type menu lists it after the read-only
+ * viewers and it stays reachable as an explicit choice. `loading: 'renderer'`
+ * tells the document owner the editor loads its own bytes through `fsops`.
  * @param title - locale-owned implementation name.
  * @returns the document renderer definition, keyed by the tab kind's own id.
  */
@@ -98,6 +101,7 @@ export function editorPreviewDefinition(title: () => string): DocumentPreviewDef
     id: EDITOR_ID,
     extensions: EDITOR_EXTENSIONS,
     priority: 'editor',
+    preferred: true,
     title,
     loading: 'renderer',
     wrap: true,

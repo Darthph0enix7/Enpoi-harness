@@ -1,5 +1,6 @@
 /** Host registry and HTTP adapter for generic Connection RPC channels. */
 
+import { createHash } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
@@ -21,6 +22,7 @@ import type {
   ConnectionFetchRoute,
   ConnectionFetchHandler,
   HostConnectionFetch,
+  ConnectionRpcAttachment,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcFailure,
   ConnectionRpcHandler,
@@ -34,6 +36,11 @@ import type {
 const INVALID_REQUEST_RPC_ID = RpcId('invalid-request')
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
+/** Highest number of RPC result validators one process retains for conditional reads. */
+const RPC_VALIDATOR_LIMIT = 256
+
+/** Last validator issued per endpoint-and-arguments key, so `Last-Modified` marks the result's last change. */
+const rpcResultValidators = new Map<string, { etag: string; lastModified: Date }>()
 
 interface ConnectionRpcInterceptor {
   readonly matches: ConnectionRpcEndpointMatcher
@@ -260,7 +267,7 @@ function rpcFetchHandler(
 
       try {
         const result = await handler(endpoint, message.payload, request.signal, peer)
-        return fullResponse(message.rpcId, result)
+        return validatedResponse(request, endpoint, message.rpcId, message.payload, result)
       } catch (error) {
         return new Response(`handler failure: ${String(error)}`, { status: 500 })
       }
@@ -303,17 +310,98 @@ function endpointFromPath(channel: string, pathname: string): string | undefined
 }
 
 function errorResponse(rpcId: RpcIdType, error: ConnectionRpcFailure): Response {
-  return fullResponse(rpcId, { ok: false, error })
+  return fullResponse(rpcId, error)
 }
 
-function fullResponse(rpcId: RpcIdType, result: Awaited<ReturnType<ConnectionRpcHandler>>): Response {
-  if (!result.ok) {
-    const body: ConnectionServerResponse = { type: 'server-response', rpcId, result }
-    return Response.json(body)
+/**
+ * Build one successful JSON RPC response with a content validator over its
+ * business result. A caller that repeats a read with `If-None-Match` (or
+ * `If-Modified-Since` against the issued `Last-Modified`) receives `304 Not
+ * Modified` with no body and reuses its cached result; the awaited handler has
+ * already run, so the conditional answer always reflects the current result.
+ * Error and attachment responses stay unvalidated.
+ * @param request - the HTTP request carrying any conditional headers.
+ * @param endpoint - canonical `<namespace>/<method>` endpoint.
+ * @param rpcId - the caller's request id, echoed on a 304 so the unary call can settle.
+ * @param payload - the request payload; only its digest is retained as the validator key.
+ * @param result - the awaited handler result.
+ * @returns a 200 envelope or a bodiless 304.
+ */
+function validatedResponse(
+  request: Request,
+  endpoint: string,
+  rpcId: RpcIdType,
+  payload: unknown,
+  result: Awaited<ReturnType<ConnectionRpcHandler>>,
+): Response {
+  if (!result.ok) return fullResponse(rpcId, result.error)
+  const { attachments = [], ...success } = result
+  if (attachments.length > 0) return attachmentResponse(rpcId, success, attachments)
+  const resultJson = JSON.stringify(success)
+  const etag = `"${createHash('sha1').update(`${endpoint}\0${resultJson}`).digest('base64url')}"`
+  const key = createHash('sha1').update(`${endpoint}\0${JSON.stringify(payload)}`).digest('base64url')
+  const previous = rpcResultValidators.get(key)
+  // HTTP dates carry whole seconds; truncating here makes the emitted header
+  // parse back to exactly this instant for the `If-Modified-Since` comparison.
+  const lastModified = previous !== undefined && previous.etag === etag
+    ? previous.lastModified
+    : new Date(Math.floor(Date.now() / 1000) * 1000)
+  rpcResultValidators.set(key, { etag, lastModified })
+  if (rpcResultValidators.size > RPC_VALIDATOR_LIMIT) {
+    const oldest = rpcResultValidators.keys().next().value
+    /* v8 ignore next -- the insertion above guarantees a first key */
+    if (oldest !== undefined) rpcResultValidators.delete(oldest)
   }
-  const { attachments, ...success } = result
+  const headers = {
+    'content-type': 'application/json',
+    'cache-control': 'no-cache',
+    etag,
+    'last-modified': lastModified.toUTCString(),
+  }
+  if (isNotModified(request, etag, lastModified, previous)) {
+    return new Response(null, {
+      status: 304,
+      headers: { ...headers, 'x-dsh-rpc-id': rpcId },
+    })
+  }
+  return new Response(`{"type":"server-response","rpcId":${JSON.stringify(rpcId)},"result":${resultJson}}`, {
+    status: 200,
+    headers,
+  })
+}
+
+/** Whether the caller's conditional headers already hold this exact result. */
+function isNotModified(
+  request: Request,
+  etag: string,
+  lastModified: Date,
+  previous: { etag: string; lastModified: Date } | undefined,
+): boolean {
+  const ifNoneMatch = request.headers.get('if-none-match')
+  if (ifNoneMatch !== null) {
+    return ifNoneMatch.split(',').some((candidate) => {
+      const value = candidate.trim()
+      return value === '*' || value === etag || value.replace(/^W\//, '') === etag
+    })
+  }
+  const ifModifiedSince = request.headers.get('if-modified-since')
+  if (ifModifiedSince === null || previous === undefined || previous.etag !== etag) return false
+  const since = Date.parse(ifModifiedSince)
+  return Number.isFinite(since) && lastModified.getTime() <= since
+}
+
+function fullResponse(rpcId: RpcIdType, failure: ConnectionRpcFailure): Response {
+  const body: ConnectionServerResponse = { type: 'server-response', rpcId, result: { ok: false, error: failure } }
+  return Response.json(body)
+}
+
+/** Frame one success whose handler projected binary fields beside the JSON envelope. */
+function attachmentResponse(
+  rpcId: RpcIdType,
+  success: { readonly ok: true; readonly value: unknown },
+  attachments: readonly ConnectionRpcAttachment[],
+): Response {
   const body: ConnectionServerResponse = { type: 'server-response', rpcId, result: success }
-  if (attachments === undefined || attachments.length === 0) return Response.json(body)
   const parts = new FormData()
   const attachmentMetadata = attachments.map((attachment, index) => {
     const part = `bytes-${index}`

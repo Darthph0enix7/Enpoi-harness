@@ -129,6 +129,13 @@ let writeSeq = 0
 
 /** Read the enpoi-orchestration namespace through the live gateway. */
 async function describeDynamicSettings(): Promise<DynamicSettingsView | undefined> {
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  if (typeof shared === 'function') {
+    const namespaces = (await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)())?.namespaces
+    return Array.isArray(namespaces)
+      ? (namespaces as DynamicSettingsView[]).find(view => view.ns === 'enpoi-orchestration')
+      : undefined
+  }
   describeSeq += 1
   const res = await fetch('/api/settings.describe', {
     method: 'POST',

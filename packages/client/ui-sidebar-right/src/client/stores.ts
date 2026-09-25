@@ -509,7 +509,7 @@ export function createSidebarRightStore(
 const PERSIST_DELAY_MS = 400
 
 /** How long a written record waits before it reaches the server; a burst of commits collapses into one push. */
-const SURFACE_PUSH_DELAY_MS = 600
+const SURFACE_PUSH_DELAY_MS = 1000
 
 /** One `enpoiUiState.*` call's outcome. */
 type UiStateResult<T> = { ok: true; value: T } | { ok: false; message: string }
@@ -600,6 +600,8 @@ function bindSurfaceSync(
   let readComplete = false
   let failureLogged = false
   let lastPushedUpdatedAt = -1
+  /** Serialized surface of the last successful push; identical content never rewrites on the server. */
+  let lastPushedJson = ''
   let pushTimer: ReturnType<typeof setTimeout> | undefined
   let pending: SurfaceEnvelope | undefined
 
@@ -607,6 +609,8 @@ function bindSurfaceSync(
     const next = pending
     pending = undefined
     if (stopped || next === undefined || next.updatedAt <= lastPushedUpdatedAt) return
+    const json = JSON.stringify(next)
+    if (json === lastPushedJson) return
     void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch: { surface: next } })
       .then((result) => {
         if (stopped) return
@@ -620,6 +624,7 @@ function bindSurfaceSync(
         failureLogged = false
         // A response may settle out of order; the highest revision stays pushed.
         lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, next.updatedAt)
+        lastPushedJson = json
       })
   }
 

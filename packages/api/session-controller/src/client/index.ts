@@ -134,6 +134,13 @@ export function apply(ctx: Context): void {
     sessions.handleSessionError(sessionId, message)
   })
 
+  // Advertise the session roster read on the boot reveal gate, when a web
+  // kernel installed one: the first window starts on the connection generation
+  // and is a first-paint gate for the shell's session list.
+  const bootGate = (globalThis as {
+    __dshBootGate?: { expect?: (name: string) => void }
+  }).__dshBootGate
+  bootGate?.expect?.('sessions')
   const control = createSessionControlStream(remotes, {
     accept: (frame) => { sessions.handleControlFrame(frame) },
     failed: (error) => { console.error('[session-controller] control stream failed:', error) },

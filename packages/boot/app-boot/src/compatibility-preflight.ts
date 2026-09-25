@@ -11,7 +11,7 @@ import { resolvePluginResource } from './package-meta.ts'
 import { barePackageName } from './profile-resolution/resolver.ts'
 import type {} from './profile-resolution/service.ts'
 import type {} from './profile-context.ts'
-import { evaluatePluginCompatibility, pluginCompatibilityWarning } from './plugin-compatibility.ts'
+import { evaluatePluginCompatibility, getDshRuntimeVersion, pluginCompatibilityWarning } from './plugin-compatibility.ts'
 import { readProfileCompatibility } from './profile-compatibility.ts'
 
 function readManifest(filename: string): object {
@@ -96,13 +96,15 @@ function preflight(
   // A damaged permission file authorizes nothing, but it must not stop the profile from starting.
   const { exemptions, warnings } = readProfileCompatibility(profile.dir)
   for (const warning of warnings) process.stderr.write(`${warning}\n`)
+  // One read per preflight: every row judges against the same running version.
+  const runtimeVersion = getDshRuntimeVersion()
   const includes = new Set<string>()
   /** Only a compatibility conflict denies a row; every other failure keeps the Loader's own diagnosis. */
   const denial = (row: EntryOptions, base: string): string | undefined => {
     try {
       const manifest = manifestOf(ctx, row.name, base)
       if (manifest === undefined) return undefined
-      const issue = evaluatePluginCompatibility(manifest, exemptions)
+      const issue = evaluatePluginCompatibility(manifest, exemptions, runtimeVersion)
       return issue === undefined || issue.exempted ? undefined : pluginCompatibilityWarning(issue)
     } catch (error) {
       // Peer metadata that cannot be read or validated is refused rather than silently admitted.

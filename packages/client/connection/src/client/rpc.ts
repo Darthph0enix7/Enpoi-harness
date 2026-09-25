@@ -7,9 +7,14 @@ import {
 } from '../rpc.ts'
 import type { ClientConnectionRpc, ConnectionRpcResult } from '../rpc.ts'
 import { randomUuid } from './random-uuid.ts'
+import { installSettingsDescribe } from './settings-describe.ts'
 
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
+/** Highest number of result validators the browser keeps for conditional reads. */
+const CALL_VALIDATOR_LIMIT = 128
+/** Endpoint spellings the server normalizes to the settings describe route. */
+const SETTINGS_DESCRIBE_ENDPOINTS = new Set(['settings/describe', 'settings.describe'])
 
 /**
  * Transport this caller posts through; same signature as the global `fetch`.
@@ -33,9 +38,27 @@ export type RpcStreamOpen = (
  */
 export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStreamOpen): ClientConnectionRpc {
   const send: RpcFetch = doFetch ?? ((input, init) => globalThis.fetch(input, init))
+  // The served page installs one coalesced describe every settings store shares;
+  // a carrier-surfaced caller (or a test mock) keeps its own transport.
+  const sharedDescribe = doFetch === undefined ? installSettingsDescribe(send) : undefined
+  const validators = new Map<string, { readonly etag: string; readonly result: ConnectionRpcResult<unknown> }>()
   return {
     async call(channel, endpoint, payload, signal) {
       assertTarget(channel, endpoint)
+      // Only the argument-less read shares the page cache; a caller passing
+      // options (e.g. redaction) keeps its own transport.
+      const args = (payload as { args?: unknown } | null | undefined)?.args
+      const argumentless = args === undefined
+        || (typeof args === 'object' && args !== null && !Array.isArray(args) && Object.keys(args).length === 0)
+      if (sharedDescribe !== undefined && argumentless
+        && channel === '/api' && SETTINGS_DESCRIBE_ENDPOINTS.has(endpoint)) {
+        const value = await sharedDescribe()
+        signal?.throwIfAborted()
+        if (value === undefined) {
+          return { ok: false, error: { code: 'gateway/internal', message: 'settings describe failed', details: {} } }
+        }
+        return { ok: true, value }
+      }
       const rpcId = RpcId(randomUuid())
       const message: ClientRequest = {
         type: 'client-request',
@@ -46,15 +69,25 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
       // The channel key is absolute; a page posts the document-relative form, and
       // a carrier that resolves against the Host root accepts the same form.
       const route = `${channel}/${endpoint}`.slice(1)
+      const validatorKey = `${channel}\0${endpoint}\0${JSON.stringify(payload) ?? ''}`
+      const validator = validators.get(validatorKey)
       const response = await send(
         route,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            ...validator === undefined ? {} : { 'if-none-match': validator.etag },
+          },
           body: JSON.stringify(message),
           ...signal === undefined ? {} : { signal },
         },
       )
+      // A Host that still holds the last result answers without a body: reuse it.
+      if (response.status === 304 && validator !== undefined) {
+        signal?.throwIfAborted()
+        return validator.result
+      }
       if (!response.ok) {
         throw new Error(`transport failure for ${channel}/${endpoint}: HTTP ${response.status}`)
       }
@@ -65,6 +98,15 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
       signal?.throwIfAborted()
       if (full.rpcId !== rpcId) {
         throw new Error(`rpcId mismatch for ${endpoint}: sent ${rpcId}, got ${full.rpcId}`)
+      }
+      const etag = response.headers.get('etag')
+      if (etag !== null) {
+        validators.set(validatorKey, { etag, result: full.result })
+        if (validators.size > CALL_VALIDATOR_LIMIT) {
+          const oldest = validators.keys().next().value
+          /* v8 ignore next -- the insertion above guarantees a first key */
+          if (oldest !== undefined) validators.delete(oldest)
+        }
       }
       return full.result
     },

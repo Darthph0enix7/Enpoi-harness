@@ -34,7 +34,7 @@ export class BootPage {
     this.root = div(css.boot)
     this.root.dataset.dshBoot = ''
     this.card = div(css.card)
-    this.wordmark = div(css.wordmark, 'HARNESS')
+    this.wordmark = div(css.wordmark, 'ENPOI')
     this.spinner = div(css.spinner)
     this.spinner.dataset.dshBootSpinner = ''
     this.hint = div(css.hint, 'Loading plugins…')
@@ -51,6 +51,15 @@ export class BootPage {
   setTotal(total: number): void {
     this.total = total
     this.updateProgress()
+  }
+
+  /**
+   * Replace the status line below the spinner, so the reveal gate can name the
+   * read it is waiting on after the module graph has settled.
+   * @param text - status line text.
+   */
+  setHint(text: string): void {
+    this.hint.textContent = text
   }
 
   /**

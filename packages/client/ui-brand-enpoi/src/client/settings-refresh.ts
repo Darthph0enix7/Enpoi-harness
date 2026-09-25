@@ -40,9 +40,17 @@ let debounceTimer: ReturnType<typeof setTimeout> | undefined
 let lastVisibleAt = 0
 const appliers = new Map<string, SettingsRefreshApplier>()
 
-/** Read the namespace through the live gateway. */
+/** Read the namespace through the live gateway, preferring the wire root's shared coalesced describe. */
 async function describeEnpoiNamespace(): Promise<EnpoiNamespaceView | undefined> {
   readSeq += 1
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  if (typeof shared === 'function') {
+    const value = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
+    const namespaces = value?.namespaces
+    return Array.isArray(namespaces)
+      ? (namespaces as EnpoiNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
+      : undefined
+  }
   const res = await fetch('/api/settings.describe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

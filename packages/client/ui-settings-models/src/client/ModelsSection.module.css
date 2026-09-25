@@ -1967,6 +1967,41 @@ select.input {
   cursor: not-allowed;
 }
 
+/* Compact pool add-key control: a key glyph with a plus badge, no wrapping
+   label, sized to the same row height as the strategy select and refresh. */
+.addKeyIconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: var(--ctl-h);
+  min-width: var(--ctl-h);
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.addKeyIconBtn svg + svg {
+  margin-left: -3px;
+}
+
+.addKeyIconBtn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--dsw-alias-label-primary);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.addKeyIconBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .deleteIdentityBtn:hover {
   color: #f87171;
   border-color: rgba(239, 68, 68, 0.3);

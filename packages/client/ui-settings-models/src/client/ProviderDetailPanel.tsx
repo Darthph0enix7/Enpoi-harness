@@ -957,15 +957,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
               >
                 <IconRefresh size={13} />
               </button>
-              <Button
-                variant="outline"
-                className={styles['testBtn']}
+              <button
+                type="button"
+                className={styles['addKeyIconBtn']}
                 onClick={() => setShowAddKeyModal(true)}
                 disabled={readOnly || busy}
+                title="Add key"
+                aria-label="Add key"
               >
-                <IconPlus size={12} />
-                Add Key
-              </Button>
+                <IconKey size={13} />
+                <IconPlus size={9} />
+              </button>
             </div>
           </div>
 

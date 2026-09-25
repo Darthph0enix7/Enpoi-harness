@@ -2,12 +2,21 @@
 import type { RefObject } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DesktopOnboardingProps } from './onboarding-contract.ts'
-import { OnboardingIllustration } from './OnboardingIllustration.tsx'
-import art from './assets/onboarding-recharge.png'
-import artDark from './assets/onboarding-recharge-dark.png'
-import artZh from './assets/onboarding-recharge-zh.png'
-import artZhDark from './assets/onboarding-recharge-zh-dark.png'
+import { OnboardingIllustration, type OnboardingArtLoaders } from './OnboardingIllustration.tsx'
 import css from './DesktopOnboarding.module.css'
+
+// The credit artwork is ~1.5 MB of base64 PNG; the step loads its pair from a
+// package-local chunk on first render instead of the eager application combo.
+const CREDIT_ART: Readonly<Record<'en' | 'zh', OnboardingArtLoaders>> = {
+  en: {
+    light: () => import('./assets/onboarding-recharge.png'),
+    dark: () => import('./assets/onboarding-recharge-dark.png'),
+  },
+  zh: {
+    light: () => import('./assets/onboarding-recharge-zh.png'),
+    dark: () => import('./assets/onboarding-recharge-zh-dark.png'),
+  },
+}
 
 /** @param props - credit facts, localized content and recharge/navigation actions. @returns the credit step. */
 export function OnboardingCreditStep({ t, locale, heading, busy, funded, canRecharge, onContinue, onRecharge, onLater }:
@@ -21,7 +30,7 @@ export function OnboardingCreditStep({ t, locale, heading, busy, funded, canRech
     onLater: () => void
   }) {
   return <div className={`${css.content} ${css.credit}`}>
-    <OnboardingIllustration className={css.creditIllustration} src={locale === 'zh' ? artZh : art} darkSrc={locale === 'zh' ? artZhDark : artDark} />
+    <OnboardingIllustration className={css.creditIllustration} art={locale === 'zh' ? CREDIT_ART.zh : CREDIT_ART.en} />
     <div className={css.copy}>
       <h1 id="desktop-onboarding-title" ref={heading} tabIndex={-1}>{t('onboardingCredit')}</h1>
       <p className={css.heroDescription}>{t('onboardingCreditDescription')}</p>

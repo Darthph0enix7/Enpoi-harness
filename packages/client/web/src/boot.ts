@@ -9,6 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type {
   BootManifest, ClientModuleCreateOptions, ClientModuleSystem, DshWindow,
 } from '@deepseek-ai/dsh-client-modules/client'
+import { installBootGate } from './boot-gate.ts'
 import { bootClient } from './boot-client.ts'
 import { BootPage } from './boot-page.ts'
 import { mountClient } from './mount.ts'
@@ -75,6 +76,9 @@ export class AppWebEntry {
         ...this.seams,
       })
       this.manifest = this.modules.manifest
+      // Advertised critical reads (sessions, settings) hold the boot page until
+      // they settle, so the first application frame is the complete shell.
+      const gate = installBootGate()
 
       const prefetching = this.prefetchImmediateTier()
       const ctx = new Context()
@@ -94,6 +98,10 @@ export class AppWebEntry {
       // know that trap. It installs before the first mount, so the surface the
       // renderer draws is the one the first frame measures.
       this.stopDragRecall = installWindowDragRecall({ document: this.container.ownerDocument })
+      // Single reveal: the boot page stays through the advertised reads (bounded
+      // by the gate budget) and the mount then hydrates it in one transition.
+      this.page.setHint('Preparing workspace…')
+      await gate.settled()
       await mountClient(ctx, this.container)
     } catch (reason) {
       console.error(reason)

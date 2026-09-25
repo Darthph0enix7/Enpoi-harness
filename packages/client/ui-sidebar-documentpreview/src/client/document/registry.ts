@@ -40,6 +40,16 @@ export interface DocumentPreviewDefinition {
    * defaults to extension.
    */
   readonly priority?: 'builtin' | 'extension' | 'editor'
+  /**
+   * Whether this implementation is the automatic choice among its matches.
+   * A `preferred` implementation outranks the band order below; a remembered
+   * display pick, an in-memory tab pick, and a requested comparison still win
+   * over it. The editing surface marks itself preferred so opening an editable
+   * text file lands in the workbench instead of a read-only renderer; binary
+   * and non-text types keep their own previews because the editor's suffix
+   * list never matches them.
+   */
+  readonly preferred?: boolean
   /** Localized implementation label, evaluated when the toolbar renders. @returns the visible name. */
   readonly title: () => string
   /** Content delivery mode supplied by the document owner. */
@@ -61,7 +71,8 @@ function rankOf(priority: DocumentPreviewDefinition['priority']): number {
  * Rank an observed definition snapshot without consulting mutable service state.
  * @param definitions - registered implementations in registration order.
  * @param path - decoded filename or file path.
- * @returns matching implementations, external band first, then longest suffix, with `editor` last.
+ * @returns matching implementations: a `preferred` implementation first, then external band before
+ * product band, then longest suffix, with the explicit `editor` band last among non-preferred entries.
  */
 export function matchingDocumentPreviews(
   definitions: readonly DocumentPreviewDefinition[],
@@ -74,7 +85,9 @@ export function matchingDocumentPreviews(
     length: matchedSuffixLength(name, definition.extensions),
   }))
     .filter(candidate => candidate.length > 0)
-    .sort((left, right) => right.rank - left.rank || right.length - left.length || left.order - right.order)
+    .sort((left, right) =>
+      Number(right.definition.preferred === true) - Number(left.definition.preferred === true)
+      || right.rank - left.rank || right.length - left.length || left.order - right.order)
     .map(candidate => candidate.definition)
 }
 

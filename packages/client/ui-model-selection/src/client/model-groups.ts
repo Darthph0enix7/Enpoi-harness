@@ -82,6 +82,18 @@ const listeners = new Set<() => void>()
 let inflight: Promise<void> | undefined
 let loaded = false
 
+/**
+ * The shared coalesced `settings.describe` reader the connection wire root
+ * publishes; absent in standalone bundles, where the local fetch stands in.
+ * @returns the shared reader, or undefined.
+ */
+function sharedDescribe(): (() => Promise<{ namespaces?: readonly unknown[] } | undefined>) | undefined {
+  const candidate = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  return typeof candidate === 'function'
+    ? candidate as () => Promise<{ namespaces?: readonly unknown[] } | undefined>
+    : undefined
+}
+
 function notify(): void {
   for (const listener of listeners) listener()
 }
@@ -151,26 +163,31 @@ export function ensureModelGroups(): Promise<void> {
  */
 export function refreshModelGroups(): Promise<void> {
   if (inflight !== undefined) return inflight
-  const operation = fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: 'model-groups-describe',
-      payload: { args: {} },
-    }),
-  })
-    .then(async (res) => {
-      if (!res.ok) return
-      const json: unknown = await res.json()
-      const response = json as { result?: { value?: { namespaces?: unknown } } } | null
-      const namespaces = response?.result?.value?.namespaces
+  const readNamespaces = async (): Promise<unknown> => {
+    const shared = sharedDescribe()
+    if (shared !== undefined) return (await shared())?.namespaces
+    const res = await fetch('/api/settings.describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.describe',
+        rpcId: 'model-groups-describe',
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) return undefined
+    const json: unknown = await res.json()
+    const response = json as { result?: { value?: { namespaces?: unknown } } } | null
+    return response?.result?.value?.namespaces
+  }
+  const operation = readNamespaces()
+    .then((namespaces) => {
       const namespace = Array.isArray(namespaces)
         ? (namespaces as Array<{ ns?: string; value?: { chains?: unknown }; user?: { chains?: unknown } }>)
           .find(entry => entry.ns === 'enpoi-orchestration')
         : undefined
-      publish(parseModelGroups(namespace?.value?.chains ?? namespace?.user?.chains))
+      if (namespace !== undefined) publish(parseModelGroups(namespace.value?.chains ?? namespace.user?.chains))
     })
     .catch(() => {
       // Offline answer: the last published registry stays until the next read.

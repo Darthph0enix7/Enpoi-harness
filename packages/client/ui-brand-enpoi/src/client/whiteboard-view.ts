@@ -323,10 +323,22 @@ export function whiteboardTokens(rendered: string): number {
 
 let rpcSeq = 0
 
-/** Read the enpoi-orchestration namespace through the live gateway. */
-function describeOrchestration(): Promise<{ whiteboard?: unknown } | undefined> {
+/** Pick the enpoi-orchestration row out of one describe answer. */
+function orchestrationRow(namespaces: readonly unknown[] | undefined): { whiteboard?: unknown } | undefined {
+  return Array.isArray(namespaces)
+    ? (namespaces as Array<{ ns?: string; value?: { whiteboard?: unknown } }>).find(entry => entry.ns === 'enpoi-orchestration')?.value
+    : undefined
+}
+
+/** Read the enpoi-orchestration namespace through the live gateway, preferring the shared coalesced reader. */
+async function describeOrchestration(): Promise<{ whiteboard?: unknown } | undefined> {
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  if (typeof shared === 'function') {
+    const answer = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
+    return orchestrationRow(answer?.namespaces)
+  }
   rpcSeq += 1
-  return fetch('/api/settings.describe', {
+  const res = await fetch('/api/settings.describe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -335,14 +347,12 @@ function describeOrchestration(): Promise<{ whiteboard?: unknown } | undefined> 
       rpcId: `wt-whiteboard-${rpcSeq}`,
       payload: { args: {} },
     }),
-  }).then(async (res) => {
-    if (!res.ok) return undefined
-    const json = await res.json() as {
-      result?: { value?: { namespaces?: Array<{ ns?: string; value?: { whiteboard?: unknown } }> } }
-    }
-    const namespaces = json.result?.value?.namespaces
-    return Array.isArray(namespaces) ? namespaces.find(entry => entry.ns === 'enpoi-orchestration')?.value : undefined
   })
+  if (!res.ok) return undefined
+  const json = await res.json() as {
+    result?: { value?: { namespaces?: Array<{ ns?: string; value?: { whiteboard?: unknown } }> } }
+  }
+  return orchestrationRow(json.result?.value?.namespaces)
 }
 
 /**

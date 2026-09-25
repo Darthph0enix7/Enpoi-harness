@@ -23,13 +23,14 @@
 
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import type { BigIntStats } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { applyEntryPatches, type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { DshBundleManifest, DshPackageManifest } from '@deepseek-ai/dsh-package-manifest'
-import { evaluatePluginCompatibility, pluginCompatibilityWarning } from './plugin-compatibility.ts'
-import { readProfileVersionExemptions } from './profile-compatibility.ts'
+import { evaluatePluginCompatibility, getDshRuntimeVersion, pluginCompatibilityWarning } from './plugin-compatibility.ts'
+import { PROFILE_COMPATIBILITY_FILENAME, readProfileVersionExemptions } from './profile-compatibility.ts'
 import { loadOverlayPatches } from './index.ts'
 import { realModuleDirectory } from './profile-resolution/legacy-links.ts'
 
@@ -639,12 +640,96 @@ export function resolveBundleDir(
   )
 }
 
+/** Highest number of profile directories one process keeps composed. */
+const PROFILE_DIRECTORY_CACHE_LIMIT = 64
+/** Composed profile directories keyed by identity and user-layer participation. */
+const profileDirectoryCache = new Map<string, CachedProfileDirectory>()
+
+/** One composed profile directory and the file identities that keep it current. */
+interface CachedProfileDirectory {
+  /** The loaded profile, shared while every watched path keeps its identity. */
+  readonly profile: Profile
+  /** Source paths whose stat identity decides cache validity. */
+  readonly watchedPaths: readonly string[]
+  /** Identity of every watched path at the moment the profile was composed. */
+  readonly token: string
+}
+
+/**
+ * One path's identity token: inode, byte size, and nanosecond mtime. Atomic
+ * writers rename a new inode into place and in-place edits move the mtime, so
+ * either change moves the token; a missing path has its own token, so creating
+ * it invalidates too.
+ * @param path - absolute path to identify.
+ * @returns a stable token for the path's current state.
+ */
+function pathIdentity(path: string): string {
+  let stat: BigIntStats | undefined
+  try {
+    stat = statSync(path, { bigint: true, throwIfNoEntry: false })
+  } catch {
+    /* v8 ignore next -- a stat failure other than absence is a host filesystem fault, not a profile edit */
+    return 'error'
+  }
+  return stat === undefined ? 'missing' : `${stat.ino}:${stat.size}:${stat.mtimeNs}`
+}
+
+/** The joined identity of every watched path. */
+function pathToken(paths: readonly string[]): string {
+  return paths.map(pathIdentity).join('|')
+}
+
+/**
+ * The paths whose stat identity decides whether a composed profile is still
+ * current: the manifest, the participating patch layers, the compatibility
+ * exemptions, every candidate manifest resolution probes (so a skipped bundle
+ * appearing at either anchor invalidates), and every resolved layer manifest
+ * and patch file (so an edited patch invalidates).
+ * @param dir - absolute profile directory.
+ * @param installAnchor - absolute path of the owning dsh app's package.json.
+ * @param packageNames - `dsh.profile.bundles` from the profile manifest.
+ * @param profile - the just-composed profile whose resolved files are watched.
+ * @param userLayer - whether the profile's own patch layer participates.
+ * @returns every watched absolute path.
+ */
+function watchedProfilePaths(
+  dir: string, installAnchor: string, packageNames: readonly string[], profile: Profile, userLayer: boolean,
+): string[] {
+  const watched = new Set<string>([
+    installAnchor,
+    join(dir, 'package.json'),
+    join(dir, PROFILE_COMPATIBILITY_FILENAME),
+    join(dir, 'node_modules'),
+  ])
+  if (userLayer) watched.add(join(dir, PROFILE_PATCH_FILENAME))
+  for (const packageName of packageNames) {
+    // Both anchors' resolution candidates participate, so a bundle that
+    // resolves past a missing higher-priority copy invalidates when it appears.
+    for (const anchor of [installAnchor, join(dir, 'package.json')]) {
+      for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
+        watched.add(join(searchPath, packageName, 'package.json'))
+      }
+    }
+  }
+  for (const layer of profile.layers) {
+    watched.add(join(layer.packageDir, 'package.json'))
+    for (const patchPath of layer.patchPaths) watched.add(patchPath)
+  }
+  return [...watched]
+}
+
 /**
  * Load an already initialized profile directory without resolving it through
  * the shared Harness home. This is used by application-owned profiles whose
  * package project and lifecycle belong to that application.
  * Unreadable bundles, and bundles whose own dsh peers the profile does not exempt, are skipped
  * without changing the manifest and listed in `skippedBundles`; nothing is printed.
+ *
+ * Successful loads are composed once and reused while every source path keeps
+ * its stat identity (inode, size, nanosecond mtime); an edited patch file, a
+ * replaced manifest, or a bundle appearing or disappearing composes again. The
+ * returned profile is shared between callers until then, so callers treat it as
+ * immutable.
  * @param binName - the diagnostic prefix on thrown errors.
  * @param dir - absolute profile package directory.
  * @param installAnchor - absolute path of the owning dsh app's package.json.
@@ -657,11 +742,37 @@ export function loadProfileDirectory(
   installAnchor: string,
   options: { userLayer?: boolean } = {},
 ): Profile {
+  const userLayer = options.userLayer !== false
+  const cacheKey = `${binName}\0${dir}\0${installAnchor}\0${String(userLayer)}`
+  const cached = profileDirectoryCache.get(cacheKey)
+  if (cached !== undefined && pathToken(cached.watchedPaths) === cached.token) {
+    return cached.profile
+  }
+  const profile = resolveProfileDirectory(binName, dir, installAnchor, options)
+  const bundles = readProfileManifest(binName, dir).dsh?.profile?.bundles ?? []
+  const watchedPaths = watchedProfilePaths(dir, installAnchor, bundles, profile, userLayer)
+  profileDirectoryCache.set(cacheKey, { profile, watchedPaths, token: pathToken(watchedPaths) })
+  if (profileDirectoryCache.size > PROFILE_DIRECTORY_CACHE_LIMIT) {
+    const oldest = profileDirectoryCache.keys().next().value
+    /* v8 ignore next -- the insertion above guarantees a first key */
+    if (oldest !== undefined) profileDirectoryCache.delete(oldest)
+  }
+  return profile
+}
+
+function resolveProfileDirectory(
+  binName: string,
+  dir: string,
+  installAnchor: string,
+  options: { userLayer?: boolean } = {},
+): Profile {
   const manifest = readProfileManifest(binName, dir)
   const bundles = manifest.dsh?.profile?.bundles ?? []
   const layers: ProfileLayer[] = []
   const skippedBundles: SkippedBundle[] = []
   const exemptions = bundles.length === 0 ? {} : readProfileVersionExemptions(dir)
+  // One read per composition: every bundle judges against the same running version.
+  const runtimeVersion = getDshRuntimeVersion()
   for (const packageName of bundles) {
     try {
       const packageDir = resolveBundleDir(binName, packageName, installAnchor, dir)
@@ -671,7 +782,7 @@ export function loadProfileDirectory(
         throw new Error(`${binName}: profile bundle ${JSON.stringify(packageName)} declares no dsh.bundle in its package.json`)
       }
       // A bundle is not a plugin row, so row admission never reads its own peers.
-      const issue = evaluatePluginCompatibility(bundleManifest, exemptions)
+      const issue = evaluatePluginCompatibility(bundleManifest, exemptions, runtimeVersion)
       if (issue !== undefined && !issue.exempted) throw new Error(pluginCompatibilityWarning(issue))
       const patchPaths = bundlePatchPaths(packageDir, bundle)
       const patches = patchPaths.flatMap(patchPath => loadOverlayPatches(binName, patchPath))

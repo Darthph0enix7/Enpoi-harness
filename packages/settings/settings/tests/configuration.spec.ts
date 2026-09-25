@@ -36,6 +36,40 @@ it('isolates instances, hides ordinary fields, rejects invalid edits, and redact
   expect(ctx.settings.describe({ redactSecrets: true }).find(row => row.ns === 'first')!.value).toEqual({ count: 2, list: [] })
 })
 
+it('lists a home-overlay row the profile owns no patch row for', async () => {
+  const { ctx, home, start } = await fixture()
+  await ctx.fiber.dispose()
+  writeFileSync(join(home, 'cordis.patch.yml'), JSON.stringify([{ insert: [
+    { id: 'home-only', name: 'cordis:probe', config: { ordinary: 'home' } },
+  ] }]))
+  const restored = await start()
+  const view = restored.settings.describe().find(row => row.ns === 'home-only')
+  expect(view?.value).toMatchObject({ count: 2 })
+  expect(view?.base).toEqual({})
+})
+
+it('composes one inherited row when the profile repeats an entry id', async () => {
+  const { ctx, profile, start } = await fixture()
+  await ctx.fiber.dispose()
+  writeFileSync(profile.patchPath, JSON.stringify([{ insert: [
+    { id: 'dup', name: 'cordis:probe', config: { ordinary: 'fixed' } },
+    { id: 'dup', name: 'cordis:probe', config: { ordinary: 'fixed', count: 5 } },
+  ] }]))
+  const restored = await start()
+  expect(restored.settings.describe().find(row => row.ns === 'first')?.value).toMatchObject({ count: 2, list: [] })
+})
+
+it('serves both redaction modes from one cached generation', async () => {
+  const { ctx } = await fixture()
+  const raw = ctx.settings.describe().find(row => row.ns === 'first')!
+  const redacted = ctx.settings.describe({ redactSecrets: true }).find(row => row.ns === 'first')!
+  expect(raw.value).toMatchObject({ count: 2, token: 'private' })
+  expect(redacted.value).toMatchObject({ count: 2 })
+  expect(redacted.secrets).toContainEqual({ path: ['token'], set: true })
+  expect(JSON.stringify(redacted)).not.toContain('private')
+  expect((raw as { secrets?: unknown }).secrets).toBeUndefined()
+})
+
 it('refuses an edit shadowed by a higher home layer', async () => {
   const { ctx, home, profile } = await fixture()
   writeFileSync(join(home, 'cordis.patch.yml'), JSON.stringify([{ id: 'default-model', config: { provider: 'test', model: 'home' } }]))

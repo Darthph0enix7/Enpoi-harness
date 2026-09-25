@@ -54,20 +54,27 @@ function safeSetJson(key: string, value: unknown): void {
 
 // Global server sync on module import: pulls cross-device preferences without blocking local 0ms render
 if (typeof window !== 'undefined') {
-  void fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: 'prime-picker-prefs',
-      payload: { args: {} },
-    }),
-  })
-    .then(async (res) => {
-      if (!res.ok) return
-      const json: unknown = await res.json()
-      const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+  const readNamespaces = async (): Promise<unknown> => {
+    if (typeof shared === 'function') {
+      return (await (shared as () => Promise<{ namespaces?: unknown } | undefined>)())?.namespaces
+    }
+    const res = await fetch('/api/settings.describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.describe',
+        rpcId: 'prime-picker-prefs',
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) return undefined
+    const json: unknown = await res.json()
+    return (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+  }
+  void readNamespaces()
+    .then((namespaces) => {
       const orch = Array.isArray(namespaces)
         ? (namespaces as Array<{ ns?: string; value?: { uiPreferences?: { favorites?: ModelRef[]; providerOrder?: string[] } }; user?: { uiPreferences?: { favorites?: ModelRef[]; providerOrder?: string[] } } }>).find(n => n.ns === 'enpoi-orchestration')
         : undefined

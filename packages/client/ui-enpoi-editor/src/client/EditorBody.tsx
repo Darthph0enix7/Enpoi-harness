@@ -16,7 +16,7 @@
  * beside — never silently overwrite either side. The async decisions live in
  * `machine.ts`.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { PropsLocale, PropsStore, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import { parseFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
@@ -25,7 +25,6 @@ import type { EditorStore, EditorViewState } from './store.ts'
 import type { EditorFsOps } from './fsops.ts'
 import type { EditorLoadOutcome } from './machine.ts'
 import { completeSave, loadOnce, pollOnce, saveBesideOnce, saveOnce } from './machine.ts'
-import { CodeMirrorEditor } from './CodeMirrorEditor.tsx'
 import type { CodeMirrorHandle } from './CodeMirrorEditor.tsx'
 import { readAutosavePref } from './prefs.ts'
 import { EditorFindBar } from './EditorFindBar.tsx'
@@ -39,6 +38,11 @@ export const AUTOSAVE_DEBOUNCE_MS = 800
 
 /** How long an auto-save waits before its single I/O retry. */
 export const AUTOSAVE_RETRY_MS = 3000
+
+// CodeMirror and its language packs are ~1 MB; the body stays in the eager
+// combo and the editing engine arrives as a package-local chunk when the
+// first document renders.
+const CodeMirrorEditor = lazy(async () => ({ default: (await import('./CodeMirrorEditor.tsx')).CodeMirrorEditor }))
 
 /** The body's injected business face: the file operations over `/sidebar/fsops`. */
 export interface EditorInjected {
@@ -491,21 +495,24 @@ export function EditorBody({
         />
       )}
       {ready && (
-        <CodeMirrorEditor
-          ref={editorRef}
-          path={path}
-          initialDoc={docText ?? ''}
-          initialSelection={viewRef.current ?? undefined}
-          initialScrollTop={viewRef.current?.scrollTop}
-          wrap={wrap ?? true}
-          readOnly={truncated}
-          onViewState={handleViewState}
-          onChange={(text) => {
-            retryBudgetRef.current = 1
-            actions.edited(key, text)
-          }}
-          onSave={() => { saveRef.current(false, false) }}
-        />
+        <Suspense fallback={<div className={css.center} data-enpoi-editor-loading>{t('loading')}</div>}>
+          <CodeMirrorEditor
+            ref={editorRef}
+            className={css.editor}
+            path={path}
+            initialDoc={docText ?? ''}
+            initialSelection={viewRef.current ?? undefined}
+            initialScrollTop={viewRef.current?.scrollTop}
+            wrap={wrap ?? true}
+            readOnly={truncated}
+            onViewState={handleViewState}
+            onChange={(text) => {
+              retryBudgetRef.current = 1
+              actions.edited(key, text)
+            }}
+            onSave={() => { saveRef.current(false, false) }}
+          />
+        </Suspense>
       )}
       {(status === 'idle' || status === 'loading') && (
         <div className={css.center} data-enpoi-editor-loading>{t('loading')}</div>
