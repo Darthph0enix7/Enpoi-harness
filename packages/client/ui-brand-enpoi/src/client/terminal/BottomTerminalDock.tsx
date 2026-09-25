@@ -20,6 +20,18 @@ import css from './TerminalPanel.module.css'
 /** Empty selection kept reference-stable so a selector never re-renders the dock. */
 const EMPTY_TABS: readonly TerminalTabState[] = []
 
+/**
+ * Closing-ride settle delay in ms: the stylesheet's slow transition plus a
+ * frame of slack, so the dock stays mounted until its slide-out has finished.
+ */
+const DOCK_RIDE_MS = 360
+
+/**
+ * Body marker the dock's handle sets while dragging; the stylesheet pauses the
+ * column's eased margin so it stays 1:1 with the pointer.
+ */
+const DOCK_RESIZE_MARKER = 'data-enpoi-bottom-dock-resizing'
+
 /** Horizontal box of the conversation column's content, in viewport px. */
 export interface DockBox {
   /** Left content edge in px. */
@@ -137,18 +149,54 @@ export function BottomTerminalDock({
   const drag = useRef<{ pointerId: number; startY: number; startHeight: number; height: number } | undefined>(undefined)
   const height = preview ?? dock.height
 
-  // The conversation column gives up exactly the dock's height while open.
+  // The dock rides in and out on the same slow curve the conversation column's
+  // margin uses, so the main glass edge and the dock's top edge stay glued. The
+  // element stays mounted for the closing ride (the stylesheet moves it to
+  // translateY(100%) while the column's margin eases back to zero); the settle
+  // timer clears the short overlap after the transition has certainly ended.
+  // The closing marker must exist in the commit that drops `dock.open`: a later
+  // commit would remove the open body marker first, and the column's margin
+  // rule — which carries its transition — would stop matching before the margin
+  // target moved, landing the main edge in one step.
+  const [closing, setClosing] = useState(false)
+  const previousOpen = useRef(dock.open)
+  const justClosed = !dock.open && previousOpen.current
+  previousOpen.current = dock.open
+  if (justClosed && !closing) setClosing(true)
+  if (dock.open && closing) setClosing(false)
   useEffect(() => {
-    if (!dock.open) return undefined
+    if (!closing) return undefined
+    const timer = window.setTimeout(() => { setClosing(false) }, DOCK_RIDE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [closing])
+  const visible = dock.open || closing
+
+  // The conversation column gives up exactly the dock's height while open. On
+  // the closing ride the height target drops to zero in the same commit, so the
+  // margin eases back beneath the descending dock.
+  useEffect(() => {
+    if (!visible) return undefined
     document.body.setAttribute('data-enpoi-bottom-dock-open', '')
-    document.documentElement.style.setProperty('--enpoi-bottom-dock-height', `${height}px`)
+    document.documentElement.style.setProperty('--enpoi-bottom-dock-height', `${dock.open ? height : 0}px`)
     return () => {
       document.body.removeAttribute('data-enpoi-bottom-dock-open')
       document.documentElement.style.removeProperty('--enpoi-bottom-dock-height')
     }
-  }, [dock.open, height])
+  }, [visible, dock.open, height])
 
-  if (!dock.open || sessionId === undefined) return null
+  // A handle gesture writes heights at pointer cadence: the column's margin
+  // must follow it without easing, so the gesture marks the body for the
+  // stylesheet and clears the mark when it ends.
+  useEffect(() => {
+    if (!dragging) {
+      document.body.removeAttribute(DOCK_RESIZE_MARKER)
+      return undefined
+    }
+    document.body.setAttribute(DOCK_RESIZE_MARKER, '')
+    return () => { document.body.removeAttribute(DOCK_RESIZE_MARKER) }
+  }, [dragging])
+
+  if (!visible || sessionId === undefined) return null
 
   return (
     <div
@@ -156,6 +204,7 @@ export function BottomTerminalDock({
       style={{ left: box.left, width: box.width === 0 ? undefined : box.width, height }}
       data-enpoi-bottom-dock
       data-enpoi-terminal-dock
+      data-enpoi-bottom-dock-open={dock.open || undefined}
       data-session={sessionId}
     >
       <div

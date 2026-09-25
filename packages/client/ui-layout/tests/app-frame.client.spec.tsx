@@ -458,6 +458,54 @@ describe('AppFrame right panel presentation', () => {
   })
 })
 
+describe('AppFrame track easing', () => {
+  it('eases tracks only across a discrete toggle, never for viewport updates', () => {
+    const { frame, instance } = mountFrame()
+    expect(frame.dataset.animating).toBeUndefined()
+    // Window-driven track updates follow the frame edge instantly.
+    resize(1600)
+    expect(frame.dataset.animating).toBeUndefined()
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.dataset.animating).toBe('true')
+    // Foreign transition ends (e.g. the handle's left) do not settle it...
+    act(() => {
+      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'left' }))
+    })
+    expect(frame.dataset.animating).toBe('true')
+    // ...the track transition's own end does.
+    act(() => {
+      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+    })
+    expect(frame.dataset.animating).toBeUndefined()
+  })
+
+  it('lands the responsive auto-collapse instantly, keeping user toggles eased', () => {
+    const { frame, instance } = mountFrame()
+    // Shrinking across the breakpoint flips the collapse in the same update as
+    // the viewport change: no easing, the tracks land with the window edge.
+    resize(900)
+    expect(frame.dataset.sidebarCollapsed).toBe('true')
+    expect(frame.dataset.animating).toBeUndefined()
+    // A user toggle at the now-stable viewport still eases.
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.dataset.animating).toBe('true')
+  })
+
+  it('animates the rightbar track flip and settles by timeout without a transition end', () => {
+    vi.useFakeTimers()
+    try {
+      const { frame, instance } = mountFrame()
+      act(() => { instance.actions.openRightbar(true, false) })
+      expect(frame.dataset.animating).toBe('true')
+      // Covered or reduced-motion frames fire no transitionend; the timeout settles.
+      act(() => { vi.advanceTimersByTime(600) })
+      expect(frame.dataset.animating).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('AppFrame pointer resizing', () => {
   it('updates columns during the gesture and freezes the drag-start width', () => {
     const { frame, instance } = mountFrame()

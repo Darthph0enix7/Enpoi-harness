@@ -11,9 +11,13 @@
    data-animating across the toggle on the deepsuite sider curve). Steady-state
    tracks move only with the viewport, and those updates must land instantly:
    an eased track chases the live window edge and the centre column visibly
-   rubber-bands while the user resizes the window. */
+   rubber-bands while the user resizes the window. The occupant's own slide
+   (ui-sidebar-right .panel transform, the terminal dock) reads the same two
+   variables so both edges interpolate on one curve. */
 .frame[data-animating] {
-  transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  transition:
+    grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    grid-template-rows var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 /* Dragging writes widths at pointer cadence; easing them would detach the
@@ -58,6 +62,10 @@
   .frame[data-animating] {
     transition: none;
   }
+
+  .frame[data-animating] .centerCol {
+    transition: none;
+  }
 }
 
 .sidebarCol {
@@ -72,6 +80,26 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* The centre column's right inset is the collapsed rail's reservation
+   (ui-sidebar-right). During a panel ride it must ease on the track's own
+   curve: the reservation appears the moment the close starts, and without the
+   transition it opens a bare-frame sliver between the conversation's glass
+   edge and the still-wide panel. Eased, the glass edge stays exactly on the
+   panel's moving left edge (padding(t) = 44·p, panelLeft(t) = trackEdge(t) −
+   44·p). The left sidebar has no such reservation, which is why its seam never
+   shows. */
+.frame[data-animating] .centerCol {
+  transition: padding-right var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+/* A gesture or a mode switch writes the track at pointer/instant cadence; the
+   reservation must land with it, not chase it. */
+.frame[data-dragging] .centerCol,
+.frame[data-rightbar-instant] .centerCol,
+.frame[data-rightbar-fullscreen] .centerCol {
+  transition: none;
 }
 
 /* macOS desktop: the frame goes transparent so window vibrancy reaches the

@@ -207,7 +207,12 @@
   background: var(--dsw-alias-interactive-bg-active);
 }
 
-/* enpoi: the bottom dock's own shell, rendered in the frame overlay layer. */
+/* enpoi: the bottom dock's own shell, rendered in the frame overlay layer. It
+   rides in and out from below the frame edge on the same slow curve the
+   conversation column's margin uses, so the main glass edge and the dock's top
+   edge interpolate together. The component keeps it mounted through the
+   closing ride and marks the open state; on mount the rise animation gives a
+   freshly opened dock the same ride instead of a pop. */
 .dock {
   position: fixed;
   bottom: 0;
@@ -218,7 +223,24 @@
   background: var(--dsw-alias-bg-base);
   border-top: 0.5px solid var(--dsw-alias-border-l4);
   box-shadow: 0 -8px 24px rgb(0 0 0 / 18%);
+  transform: translateY(100%);
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+/* Out of reach while parked: the frame overlay's child rule grants pointer
+   events to the open dock only. */
+.dock:not([data-enpoi-bottom-dock-open]) {
+  pointer-events: none;
+}
+
+.dock[data-enpoi-bottom-dock-open] {
+  transform: none;
   pointer-events: auto;
+  animation: dock-rise var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+@keyframes dock-rise {
+  from { transform: translateY(100%); }
 }
 
 .dockHandle {
@@ -309,9 +331,33 @@
 /*
  * enpoi: while the dock is open, the conversation column gives up the dock's
  * height (margin, so the transcript squeezes rather than being covered). The
- * marker and the variable come from the dock component itself.
+ * marker and the variable come from the dock component itself. The list also
+ * carries the rail reservation's padding (ui-layout .frame[data-animating]
+ * .centerCol): this rule outranks that one, so a panel ride with the dock open
+ * must keep both transitions or the reservation would snap.
  */
 :global(body[data-enpoi-bottom-dock-open] div:has(+ [data-rightbar-col])) {
   margin-bottom: var(--enpoi-bottom-dock-height, 0px);
-  transition: margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  transition:
+    margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    padding-right var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+/* A handle gesture writes heights at pointer cadence; the margin pauses with
+   it so the column edge stays under the pointer (the component marks the body
+   for the whole gesture). */
+:global(body[data-enpoi-bottom-dock-resizing]) div:has(+ [data-rightbar-col]) {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock,
+  .dock[data-enpoi-bottom-dock-open] {
+    transition: none;
+    animation: none;
+  }
+
+  :global(body[data-enpoi-bottom-dock-open]) div:has(+ [data-rightbar-col]) {
+    transition: none;
+  }
 }
