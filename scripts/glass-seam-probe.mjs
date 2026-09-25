@@ -66,12 +66,13 @@ const MAX_FRAME_DELTA_FRACTION = 0.25
  */
 const MAX_CONTINUITY_DT_MS = 16.7
 /**
- * Resting material for the right-panel corridor: 'panel-glass' (today: the
- * panel paints bg-base a second time), 'frame-glass' (the panel transparent
- * over the frame ground, identical to the conversation), or 'sidebar-fill'
- * (match the left sidebar's single tint). This is the ONE flip point.
+ * Resting material for the right-panel corridor, the ONE flip point:
+ * 'panel-glass-double' (restored: panel fill + tab-body ground = the browser
+ * page and editor depth, twice bg-base over the frame), 'panel-glass' (one
+ * fill), 'frame-glass' (panel transparent over the frame ground), or
+ * 'sidebar-fill' (the left sidebar's tint).
  */
-const RIGHT_CORRIDOR_TARGET = 'panel-glass'
+const RIGHT_CORRIDOR_TARGET = 'panel-glass-double'
 /** RGB distance allowed between the measured corridor and the chosen target. */
 const MATERIAL_CLASS_TOLERANCE = 12
 /** RGB distance at which left and right interiors would read as the same material. */
@@ -221,7 +222,7 @@ async function main() {
     const glass2 = composite(frameToken, glass1)
     const glass3 = composite(frameToken, glass2)
     const sidebarLayer = sidebarToken === null ? glass1 : composite(sidebarToken, glass1)
-    const targetComposites = { 'panel-glass': glass2, 'frame-glass': glass1, 'sidebar-fill': sidebarLayer }
+    const targetComposites = { 'panel-glass-double': glass3, 'panel-glass': glass2, 'frame-glass': glass1, 'sidebar-fill': sidebarLayer }
     report.layers = { frameToken, sidebarToken, glass1, glass2, glass3, sidebarLayer, rightCorridorTarget: RIGHT_CORRIDOR_TARGET, targetComposite: targetComposites[RIGHT_CORRIDOR_TARGET] }
 
     const state = () => page.evaluate(() => {
@@ -685,7 +686,7 @@ async function main() {
         leftVsRight: +dist(leftCorridor, rightCorridor).toFixed(1),
         parityTolerance: MATERIAL_PARITY_TOLERANCE,
         parityWithinTolerance: dist(leftCorridor, rightCorridor) <= MATERIAL_PARITY_TOLERANCE,
-        choices: { 'panel-glass': glass2, 'frame-glass': glass1, 'sidebar-fill': sidebarLayer },
+        choices: { 'panel-glass-double': glass3, 'panel-glass': glass2, 'frame-glass': glass1, 'sidebar-fill': sidebarLayer },
       }
       const bad = []
       if (material.rightVsTarget > MATERIAL_CLASS_TOLERANCE) bad.push(`right corridor ${rightCorridor} is ${material.rightVsTarget} from target ${RIGHT_CORRIDOR_TARGET}`)

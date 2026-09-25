@@ -246,7 +246,7 @@ function TabSlot({
   const content = renderSlot(seat, {}, { entryKey: definition?.id ?? tab.kind, fallback, hookContext })
   return seat === 'sidebar.right.pane.tab.title'
     ? <span className={css.tabTitle} data-sidebar-right-tab={tab.id} data-sidebar-right-occurrence={id}>{content}</span>
-    : <div className={css.tabBody} data-sidebar-right-tab={tab.id} data-sidebar-right-occurrence={id}>{content}</div>
+    : <div className={css.tabBody} data-sidebar-right-tab={tab.id} data-sidebar-right-occurrence={id} data-sidebar-right-kind={tab.kind}>{content}</div>
 }
 
 /**

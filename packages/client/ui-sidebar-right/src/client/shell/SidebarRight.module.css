@@ -245,6 +245,19 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  /* The docked page's ground: the panel's own fill plus this layer restore the
+     two-fill depth the shell's other surfaces carry (the editor pane below, the
+     browser page's root, the left sidebar's double sidebar-fill), so the
+     Files/Git/guide pages read as dark as the surfaces that were never
+     complained about. Pages that paint their own equivalent ground are exempt
+     instead of being stacked twice; a new page defaults to the ground. */
+  background: var(--dsw-alias-bg-base);
+}
+
+.tabBody[data-sidebar-right-kind='browser'],
+.tabBody[data-sidebar-right-kind='capabilities'],
+.tabBody[data-sidebar-right-kind='agent-models'] {
+  background: transparent;
 }
 
 /*
