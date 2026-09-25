@@ -82,11 +82,10 @@ function mountFrame(windowWidth = frameWidth) {
       },
     },
     phase: 'ready',
-    subagentsByParent: {},
-    jobsBySession: {},
+    projectionsBySession: {},
   })
   const workspaceState: WorkspaceSnapshot = {
-    items: [], archivedSessionIds: [], state: 'idle', phase: 'ready', error: null,
+    items: [], archivedSessionIds: [], pinnedSessionIds: [], state: 'idle', phase: 'ready', error: null,
     ...(workspacesReady ? {} : { state: 'loading' as const, phase: 'pending' as const }),
   }
   const useStore = bindSnapshotSelector(instance)

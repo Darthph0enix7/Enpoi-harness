@@ -4,6 +4,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
 import { TheMarkTaskCard } from '../src/client/TheMarkTaskCard.tsx'
 import { TheMarkTaskCardAdapter } from '../src/client/TheMarkTaskCardAdapter.tsx'
+import { useDisclosure } from '@deepseek-ai/dsh-client-ui-chat/src/client/chat/use-disclosure.ts'
 import type { ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 
 describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
@@ -167,6 +168,8 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
       <TheMarkTaskCardAdapter
         callId="call-sub-1"
         toolName="subagent"
+        phase="result"
+        useDisclosure={useDisclosure}
         block={mockBlock}
         openFile={vi.fn()}
         loadImage={vi.fn(() => Promise.resolve('blob:test')) as unknown as Parameters<typeof TheMarkTaskCardAdapter>[0]['loadImage']}

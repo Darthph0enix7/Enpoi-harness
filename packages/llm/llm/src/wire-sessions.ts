@@ -276,7 +276,7 @@ function messageChars(message: RequestMessage): number {
   return total
 }
 
-/** Text length for text-like blocks, JSON length otherwise; nested results recurse. */
+/** Text length for text-like blocks, JSON length otherwise. */
 function blockChars(block: ContentBlock): number {
   switch (block.type) {
     case 'text':
@@ -284,8 +284,6 @@ function blockChars(block: ContentBlock): number {
       return block.text.length
     case 'tool-call':
       return block.arguments.length
-    case 'tool-result':
-      return block.content.reduce((sum, nested) => sum + blockChars(nested), 0)
     default:
       // Merge-extensible block types fall through to their JSON size.
       return JSON.stringify(block).length

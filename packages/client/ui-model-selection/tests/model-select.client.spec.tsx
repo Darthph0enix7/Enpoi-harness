@@ -46,6 +46,7 @@ function state(overrides: Partial<ModelDirectoryState> = {}): ModelDirectoryStat
       }],
     }],
     failures: [],
+    pending: null,
     status: 'ready',
     error: null,
     ...overrides,
@@ -179,8 +180,8 @@ describe('ModelSelect reasoning effort', () => {
 
     // OpenChamber fallback while loading: shows the fallback label, not the loading key,
     // because the component derives modelLabel from fallback when current is null.
-    expect(screen.getByRole('button', { name: '选择模型' }).textContent)
-      .toContain('选择模型')
+    expect(screen.getByRole('button', { name: '请选择模型' }).textContent)
+      .toContain('请选择模型')
     directory.set(state())
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' })).toBeTruthy()

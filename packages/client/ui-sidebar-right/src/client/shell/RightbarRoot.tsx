@@ -12,9 +12,15 @@ export function RightbarRoot({
 }: PropsRuntime<'rightbar'> & PropsRenderSlots<'rightbar.session'>) {
   const visible = usePanelInfo(info => info.activePanelId === null)
   if (!visible) return null
+  // One mounted Conversation at a time: this seat's view is the active one, and
+  // tab retention stays a no-op until background Session views are adopted.
   return (
     <SessionProvider>
-      {renderSlot('rightbar.session', { width, viewportWidth, canShow, mobile })}
+      {renderSlot('rightbar.session', {
+        width, viewportWidth, canShow, mobile,
+        active: true,
+        retainTab: () => () => {},
+      })}
     </SessionProvider>
   )
 }

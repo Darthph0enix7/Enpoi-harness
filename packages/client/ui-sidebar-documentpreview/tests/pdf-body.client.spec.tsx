@@ -123,7 +123,7 @@ describe('PDF body', () => {
     const view = render(<h.View />)
     expect(screen.getByRole('status').getAttribute('aria-label')).toBe('Rendering document...')
     expect(screen.getByRole('status').hasAttribute('data-document-loading')).toBe(true)
-    expect(screen.getByRole('status').querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(screen.getByRole('status').querySelector('svg')).not.toBeNull()
     await act(async () => { loads[0]!.deferred.resolve(documentOf()) })
     await act(async () => {})
     expect(screen.getByRole('toolbar', { name: 'Zoom controls' })).toBeTruthy()

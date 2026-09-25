@@ -273,7 +273,7 @@ describe('approval Remote Event consumer', () => {
   })
 
   it('returns the composer to no takeover when the host cancels a bounded-wait ask', async () => {
-    const bench = setupPlugin()
+    const bench = await setupPlugin()
     const scope = createScope(bench.ctx, id('s1'))
     await scope.fiber.await()
     const controller = new AbortController()

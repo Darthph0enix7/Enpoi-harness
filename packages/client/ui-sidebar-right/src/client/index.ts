@@ -18,6 +18,9 @@
  * guide registers through those stages unmodified, exactly as a type shipped
  * from another package does — `ui-sidebar-documentpreview` is the live proof.
  */
+import type {} from '@deepseek-ai/dsh-client-shortcuts/client'
+import { observeSidebarFocus } from './focus.ts'
+import { registerSidebarShortcuts } from './shortcuts.ts'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-resources/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -44,6 +47,7 @@ import { guideTabInfoFactory, tabInfoFactory } from './tab-info.ts'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { defaultSeed } from './contract/seed.ts'
 
+export type { SidebarRightTarget } from './focus.ts'
 export type { RightbarSeatProps, SidebarRightInjected, SidebarRightPresentation } from './shell/SidebarRight.tsx'
 export type { GuideBodyProps, GuideInjected } from './tabs/guide/GuideBody.tsx'
 export type { SidebarRightRailState } from './rail.ts'
@@ -66,7 +70,7 @@ export type {
 } from './contract/params.ts'
 // The layout ids and rectangle the navigation face takes, so a caller needs no import from the kit.
 export type { FloatRect, PaneId, TabId, TabRecord } from '@deepseek-ai/dsh-client-ui-dockkit'
-export type { PinResource, SidebarRightNavigator, TabOccurrence } from './tab-domain.ts'
+export type { PinResource, SidebarRightNavigator, TabOccurrence, SidebarRightOccurrenceId } from './tab-domain.ts'
 export type { SidebarRightKey } from './locales.ts'
 export type { OpenContentIntent } from './stores.ts'
 export type { SidebarRightOpenTab } from './tab-inventory.ts'
@@ -75,7 +79,7 @@ export type { SidebarRightOpenTab } from './tab-inventory.ts'
 const NS = 'sidebarRight'
 
 /** Required browser services: the slot registry, the frame's panel actions, copy, and the resource model. */
-export const inject = ['slots', 'layout', 'locale', 'resources']
+export const inject = ['slots', 'layout', 'locale', 'resources', 'sessions', 'uiSession', 'shortcuts']
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -113,6 +117,7 @@ export function apply(ctx: ClientContext): void {
   rail.clearKindIfHidden(isSidebarRightKindHidden)
   // enpoi: per-session column surfaces, restored from localStorage on reload.
   const surfaces = new SurfaceStorage(kind => tabs.get(kind) !== undefined && !isSidebarRightKindHidden(kind))
+
   const { controller, adopt, forget } = createSidebarRightController(
     tabs,
     (address, signal) => { ctx.resources.pin(address, signal) },
@@ -132,6 +137,10 @@ export function apply(ctx: ClientContext): void {
   }, 'ui-sidebar-right: service faces')
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar-right: dictionaries')
+  ctx.effect(() => registerSidebarShortcuts(ctx.shortcuts, controller, t, () => {
+    void ctx.shortcuts.closeWindow().catch((error: unknown) => { console.error('Window close failed', error) })
+  }), 'ui-sidebar-right: shortcuts')
+  if (typeof document !== 'undefined') ctx.effect(() => observeSidebarFocus(document), 'ui-sidebar-right: focus')
 
   // enpoi: hidden-surface preference sync. The local cache serves the first
   // paint; the boot read and every `settings/document-updated` push (any client
@@ -171,25 +180,35 @@ export function apply(ctx: ClientContext): void {
     // is on screen, and that store's commits sync the Tab domain themselves.
     // The same key restores the session's stored column and starts its debounced
     // persistence; the stops run when this plugin unloads, so a pending write
-    // never outlives the seats it belongs to.
-    const adoptions: Array<() => void> = []
+    // never outlives the seats it belongs to. Each Session Context generation
+    // owns one Store; background tab actions use the latest adoption.
+    const adoptions = new Map<SessionId, () => void>()
     const persistences: Array<() => void> = []
     const store: typeof handle = {
       ...handle,
       create: (scopeKey) => {
         const instance = handle.create(scopeKey)
         if (scopeKey !== undefined) {
+          const sessionId = scopeKey as SessionId
+          // A replaced Context generation hands its subscription and its
+          // persistence back before the new one takes over.
+          adoptions.get(sessionId)?.()
           // The fork's surface storage restores the richer record — editor pane
           // and navigation included — over the layout mirror the handle already
           // applied, so both keys can hold the session and the fork's wins.
-          persistences.push(bindSurfacePersistence(
+          const stopPersistence = bindSurfacePersistence(
             instance,
             scopeKey,
             surfaces,
-            sessionId => controller.tabDomain.records(sessionId as SessionId),
+            id => controller.tabDomain.records(id as SessionId),
             true,
-          ))
-          adoptions.push(adopt(scopeKey as SessionId, instance))
+          )
+          const releaseAdoption = adopt(sessionId, instance)
+          persistences.push(stopPersistence)
+          adoptions.set(sessionId, () => {
+            stopPersistence()
+            releaseAdoption()
+          })
         }
         return { ...instance, clearPersisted() {
           instance.clearPersisted()
@@ -204,12 +223,15 @@ export function apply(ctx: ClientContext): void {
         else layout.closeRightbar()
       },
       bindService: binding => controller.bind(binding),
+      splitPane: (paneId) => { controller.split(paneId) },
+      toggleFullscreen: () => { const target = controller.commandTarget(); if (target !== undefined) controller.toggleFullscreen(target) },
       openTab: (kind, options) => { controller.openTab(kind, options) },
       // enpoi: the rail's gestures and its two hook sources (icons, state).
       selectKind: (kind) => { controller.selectKind(kind) },
       setEditorWidth: (px) => { rail.setEditorWidth(px) },
       setRightbarWidth: (px) => { layout.setRightbar(px) },
       hooks: {
+        shortcuts: ctx.shortcuts.catalog,
         tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() },
         railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
         rail: rail.state,
@@ -245,7 +267,10 @@ export function apply(ctx: ClientContext): void {
     // Stage two for the guide: it declares the chain child it hosts and reads
     // the registry's entry boxes, which an ordinary type has no reason to do.
     const guideInjected: GuideInjected = {
-      hooks: { guideEntries: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.guide() } },
+      hooks: {
+        shortcuts: ctx.shortcuts.catalog,
+        guideEntries: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.guide() },
+      },
     }
     const disposeGuide = ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
       name: 'sidebar.right.pane.tab',
@@ -295,7 +320,8 @@ export function apply(ctx: ClientContext): void {
       disposeSeat()
       for (const dispose of disposeTypes.reverse()) dispose()
       for (const stop of persistences) stop()
-      for (const release of adoptions) release()
+      for (const release of adoptions.values()) release()
+      adoptions.clear()
     }
   }, 'ui-sidebar-right: seats and shipped tab type')
 }

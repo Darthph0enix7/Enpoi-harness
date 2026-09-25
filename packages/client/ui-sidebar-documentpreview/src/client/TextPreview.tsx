@@ -354,9 +354,11 @@ export function TextPreview({
   const add = useCallback((address: string) => {
     addResource(tab.id, address, signal)
   }, [addResource, tab.id, signal])
+  // Only dependencies join the invalidation group: the file's own metadata
+  // move is announced by the bar above, never applied under the reader.
   const set = useCallback((addresses: readonly string[]) => {
-    setResources(tab.id, [tab.contentId, ...addresses], signal)
-  }, [setResources, tab.id, tab.contentId, signal])
+    setResources(tab.id, addresses, signal)
+  }, [setResources, tab.id, signal])
   useEffect(() => {
     set([])
   }, [set, selected?.id])
@@ -366,6 +368,7 @@ export function TextPreview({
       if (current === undefined) return undefined
       const revision = current.loadRevision
       return { kind: 'renderer', revision, reload: rendererReload,
+        failed: () => { actions.rendererFailed(tab.id, revision) },
         loaded: (version) => { actions.rendered(tab.id, revision, version) } }
     }
     if (mode === 'bytes-complete') {
@@ -376,6 +379,21 @@ export function TextPreview({
     if (current === undefined || loaded.length === 0) return undefined
     return { kind: 'text', pages: loaded, text: loaded.filter(page => page.lines > 0).map(page => page.text).join('\n'), eof: current.eof }
   }, [mode, loaded, current?.complete, current?.eof, current?.loadRevision, rendererReload, actions, tab.id])
+
+  // Related-resource invalidation is owned by the loaded revision: an HTML
+  // asset or a conversion dependency changed under what is displayed, so the
+  // content is reread in place instead of announcing a file edit the reader
+  // never made. Text pages, complete bytes, and renderer-owned bodies each
+  // have their own reread entry point.
+  const resourcesDirty = state?.resourcesDirty === true
+  useEffect(() => {
+    if (!resourcesDirty || selected === undefined || current === undefined
+      || current.loading || !canRead || meta.status !== 'live') return
+    if (mode === 'renderer') prepareRenderer(tab.id, signal, selected.id, meta.value?.version, true)
+    else if (mode === 'bytes-complete') reloadAll(tab.id, file, signal, meta.value?.version)
+    else reloadPages(tab.id, file, signal, meta.value?.version)
+  }, [resourcesDirty, mode, selected?.id, current?.loading, canRead, meta.status, meta.value?.version,
+    prepareRenderer, reloadAll, reloadPages, tab.id, signal, file])
 
   // Go to line: the renderer's own jump when it offers one (the editor moves
   // its cursor), otherwise the tab's line navigation, which loads the pages
@@ -622,6 +640,9 @@ export function TextPreview({
           )}
         {renderSlot('sidebar.right.tab.document.toolbar', { rendererId: selected.id, compact: collapsed > 0 }, {
           entryKey: selected.id, hookContext: useTabInfo, fallback: null,
+        })}
+        {content !== undefined && renderSlot('sidebar.right.tab.document.action', { content }, {
+          entryKey: selected.id, hookContext: useTabInfo,
         })}
         <div className={css.tools} data-textpreview-tools>
           {visibleActions.map(toolbarButton)}

@@ -2037,7 +2037,7 @@ Source: [`packages/subagent/tool-subagent/src/list-models.ts`](../packages/subag
 
 ### `subagent`
 
-Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. This call waits for the result by default.
+Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. An optional `role` names the child's specialist identity from the operator role registry (for example `librarian`, `fixer`, `explorer`); omit it to infer the role from the task. Tool-only roles (for example the Oracle, consulted via `oracle_review`) are refused by design. This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.
 
 ```json
 {
@@ -2050,6 +2050,10 @@ Delegate a self-contained task to a subagent (a separate agent that works in its
     "prompt": {
       "type": "string",
       "description": "The complete, self-contained task for the subagent. It does not share this conversation's context, so include everything it needs."
+    },
+    "role": {
+      "type": "string",
+      "description": "Optional specialist role id for the child, naming a delegatable role in the operator role registry. Omit to infer the role from the description and prompt. An unknown or tool-only id is rejected and lists the configured roles."
     },
     "run_in_background": {
       "type": "boolean",

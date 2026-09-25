@@ -797,12 +797,12 @@ resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult>
 inspect( sessionId: SessionId, signal?: AbortSignal, ): Promise<SessionInspection>
 
 /**
- * Read all visible Session rows without resuming an Agent.
- * @param _request - reserved empty list request.
+ * Read one newest-first window of visible Session rows without resuming an Agent.
+ * @param request - optional continuation cursor and page size.
  * @param signal - cancellation for persistence reads.
- * @returns visible Session summaries ordered by activity.
+ * @returns the page's visible Session summaries plus a cursor when older rows remain.
  */
-@Remote('list') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>
+@Remote('list') async list(request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>
 
 /**
  * Search visible Session content without resuming an Agent.
@@ -919,6 +919,50 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
  * @returns acknowledgement that the Agent accepted the prompt.
  */
 @Remote('prompt') prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue>
+
+/**
+ * Read what the model was actually sent for one Session's most recent main
+ * request (the LLM seam's per-Session wire capture).
+ *
+ * The default summary is a digest-and-size view: `system` reports character
+ * count and SHA-256, `tools` names, and one `{role, chars}` row per message.
+ * `includeBodies: true` additionally returns the SECRET-BEARING bodies — the
+ * full system prompt, tool schemas, and message text — so callers must treat
+ * the result as sensitive. When the capture exceeded its byte cap, the bodies
+ * are unavailable and the response keeps `bodiesIncluded: false` with
+ * `bodiesOmitted: 'size-cap'`.
+ * @param request - Session identity and whether secret-bearing bodies are requested.
+ * @param signal - caller cancellation for the capture read.
+ * @returns the captured request summary, or the bodies too when requested.
+ * @throws RemoteError `gateway/bad-request` for an unaddressable Session id, `session/not-found` when no capture exists.
+ */
+@Remote('requestSnapshot') requestSnapshot( request: SessionRequestSnapshotRequest, signal: AbortSignal, ): Promise<SessionRequestSnapshotValue>
+
+/**
+ * Read the aggregate execution latch of one attached Session: the
+ * `running | waiting_approval | waiting_subagents | idle` state, live
+ * descendants (quiet children included), pending approvals and questions,
+ * the last turn terminal, the last attributed participant action, and the
+ * current model selection (doc 69 §8 correction 3; doc 70 §4). Read-only:
+ * the count comes from the live Agent registry and subagent lifecycle
+ * events, never from crawling the parent log.
+ * @param request - attached Session identity.
+ * @returns the host-published latch value.
+ * @throws RemoteError `session/not-found` when no live Session owns the id.
+ */
+@Remote('executionState') executionState(request: SessionExecutionStateRequest): SessionExecutionStateValue
+
+/**
+ * Read the one-call Session digest for a debugging consumer: the execution
+ * latch, current model, last attributed action, recent tool calls, the
+ * injection index, the subagent tree, and pending interactions (doc 69
+ * §9.1). Every preview is bounded and no credentials or captured request
+ * bodies are included.
+ * @param request - attached Session identity and the recent-tool-call budget.
+ * @returns the bounded digest value.
+ * @throws RemoteError `session/not-found` when no live Session owns the id.
+ */
+@Remote('digest') digest(request: SessionDigestRequest): SessionDigestValue
 
 /**
  * Read one image proven reachable from the addressed Session log.

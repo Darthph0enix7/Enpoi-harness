@@ -735,7 +735,7 @@ describe('list window paging', () => {
     remote.session.list
       .mockResolvedValueOnce(ok({ items: [summary(S2, { updatedAt: 200 })], nextCursor: '1' } as never))
       .mockResolvedValueOnce(ok({
-        items: [summary(S1, { updatedAt: 100, running: true, projections: { asOfSeq: -1, values: { title: 'Older' } } })] as never,
+        items: [summary(S1, { updatedAt: 100, running: true, projections: { kind: 'sequenced' as const, asOfSeq: -1, values: { title: 'Older' } } })] as never,
         nextCursor: '2',
       }))
       .mockResolvedValueOnce(ok({ items: [summary(S3)] } as never))

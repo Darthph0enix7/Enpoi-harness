@@ -3,10 +3,11 @@ import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SettingsRootComponentProps } from '../src/client/shell-contract.ts'
+import { createSettingsShellStore } from '../src/client/shell-store.ts'
 import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { DesktopUpdateView } from '../src/client/desktop-update-bridge.ts'
@@ -90,10 +91,13 @@ function mount({
         updatedAt: 0,
       },
     },
-    phase: 'ready', subagentsByParent: {}, jobsBySession: {},
+    phase: 'ready', projectionsBySession: {},
   }
   const unusedHook = (() => { throw new Error('unused by SettingsRoot') }) as never
+  const shell = createSettingsShellStore().create()
   const props: SettingsRootComponentProps = {
+    useStore: bindSnapshotSelector(shell),
+    actions: shell.actions,
     useSessions: select => select(sessions),
     useSessionStatus,
     usePanelInfo, useSessionRetainInfo: () => undefined, useResource,

@@ -3,8 +3,8 @@ import {
   IconNewChatOutlineRegular, IconPanelLeftOutlineRegular, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: pulls the frame's shell.leading slot declaration.
-import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// Type-only: pulls the shell.leading slot declaration from its declaring package.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { SidebarRootInjected } from './contract/slots.ts'
 import css from './HeaderLeadingControls.module.css'
 

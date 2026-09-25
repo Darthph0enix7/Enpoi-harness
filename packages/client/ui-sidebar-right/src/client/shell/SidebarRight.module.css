@@ -232,6 +232,21 @@
   overflow: hidden;
 }
 
+/* Title chips and bodies are wrapped per record so the kit can address each
+   occurrence by its data attributes; the title wrapper adds no box. */
+.tabTitle {
+  display: contents;
+}
+
+.tabBody {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
 /*
  * enpoi: the file editor opens to the LEFT of the tree, like the old
  * EditorHost (conversation | editor | file tree). It is the first child of the

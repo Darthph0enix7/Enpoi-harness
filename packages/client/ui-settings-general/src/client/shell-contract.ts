@@ -9,8 +9,9 @@
 import type { ConnectionState } from '@deepseek-ai/dsh-client-connection/client'
 import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
-  HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime,
+  HostObservable, InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
+import type { createSettingsShellStore } from './shell-store.ts'
 // Type-only: pulls ui-sidebar's SlotMap merge (the 'sidebar.settings' entry)
 // into every program that sees this contract.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -63,12 +64,13 @@ export type SettingsRootInjected = {
 
 /**
  * Full component props of the settings shell root: the sidebar owner share
- * (wide/rail state) plus the declared render shares and the injected face
- * (hooks compartment bound to useSections). No store is registered — modal
- * open state and active section id are component-local viewing state.
+ * (wide/rail state), the declared owner store (modal open state and the active
+ * section id, shared with the `settings.open` command), the declared render
+ * shares, and the injected face (hooks compartment bound to useSections).
  */
 export type SettingsRootComponentProps =
   PropsRuntime<'sidebar.settings'>
+  & PropsStore<ReturnType<typeof createSettingsShellStore>>
   & PropsRenderSlots<
     | 'settings.trigger'
     | 'settings.header'

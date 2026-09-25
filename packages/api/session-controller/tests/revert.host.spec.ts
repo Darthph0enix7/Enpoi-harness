@@ -10,6 +10,13 @@ import { describe, expect, it } from 'vitest'
 import SessionController from '../src/index.ts'
 import { createSessionTestController, testSessionPersistence } from './test-remote.ts'
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** Test double for the profile's file-revert resolution bridge. */
+    'file-revert/resolve'(request: unknown, next: () => unknown): unknown
+  }
+}
+
 const defaults = {
   defaultModelSelection: () => ({ provider: 'fixture', model: 'fixture-model' }),
   cwd: '/tmp',
@@ -124,5 +131,30 @@ describe('SessionController revert RPC', () => {
     const { controller } = await composed()
     await expect(controller.revert({ sessionId: SessionId('missing'), atSeq: 1 }))
       .rejects.toMatchObject({ code: 'session-not-found' })
+  })
+
+  it('rejects deleting an unknown session', async () => {
+    const { controller } = await composed()
+    await expect(controller.delete({ sessionId: SessionId('missing') }))
+      .rejects.toMatchObject({
+        code: 'session-not-found',
+        message: expect.stringContaining('missing') as string,
+      })
+  })
+
+  it('rejects a file-revert resolution the mounted bridge refuses', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    ctx.on('file-revert/resolve', () => ({ accepted: false, reason: 'Error: conflict "nope" not found' }))
+    await expect(controller.resolveFileConflict({ sessionId, conflictId: 'nope', resolution: 'keep' }))
+      .rejects.toMatchObject({
+        code: 'file-revert-invalid',
+        message: expect.stringContaining('conflict "nope" not found') as string,
+      })
+  })
+
+  it('keeps the unavailable code when no bridge listener answers', async () => {
+    const { controller, sessionId } = await composed()
+    await expect(controller.resolveFileConflict({ sessionId, conflictId: 'nope', resolution: 'keep' }))
+      .rejects.toMatchObject({ code: 'file-revert-unavailable' })
   })
 })

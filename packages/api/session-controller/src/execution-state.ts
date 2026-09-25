@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type { ParticipantTag } from '@deepseek-ai/dsh-llm'
+import type { MessageSource, ParticipantTag } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
@@ -40,6 +40,15 @@ const DIGEST_TREE_LIMIT = 50
 
 /** Bounded injections in one digest index. */
 const DIGEST_INJECTION_LIMIT = 16
+
+/**
+ * Source kinds that render as the user's own conversation rather than
+ * producer-injected context. Every kind outside this allowlist is an injection
+ * row, so a newly declared producer can never leak into the user-visible
+ * digest by default; the retired catch-all `plugin` kind is only one historical
+ * member of that outside set.
+ */
+const USER_VISIBLE_SOURCE_KINDS: ReadonlySet<string> = new Set(['user', 'model', 'tool', 'system-prompt'])
 
 /** Bounded displayed preview length for every digest text field. */
 const PREVIEW_CHARS = 200
@@ -259,7 +268,7 @@ interface ScannedToolResult {
 /** One parent-owned spawn catalog row collected by the bounded reverse scan. */
 interface ScannedCatalogEntry {
   readonly childId: SessionId
-  readonly mode: 'one-shot' | 'continuable'
+  readonly mode: SessionDigestSubagent['mode']
   readonly label?: string
 }
 
@@ -540,16 +549,16 @@ export class SessionExecutionStateReader {
           break
         }
         case 'tool/result': {
-          const block = event.data.message.content[0]
+          const { message } = event.data
           // Mark every witnessed result, even past the row budget: a call with
           // a result must never be reported as still running.
-          answered.add(block.toolCallId)
+          answered.add(message.toolCallId)
           if (results.length >= maxTools) break
-          const resultPreview = preview(messageText(block))
+          const resultPreview = preview(messageText(message))
           results.push({
             seq,
-            callId: block.toolCallId,
-            status: block.isError === true ? 'error' : 'ok',
+            callId: message.toolCallId,
+            status: message.isError === true ? 'error' : 'ok',
             ...event.data.error === undefined ? {} : { error: { ...event.data.error } },
             ...resultPreview === undefined ? {} : { resultPreview },
           })
@@ -557,10 +566,10 @@ export class SessionExecutionStateReader {
         }
         case 'user/message': {
           const source = event.data.source
-          if (source.kind !== 'plugin' || injections.length >= DIGEST_INJECTION_LIMIT) break
+          if (USER_VISIBLE_SOURCE_KINDS.has(source.kind) || injections.length >= DIGEST_INJECTION_LIMIT) break
           const label = injectionLabel(source)
           injections.push({
-            kind: source.plugin,
+            kind: source.kind,
             ...label === undefined ? {} : { label },
             chars: messageChars(event.data),
             seq,
@@ -760,25 +769,34 @@ function messageChars(value: { readonly content: readonly { readonly type: strin
 }
 
 /**
- * Display label of one injected plugin message.
- * @param source - plugin source of a logged `user/message`.
- * @returns bounded section names, notice summary, or the declared form.
+ * Producer context fields the injection label reads. Producers declare these
+ * through their own source kind, so the reader is structural: an absent field
+ * is the merged model's documented opaque-context default.
  */
-function injectionLabel(source: {
-  readonly plugin: string
+interface InjectionLabelFields {
+  readonly kind?: string
   readonly form?: string
   readonly sections?: readonly { readonly name: string }[]
   readonly summary?: string
-}): string | undefined {
-  if (source.form === 'snapshot') {
-    const names = (source.sections ?? []).map(section => section.name).join(', ')
+}
+
+/**
+ * Display label of one injected producer-context message.
+ * @param source - declared source of a logged `user/message`.
+ * @returns bounded section names, notice summary, or the declared form.
+ */
+function injectionLabel(source: MessageSource): string | undefined {
+  const fields: InjectionLabelFields = source
+  const form = fields.form
+  if (form === 'snapshot') {
+    const names = (fields.sections ?? []).map(section => section.name).join(', ')
     return names.length === 0 ? undefined : bound(names, LABEL_CHARS)
   }
-  if (source.form === 'notice') {
-    const summary = source.summary ?? ''
+  if (form === 'notice') {
+    const summary = fields.summary ?? ''
     return summary.length === 0 ? undefined : bound(summary, LABEL_CHARS)
   }
-  return source.form
+  return form
 }
 
 /**

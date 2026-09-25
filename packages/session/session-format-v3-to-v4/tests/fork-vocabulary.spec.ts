@@ -3,12 +3,11 @@ import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import type { SessionFormatArtifact, SessionFormatEvent, SessionFormatHeader } from '@deepseek-ai/dsh-session-format'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import {
-  OPAQUE_FORK_V3_EVENT_TYPES,
   createSessionFormatV3ToV4,
-  namespaceV3OpaqueEvent,
   restoreReleasedV4Artifact,
   sessionFormatV3ToV4,
 } from '../src/index.ts'
+import { OPAQUE_FORK_V3_EVENT_TYPES, namespaceV3OpaqueEvent } from '../src/extension-identities.ts'
 
 const header: SessionFormatHeader = { version: 3, id: 'fork-vocabulary', createdAt: 1, isSeeded: false, delegationDepth: 0 }
 

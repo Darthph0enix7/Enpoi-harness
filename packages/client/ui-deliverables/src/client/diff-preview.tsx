@@ -166,6 +166,9 @@ export function DiffPreview({
   const labels = useMemo((): DiffBlockLabels => ({
     copy: t('diffView.copyDiff'),
     copied: t('diffView.copied'),
+    codeLabel: t('diffView.codeLabel'),
+    wrapLabel: t('diffView.wrap'),
+    unwrapLabel: t('diffView.unwrap'),
     collapseAria: t('diffView.collapseAria'),
     expandAria: hidden => t('diffView.expandAria', { count: String(hidden) }),
     collapse: t('diffView.collapse'),

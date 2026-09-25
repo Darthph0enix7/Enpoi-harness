@@ -26,3 +26,21 @@
   padding: 0;
   vertical-align: middle;
 }
+
+.icon {
+  display: flex;
+  flex: none;
+  animation: turn 0.8s linear infinite;
+}
+
+@keyframes turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon {
+    animation: none;
+  }
+}

@@ -287,6 +287,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'session-not-found': { readonly sessionId: SessionId }
     'revert-invalid': { readonly sessionId: SessionId; readonly atSeq?: number }
     'file-revert-unavailable': { readonly sessionId: SessionId }
+    /** The bridge plugin refused the resolution: the conflict id names no actionable card. */
+    'file-revert-invalid': { readonly sessionId: SessionId; readonly conflictId: string; readonly reason: string }
   }
 }
 
@@ -358,7 +360,7 @@ export interface SessionTurnError {
 /** One turn terminal with its durable reason, at the event time it committed. */
 export interface SessionTurnTerminal {
   readonly turn: number
-  readonly reason: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted'
+  readonly reason: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted' | 'forked'
   readonly at: number
   readonly error?: SessionTurnError
 }
@@ -501,7 +503,7 @@ export interface SessionDigestToolCall {
 
 /** One injected context block in a Session digest, in log order. */
 export interface SessionDigestInjection {
-  /** The producing plugin's source name. */
+  /** The producer-declared source kind of the injected message. */
   readonly kind: string
   /** Snapshot section names or notice summary, truncated. */
   readonly label?: string

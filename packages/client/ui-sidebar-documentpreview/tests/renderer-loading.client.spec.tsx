@@ -57,12 +57,13 @@ it('lets a non-Office renderer load content, report its version, and reload thro
   expect(read).toHaveBeenCalledTimes(1)
   expect(await screen.findByText('Custom content v1')).toBeTruthy()
   expect(h.instance.getSnapshot().byTab[TAB_ID]?.version).toBe('v1')
-  act(() => { h.instance.actions.toggledAutoRefresh(TAB_ID) })
   h.setVersion('v2')
   view.rerender(<TextPreview {...h.props()} renderSlot={renderSlot} useDocumentPreviews={useDocumentPreviews} />)
-  expect(screen.getByText('changed')).toBeTruthy()
+  // A renderer-owned body carries its own change signal; the shared bar stays
+  // out, and the new metadata is not applied until the reader reloads.
+  expect(screen.queryByText('changed')).toBeNull()
   expect(read).toHaveBeenCalledTimes(1)
-  fireEvent.click(screen.getByRole('button', { name: 'reloadNow' }))
+  fireEvent.click(screen.getByRole('button', { name: 'reload' }))
   expect(await screen.findByText('Custom content v2')).toBeTruthy()
   expect(read).toHaveBeenCalledTimes(2)
   expect(h.instance.getSnapshot().byTab[TAB_ID]?.version).toBe('v2')
@@ -133,7 +134,7 @@ function setup() {
   return { h, office, pending, read, View, request: () => request! }
 }
 
-it('retains renderer content across remounts and waits for reload when automatic refresh is paused', async () => {
+it('retains renderer content across remounts and rereads only when the reader reloads', async () => {
   const h = setup()
   let mounted = render(<h.View />)
   expect(screen.getByRole('status').getAttribute('aria-label')).toBe(en.loading)
@@ -146,12 +147,12 @@ it('retains renderer content across remounts and waits for reload when automatic
   mounted = render(<h.View />)
   expect(screen.getByText('PDF v1')).toBeTruthy()
   expect(h.read).toHaveBeenCalledTimes(1)
-  act(() => { h.h.instance.actions.toggledAutoRefresh(TAB_ID) })
   h.h.setVersion('v2')
   mounted.rerender(<h.View />)
-  expect(screen.getByText('changed')).toBeTruthy()
+  // A metadata change is announced by the renderer, never applied under it.
+  expect(screen.queryByText('changed')).toBeNull()
   expect(h.read).toHaveBeenCalledTimes(1)
-  fireEvent.click(screen.getByRole('button', { name: 'reloadNow' }))
+  fireEvent.click(screen.getByRole('button', { name: 'reload' }))
   expect(h.read).toHaveBeenCalledTimes(2)
   await act(async () => { h.pending[1]!.deferred.resolve(result('v2')) })
   expect(screen.queryByText('changed')).toBeNull()
@@ -302,15 +303,15 @@ it('starts no conversion or store write for an already closed request', () => {
   expect(store.getSnapshot().byTab[TAB_ID]).toBeUndefined()
 })
 
-it('keeps a pending conversion when metadata changes while automatic refresh is paused', async () => {
+it('keeps a pending conversion when metadata changes before the renderer loads', async () => {
   const h = setup()
   const view = render(<h.View />)
-  act(() => { h.h.instance.actions.toggledAutoRefresh(TAB_ID) })
   h.h.setVersion('v2')
   view.rerender(<h.View />)
   expect(h.read).toHaveBeenCalledTimes(1)
   expect(h.pending[0]!.signal.aborted).toBe(false)
   await act(async () => { h.pending[0]!.deferred.resolve(result('v1')) })
   expect(screen.getByText('PDF v1')).toBeTruthy()
-  expect(screen.getByText('changed')).toBeTruthy()
+  // Renderer-owned bodies carry their own change signal; the shared bar stays out.
+  expect(screen.queryByText('changed')).toBeNull()
 })

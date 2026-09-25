@@ -69,6 +69,15 @@ async function mountSeat(viewportWidth = 1440, canShow = true, entryCount = 0, m
   const pin = vi.fn<(address: string, signal: AbortSignal) => void>()
   runtime.ctx.provide('layout', frame as never)
   runtime.ctx.provide('resources', { pin } as never)
+  // The merged plugin injects the shortcut registry; the seat reads only its
+  // catalog for chrome hints, so an empty effective catalog serves the seat.
+  const shortcutCatalog: readonly never[] = []
+  runtime.ctx.provide('shortcuts', {
+    runtime: 'web',
+    register: () => () => {},
+    // A stable snapshot: the hook compares by identity.
+    catalog: { getSnapshot: () => shortcutCatalog, subscribe: () => () => {} },
+  } as never)
   const locale = new LocaleRuntime(runtime.ctx)
   runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)

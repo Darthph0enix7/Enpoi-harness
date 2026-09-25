@@ -719,7 +719,9 @@ export function bindSurfacePersistence(
   const sync = bindSurfaceSync(instance, sessionId, persistence)
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
-  const unsubscribe = instance.subscribe(() => {
+  // Subscribe through the engine source: persistence is plugin machinery over
+  // the raw store, and the adoption path owns the instance's own subscription.
+  const unsubscribe = instance.store.subscribe(() => {
     if (stopped) return
     if (timer !== undefined) clearTimeout(timer)
     timer = setTimeout(() => {

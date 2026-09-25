@@ -266,7 +266,6 @@ export class ClientSessions implements ISessions {
     this.manager = new SessionManager(remote)
     this.list = createSnapshotStore<SessionListState>({
       ids: [], byId: {}, phase: 'pending', hasMore: false, projectionsBySession: {},
-      projectionsBySession: {},
     })
     const disposeManagerProjection = this.manager.subscribe(() => { this.projectList() })
     rootCtx.effect(() => async () => {

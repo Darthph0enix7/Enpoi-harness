@@ -174,7 +174,8 @@ describe('ui-sidebar-right apply', () => {
     vi.stubGlobal('document', { activeElement: null })
     onTestFinished(() => { vi.unstubAllGlobals() })
     injected.toggleFullscreen()
-    expect(injectedOf(seat('conversation.session.header.corner'))).toHaveProperty('hooks.shortcuts')
+    // The fork's always-visible icon rail replaces the header expand control,
+    // so no `conversation.session.header.corner` entry is registered.
     const release = injected.bindService({
       sessionId: SESSION, actions: instance.actions, surfaces: {},
       closeWithFocus: (_paneId, close) => { close() },

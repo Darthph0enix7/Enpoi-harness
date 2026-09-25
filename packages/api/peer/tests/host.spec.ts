@@ -397,6 +397,17 @@ describe('peer host service', () => {
     }
   })
 
+  it('rejects an absent handshake request as bad input instead of failing internally', async () => {
+    const { peer } = await setup()
+    try {
+      peer.handshake(undefined as never)
+      expect.unreachable('handshake must reject an absent request')
+    } catch (error) {
+      expect((error as RemoteError).code).toBe('gateway/bad-request')
+      expect((error as RemoteError).message).toContain('handshake requires a request object')
+    }
+  })
+
   it('creates, prompts, observes a completed turn, and pages history', async () => {
     const { peer, ctx, sessionId, target } = await setup()
     const bound = JSON.parse(readFileSync(join(peer.pairings.bindingsPath), 'utf8')) as {

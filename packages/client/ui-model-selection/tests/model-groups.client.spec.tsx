@@ -28,6 +28,7 @@ function state(): ModelDirectoryState {
       models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
     }],
     failures: [],
+    pending: null,
     status: 'ready',
     error: null,
   }

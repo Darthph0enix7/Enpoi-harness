@@ -185,10 +185,21 @@ export class PeerService extends TypertRemoteService {
    * Negotiate protocol, capability, and pairing identity.
    * @param request - caller protocol, harness version, schema digest, and device name.
    * @returns the host identity, capabilities, and visible pairings.
-   * @throws {@link RemoteError} `peer/version-skew` on protocol divergence.
+   * @throws {@link RemoteError} `gateway/bad-request` when the request is
+   * absent or not an object, `peer/version-skew` on protocol divergence.
    */
   @Remote('handshake')
   handshake(request: PeerHandshakeRequest): PeerHandshakeValue {
+    // SRC descriptors cannot see which parameters are required, so an empty
+    // args object reaches the method as undefined; reject it as a clean input
+    // error instead of the `request.protocolVersion` TypeError it would raise.
+    if (request === null || typeof request !== 'object') {
+      throw new RemoteError(
+        'gateway/bad-request',
+        'handshake requires a request object with protocolVersion, harnessVersion, schemaDigest, and device',
+        {},
+      )
+    }
     if (request.protocolVersion !== PEER_PROTOCOL_VERSION) {
       throw new RemoteError(
         'peer/version-skew',

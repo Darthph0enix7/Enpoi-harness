@@ -51,7 +51,10 @@ export interface ILayout {
   openRightbar(track: boolean, fullscreen: boolean): void
   /** Report the right panel as hidden: no track, no handle. */
   closeRightbar(): void
-  /** Set the right panel's width preference in px. */
+  /**
+   * Set the right panel's width preference in px.
+   * @param px - the width preference in pixels.
+   */
   setRightbar(px: number): void
 }
 
@@ -70,7 +73,10 @@ export class LayoutController implements ILayout {
     readonly panelInfo: HostObservable<PanelInfo>,
   ) {}
 
-  /** Set the right panel's width preference in px. */
+  /**
+   * Set the right panel's width preference in px.
+   * @param px - the width preference in pixels.
+   */
   setRightbar(px: number): void {
     this.panels.setRightbar(px)
   }

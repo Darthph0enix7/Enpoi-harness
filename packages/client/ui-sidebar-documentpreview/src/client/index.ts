@@ -38,6 +38,7 @@ import { apply as registerImage } from './image/index.ts'
 import { apply as registerPdf } from './pdf/index.ts'
 import { apply as registerCode } from './code/index.ts'
 import { apply as registerOffice } from './office/index.ts'
+import { apply as registerExcel } from './excel/index.ts'
 import { Config } from '../config.ts'
 
 // Values stay package-private unless another package needs them; the plugin
@@ -109,6 +110,9 @@ export function apply(ctx: ClientContext): void {
       name: 'sidebar.right.pane.tab', key: TEXTPREVIEW_ID, locale: NS, store,
       children: {
         'sidebar.right.tab.document': { kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentTabInfoFactory } } },
+        'sidebar.right.tab.document.actions': { kind: 'list', scope: 'session' },
+        'sidebar.right.tab.document.unpreviewable': { kind: 'list', scope: 'session' },
+        'sidebar.right.tab.document.action': { kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentTabInfoFactory } } },
         'sidebar.right.tab.document.toolbar': {
           kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentToolbarTabInfoFactory } },
         },
@@ -137,6 +141,10 @@ export function apply(ctx: ClientContext): void {
   registerHtml(ctx)
   registerImage(ctx)
   registerPdf(ctx)
-  registerCode(ctx)
+  // Specialized parse-first renderers register before the shared highlighter:
+  // the registry keeps the earlier claimant and Code offers its suffixes as a
+  // later candidate.
   registerOffice(ctx, config.office)
+  registerExcel(ctx, config.excel)
+  registerCode(ctx)
 }

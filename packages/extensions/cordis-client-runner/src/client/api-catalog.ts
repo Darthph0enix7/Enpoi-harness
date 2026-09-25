@@ -824,6 +824,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type RenderFactorySlot = <F extends keyof SlotFactoryMap & string>(name: F, props: FactoryInputPropsOf<F>, options?: {\n    slots?: Partial<{\n        [N in FactoryLocalNameOf<F>]: FactoryLocalComponent<F, N>;\n    }>;\n    fallback?: ReactNode;\n}) => ReactNode;',
   },
   {
+    name: 'RevertFileConflict',
+    declaration: 'export interface RevertFileConflict {\n    readonly conflictId: string;\n    readonly targetKey: string;\n    readonly displayPath: string;\n    readonly state: \'conflict\' | \'missing\' | \'unavailable\';\n    readonly reason: string;\n    readonly mode?: \'revert\' | \'restore\';\n    readonly boundarySeq?: number | null;\n    readonly spanStartSeq?: number;\n    readonly targetBlobSha?: string | null;\n    readonly targetAbsent?: boolean;\n    readonly spanPreExisted?: boolean;\n}',
+  },
+  {
+    name: 'RevertFileOutcome',
+    declaration: 'export interface RevertFileOutcome {\n    readonly status: string;\n    readonly fromSha?: string | null;\n    readonly toSha?: string | null;\n    readonly dest?: string;\n    readonly reason?: string;\n}',
+  },
+  {
     name: 'ScopeOf',
     declaration: 'export type ScopeOf<K extends keyof SlotMap & string> = SlotMap[K][\'scope\'];',
   },
@@ -900,12 +908,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionRetainOptions {\n    readonly source: SessionReferenceSource;\n    readonly signal?: AbortSignal | undefined;\n}',
   },
   {
+    name: 'SessionRevertShadowRange',
+    declaration: 'export interface SessionRevertShadowRange {\n    readonly start: number;\n    readonly end: number;\n}',
+  },
+  {
     name: 'SessionSearchResultItem',
     declaration: 'export interface SessionSearchResultItem {\n    sessionId: SessionId;\n    snippet: string;\n}',
   },
   {
     name: 'SessionSnapshot',
-    declaration: 'export interface SessionSnapshot {\n    readonly sessionId: SessionId;\n    readonly pendingSubmissions: readonly PendingSubmission[];\n    readonly running: boolean;\n    readonly subagent: {\n        readonly address: SubagentAddress;\n        readonly parentAvailable?: boolean;\n    } | null;\n    readonly removed: boolean;\n    readonly openState: OpenState;\n    readonly openError: RemoteFailure | null;\n    readonly hasMore: boolean;\n    readonly loadingOlder: boolean;\n    readonly promptError: PromptError | null;\n    readonly blank: boolean;\n    readonly lastAgentError: string | null;\n    readonly promptAttempted: boolean;\n    readonly awaitingFirstTurn: boolean;\n}',
+    declaration: 'export interface SessionSnapshot {\n    readonly sessionId: SessionId;\n    readonly pendingSubmissions: readonly PendingSubmission[];\n    readonly running: boolean;\n    readonly subagent: {\n        readonly address: SubagentAddress;\n        readonly parentAvailable?: boolean;\n    } | null;\n    readonly removed: boolean;\n    readonly openState: OpenState;\n    readonly openError: RemoteFailure | null;\n    readonly hasMore: boolean;\n    readonly loadingOlder: boolean;\n    readonly promptError: PromptError | null;\n    readonly blank: boolean;\n    readonly lastAgentError: string | null;\n    readonly promptAttempted: boolean;\n    readonly awaitingFirstTurn: boolean;\n    readonly revertFromSeq: number | null;\n    readonly revertShadowRanges: readonly SessionRevertShadowRange[];\n    readonly revertFileConflicts: readonly RevertFileConflict[];\n    readonly revertFileOutcomes: Readonly<Record<string, RevertFileOutcome>>;\n}',
   },
   {
     name: 'SessionStandardProps',

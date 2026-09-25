@@ -25,6 +25,8 @@ const CATALOG: PermissionCatalog = {
       description: 'Host English Auto description',
     },
   ],
+  defaultOptions: [],
+  defaultPreset: 'workspace-write',
 }
 
 const t: PermissionSelectProps['t'] = makeTranslate(accessZh)
@@ -99,6 +101,8 @@ describe('PermissionSelect', () => {
         { value: 'danger-full-access', name: 'Operator Mode' },
         { value: 'custom-mode', name: 'custom-mode' },
       ],
+      defaultOptions: [],
+      defaultPreset: 'workspace-write',
     }
     const { select } = setup({ catalog, selection: { currentValue: 'workspace-write' } })
     expect(trigger().textContent).toBe('')

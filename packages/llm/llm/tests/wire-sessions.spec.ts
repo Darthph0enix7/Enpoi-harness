@@ -50,7 +50,7 @@ function request(over: Partial<GenerateOptions> = {}): GenerateOptions {
     model: 'mock',
     sessionId: SESSION_ID,
     messages: [
-      createSystemMessage('SYSTEM RULES', 'test'),
+      createSystemMessage('SYSTEM RULES'),
       createUserMessage({
         content: [{ type: 'text', text: 'hello' }],
         source: { kind: 'user' },

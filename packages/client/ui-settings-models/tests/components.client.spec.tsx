@@ -104,6 +104,7 @@ function wireNamespaces(): SettingsNamespaceView[] {
       },
       base: { defaultContextWindow: 1_000_000, maxTokens: 256_000, models: DEFAULT_DEEPSEEK_MODELS },
       user: { baseURL: 'https://base' },
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -114,6 +115,7 @@ function wireNamespaces(): SettingsNamespaceView[] {
         profiles: Schema.dict(Schema.object({ note: Schema.string() })),
       }).toJSON())) as JsonValue,
       value: {},
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -123,6 +125,7 @@ function wireNamespaces(): SettingsNamespaceView[] {
       schema: JSON.parse(JSON.stringify(PiAiConfig.toJSON())) as JsonValue,
       value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
       user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -131,6 +134,7 @@ function wireNamespaces(): SettingsNamespaceView[] {
       ns: 'subagent-model-selection',
       schema: JSON.parse(JSON.stringify(Schema.object({ enabled: Schema.boolean().default(false) }).toJSON())) as JsonValue,
       value: { enabled: false },
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 4,
@@ -506,9 +510,9 @@ describe('ModelsSection', () => {
     })
     fireEvent.click(screen.getByText(en.customized))
     const baseURL = screen.getByLabelText<HTMLInputElement>(en.baseUrl)
-    // The deepseek placeholder is pinned to the public endpoint, not the
-    // effective value (which may reflect a launch-environment override).
-    expect(baseURL.placeholder).toBe('https://api.deepseek.com')
+    // The deepseek placeholder is pinned to the public Messages endpoint, not
+    // the effective value (which may reflect a launch-environment override).
+    expect(baseURL.placeholder).toBe('https://api.deepseek.com/anthropic')
     fireEvent.change(baseURL, { target: { value: 'https://next2' } })
     fireEvent.click(screen.getByText(en.apply))
     await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
@@ -744,6 +748,7 @@ describe('ModelsSection', () => {
       value: { ...stored, defaultContextWindow: 1_000_000 },
       ...base === undefined ? {} : { base },
       user: stored,
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -974,6 +979,7 @@ describe('ModelsSection', () => {
       ns: 'llm-deepseek',
       schema: JSON.parse(JSON.stringify(DeepSeekConfig.toJSON())) as JsonValue,
       value: {},
+      autoGenerate: true,
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -992,7 +998,7 @@ describe('ModelsSection', () => {
     />)
     fireEvent.click(screen.getByText(en.customized))
     const baseURL = screen.getByLabelText<HTMLInputElement>(en.baseUrl)
-    expect(baseURL.placeholder).toBe('https://api.deepseek.com')
+    expect(baseURL.placeholder).toBe('https://api.deepseek.com/anthropic')
     fireEvent.change(baseURL, { target: { value: 'https://x' } })
     expect(baseURL.value).toBe('https://x')
     fireEvent.change(baseURL, { target: { value: '' } })

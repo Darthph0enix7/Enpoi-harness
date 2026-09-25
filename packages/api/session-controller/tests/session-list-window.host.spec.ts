@@ -101,7 +101,7 @@ describe('session.list windowing', () => {
     const { ctx, remote } = await harness()
     const coldId = 'w-cold' as never
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
-      list: async () => [{ version: 3, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
+      list: async () => [{ version: 4, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
     }) as never)
     ctx.provide('sessionProjectionCache', {
       cachedSnapshot: () => ({
@@ -132,7 +132,7 @@ describe('session.list windowing', () => {
     const { ctx, remote } = await harness()
     const coldId = 'w-heavy' as never
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
-      list: async () => [{ version: 3, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
+      list: async () => [{ version: 4, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
     }) as never)
     ctx.provide('sessionProjectionCache', {
       cachedSnapshot: () => ({

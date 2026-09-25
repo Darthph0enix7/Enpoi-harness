@@ -29,7 +29,7 @@ export function createCatalogPickerFace(
   catalog: ModelDirectoryResolver['catalog'],
 ): { face: ModelPickerFace; dispose: () => void } {
   const directory = createSnapshotStore<ModelDirectoryState>({
-    current: null, routable: null, groups: [], failures: [], status: 'idle', error: null,
+    current: null, routable: null, groups: [], failures: [], status: 'idle', pending: null, error: null,
   })
   const publish = (): void => {
     const current = catalog.store.getSnapshot()
@@ -39,6 +39,7 @@ export function createCatalogPickerFace(
       groups: current.value?.groups ?? [],
       failures: current.value?.failures ?? [],
       status: current.status,
+      pending: null,
       error: current.error,
     })
   }

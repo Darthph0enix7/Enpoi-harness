@@ -20,6 +20,9 @@
 /deepseek-ai-dsh-tool-subagent/use-this-package/minimal-configuration:
   en: a8809e00166c7f2f
   zh: 261432232638c445
+/deepseek-ai-dsh-tool-subagent/use-this-package/delegating-with-a-specialist-role:
+  en: 682c598d6799f3f9
+  zh: f196f938ef444802
 /deepseek-ai-dsh-tool-subagent/use-this-package/foreground-and-background-modes:
   en: 8e7319bc2887ae5c
   zh: 87d5abdfbe7562df
@@ -114,7 +117,7 @@
   en: f5d5f97a153f7c70
   zh: 3d6bc05b9eadfbc2
 /deepseek-ai-dsh-tool-subagent/known-limitations-and-deferred-work:
-  en: 30b202766dae2b9d
+  en: 90193ea7e99c4c64
   zh: e2654c858b5a2378
 /deepseek-ai-dsh-tool-subagent/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773

@@ -122,17 +122,20 @@ describe('session rename through the assembled browser', () => {
     const row = (await view.findByText('Session title')).closest('[role="treeitem"]')!
     const trigger = within(row as HTMLElement).getByLabelText('会话“Session title”的操作')
     fireEvent.click(trigger)
+    // The declared entries keep their ascending order; the fork's own row
+    // verbs ride the menu footer after them.
     expect(view.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
       '置顶会话', '重命名', '分叉会话', '归档会话', 'Export action', 'Last action',
+      '复制会话 ID', '导出 Markdown', '移动到文件夹…', '下载日志', '删除会话',
     ])
     expect(view.getAllByRole('separator')).toHaveLength(1)
-    const last = view.getByRole('menuitem', { name: 'Last action' })
+    const last = view.getByRole('menuitem', { name: '删除会话' })
     const exportRow = view.getByRole('menuitem', { name: 'Export action' })
     trigger.focus()
     fireEvent.keyDown(trigger, { key: 'End' })
     expect(document.activeElement).toBe(last)
     fireEvent.keyDown(last, { key: 'ArrowUp' })
-    expect(document.activeElement).toBe(exportRow)
+    expect(document.activeElement).toBe(view.getByRole('menuitem', { name: '下载日志' }))
     fireEvent.click(exportRow)
     expect(selected).toHaveBeenCalledWith('export', SID, 'Session title')
     // The plugin row dismissed the menu through the bound open-state hook;

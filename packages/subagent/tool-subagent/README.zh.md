@@ -54,6 +54,23 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-subagent)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
+### 使用专家角色委派
+
+该工具接受一个可选的 `role` 参数来指定专家。角色是数据而非代码：设置命名空间 `enpoi-orchestration.roles` 保存一份合并到内置默认值（librarian、fixer、explorer、designer、oracle）之上的注册表，因此运维者可以覆盖内置角色的 persona 或工具面、将其停用，或新增角色。角色条目形如 `{ label?, persona?, group?, seat?, tools?: { available?: string[] } }`：
+
+```yaml
+enpoi-orchestration:
+  roles:
+    auditor:
+      label: Auditor
+      group: specialists
+      persona: You review changes for correctness and report findings.
+      tools:
+        available: [read, glob, grep, web_search]
+```
+
+`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换该角色内置的拒绝表，并始终受共享子级下限约束；模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。
+
 ### 前台与后台模式
 
 `one-shot` 策略下，省略 `run_in_background` 会在前台等待并返回子 agent 的最终文本；`run_in_background: true` 会启动一个归父级所有的普通后台任务，并返回 `started background subagent job <id>`，可用 `job_output` 收集、用 `job_kill` 停止。

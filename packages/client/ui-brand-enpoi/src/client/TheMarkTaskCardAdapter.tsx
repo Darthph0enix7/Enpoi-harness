@@ -133,7 +133,10 @@ export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
 
   // RunningToolCall has no `kind`; ToolResultNode is kind: 'tool-result'.
   const running = !('kind' in block)
-  const argsRaw = running ? block.argsRaw : (block.call?.argsRaw ?? '')
+  // A preparing call has no arguments yet; only a dispatched call carries them.
+  const argsRaw = running
+    ? (block.phase === 'start' ? block.argsRaw : '')
+    : (block.call?.argsRaw ?? '')
 
   let parsedArgs: Record<string, unknown> = {}
   try {

@@ -1,5 +1,5 @@
 /** React-commit-driven movement and entry/exit fades for the sidebar's keyed rows. */
-import { Component, createRef, type ReactNode } from 'react'
+import { Component, createRef, type ReactNode, type UIEvent } from 'react'
 import css from './AnimatedRows.module.css'
 
 const ROW_FADE_MS = 100
@@ -14,6 +14,8 @@ interface AnimatedRowsProps {
   ready: boolean
   /** Changes that replace the view or reveal hidden rows settle immediately. */
   resetKey: string
+  /** Scroll handler for the row viewport (the fork's next-window pull). */
+  onScroll?: ((event: UIEvent<HTMLDivElement>) => void) | undefined
 }
 
 interface RowPosition {
@@ -172,6 +174,7 @@ export class AnimatedRows extends Component<AnimatedRowsProps> {
         className={this.props.className}
         role="tree"
         aria-label={this.props.label}
+        onScroll={this.props.onScroll}
         onPointerDownCapture={() => { this.armed = true }}
         onKeyDownCapture={() => { this.armed = true }}
       >

@@ -169,6 +169,7 @@ export interface ISessions {
    * becomes reverted (hidden from the transcript and the model surface on the
    * next commit). Returns the reverted query text for the input card.
    * @param opts - session and the user-message seq anchoring the revert.
+   * @returns the reverted query text and the number of reverted messages.
    * @throws when the host rejects the anchor.
    */
   revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }>

@@ -218,8 +218,8 @@ export class ApiSessionList {
     try {
       const cache = this.ctx.get('sessionProjectionCache')
       if (cache === undefined || header.isSeeded) return undefined
-      const block = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])
-        ?? cache.cachedPredecessorTitle(header, SessionLogOffset(0))
+      const block = cache.cachedSnapshot(header, ['sessionListMetadata'])
+        ?? cache.cachedPredecessorTitle(header)
       return block?.values.sessionListMetadata as SessionListMetadata | undefined
     } catch (error) {
       this.ctx.logger.warn(
@@ -428,7 +428,7 @@ function listRow(summary: SessionSummary): SessionSummary {
   ) as SessionProjectionValues
   return Object.keys(values).length === 0
     ? rest
-    : { ...rest, projections: { asOfSeq: projections.asOfSeq, values } }
+    : { ...rest, projections: { kind: projections.kind, asOfSeq: projections.asOfSeq, values } }
 }
 
 /**

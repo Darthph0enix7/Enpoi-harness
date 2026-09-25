@@ -45,7 +45,7 @@ function options(sessionId: SessionId): GenerateOptions {
     model: 'mock',
     sessionId,
     messages: [
-      createSystemMessage('SYSTEM RULES', 'test'),
+      createSystemMessage('SYSTEM RULES'),
       createUserMessage({
         content: [{ type: 'text', text: 'hello' }],
         source: { kind: 'user' },

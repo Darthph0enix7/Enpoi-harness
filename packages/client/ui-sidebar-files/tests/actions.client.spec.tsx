@@ -53,10 +53,13 @@ function fakeServer() {
 }
 
 /** Mount the body with the fake transport installed before `createFsOps` runs. */
-function mountActions() {
+async function mountActions() {
   const server = fakeServer()
   vi.stubGlobal('fetch', server.fetch)
-  return { ...mountBody(), server }
+  const mounted = mountBody()
+  // Watch-first contract: the root lists only once its watch reports ready.
+  await act(async () => { await mounted.script.watches.ready(ROOT) })
+  return { ...mounted, server }
 }
 
 afterEach(() => {
@@ -95,7 +98,7 @@ function openDots(container: HTMLElement, path: string): void {
 
 describe('row menu and file actions', () => {
   it('opens the file menu from the 3-dots without opening the file, and right-click opens the same list', async () => {
-    const { view, script, tabActions } = mountActions()
+    const { view, script, tabActions } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     const file = row(view.container, `${ROOT}/README.md`)
     openDots(view.container, `${ROOT}/README.md`)
@@ -123,7 +126,7 @@ describe('row menu and file actions', () => {
   })
 
   it('opens the directory menu on right-click too', async () => {
-    const { view, script } = mountActions()
+    const { view, script } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     expect(fireEvent.contextMenu(row(view.container, `${ROOT}/src`))).toBe(false)
     expect(menuLabels()).toEqual([
@@ -133,7 +136,7 @@ describe('row menu and file actions', () => {
   })
 
   it('offers the directory actions, expands a collapsed directory, and creates a file inline', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/src`)
     expect(menuLabels()).toEqual([
@@ -141,7 +144,9 @@ describe('row menu and file actions', () => {
       zh['menu.delete'], zh['menu.copyPath'], zh['menu.copyRelative'],
     ])
     fireEvent.click(item('new-file'))
-    // The collapsed directory opens before the inline row can show.
+    // The collapsed directory opens before the inline row can show; under the
+    // watch-first contract its listing starts once the new subscription is ready.
+    await act(async () => { await script.watches.ready(`${ROOT}/src`) })
     expect(script.list).toHaveBeenLastCalledWith(SESSION, `${ROOT}/src`, expect.any(AbortSignal))
     await act(() => script.settle({ ok: true, value: { entries: [], truncated: false } }))
     const input = document.querySelector<HTMLInputElement>('[data-files-create]')!
@@ -160,7 +165,7 @@ describe('row menu and file actions', () => {
   })
 
   it('offers the empty-area actions, creates a directory inline at the root, and refreshes', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     const area = view.container.querySelector('[data-files-area]')!
     expect(fireEvent.contextMenu(area)).toBe(false)
@@ -181,12 +186,13 @@ describe('row menu and file actions', () => {
     fireEvent.contextMenu(area)
     fireEvent.click(item('refresh'))
     expect(script.list).toHaveBeenLastCalledWith(SESSION, ROOT, expect.any(AbortSignal))
-    expect(view.container.querySelector('[data-files-row="loading"]')).not.toBeNull()
+    // The in-place refresh re-lists without clearing the rows already shown.
+    expect(row(view.container, `${ROOT}/src`)).not.toBeNull()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
   })
 
   it('keeps a failed create input with the host message inline', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     server.reply('fs.mkdir', { ok: false, error: { code: 'exists', message: 'already there' } }, 409)
     const area = view.container.querySelector('[data-files-area]')!
@@ -201,7 +207,7 @@ describe('row menu and file actions', () => {
   })
 
   it('cancels the inline create on Escape and on an empty name, with no request', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     const area = view.container.querySelector('[data-files-area]')!
     fireEvent.contextMenu(area)
@@ -220,7 +226,7 @@ describe('row menu and file actions', () => {
 
 describe('row rename', () => {
   it('renames inline on Enter, reloads the parent, and cancels with Escape', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/README.md`)
     fireEvent.click(item('rename'))
@@ -252,7 +258,7 @@ describe('row rename', () => {
   })
 
   it('sends nothing when the name did not change, and keeps the input on a host failure', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/README.md`)
     fireEvent.click(item('rename'))
@@ -272,7 +278,7 @@ describe('row rename', () => {
   })
 
   it('keeps the rename input with an inline error when the name is emptied', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/README.md`)
     fireEvent.click(item('rename'))
@@ -285,7 +291,7 @@ describe('row rename', () => {
   })
 
   it('renames a directory inline, collapsed and expanded', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     // Collapsed: the editing row carries the closed-folder glyph; Escape leaves it.
     fireEvent.contextMenu(row(view.container, `${ROOT}/src`))
@@ -295,6 +301,7 @@ describe('row rename', () => {
 
     // Expanded: the editing row carries the open-folder glyph, and Enter commits.
     act(() => { fireEvent.click(row(view.container, `${ROOT}/src`).querySelector('button')!) })
+    await act(async () => { await script.watches.ready(`${ROOT}/src`) })
     await act(() => script.settle({ ok: true, value: { entries: [], truncated: false } }))
     fireEvent.contextMenu(row(view.container, `${ROOT}/src`))
     fireEvent.click(item('rename'))
@@ -311,7 +318,7 @@ describe('row rename', () => {
 
 describe('delete, download, copy', () => {
   it('deletes only after the in-menu confirmation, then the row disappears', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/README.md`)
     expect(menuLabels()).toContain(zh['menu.delete'])
@@ -329,7 +336,7 @@ describe('delete, download, copy', () => {
   })
 
   it('reports a failed delete in the body notice', async () => {
-    const { view, script, server } = mountActions()
+    const { view, script, server } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     server.reply('fs.delete', { ok: false, error: { code: 'io', message: 'locked' } }, 500)
     openDots(view.container, `${ROOT}/README.md`)
@@ -355,7 +362,7 @@ describe('delete, download, copy', () => {
       downloads.push(this.download)
     })
     try {
-      const { view, script, server } = mountActions()
+      const { view, script, server } = await mountActions()
       await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
       server.reply('fs.download', { ok: true, value: { base64: 'aGVsbG8=', size: 5, name: 'README.md' } })
       openDots(view.container, `${ROOT}/README.md`)
@@ -380,7 +387,7 @@ describe('delete, download, copy', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     vi.useFakeTimers()
     try {
-      const { view, script } = mountActions()
+      const { view, script } = await mountActions()
       await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
       openDots(view.container, `${ROOT}/README.md`)
       fireEvent.click(item('copy-path'))
@@ -402,7 +409,7 @@ describe('delete, download, copy', () => {
     const writeText = vi.fn((_text: string) => Promise.reject(new Error('denied')))
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     try {
-      const { view, script } = mountActions()
+      const { view, script } = await mountActions()
       await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
       openDots(view.container, `${ROOT}/README.md`)
       fireEvent.click(item('copy-path'))
@@ -417,7 +424,7 @@ describe('delete, download, copy', () => {
 
 describe('menu dismissal and keyboard', () => {
   it('closes on an outside pointerdown and returns focus to the row', async () => {
-    const { view, script } = mountActions()
+    const { view, script } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     const file = row(view.container, `${ROOT}/README.md`)
     openDots(view.container, `${ROOT}/README.md`)
@@ -427,7 +434,7 @@ describe('menu dismissal and keyboard', () => {
   })
 
   it('navigates the menu with the arrow keys, Home, and End', async () => {
-    const { view, script } = mountActions()
+    const { view, script } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     openDots(view.container, `${ROOT}/README.md`)
     expect(document.activeElement).toBe(item('open'))
@@ -451,7 +458,7 @@ describe('menu dismissal and keyboard', () => {
   })
 
   it('gives an other row no 3-dots and no menu, only the suppressed browser menu', async () => {
-    const { view, script } = mountActions()
+    const { view, script } = await mountActions()
     await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
     const other = row(view.container, `${ROOT}/pipe`)
     expect(other.querySelector('[data-files-actions]')).toBeNull()

@@ -88,7 +88,7 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
   return (
     <div className={css.overlay} role="presentation">
       <div className={css.mask} aria-hidden="true" onClick={onClose} />
-      <div className={css.panel} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div className={css.panel} role="dialog" aria-modal="true" aria-labelledby={titleId} data-shortcut-modal="settings">
         <nav className={css.nav}>
           <div className={css.navTitle} id={titleId}>{renderSlot('settings.header', {})}</div>
           <div className={css.navList}>
@@ -142,7 +142,7 @@ type MobilePageProps = {
 function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onClose, t }: MobilePageProps) {
   const active = rows.find(row => row.id === activeId)
   return (
-    <div className={css.mobilePage} role="dialog" aria-modal="true" aria-label={t('title')}>
+    <div className={css.mobilePage} role="dialog" aria-modal="true" aria-label={t('title')} data-shortcut-modal="settings">
       <header className={css.mobileHeader}>
         <button
           type="button"
@@ -191,34 +191,26 @@ function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onCl
 export function SettingsRoot(props: SettingsRootComponentProps) {
   const {
     wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useSessions, renderSlot, t,
-    useDesktopUpdate, useDevice, openDesktopUpdate, publishOpenSection,
+    useDesktopUpdate, useDevice, openDesktopUpdate, publishOpenSection, useStore, actions,
   } = props
-  const [open, setOpen] = useState(false)
-  const [activeId, setActiveId] = useState<string | undefined>(undefined)
+  const { open, activeId } = useStore(state => state)
+  const { close, openSection } = actions
   const [completedOnboarding, setCompletedOnboarding] = useState<ReadonlySet<string>>(() => new Set())
   const [showRecovery, setShowRecovery] = useState(false)
   const [holdConnecting, setHoldConnecting] = useState(false)
   const connectingShownAt = useRef<number | undefined>(undefined)
   const triggerButton = useRef<HTMLButtonElement | null>(null)
   const wasOpen = useRef(open)
-  const close = useCallback(() => {
-    setOpen(false)
-    setActiveId(undefined)
-  }, [])
   // Restore after the close commit, when the dialog can no longer own focus.
   useEffect(() => {
     if (wasOpen.current && !open) triggerButton.current?.focus()
     wasOpen.current = open
   }, [open])
-  const openSection = useCallback((id: string) => {
-    setActiveId(id)
-    setOpen(true)
-  }, [])
 
   // The phone page steps list → detail → closed; the shared stack runs the
   // same step for the back gesture, and both land on a visible control.
   const phone = useDevice(snapshot => snapshot).device === 'phone'
-  const backToList = useCallback(() => { setActiveId(undefined) }, [])
+  const backToList = useCallback(() => { actions.select(undefined) }, [actions])
   useBackHandler('ui-settings:mobile', () => {
     if (activeId === undefined) close()
     else backToList()
@@ -313,7 +305,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           aria-label={t('trigger')}
           aria-haspopup="dialog"
           aria-expanded={open}
-          onClick={() => { setOpen(true) }}
+          onClick={() => { actions.open() }}
         >
           {renderSlot('settings.trigger', { wide })}
         </button>
@@ -334,7 +326,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           rows={rows}
           renderSlot={renderSlot}
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={actions.select}
           onBack={backToList}
           onClose={close}
           t={t}
@@ -344,7 +336,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           rows={rows}
           renderSlot={renderSlot}
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={actions.select}
           onClose={close}
         />
       ))}

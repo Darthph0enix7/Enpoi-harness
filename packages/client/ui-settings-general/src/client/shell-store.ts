@@ -5,7 +5,8 @@ type State = { open: boolean; activeId: string | undefined }
 type Actions = {
   open(draft: State): void
   close(draft: State): void
-  select(draft: State, id: string): void
+  /** Show one section by id, or the section list again when id is undefined (mobile back). */
+  select(draft: State, id: string | undefined): void
   openSection(draft: State, id: string): void
 }
 
@@ -19,7 +20,7 @@ export function createSettingsShellStore(): EngineStoreHandle<State, Actions> {
     actions: {
       open: (d) => { d.open = true },
       close: (d) => { d.open = false; d.activeId = undefined },
-      select: (d, id: string) => { d.activeId = id },
+      select: (d, id) => { d.activeId = id },
       openSection: (d, id: string) => { d.activeId = id; d.open = true },
     },
   })

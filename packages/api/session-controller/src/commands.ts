@@ -652,6 +652,9 @@ export class SessionCommandController {
    * (surfaced via `revert/file-conflict` log events by the `enpoi-file-revert`
    * plugin). The host bridges to the plugin through the `file-revert/resolve`
    * waterfall; without the plugin mounted the call degrades to a clear error.
+   * A mounted plugin that refuses the id (no such conflict, or a stale card)
+   * rejects with `file-revert-invalid`; its own diagnostics and resolution
+   * audit stay with the plugin.
    */
   async resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue> {
     const agent = this.ctx.agents.get(request.sessionId)
@@ -668,9 +671,19 @@ export class SessionCommandController {
       sessionId: request.sessionId,
       conflictId: request.conflictId,
       resolution: request.resolution,
-    }, () => ({ accepted: false as const, reason: 'file-revert plugin not mounted' }))
-    if (outcome === undefined) {
-      reject('file-revert-unavailable', 'file-revert plugin is not mounted; cannot resolve conflicts', { sessionId: request.sessionId })
+    }, () => ({ accepted: false as const, reason: 'file-revert plugin not mounted' })) as
+      | { readonly accepted?: boolean; readonly reason?: string }
+      | undefined
+    if (outcome === undefined || outcome.accepted !== true) {
+      if (outcome === undefined || outcome.reason === 'file-revert plugin not mounted') {
+        reject('file-revert-unavailable', 'file-revert plugin is not mounted; cannot resolve conflicts', { sessionId: request.sessionId })
+      }
+      const reason = outcome.reason ?? 'the file-revert bridge returned no outcome'
+      reject(
+        'file-revert-invalid',
+        `session "${request.sessionId}" cannot resolve file-revert conflict "${request.conflictId}": ${reason}`,
+        { sessionId: request.sessionId, conflictId: request.conflictId, reason },
+      )
     }
     return { accepted: true }
   }

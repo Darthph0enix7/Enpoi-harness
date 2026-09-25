@@ -36,6 +36,9 @@
       "path": "../ui-layout"
     },
     {
+      "path": "../ui-sidebar-right"
+    },
+    {
       "path": "../locale/tsconfig.client.json"
     },
     {

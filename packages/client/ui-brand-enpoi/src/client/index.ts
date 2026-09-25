@@ -106,6 +106,7 @@ function createCatalogDirectoryFace(ctx: Context): CatalogDirectoryFace | null {
           routable: null,
           groups: current.value?.groups ?? [],
           failures: current.value?.failures ?? [],
+          pending: null,
           status: current.status === 'ready' ? 'ready' as const : current.status === 'error' ? 'error' as const : 'idle' as const,
           error: current.error,
         }
@@ -433,11 +434,8 @@ export function apply(ctx: Context): void {
     const openSession = (id: SessionId) => {
       uiWorkspace?.openSession(id)
     }
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'subagent',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
+    // `subagent` is upstream ui-tool's DetailsRow: the merged tool layer already
+    // owns that key, so the fork's card cannot register it a second time.
     yield ctx.slots.register({
       name: 'tool.call.toolview',
       key: 'dispatch_task',

@@ -1,0 +1,37 @@
+# Bilingual-pair consistency record for peer.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/subsystems/peer.md
+/peer-interconnect:
+  en: b237e8f14c5990c1
+  zh: ddc6f46d71326584
+/peer-interconnect/host-service-and-configuration:
+  en: 23aaed6ebfb9a64d
+  zh: c32b82b4660d7e32
+/peer-interconnect/pairing-model:
+  en: e45b4dcee9a4f9cd
+  zh: a37f3b2940d490e7
+/peer-interconnect/exposure-filter:
+  en: 163e99df86927f9e
+  zh: 9115fc4e4f494e67
+/peer-interconnect/handshake:
+  en: 9d2c2ec747e7f842
+  zh: 2896dcb51512d99c
+/peer-interconnect/sessions-create-prompt-cancel:
+  en: 0a9af6c1e79a31dd
+  zh: f854480db269ee94
+/peer-interconnect/execution-state:
+  en: f02875b3202c8efe
+  zh: 236b3ca800b7f890
+/peer-interconnect/asks-answer-and-the-race:
+  en: af70390842bdfd36
+  zh: 34117249dd415a90
+/peer-interconnect/history-page-and-follow:
+  en: 1b78bff465c8a80b
+  zh: 871cab7969fa25fa
+/peer-interconnect/orphan-watchdog:
+  en: adfad8b8f13c73e2
+  zh: bc0f8104060b0f8e
+/peer-interconnect/limits-and-known-gaps:
+  en: 929712e1b6f3f466
+  zh: 9ffe68e3ba3da15e

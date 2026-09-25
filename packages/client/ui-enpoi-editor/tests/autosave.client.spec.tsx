@@ -260,7 +260,7 @@ describe('auto-save invariants', () => {
       const store = createEditorStore().create()
       seedDirty(store)
       const loaded = vi.fn()
-      const content: DocumentContent = { kind: 'renderer', revision: 0, reload: () => {}, loaded }
+      const content: DocumentContent = { kind: 'renderer', revision: 0, reload: () => {}, failed: () => {}, loaded }
       render(<EditorBody {...propsFor(store, io.fs, content)} />)
       await act(async () => { await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS + 10) })
       expect(loaded).toHaveBeenCalledWith('sha-written')

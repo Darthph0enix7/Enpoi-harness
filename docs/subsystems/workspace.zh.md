@@ -384,6 +384,12 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('archiveSession') archiveSession(request: WorkspaceArchiveSessionRequest): Promise<WorkspaceArchiveValue>
 
 /**
+ * Move one known Session to a target Workspace (display-only overlay).
+ * @param request - Session identity plus the target Workspace.
+ */
+@Remote('moveSession') moveSession(request: WorkspaceMoveSessionRequest): Promise<void>
+
+/**
  * Restore one archived Session to Workspace grouping surfaces.
  * @param request - Session identity to unarchive.
  * @returns the complete resulting archive set.
@@ -566,11 +572,35 @@ archiveSession(sessionId: SessionId, options: ArchiveSessionOptions = {}): Promi
  * returns to its recorded position. Unarchiving runs no session-existence
  * check because removing an id cannot introduce an unknown one, so an
  * entry whose session is gone still resolves. An id that is not archived
- * resolves without writing.
+ * resolves without writing. Also used after a permanent session delete so
+ * deleted ids do not ride the archive set forever.
  * @param sessionId - The session to unarchive.
  * @returns resolution after durability.
  */
 unarchiveSession(sessionId: SessionId): Promise<void>
+
+/**
+ * Display-only move: claim a session for display under another workspace
+ * without touching its cwd accounting. One atomic setState (the same crash
+ * story as archive — no two-write window). The session's cwd workspace
+ * record is untouched; the wire projection excludes overlay-claimed ids
+ * from their cwd workspace's list and includes them under the target.
+ * Moving to the session's own cwd workspace (or an already-claimed target)
+ * resolves without writing.
+ * @param sessionId - The session to display under another workspace.
+ * @param targetWorkspaceId - The workspace that displays the session.
+ * @returns resolution after durability.
+ */
+moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void>
+
+/**
+ * Remove a session's display-move overlay claim: the session returns to
+ * its cwd workspace's list. A session without a claim resolves without
+ * writing.
+ * @param sessionId - The session to un-claim.
+ * @returns resolution after durability.
+ */
+unmoveSession(sessionId: SessionId): Promise<void>
 
 /**
  * Pin one session durably, prepending it to the registry-global pin set.

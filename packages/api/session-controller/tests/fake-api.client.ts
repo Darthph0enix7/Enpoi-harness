@@ -4,7 +4,7 @@
 import type {
   MessageId,
   SessionId, SessionSearchItem,
-  SubagentCatalog, SubagentInterruptReceipt, SubagentPromptReceipt,
+  SubagentInterruptReceipt, SubagentPromptReceipt,
   WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
@@ -32,6 +32,7 @@ import {
   RemoteStream,
   type RemoteStreamOptions,
 } from '@deepseek-ai/dsh-api-gateway/client'
+import { streamHandle } from '@deepseek-ai/dsh-remote-mock'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
 import { followSnapshot, pageThrough } from './remote/history.client.ts'
 
@@ -202,7 +203,6 @@ export class FakeApiClient {
   /** Optional Host opening cursor override for stale-page and reconnect tests. */
   followCursor: number | undefined
   controlBaseline: SessionControlBaseline = {
-    jobs: {},
     projections: {},
   }
   assistantStreamBaseline: SessionAssistantStreamBaseline = {
@@ -211,11 +211,10 @@ export class FakeApiClient {
   workspaceBaseline: Extract<WorkspaceFollowFrame, { type: 'baseline' }>['value'] = {
     items: [],
     archivedSessionIds: [],
+    pinnedSessionIds: [],
   }
   lastSearchSignal: AbortSignal | undefined
 
-  onSubagentList: (payload: unknown) => Promise<RemoteResult<SubagentCatalog>>
-    = () => Promise.resolve(ok({ entries: [], parentAvailable: true }))
   onSubagentPrompt: (payload: unknown) => Promise<RemoteResult<SubagentPromptReceipt>>
     = () => Promise.resolve(ok({ messageId: 'fake-message' as MessageId }))
 
@@ -244,6 +243,12 @@ export class FakeApiClient {
   onWorkspaceMoveSession: (payload: unknown) => Promise<RemoteResult<void>> =
     () => Promise.resolve(ok(undefined))
 
+  onWorkspacePinSession: (payload: unknown) => Promise<RemoteResult<{ readonly pinnedSessionIds: readonly SessionId[] }>> =
+    () => Promise.resolve(ok({ pinnedSessionIds: [] }))
+
+  onWorkspaceUnpinSession: (payload: unknown) => Promise<RemoteResult<{ readonly pinnedSessionIds: readonly SessionId[] }>> =
+    () => Promise.resolve(ok({ pinnedSessionIds: [] }))
+
   /** Remote namespaces bound to this fake's programmable unary slots and stream pumps. */
   sessionRemotes(): RuntimeRemotes {
     return {
@@ -255,6 +260,7 @@ export class FakeApiClient {
       },
       session: {
         canOpenWorkspacePath: () => Promise.resolve(ok(true)),
+        initializeDefaultModel: () => Promise.resolve(ok(undefined)),
         list: payload => this.record('session.list', payload, this.onList(payload)),
         modelCatalog: () => Promise.resolve({
           ok: true,
@@ -292,21 +298,26 @@ export class FakeApiClient {
           this.onOpenWorkspacePath(payload),
         ),
         page: request => this.page(request),
-        follow: (request, signal) => this.openFollow(request, signal),
-        control: signal => this.openControl(signal),
+        projections: payload => this.record(
+          'session.projections',
+          payload,
+          Promise.resolve(ok({ asOfSeq: -1, values: {} })),
+        ),
+        follow: (request, signal) => streamHandle(this.openFollow(request, signal)),
+        control: signal => streamHandle(this.openControl(signal)),
         revert: payload => this.record('session.revert', payload, this.onRevert(payload)),
         revertRestore: payload => this.record('session.revertRestore', payload, this.onRevertRestore(payload)),
         resolveFileConflict: payload => this.record('session.resolveFileConflict', payload, this.onResolveFileConflict(payload)),
         delete: payload => this.record('session.delete', payload, this.onDelete(payload)),
         executionState: payload => this.record('session.executionState', payload, this.onExecutionState(payload)),
         digest: payload => this.record('session.digest', payload, this.onDigest(payload)),
+        workspacePathApplications: payload => this.record(
+          'session.workspacePathApplications',
+          payload,
+          Promise.resolve(ok([])),
+        ),
       },
       subagents: {
-        list: parentSessionId => this.record(
-          'subagents.list',
-          parentSessionId,
-          this.onSubagentList(parentSessionId),
-        ),
         prompt: request => this.record('subagents.prompt', request, this.onSubagentPrompt(request)),
         interruptByParent: (childSessionId, parentSessionId, mode) => this.record(
           'subagents.interruptByParent',
@@ -316,6 +327,7 @@ export class FakeApiClient {
       },
       workspace: {
         create: payload => this.record('workspace.create', payload, this.onWorkspaceCreate(payload)),
+        initializeDefault: () => Promise.resolve(ok(undefined)),
         rename: payload => this.record('workspace.rename', payload, this.onWorkspaceRename(payload)),
         delete: payload => this.record('workspace.delete', payload, this.onWorkspaceDelete(payload)),
         insertBefore: payload => this.record(
@@ -343,7 +355,17 @@ export class FakeApiClient {
           payload,
           this.onWorkspaceMoveSession(payload),
         ),
-        follow: signal => this.openWorkspace(signal),
+        pinSession: payload => this.record(
+          'workspace.pinSession',
+          payload,
+          this.onWorkspacePinSession(payload),
+        ),
+        unpinSession: payload => this.record(
+          'workspace.unpinSession',
+          payload,
+          this.onWorkspaceUnpinSession(payload),
+        ),
+        follow: signal => streamHandle(this.openWorkspace(signal)),
       },
     }
   }

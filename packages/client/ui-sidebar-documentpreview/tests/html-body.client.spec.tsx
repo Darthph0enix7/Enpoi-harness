@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /** HTML iframe ownership follows file identity and bytes, not locale or wrapping changes. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { bindSnapshotSelector, stubConfigForm } from '@deepseek-ai/dsh-client-test-runtime'
 import { DeveloperToolsPreference } from '@deepseek-ai/dsh-client-ui-settings/src/client/developer-tools.ts'
@@ -129,6 +129,11 @@ describe('HtmlBody', () => {
     expect(h.bytes).toHaveBeenCalledTimes(reads + 1)
     expect(readRelated).toHaveBeenCalledTimes(relatedReads + 1)
     act(() => { root.set(metadata('root-v2')) })
+    // The file's own metadata change is announced in the preview chrome, not
+    // applied under a reader: the toolbar's reload (or the announced bar for
+    // host-owned views) performs the reread.
+    expect(h.bytes).toHaveBeenCalledTimes(reads + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'reload' }))
     await waitFor(() => { expect(h.bytes).toHaveBeenCalledTimes(reads + 2) })
     expect(readRelated).toHaveBeenCalledTimes(relatedReads + 1)
     view.unmount()

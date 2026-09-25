@@ -391,7 +391,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'setPolicy(agent: Agent, policy: ApprovalPolicy): void',
-        description: 'Switch one live agent\'s policy and queue the transition for its next model step. Session initialization uses setApprovalPolicy directly because there is no previously visible policy to change.',
+        description: 'Switch one live agent\'s policy and queue the transition for its next model step. Session initialization uses setApprovalPolicy directly because there is no previously visible policy to change.\n\nThe new value surfaces to the model through the runtime-context snapshot (`approval:policy` context described above): the snapshot updates in place on the next step\'s assembly. No synthetic user message is appended — an injected notice would persist as history and reach the model on every subsequent turn (Enpoi Harness: fixed a cache-hostile, context-polluting append; the runtime-context snapshot is the only channel).',
         parameters: [{ name: 'agent', description: 'the live agent whose policy is changing.' }, { name: 'policy', description: 'the new effective policy.' }],
       },
       {
@@ -586,7 +586,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'rebuilt(id: string): string | undefined',
-        description: 'Publish one completed bundle generation (the HMR watch\'s registration hook — the only entry point through which build changes reach the graph). Unchanged mtime, ctime and size preserve the graph without reading the bundle.',
+        description: 'Publish one completed bundle generation (the HMR watch\'s registration hook — the only entry point through which build changes reach the graph). Equal executable bytes keep the same rev without a graph change.',
         parameters: [{ name: 'id', description: 'entry id (package name).' }],
         returns: 'the current artifact rev, or undefined for an unknown id.',
       },
@@ -1397,6 +1397,29 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the advertised models, deduplicated in endpoint order.',
       },
       {
+        signature: 'registerPoolOperations( settingsNs: string, ops: LlmPoolOperations, ): () => void',
+        description: 'Register provider pool management operations on behalf of a settings namespace.',
+        parameters: [{ name: 'settingsNs', description: 'namespace whose pool this operations set manages.' }, { name: 'ops', description: 'pool operations implementation.' }],
+        returns: 'disposer.',
+      },
+      {
+        signature: '@Remote async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>',
+        description: 'Get pool identities status for a provider route.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }],
+        returns: 'per-identity pool status rows.',
+      },
+      {
+        signature: '@Remote async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>',
+        description: 'Reset cooldowns for one identity or all identities under a provider route.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }, { name: 'identityId', description: 'optional identity to reset; omitted resets all.' }],
+      },
+      {
+        signature: '@Remote async poolTestIdentity( settingsNs: string, provider: string, identityId: string, apiKey?: string, ): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string; modelsCount?: number }>',
+        description: 'Test an individual identity in a provider route pool.',
+        parameters: [{ name: 'settingsNs', description: 'provider settings namespace.' }, { name: 'provider', description: 'provider route id.' }, { name: 'identityId', description: 'identity to probe.' }, { name: 'apiKey', description: 'optional override credential for the probe.' }],
+        returns: 'probe outcome with status, latency, and error detail.',
+      },
+      {
         signature: '@Remote(\'discoverModels\') async remoteDiscoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal, ): Promise<LlmDiscoveredModel[]>',
         description: 'Remote adapter for one draft provider interrogation.',
         parameters: [{ name: 'settingsNs', description: 'namespace whose registered discovery serves this draft.' }, { name: 'request', description: 'endpoint, protocol, and one-shot credential to use.' }, { name: 'signal', description: 'caller cancellation supplied by the Remote carrier.' }],
@@ -1538,6 +1561,73 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Read the current rendering generation before reusing a Client PDF.',
         parameters: [{ name: 'signal', description: 'Remote caller cancellation.' }],
         returns: 'provider lifetime, replaced with rendering, font, or engine configuration.',
+      },
+    ],
+  },
+  {
+    key: 'peerService',
+    summary: 'Host service backing the generated `ctx.remote.peer` namespace.',
+    description: 'Host service backing the generated `ctx.remote.peer` namespace.',
+    methods: [
+      {
+        signature: 'readonly pairings: PeerPairingsStore',
+        description: 'Pairing table and created-session bindings.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly registry: PeerAskRegistry',
+        description: 'Ask registry resolving the local-versus-peer answer race.',
+        parameters: [],
+      },
+      {
+        signature: '@Remote(\'handshake\') handshake(request: PeerHandshakeRequest): PeerHandshakeValue',
+        description: 'Negotiate protocol, capability, and pairing identity.',
+        parameters: [{ name: 'request', description: 'caller protocol, harness version, schema digest, and device name.' }],
+        returns: 'the host identity, capabilities, and visible pairings.',
+        throws: ['{@link RemoteError} `peer/version-skew` on protocol divergence.'],
+      },
+      {
+        signature: '@Remote(\'state\') async state(request: PeerStateRequest): Promise<PeerStateValue>',
+        description: 'Read the aggregate execution state for one paired Session. The host\'s `session.executionState` latch wins when it answers (`source:\'host-latch\'`); a cold Session or a host without that call keeps the derived fold.',
+        parameters: [{ name: 'request', description: 'resolved target.' }],
+        returns: 'latch, descendants, pending asks, model selection, and cursor.',
+      },
+      {
+        signature: '@Remote(\'create\') async create(request: PeerCreateRequest): Promise<PeerCreateValue>',
+        description: 'Create or explicitly adopt a Session and bind it to a pairing alias.',
+        parameters: [{ name: 'request', description: 'pairing alias, participant, optional explicit session and routing.' }],
+        returns: 'the resolved target and whether a new Session was created.',
+      },
+      {
+        signature: '@Remote(\'prompt\') async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue>',
+        description: 'Admit one queued peer turn into a paired Session.',
+        parameters: [{ name: 'request', description: 'target, participant, dedupe id, text content, and hop telemetry.' }, { name: 'signal', description: 'carrier cancellation before prompt admission begins.' }],
+        returns: 'acceptance and the incremented hop count.',
+        throws: ['{@link RemoteError} `peer/hop-limit` only when the pairing configures a ceiling.'],
+      },
+      {
+        signature: '@Remote(\'cancel\') cancel(request: PeerCancelRequest): PeerCancelValue',
+        description: 'Cancel the active turn of a paired Session, attributed to the peer.',
+        parameters: [{ name: 'request', description: 'target and participant.' }],
+        returns: 'acceptance and whether a turn was active.',
+      },
+      {
+        signature: '@Remote(\'answer\') answer(request: PeerAnswerRequest): PeerAnswerValue',
+        description: 'Settle a pending ask for a paired Session.',
+        parameters: [{ name: 'request', description: 'target, participant, ask id, and answer payload.' }],
+        returns: 'acceptance after the ask settled.',
+      },
+      {
+        signature: '@Remote(\'page\') async page(request: PeerPageRequest, signal: AbortSignal): Promise<PeerPageValue>',
+        description: 'Repair history backwards from a follow cut, exposure-filtered.',
+        parameters: [{ name: 'request', description: 'target, inclusive cut, and optional backwards cursor.' }, { name: 'signal', description: 'carrier cancellation for persistence reads.' }],
+        returns: 'one contiguous backwards window of visible records.',
+      },
+      {
+        signature: '@Remote({ mode: \'stream\' }) async *follow(request: PeerFollowRequest, signal: AbortSignal): AsyncIterable<PeerFollowFrame>',
+        description: 'Open a filtered stream: opening snapshot, then durable events and latch transitions.',
+        parameters: [{ name: 'request', description: 'target, window budget, and debug-only assistant stream opt-in.' }, { name: 'signal', description: 'carrier cancellation owned by the Remote stream.' }],
+        returns: 'peer follow frames; `event`/`state` frames carry the durable scan cursor.',
       },
     ],
   },
@@ -1870,10 +1960,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the current attached state or persisted header and event prefix.',
       },
       {
-        signature: '@Remote(\'list\') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
-        description: 'Read all visible Session rows without resuming an Agent.',
-        parameters: [{ name: '_request', description: 'reserved empty list request.' }, { name: 'signal', description: 'cancellation for persistence reads.' }],
-        returns: 'visible Session summaries ordered by activity.',
+        signature: '@Remote(\'list\') async list(request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
+        description: 'Read one newest-first window of visible Session rows without resuming an Agent.',
+        parameters: [{ name: 'request', description: 'optional continuation cursor and page size.' }, { name: 'signal', description: 'cancellation for persistence reads.' }],
+        returns: 'the page\'s visible Session summaries plus a cursor when older rows remain.',
       },
       {
         signature: '@Remote(\'search\') search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue>',
@@ -1944,10 +2034,55 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the new Session identity.',
       },
       {
+        signature: '@Remote(\'revert\') revert(request: SessionRevertRequest): Promise<SessionRevertValue>',
+        description: 'Revert the conversation from a user message (revert-from-here).',
+        parameters: [{ name: 'request', description: 'session and the user-message seq anchoring the revert.' }],
+        returns: 'the reverted query text and count for the input card.',
+      },
+      {
+        signature: '@Remote(\'revertRestore\') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>',
+        description: 'Restore reverted messages (restoreSeq omitted restores everything).',
+        parameters: [{ name: 'request', description: 'session and the optional restore boundary.' }],
+        returns: 'acknowledgement that the restore was accepted.',
+      },
+      {
+        signature: '@Remote(\'resolveFileConflict\') resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue>',
+        description: 'Resolve a file revert conflict (bridged to the enpoi-file-revert plugin).',
+        parameters: [{ name: 'request', description: 'session, conflictId, and the chosen resolution.' }],
+        returns: 'acknowledgement that the resolution was accepted.',
+      },
+      {
+        signature: '@Remote(\'delete\') delete(request: SessionDeleteRequest): Promise<SessionDeleteValue>',
+        description: 'Permanently delete a session (log, revert history, file history).',
+        parameters: [{ name: 'request', description: 'session to delete.' }],
+        returns: 'acknowledgement that the session was deleted.',
+      },
+      {
         signature: '@Remote(\'prompt\') prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue>',
         description: 'Admit one prompt after explicitly resuming its Session.',
         parameters: [{ name: 'request', description: 'Session identity, prompt content, source metadata, and delivery mode.' }, { name: 'signal', description: 'caller cancellation before prompt admission begins.' }],
         returns: 'acknowledgement that the Agent accepted the prompt.',
+      },
+      {
+        signature: '@Remote(\'requestSnapshot\') requestSnapshot( request: SessionRequestSnapshotRequest, signal: AbortSignal, ): Promise<SessionRequestSnapshotValue>',
+        description: 'Read what the model was actually sent for one Session\'s most recent main request (the LLM seam\'s per-Session wire capture).\n\nThe default summary is a digest-and-size view: `system` reports character count and SHA-256, `tools` names, and one `{role, chars}` row per message. `includeBodies: true` additionally returns the SECRET-BEARING bodies — the full system prompt, tool schemas, and message text — so callers must treat the result as sensitive. When the capture exceeded its byte cap, the bodies are unavailable and the response keeps `bodiesIncluded: false` with `bodiesOmitted: \'size-cap\'`.',
+        parameters: [{ name: 'request', description: 'Session identity and whether secret-bearing bodies are requested.' }, { name: 'signal', description: 'caller cancellation for the capture read.' }],
+        returns: 'the captured request summary, or the bodies too when requested.',
+        throws: ['RemoteError `gateway/bad-request` for an unaddressable Session id, `session/not-found` when no capture exists.'],
+      },
+      {
+        signature: '@Remote(\'executionState\') executionState(request: SessionExecutionStateRequest): SessionExecutionStateValue',
+        description: 'Read the aggregate execution latch of one attached Session: the `running | waiting_approval | waiting_subagents | idle` state, live descendants (quiet children included), pending approvals and questions, the last turn terminal, the last attributed participant action, and the current model selection (doc 69 §8 correction 3; doc 70 §4). Read-only: the count comes from the live Agent registry and subagent lifecycle events, never from crawling the parent log.',
+        parameters: [{ name: 'request', description: 'attached Session identity.' }],
+        returns: 'the host-published latch value.',
+        throws: ['RemoteError `session/not-found` when no live Session owns the id.'],
+      },
+      {
+        signature: '@Remote(\'digest\') digest(request: SessionDigestRequest): SessionDigestValue',
+        description: 'Read the one-call Session digest for a debugging consumer: the execution latch, current model, last attributed action, recent tool calls, the injection index, the subagent tree, and pending interactions (doc 69 §9.1). Every preview is bounded and no credentials or captured request bodies are included.',
+        parameters: [{ name: 'request', description: 'attached Session identity and the recent-tool-call budget.' }],
+        returns: 'the bounded digest value.',
+        throws: ['RemoteError `session/not-found` when no live Session owns the id.'],
       },
       {
         signature: '@Remote(\'attachment\') attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue>',
@@ -2061,6 +2196,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'List every stored session visible to this process, in no promised order.',
         parameters: [{ name: 'options', description: 'optional cancellation.' }],
         returns: 'one snapshot per stored session.',
+      },
+      {
+        signature: 'abstract delete(id: SessionId, signal?: AbortSignal): Promise<void>',
+        description: 'Permanently delete a session\'s durable artifacts. An absent session is a no-op success (blank sessions may be deleted before ever materializing — backends create lazily). Implementations must not reject on a missing artifact; storage faults propagate.',
+        parameters: [{ name: 'id', description: 'the persisted session to delete.' }, { name: 'signal', description: 'optional cancellation for backend delete work.' }],
       },
     ],
   },
@@ -2351,6 +2491,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Look up a live session.',
         parameters: [{ name: 'id', description: 'the session id to look up.' }],
         returns: 'the session, or undefined when no live session has that id.',
+      },
+      {
+        signature: 'dispose(id: SessionId): boolean',
+        description: 'Dispose a live session by id: detach it from the store and emit its paired disposal edge. Safe to call from host RPCs (e.g. permanent session delete); the single-shot `entered` guard makes a later detach by the session\'s own lifecycle owner a no-op. Does NOT stop a running agent loop — callers must cancel and await quiescence first.',
+        parameters: [{ name: 'id', description: 'the live session to dispose.' }],
+        returns: 'whether a live session was detached.',
       },
       {
         signature: 'list(): Session[]',
@@ -3541,6 +3687,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the complete resulting archive set.',
       },
       {
+        signature: '@Remote(\'moveSession\') moveSession(request: WorkspaceMoveSessionRequest): Promise<void>',
+        description: 'Move one known Session to a target Workspace (display-only overlay).',
+        parameters: [{ name: 'request', description: 'Session identity plus the target Workspace.' }],
+      },
+      {
         signature: '@Remote(\'unarchiveSession\') unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<WorkspaceArchiveValue>',
         description: 'Restore one archived Session to Workspace grouping surfaces.',
         parameters: [{ name: 'request', description: 'Session identity to unarchive.' }],
@@ -3653,8 +3804,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'unarchiveSession(sessionId: SessionId): Promise<void>',
-        description: 'Unarchive one session durably by dropping it from the registry-global archive set; the accounting slot was never touched, so the session returns to its recorded position. Unarchiving runs no session-existence check because removing an id cannot introduce an unknown one, so an entry whose session is gone still resolves. An id that is not archived resolves without writing.',
+        description: 'Unarchive one session durably by dropping it from the registry-global archive set; the accounting slot was never touched, so the session returns to its recorded position. Unarchiving runs no session-existence check because removing an id cannot introduce an unknown one, so an entry whose session is gone still resolves. An id that is not archived resolves without writing. Also used after a permanent session delete so deleted ids do not ride the archive set forever.',
         parameters: [{ name: 'sessionId', description: 'The session to unarchive.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'moveSession(sessionId: SessionId, targetWorkspaceId: WorkspaceId): Promise<void>',
+        description: 'Display-only move: claim a session for display under another workspace without touching its cwd accounting. One atomic setState (the same crash story as archive — no two-write window). The session\'s cwd workspace record is untouched; the wire projection excludes overlay-claimed ids from their cwd workspace\'s list and includes them under the target. Moving to the session\'s own cwd workspace (or an already-claimed target) resolves without writing.',
+        parameters: [{ name: 'sessionId', description: 'The session to display under another workspace.' }, { name: 'targetWorkspaceId', description: 'The workspace that displays the session.' }],
+        returns: 'resolution after durability.',
+      },
+      {
+        signature: 'unmoveSession(sessionId: SessionId): Promise<void>',
+        description: 'Remove a session\'s display-move overlay claim: the session returns to its cwd workspace\'s list. A session without a claim resolves without writing.',
+        parameters: [{ name: 'sessionId', description: 'The session to un-claim.' }],
         returns: 'resolution after durability.',
       },
       {
@@ -3772,7 +3935,7 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'agent/request-error',
     mode: 'waterfall',
-    signature: '\'agent/request-error\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>',
+    signature: '\'agent/request-error\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; model: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>',
     summary: 'Handle one failed model-request attempt before the loop retries or closes its step.',
     description: 'Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: \'retry\' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal.',
     parameters: [{ name: 'payload', description: '.signal - the turn abort signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
@@ -4391,7 +4554,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentCancelCause',
-    declaration: 'export type AgentCancelCause = {\n    readonly kind: \'user\';\n} | {\n    readonly kind: \'parent\';\n} | {\n    readonly kind: \'hook\';\n    readonly reason: string;\n} | {\n    readonly kind: \'disposed\';\n};',
+    declaration: 'export type AgentCancelCause = {\n    readonly kind: \'user\';\n    readonly participant?: ParticipantTag;\n} | {\n    readonly kind: \'parent\';\n} | {\n    readonly kind: \'hook\';\n    readonly reason: string;\n} | {\n    readonly kind: \'disposed\';\n};',
   },
   {
     name: 'AgentFactory',
@@ -4403,7 +4566,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentOptions',
-    declaration: 'export interface AgentOptions {\n    provider?: string;\n    model?: string;\n    reasoningEffort?: ReasoningEffortId;\n    maxTokens?: number;\n}',
+    declaration: 'export interface AgentOptions {\n    provider?: string;\n    model?: string;\n    chain?: string;\n    reasoningEffort?: ReasoningEffortId;\n    maxTokens?: number;\n}',
   },
   {
     name: 'AgentPresetComposition',
@@ -4442,6 +4605,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type AgentStatus = \'idle\' | \'running\';',
   },
   {
+    name: 'AnsweringLink',
+    declaration: 'export interface AnsweringLink {\n    readonly provider: string;\n    readonly model: string;\n}',
+  },
+  {
     name: 'ApiKeyRecord',
     declaration: 'export interface ApiKeyRecord {\n    readonly kind: \'api-key\';\n    readonly key?: string;\n    readonly env?: Readonly<Record<string, string>>;\n}',
   },
@@ -4455,7 +4622,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ApprovalOutcome',
-    declaration: 'export type ApprovalOutcome = \'allowed-once\' | \'rejected\' | \'cancelled\' | \'unavailable\';',
+    declaration: 'export type ApprovalOutcome = \'allowed-once\' | \'allowed-always\' | \'rejected\' | \'cancelled\' | \'unavailable\';',
   },
   {
     name: 'ApprovalPolicy',
@@ -4519,7 +4686,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AssistantProviderMetadata',
-    declaration: 'export interface AssistantProviderMetadata {\n    provider: string;\n    model: string;\n    replayState?: unknown;\n}',
+    declaration: 'export interface AssistantProviderMetadata {\n    provider: string;\n    model: string;\n    chain?: string;\n    replayState?: unknown;\n}',
   },
   {
     name: 'AssistantStreamFrame',
@@ -4799,11 +4966,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContinuableStartSpec',
-    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n}',
+    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'ContinuableSubagentDescriptorData',
-    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly agentReasoningEffort?: ReasoningEffortId;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
+    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly agentReasoningEffort?: ReasoningEffortId;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'CordisDynamicPackageId',
@@ -5179,7 +5346,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    chain?: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -5515,7 +5682,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailure',
-    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly offloadImages?: number;\n}',
+    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly offloadImages?: number;\n}',
   },
   {
     name: 'LlmImageRequestPrice',
@@ -5542,6 +5709,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmModelReasoningInfo {\n    efforts: readonly LlmReasoningEffortInfo[];\n    defaultEffort?: ReasoningEffortId;\n}',
   },
   {
+    name: 'LlmPoolIdentityStatus',
+    declaration: 'export interface LlmPoolIdentityStatus {\n    id: string;\n    credentialRef: string;\n    priority?: number;\n    enabled?: boolean;\n    cooldownUntil: number;\n    consecutiveFailures: number;\n    lastStatus?: number;\n    lastError?: string;\n    quota?: {\n        remainingFraction?: number | null;\n        resetTime?: string | number | null;\n        source?: string;\n    };\n}',
+  },
+  {
+    name: 'LlmPoolOperations',
+    declaration: 'export interface LlmPoolOperations {\n    status(provider: string): Promise<LlmPoolIdentityStatus[]>;\n    resetCooldown(provider: string, identityId?: string): Promise<void>;\n    testIdentity(provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n}',
+  },
+  {
     name: 'LlmProviderInfo',
     declaration: 'export interface LlmProviderInfo {\n    id: string;\n    name: string;\n}',
   },
@@ -5555,7 +5730,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions) /* …truncated — full shape in source */',
+    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    registerPoolOperations(settingsNs: string, ops: LlmPoolOperations): () => void;\n    @Remote\n    async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>;\n    @Remote\n    async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>;\n    @Remote\n    async poolTestIdentity(settingsNs: string, provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedR /* …truncated — full shape in source */',
+  },
+  {
+    name: 'LoadedPeerPairings',
+    declaration: 'export interface LoadedPeerPairings {\n    readonly device: PeerDeviceName;\n    readonly watchdogMs: number;\n    readonly pairings: readonly PeerPairing[];\n    readonly bindings: Readonly<Record<string, PeerBinding>>;\n}',
   },
   {
     name: 'LocalAtInput',
@@ -5711,7 +5890,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MessageSourceMap',
-    declaration: 'export interface MessageSourceMap {\n    user: {\n        kind: \'user\';\n    };\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
+    declaration: 'export interface MessageSourceMap {\n    user: {\n        kind: \'user\';\n        participant?: ParticipantTag;\n    };\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
   },
   {
     name: 'ModelCatalog',
@@ -5723,7 +5902,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ModelCatalogModel',
-    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly reasoning?: ModelReasoning;\n}',
+    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly contextWindow?: number;\n    readonly maxTokens?: number;\n    readonly reasoning?: ModelReasoning;\n}',
   },
   {
     name: 'ModelMessageSource',
@@ -5806,16 +5985,220 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PackageResult {\n    exitCode: number;\n    output: string;\n    truncated: boolean;\n    logPath: string;\n    kind?: PluginInstallFailureKind;\n    timedOut?: boolean;\n    incompatible?: IncompatiblePlugin[];\n}',
   },
   {
+    name: 'ParticipantTag',
+    declaration: 'export interface ParticipantTag {\n    readonly kind: \'human\' | \'peer\';\n    readonly name: string;\n    readonly device?: string;\n}',
+  },
+  {
+    name: 'PeerActor',
+    declaration: 'export type PeerActor = PeerParticipant | {\n    readonly kind: \'human\';\n    readonly name: string;\n    readonly device?: PeerDeviceName;\n};',
+  },
+  {
     name: 'PeerAdmission',
     declaration: 'export type PeerAdmission = {\n    readonly peer: PeerScope;\n} | {\n    readonly rejection: 401 | 403;\n};',
+  },
+  {
+    name: 'PeerAlias',
+    declaration: 'export type PeerAlias = Branded<\'PeerAlias\'>;',
+  },
+  {
+    name: 'PeerAnswer',
+    declaration: 'export type PeerAnswer = {\n    readonly kind: \'approval\';\n    readonly outcome: PeerApprovalOutcome;\n} | {\n    readonly kind: \'question\';\n    readonly answer: AskUserQuestionAnswer;\n};',
+  },
+  {
+    name: 'PeerAnswerRequest',
+    declaration: 'export interface PeerAnswerRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n    readonly askId: PeerAskId;\n    readonly answer: PeerAnswer;\n}',
+  },
+  {
+    name: 'PeerAnswerValue',
+    declaration: 'export interface PeerAnswerValue {\n    readonly accepted: true;\n    readonly settled: true;\n}',
+  },
+  {
+    name: 'PeerApprovalOutcome',
+    declaration: 'export type PeerApprovalOutcome = Extract<ApprovalOutcome, \'allowed-once\' | \'rejected\'>;',
+  },
+  {
+    name: 'PeerAskId',
+    declaration: 'export type PeerAskId = Branded<\'PeerAskId\'>;',
+  },
+  {
+    name: 'PeerAskRegistry',
+    declaration: 'export class PeerAskRegistry {\n    constructor(private readonly ctx: Context, private readonly pairings: PeerPairingsStore);\n    install(): void;\n    onChange(listener: (sessionId: SessionId) => void): () => void;\n    pendingFor(sessionId: SessionId): readonly PeerPendingAsk[];\n    answer(resolved: ResolvedPeerPairing, askId: PeerAskId, answer: PeerAnswer): PeerAnswerValue;\n}',
+  },
+  {
+    name: 'PeerBinding',
+    declaration: 'export interface PeerBinding {\n    readonly sessionId: SessionId;\n    readonly device: PeerDeviceName;\n    readonly createdAt: number;\n}',
+  },
+  {
+    name: 'PeerCancelRequest',
+    declaration: 'export interface PeerCancelRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n}',
+  },
+  {
+    name: 'PeerCancelValue',
+    declaration: 'export interface PeerCancelValue {\n    readonly accepted: true;\n    readonly cancelled: boolean;\n}',
+  },
+  {
+    name: 'PeerCapability',
+    declaration: 'export type PeerCapability = \'state-latch\' | \'derived-latch\' | \'assistant-stream\' | \'answer-routing\' | \'runaway-ceiling\' | \'session-create\';',
+  },
+  {
+    name: 'PeerCreateDefaults',
+    declaration: 'export interface PeerCreateDefaults {\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n}',
+  },
+  {
+    name: 'PeerCreateRequest',
+    declaration: 'export interface PeerCreateRequest {\n    readonly alias: PeerAlias;\n    readonly participant: PeerParticipant;\n    readonly sessionId?: SessionId;\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly chain?: string;\n    readonly reasoningEffort?: string;\n}',
+  },
+  {
+    name: 'PeerCreateValue',
+    declaration: 'export interface PeerCreateValue {\n    readonly target: PeerTargetResolved;\n    readonly created: boolean;\n}',
+  },
+  {
+    name: 'PeerDeviceName',
+    declaration: 'export type PeerDeviceName = string;',
+  },
+  {
+    name: 'PeerEventRecord',
+    declaration: 'export interface PeerEventRecord {\n    readonly seq: SessionSeq;\n    readonly time: number;\n    readonly type: string;\n    readonly data: JsonValue;\n}',
+  },
+  {
+    name: 'PeerExecutionState',
+    declaration: 'export interface PeerExecutionState {\n    readonly latch: PeerLatch;\n    readonly since: number;\n    readonly source: \'host-latch\' | \'derived\';\n    readonly activeDescendants: number;\n    readonly descendantsExact: boolean;\n    readonly pendingAsks: readonly PeerPendingAsk[];\n    readonly lastTurnEnd?: PeerTurnTerminal;\n    readonly lastParticipantAction?: PeerParticipantAction;\n    readonly model?: PeerModelSelection;\n}',
+  },
+  {
+    name: 'PeerExposure',
+    declaration: 'export type PeerExposure = \'answer-only\' | \'debug\';',
+  },
+  {
+    name: 'PeerFollowAssistantStreamFrame',
+    declaration: 'export interface PeerFollowAssistantStreamFrame {\n    readonly type: \'assistant-stream\';\n    readonly frame: JsonValue;\n}',
+  },
+  {
+    name: 'PeerFollowEndFrame',
+    declaration: 'export interface PeerFollowEndFrame {\n    readonly type: \'end\';\n    readonly reason: \'closed\' | \'target-detached\';\n}',
+  },
+  {
+    name: 'PeerFollowEventFrame',
+    declaration: 'export interface PeerFollowEventFrame {\n    readonly type: \'event\';\n    readonly record: PeerEventRecord;\n    readonly cursor: SessionSeq;\n}',
+  },
+  {
+    name: 'PeerFollowFrame',
+    declaration: 'export type PeerFollowFrame = PeerFollowSnapshotFrame | PeerFollowEventFrame | PeerFollowStateFrame | PeerFollowAssistantStreamFrame | PeerFollowEndFrame;',
+  },
+  {
+    name: 'PeerFollowRequest',
+    declaration: 'export interface PeerFollowRequest {\n    readonly target: PeerTarget;\n    readonly maxMessages?: number;\n    readonly assistantStream?: true;\n}',
+  },
+  {
+    name: 'PeerFollowSnapshotFrame',
+    declaration: 'export interface PeerFollowSnapshotFrame {\n    readonly type: \'snapshot\';\n    readonly target: PeerTargetResolved;\n    readonly header: {\n        readonly id: SessionId;\n        readonly version: number;\n        readonly createdAt: number;\n        readonly cwd?: string;\n        readonly agentPreset?: string;\n    };\n    readonly cursor: SessionSeq;\n    readonly state: PeerExecutionState;\n    readonly records: readonly PeerEventRecord[];\n    readonly hasMore: boolean;\n}',
+  },
+  {
+    name: 'PeerFollowStateFrame',
+    declaration: 'export interface PeerFollowStateFrame {\n    readonly type: \'state\';\n    readonly state: PeerExecutionState;\n    readonly cursor: SessionSeq;\n}',
+  },
+  {
+    name: 'PeerHandshakeRequest',
+    declaration: 'export interface PeerHandshakeRequest {\n    readonly protocolVersion: number;\n    readonly harnessVersion: string;\n    readonly schemaDigest: string;\n    readonly device: PeerDeviceName;\n}',
+  },
+  {
+    name: 'PeerHandshakeValue',
+    declaration: 'export interface PeerHandshakeValue {\n    readonly protocolVersion: PeerProtocolVersion;\n    readonly harnessVersion: string;\n    readonly schemaDigest: string;\n    readonly hostDevice: PeerDeviceName;\n    readonly capabilities: readonly PeerCapability[];\n    readonly pairings: readonly PeerPairingSummary[];\n}',
   },
   {
     name: 'PeerId',
     declaration: 'export type PeerId = Branded<\'PeerId\'>;',
   },
   {
+    name: 'PeerLatch',
+    declaration: 'export type PeerLatch = \'running\' | \'waiting_approval\' | \'waiting_subagents\' | \'idle\';',
+  },
+  {
+    name: 'PeerModelSelection',
+    declaration: 'export interface PeerModelSelection {\n    readonly provider: string;\n    readonly model: string;\n    readonly chain?: string;\n    readonly reasoningEffort?: string;\n}',
+  },
+  {
+    name: 'PeerPageRequest',
+    declaration: 'export interface PeerPageRequest {\n    readonly target: PeerTarget;\n    readonly throughSeq: SessionSeq;\n    readonly beforeSeq?: SessionSeq;\n    readonly maxMessages?: number;\n}',
+  },
+  {
+    name: 'PeerPageValue',
+    declaration: 'export interface PeerPageValue {\n    readonly records: readonly PeerEventRecord[];\n    readonly hasMore: boolean;\n}',
+  },
+  {
+    name: 'PeerPairing',
+    declaration: 'export interface PeerPairing {\n    readonly alias: PeerAlias;\n    readonly peer: PeerDeviceName;\n    readonly exposure: PeerExposure;\n    readonly sessionId?: SessionId;\n    readonly create?: PeerCreateDefaults;\n    readonly remoteSessionId?: SessionId;\n    readonly endpoint?: string;\n    readonly token?: string;\n    readonly runawayCeiling?: number;\n    readonly allowModelChange?: boolean;\n}',
+  },
+  {
+    name: 'PeerPairingsStore',
+    declaration: 'export class PeerPairingsStore {\n    readonly pairingsPath: string;\n    readonly bindingsPath: string;\n    constructor(pairingsPath: string = dshHomePath(\'pairings.yaml\'), bindingsPath: string = dshHomePath(\'peer-state.json\'));\n    load(): LoadedPeerPairings;\n    reload(): LoadedPeerPairings;\n    device(): PeerDeviceName;\n    list(): readonly PeerPairing[];\n    resolve(target: PeerTarget): ResolvedPeerPairing | undefined;\n    exposed(sessionId: SessionId): ResolvedPeerPairing | undefined;\n    async bind(alias: PeerAlias, device: PeerDeviceName, sessionId: SessionId): Promise<void>;\n    describe(resolved: ResolvedPeerPairing): PeerTargetResolved;\n}',
+  },
+  {
+    name: 'PeerPairingSummary',
+    declaration: 'export interface PeerPairingSummary {\n    readonly alias: PeerAlias;\n    readonly peer: PeerDeviceName;\n    readonly exposure: PeerExposure;\n    readonly tokenRequired: boolean;\n    readonly target?: PeerTargetResolved;\n}',
+  },
+  {
+    name: 'PeerParticipant',
+    declaration: 'export interface PeerParticipant {\n    readonly kind: \'peer\';\n    readonly name: string;\n    readonly device?: PeerDeviceName;\n}',
+  },
+  {
+    name: 'PeerParticipantAction',
+    declaration: 'export interface PeerParticipantAction {\n    readonly action: \'prompt\' | \'steer\' | \'cancel\' | \'queue-edit\' | \'answer\' | \'model-change\' | \'create\';\n    readonly actor: PeerActor;\n    readonly at: number;\n    readonly detail?: string;\n}',
+  },
+  {
+    name: 'PeerPendingAsk',
+    declaration: 'export type PeerPendingAsk = {\n    readonly kind: \'approval\';\n    readonly askId: PeerAskId;\n    readonly toolName: string;\n    readonly callId?: string;\n    readonly reason?: string;\n    readonly since: number;\n} | {\n    readonly kind: \'question\';\n    readonly askId: PeerAskId;\n    readonly questions: readonly AskUserQuestionItem[];\n    readonly since: number;\n};',
+  },
+  {
+    name: 'PeerPromptContentPart',
+    declaration: 'export type PeerPromptContentPart = PeerPromptTextPart;',
+  },
+  {
+    name: 'PeerPromptRequest',
+    declaration: 'export interface PeerPromptRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n    readonly requestId: PeerRequestId;\n    readonly content: readonly PeerPromptContentPart[];\n    readonly hopCount?: number;\n}',
+  },
+  {
+    name: 'PeerPromptTextPart',
+    declaration: 'export interface PeerPromptTextPart {\n    readonly type: \'text\';\n    readonly text: string;\n}',
+  },
+  {
+    name: 'PeerPromptValue',
+    declaration: 'export interface PeerPromptValue {\n    readonly accepted: true;\n    readonly queued: boolean;\n    readonly hopCount: number;\n}',
+  },
+  {
+    name: 'PeerProtocolVersion',
+    declaration: 'export type PeerProtocolVersion = 1;',
+  },
+  {
+    name: 'PeerRequestId',
+    declaration: 'export type PeerRequestId = Branded<\'peer-request-id\'>;',
+  },
+  {
     name: 'PeerScope',
     declaration: 'export interface PeerScope {\n    readonly id: PeerId;\n    readonly ctx: Context;\n    dispose(): Promise<void>;\n}',
+  },
+  {
+    name: 'PeerStateRequest',
+    declaration: 'export interface PeerStateRequest {\n    readonly target: PeerTarget;\n}',
+  },
+  {
+    name: 'PeerStateValue',
+    declaration: 'export interface PeerStateValue {\n    readonly target: PeerTargetResolved;\n    readonly state: PeerExecutionState;\n    readonly cursor: SessionSeq;\n}',
+  },
+  {
+    name: 'PeerTarget',
+    declaration: 'export type PeerTarget = {\n    readonly kind: \'alias\';\n    readonly alias: PeerAlias;\n} | {\n    readonly kind: \'session\';\n    readonly sessionId: SessionId;\n};',
+  },
+  {
+    name: 'PeerTargetResolved',
+    declaration: 'export interface PeerTargetResolved {\n    readonly device: PeerDeviceName;\n    readonly sessionId: SessionId;\n    readonly exposure: PeerExposure;\n    readonly alias?: PeerAlias;\n}',
+  },
+  {
+    name: 'PeerTurnError',
+    declaration: 'export interface PeerTurnError {\n    readonly code: string;\n    readonly message: string;\n    readonly provider?: string;\n    readonly model?: string;\n}',
+  },
+  {
+    name: 'PeerTurnTerminal',
+    declaration: 'export interface PeerTurnTerminal {\n    readonly turn: number;\n    readonly reason: \'completed\' | \'aborted\' | \'blocked\' | \'error\' | \'max-tokens\' | \'interrupted\';\n    readonly at: number;\n    readonly error?: PeerTurnError;\n}',
   },
   {
     name: 'PermissionCatalog',
@@ -6142,6 +6525,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {\n    readonly mode: \'normal\';\n    readonly maxRetries: number;\n    readonly retryableCodes: readonly string[];\n}',
   },
   {
+    name: 'ResolvedPeerPairing',
+    declaration: 'export interface ResolvedPeerPairing {\n    readonly pairing: PeerPairing;\n    readonly sessionId: SessionId;\n    readonly exposure: PeerExposure;\n    readonly device: PeerDeviceName;\n}',
+  },
+  {
     name: 'ResolvedRetryBackoff',
     declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly jitterRatio: number;\n}',
   },
@@ -6323,7 +6710,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Session',
-    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    deriveMessages(): Message[];\n    deriveEventMessage(event: SessionEvent): Message | null;\n}',
+    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    deriveMessages(): Message[];\n    deriveEventMessage(event: SessionEvent): Message | null;\n}',
   },
   {
     name: 'SessionAccess',
@@ -6379,7 +6766,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionCancelRequest',
-    declaration: 'export interface SessionCancelRequest {\n    readonly sessionId: SessionId;\n}',
+    declaration: 'export interface SessionCancelRequest {\n    readonly sessionId: SessionId;\n    readonly participant?: ParticipantTag;\n}',
   },
   {
     name: 'SessionCancelValue',
@@ -6400,6 +6787,38 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionCreateValue',
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
+  },
+  {
+    name: 'SessionDeleteRequest',
+    declaration: 'export interface SessionDeleteRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionDeleteValue',
+    declaration: 'export interface SessionDeleteValue {\n    readonly deleted: true;\n}',
+  },
+  {
+    name: 'SessionDigestFailure',
+    declaration: 'export interface SessionDigestFailure {\n    readonly seq: number;\n    readonly provider: string;\n    readonly model: string;\n    readonly code: string;\n    readonly message: string;\n    readonly link?: number;\n    readonly identity?: string;\n    readonly next?: {\n        readonly provider: string;\n        readonly model: string;\n    };\n}',
+  },
+  {
+    name: 'SessionDigestInjection',
+    declaration: 'export interface SessionDigestInjection {\n    readonly kind: string;\n    readonly label?: string;\n    readonly chars: number;\n    readonly seq: number;\n}',
+  },
+  {
+    name: 'SessionDigestRequest',
+    declaration: 'export interface SessionDigestRequest {\n    readonly sessionId: SessionId;\n    readonly recentTools?: number;\n}',
+  },
+  {
+    name: 'SessionDigestSubagent',
+    declaration: 'export interface SessionDigestSubagent {\n    readonly childSessionId: SessionId;\n    readonly mode: \'one-shot\' | \'continuable\' | \'unknown\';\n    readonly quiet: boolean;\n    readonly status: \'running\' | \'idle\' | \'inactive\';\n    readonly queryPreview?: string;\n}',
+  },
+  {
+    name: 'SessionDigestToolCall',
+    declaration: 'export interface SessionDigestToolCall {\n    readonly tool: string;\n    readonly status: \'ok\' | \'error\' | \'running\';\n    readonly error?: {\n        readonly name: string;\n        readonly code: string;\n        readonly reason?: string;\n    };\n    readonly argumentPreview?: string;\n    readonly resultPreview?: string;\n}',
+  },
+  {
+    name: 'SessionDigestValue',
+    declaration: 'export interface SessionDigestValue {\n    readonly sessionId: SessionId;\n    readonly state: SessionExecutionStateValue;\n    readonly model?: SessionModelSelection;\n    readonly lastParticipantAction?: SessionParticipantAction;\n    readonly recentFailures: readonly SessionDigestFailure[];\n    readonly recentToolCalls: readonly SessionDigestToolCall[];\n    readonly injectionIndex: readonly SessionDigestInjection[];\n    readonly subagentTree: readonly SessionDigestSubagent[];\n    readonly pendingInteractions: readonly SessionPendingAsk[];\n}',
   },
   {
     name: 'SessionEvent',
@@ -6468,6 +6887,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionEventWindow',
     declaration: 'export interface SessionEventWindow {\n    session: SessionHeader;\n    inheritedEventCount: SessionLogOffset;\n    target: SessionEvent;\n    events: SessionEvent[];\n    startSeq: SessionSeq;\n    endSeq: SessionSeq;\n}',
+  },
+  {
+    name: 'SessionExecutionStateRequest',
+    declaration: 'export interface SessionExecutionStateRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionExecutionStateValue',
+    declaration: 'export interface SessionExecutionStateValue {\n    readonly latch: SessionLatch;\n    readonly since: number;\n    readonly source: \'host-latch\';\n    readonly activeDescendants: number;\n    readonly descendantsExact: boolean;\n    readonly pendingAsks: readonly SessionPendingAsk[];\n    readonly lastTurnEnd?: SessionTurnTerminal;\n    readonly lastParticipantAction?: SessionParticipantAction;\n    readonly model?: SessionModelSelection;\n}',
   },
   {
     name: 'SessionFeedbackRecordRequest',
@@ -6542,6 +6969,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionInspection extends SessionStorageMetadata {\n    readonly events: readonly SessionEvent[];\n}',
   },
   {
+    name: 'SessionLatch',
+    declaration: 'export type SessionLatch = \'running\' | \'waiting_approval\' | \'waiting_subagents\' | \'idle\';',
+  },
+  {
     name: 'SessionLineageNode',
     declaration: 'export interface SessionLineageNode {\n    session: SessionRecord;\n    descendants: SessionLineageNode[];\n}',
   },
@@ -6551,11 +6982,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionListRequest',
-    declaration: 'export interface SessionListRequest {\n    readonly cursor?: string;\n}',
+    declaration: 'export interface SessionListRequest {\n    readonly cursor?: string;\n    readonly limit?: number;\n}',
   },
   {
     name: 'SessionListValue',
-    declaration: 'export interface SessionListValue {\n    readonly items: readonly SessionSummary[];\n}',
+    declaration: 'export interface SessionListValue {\n    readonly items: readonly SessionSummary[];\n    readonly nextCursor?: string;\n}',
   },
   {
     name: 'SessionLogOffset',
@@ -6572,6 +7003,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionMessageProjectionContext',
     declaration: 'export interface SessionMessageProjectionContext {\n    nodes: readonly SessionSeq[];\n    events: readonly SessionEvent[];\n    baseSeq: SessionLogOffset;\n    messages: ReadonlyMap<SessionSeq, Message>;\n}',
+  },
+  {
+    name: 'SessionModelSelection',
+    declaration: 'export interface SessionModelSelection {\n    readonly provider: string;\n    readonly model: string;\n    readonly chain?: string;\n}',
   },
   {
     name: 'SessionObservation',
@@ -6596,6 +7031,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionPageRequest',
     declaration: 'export interface SessionPageRequest {\n    readonly address: SessionAddress;\n    readonly throughSeq: number;\n    readonly beforeSeq?: number;\n    readonly maxMessages?: number;\n    readonly turnWindow?: {\n        readonly minMessages: number;\n        readonly minTurns: number;\n    };\n}',
+  },
+  {
+    name: 'SessionParticipantAction',
+    declaration: 'export interface SessionParticipantAction {\n    readonly action: \'prompt\' | \'cancel\';\n    readonly actor: ParticipantTag;\n    readonly at: number;\n}',
+  },
+  {
+    name: 'SessionPendingAsk',
+    declaration: 'export type SessionPendingAsk = {\n    readonly kind: \'approval\';\n    readonly askId: string;\n    readonly toolName: string;\n    readonly callId?: string;\n    readonly reason?: string;\n    readonly since: number;\n} | {\n    readonly kind: \'question\';\n    readonly askId: string;\n    readonly questions: readonly SessionQuestionItem[];\n    readonly since: number;\n};',
   },
   {
     name: 'SessionPersistenceCreateOptions',
@@ -6659,11 +7102,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionPromptRequest',
-    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n}',
+    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n    readonly participant?: ParticipantTag;\n    readonly revertFromSeq?: number;\n}',
   },
   {
     name: 'SessionPromptValue',
     declaration: 'export interface SessionPromptValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionQuestionItem',
+    declaration: 'export interface SessionQuestionItem {\n    readonly id: string;\n    readonly question: string;\n    readonly detail?: string;\n    readonly header?: string;\n    readonly options?: readonly {\n        readonly label: string;\n        readonly description?: string;\n    }[];\n    readonly multiSelect?: boolean;\n}',
   },
   {
     name: 'SessionRecord',
@@ -6694,12 +7141,64 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SessionRequestId = Branded<\'session-request-id\'>;',
   },
   {
+    name: 'SessionRequestSnapshotBase',
+    declaration: 'export interface SessionRequestSnapshotBase {\n    readonly capturedAt: number;\n    readonly sessionId: SessionId;\n    readonly provider: string;\n    readonly model: string;\n    readonly system: {\n        readonly chars: number;\n        readonly sha256: string;\n    } | null;\n    readonly tools: readonly string[];\n    readonly messages: readonly SessionRequestSnapshotMessage[];\n    readonly bodiesIncluded: boolean;\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotBodies',
+    declaration: 'export interface SessionRequestSnapshotBodies {\n    readonly system: string | null;\n    readonly tools: readonly JsonValue[];\n    readonly messages: readonly JsonValue[];\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotFull',
+    declaration: 'export interface SessionRequestSnapshotFull extends SessionRequestSnapshotBase {\n    readonly bodiesIncluded: true;\n    readonly bodies: SessionRequestSnapshotBodies;\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotMessage',
+    declaration: 'export interface SessionRequestSnapshotMessage {\n    readonly role: string;\n    readonly chars: number;\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotRequest',
+    declaration: 'export interface SessionRequestSnapshotRequest {\n    readonly sessionId: SessionId;\n    readonly includeBodies?: boolean;\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotSummary',
+    declaration: 'export interface SessionRequestSnapshotSummary extends SessionRequestSnapshotBase {\n    readonly bodiesIncluded: false;\n    readonly bodiesOmitted?: \'size-cap\';\n}',
+  },
+  {
+    name: 'SessionRequestSnapshotValue',
+    declaration: 'export type SessionRequestSnapshotValue = SessionRequestSnapshotSummary | SessionRequestSnapshotFull;',
+  },
+  {
+    name: 'SessionResolveFileConflictRequest',
+    declaration: 'export interface SessionResolveFileConflictRequest {\n    readonly sessionId: SessionId;\n    readonly conflictId: string;\n    readonly resolution: \'keep\' | \'restore\' | \'recreate\' | \'trash\';\n}',
+  },
+  {
+    name: 'SessionResolveFileConflictValue',
+    declaration: 'export interface SessionResolveFileConflictValue {\n    readonly accepted: true;\n}',
+  },
+  {
     name: 'SessionResultFilter',
     declaration: 'export type SessionResultFilter = {\n    kind: \'id\';\n    values: readonly SessionId[];\n} | {\n    kind: \'cwd\';\n    values: readonly (string | null)[];\n} | ({\n    kind: \'created-at\';\n} & SessionResultRange) | {\n    kind: \'parent\';\n    values: readonly (SessionId | null)[];\n} | {\n    kind: \'availability\';\n    values: readonly SessionAvailability[];\n};',
   },
   {
     name: 'SessionResultRange',
     declaration: 'export interface SessionResultRange {\n    from?: number;\n    to?: number;\n}',
+  },
+  {
+    name: 'SessionRevertRequest',
+    declaration: 'export interface SessionRevertRequest {\n    readonly sessionId: SessionId;\n    readonly atSeq: number;\n    readonly participant?: ParticipantTag;\n}',
+  },
+  {
+    name: 'SessionRevertRestoreRequest',
+    declaration: 'export interface SessionRevertRestoreRequest {\n    readonly sessionId: SessionId;\n    readonly restoreSeq?: number;\n}',
+  },
+  {
+    name: 'SessionRevertRestoreValue',
+    declaration: 'export interface SessionRevertRestoreValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionRevertValue',
+    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedCount: number;\n}',
   },
   {
     name: 'SessionSearchCursor',
@@ -6731,7 +7230,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSelectModelRequest',
-    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n}',
+    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n    readonly persistDefault?: boolean;\n}',
   },
   {
     name: 'SessionSelectModelValue',
@@ -6755,7 +7254,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSummary',
-    declaration: 'export interface SessionSummary {\n    readonly agentAvailable: boolean;\n    readonly sessionId: SessionId;\n    readonly updatedAt: number;\n    readonly running: boolean;\n    readonly blank: boolean;\n    readonly parentSessionId?: SessionId;\n    readonly origin?: \'subagent\';\n    readonly cwd?: string;\n    readonly projections?: SessionProjectionHints;\n}',
+    declaration: 'export interface SessionSummary {\n    readonly agentAvailable: boolean;\n    readonly sessionId: SessionId;\n    readonly updatedAt: number;\n    readonly running: boolean;\n    readonly blank: boolean;\n    readonly parentSessionId?: SessionId;\n    readonly origin?: \'subagent\';\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly projections?: SessionProjectionHints;\n}',
   },
   {
     name: 'SessionSurface',
@@ -6820,6 +7319,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionTitleUserMessage',
     declaration: 'export interface SessionTitleUserMessage {\n    readonly seq: SessionSeq;\n    readonly text: string;\n}',
+  },
+  {
+    name: 'SessionTurnError',
+    declaration: 'export interface SessionTurnError {\n    readonly code: string;\n    readonly message: string;\n    readonly provider?: string;\n    readonly model?: string;\n}',
+  },
+  {
+    name: 'SessionTurnTerminal',
+    declaration: 'export interface SessionTurnTerminal {\n    readonly turn: number;\n    readonly reason: \'completed\' | \'aborted\' | \'blocked\' | \'error\' | \'max-tokens\' | \'interrupted\' | \'forked\';\n    readonly at: number;\n    readonly error?: SessionTurnError;\n}',
   },
   {
     name: 'SessionUpdateQueueRequest',
@@ -7107,7 +7614,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'StreamChunk',
-    declaration: 'export type StreamChunk = {\n    type: \'block-start\';\n    index: number;\n    blockType: ContentBlockType;\n} | {\n    type: \'text-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'reasoning-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'tool-call-delta\';\n    index: number;\n    id: ToolCallId;\n    name?: string;\n    argumentsDelta: string;\n} | {\n    type: \'block-end\';\n    index: number;\n    block: ContentBlock;\n} | {\n    type: \'usage\';\n    usage: TokenUsage;\n} | {\n    type: \'finish\';\n    reason: FinishReason;\n    replayState?: ReplayEnvelope;\n};',
+    declaration: 'export type StreamChunk = {\n    type: \'block-start\';\n    index: number;\n    blockType: ContentBlockType;\n} | {\n    type: \'text-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'reasoning-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'tool-call-delta\';\n    index: number;\n    id: ToolCallId;\n    name?: string;\n    argumentsDelta: string;\n} | {\n    type: \'block-end\';\n    index: number;\n    block: ContentBlock;\n} | {\n    type: \'usage\';\n    usage: TokenUsage;\n} | {\n    type: \'finish\';\n    reason: FinishReason;\n    replayState?: ReplayEnvelope;\n    answeringLink?: AnsweringLink;\n};',
   },
   {
     name: 'SubagentCapabilities',
@@ -7187,7 +7694,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly quiet?: boolean;\n}',
   },
   {
     name: 'SubagentStopReason',
@@ -7607,7 +8114,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'TurnEndReasonMap',
-    declaration: 'export interface TurnEndReasonMap {\n    completed: {\n        kind: \'completed\';\n    };\n    aborted: {\n        kind: \'aborted\';\n        reason: TurnEndCancelCause;\n    };\n    blocked: {\n        kind: \'blocked\';\n    };\n    error: {\n        kind: \'error\';\n        error: LlmFailure;\n    };\n    \'max-tokens\': {\n        kind: \'max-tokens\';\n    };\n    interrupted: {\n        kind: \'interrupted\';\n    };\n    forked: {\n        kind: \'forked\';\n    };\n}',
+    declaration: 'export interface TurnEndReasonMap {\n    completed: {\n        kind: \'completed\';\n    };\n    aborted: {\n        kind: \'aborted\';\n        reason: TurnEndCancelCause;\n        error?: LlmFailure;\n    };\n    blocked: {\n        kind: \'blocked\';\n    };\n    error: {\n        kind: \'error\';\n        error: LlmFailure;\n    };\n    \'max-tokens\': {\n        kind: \'max-tokens\';\n    };\n    interrupted: {\n        kind: \'interrupted\';\n    };\n    forked: {\n        kind: \'forked\';\n    };\n}',
   },
   {
     name: 'TypertCodec',
@@ -8004,6 +8511,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkspaceInsertSessionBeforeRequest',
     declaration: 'export interface WorkspaceInsertSessionBeforeRequest {\n    readonly workspaceId: WorkspaceId;\n    readonly sessionId: SessionId;\n    readonly beforeSessionId?: SessionId;\n}',
+  },
+  {
+    name: 'WorkspaceMoveSessionRequest',
+    declaration: 'export interface WorkspaceMoveSessionRequest {\n    readonly sessionId: SessionId;\n    readonly targetWorkspaceId: WorkspaceId;\n}',
   },
   {
     name: 'WorkspaceOrderValue',

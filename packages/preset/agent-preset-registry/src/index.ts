@@ -298,7 +298,7 @@ export class AgentPresetRegistry extends TypertRemoteService {
     return serviceForAgent(this.owner, agent, name)
   }
 
-  /** Rebind a blank Agent; the caller owns the blank-session check.
+  /** Rebind an idle Agent to another preset; the caller owns the running-turn check.
    * @param ctx Agent context.
    * @param id Requested preset.
    * @returns The bound identity.
@@ -310,17 +310,32 @@ export class AgentPresetRegistry extends TypertRemoteService {
     return preset
   }
 
-  /** Select a preset before a session starts its first turn.
+  /** Select a preset for an idle Agent.
+   *
+   * Allowed whenever the session is idle, including one that has already run
+   * turns (and when the target is the preset it already runs); refused only
+   * while a turn is running.
    * @param agent Target Agent.
    * @param agentPreset Requested identity.
    * @returns Committed preset identity.
+   * @throws {RemoteError} `agent-preset/busy` while a turn is open, plus the
+   * not-found/invalid failures `recompose` raises.
    */
   @Remote('select')
   async select(agent: Agent, agentPreset: string): Promise<string> {
     const turn = (this.switches.get(agent.id) ?? Promise.resolve()).then(async () => {
+      // Re-read inside the queue: an earlier switch may have run, or a turn may
+      // have started, since this call was queued. History is no obstacle — a
+      // switch between turns is what this RPC is for — but a running turn is:
+      // swapping mid-turn would resolve tools and persona under the new
+      // composition for a loop that already started under the old one.
       const boundary = this.owner.sessionProjections.stateOf(agent.session, 'turnBoundary')
-      if (boundary !== undefined && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)) {
-        throw new RemoteError('agent-preset/locked', 'This session has already started', { sessionId: agent.id, agentPreset })
+      if (boundary !== undefined && boundary.openTurnStartSeq !== null) {
+        throw new RemoteError(
+          'agent-preset/busy',
+          `session "${agent.id}" has a turn running; switch again once it settles`,
+          { sessionId: agent.id, agentPreset },
+        )
       }
       const preset = await this.recompose(agent.ctx, agentPreset)
       agent.session.append('agent-preset/selected', { agentPreset: preset.id })

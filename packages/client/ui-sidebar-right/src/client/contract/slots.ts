@@ -101,8 +101,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * registrant the menu shows only the kit's own layout actions.
      */
     'sidebar.right.tab.menu.item': { kind: 'list'; scope: 'session'; owner: SidebarRightTabMenuOwnerProps }
+    /**
+     * Window-chrome seat at the frame's top-left, over every main panel,
+     * occupied by ui-sidebar's reopen/New Session controls while the sidebar
+     * column is fully hidden. Declared here for the same merge reason as the
+     * Session-row seats above: the registration survives the fork's frame
+     * rework, so the seat must stay typed.
+     */
+    'shell.leading': { kind: 'single'; scope: 'root' }
   }
 }
+
 
 /** Where a tab was last navigated to: what the `open` that created or revealed it carried. */
 export interface SidebarRightTabNavigation {

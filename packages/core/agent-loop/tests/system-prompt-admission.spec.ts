@@ -322,7 +322,7 @@ describe('prepared-route prompt admission', () => {
     // The fork records a routing change as selection/header facts only: no
     // model-selection notice message is appended or injected.
     const notices = h.agent.session.snapshotEvents().filter(event => event.type === 'user/message'
-      && event.data.source.kind === 'model-selection')
+      && String(event.data.source.kind) === 'model-selection')
     expect(notices).toHaveLength(0)
     expect(h.agent.session.snapshotEvents().some(event => event.type === 'model/selection'
       || (event.type === 'request/header' && event.data.reason === 'change'))).toBe(true)

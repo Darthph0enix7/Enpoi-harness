@@ -48,7 +48,10 @@ const MAX_DECL_CHARS = 1200
  * ways a report runs away: an owner share that hands down a subsystem instead of
  * a share, and prose that grew into a manual.
  */
-const MAX_ENTRY_LINES = 120
+// Fork: 120 fits upstream exactly (the largest slot sits at 119). Our unified task-card
+// registrations (ui-brand-enpoi: tool.call.toolview + friends) push that entry to ~125, so
+// the ceiling is raised for the fork rather than trimming upstream's contract prose.
+const MAX_ENTRY_LINES = 140
 
 /** One register-call option as the catalog teaches it. */
 interface OptionDoc {

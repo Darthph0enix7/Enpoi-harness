@@ -14,6 +14,43 @@ import { DEFAULT_MAX_IMAGES_PER_REQUEST, DEFAULT_MAX_REQUEST_FILES_BYTES, DEFAUL
 
 const MODEL_MODALITIES = ['text', 'image'] as const satisfies readonly ModelModality[]
 
+/** One credential identity inside a provider pool. */
+export interface DeepSeekPoolIdentity {
+  /** Stable identity key (state, logs, UI). */
+  id: string
+  /** Credential reference resolved per request through `ctx.credentials`. */
+  credentialRef: string
+  /** Lower serves first under priority-sticky; omission ranks last. */
+  priority?: number
+  /** Disabled identities are skipped without losing their state. */
+  enabled?: boolean
+}
+
+/** How the pool picks among healthy identities. */
+export type DeepSeekPoolStrategy =
+  | 'priority-sticky'
+  | 'balanced'
+
+/** Multi-credential routing configuration for one provider route. */
+export interface DeepSeekPoolConfig {
+  /** Selection strategy; defaults to `priority-sticky`. */
+  strategy?: DeepSeekPoolStrategy
+  /** The route's credential identities. */
+  identities: DeepSeekPoolIdentity[]
+}
+
+const poolIdentity: z<DeepSeekPoolIdentity> = z.object({
+  id: z.string(),
+  credentialRef: z.string().role('credential-ref'),
+  priority: z.natural(),
+  enabled: z.boolean().default(true),
+})
+
+const poolConfig: z<DeepSeekPoolConfig> = z.object({
+  strategy: z.union(['priority-sticky', 'balanced']),
+  identities: z.array(poolIdentity),
+})
+
 /** Shared Messages request configuration, without provider credential selection. */
 export interface Config {
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
@@ -52,6 +89,12 @@ export interface Config {
   fileQuotaCleanupBatch: Volatile<number>
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy: Volatile<RetryPolicyConfig | undefined>
+  /**
+   * Multi-credential routing configuration accepted from the provider section.
+   * Declared volatile so a stored `pool` section imports instead of rejecting
+   * its whole entry.
+   */
+  pool: Volatile<DeepSeekPoolConfig | undefined>
 }
 
 /** Plain options accepted by the provider resolver. */
@@ -98,6 +141,7 @@ export const deepSeekConfigFields = {
   fileRefreshMarginSeconds: z.number().step(1).min(0).default(DEFAULT_FILE_REFRESH_MARGIN_SECONDS).volatile(),
   fileQuotaCleanupBatch: z.number().step(1).min(1).max(1_000).default(DEFAULT_FILE_QUOTA_CLEANUP_BATCH).volatile(),
   retryPolicy: RetryPolicySchema.volatile(),
+  pool: poolConfig.volatile(),
 }
 
 export const Config = z.object(deepSeekConfigFields)

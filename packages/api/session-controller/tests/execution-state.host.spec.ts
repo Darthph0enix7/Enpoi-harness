@@ -12,7 +12,7 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
@@ -30,6 +30,13 @@ import { createSessionTestRemote } from './test-remote.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Test-only producer kind: the digest fixture's injected context source. */
+    'digest-test': { kind: 'digest-test' } & ContextFormed
+  }
+}
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
@@ -368,8 +375,7 @@ describe('session digest', () => {
     const injectionSeq = session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'i'.repeat(300) }],
       source: {
-        kind: 'plugin',
-        plugin: 'digest-test',
+        kind: 'digest-test',
         form: 'snapshot',
         sections: [{ name: 'runtime-context', text: 'context' }],
       },

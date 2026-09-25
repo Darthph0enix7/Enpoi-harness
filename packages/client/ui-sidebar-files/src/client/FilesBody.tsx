@@ -88,7 +88,7 @@ export function failureLine(t: TranslateNS<'sidebarFiles'>, failure: RemoteFailu
    only through the platform modules. TODO: once the artifact and slot surfaces
    settle, one copy in ui-primitives could serve every pane header. */
 /**
- * Keep the path row's `data-files-path-clipped` current: set while the path's
+ * Keep the path row's `data-path-clipped` current: set while the path's
  * text is wider than its box, so the stylesheet fades the clipped start. Read
  * after each commit that can change the path or mount the header, and whenever
  * either box resizes; written to the DOM directly because it changes only how
@@ -104,8 +104,8 @@ function usePathClipped(
     const inner = text.current
     if (outer === null || inner === null) return undefined
     const apply = (): void => {
-      if (inner.offsetWidth > outer.clientWidth) outer.dataset.filesPathClipped = ''
-      else delete outer.dataset.filesPathClipped
+      if (inner.offsetWidth > outer.clientWidth) outer.dataset.pathClipped = ''
+      else delete outer.dataset.pathClipped
     }
     apply()
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(apply)
@@ -141,7 +141,7 @@ interface CreateState {
 /** What every level shares: the tab's tree, the gestures, and the inline editors. */
 interface TreeContext {
   readonly state: FilesTabState
-  readonly onToggle: (path: string) => void
+  readonly onToggle: (parent: string, path: string) => void
   readonly onOpen: (path: string) => void
   readonly t: TranslateNS<'sidebarFiles'>
   /** The open row menu, so a trigger can mark itself expanded. */
@@ -263,7 +263,7 @@ function Entry({ parent, entry, tree }: { parent: string; entry: WorkspaceDirect
             </div>
           )
           : (
-            <button type="button" className={css.row} aria-expanded={expanded} onClick={() => { tree.onToggle(path) }}>
+            <button type="button" className={css.row} aria-expanded={expanded} onClick={() => { tree.onToggle(parent, path) }}>
               {expanded ? <IconFolderOpenMedium className={css.icon} /> : <IconFolderCloseMedium className={css.icon} />}
               <span className={css.name}>{entry.name}</span>
             </button>
@@ -343,6 +343,12 @@ function Level({ path, tree }: { path: string; tree: TreeContext }): ReactNode {
   return (
     <>
       {createRow}
+      {/* A failed reread keeps what the level already showed and says why under it. */}
+      {level.failure !== undefined && (
+        <li className={css.note} data-files-row="failed" data-files-code={level.failure.code}>
+          {failureLine(t, level.failure)}
+        </li>
+      )}
       {entries.length === 0 && <li className={css.note} data-files-row="empty">{t('empty')}</li>}
       {entries.map(entry => <Entry key={entry.name} parent={path} entry={entry} tree={tree} />)}
       {level.level.truncated && <li className={css.note} data-files-row="truncated">{t('truncated')}</li>}
@@ -352,7 +358,7 @@ function Level({ path, tree }: { path: string; tree: TreeContext }): ReactNode {
 
 /** The file tree's body: the workspace root and whatever the reader has opened under it. */
 export function FilesBody({
-  useTabInfo, sessionId, useSessions, useStore, actions, start, load, toggle, t,
+  useTabInfo, sessionId, useSessions, useStore, actions, start, load, toggle, refresh, setAutoRefresh, t,
 }: FilesBodyProps): ReactNode {
   const { tab } = useTabInfo()
   const { signal, actions: tabActions } = tab
@@ -396,6 +402,12 @@ export function FilesBody({
     if (state !== undefined || cwd === undefined || signal.aborted) return
     start(tab.id, cwd, signal)
   }, [state, cwd, tab.id, signal, start])
+
+  // The header's reload control and the page.refresh command share one
+  // reload: the face re-lists every open level in place, so the rows already
+  // shown and the body's scroll position survive the reread.
+  const reload = useCallback((): void => { refresh(tab.id) }, [refresh, tab.id])
+  useEffect(() => tab.actions.bindCommands({ refresh: reload }), [tab.actions, reload])
 
   const copied = menu?.copied ?? null
   useEffect(() => {
@@ -516,7 +528,7 @@ export function FilesBody({
     const parent = target.path
     // The inline row lives at the top of the directory's listing: open the
     // directory first when it was collapsed.
-    if (!state.expanded.includes(parent)) toggle(tab.id, parent, state.levels[parent] !== undefined, signal)
+    if (!state.expanded.includes(parent)) toggle(tab.id, parentPath(parent), parent, state.expanded, signal)
     setCreating({ parent, kind, value: '', error: null })
   }
 
@@ -560,13 +572,6 @@ export function FilesBody({
     }
   }
 
-  // Reload drops every level and asks again for the expanded ones; a collapsed
-  // level is fetched again the next time it opens.
-  const reload = (): void => {
-    actions.reset(tab.id)
-    for (const path of state.expanded) load(tab.id, path, signal)
-  }
-
   const menuItems: readonly RowMenuItem[] = menu === null ? [] : menuItemsOf(menu).map(id => ({
     id,
     label: menu.copied === id ? t('copied') : t(MENU_LABEL_KEYS[id]),
@@ -575,7 +580,7 @@ export function FilesBody({
 
   const tree: TreeContext = {
     state,
-    onToggle: (path) => { toggle(tab.id, path, state.levels[path] !== undefined, signal) },
+    onToggle: (parent, path) => { toggle(tab.id, parent, path, state.expanded, signal) },
     // Every row is under the tree's root, so its address is session-relative.
     onOpen: (path) => { tabActions.openResource(fileAddressFor(sessionId, state.root, path)) },
     t,
@@ -607,12 +612,30 @@ export function FilesBody({
           type="button"
           className={css.tool}
           aria-label={t('reload')}
+          aria-keyshortcuts={tab.refreshShortcut?.aria}
           title={t('reload')}
           data-files-reload
           onClick={reload}
         >
           <IconRefreshOutlineMedium />
         </button>
+        {/* The automatic-reread toggle stays out of the chrome: the tree follows
+            its watches by default, and this control only exists so a reader who
+            needs a frozen view can stop it. Hidden, not unmounted, so the state
+            stays reachable by pointer tests and future chrome. */}
+        <span hidden>
+          <button
+            type="button"
+            className={css.tool}
+            aria-label={t('autoRefresh')}
+            aria-pressed={state.autoRefresh}
+            title={state.autoRefresh ? t('autoRefresh.disable') : t('autoRefresh.enable')}
+            data-files-auto-refresh
+            onClick={() => { setAutoRefresh(tab.id, !state.autoRefresh) }}
+          >
+            <IconRefreshOutlineMedium />
+          </button>
+        </span>
       </div>
       {/* jscpd:ignore-end */}
       <div

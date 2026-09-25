@@ -741,7 +741,9 @@ export class SessionManager {
     // that switches agents must not re-appear as a blank hero seat).
     const existing = this.summaries.find(summary => summary.sessionId === sessionId)
     this.recordMutation({ kind: 'upsert', summary: {
-      sessionId, updatedAt: Date.now(), running: false, blank: existing?.blank ?? false, agentPreset,
+      // A host-confirmed switch runs on a live Agent, so availability is true.
+      sessionId, updatedAt: Date.now(), running: false, agentAvailable: true,
+      blank: existing?.blank ?? false, agentPreset,
     } })
   }
   /** Apply immediately and retain for replay when a list response is in flight. */

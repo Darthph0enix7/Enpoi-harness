@@ -19,19 +19,19 @@ const files = ['main.ts', 'second.ts'].map(path => ({ path, display: path, added
 function mount(fileCount = 2) {
   const diffs = new ChangesDiffStore()
   const loadChangesDiff = vi.fn<ChangesDiffStore['load']>().mockResolvedValue(undefined)
-  const openReview = vi.fn()
+  const openDiff = vi.fn()
   const subscribe = diffs.state.subscribe.bind(diffs.state)
   const getSnapshot = diffs.state.getSnapshot.bind(diffs.state)
   const changes = { seq: 5, files: files.slice(0, fileCount), total: fileCount, added: fileCount, deleted: fileCount }
   const view = render(<ChangedFiles changes={changes}
-    cwd="/workspace" sessionId={sessionId} t={makeTranslate(en)} openReview={openReview}
+    cwd="/workspace" sessionId={sessionId} t={makeTranslate(en)} openDiff={openDiff}
     loadChangesDiff={loadChangesDiff}
     useChangesDiff={select => select(useSyncExternalStore(subscribe, getSnapshot))} />)
-  return { view, diffs, loadChangesDiff, openReview, row: screen.getByRole('button', { name: 'View changes to main.ts' }) }
+  return { view, diffs, loadChangesDiff, openDiff, row: screen.getByRole('button', { name: 'View changes to main.ts' }) }
 }
 
 it.each([1, 2])('reads only after 500ms and renders the selected comparison with %i files', (fileCount) => {
-  const { row, diffs, loadChangesDiff, openReview } = mount(fileCount)
+  const { row, diffs, loadChangesDiff, openDiff } = mount(fileCount)
   fireEvent.pointerEnter(row)
   act(() => { vi.advanceTimersByTime(499) })
   expect(loadChangesDiff).not.toHaveBeenCalled()
@@ -62,7 +62,7 @@ it.each([1, 2])('reads only after 500ms and renders the selected comparison with
   expect(document.querySelector('[data-changes-hover-preview]')).toBe(preview)
   act(() => { vi.advanceTimersByTime(1) })
   expect(document.querySelector('[data-changes-hover-preview]')).toBeNull()
-  expect(openReview).toHaveBeenCalledExactlyOnceWith(0)
+  expect(openDiff).toHaveBeenCalledExactlyOnceWith(0)
 })
 
 it('keeps a status note for a comparison with no hunks', () => {

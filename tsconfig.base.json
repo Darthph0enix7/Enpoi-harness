@@ -93,6 +93,7 @@
       "@deepseek-ai/dsh-api-job-controller": ["./packages/api/job-controller/src/index.ts"],
       "@deepseek-ai/dsh-api-job-controller/client": ["./packages/api/job-controller/src/client/index.ts"],
       "@deepseek-ai/dsh-api-job-controller/types": ["./packages/api/job-controller/src/types.ts"],
+      "@deepseek-ai/dsh-api-peer": ["./packages/api/peer/src/index.ts"],
       "@deepseek-ai/dsh-api-session-controller": ["./packages/api/session-controller/src/index.ts"],
       "@deepseek-ai/dsh-api-session-controller/client": ["./packages/api/session-controller/src/client/index.ts"],
       "@deepseek-ai/dsh-api-session-controller/types": ["./packages/api/session-controller/src/types.ts"],

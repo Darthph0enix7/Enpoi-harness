@@ -35,6 +35,8 @@ function fakeDirectory(selectModel: ReturnType<typeof vi.fn>): Fake {
       subscribe: () => () => {},
     },
     load: async () => {},
+    // The directory reads the adapter's reasoning levels for the retained label.
+    reasoningFor: () => undefined,
   } as unknown as ModelCatalogDirectory
   const projected = {
     getSnapshot: () => projectedValue,

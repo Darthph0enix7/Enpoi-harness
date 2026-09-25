@@ -210,7 +210,7 @@ function shortHash(input: string): string {
 }
 
 /** Hash several response fields without allowing bytes to move across field boundaries. */
-function framedHash(domain: string, parts: readonly string[]): string {
+function framedHash(domain: string, parts: readonly (string | Buffer)[]): string {
   const hash = createHash('sha1').update(domain).update('\0')
   for (const part of parts) hash.update(`${String(Buffer.byteLength(part))}:`).update(part)
   return hash.digest('hex').slice(0, HASH_REVISION_LENGTH)

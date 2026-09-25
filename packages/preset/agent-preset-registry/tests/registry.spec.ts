@@ -99,7 +99,7 @@ describe('declarative preset revisions', () => {
     expect(ctx.agentPresets.composeFrom(createScope(ctx, {}).ctx, ctx)).toBeUndefined()
   })
 
-  it('logs selection and rejects preset changes after the first turn', async () => {
+  it('switches an idle session with history and logs the selection', async () => {
     const ctx = await setup()
     await declare(ctx, contribution('standard'))
     await declare(ctx, contribution('minimal'))
@@ -107,7 +107,25 @@ describe('declarative preset revisions', () => {
     expect(await ctx.agentPresets.select(agent, 'minimal')).toBe('minimal')
     expect(ctx.sessionProjections.stateOf(agent.session, 'agentPreset')).toBe('minimal')
     agent.session.append('turn/start', { turn: 1 })
-    await expect(ctx.agentPresets.select(agent, 'standard')).rejects.toThrow('already started')
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    expect(await ctx.agentPresets.select(agent, 'standard')).toBe('standard')
+    expect(ctx.sessionProjections.stateOf(agent.session, 'agentPreset')).toBe('standard')
+    const selections = agent.session.snapshotEvents().filter(event => event.type === 'agent-preset/selected')
+    expect(selections.map(event => event.data.agentPreset)).toEqual(['minimal', 'standard'])
+  })
+
+  it('refuses a switch while a turn is running without touching the log or preset', async () => {
+    const ctx = await setup()
+    await declare(ctx, contribution('standard'))
+    await declare(ctx, contribution('minimal'))
+    const agent = await agentOn(ctx, 'running')
+    expect(await ctx.agentPresets.select(agent, 'minimal')).toBe('minimal')
+    const before = agent.session.snapshotEvents().length
+    agent.session.append('turn/start', { turn: 1 })
+    await expect(ctx.agentPresets.select(agent, 'standard'))
+      .rejects.toMatchObject({ code: 'agent-preset/busy', message: expect.stringContaining('has a turn running') as string })
+    expect(ctx.sessionProjections.stateOf(agent.session, 'agentPreset')).toBe('minimal')
+    expect(agent.session.snapshotEvents().slice(before).filter(event => event.type === 'agent-preset/selected')).toEqual([])
   })
 
   it('inventories active and disabled child entries and declared display metadata', async () => {

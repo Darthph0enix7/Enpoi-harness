@@ -40,8 +40,7 @@ function mountMobile(overrides: { readonly dismissBack?: () => boolean } = {}) {
       },
     },
     phase: 'ready',
-    subagentsByParent: {},
-    jobsBySession: {},
+    projectionsBySession: {},
   })
   const useStore = bindSnapshotSelector(instance)
   const usePanelInfo = bindSnapshotSelector({
