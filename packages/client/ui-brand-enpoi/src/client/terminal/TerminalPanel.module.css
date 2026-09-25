@@ -207,12 +207,12 @@
   background: var(--dsw-alias-interactive-bg-active);
 }
 
-/* enpoi: the bottom dock's own shell, rendered in the frame overlay layer. It
-   rides in and out from below the frame edge on the same slow curve the
-   conversation column's margin uses, so the main glass edge and the dock's top
-   edge interpolate together. The component keeps it mounted through the
-   closing ride and marks the open state; on mount the rise animation gives a
-   freshly opened dock the same ride instead of a pop. */
+/* enpoi: the bottom dock's own shell, rendered in the frame overlay layer. The
+   frame's registered tracks place it exactly on the conversation's glass box at
+   every frame — no JS follower can lag the moving column — and it rides in and
+   out on one transform transition (the component keeps it mounted and marks the
+   open state), so a reopen mid-ride retargets smoothly instead of restarting an
+   animation. */
 .dock {
   position: fixed;
   bottom: 0;
@@ -220,11 +220,16 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  left: var(--dsh-sidebar-track, 0px);
+  right: calc(var(--dsh-rightbar-width, 0px) * var(--dsh-rightbar-progress, 0) + 44px * (1 - var(--dsh-rightbar-progress, 0)));
   background: var(--dsw-alias-bg-base);
   border-top: 0.5px solid var(--dsw-alias-border-l4);
   box-shadow: 0 -8px 24px rgb(0 0 0 / 18%);
   transform: translateY(100%);
-  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  visibility: hidden;
+  transition:
+    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    visibility 0s linear var(--ds-transition-duration-slow);
 }
 
 /* Out of reach while parked: the frame overlay's child rule grants pointer
@@ -235,12 +240,9 @@
 
 .dock[data-enpoi-bottom-dock-open] {
   transform: none;
+  visibility: visible;
   pointer-events: auto;
-  animation: dock-rise var(--ds-transition-duration-slow) var(--ds-ease-in-out);
-}
-
-@keyframes dock-rise {
-  from { transform: translateY(100%); }
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 .dockHandle {
@@ -331,16 +333,11 @@
 /*
  * enpoi: while the dock is open, the conversation column gives up the dock's
  * height (margin, so the transcript squeezes rather than being covered). The
- * marker and the variable come from the dock component itself. The list also
- * carries the rail reservation's padding (ui-layout .frame[data-animating]
- * .centerCol): this rule outranks that one, so a panel ride with the dock open
- * must keep both transitions or the reservation would snap.
+ * marker and the variable come from the dock component itself.
  */
 :global(body[data-enpoi-bottom-dock-open] div:has(+ [data-rightbar-col])) {
   margin-bottom: var(--enpoi-bottom-dock-height, 0px);
-  transition:
-    margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    padding-right var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  transition: margin-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 /* A handle gesture writes heights at pointer cadence; the margin pauses with

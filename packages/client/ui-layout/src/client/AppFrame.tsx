@@ -15,7 +15,7 @@
  * shares — zero cordis or framework imports, zero self-made hooks.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type {
   InjectFace, HostObservable, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -231,12 +231,34 @@ export function AppFrame({
     const frame = frameRef.current
     /* v8 ignore next -- the ref is always attached by effect time: the frame div renders unconditionally. */
     if (frame === null) return
-    const settle = () => { setAnimating(0) }
+    // The marker may only drop when no track-owned transition still runs: a
+    // toggle landing on a completed end restarts the effect, and the queued end
+    // event of the replaced transition would otherwise dispatch into the fresh
+    // listener and clear the marker while the retargeted transition is still
+    // gliding — the retargeted grid/padding then snap without their transition
+    // declarations while the panel keeps moving. The 600 ms timer is the
+    // backstop for reduced motion and covered frames.
+    const trackProperties = new Set(['grid-template-columns', 'padding-right', '--dsh-sidebar-track', '--dsh-rightbar-progress'])
+    const stillRunning = () => {
+      const centre = frame.children[1] ?? null
+      for (const element of [frame, centre]) {
+        if (element === null || typeof element.getAnimations !== 'function') continue
+        for (const animation of element.getAnimations()) {
+          if (animation.playState !== 'running') continue
+          const property = 'transitionProperty' in animation ? String(animation.transitionProperty) : undefined
+          if (property === undefined || trackProperties.has(property)) return true
+        }
+      }
+      return false
+    }
+    const settleIfDone = () => { if (!stillRunning()) setAnimating(0) }
     const onTransitionEnd = (event: TransitionEvent) => {
-      if (event.target === frame && event.propertyName === 'grid-template-columns') settle()
+      if (event.target !== frame && event.target !== frame.children[1]) return
+      if (!trackProperties.has(event.propertyName)) return
+      settleIfDone()
     }
     frame.addEventListener('transitionend', onTransitionEnd)
-    const timer = setTimeout(settle, 600)
+    const timer = setTimeout(settleIfDone, 600)
     return () => {
       frame.removeEventListener('transitionend', onTransitionEnd)
       clearTimeout(timer)
@@ -285,16 +307,31 @@ export function AppFrame({
     )
   }
 
+  // One animated value per side: the registered track variables are what the
+  // frame transitions, and the grid, the centre's rail reservation
+  // (ui-sidebar-right), the right panel's slide and the terminal dock all read
+  // them. The right track is the width target scaled by the eased progress, so
+  // a mid-ride target change (the crossed collapse, a window resize) moves
+  // every consumer by the same amount.
+  const frameStyle: CSSProperties & {
+    '--dsh-sidebar-track': string
+    '--dsh-rightbar-width': string
+    '--dsh-rightbar-progress': number
+  } = {
+    ...(document.documentElement.hasAttribute('data-windows-titlebar')
+      ? { '--dsh-windows-sidebar-width': `${cols.sidebar}px` } : {}),
+    '--dsh-sidebar-track': `${cols.sidebar}px`,
+    '--dsh-rightbar-width': `${normal.rightbar}px`,
+    '--dsh-rightbar-progress': layoutInfo.rightbarTrack ? 1 : 0,
+    gridTemplateColumns:
+      'var(--dsh-sidebar-track) minmax(0, 1fr) calc(var(--dsh-rightbar-width) * var(--dsh-rightbar-progress))',
+  }
+
   return (
     <div
       ref={frameRef}
       className={css.frame}
-      style={{
-        ...(document.documentElement.hasAttribute('data-windows-titlebar')
-          ? { '--dsh-windows-sidebar-width': `${cols.sidebar}px` } : {}),
-        gridTemplateColumns:
-          `${cols.sidebar}px minmax(0, 1fr) ${cols.rightbar}px`,
-      }}
+      style={frameStyle}
       data-sidebar-collapsed={sidebarCollapsed || undefined}
       data-rightbar-collapsed={cols.rightbar === 0 || undefined}
       data-rightbar-fullscreen={layoutInfo.rightbarFullscreen || undefined}

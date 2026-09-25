@@ -119,10 +119,13 @@ function mountFrame(windowWidth = frameWidth) {
   }
 }
 
+/** Target track widths: the registered variables are what the frame animates. */
 function tracks(frame: HTMLElement): number[] {
-  const match = /^([\d.]+)px minmax\(0, 1fr\) ([\d.]+)px$/.exec(frame.style.gridTemplateColumns)
-  if (match === null) throw new Error(`unexpected template: ${frame.style.gridTemplateColumns}`)
-  return [Number(match[1]), Number(match[2])]
+  const sidebar = Number.parseFloat(frame.style.getPropertyValue('--dsh-sidebar-track'))
+  const width = Number.parseFloat(frame.style.getPropertyValue('--dsh-rightbar-width'))
+  const progress = Number.parseFloat(frame.style.getPropertyValue('--dsh-rightbar-progress')) || 0
+  if (Number.isNaN(sidebar) || Number.isNaN(width)) throw new Error(`unexpected tracks: ${frame.style.cssText}`)
+  return [sidebar, width * progress]
 }
 
 function handleFor(frame: HTMLElement, side: 'sidebar' | 'rightbar'): HTMLElement {
@@ -503,6 +506,31 @@ describe('AppFrame track easing', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps the marker while a retargeted track transition is still running', () => {
+    const { frame, instance } = mountFrame()
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.dataset.animating).toBe('true')
+    // The end event of a replaced transition dispatches into the fresh
+    // listener; the retargeted one is still gliding, so the marker must stay.
+    const running: { playState: string; transitionProperty: string }[] = [
+      { playState: 'running', transitionProperty: '--dsh-sidebar-track' },
+    ]
+    replaceProperty(
+      frame,
+      'getAnimations',
+      (() => running) as unknown as HTMLElement['getAnimations'],
+    )
+    act(() => {
+      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+    })
+    expect(frame.dataset.animating).toBe('true')
+    running.length = 0
+    act(() => {
+      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: '--dsh-sidebar-track' }))
+    })
+    expect(frame.dataset.animating).toBeUndefined()
   })
 })
 

@@ -1,3 +1,20 @@
+/* One animated value per side: the registered track variables interpolate on
+   the frame, and the grid, the centre's rail reservation, the right panel's
+   slide and the terminal dock all read them. Nothing else may animate those
+   consumers independently — a second curve (a JS follower, a per-element
+   transition) can diverge from the track mid-retarget and open the seam. */
+@property --dsh-sidebar-track {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+
+@property --dsh-rightbar-progress {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
 .frame {
   position: relative; /* anchors the drag handles, which straddle column borders */
   display: grid;
@@ -7,17 +24,15 @@
   background: var(--dsw-alias-bg-base);
 }
 
-/* Only a discrete collapse/expand toggle eases the tracks (the TSX holds
-   data-animating across the toggle on the deepsuite sider curve). Steady-state
-   tracks move only with the viewport, and those updates must land instantly:
-   an eased track chases the live window edge and the centre column visibly
-   rubber-bands while the user resizes the window. The occupant's own slide
-   (ui-sidebar-right .panel transform, the terminal dock) reads the same two
-   variables so both edges interpolate on one curve. */
+/* Only a discrete collapse/expand toggle eases the registered tracks (the TSX
+   holds data-animating across the toggle). Steady-state tracks move only with
+   the viewport, and those updates must land instantly: an eased track chases
+   the live window edge and the centre column visibly rubber-bands while the
+   user resizes the window. */
 .frame[data-animating] {
   transition:
-    grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    grid-template-rows var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+    --dsh-sidebar-track var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+    --dsh-rightbar-progress var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 /* Dragging writes widths at pointer cadence; easing them would detach the
@@ -62,10 +77,6 @@
   .frame[data-animating] {
     transition: none;
   }
-
-  .frame[data-animating] .centerCol {
-    transition: none;
-  }
 }
 
 .sidebarCol {
@@ -82,21 +93,8 @@
   overflow: hidden;
 }
 
-/* The centre column's right inset is the collapsed rail's reservation
-   (ui-sidebar-right). During a panel ride it must ease on the track's own
-   curve: the reservation appears the moment the close starts, and without the
-   transition it opens a bare-frame sliver between the conversation's glass
-   edge and the still-wide panel. Eased, the glass edge stays exactly on the
-   panel's moving left edge (padding(t) = 44·p, panelLeft(t) = trackEdge(t) −
-   44·p). The left sidebar has no such reservation, which is why its seam never
-   shows. */
-.frame[data-animating] .centerCol {
-  transition: padding-right var(--ds-transition-duration-slow) var(--ds-ease-in-out);
-}
-
-/* A gesture or a mode switch writes the track at pointer/instant cadence; the
-   reservation must land with it, not chase it. */
-.frame[data-dragging] .centerCol,
+/* A gesture or a mode switch writes the tracks at pointer/instant cadence; the
+   consumers must land with them, not chase them. */
 .frame[data-rightbar-instant] .centerCol,
 .frame[data-rightbar-fullscreen] .centerCol {
   transition: none;

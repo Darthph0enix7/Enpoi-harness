@@ -37,10 +37,10 @@ describe('collapsed right sidebar', () => {
     // pane take that same moment.
     const panel = declarationsFrom(css, '.panel')
     expect(panel).toContain('visibility: hidden')
-    expect(panel).toContain(
-      'transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),'
-      + ' width var(--ds-transition-duration-slow) var(--ds-ease-in-out),'
-      + ' visibility 0s linear var(--ds-transition-duration-slow)',
-    )
+    // The slide is a consumer of the frame's registered progress value, not a
+    // per-element transform transition: a retarget must not diverge from the
+    // track. Only the delayed visibility flip stays a transition here.
+    expect(panel).toContain('transform: translateX(calc(100% * (1 - var(--dsh-rightbar-progress, 0))))')
+    expect(panel).toContain('transition: visibility 0s linear var(--ds-transition-duration-slow)')
   })
 })

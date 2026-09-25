@@ -44,20 +44,19 @@
    (ui-dockkit `.divider`), so the panel's outline and its inner rules match. */
   background: var(--dsw-alias-bg-base);
   border-left: 0.5px solid var(--dsw-alias-border-l4);
-  transform: translateX(100%);
+  /* One animated value: the frame's --dsh-rightbar-progress drives the slide,
+     the same value the grid track and the centre's rail reservation read. No
+     per-element transform/width transition may run against it — a retarget
+     (spam, a crossed toggle, a moving width target) would diverge from the
+     track and open the seam. */
+  transform: translateX(calc(100% * (1 - var(--dsh-rightbar-progress, 0))));
   visibility: hidden;
-  transition:
-    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    width var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    visibility 0s linear var(--ds-transition-duration-slow);
+  transition: visibility 0s linear var(--ds-transition-duration-slow);
 }
 
 .panel[data-sidebar-right-open] {
-  transform: none;
   visibility: visible;
-  transition:
-    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    width var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  transition: visibility 0s;
 }
 
 /*
@@ -70,9 +69,10 @@
   inset: 0;
   z-index: 40;
   border: none;
-  transition:
-    transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
-    visibility 0s linear var(--ds-transition-duration-slow);
+  /* The base slide is a track consumer; fullscreen is a mode switch and must
+     not carry that transform. */
+  transform: none;
+  transition: visibility 0s linear var(--ds-transition-duration-slow);
 
   /* Electron drag regions are window geometry, not stacking: the conversation
      title row's and the sidebar top strip's drag bands underneath keep taking
@@ -343,8 +343,17 @@
  * comes from the rail itself, so a global panel (which unmounts the seat)
  * keeps the full width.
  */
-:global(body[data-sidebar-right-rail-mounted] [data-rightbar-collapsed] > div:has(+ [data-rightbar-col])) {
-  padding-right: 44px;
+/*
+ * enpoi: the rail's strip is reserved on the centre column for exactly the
+ * width of the parked track: 44 px while the panel is collapsed, easing to 0
+ * with the frame's own --dsh-rightbar-progress — the same value the grid track
+ * and the panel's slide read. One value for all three consumers means the
+ * conversation's glass edge and the panel's moving left edge cannot separate,
+ * including through a mid-ride retarget. The body marker comes from the rail
+ * itself, so a global panel (which unmounts the seat) keeps the full width.
+ */
+:global(body[data-sidebar-right-rail-mounted] div:has(+ [data-rightbar-col])) {
+  padding-right: calc(44px * (1 - var(--dsh-rightbar-progress, 0)));
 }
 
 /*
