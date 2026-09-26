@@ -104,7 +104,7 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
     ])
   })
 
-  it('hides exactly the declared single-node span of a checkpoint refresh', async () => {
+  it('keeps every row for replacements no revert boundary claims', async () => {
     const api = new FakeApiClient()
     const session = new Session(SID, fakeRemote(api))
     api.onHistory = () => Promise.resolve(ok({
@@ -116,9 +116,16 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
       hasMore: false,
     } as never))
     await session.open()
-    // The refresh declares exactly seq 7 (startSeq === endSeq); the turn at
-    // 8..12 stays visible instead of being shadowed up to the refresh event.
-    expect(session.getSnapshot().revertShadowRanges).toEqual([{ start: 7, end: 8 }])
+    // Product rule: a replacement is shadowed only while a user-activated
+    // revert boundary is live. A keeper refresh (and any future edit/retry
+    // writer) leaves every row visible, including the superseded message.
+    expect(session.getSnapshot().revertShadowRanges).toEqual([])
+    // An edit-and-resend carries a user source but no boundary: not a revert.
+    session.acceptEventChange({
+      type: 'append',
+      entry: { type: 'event', event: revertCommit(19, 'edited', [7]) as never },
+    })
+    expect(session.getSnapshot().revertShadowRanges).toEqual([])
   })
 
   it('re-installs a replace window without accumulating duplicate shadow ranges', async () => {

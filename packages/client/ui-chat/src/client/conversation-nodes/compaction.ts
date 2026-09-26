@@ -1,63 +1,41 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  CompactionSummaryNode, ConversationMatch, ConversationNodeContext, ConversationNodeDefinition,
+  CompactionSummaryNode, ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-compaction/types'
-import { chatNode } from './common.ts'
-import { compactSource, compactSummary, updateCompactionState } from './command.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
-    /** Automatic compaction checkpoint marker. */
+    /**
+     * Legacy automatic-compaction marker. Automatic compaction no longer emits
+     * a Chat node (see {@link compactionDefinition}); the data type remains for
+     * the keyed renderer so historical fixtures and the manual `/compact` card
+     * keep their existing presentation contract.
+     */
     compaction: CompactionSummaryNode
   }
 }
 
-interface CompactionState {
-  readonly summary?: ConversationMatch
-  readonly checkpoint?: ConversationMatch
-}
-
-function fallbackState(context: ConversationNodeContext<CompactionState>): CompactionState {
-  const summary = context.matches.find(match => match.event.type === 'compaction/summary')
-  const checkpoint = context.matches.find(match => compactSource(match.event) !== undefined)
-  return {
-    ...summary === undefined ? {} : { summary },
-    ...checkpoint === undefined ? {} : { checkpoint },
-  }
-}
-
-/** Automatic compaction lifecycle and landed checkpoint Definition. */
-export const compactionDefinition: ConversationNodeDefinition<CompactionState> = {
+/**
+ * Automatic compaction owns no Chat row.
+ *
+ * Product rule: compaction is a model-context operation. The viewer must keep
+ * rendering every message it already showed — no card, no hidden span, no
+ * ordering or scroll change. The definition stays registered as the explicit
+ * owner of that rule; it matches nothing, so no Context, State, or node is ever
+ * produced. Manual `/compact` remains the command Definition's own card.
+ */
+export const compactionDefinition: ConversationNodeDefinition<Record<string, never>> = {
   kind: 'compaction',
   target: 'chat',
-  match: (event) => {
-    const checkpoint = compactSource(event)
-    if (checkpoint !== undefined && checkpoint.sourceCommandId === undefined) {
-      return { id: checkpoint.compactionId, role: 'update' }
-    }
-    if (event.type === 'compaction/start'
-      || event.type === 'compaction/summary'
-      || event.type === 'compaction/end') {
-      if (event.data.sourceCommandId !== undefined) return null
-      const compactionId: unknown = event.data.compactionId
-      if (typeof compactionId !== 'string' || compactionId === '') return null
-      return { id: compactionId, role: event.type === 'compaction/start' ? 'start' : 'update' }
-    }
-    return null
-  },
+  match: () => null,
   start: () => ({}),
-  update: (context, match) => updateCompactionState(context.state, match),
-  buildViewNode: (context) => {
-    const state = context.state ?? fallbackState(context)
-    if (state.checkpoint === undefined) return null
-    const marker = compactSummary(state.summary, state.checkpoint)
-    return chatNode(context, 'compaction', marker.seq, marker)
-  },
+  update: context => context.state,
+  buildViewNode: () => null,
 }
 
 /**
- * Register the automatic-compaction business contribution.
+ * Register the inert automatic-compaction policy contribution.
  * @param ctx - owning UI Conversation context.
  */
 export function registerCompactionConversationNode(ctx: Context): void {

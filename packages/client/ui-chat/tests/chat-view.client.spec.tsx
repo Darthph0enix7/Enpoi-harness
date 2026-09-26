@@ -599,6 +599,22 @@ describe('Chat node rendering', () => {
     expect(view.container.querySelector('[data-chat-node-key="fixture:user:5"]')).not.toBeNull()
   })
 
+  it('hides the reverted span from the user boundary and restores it when the revert clears', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'first'), assistant(2, 'answer', 1), user(3, 'second'), assistant(4, 'answer', 2)],
+      turnEnds: new Map([[1, 2], [2, 4]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).not.toBeNull()
+    act(() => { h.setSession({ revertFromSeq: 3 }) })
+    // The reverted-from message and everything after it leaves the transcript
+    // (the RevertTray reads those rows from the store instead).
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).toBeNull()
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:1"]')).not.toBeNull()
+    act(() => { h.setSession({ revertFromSeq: null }) })
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).not.toBeNull()
+  })
+
   it('threads the injected file-mention vocabulary into the closing prose only', () => {
     const wrote = (seq: number, callId: string): ToolResultNode => ({
       ...toolResult(seq, callId, 'write'),

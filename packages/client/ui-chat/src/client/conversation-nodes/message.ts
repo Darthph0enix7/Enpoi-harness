@@ -58,12 +58,13 @@ function contextMessage(
   }
 }
 
-/** A user-origin replacement event: the revert-commit message shadowing the reverted span. */
-function isRevertCommit(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
-  return event.type === 'user/message'
-    && isReplacementSurfaceEvent(event)
-    && event.data.source.kind === 'user'
-}
+/**
+ * Producers whose replacement copies stay in the visible transcript. A
+ * replacement copy from any other producer is a model-only rewrite (runtime
+ * context, skill catalog, upstream compaction staging) that must not add rows,
+ * and a compaction checkpoint keeps its own card-less lifecycle.
+ */
+const VISIBLE_REPLACEMENT_SOURCES = new Set(['user', 'enpoi-keeper'])
 
 /** User, steering, and injected-context message classification Definition. */
 export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
@@ -71,7 +72,13 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
   target: 'chat',
   match: (event) => {
     if (event.type === 'user/message') {
-      return (isAppendSurfaceEvent(event) || isRevertCommit(event)) && !isCompactionCheckpoint(event)
+      // Product rule: a user-initiated revert commit and a producer that owns
+      // user-visible history (the checkpoint keeper) both render, so a
+      // superseded message is never removed from the transcript by a
+      // background rewrite. Compaction never adds or removes a row.
+      const visibleReplacement = isReplacementSurfaceEvent(event)
+        && VISIBLE_REPLACEMENT_SOURCES.has(String(event.data.source.kind))
+      return (isAppendSurfaceEvent(event) || visibleReplacement) && !isCompactionCheckpoint(event)
         ? { id: String(event.data.id), role: 'start' }
         : null
     }

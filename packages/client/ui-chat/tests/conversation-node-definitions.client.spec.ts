@@ -2484,20 +2484,46 @@ describe('built-in conversation node Definitions', () => {
       summary: 'manual summary',
       summaryEventSeq: 12,
     })
-    const automatic = node(snapshot(compactions), 'compaction')
-    expect(automatic?.data).toMatchObject({ summary: 'automatic summary', summaryEventSeq: 21 })
-    expect(snapshot(compactions).nodes.values().filter(candidate => candidate.kind === 'compaction')).toHaveLength(1)
+    // Automatic compaction owns no Chat row: the manual command card remains,
+    // the automatic transaction adds nothing to the transcript.
+    expect(node(snapshot(compactions), 'compaction')).toBeUndefined()
   })
 
-  it('fills a landed compaction marker when an older page supplies its summary', () => {
+  it('renders keeper replacements beside their superseded rows and adds no compaction row', () => {
+    const value = assembler([
+      at(1, 'user/message', textMessage('prompt-1', 'first prompt'), { surfaceOp: 'append' }),
+      at(2, 'user/message', { ...textMessage('checkpoint-1', 'checkpoint 1'), source: { kind: 'enpoi-keeper' } },
+        { surfaceOp: 'append' }),
+      at(3, 'compaction/start', { compactionId: 'auto-1', turn: null }),
+      at(4, 'compaction/summary', {
+        compactionId: 'auto-1',
+        summary: [{ type: 'text', text: 'auto summary' }],
+        shadowedSeqs: [1, 2],
+        shadowedTokenCount: 10,
+      }),
+      at(5, 'user/message', { ...textMessage('checkpoint-2', 'checkpoint 2'), source: { kind: 'enpoi-keeper' } },
+        { surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 }, sourceEventSeqs: [2] }),
+      at(6, 'compaction/end', { compactionId: 'auto-1', turn: null }),
+    ])
+    const current = snapshot(value)
+    // The superseded checkpoint and its replacement both stay visible, as
+    // light context rows; automatic compaction adds no card and no shadow.
+    const contexts = [...current.nodes.values()]
+      .filter(candidate => candidate.kind === 'context')
+      .sort((left, right) => left.anchorSeq - right.anchorSeq)
+    expect(contexts.map(candidate => candidate.anchorSeq)).toEqual([2, 5])
+    expect(current.nodes.values().filter(candidate => candidate.kind === 'user')).toHaveLength(1)
+    expect(node(current, 'compaction')).toBeUndefined()
+  })
+
+  it('never materializes an automatic compaction marker even when a page supplies its summary', () => {
     const value = assembler([
       at(13, 'user/message', {
         ...textMessage('checkpoint', 'checkpoint'),
         source: { kind: 'compact-checkpoint', compactionId: 'compact-1' },
       }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 8 } }),
     ], true)
-    const before = node(snapshot(value), 'compaction')
-    expect(before?.data).toMatchObject({ summary: null, summaryEventSeq: null })
+    expect(node(snapshot(value), 'compaction')).toBeUndefined()
 
     value.prepend([
       at(9, 'compaction/start', { compactionId: 'compact-1', turn: null }),
@@ -2514,17 +2540,10 @@ describe('built-in conversation node Definitions', () => {
     ], false)
     value.flush()
 
-    const after = node(snapshot(value), 'compaction')
-    expect(after?.key).toBe(before?.key)
-    expect(after?.data).toMatchObject({
-      summary: 'older summary',
-      summaryEventSeq: 10,
-      shadowedItemCount: 3,
-      shadowedTokenCount: 42,
-    })
+    expect(node(snapshot(value), 'compaction')).toBeUndefined()
   })
 
-  it('renders a historical compaction when its start remains outside the loaded window', () => {
+  it('never renders a historical compaction even when its start is outside the loaded window', () => {
     const value = assembler([
       at(10, 'compaction/summary', {
         compactionId: 'compact-windowed',
@@ -2538,12 +2557,7 @@ describe('built-in conversation node Definitions', () => {
       }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 } }),
     ], true)
 
-    expect(node(snapshot(value), 'compaction')?.data).toMatchObject({
-      summary: 'loaded summary',
-      summaryEventSeq: 10,
-      shadowedItemCount: 3,
-      shadowedTokenCount: 42,
-    })
+    expect(node(snapshot(value), 'compaction')).toBeUndefined()
   })
 
   it('ignores legacy compaction transactions without correlation ids', () => {

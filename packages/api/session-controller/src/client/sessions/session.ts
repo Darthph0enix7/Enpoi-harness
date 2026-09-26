@@ -836,21 +836,24 @@ export class Session implements SessionFace {
       return true
     }
     if (event.type === 'user/message') {
-      // V3 surface op shape: { op: 'replace', startSeq, endSeq } (inclusive
-      // over the replaced surface nodes). The transcript hides the declared
-      // half-open span [startSeq, endSeq + 1): a single-node replacement
-      // (startSeq === endSeq) hides exactly that node, while a revert commit's
-      // wide span keeps hiding every replaced node. Folding to `event.seq`
-      // instead would also hide the live events between the replaced node and
-      // its replacement, which is only correct when that gap is the reverted
-      // region and endSeq already names that region's end.
+      // Product rule: the viewer's fold may hide a span only for a
+      // user-initiated revert, i.e. a user-origin replacement that lands while
+      // a `revert/state` boundary is active. Every other `surfaceOp: replace`
+      // writer (automatic or manual compaction, the checkpoint keeper, future
+      // edit/retry flows) must leave the transcript untouched: compaction is a
+      // model-context operation, not a viewer change.
+      // The declared V3 span { op: 'replace', startSeq, endSeq } is inclusive
+      // over the replaced surface nodes, so a revert commit's wide range is
+      // honoured as the half-open span [startSeq, endSeq + 1).
       const surfaceOp = event.surfaceOp as {
         readonly op?: string
         readonly startSeq?: number
         readonly endSeq?: number
       } | undefined
+      const sourceKind = (event.data as { readonly source?: { readonly kind?: unknown } } | undefined)?.source?.kind
       if (surfaceOp?.op === 'replace' && typeof surfaceOp.startSeq === 'number'
-        && typeof surfaceOp.endSeq === 'number') {
+        && typeof surfaceOp.endSeq === 'number'
+        && this.revertFromSeq !== null && sourceKind === 'user') {
         // Immutable (same reason as the revert/file-* fold below): selectors
         // compare the snapshot's array identity, so an in-place push would keep
         // the previous reference and could skip a re-render.
