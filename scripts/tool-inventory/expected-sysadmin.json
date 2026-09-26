@@ -26,7 +26,6 @@
     "read_image",
     "request_evidence",
     "roundtable",
-    "run_code",
     "skill",
     "subagent",
     "todo_write",
