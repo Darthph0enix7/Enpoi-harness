@@ -191,15 +191,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async recompose(ctx: Context, id: string): Promise<AgentPreset>',
-        description: 'Rebind a blank Agent; the caller owns the blank-session check.',
+        description: 'Rebind an idle Agent to another preset; the caller owns the running-turn check.',
         parameters: [{ name: 'ctx', description: 'Agent context.' }, { name: 'id', description: 'Requested preset.' }],
         returns: 'The bound identity.',
       },
       {
         signature: '@Remote(\'select\') async select(agent: Agent, agentPreset: string): Promise<string>',
-        description: 'Select a preset before a session starts its first turn.',
+        description: 'Select a preset for an idle Agent.\n\nAllowed whenever the session is idle, including one that has already run turns (and when the target is the preset it already runs); refused only while a turn is running.',
         parameters: [{ name: 'agent', description: 'Target Agent.' }, { name: 'agentPreset', description: 'Requested identity.' }],
         returns: 'Committed preset identity.',
+        throws: ['{RemoteError} `agent-preset/busy` while a turn is open, plus the not-found/invalid failures `recompose` raises.'],
       },
       {
         signature: 'async acquireScope(id?: string): Promise<{ key: ScopeKey } & AsyncDisposable>',
@@ -694,7 +695,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }>',
-        description: 'Read inherited and explicit profile values for the active entries.',
+        description: 'Read inherited and explicit profile values for the active entries. Both values depend only on the composed profile and the entry id, so each id is composed once per profile generation and cloned per read.',
         parameters: [],
         returns: 'Detached layer values alongside their Loader entries.',
       },
@@ -1584,7 +1585,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Negotiate protocol, capability, and pairing identity.',
         parameters: [{ name: 'request', description: 'caller protocol, harness version, schema digest, and device name.' }],
         returns: 'the host identity, capabilities, and visible pairings.',
-        throws: ['{@link RemoteError} `peer/version-skew` on protocol divergence.'],
+        throws: ['{@link RemoteError} `gateway/bad-request` when the request is absent or not an object, `peer/version-skew` on protocol divergence.'],
       },
       {
         signature: '@Remote(\'state\') async state(request: PeerStateRequest): Promise<PeerStateValue>',
@@ -2078,7 +2079,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['RemoteError `session/not-found` when no live Session owns the id.'],
       },
       {
-        signature: '@Remote(\'digest\') digest(request: SessionDigestRequest): SessionDigestValue',
+        signature: '@Remote(\'digest\') digest(request: SessionDigestRequest): Promise<SessionDigestValue>',
         description: 'Read the one-call Session digest for a debugging consumer: the execution latch, current model, last attributed action, recent tool calls, the injection index, the subagent tree, and pending interactions (doc 69 §9.1). Every preview is bounded and no credentials or captured request bodies are included.',
         parameters: [{ name: 'request', description: 'attached Session identity and the recent-tool-call budget.' }],
         returns: 'the bounded digest value.',
@@ -2239,6 +2240,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'meta', description: 'the stored session header (identity witness).' }, { name: 'inheritedEventCount', description: 'exact inherited prefix length for projection initialization and identity.' }, { name: 'events', description: 'the session\'s complete log, in seq order.' }],
         returns: 'the projection cut at the log end.',
       },
+      {
+        signature: 'async reindex( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): Promise<ProjectionSnapshot>',
+        description: 'Rebuild one session\'s checkpoint from its complete log and AWAIT the durable write-back. The fold is exactly coldSnapshot\'s; the difference is settlement — a maintenance backfill must know each session\'s replacement landed before it reports progress or resumes, so a failed write is observable to the caller instead of a swallowed warning.',
+        parameters: [{ name: 'meta', description: 'the stored session header (identity witness).' }, { name: 'inheritedEventCount', description: 'exact inherited prefix length for projection initialization and identity.' }, { name: 'events', description: 'the session\'s complete log, in seq order.' }],
+        returns: 'the projection cut at the log end, after the durable write.',
+      },
     ],
   },
   {
@@ -2302,7 +2309,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'restore( checkpoint: ProjectionCheckpoint, events: readonly SessionEvent[], baseSeq: SessionLogOffset, header: SessionHeader, inheritedEventCount: SessionLogOffset, ): { snapshot: ProjectionSnapshot; checkpoint: ProjectionCheckpoint }',
-        description: 'Cold read: fold every persisted unit over a stored log suffix, seeding each from its checkpoint row when usable — the one read recipe (cached state + forward tail replay + `view`) applied without a live `Session`. Call with the stored events at or past `restoreFloor(checkpoint)` (a `SessionHandle.read` slice) and that same floor as `baseSeq`; the floor\'s one-below anchor makes the supplied end honest, so a shrunk log is detected here. A row is usable iff its `ver` matches the live unit\'s `stateVersion`, it does not predate `baseSeq` (`seq >= baseSeq - 1`), and it does not claim events past the supplied end (`seq <= endSeq`); an unusable row is discarded and its key refolds from `init` — which is only sound over the full log, so a discarded row with `baseSeq > 0` throws (the caller re-reads from seq 0, e.g. after a crash-repair truncation shrank the log below a row\'s watermark).',
+        description: 'Cold read: fold every persisted unit over a stored log suffix, seeding each from its checkpoint row when usable — the one read recipe (cached state + forward tail replay + `view`) applied without a live `Session`. Call with the stored events at or past `restoreFloor(checkpoint)` (a `SessionHandle.read` slice) and that same floor as `baseSeq`; the floor\'s one-below anchor makes the supplied end honest, so a shrunk log is detected here. A row is usable iff its `ver` matches the live unit\'s `stateVersion`, it does not predate `baseSeq` (`seq >= baseSeq - 1`), and it does not claim events past the supplied end (`seq <= endSeq`); an unusable row is discarded and its key refolds from `init` — which is only sound over the full log, so a discarded row with `baseSeq > 0` throws (the caller re-reads from seq 0, e.g. after a crash-repair truncation shrank the log below a row\'s watermark). One unit\'s own schema rejecting either its seed row or the state its fold produces drops THAT key from the cut (absent from both `snapshot.values` and the refreshed checkpoint, so the next full read refolds it) and never fails the other units: a unit whose value cannot be produced is absent, never wrong.',
         parameters: [{ name: 'checkpoint', description: 'persisted rows for one session (possibly stale or empty).' }, { name: 'events', description: 'the stored events with `seq >= baseSeq`, in seq order.' }, { name: 'baseSeq', description: 'the seq `events` starts at (its first event\'s seq when non-empty).' }, { name: 'header', description: 'immutable metadata for the Session being restored.' }, { name: 'inheritedEventCount', description: 'exact fork-inherited prefix length supplied to unit initialization.' }],
         returns: 'the snapshot cut at the supplied log end (`asOfSeq` is the last supplied event\'s seq, `baseSeq - 1` for an empty tail) plus the refreshed checkpoint rows at that cut, ready for a durable write-back.',
       },
@@ -4554,7 +4561,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentCancelCause',
-    declaration: 'export type AgentCancelCause = {\n    readonly kind: \'user\';\n    readonly participant?: ParticipantTag;\n} | {\n    readonly kind: \'parent\';\n} | {\n    readonly kind: \'hook\';\n    readonly reason: string;\n} | {\n    readonly kind: \'disposed\';\n};',
+    declaration: 'export type AgentCancelCause = {\n    readonly kind: \'user\';\n    readonly participant?: ParticipantTag;\n    readonly intent?: StopIntent;\n    readonly revertFromSeq?: SessionSeq;\n} | {\n    readonly kind: \'parent\';\n} | {\n    readonly kind: \'hook\';\n    readonly reason: string;\n} | {\n    readonly kind: \'disposed\';\n};',
   },
   {
     name: 'AgentFactory',
@@ -6422,7 +6429,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'QueueAction',
-    declaration: 'export type QueueAction = {\n    readonly kind: \'edit\';\n    readonly content: readonly TextBlock[];\n} | {\n    readonly kind: \'remove\';\n} | {\n    readonly kind: \'steer\';\n};',
+    declaration: 'export type QueueAction = {\n    readonly kind: \'edit\';\n    readonly content: readonly TextBlock[];\n} | {\n    readonly kind: \'remove\';\n} | {\n    readonly kind: \'steer\';\n} | {\n    readonly kind: \'wake\';\n};',
   },
   {
     name: 'ReadFileLine',
@@ -6766,7 +6773,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionCancelRequest',
-    declaration: 'export interface SessionCancelRequest {\n    readonly sessionId: SessionId;\n    readonly participant?: ParticipantTag;\n}',
+    declaration: 'export interface SessionCancelRequest {\n    readonly sessionId: SessionId;\n    readonly participant?: ParticipantTag;\n    readonly intent?: \'detach\' | \'stop-all\';\n}',
   },
   {
     name: 'SessionCancelValue',
@@ -7353,10 +7360,6 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SettingsDescribeOptions {\n    redactSecrets?: boolean;\n}',
   },
   {
-    name: 'SettingsDescribeValue',
-    declaration: 'export interface SettingsDescribeValue {\n    writable: boolean;\n    hasDocument: boolean;\n    namespaces: SettingsNamespaceView[];\n}',
-  },
-  {
     name: 'SettingsDescriptor',
     declaration: 'export interface SettingsDescriptor {\n    ns: SettingsNamespace;\n    autoGenerate: boolean;\n    schema: unknown;\n    value: unknown;\n    revision: number;\n    base?: unknown;\n    user?: unknown;\n    applies: \'live\';\n    secrets?: RedactedSecret[];\n}',
   },
@@ -7601,6 +7604,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SshStreamEndpoint = z.infer<typeof streamEndpointSchema>;',
   },
   {
+    name: 'StopIntent',
+    declaration: 'export type StopIntent = \'detach\' | \'stop-all\' | \'revert\';',
+  },
+  {
     name: 'StorageBackend',
     declaration: 'export interface StorageBackend {\n    readonly kv?: KvFacet;\n    close(): Promise<void>;\n}',
   },
@@ -7622,11 +7629,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentCatalogEntry',
-    declaration: 'export type SubagentCatalogEntry = {\n    readonly id: SessionId;\n    readonly createdAt: number;\n} & ({\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n} | {\n    readonly mode: \'continuable\';\n    readonly label: string;\n} | {\n    readonly mode: \'unknown\';\n    readonly label?: string;\n});',
+    declaration: 'export type SubagentCatalogEntry = {\n    readonly id: SessionId;\n    readonly createdAt: number;\n    readonly seq: SessionSeq;\n} & ({\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n} | {\n    readonly mode: \'continuable\';\n    readonly label: string;\n} | {\n    readonly mode: \'unknown\';\n    readonly label?: string;\n});',
   },
   {
     name: 'SubagentCatalogRow',
-    declaration: 'export type SubagentCatalogRow = {\n    readonly id: SessionId;\n    readonly activity: \'running\' | \'inactive\';\n} & ({\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n} | {\n    readonly mode: \'continuable\';\n    readonly label: string;\n});',
+    declaration: 'export type SubagentCatalogRow = {\n    readonly id: SessionId;\n    readonly seq: SessionSeq;\n    readonly activity: \'running\' | \'inactive\';\n} & ({\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n} | {\n    readonly mode: \'continuable\';\n    readonly label: string;\n});',
   },
   {
     name: 'SubagentDescendantListEntry',

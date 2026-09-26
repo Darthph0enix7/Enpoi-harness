@@ -15,6 +15,7 @@ kind: "package-reference"
 - [使用本包](#use-this-package)
 - [Client 引用](#client-references)
 - [会话媒体引用](#session-media-references)
+- [会话投影回填](#session-projection-backfill)
 - [配置](#configuration)
 - [模型体验](#model-experience)
 - [已知限制与延期工作](#known-limitations-and-deferred-work)
@@ -83,6 +84,11 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 GUI 模型选择要求确切提供方／模型对出现在可用目录中；不可用的选择以 `session/model-unavailable` 拒绝。提示词准入保留已保存的路由，不按目录可用性阻断发送，由请求执行报告凭据缺失或模型不可用。`initializeDefaultModel()` 在账号登录后、其他提供方均未配置 API key 时，将第一个可用账号模型保存为默认模型；凭据检查使用已配置的引用，不依赖模型是否可用。提供方没有可用模型时，初始化以 `session/provider-models-unavailable` 拒绝。可用性变化不会替换模型或改写会话选择。
 
 `selectModel` 成功返回表示会话级模型选择已生效，不等待默认 profile 设置保存。默认设置在后台按提交顺序保存；保存失败会记录警告，并保留会话选择。新会话读取最近一次成功保存的默认值。
+
+<a id="session-projection-backfill"></a>
+## 会话投影回填
+
+当 `connection`、`sessionQuery`、`sessionPersistence`、`sessions` 与 `sessionProjectionCache` 均被组合时，`SessionProjectionBackfill` 在同一鉴权 `connection.fetch` 通道上挂载 `POST /api/session-projections/backfill`。它运行 [`dsh-session-query`](../../session-query/session-query/README.zh.md) 的宿主内重建：JSON 请求体可带可选 `keys`（存量记录必须已提供哪些投影 key 才跳过该会话）、`delayMs` 与 `limit`，成功响应为 `{ ok: true, report }`，含折叠、实时、已服务、缺失、不支持与失败的计数。影响范围仅限于每个被折叠会话的一条派生缓存记录：本轮绝不写入 Session 日志，也不产生任何模型可见变化；已挂接的会话会被跳过，因为其检查点由自身写入路径负责，而任一上限都让本轮可续跑。格式错误的请求体以 `400` 拒绝；单个会话的读取或写入失败会被隔离并计入报告，而任何会话之外的失败（例如语料库列表读取）会拒绝该请求。
 
 -----
 

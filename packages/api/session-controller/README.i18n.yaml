@@ -12,17 +12,20 @@
   en: 4914824c347fdab5
   zh: 684a7b7fa970c39f
 /session-controller/table-of-contents:
-  en: 1fdf707322fb6996
-  zh: 0204f7e9d4aa3cce
+  en: 10023254f9cfb851
+  zh: 1f638c7af80b9269
 /session-controller/use-this-package:
-  en: eaa0fe1d08de2355
+  en: ba13e86fa1d84f70
   zh: 190aea1522fa6349
 /session-controller/client-references:
   en: 41bdda1ac32df558
   zh: aa5d0e325924066b
 /session-controller/session-media-references:
-  en: 266ab2b1e2fec542
-  zh: b3450ae28a1e0baf
+  en: e7e34753c98705f8
+  zh: 3c2608be84489995
+/session-controller/session-projection-backfill:
+  en: bc89f23556b72b3e
+  zh: fe4c0eda13718b63
 /session-controller/configuration:
   en: 5c4c4224074e38a8
   zh: e0b0edac65c88ff4

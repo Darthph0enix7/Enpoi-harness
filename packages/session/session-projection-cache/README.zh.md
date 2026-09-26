@@ -60,6 +60,10 @@ kind: "package-reference"
 
 `cachedSnapshot(meta, keys?)` 是只读面：以零 I/O 从存储域的内存表同步提供客户端值。它接受生命周期身份（`formatVersion`、`createdAt`、`cwd`、`isSeeded`）与 header 匹配的记录，把其中版本和 schema 均匹配的 key 作为一个 block 提供，其 `asOfSeq` 是所服务各行中最低的水位。这个水位是存储记录自己的：header 作证不了 inherited cut，也作证不了行序号与消费者稍后打开的日志可比，因此 Session list 把该 block 标为 `cached`，客户端让建连后的 Session 产出的任何值覆盖它。在同一格式代内，cut 在 fork 时写死，不能区分其他字段区分不了的生命周期，而只读视图也从不播种 fold，所以 seeded（fork 出来的）会话与 unseeded 会话被同样地提供。`cachedPredecessorTitle(meta)` 是跨 Session 格式 edge 的更窄列表专用例外：生命周期匹配且已通过结构准入的 predecessor record 只能公开与当前版本兼容的 `title` row，因为 title 文本在相邻 edge 之间保持不变。其他 predecessor row 仍不可用。`coldSnapshot(meta, inheritedEventCount, events)` 是 fold 面：接受精确切点与完整有序日志，在折叠时跳过已检查点化的前缀，并在自身不读取持久化层的情况下刷新记录。
 
+### 重建缓存行
+
+`reindex(meta, inheritedEventCount, events)` 执行与 `coldSnapshot` 相同的身份校验式播种与折叠，但会等待持久化替换完成，因此维护调用方在报告进度或处理下一个会话之前能确知替换已落盘；同一次调用在写入失败时会拒绝，而不是记录警告并让缓存保持陈旧。软失败的 `coldSnapshot` 路径无法告诉可续跑的回填某个会话是否真的被修复，这正是等待式入口存在的原因。批量重建的遍历读取每个完整存量日志并用它调用 `reindex`——例如 [`dsh-session-query`](../../session-query/session-query/README.zh.md) 中的 `backfillProjectionCache`，由 [`dsh-api-session-controller`](../../api/session-controller/README.zh.md) 的 `POST /api/session-projections/backfill` 路由提供——节奏、取消与逐会话失败策略由该调用方负责。
+
 ### 缓存保证什么
 
 日志领先，缓存跟随：活会话检查点先把会话的缓冲事件持久化，然后才保存缓存记录。因此崩溃可能让缓存落后于日志，但绝不会让缓存领先。读取和写入共享存储域内一致的内存状态；逐单元写入链只在持久化成功后修改内存。每个带版本戳的记录必须匹配当前运行单元的 schema 与生命周期身份（`formatVersion`、`createdAt`、`cwd`、`isSeeded`）；fold 面（`hydratePrepared`、`coldSnapshot` 与检查点写入）还要求精确的 `inheritedEventCount`，因此从另一会话格式代或 fork 切点折叠出的行不能播种调用方。JSON 后端把每条记录存于仅所有者可访问的 `<root>/session_projcache/sessions/<id>.json` 目录树中。Domain 读取校验保留检查点值中的所有自有 JSON 键，包括不透明元数据中的 `__proto__` 与 `constructor`。它拒绝无法无损完成 JSON 往返的值，并与检查点写入使用相同规则。随后，每个 projection 用自己的 `stateSchema` 校验 hydration 状态；承载不透明 JSON 的字段需要使用保留其键的校验器。
@@ -127,7 +131,7 @@ kind: "package-reference"
 
 - **无淘汰或保留接口**——记录按会话持续累积；清理已存储检查点属于带外维护，与会话持久化采用相同策略。
 - **间隔节流采用按会话的粗粒度控制**——一次无脏数据的写入完成后，计时器在首个脏事件到达时启动；持续但低于条数阈值的事件流每间隔写入一次，而非滑动窗口。
-- **缓存侧不做冷重折叠**——缓存只服务并刷新自己的记录，从不读取会话日志，因为它不依赖持久化层；需要保证冷快照的消费方自行从日志重新折叠。
+- **缓存侧不做冷重折叠**——缓存服务、刷新记录，并通过 `reindex` 替换记录，但从不读取会话日志，因为它不依赖持久化层；需要保证冷快照的消费方自行从日志重新折叠并交给 `reindex`。
 - **每次 schema 或域版本变更都必须论证升级路径**——改动存储记录 schema 或域版本时，同一 PR 必须在 `tests/fixtures/` 下归档此前已发布磁盘格式的 fixture（测试前置数据），并在 `tests/fixtures.spec.ts` 中用测试论证所选的处置方式：读兼容恢复（`compatibleVersions`）、当前版本重写，或 backup-and-skip 抢救。即便选择直接丢弃旧记录的 bump，也要证明丢弃既不会导致启动失败，也不会污染缓存树。
 
 <a id="dev-note"></a>

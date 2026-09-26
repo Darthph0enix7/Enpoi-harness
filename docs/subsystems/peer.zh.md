@@ -364,7 +364,8 @@ Host service backing the generated `ctx.remote.peer` namespace.
  * Negotiate protocol, capability, and pairing identity.
  * @param request - caller protocol, harness version, schema digest, and device name.
  * @returns the host identity, capabilities, and visible pairings.
- * @throws {@link RemoteError} `peer/version-skew` on protocol divergence.
+ * @throws {@link RemoteError} `gateway/bad-request` when the request is
+ * absent or not an object, `peer/version-skew` on protocol divergence.
  */
 @Remote('handshake') handshake(request: PeerHandshakeRequest): PeerHandshakeValue
 

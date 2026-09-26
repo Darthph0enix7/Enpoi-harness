@@ -544,17 +544,23 @@ composedPreset(ctx: Context): string | undefined
  */
 serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): Context[K] | undefined
 
-/** Rebind a blank Agent; the caller owns the blank-session check.
+/** Rebind an idle Agent to another preset; the caller owns the running-turn check.
  * @param ctx Agent context.
  * @param id Requested preset.
  * @returns The bound identity.
  */
 async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
-/** Select a preset before a session starts its first turn.
+/** Select a preset for an idle Agent.
+ *
+ * Allowed whenever the session is idle, including one that has already run
+ * turns (and when the target is the preset it already runs); refused only
+ * while a turn is running.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.
+ * @throws {RemoteError} `agent-preset/busy` while a turn is open, plus the
+ * not-found/invalid failures `recompose` raises.
  */
 @Remote('select') async select(agent: Agent, agentPreset: string): Promise<string>
 

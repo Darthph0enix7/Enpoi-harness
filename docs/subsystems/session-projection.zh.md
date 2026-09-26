@@ -194,6 +194,19 @@ async write(session: Session): Promise<void>
  * @returns the projection cut at the log end.
  */
 coldSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): ProjectionSnapshot
+
+/**
+ * Rebuild one session's checkpoint from its complete log and AWAIT the
+ * durable write-back. The fold is exactly {@link coldSnapshot}'s; the
+ * difference is settlement — a maintenance backfill must know each
+ * session's replacement landed before it reports progress or resumes, so a
+ * failed write is observable to the caller instead of a swallowed warning.
+ * @param meta - the stored session header (identity witness).
+ * @param inheritedEventCount - exact inherited prefix length for projection initialization and identity.
+ * @param events - the session's complete log, in seq order.
+ * @returns the projection cut at the log end, after the durable write.
+ */
+async reindex( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): Promise<ProjectionSnapshot>
 ```
 
 Types: [Session](session.zh.md) · [SessionEvent](session.zh.md) · [SessionHeader](persistence.zh.md) · [SessionLogOffset](session.zh.md)
@@ -325,7 +338,11 @@ viewCheckpoint( checkpoint: ProjectionCheckpoint, keys?: readonly Extract<keyof 
  * and its key refolds from `init` — which is only sound over the full
  * log, so a discarded row with `baseSeq > 0` throws (the caller re-reads
  * from seq 0, e.g. after a crash-repair truncation shrank the log below
- * a row's watermark).
+ * a row's watermark). One unit's own schema rejecting either its seed row
+ * or the state its fold produces drops THAT key from the cut (absent from
+ * both `snapshot.values` and the refreshed checkpoint, so the next full
+ * read refolds it) and never fails the other units: a unit whose value
+ * cannot be produced is absent, never wrong.
  * @param checkpoint - persisted rows for one session (possibly stale or empty).
  * @param events - the stored events with `seq >= baseSeq`, in seq order.
  * @param baseSeq - the seq `events` starts at (its first event's seq when non-empty).

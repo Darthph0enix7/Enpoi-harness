@@ -962,7 +962,7 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
  * @returns the bounded digest value.
  * @throws RemoteError `session/not-found` when no live Session owns the id.
  */
-@Remote('digest') digest(request: SessionDigestRequest): SessionDigestValue
+@Remote('digest') digest(request: SessionDigestRequest): Promise<SessionDigestValue>
 
 /**
  * Read one image proven reachable from the addressed Session log.

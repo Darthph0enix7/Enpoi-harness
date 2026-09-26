@@ -39,6 +39,8 @@ Persist complete raw configs and apply them through the normal Loader path.
 entries(): Entry[]
 
 /** Read inherited and explicit profile values for the active entries.
+ * Both values depend only on the composed profile and the entry id, so each
+ * id is composed once per profile generation and cloned per read.
  * @returns Detached layer values alongside their Loader entries.
  */
 configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }>
