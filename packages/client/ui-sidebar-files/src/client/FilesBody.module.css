@@ -10,6 +10,17 @@
   color: var(--dsw-alias-label-primary);
   font-size: var(--dsh-content-font-size-secondary, 13px);
   line-height: 1.5;
+  /* The frame eases its registered track variables (--dsh-sidebar-track,
+     --dsh-rightbar-progress) and every descendant inherits the per-frame
+     change, so Blink re-calcs the whole inheriting subtree on each frame of a
+     sidebar ride. With this tree open that is ~2.1k elements and ~36 ms per
+     frame, which drops frames on both sides; without it, ~400 and ~13 ms.
+     The tree reads neither variable, so re-declaring them at this subtree's
+     root stops the inherited recalculation here while the frame, the panel's
+     slide and the dock above keep the animated values. Keep this in step with
+     ui-layout AppFrame.module.css if the track set ever changes. */
+  --dsh-sidebar-track: 0px;
+  --dsh-rightbar-progress: 0;
 }
 
 /* One 38px row flush under the pane's strip: the root's path, then reload at
@@ -66,6 +77,15 @@
   position: relative;
   margin: 0;
   padding: 0;
+}
+
+/* Rows outside the scrollport skip style, layout and paint and stand in at
+   their last measured height, so a deep tree costs only what the viewport
+   shows — both while scrolling and while a sidebar ride recalcs. The 30px
+   guess is the collapsed row's own height (5px padding, 13px/1.5 text). */
+.item[data-files-entry] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
 }
 
 .row {

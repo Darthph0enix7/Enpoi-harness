@@ -52,6 +52,9 @@ const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base'
 /** How long one copy item shows its "copied" label, in ms. */
 const COPIED_MS = 1200
 
+/** How long after the last resize the clipped path re-measures, past the track ride (300ms). */
+const PATH_CLIP_SETTLE_MS = 320
+
 /**
  * Order one level's entries for display: directories first, then everything
  * else, each group by name. The endpoint's order is a listing fact; this is the
@@ -93,6 +96,10 @@ export function failureLine(t: TranslateNS<'sidebarFiles'>, failure: RemoteFailu
  * after each commit that can change the path or mount the header, and whenever
  * either box resizes; written to the DOM directly because it changes only how
  * the stylesheet fades what is already rendered.
+ *
+ * While the frame rides its eased track variables ([data-animating]) the box
+ * resizes on every frame; those reads and writes are deferred so the ride's
+ * frames stay cheap, and one final measurement lands after it settles.
  */
 function usePathClipped(
   box: RefObject<HTMLDivElement | null>,
@@ -103,15 +110,28 @@ function usePathClipped(
     const outer = box.current
     const inner = text.current
     if (outer === null || inner === null) return undefined
-    const apply = (): void => {
+    const measure = (): void => {
       if (inner.offsetWidth > outer.clientWidth) outer.dataset.pathClipped = ''
       else delete outer.dataset.pathClipped
+    }
+    let settle: number | undefined
+    const apply = (): void => {
+      if (document.querySelector('[data-animating]') === null) {
+        settle = undefined
+        measure()
+        return
+      }
+      window.clearTimeout(settle)
+      settle = window.setTimeout(apply, PATH_CLIP_SETTLE_MS)
     }
     apply()
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(apply)
     observer?.observe(outer)
     observer?.observe(inner)
-    return () => { observer?.disconnect() }
+    return () => {
+      window.clearTimeout(settle)
+      observer?.disconnect()
+    }
   }, [box, text, path])
 }
 /* jscpd:ignore-end */

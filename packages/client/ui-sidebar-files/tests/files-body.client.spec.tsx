@@ -117,6 +117,65 @@ describe('FilesBody', () => {
     }
   })
 
+  it('defers the clipped-flag write while the frame animates and lands one measurement at settle', async () => {
+    class FakeResizeObserver implements ResizeObserver {
+      static latest: FakeResizeObserver | undefined
+      readonly observe = vi.fn()
+      readonly unobserve = vi.fn()
+      readonly disconnect = vi.fn()
+      constructor(private readonly callback: ResizeObserverCallback) {
+        FakeResizeObserver.latest = this
+      }
+
+      fire(): void {
+        this.callback([], this)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    let boxWidth = 300
+    const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')
+    const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => 200 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => boxWidth })
+    const marker = document.createElement('div')
+    marker.setAttribute('data-animating', '')
+    document.body.append(marker)
+    try {
+      const { view, script } = mountBody()
+      await act(() => script.watches.ready(ROOT))
+      await act(() => script.settle({ ok: true, value: ROOT_LEVEL }))
+      const path = view.container.querySelector<HTMLElement>('[data-files-path]')
+      const observer = FakeResizeObserver.latest
+      if (observer === undefined) throw new Error('expected the path to observe its size')
+      expect(path?.hasAttribute('data-path-clipped')).toBe(false)
+
+      // A resize during the ride writes nothing, and re-arms the settle wait.
+      boxWidth = 120
+      act(() => { observer.fire() })
+      act(() => { observer.fire() })
+      expect(path?.hasAttribute('data-path-clipped')).toBe(false)
+
+      marker.remove()
+      await act(() => new Promise(resolve => { setTimeout(resolve, 400) }))
+      expect(path?.hasAttribute('data-path-clipped')).toBe(true)
+
+      // A deferred measurement is dropped with the effect, not run after unmount.
+      document.body.append(marker)
+      boxWidth = 300
+      act(() => { observer.fire() })
+      view.unmount()
+      await act(() => new Promise(resolve => { setTimeout(resolve, 400) }))
+      expect(path?.hasAttribute('data-path-clipped')).toBe(true)
+    } finally {
+      marker.remove()
+      vi.unstubAllGlobals()
+      for (const [name, descriptor] of [['offsetWidth', offsetWidth], ['clientWidth', clientWidth]] as const) {
+        if (descriptor === undefined) Reflect.deleteProperty(HTMLElement.prototype, name)
+        else Object.defineProperty(HTMLElement.prototype, name, descriptor)
+      }
+    }
+  })
+
   it('reopening a directory shows its cache and replaces it after the new subscription is ready', async () => {
     const { view, script } = mountBody()
     await act(() => script.watches.ready(ROOT))
