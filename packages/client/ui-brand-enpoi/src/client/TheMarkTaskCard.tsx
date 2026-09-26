@@ -3,6 +3,8 @@ import styles from './TheMarkTaskCard.module.css'
 
 export interface TheMarkTaskCardProps {
   taskId: string
+  /** Wire Tool name that opened this card; a probe anchor (`data-mark-task-tool`). */
+  toolName?: string | undefined
   persona: string
   title: string
   model?: string | undefined
@@ -58,6 +60,8 @@ function toolIconD(name: string): string {
 }
 
 export function TheMarkTaskCard({
+  taskId,
+  toolName,
   persona,
   title,
   model,
@@ -105,7 +109,7 @@ export function TheMarkTaskCard({
   const personaLabel = persona.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\s]+/u, '').trim() || persona
 
   return (
-    <div className={styles.markTaskCard}>
+    <div className={styles.markTaskCard} data-mark-task-card="" data-mark-task-id={taskId} {...toolName === undefined ? {} : { 'data-mark-task-tool': toolName }}>
       {/* Zoom 1: Collapsed Header Badge Row (a real button: the whole card
           head is the tap target and keyboard toggles the drawer too). */}
       <button

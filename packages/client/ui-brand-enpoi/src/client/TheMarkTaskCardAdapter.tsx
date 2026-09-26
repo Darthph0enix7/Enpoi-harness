@@ -189,6 +189,7 @@ export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
   return (
     <TheMarkTaskCard
       taskId={callId}
+      toolName={toolName}
       persona={persona}
       title={title}
       model={model}

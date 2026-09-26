@@ -79,6 +79,13 @@ import {
 /** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, locale, and Remote push. */
 export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale', 'remote']
 
+/**
+ * Cell priority for The Mark's keyed `tool.call.toolview` entries. Lower than
+ * the default 0 so the fork card shadows upstream ui-tool's DetailsRow on keys
+ * both claim (`subagent`), without a same-priority registration clash.
+ */
+const MARKS_SHADOW_PRIORITY = -1
+
 /** Session-less model directory: the global catalog mapped to the directory state shape. */
 type CatalogDirectoryFace = Omit<AgentModelsDirectoryFace, 'available'> & { available: true }
 
@@ -433,38 +440,24 @@ export function apply(ctx: Context): void {
     inject: terminalInjected,
   }, BottomTerminalDock))
 
-  // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates
+  // 4. In-Chat Task Cards (The Mark) for subagent dispatches, Oracle reviews, and Council debates.
+  // Keyed toolview entries shadow at a lower priority (ui-slots register: the
+  // lowest live entry renders; a second entry at the same priority throws at
+  // load). Upstream ui-tool claims `subagent` with its DetailsRow at priority 0,
+  // so the fork card registers at MARKS_SHADOW_PRIORITY to deterministically win
+  // that key — and never collides if upstream later claims any of the others.
   ctx.slots.inject('tool.call.toolview', function* () {
     const uiWorkspace = ctx.get('uiWorkspace')
     const openSession = (id: SessionId) => {
       uiWorkspace?.openSession(id)
     }
-    // `subagent` is upstream ui-tool's DetailsRow: the merged tool layer already
-    // owns that key, so the fork's card cannot register it a second time.
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'dispatch_task',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'task',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'oracle_review',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'roundtable',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
-    yield ctx.slots.register({
-      name: 'tool.call.toolview',
-      key: 'chorus',
-      inject: () => ({ openSession }),
-    }, TheMarkTaskCardAdapter)
+    for (const key of ['subagent', 'dispatch_task', 'task', 'oracle_review', 'roundtable', 'chorus']) {
+      yield ctx.slots.register({
+        name: 'tool.call.toolview',
+        key,
+        priority: MARKS_SHADOW_PRIORITY,
+        inject: () => ({ openSession }),
+      }, TheMarkTaskCardAdapter)
+    }
   })
 }

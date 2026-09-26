@@ -3,7 +3,7 @@ import type { ChatSnapshot, UseChat } from '@deepseek-ai/dsh-client-ui-chat/clie
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { ApprovalCommand, commandOf } from '../src/client/chat/ApprovalCommand.tsx'
+import { ApprovalCommand, commandOf, programOf } from '../src/client/chat/ApprovalCommand.tsx'
 
 function props(
   nodes: readonly unknown[],
@@ -26,6 +26,25 @@ describe('commandOf', () => {
   })
 })
 
+describe('programOf', () => {
+  it('accepts only a non-empty string code from object arguments', () => {
+    expect(programOf(undefined)).toBeUndefined()
+    expect(programOf({ callId: 'c1', argsRaw: '{' })).toBeUndefined()
+    expect(programOf({ callId: 'c1', argsRaw: '[]' })).toBeUndefined()
+    expect(programOf({ callId: 'c1', argsRaw: '{}' })).toBeUndefined()
+    expect(programOf({ callId: 'c1', argsRaw: '{"code":""}' })).toBeUndefined()
+    expect(programOf({ callId: 'c1', argsRaw: '{"code":42}' })).toBeUndefined()
+  })
+
+  it('returns the program, its description, and sorted deduplicated referenced tools', () => {
+    const source = 'const a = await tools.read({ path: "a" })\nconst b = await tools["bash"]({ command: "ls" })\nawait tools.read({ path: "b" })'
+    expect(programOf({ callId: 'c1', argsRaw: JSON.stringify({ code: source, description: '  Summarize files  ' }) }))
+      .toEqual({ description: 'Summarize files', source, tools: ['bash', 'read'] })
+    expect(programOf({ callId: 'c1', argsRaw: JSON.stringify({ code: 'return 1' }) }))
+      .toEqual({ description: '', source: 'return 1', tools: [] })
+  })
+})
+
 describe('ApprovalCommand', () => {
   it('renders the running correlated Tool command', () => {
     render(<ApprovalCommand {...props([
@@ -35,6 +54,18 @@ describe('ApprovalCommand', () => {
     ] as never)} />)
 
     expect(screen.getByText('pnpm test')).toBeTruthy()
+  })
+
+  it('renders the correlated run_code program and the tools it references', () => {
+    const argsRaw = JSON.stringify({ code: 'await tools.bash({ command: "ls" })', description: 'List files' })
+    render(<ApprovalCommand {...props([
+      { kind: 'tool-call', data: { root: { phase: 'start', callId: 'call-1', argsRaw } } },
+    ] as never)} />)
+
+    expect(screen.getByText('List files')).toBeTruthy()
+    expect(screen.getByText('await tools.bash({ command: "ls" })')).toBeTruthy()
+    expect(screen.getByText('Tools referenced in the program:')).toBeTruthy()
+    expect(screen.getByText('bash')).toBeTruthy()
   })
 
   it('omits absent, uncorrelated, preparing, and settled Tool calls', () => {
