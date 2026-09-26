@@ -160,7 +160,7 @@
     }
   },
   "preMergeReference": {
-    "note": "pre-0.1.7-merge observations for context only — not consumed by scripts/tool-roster-diff.mjs",
+    "note": "pre-0.1.7-merge observations for context only \u2014 not consumed by scripts/tool-roster-diff.mjs",
     "orchestrator": {
       "2026-09-13 (doc 52 era)": 29,
       "2026-09-19 (3fff640)": 31,
