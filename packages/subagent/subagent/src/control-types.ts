@@ -8,7 +8,7 @@
 import type { PromptContentPart } from '@deepseek-ai/dsh-attachment/types'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 // Type-only: the Workspace registry's archive-admission family map this runtime merges `subagent` into.
 import type {} from '@deepseek-ai/dsh-workspace/types'
 
@@ -26,6 +26,11 @@ export type SubagentCatalogRow =
   & {
     /** The durable child session id, stable across Activations. */
     readonly id: SessionId
+    /**
+     * Seq of the parent's `subagent/catalog` event that established this child:
+     * the durable spawn point a revert span matches against.
+     */
+    readonly seq: SessionSeq
     /**
      * Whether recursive catalog listing observed a resident Session. This
      * does not encode a durable outcome or guarantee continuation delivery.

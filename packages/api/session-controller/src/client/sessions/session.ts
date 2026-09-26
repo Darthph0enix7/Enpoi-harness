@@ -354,9 +354,10 @@ export class Session implements SessionFace {
    * land in promptError (same error-strip display slot). A subagent address
    * routes through `subagents.interruptByParent`, whose durable parent-address
    * authority works without a live parent Agent.
+   * @param intent - stop intent forwarded to the Host; absent keeps its default.
    * @returns the cancel result.
    */
-  async cancel(): Promise<RemoteResult<{ accepted: true }>> {
+  async cancel(intent?: 'detach' | 'stop-all'): Promise<RemoteResult<{ accepted: true }>> {
     const address = this.address
     const result = address !== undefined
       ? await this.remote.subagents.interruptByParent(
@@ -364,7 +365,10 @@ export class Session implements SessionFace {
         address.parentSessionId,
         'continuable',
       )
-      : await this.remote.session.cancel({ sessionId: this.sessionId })
+      : await this.remote.session.cancel({
+        sessionId: this.sessionId,
+        ...(intent === undefined ? {} : { intent }),
+      })
     if (!result.ok) {
       this.promptError = { op: 'stop', error: result.error }
       this.notifier.markDirty()
@@ -709,8 +713,11 @@ export class Session implements SessionFace {
     }
     for (const entry of visible) {
       this.observeSubmissionEvent(entry.event)
-      this.foldRevertState(entry.event)
     }
+    // A complete window replace is authoritative for revert state: rebuild the
+    // fold from the new window instead of layering it over the previous one, so
+    // a gap-repair re-install cannot accumulate duplicate or stale ranges.
+    this.replayRevertState()
     if (projections !== undefined) {
       const inbox = projections.values.inbox as InboxState | undefined
       for (const target of ['next-turn', 'next-step'] as const) {
@@ -765,6 +772,17 @@ export class Session implements SessionFace {
     // carry older revert/file-* events the incremental fold never saw (the
     // opening window is only the seed prefix). Reset then replay in order so
     // the latest boundary/outcomes win.
+    this.replayRevertState()
+    this.notifier.markDirty()
+  }
+
+  /**
+   * Rebuild the revert fold from the complete loaded window. Both window
+   * mutation paths call this instead of folding incrementally, so the fold is
+   * always a pure function of the current window and a re-install is
+   * idempotent.
+   */
+  private replayRevertState(): void {
     this.revertFromSeq = null
     this.revertShadowRanges = []
     this.revertFileOutcomes = {}
@@ -772,7 +790,6 @@ export class Session implements SessionFace {
     for (const entry of this.eventSource.getSnapshot().entries) {
       this.foldRevertState(entry.event)
     }
-    this.notifier.markDirty()
   }
 
   /** Append one stream-validated live event. */
@@ -819,12 +836,25 @@ export class Session implements SessionFace {
       return true
     }
     if (event.type === 'user/message') {
-      // V3 surface op shape: { op: 'replace', startSeq, endSeq } (inclusive).
-      // The replacement commit lands at `event.seq`; the transcript hides the
-      // half-open span [startSeq, event.seq).
-      const surfaceOp = event.surfaceOp as { readonly op?: string; readonly startSeq?: number } | undefined
-      if (surfaceOp?.op === 'replace' && typeof surfaceOp.startSeq === 'number') {
-        this.revertShadowRanges.push({ start: surfaceOp.startSeq, end: event.seq })
+      // V3 surface op shape: { op: 'replace', startSeq, endSeq } (inclusive
+      // over the replaced surface nodes). The transcript hides the declared
+      // half-open span [startSeq, endSeq + 1): a single-node replacement
+      // (startSeq === endSeq) hides exactly that node, while a revert commit's
+      // wide span keeps hiding every replaced node. Folding to `event.seq`
+      // instead would also hide the live events between the replaced node and
+      // its replacement, which is only correct when that gap is the reverted
+      // region and endSeq already names that region's end.
+      const surfaceOp = event.surfaceOp as {
+        readonly op?: string
+        readonly startSeq?: number
+        readonly endSeq?: number
+      } | undefined
+      if (surfaceOp?.op === 'replace' && typeof surfaceOp.startSeq === 'number'
+        && typeof surfaceOp.endSeq === 'number') {
+        // Immutable (same reason as the revert/file-* fold below): selectors
+        // compare the snapshot's array identity, so an in-place push would keep
+        // the previous reference and could skip a re-render.
+        this.revertShadowRanges = [...this.revertShadowRanges, { start: surfaceOp.startSeq, end: surfaceOp.endSeq + 1 }]
         this.revertFromSeq = null
         return true
       }

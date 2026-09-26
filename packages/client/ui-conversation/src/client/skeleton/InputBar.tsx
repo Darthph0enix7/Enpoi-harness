@@ -17,7 +17,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { ChangeEvent, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import clsx from 'clsx'
 import {
-  IconPlusOutlineMedium, IconWarningOutlineRegular, Toast, Tooltip, useSheetPresentation,
+  IconChevronDownOutlineRegular, IconPlusOutlineMedium, IconWarningOutlineRegular, Menu, Toast, Tooltip,
+  useSheetPresentation,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: the `plan` projection key merge (the TodoDock posture — the
 // composer reads a host-computed value; the domain owns the key).
@@ -28,6 +29,7 @@ import type {} from '@deepseek-ai/dsh-goal/client'
 // wire types: apiproxy's sessions contract declares it, and client-runtime's
 // api-remotes import already places it in every client program.
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ComposerBarProps } from '../contract/slots.ts'
 import { DraftEditor } from '../input/editor/DraftEditor.tsx'
 import {
@@ -45,9 +47,9 @@ export type InputBarProps = ComposerBarProps
 export const InputBar = memo(function InputBar({
   useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
   retryFileUpload,
-  toggleCommandMenu, stop, t,
+  toggleCommandMenu, stop, stopAll, t,
   renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useStopShortcut,
-  useProjection, sessionId, variant, disabled: inert = false, blocked,
+  useProjection, useSessions, useSessionStatus, sessionId, variant, disabled: inert = false, blocked,
   workspacePickerOpen = false, onRequestWorkspace,
   placeholder, accessory,
 }: InputBarProps) {
@@ -63,6 +65,31 @@ export const InputBar = memo(function InputBar({
   const running = useSession(s => s.running) ?? false
   const subagent = useSession(s => s.subagent) ?? null
   const removed = useSession(s => s.removed) ?? false
+  const sessionRows = useSessions(state => state.byId)
+  const statuses = useSessionStatus(value => value)
+  // Live subagent descendants of this session: the parentId chain proves the
+  // relation, and only a live Agent counts as running (a parked child keeps a
+  // durable row but no live status). Mirrors the lineage header's count.
+  const liveChildren = useMemo(() => {
+    let count = 0
+    for (const row of Object.values(sessionRows)) {
+      if (row.id === sessionId || row.origin !== 'subagent') continue
+      const seen = new Set<SessionId>([row.id])
+      let parent = row.parentId
+      let descendant = false
+      while (parent !== undefined && !seen.has(parent)) {
+        if (parent === sessionId) {
+          descendant = true
+          break
+        }
+        seen.add(parent)
+        parent = sessionRows[parent]?.parentId
+      }
+      if (descendant && (statuses.get(row.id)?.running ?? row.running) === true) count += 1
+    }
+    return count
+  }, [sessionRows, statuses, sessionId])
+  const [stopAllOpen, setStopAllOpen] = useState(false)
   // Plan mode swaps the composer placeholder (the projection is the folded
   // host value; owner-prop placeholders — hero, session-unavailable — win).
   const planActive = useProjection('plan', plan => plan !== undefined && (plan.pending ? !plan.active : plan.active))
@@ -315,6 +342,13 @@ export const InputBar = memo(function InputBar({
   // Disabled native buttons may omit mouseleave; their tooltip must close from state.
   const primaryDisabled = primaryStops ? stop === undefined : empty || disabled || machineBusy || uploadsPending
   const interruptible = running && continuable
+  // The split stop control: the count badge and "Stop all agents" sit beside
+  // the ✕ whenever the running main turn has live subagent descendants. With
+  // none, ✕ stays a plain detach.
+  const stopAllAvailable = primaryStops && liveChildren > 0 && stopAll !== undefined
+  useEffect(() => {
+    if (!stopAllAvailable) setStopAllOpen(false)
+  }, [stopAllAvailable])
   const primarySubmitMode = resolveSubmitMode(busyEnter, running, 'enter', steeringAvailable)
   const plainMessageDraft = !empty && input?.phase === 'plain' && !draft.trimStart().startsWith('/')
   const primaryLabel = primaryStops
@@ -521,6 +555,34 @@ export const InputBar = memo(function InputBar({
                 )}
               </button>
             </Tooltip>
+            {stopAllAvailable && (
+              <Menu
+                open={stopAllOpen}
+                onClose={() => { setStopAllOpen(false) }}
+                items={[{ id: 'stop-all', label: t('input.stopAll', { n: liveChildren }) }]}
+                onSelect={() => {
+                  setStopAllOpen(false)
+                  stopAll?.()
+                }}
+                align="end"
+                portal
+                anchor={(
+                  <button
+                    type="button"
+                    className={css.stopAll}
+                    aria-label={t('input.stopAll', { n: liveChildren })}
+                    aria-haspopup="menu"
+                    aria-expanded={stopAllOpen}
+                    onMouseDown={keepFocus}
+                    onPointerDown={keepFocusTouch}
+                    onClick={() => { setStopAllOpen(value => !value) }}
+                  >
+                    <span className={css.stopCount} aria-hidden>{liveChildren}</span>
+                    <IconChevronDownOutlineRegular size={12} />
+                  </button>
+                )}
+              />
+            )}
           </div>
         </div>
       </div>

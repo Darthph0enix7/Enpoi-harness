@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { Context } from '@deepseek-ai/cordis'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -305,7 +306,7 @@ const listState = (overrides: Partial<SessionListState> = {}): SessionListState 
   },
   phase: 'ready',
   projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [
-    { createdAt: 1, id: CHILD_ID, mode: 'one-shot' },
+    { createdAt: 1, id: CHILD_ID, seq: SessionSeq(0), mode: 'one-shot' },
   ] } } },
   ...overrides,
 })
@@ -670,8 +671,8 @@ describe('WorkflowRunPanel', () => {
     const sessions = listState({
       ids: [PARENT_ID, CHILD_ID, SECOND_ID],
       projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [
-        { createdAt: 1, id: CHILD_ID, mode: 'one-shot' },
-        { createdAt: 1, id: SECOND_ID, mode: 'one-shot' },
+        { createdAt: 1, id: CHILD_ID, seq: SessionSeq(0), mode: 'one-shot' },
+        { createdAt: 1, id: SECOND_ID, seq: SessionSeq(1), mode: 'one-shot' },
       ] } } },
       byId: {
         ...listState().byId,
@@ -881,7 +882,7 @@ describe('WorkflowRunPanel', () => {
   it.each([
     ['catalog absent', listState({ projectionsBySession: {} }), 'running'],
     ['catalog empty', listState({ projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [] } } } }), 'running'],
-    ['wrong parent', listState({ projectionsBySession: { ['other' as SessionId]: { state: 'ready', error: null, values: { subagentCatalog: [{ createdAt: 1, id: CHILD_ID, mode: 'one-shot' }] } } } }), 'running'],
+    ['wrong parent', listState({ projectionsBySession: { ['other' as SessionId]: { state: 'ready', error: null, values: { subagentCatalog: [{ createdAt: 1, id: CHILD_ID, seq: SessionSeq(0), mode: 'one-shot' }] } } } }), 'running'],
     ['child inactive', listState({ byId: { ...listState().byId, [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false } } }), 'running'],
     ['member terminal', listState(), 'completed'],
   ] as const)('does not navigate when %s', (_name, sessions, memberStatus) => {

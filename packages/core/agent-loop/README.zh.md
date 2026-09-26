@@ -122,7 +122,7 @@ const handle = await ctx.agents.create({
 
 ### 失败与取消
 
-`turn/end` 声明的类型是 `TurnEndCancelCause`；取消时，循环在其中记录一份新的 `AgentCancelCause`，保留调用方的 `kind` 和 hook 的 `reason` 文本。实时 `AbortSignal.reason` 仍是调用方的那个对象，传输层可能向其添加属性——Node 的 fetch 会给它赋一个 `stack`——因此这份拷贝既让该调用栈不进入日志，也让结束事件保持可追加。
+`turn/end` 声明的类型是 `TurnEndCancelCause`；取消时，循环在其中记录一份新的 `AgentCancelCause`，保留调用方的 `kind` 和 hook 的 `reason` 文本。实时 `AbortSignal.reason` 仍是调用方的那个对象，传输层可能向其添加属性——Node 的 fetch 会给它赋一个 `stack`——因此这份拷贝既让该调用栈不进入日志，也让结束事件保持可追加。对于用户停止，它还会保留可选的 `participant`、`intent` 和 `revertFromSeq` 字段，让 peer 身份与停止的作用范围一并留存到 `turn/end`。
 
 最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期。
 

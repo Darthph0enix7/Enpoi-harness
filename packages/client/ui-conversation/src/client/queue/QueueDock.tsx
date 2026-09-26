@@ -17,6 +17,17 @@ import css from './QueueDock.module.css'
 const EMPTY_QUEUE = [] as const
 const QUEUE_PREVIEW_CHARS = 200
 
+/**
+ * Read one merge-extensible message source's discriminant. The Client program
+ * does not load every host source merge, so a typed comparison against the
+ * `subagent-settled` literal would read as an unintentional comparison.
+ * @param source - one durable inbox row's source.
+ * @returns its source kind, or `'unknown'` when absent.
+ */
+function sourceKind(source: InboxState['next-turn'][number]['source']): string {
+  return (source as { readonly kind?: string }).kind ?? 'unknown'
+}
+
 function previewOf(content: InboxState['next-turn'][number]['content']): string {
   const flat = content
     .filter(block => block.type !== 'image' && block.type !== 'file')
@@ -174,6 +185,10 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
   const rowCount = queue.length + pendingQueue.length
   const running = useSession(s => s.running)
   const queueMutable = useSession(s => s.subagent === null || s.subagent.address.mode === 'continuable')
+  // A queue made only of subagent settlement notices reads as pending results.
+  const noticeOnly = queue.length > 0 && pendingQueue.length === 0
+    && queue.every(row => sourceKind(row.source) === 'subagent-settled')
+  const headerKey = noticeOnly ? 'queue.results' as const : 'queue.count' as const
   const [editing, setEditing] = useState<{ id: MessageId; text: string } | null>(null)
   const [busy, setBusy] = useState<MessageId | null>(null)
   const [collapsed, setCollapsed] = useState(true)
@@ -229,7 +244,7 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
             onClick={() => { setCollapsed(value => !value) }}
           >
             <span className={css.lead} aria-hidden><IconQueueOutlineRegular /></span>
-            <span className={css.count}>{t('queue.count', { n: rowCount })}</span>
+            <span className={css.count}>{t(headerKey, { n: rowCount })}</span>
             {!listVisible && pendingQueue.length > 0 && (
               <span className={css.status} role="status">{t('queue.sending')}</span>
             )}
@@ -242,6 +257,7 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
           {listVisible && queue.map((row) => {
             const attachments = queueAttachments(row.content)
             const text = textOf(row.content)
+            const isNotice = sourceKind(row.source) === 'subagent-settled'
             return (
               <li key={row.id} className={css.row}>
                 {/* Single-item strip has no count header, so the row itself carries the queue glyph. */}
@@ -309,7 +325,41 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
                         </Tooltip>
                       </>
                     )
-                    : (
+                    : isNotice
+                      ? (
+                        <>
+                          {/* A settlement notice is runtime-owned: it can be
+                              delivered now (its own next turn) or removed,
+                              never edited or steered. */}
+                          <Tooltip portal label={t('queue.deliver')} side="bottom" delayMs={500}>
+                            <button
+                              type="button"
+                              className={css.action}
+                              aria-label={t('queue.deliver')}
+                              disabled={busy !== null}
+                              onClick={() => {
+                                void applyAction(row.id, { kind: 'wake' }, t('queue.deliverFailed'))
+                              }}
+                            >
+                              <IconSendOutlineRegular />
+                            </button>
+                          </Tooltip>
+                          <Tooltip portal label={t('queue.remove')} side="bottom" delayMs={500}>
+                            <button
+                              type="button"
+                              className={css.action}
+                              aria-label={t('queue.remove')}
+                              disabled={busy !== null}
+                              onClick={() => {
+                                void applyAction(row.id, { kind: 'remove' }, t('queue.removeFailed'))
+                              }}
+                            >
+                              <IconTrashOutlineRegular size={14} />
+                            </button>
+                          </Tooltip>
+                        </>
+                      )
+                      : (
                       <>
                         <Tooltip portal label={t('queue.edit')} side="bottom" delayMs={500} disabled={text === null}>
                           <button

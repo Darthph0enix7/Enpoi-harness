@@ -225,7 +225,30 @@ describe('Session queue commands', () => {
       sessionId: SessionId('missing'),
     })), 'session/not-found')
     expect(controller.cancel({ sessionId: agent.id })).toEqual({ accepted: true })
-    expect(cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
+    expect(cancel).toHaveBeenLastCalledWith({ kind: 'user', intent: 'stop-all' }, { keepInbox: true })
+    expect(controller.cancel({ sessionId: agent.id, intent: 'detach' })).toEqual({ accepted: true })
+    expect(cancel).toHaveBeenLastCalledWith({ kind: 'user', intent: 'detach' }, { keepInbox: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('wakes a quietly queued settlement notice as its own next turn', async () => {
+    const { ctx, controller, agent, inbox } = await commandHarness()
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child was stopped before it finished.' }],
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'Background subagent child was stopped before it finished.',
+        senderSessionId: SessionId('child-notice'),
+      },
+    })
+    inbox.append('next-turn', notice)
+
+    expect(await controller.updateQueue({
+      sessionId: agent.id, itemId: notice.id, action: { kind: 'wake' },
+    })).toEqual({ accepted: true })
+    expect(inbox.nextTurn).toEqual([])
+    expect(agent.followup).toHaveBeenCalledWith(notice)
     await ctx.fiber.dispose()
   })
 

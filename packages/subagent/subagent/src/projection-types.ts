@@ -11,6 +11,12 @@ export type SubagentCatalogEntry =
   & {
     readonly id: SessionId
     readonly createdAt: number
+    /**
+     * Seq of the parent's `subagent/catalog` event that established this child.
+     * The durable spawn point: a revert anchored at `fromSeq` owns exactly the
+     * direct children whose `seq` is greater.
+     */
+    readonly seq: SessionSeq
   }
   & (
     | { readonly mode: 'one-shot'; readonly label?: string }

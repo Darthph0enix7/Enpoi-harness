@@ -108,9 +108,12 @@ export interface ISession {
   /**
    * Cancel the running turn. Pending queued work remains and resumes in FIFO
    * order after the Host reaches cancellation quiescence.
+   * @param intent - `detach` abandons only this turn and leaves live
+   *   continuable descendants running; `stop-all` also parks them; absent
+   *   keeps the pre-intent Host behaviour (`stop-all`).
    * @returns acceptance, or the business error.
    */
-  cancel(): Promise<RemoteResult<{ accepted: true }>>
+  cancel(intent?: 'detach' | 'stop-all'): Promise<RemoteResult<{ accepted: true }>>
   /**
    * Rename this session (explicit user title; pins it against automatic
    * regeneration).

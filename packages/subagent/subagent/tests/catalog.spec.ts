@@ -65,7 +65,7 @@ describe('subagent catalog projection', () => {
       parent.append('subagent/catalog', fact(0, 'first', 1, { mode: 'one-shot' }).data)
       const first = ctx.sessionProjections.snapshot(parent)
       expect(first.values.subagentCatalog).toEqual([
-        { id: SessionId('first'), createdAt: 1, mode: 'one-shot' },
+        { id: SessionId('first'), createdAt: 1, seq: 0, mode: 'one-shot' },
       ])
       changes.mockClear()
       parent.append('session/title', { title: 'Parent', messageSeqs: [], source: { kind: 'user' } })
@@ -110,8 +110,8 @@ describe('subagent catalog projection', () => {
         data: { version, childId: SessionId('ongoing'), childCreatedAt: 2, mode: 'continuable', label: 'child' } },
     ]
     expect(subagentCatalogProjectionDefinition.wire.view(fold(events))).toEqual([
-      { id: SessionId('once'), createdAt: 1, mode: 'one-shot' },
-      { id: SessionId('ongoing'), createdAt: 2, mode: 'continuable', label: 'child' },
+      { id: SessionId('once'), createdAt: 1, seq: 0, mode: 'one-shot' },
+      { id: SessionId('ongoing'), createdAt: 2, seq: 1, mode: 'continuable', label: 'child' },
     ])
   })
 
@@ -133,10 +133,10 @@ describe('subagent catalog projection', () => {
       { id: 'bad', createdAt: 1, mode: 'continuable' },
     ])).toThrow()
     expect(view).toEqual([
-      { id: SessionId('child-b'), createdAt: 1, mode: 'one-shot' },
-      { id: SessionId('child-a'), createdAt: 1, mode: 'one-shot', label: 'once' },
-      { id: SessionId('child-d'), createdAt: 3, mode: 'continuable', label: 'later' },
-      { id: SessionId('unreadable'), createdAt: 4, mode: 'unknown' },
+      { id: SessionId('child-b'), createdAt: 1, seq: 0, mode: 'one-shot' },
+      { id: SessionId('child-a'), createdAt: 1, seq: 1, mode: 'one-shot', label: 'once' },
+      { id: SessionId('child-d'), createdAt: 3, seq: 2, mode: 'continuable', label: 'later' },
+      { id: SessionId('unreadable'), createdAt: 4, seq: 3, mode: 'unknown' },
     ])
   })
 

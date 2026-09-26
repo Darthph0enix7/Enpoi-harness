@@ -180,6 +180,24 @@ export class ChildLock {
   }
 }
 
+/**
+ * Latest active revert boundary on one Agent's session, folded from the
+ * durable `revert/state` records. A non-undefined boundary means the operator
+ * reverted a message and has not committed the edit yet.
+ * @param agent - the live agent whose session log is folded.
+ * @returns the active `fromSeq`, or `undefined` when no revert is pending.
+ */
+function revertBoundaryOf(agent: Agent): number | undefined {
+  let boundary: number | undefined
+  for (const event of agent.session.snapshotEvents()) {
+    if (event.type !== 'revert/state') continue
+    const { fromSeq } = event.data
+    if (fromSeq === null) boundary = undefined
+    else boundary = fromSeq
+  }
+  return boundary
+}
+
 /** Own the complete process-local lifetime of continuable child Activations. */
 export class ContinuableActivationRegistry {
   /** Child session id → its live Activation. Process-local, never durable. */
@@ -889,6 +907,20 @@ export class ContinuableActivationRegistry {
       if (this.closingTeardownFor(parent) !== undefined) {
         parent.inject(message)
         return
+      }
+      // A user-initiated park (`aborted` epoch) and any settlement landing
+      // while a revert/edit is in flight queue quietly: the notice waits in
+      // the root parent's durable inbox for the operator's next send instead
+      // of waking a turn that would inject into the message being rewritten.
+      // A resident (nested) parent keeps the existing waking flow: a quiet
+      // hold there would leave its Activation waiting on unclaimed inbox work
+      // forever. Ordinary completions keep the wake/steer flow either way.
+      if (terminal.stopReason === 'aborted' || revertBoundaryOf(parent) !== undefined) {
+        const parentActivation = this.resident.get(parent.id)
+        if (parentActivation === undefined || parentActivation.handle.agent !== parent) {
+          parent.send(message, 'next-turn', false)
+          return
+        }
       }
       this.sendWaking(parent, message, parent.status === 'idle' ? 'queue' : 'steer')
     } catch (error: unknown) {

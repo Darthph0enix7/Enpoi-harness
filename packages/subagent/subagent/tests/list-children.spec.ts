@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { generationLogPath } from '../../../session/session-persistence-jsonl/src/format.ts'
@@ -102,7 +102,7 @@ describe('SubagentRuntime.listChildren', () => {
     })
 
     expect(await ctx.subagents.listChildren(parent)).toEqual([{
-      id: child, createdAt: 2, mode: 'continuable', label: 'historical child',
+      id: child, createdAt: 2, seq: expect.any(Number), mode: 'continuable', label: 'historical child',
     }])
     for (const { path, content } of originals) {
       expect(readFileSync(path, 'utf8')).toBe(content)
@@ -127,10 +127,11 @@ describe('SubagentRuntime.listChildren', () => {
 
     const children = await ctx.subagents.listChildren(parent.id)
     expect(children.map(({ createdAt: _createdAt, ...child }) => child)).toEqual([
-      { id: oneShotId, mode: 'one-shot' },
-      { id: continuableId, label: 'continuable child', mode: 'continuable' },
+      { id: oneShotId, seq: expect.any(Number), mode: 'one-shot' },
+      { id: continuableId, seq: expect.any(Number), label: 'continuable child', mode: 'continuable' },
     ])
     expect(children.every(child => Number.isFinite(child.createdAt))).toBe(true)
+    expect(children.every(child => Number.isSafeInteger(child.seq))).toBe(true)
     expect(listSessions).not.toHaveBeenCalled()
     expect(observeSession).toHaveBeenCalledOnce()
   })
@@ -152,7 +153,7 @@ describe('SubagentRuntime.listChildren', () => {
       [Symbol.dispose]: dispose,
     })
     expect(await ctx.subagents.listChildren(parent.id)).toEqual([{
-      id: childId, createdAt: 3, label: 'state child', mode: 'one-shot',
+      id: childId, createdAt: 3, seq: expect.any(Number), label: 'state child', mode: 'one-shot',
     }])
     expect(dispose).toHaveBeenCalledOnce()
   })
@@ -205,7 +206,7 @@ describe('SubagentRuntime.listChildren', () => {
     })
 
     expect(await ctx.subagents.listChildren(fork.id)).toEqual([{
-      id: SessionId('own-child'), createdAt: 2, mode: 'continuable', label: 'own',
+      id: SessionId('own-child'), createdAt: 2, seq: expect.any(Number), mode: 'continuable', label: 'own',
     }])
   })
 
@@ -238,7 +239,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(listSessions).not.toHaveBeenCalled()
     expect(entries).toHaveLength(1_025)
     expect(entries.find(entry => entry.id === 'child-064')).toEqual({
-      id: SessionId('child-064'), createdAt: 64, mode: 'one-shot',
+      id: SessionId('child-064'), createdAt: 64, seq: expect.any(Number), mode: 'one-shot',
     })
   })
 
@@ -257,13 +258,13 @@ describe('SubagentRuntime.listChildren', () => {
 
 /** Add discovery facts without requiring a child descriptor. */
 function catalog(parent: Session, children: SubagentCatalogEntry[]): void {
-  for (const { id, createdAt, ...identity } of children) {
+  for (const { id, createdAt, seq: _seq, ...identity } of children) {
     parent.append('subagent/catalog', { version: 1, childId: id, childCreatedAt: createdAt, ...identity })
   }
 }
 
 function child(id: string, mode: 'one-shot' | 'continuable' | 'unknown' = 'continuable'): SubagentCatalogEntry {
-  return { id: SessionId(id), createdAt: 1, mode, label: id }
+  return { id: SessionId(id), createdAt: 1, seq: SessionSeq(1), mode, label: id }
 }
 
 describe('SubagentRuntime.listDescendants', () => {
@@ -279,9 +280,9 @@ describe('SubagentRuntime.listDescendants', () => {
     const observeSession = vi.spyOn(ctx.sessionQuery, 'observeSession')
 
     expect(await ctx.subagents.listDescendants(parent.id)).toEqual([
-      { kind: 'child', id: branch.id, mode: 'continuable', label: 'branch', activity: 'running', hasChildren: true, parentId: parent.id, depth: 1 },
-      { kind: 'child', id: leaf.id, mode: 'continuable', label: 'leaf', activity: 'running', hasChildren: false, parentId: branch.id, depth: 2 },
-      { kind: 'child', id: sibling.id, mode: 'one-shot', label: 'sibling', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: branch.id, mode: 'continuable', label: 'branch', seq: expect.any(Number), activity: 'running', hasChildren: true, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: leaf.id, mode: 'continuable', label: 'leaf', seq: expect.any(Number), activity: 'running', hasChildren: false, parentId: branch.id, depth: 2 },
+      { kind: 'child', id: sibling.id, mode: 'one-shot', label: 'sibling', seq: expect.any(Number), activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
     ])
     expect(listSessions).not.toHaveBeenCalled()
     expect(observeSession.mock.calls.map(([id]) => id)).toEqual([parent.id, branch.id, leaf.id, sibling.id])
@@ -294,9 +295,9 @@ describe('SubagentRuntime.listDescendants', () => {
       version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false,
       origin: 'subagent', parentSession: parent.id,
     }, [])
-    catalog(parent.session, [{ id, createdAt: 1, mode: 'one-shot' }])
+    catalog(parent.session, [{ id, createdAt: 1, seq: SessionSeq(1), mode: 'one-shot' }])
     expect(await ctx.subagents.listDescendants(parent.id)).toEqual([
-      { kind: 'child', id, mode: 'one-shot', activity: 'inactive', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id, mode: 'one-shot', seq: expect.any(Number), activity: 'inactive', hasChildren: false, parentId: parent.id, depth: 1 },
     ])
     expect(ctx.agents.get(id)).toBeUndefined()
     expect(ctx.sessions.get(id)).toBeUndefined()
@@ -343,7 +344,7 @@ describe('SubagentRuntime.listDescendants', () => {
 
     expect(await ctx.subagents.listDescendants(parent.id)).toEqual([])
     expect(await ctx.subagents.listDescendants(fork.id)).toEqual([
-      { kind: 'child', id: leaf.id, mode: 'continuable', label: 'fork-child',
+      { kind: 'child', id: leaf.id, mode: 'continuable', label: 'fork-child', seq: expect.any(Number),
         activity: 'running', hasChildren: false, parentId: fork.id, depth: 1 },
     ])
   })
@@ -383,7 +384,7 @@ describe('SubagentRuntime.listDescendants', () => {
 
     expect(await ctx.subagents.listDescendants(parent.id)).toEqual([
       { kind: 'diagnostic', id: branch.id, parentId: parent.id, depth: 1, reason: 'corrupt' },
-      { kind: 'child', id: sibling.id, mode: 'continuable', label: 'sibling',
+      { kind: 'child', id: sibling.id, mode: 'continuable', label: 'sibling', seq: expect.any(Number),
         activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
     ])
   })

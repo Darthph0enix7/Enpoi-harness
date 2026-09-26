@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {
@@ -25,9 +26,9 @@ const list = (...items: SessionSummary[]): SessionListState => ({
   phase: 'ready', projectionsBySession: {},
 })
 const catalog = (...ids: string[]): SessionProjectionSnapshot => ({
-  values: { subagentCatalog: ids.map(id => ({
+  values: { subagentCatalog: ids.map((id, index) => ({
     id: sid(id), mode: 'continuable', label: id,
-    createdAt: 1,
+    createdAt: 1, seq: SessionSeq(index),
   })) },
   state: 'ready',
   error: null,

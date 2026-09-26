@@ -415,7 +415,10 @@ export interface ComposerBarInjected {
   /** Restart one failed file upload; absent without a session. */
   retryFileUpload: ((id: DraftAttachmentId) => void) | undefined
   toggleCommandMenu: ((selection: EditSelection) => void) | undefined
+  /** Stop the running turn only; live continuable descendants keep running. */
   stop: (() => void) | undefined
+  /** Stop the running turn and park every live continuable descendant. */
+  stopAll: (() => void) | undefined
   hooks: {
     /** Readable sequence while the fixed Stop command is registered. */
     stopShortcut: ObservableSnapshot<readonly string[]>

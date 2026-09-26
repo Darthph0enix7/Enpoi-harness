@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent'
@@ -145,24 +145,28 @@ describe('dsh-tool-subagent-control/list-agents', () => {
       {
         id: SessionId('one-shot-child'),
         createdAt: 1,
+        seq: SessionSeq(1),
         label: 'finished once',
         mode: 'one-shot',
       },
       {
         id: started.childId,
         createdAt: 2,
+        seq: SessionSeq(2),
         label: 'real child',
         mode: 'continuable',
       },
       {
         id: SessionId('running-child'),
         createdAt: 3,
+        seq: SessionSeq(3),
         label: 'still working',
         mode: 'continuable',
       },
       {
         id: SessionId('waiting-child'),
         createdAt: 4,
+        seq: SessionSeq(4),
         label: 'waiting on descendants',
         mode: 'continuable',
       },
@@ -309,6 +313,7 @@ describe('dsh-tool-subagent-control/list-agents', () => {
         id: SessionId('one-shot-mid'),
         label: 'one-shot intermediate',
         mode: 'one-shot',
+        seq: SessionSeq(1),
         activity: 'inactive',
         hasChildren: true,
         parentId: parent.id,
@@ -319,6 +324,7 @@ describe('dsh-tool-subagent-control/list-agents', () => {
         id: SessionId('deep-leaf'),
         label: 'deep leaf',
         mode: 'continuable',
+        seq: SessionSeq(2),
         activity: 'inactive',
         hasChildren: false,
         parentId: SessionId('one-shot-mid'),

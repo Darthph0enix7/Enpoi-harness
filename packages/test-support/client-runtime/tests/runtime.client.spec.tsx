@@ -7,6 +7,7 @@
  * stack — this suite is the fixture the migrated feature specs rely on.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { Context } from '@deepseek-ai/cordis'
 import { stubConfigForm } from '../src/config-form.ts'
 import { act, cleanup } from '@testing-library/react'
@@ -184,7 +185,7 @@ describe('sessions', () => {
       const child = 'child' as SessionId
       runtime.sessions.list.update((draft) => {
         draft.projectionsBySession = {
-          [parent]: { state: 'ready', error: null, values: { subagentCatalog: [{ createdAt: 1, id: child, mode: 'continuable', label: 'worker' }] } },
+          [parent]: { state: 'ready', error: null, values: { subagentCatalog: [{ createdAt: 1, id: child, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }] } },
         }
       })
       expect(runtime.sessions.subagentAddress(child)).toEqual({
@@ -236,8 +237,8 @@ describe('sessions', () => {
         [parentId]: {
           state: 'ready', error: null,
           values: { subagentCatalog: [
-            { createdAt: 1, id: 'other' as SessionId, mode: 'one-shot' },
-            { createdAt: 2, id: 'child' as SessionId, mode: 'continuable', label: 'Child' },
+            { createdAt: 1, id: 'other' as SessionId, seq: SessionSeq(0), mode: 'one-shot' },
+            { createdAt: 2, id: 'child' as SessionId, seq: SessionSeq(1), mode: 'continuable', label: 'Child' },
           ] },
         },
       }

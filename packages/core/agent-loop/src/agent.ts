@@ -126,6 +126,12 @@ function abortedCancelCause(signal: AbortSignal): AgentCancelCause | undefined {
   const cause = signal.reason as AgentCancelCause
   switch (cause.kind) {
     case 'user':
+      return {
+        kind: 'user',
+        ...cause.participant === undefined ? {} : { participant: cause.participant },
+        ...cause.intent === undefined ? {} : { intent: cause.intent },
+        ...cause.revertFromSeq === undefined ? {} : { revertFromSeq: cause.revertFromSeq },
+      }
     case 'parent':
     case 'disposed':
       return { kind: cause.kind }

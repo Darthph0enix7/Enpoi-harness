@@ -1,4 +1,5 @@
 import { ToolCallId, createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
+import type { ParticipantTag } from '@deepseek-ai/dsh-llm'
 /**
  * Tests for the queue-aware `Agent.cancel()` primitive. The default clears
  * queued and steering work, while `keepInbox` preserves pending input for a
@@ -11,7 +12,7 @@ import { ToolCallId, createUserMessage, expandAssistantStream } from '@deepseek-
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import SessionStore, { Session, SessionId, SessionLogOffset, TurnEndReason } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, SessionLogOffset, SessionSeq, TurnEndReason } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent, type AgentCancelCause } from '@deepseek-ai/dsh-agent'
@@ -142,6 +143,25 @@ describe('Agent.cancel()', () => {
     expect(Object.getOwnPropertyDescriptor(cause, 'stack')?.enumerable).toBe(false)
     expect(errors).toEqual([])
     expect(endings).toEqual([{ kind: 'aborted', reason: { kind: 'user' } }, { kind: 'completed' }])
+  })
+
+  it('copies the user stop intent, participant, and revert span onto the recorded turn ending', async () => {
+    const participant: ParticipantTag = { kind: 'peer', name: 'cli' }
+    const cause: AgentCancelCause = {
+      kind: 'user',
+      participant,
+      intent: 'revert',
+      revertFromSeq: SessionSeq(7),
+    }
+
+    const { endings, errors, requests } = await endingsAfterMutatingCancel(cause, assignTransportStack)
+
+    expect(errors).toEqual([])
+    expect(requests).toBe(1)
+    expect(endings).toEqual([
+      { kind: 'aborted', reason: { kind: 'user', participant, intent: 'revert', revertFromSeq: 7 } },
+      { kind: 'completed' },
+    ])
   })
 
   it('cancel() on an idle agent with nothing queued is a no-op; the next prompt runs (F2 leak guard)', async () => {

@@ -181,6 +181,7 @@ function mount(
   const useInput = bindSnapshotSelector(wiring.state)
   const inputActions = wiring.actions
   const stop = vi.fn()
+  const stopAll = vi.fn()
   const open = vi.fn()
   const slotCalls: string[] = []
   const lineageOwners: ConversationHeaderLineageOwnerProps[] = []
@@ -294,6 +295,7 @@ function mount(
           useLexicon={bindSnapshotSelector(wiring.lexicon)}
           useMenuLauncher={bindSnapshotSelector(createSnapshotStore<string | null>(null))}
           stop={stop}
+          stopAll={stopAll}
           t={t}
           renderSlot={((key: string, seatOwner: object) => {
             // The bar's own seats: recorded so a case can assert what share

@@ -85,7 +85,7 @@ session.deriveMessages()         // the derived model history
 
 ### 设计理念
 
-该包建立在事件溯源之上：`Session` 是类型化 `SessionEvent` 的仅追加日志，其他一切——模型历史、transcript（文本记录）、遥测、标题、持久化——都从这条流派生。surface 是派生投影：一个增量管理器校验追加候选、根据已提交事件推进有序视图，通过 `replaceGeneration` 跟踪位置替换，通过 `contentGeneration` 跟踪位置替换和插件拥有的消息变更。模型可见即已记录：任何到达模型请求的内容都必须能从日志重建。每个完成结算的模型尝试都会提交一个事件：`assistant/message` 携带组装后的模型可见 message 及其紧凑带时间 stream，`assistant/attempt` 则保留失败、重试、取消或 stream error attempt，且不添加模型历史。如果进程在 settlement 前硬中断，则不会留下持久 attempt stream。
+该包建立在事件溯源之上：`Session` 是类型化 `SessionEvent` 的仅追加日志，其他一切——模型历史、transcript（文本记录）、遥测、标题、持久化——都从这条流派生。surface 是派生投影：一个增量管理器校验追加候选、根据已提交事件推进有序视图，通过 `replaceGeneration` 跟踪位置替换，通过 `contentGeneration` 跟踪位置替换和插件拥有的消息变更。模型可见即已记录：任何到达模型请求的内容都必须能从日志重建。每个完成结算的模型尝试都会提交一个事件：`assistant/message` 携带组装后的模型可见 message 及其紧凑带时间 stream，`assistant/attempt` 则保留失败、重试、取消或 stream error attempt，且不添加模型历史。如果进程在 settlement 前硬中断，则不会留下持久 attempt stream。被取消轮次的持久原因保留调用方的 `kind`；用户停止还会记录其 `StopIntent`（`detach` | `stop-all` | `revert`）以及限定 revert 取消范围的 `revertFromSeq` 锚点。
 
 ### 请求头
 

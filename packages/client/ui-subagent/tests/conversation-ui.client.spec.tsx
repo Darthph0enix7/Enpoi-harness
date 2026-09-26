@@ -5,8 +5,8 @@ import { makeTranslate, RemoteError, sessionSnapshot } from '@deepseek-ai/dsh-cl
 import type {
   SessionListState, SessionSummary, SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SubagentAddress, SubagentCatalogRow } from '@deepseek-ai/dsh-subagent/client'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
+import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import {
   SubagentCatalogAction, SubagentHeaderLineage,
@@ -26,7 +26,18 @@ const CHILD = 'child' as SessionId
 const GRANDCHILD = 'grandchild' as SessionId
 const t: SubagentHeaderLineageProps['t'] = makeTranslate(zh)
 
-type CatalogFixture = { entries: readonly (SubagentCatalogRow | { id: SessionId; mode: 'unknown'; label?: string; activity: 'inactive' })[]; parentAvailable: boolean; state: 'loading' | 'ready' | 'error'; error: SessionListState['projectionsBySession'][SessionId]['error'] }
+/** One catalog row fixture; `seq` defaults to a stable value when omitted. */
+type CatalogRowFixture = {
+  readonly id: SessionId
+  readonly activity: 'running' | 'inactive'
+  readonly seq?: SessionSeq
+} & (
+  | { readonly mode: 'one-shot'; readonly label?: string }
+  | { readonly mode: 'continuable'; readonly label: string }
+  | { readonly mode: 'unknown'; readonly label?: string }
+)
+
+type CatalogFixture = { entries: readonly CatalogRowFixture[]; parentAvailable: boolean; state: 'loading' | 'ready' | 'error'; error: SessionListState['projectionsBySession'][SessionId]['error'] }
 
 function catalog(over: Partial<CatalogFixture> = {}): CatalogFixture {
   return {
@@ -74,7 +85,11 @@ function props(
     phase: 'ready',
     projectionsBySession: Object.fromEntries(Object.entries(catalogs).map(([id, catalog]) => [id, {
       state: catalog.state, error: catalog.error,
-      values: { subagentCatalog: catalog.entries.map(({ activity: _activity, ...entry }) => ({ ...entry, createdAt: 1 })) },
+      values: {
+        subagentCatalog: catalog.entries.map(({ activity: _activity, seq, ...entry }) => ({
+          ...entry, seq: seq ?? (1 as SessionSeq), createdAt: 1,
+        })),
+      },
     }])) ,
   } satisfies SessionListState
   function useSessions<T>(select: (snapshot: SessionListState) => T): T {

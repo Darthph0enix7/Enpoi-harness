@@ -42,6 +42,23 @@ function revertState(seq: number, fromSeq: number | null): Record<string, unknow
   return { type: 'revert/state', seq, time: Date.now(), data: { fromSeq } }
 }
 
+/** One single-node checkpoint refresh: the declared span is exactly the replaced node. */
+function checkpointRefresh(seq: number, replaced: number): Record<string, unknown> {
+  return {
+    type: 'user/message',
+    seq,
+    time: Date.now(),
+    data: {
+      content: [{ type: 'text', text: '### State checkpoint' }],
+      source: { kind: 'enpoi-keeper' },
+      role: 'user',
+      id: `checkpoint-${seq}`,
+    },
+    surfaceOp: { op: 'replace', startSeq: replaced, endSeq: replaced },
+    sourceEventSeqs: [replaced],
+  }
+}
+
 /** Fill a contiguous assistant turn between two user messages (seqs start..start+4). */
 function assistantTurn(start: number, turn: number): Record<string, unknown>[] {
   return [
@@ -85,6 +102,50 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
       { start: 7, end: 19 },
       { start: 21, end: 33 },
     ])
+  })
+
+  it('hides exactly the declared single-node span of a checkpoint refresh', async () => {
+    const api = new FakeApiClient()
+    const session = new Session(SID, fakeRemote(api))
+    api.onHistory = () => Promise.resolve(ok({
+      records: entries([
+        userMessage(7, 'hello'),
+        ...assistantTurn(8, 1),
+        checkpointRefresh(13, 7),
+      ] as never[]) as never[],
+      hasMore: false,
+    } as never))
+    await session.open()
+    // The refresh declares exactly seq 7 (startSeq === endSeq); the turn at
+    // 8..12 stays visible instead of being shadowed up to the refresh event.
+    expect(session.getSnapshot().revertShadowRanges).toEqual([{ start: 7, end: 8 }])
+  })
+
+  it('re-installs a replace window without accumulating duplicate shadow ranges', async () => {
+    const api = new FakeApiClient()
+    const session = new Session(SID, fakeRemote(api))
+    const window = [
+      userMessage(7, 'hello'),
+      revertState(8, 7),
+      ...assistantTurn(9, 1),
+      revertCommit(14, 'goodbye', [7, 8, 9, 10, 13]),
+      revertState(15, null),
+    ]
+    api.onHistory = () => Promise.resolve(ok({
+      records: entries(window as never[]) as never[],
+      hasMore: false,
+    } as never))
+    await session.open()
+    expect(session.getSnapshot().revertShadowRanges).toEqual([{ start: 7, end: 14 }])
+    // A gap-repair re-install carries the same complete window: the fold is
+    // rebuilt, not layered, so the range is not duplicated.
+    session.acceptEventChange({
+      type: 'replace',
+      entries: entries(window as never[]) as never,
+      hasMore: false,
+      page: { records: [], hasMore: false } as never,
+    })
+    expect(session.getSnapshot().revertShadowRanges).toEqual([{ start: 7, end: 14 }])
   })
 
   it('falls back to the window boundary when the window carries the revert/state event', async () => {

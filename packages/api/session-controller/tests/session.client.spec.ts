@@ -535,6 +535,21 @@ describe('prompt and cancel errors', () => {
     expect(session.getSnapshot().promptError).toBeNull()
   })
 
+  it('forwards the stop intent for an ordinary session and omits it when none is given', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    await session.open()
+
+    await session.cancel('detach')
+    await session.cancel('stop-all')
+    await session.cancel()
+
+    expect(mock.log.requests('session/cancel')).toEqual([
+      { sessionId: SID, intent: 'detach' },
+      { sessionId: SID, intent: 'stop-all' },
+      { sessionId: SID },
+    ])
+  })
+
   it('lands an interrupt business failure in promptError with op=stop', async ({ mock, start }) => {
     const session = await sessionBench(mock, start, SID, { address: CHILD, parentAvailable: true })
     mock.remote.subagents.interruptByParent.mockResolvedValue(err(new RemoteError('subagent/unauthorized', 'nope', { childSessionId: SID })))

@@ -13,6 +13,7 @@ import type {
   SessionHeader,
   SessionId,
   SessionLogOffset,
+  SessionSeq,
 } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SubagentCatalogEntry } from './projection-types.ts'
@@ -44,10 +45,13 @@ declare module '@deepseek-ai/dsh-session/types' {
   }
 }
 
+/** One catalog event as stored in the fold state: the payload plus its spawn seq. */
+type StoredSubagentCatalogEvent = SubagentCatalogEvent & { readonly seq: SessionSeq }
+
 /** Host fold state for one parent catalog. */
 export interface SubagentCatalogState {
   readonly inheritedEventCount: SessionLogOffset
-  readonly head?: ChunkedList<SubagentCatalogEvent> | undefined
+  readonly head?: ChunkedList<StoredSubagentCatalogEvent> | undefined
 }
 
 const sessionIdSchema = z.string() as unknown as z.ZodType<SessionId>
@@ -66,28 +70,32 @@ const continuableCatalogSchema = z.object({
   label: z.string(),
 }).strict()
 const unknownCatalogSchema = oneShotCatalogSchema.extend({ version: z.literal(1), mode: z.literal('unknown') })
-const eventDataSchema = z.union([
-  oneShotCatalogSchema,
-  continuableCatalogSchema,
-  unknownCatalogSchema,
-]) as z.ZodType<SubagentCatalogEvent>
+const sessionSeqSchema = z.number().int().nonnegative() as unknown as z.ZodType<SessionSeq>
+const storedEventSchema = z.union([
+  oneShotCatalogSchema.extend({ seq: sessionSeqSchema }),
+  continuableCatalogSchema.extend({ seq: sessionSeqSchema }),
+  unknownCatalogSchema.extend({ seq: sessionSeqSchema }),
+]) as unknown as z.ZodType<StoredSubagentCatalogEvent>
 const viewSchema = z.array(z.union([
   oneShotCatalogSchema.omit({ version: true, childId: true, childCreatedAt: true }).extend({
     id: sessionIdSchema,
     createdAt: oneShotCatalogSchema.shape.childCreatedAt,
+    seq: sessionSeqSchema,
   }),
   continuableCatalogSchema.omit({ version: true, childId: true, childCreatedAt: true }).extend({
     id: sessionIdSchema,
     createdAt: continuableCatalogSchema.shape.childCreatedAt,
+    seq: sessionSeqSchema,
   }),
   unknownCatalogSchema.omit({ version: true, childId: true, childCreatedAt: true }).extend({
     id: sessionIdSchema,
     createdAt: unknownCatalogSchema.shape.childCreatedAt,
+    seq: sessionSeqSchema,
   }),
 ])) as z.ZodType<SubagentCatalogEntry[]>
 const stateSchema: z.ZodType<SubagentCatalogState> = z.object({
   inheritedEventCount: z.number().int().nonnegative() as unknown as z.ZodType<SessionLogOffset>,
-  head: chunkedListSchema(eventDataSchema).optional(),
+  head: chunkedListSchema(storedEventSchema).optional(),
 }).strict()
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -108,12 +116,14 @@ function subagentCatalogEntries(state: SubagentCatalogState): SubagentCatalogEnt
       ? {
         id: data.childId,
         createdAt: data.childCreatedAt,
+        seq: data.seq,
         mode: data.mode,
         ...data.label === undefined ? {} : { label: data.label },
       }
       : {
         id: data.childId,
         createdAt: data.childCreatedAt,
+        seq: data.seq,
         mode: data.mode,
         label: data.label,
       })
@@ -128,9 +138,12 @@ export const subagentCatalogProjectionDefinition = {
   init: (_header: SessionHeader, inheritedEventCount: SessionLogOffset) => ({ inheritedEventCount }),
   apply: (state, event: SessionEvent) => {
     if (event.type !== 'subagent/catalog' || event.seq < state.inheritedEventCount) return state
-    return { ...state, head: appendChunkedList(state.head, eventDataSchema.parse(event.data)) }
+    return {
+      ...state,
+      head: appendChunkedList(state.head, storedEventSchema.parse({ ...event.data, seq: event.seq })),
+    }
   },
-  stateVersion: 3,
+  stateVersion: 4,
   wire: { viewSchema, view: subagentCatalogEntries },
 } satisfies ProjectionDefinition<'subagentCatalog', SubagentCatalogState>
 

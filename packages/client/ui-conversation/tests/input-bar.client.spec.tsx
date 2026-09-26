@@ -20,6 +20,7 @@ import {
 } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SessionListState, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionStatus } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { ContextPressureProjection } from '@deepseek-ai/dsh-token-meter/client'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -104,6 +105,10 @@ interface BenchOptions {
   commandMenuOpen?: boolean
   busyEnter?: 'queue' | 'steer'
   toggleCommandMenu?: (selection: { start: number; end: number }) => void
+  /** Session list rows used to resolve live subagent descendants. */
+  sessions?: SessionListState
+  /** Live statuses used beside the session list rows. */
+  statuses?: ReadonlyMap<SessionId, SessionStatus>
 }
 
 /** One pending queue row (the runtime snapshot shape, as the dock tests build it). */
@@ -111,6 +116,20 @@ function row(id: string): InboxState['next-turn'][number] {
   return {
     id: id as never, role: 'user', source: { kind: 'user' },
     content: [{ type: 'text', text: id }],
+  }
+}
+
+/** One session-list row for a subagent descendant. */
+function childRow(id: string, parentId: string, running: boolean): SessionListState['byId'][SessionId] {
+  return {
+    id: id as SessionId,
+    displayTitle: id,
+    parentId: parentId as SessionId,
+    origin: 'subagent',
+    running,
+    retainedBy: {},
+    blank: false,
+    updatedAt: 0,
   }
 }
 
@@ -153,6 +172,7 @@ function bench(over?: BenchOptions) {
   if (over?.draft !== undefined && over.draft !== '') shell.setDraft(over.draft)
   if (over?.attachments !== undefined) shell.addAttachments(over.attachments.map(attachment => attachment.id))
   const stop = vi.fn()
+  const stopAll = vi.fn()
   const removeAttachment = vi.fn((id: DraftAttachmentId) => { shell.removeAttachment(id) })
   const menuLauncher = createSnapshotStore<string | null>(over?.commandMenuOpen === true ? 'command' : null)
   const busyEnter = createSnapshotStore<'queue' | 'steer'>(over?.busyEnter ?? 'queue')
@@ -176,10 +196,10 @@ function bench(over?: BenchOptions) {
     SessionProvider: ({ children }) => children,
     useSession: bindSnapshotSelector(session),
     useConversation: bindSnapshotSelector(createSnapshotStore(conversationFixture())),
-    useSessionStatus: bindSnapshotSelector(createSnapshotStore(new Map())),
+    useSessionStatus: bindSnapshotSelector(createSnapshotStore(over?.statuses ?? new Map<SessionId, SessionStatus>())),
     useSessionRetainInfo: () => undefined,
     useResource,
-    useSessions: bindSnapshotSelector(createSnapshotStore<SessionListState>({
+    useSessions: bindSnapshotSelector(createSnapshotStore<SessionListState>(over?.sessions ?? {
       ids: [], byId: {}, phase: 'ready',
       projectionsBySession: {},
     })),
@@ -210,6 +230,7 @@ function bench(over?: BenchOptions) {
     useLexicon: bindSnapshotSelector(shell.lexicon),
     useMenuLauncher: bindSnapshotSelector(menuLauncher),
     stop,
+    stopAll,
     // Mirrors the real lookup chain (conversation namespace, then common).
     t: over?.t ?? makeTranslate(zh, commonZh),
     renderSlot,
@@ -247,7 +268,7 @@ function bench(over?: BenchOptions) {
   const button = view.container.querySelector<HTMLButtonElement>(`button[aria-label="${primaryLabel}"]`)!
   const interruptButton = view.container.querySelector<HTMLButtonElement>('button[aria-label="停止生成"]')
   return {
-    view, textarea, button, interruptButton, props, sink, shell, wiring: shell, session, stop, removeAttachment, slotCalls,
+    view, textarea, button, interruptButton, props, sink, shell, wiring: shell, session, stop, stopAll, removeAttachment, slotCalls,
     menuLauncher, busyEnter, stopShortcut,
     steerQueue: over?.steerQueue,
     get placeholder() { return placeholderOf(view.container) },
@@ -899,6 +920,54 @@ describe('running and lock semantics', () => {
     expect(sink).toHaveBeenCalledWith('排队消息2', [], 'queue', expect.any(AbortSignal))
     await vi.waitFor(() => { expect(button.getAttribute('aria-label')).toBe('停止生成') })
     expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps ✕ a plain detach and offers stop-all with the live descendant count', () => {
+    const rows = [
+      childRow('child-a', SID, true),
+      childRow('child-b', SID, true),
+      childRow('grandchild', 'child-a', true),
+      childRow('parked', SID, false),
+      childRow('other-root', 'other-session', true),
+    ]
+    const sessions: SessionListState = {
+      ids: rows.map(row => row.id),
+      phase: 'ready',
+      projectionsBySession: {},
+      byId: Object.fromEntries(rows.map(row => [row.id, row])) as SessionListState['byId'],
+    }
+    // The hook status wins over the row fallback; parked rows stay uncounted.
+    const statuses = new Map<SessionId, SessionStatus>([
+      ['child-a' as SessionId, { running: true, pendingInteraction: undefined, completionUnread: false }],
+      ['child-b' as SessionId, { running: false, pendingInteraction: undefined, completionUnread: false }],
+      ['parked' as SessionId, { running: false, pendingInteraction: undefined, completionUnread: false }],
+    ])
+    const { button, stop, stopAll, view } = bench({ running: true, sessions, statuses })
+
+    fireEvent.click(button)
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    const split = view.getByRole('button', { name: '停止全部智能体（2 个运行中）' })
+    expect(split.textContent).toContain('2')
+    fireEvent.click(split)
+    fireEvent.click(view.getByRole('menuitem', { name: '停止全部智能体（2 个运行中）' }))
+    expect(stopAll).toHaveBeenCalledTimes(1)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers no stop-all choice while no descendant is live', () => {
+    const parkedRows = [childRow('parked', SID, false)]
+    const parked: SessionListState = {
+      ids: parkedRows.map(row => row.id),
+      phase: 'ready',
+      projectionsBySession: {},
+      byId: Object.fromEntries(parkedRows.map(row => [row.id, row])) as SessionListState['byId'],
+    }
+    const { view, stopAll } = bench({ running: true, sessions: parked })
+    expect(view.queryByRole('button', { name: /停止全部智能体/ })).toBeNull()
+    // A descendant whose list row says running still needs a live status/live
+    // row combination; the distant unrelated root never counts either.
+    expect(stopAll).not.toHaveBeenCalled()
   })
 
   it('running Send follows the busy-state Steer preference and labels the delivery', () => {

@@ -190,6 +190,10 @@ export type QueueAction =
   }
   | { readonly kind: 'remove' }
   | { readonly kind: 'steer' }
+  | {
+    readonly kind: 'wake'
+    /** Deliver this item now as its own next turn, waking an idle Agent. */
+  }
 
 /** One Session list entry. */
 export interface SessionSummary {
@@ -718,6 +722,12 @@ export interface SessionCancelRequest {
   readonly sessionId: SessionId
   /** Who asked for the cancellation, when the caller is a peer rather than a local browser. */
   readonly participant?: ParticipantTag
+  /**
+   * What the stop asks for. `detach` abandons only the aborted turn and leaves
+   * live continuable descendants running; `stop-all` also parks them. Absent
+   * keeps the pre-intent behaviour (`stop-all`) for callers that never send one.
+   */
+  readonly intent?: 'detach' | 'stop-all'
 }
 
 /** Receipt after cancellation is admitted to the live Agent. */

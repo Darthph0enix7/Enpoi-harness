@@ -3846,3 +3846,56 @@ describe('SubagentRuntime.interrupt', () => {
     await drained
   })
 })
+
+describe('continuable settlement notice deferral', () => {
+  it('holds a park notice in the parent queue without waking a turn', async () => {
+    const gate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('working'), gate: gate.promise },
+      { chunks: textResponse('parent wake') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+    ctx.subagents.interrupt(started.childId, { kind: 'user', parentSessionId: parent.id })
+    gate.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(parent.inbox.nextTurn).toHaveLength(1) })
+
+    // The park notice is a pending result, not a wake: the parent opened no
+    // turn and the notice never reached its model surface.
+    expect(adapter.requests).toHaveLength(1)
+    expect(parent.status).toBe('idle')
+    expect(parent.inbox.nextTurn[0]?.source.kind).toBe('subagent-settled')
+    expect(parent.session.snapshotEvents().some(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toBe(false)
+  })
+
+  it('keeps a normal completion waking the parent as before', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('child done'), textResponse('parent wake')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    await parent.whenIdle()
+    expect(parent.session.snapshotEvents().filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toHaveLength(1)
+  })
+
+  it('queues a completion quietly while a revert edit is in flight', async () => {
+    const adapter = new MockAdapter([textResponse('child done'), textResponse('parent wake')])
+    const { ctx, parent } = await setupWith(adapter)
+    const anchor = createUserMessage({ content: message('reverted ask'), source: { kind: 'user' } })
+    const anchored = parent.session.append('user/message', anchor, { surfaceOp: 'append' })
+    parent.session.append('revert/state', { fromSeq: anchored.seq, cause: 'revert' })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(parent.inbox.nextTurn).toHaveLength(1) })
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(parent.status).toBe('idle')
+    expect(parent.inbox.nextTurn[0]?.source.kind).toBe('subagent-settled')
+  })
+})

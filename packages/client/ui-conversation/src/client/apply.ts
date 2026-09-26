@@ -261,8 +261,8 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     }, 'ui-conversation: hidden-view settings push')
   })
 
-  const stop = (sessionId: SessionId): void => {
-    scopedConversation(sessions, sessionId).cancel().catch((_error: unknown) => {
+  const stop = (sessionId: SessionId, intent: 'detach' | 'stop-all' = 'detach'): void => {
+    scopedConversation(sessions, sessionId).cancel(intent).catch((_error: unknown) => {
       // Stop failure is published through Session promptError.
     })
   }
@@ -475,6 +475,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
           retryFileUpload: undefined,
           toggleCommandMenu: undefined,
           stop: undefined,
+          stopAll: undefined,
           hooks: {
             stopShortcut,
             busyEnter: submissionPolicy.busyEnter,
@@ -551,6 +552,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
             })
           },
         stop: () => { stop(sessionId) },
+        stopAll: () => { stop(sessionId, 'stop-all') },
         hooks: {
           stopShortcut,
           busyEnter: submissionPolicy.busyEnter,

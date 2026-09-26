@@ -177,7 +177,7 @@ describe('scope tree', () => {
     b.mock.stream(FOLLOW, followScript(ok({
       records: [], hasMore: false,
       projections: { asOfSeq: 0, values: { subagentCatalog: [{
-        id: sid('child'), createdAt: 1, mode: 'one-shot',
+        id: sid('child'), createdAt: 1, seq: SessionSeq(0), mode: 'one-shot',
       }] } },
     })))
     await feedList(b, [{ id: 's1' }])
@@ -185,7 +185,7 @@ describe('scope tree', () => {
     await reference.ready
     await vi.waitFor(() => {
       expect(b.svc.list.getSnapshot().projectionsBySession[sid('s1')]?.values.subagentCatalog)
-        .toEqual([{ id: sid('child'), createdAt: 1, mode: 'one-shot' }])
+        .toEqual([{ id: sid('child'), createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }])
     })
     expect(b.mock.remote.session.projections).not.toHaveBeenCalled()
   })
@@ -756,7 +756,7 @@ describe('catalog-addressed navigation', () => {
     const b = bench()
     await feedList(b, [{ id: 'root' }])
     b.mock.remote.session.projections.mockResolvedValue(ok({
-      asOfSeq: 0, values: { subagentCatalog: [{ id: sid('child'), createdAt: 1, mode: 'continuable', label: 'Child' }] },
+      asOfSeq: 0, values: { subagentCatalog: [{ id: sid('child'), createdAt: 1, seq: SessionSeq(0), mode: 'continuable', label: 'Child' }] },
     }))
     await b.svc.refreshProjections(sid('root'))
     const address = b.svc.subagentAddress(sid('child'))!
@@ -787,7 +787,7 @@ describe('catalog-addressed navigation', () => {
         type: 'projection', sessionId: sid('one-shot'), key: 'title', value: title, seq: 2,
       })
       b.mock.remote.session.projections.mockResolvedValue(ok({
-        asOfSeq: 0, values: { subagentCatalog: [{ id: sid('one-shot'), createdAt: 1, mode: 'one-shot' }] },
+        asOfSeq: 0, values: { subagentCatalog: [{ id: sid('one-shot'), createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }] },
       }))
       await b.svc.refreshProjections(sid('root'))
       expect(b.svc.list.getSnapshot().byId[sid('one-shot')]?.displayTitle).toBe(title ?? 'one-shot')
@@ -806,12 +806,12 @@ describe('catalog-addressed navigation', () => {
     b.mock.remote.session.projections.mockImplementation((payload) => {
       const { sessionId } = payload as { sessionId: SessionId }
       if (sessionId === sid('root')) {
-        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1,
+        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
           id: sid('child'), mode: 'continuable', label: 'Child',
         }] } }))
       }
       if (sessionId === sid('child')) {
-        return Promise.resolve(ok({ asOfSeq: 0, values: { title: 'Child session title', subagentCatalog: [{ createdAt: 1,
+        return Promise.resolve(ok({ asOfSeq: 0, values: { title: 'Child session title', subagentCatalog: [{ createdAt: 1, seq: SessionSeq(1),
           id: sid('grandchild'), mode: 'continuable', label: 'Grandchild',
         }] } }))
       }
@@ -845,12 +845,12 @@ describe('catalog-addressed navigation', () => {
     b.mock.remote.session.projections.mockImplementation((payload) => {
       const { sessionId } = payload as { sessionId: SessionId }
       if (sessionId === sid('root')) {
-        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1,
+        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
           id: sid('child'), mode: 'continuable', label: 'Child',
         }] } }))
       }
       if (sessionId === sid('child')) {
-        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1,
+        return Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(1),
           id: sid('grandchild'), mode: 'continuable', label: 'Grandchild',
         }] } }))
       }

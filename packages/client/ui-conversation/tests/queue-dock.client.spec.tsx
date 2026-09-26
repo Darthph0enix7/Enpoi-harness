@@ -46,6 +46,21 @@ function row(id: string, text: string | null, preview = text ?? '[image]'): User
   }
 }
 
+/**
+ * One durable settlement notice row. The `subagent-settled` source merge lives
+ * in the host's continuation-messages module, which the client test program
+ * does not load; the durable inbox still carries this source verbatim.
+ */
+function noticeRow(id: string, summary: string): UserMessage {
+  return {
+    id: iid(id), role: 'user',
+    source: {
+      kind: 'subagent-settled', form: 'notice', summary, senderSessionId: 'child-notice' as SessionId,
+    } as never,
+    content: [{ type: 'text', text: summary }, { type: 'text', text: 'It left no closing message.' }],
+  }
+}
+
 interface TestSnapshot extends SessionSnapshot {
   readonly testInbox: InboxState
 }
@@ -177,6 +192,42 @@ describe('QueueDock', () => {
     const source = liveSession(snap)
     const { container } = render(<QueueDock {...kitFor(snap)} useSession={source.useSession} useProjection={source.useProjection} />)
     expect(container.innerHTML).toBe('')
+  })
+
+  it('renders queued settlement notices as pending results with a deliver action', async () => {
+    const first = noticeRow('notice-1', 'Background subagent child-a was stopped before it finished.')
+    const second = noticeRow('notice-2', 'Background subagent child-b finished.')
+    const snap = snapshotWith([first, second])
+    const source = liveSession(snap)
+    const props = kitFor(snap)
+    const view = render(<QueueDock {...props} useSession={source.useSession} useProjection={source.useProjection} />)
+
+    // The count header names pending results; each notice is runtime-owned, so
+    // it offers deliver/remove and never edit/steer.
+    fireEvent.click(view.getByRole('button', { name: '2 条结果待处理' }))
+    expect(view.queryByRole('button', { name: '编辑排队消息' })).toBeNull()
+    expect(view.queryByRole('button', { name: '插话发送' })).toBeNull()
+    expect(view.getAllByText(/It left no closing message\./)).toHaveLength(2)
+    fireEvent.click(view.getAllByRole('button', { name: '立即送达' })[0]!)
+    await waitFor(() => {
+      expect(props.updateQueue).toHaveBeenCalledWith(first.id, { kind: 'wake' })
+    })
+  })
+
+  it('renders a mixed queue with its own count and keeps deliver on the notice row', () => {
+    const operator = row('queued-1', 'operator message')
+    const pending = {
+      ...snapshotWith([operator]),
+      testInbox: {
+        'next-turn': [operator, noticeRow('notice-mixed', 'Background subagent child was stopped before it finished.')],
+        'next-step': [],
+      },
+    }
+    const source = liveSession(pending)
+    const view = render(<QueueDock {...kitFor(pending)} useSession={source.useSession} useProjection={source.useProjection} />)
+    fireEvent.click(view.getByRole('button', { name: '2 条排队消息' }))
+    expect(view.getByRole('button', { name: '立即送达' })).toBeTruthy()
+    expect(view.getByRole('button', { name: '编辑排队消息' })).toBeTruthy()
   })
 
   it('renders a queued local echo in the dock and hands off by rpcId', () => {

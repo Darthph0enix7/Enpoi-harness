@@ -387,7 +387,13 @@ export class SessionCommandController {
           if (request.mode === 'steer') {
             reject('revert-invalid', 'revert commit is only valid for queued prompts', { sessionId: request.sessionId })
           }
-          if (agent.status === 'running' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+          // Quietly queued child settlement notices do not block the commit:
+          // they are not operator input, they keep their FIFO order before the
+          // edited message, and rejecting here would make the preserved
+          // results from a revert impossible to land on the next send.
+          const pendingUserInput = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+            .some(message => message.source.kind === 'user')
+          if (agent.status === 'running' || pendingUserInput) {
             reject('revert-invalid', 'revert commit requires idle session with no pending input', { sessionId: request.sessionId })
           }
           const anchor = SessionSeq(revertFromSeq)
@@ -545,6 +551,11 @@ export class SessionCommandController {
         agent.inbox.remove(request.itemId)
         agent.steer(message)
         break
+      case 'wake':
+        // A quietly queued settlement notice lands as its own next turn.
+        agent.inbox.remove(request.itemId)
+        agent.followup(message)
+        break
       /* v8 ignore next 2 -- closed-union exhaustiveness guard */
       default:
         assertNever(request.action, 'queue action')
@@ -570,7 +581,12 @@ export class SessionCommandController {
       throw apiSessionSubagentOwnershipError(request.sessionId)
     }
     agent.cancel(
-      { kind: 'user', ...(request.participant === undefined ? {} : { participant: request.participant }) },
+      {
+        kind: 'user',
+        ...(request.participant === undefined ? {} : { participant: request.participant }),
+        // Absent intent keeps the pre-intent wire behaviour: stop everything.
+        intent: request.intent ?? 'stop-all',
+      },
       { keepInbox: true },
     )
     return { accepted: true }
@@ -592,11 +608,37 @@ export class SessionCommandController {
     }
     // If a turn is running or inbox has pending work, cancel it first so the
     // revert takes effect immediately instead of rejecting with agent-busy.
+    // Child settlement notices survive the revert (A3): they are captured,
+    // the cancel clears the inbox, and they are re-queued quietly once the
+    // aborted activity converges, so the revert never discards a child result
+    // and never wakes a turn to deliver one.
     if (agent.status === 'running' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+      const preserved = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+        .filter(message => message.source.kind !== 'user')
       agent.cancel(
-        { kind: 'user', ...(request.participant === undefined ? {} : { participant: request.participant }) },
+        {
+          kind: 'user',
+          ...(request.participant === undefined ? {} : { participant: request.participant }),
+          intent: 'revert',
+          revertFromSeq: SessionSeq(request.atSeq),
+        },
         { keepInbox: false },
       )
+      if (preserved.length > 0) {
+        void agent.whenIdle().then(() => {
+          for (const message of preserved) {
+            try {
+              agent.send(message, 'next-turn', false)
+            } catch {
+              // The Agent was disposed between convergence and this replay:
+              // its inbox can no longer hold the preserved notices.
+            }
+          }
+        }, () => {
+          // Disposal or a failed driver: the preserved notices have no live
+          // inbox left to hold them.
+        })
+      }
     }
     const session = agent.session
     const nodes = session.surface.nodes

@@ -839,7 +839,7 @@ describe('subagent catalogs', () => {
       summary(S1),
       summary(S2, { parentSessionId: S1, origin: 'subagent' }),
     ] as never[] })))
-    remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1,
+    remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
       id: S2, mode: 'continuable', label: 'worker',
     }] } })))
     mock.load(sessionWorld)
@@ -943,10 +943,10 @@ describe('subagent catalogs', () => {
     manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1, running: true }))
     manager.handleControlFrame({
       type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 4,
-      value: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }],
+      value: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }],
     })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual([
-      { id: S2, createdAt: 1, mode: 'continuable', label: 'worker' },
+      { id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'continuable', label: 'worker' },
     ])
     expect(manager.subagentAddress(S2)).toEqual({ parentSessionId: S1, childSessionId: S2, mode: 'continuable' })
     expect(remote.session.projections.mock.calls.map(([request]) => request)).toEqual([])
@@ -1003,11 +1003,11 @@ describe('subagent catalogs', () => {
     const manager = makeManager(mock, remote)
     const read = manager.refreshProjections(S1)
     manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 1,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+      value: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }] })
     response.resolve(ok(null))
     await read
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual([
-      { id: S2, createdAt: 1, mode: 'one-shot' },
+      { id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' },
     ])
   })
 
@@ -1019,7 +1019,7 @@ describe('subagent catalogs', () => {
     expect(manager.refreshProjections(S1)).toBe(read)
     expect(manager.getListSnapshot().projectionsBySession[S1]?.state).toBe('loading')
     response.resolve(ok({ asOfSeq: 0, values: {
-      subagentCatalog: [{ id: S2, createdAt: 1, mode: 'one-shot' }],
+      subagentCatalog: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }],
       title: 'cold parent',
     } }))
     await read
@@ -1027,7 +1027,7 @@ describe('subagent catalogs', () => {
     manager.handleSessionAdded(summary(S1))
     expect(manager.getListSnapshot().items[0]?.title).toBe('cold parent')
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-      values: { subagentCatalog: [{ id: S2, createdAt: 1, mode: 'one-shot' }] }, state: 'ready',
+      values: { subagentCatalog: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }] }, state: 'ready',
     })
     expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(1)
   })
@@ -1040,7 +1040,7 @@ describe('subagent catalogs', () => {
     manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1 }))
     manager.handleSessionStatus(S2, true)
     response.resolve(ok({ asOfSeq: 0, values: {
-      subagentCatalog: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }],
+      subagentCatalog: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }],
     } }))
     await read
     expect(manager.getListSnapshot().items.find(item => item.sessionId === S2)?.running).toBe(true)
@@ -1054,7 +1054,7 @@ describe('subagent catalogs', () => {
     manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1, running: true }))
     manager.handleControlFrame({ type: 'projection', sessionId: S2, key: 'title', value: 'finished child', seq: 2 })
     manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 1,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+      value: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }] })
     manager.handleSessionRemoved(S2)
     expect(manager.getListSnapshot().items[0]).toMatchObject({ title: 'finished child', running: false })
     expect(manager.getListSnapshot().items.find(item => item.sessionId === S2)?.running).toBe(false)
@@ -1070,7 +1070,7 @@ describe('subagent catalogs', () => {
     remote.session.projections.mockImplementation(() => Promise.resolve(err(new RemoteError('gateway/internal', 'offline', {}))))
     const manager = makeManager(mock, remote)
     manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 2,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+      value: [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'one-shot' }] })
     await manager.refreshProjections(S1)
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({ state: 'error', values: { subagentCatalog: [{ id: S2 }] } })
     remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 2, values: { subagentCatalog: [] } })))
@@ -1410,7 +1410,7 @@ describe('connected generation', () => {
       summary(S1),
       summary(S2, { parentSessionId: S1, origin: 'subagent', running: hostRunning }),
     ] as never[] })))
-    remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, mode: 'continuable', label: 'worker' }] } })))
+    remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }] } })))
     const manager = makeManager(mock, remote)
     try {
       await manager.refreshList()
@@ -1440,7 +1440,7 @@ describe('connected generation', () => {
       const read = manager.refreshProjections(S1)
       manager.handleConnected()
       expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(2)
-      previous.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, mode: 'continuable', label: 'worker' }] } }))
+      previous.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }] } }))
       await read
       await vi.waitFor(() => {
         expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
@@ -1488,7 +1488,7 @@ describe('connected generation', () => {
 
     manager.handleConnected()
     expect(manager.get(S2).getSnapshot().subagent).toEqual({ address })
-    parent.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1,
+    parent.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
       id: S2, mode: 'continuable', label: 'worker',
     }] } }))
 

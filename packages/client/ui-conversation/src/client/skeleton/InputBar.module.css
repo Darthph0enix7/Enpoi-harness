@@ -399,6 +399,36 @@
   cursor: default;
 }
 
+/* Split stop control: the live-child count plus the chevron that opens the
+   "Stop all agents" menu. Keeps the primary circle's seat and fill. */
+.stopAll {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 34px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-alias-button-info-fill);
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+  transform: translateY(-2px);
+}
+
+.stopAll:hover {
+  background: var(--dsw-alias-button-info-hover);
+}
+
+.stopCount {
+  min-width: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+}
+
 .retry {
   margin-left: 8px;
   padding: 1px 8px;

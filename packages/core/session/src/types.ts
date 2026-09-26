@@ -186,9 +186,23 @@ export type PrepareSessionOptions =
   | (CreateSessionOptions & { readonly eventState?: undefined })
   | RestoredSessionOptions
 
+/**
+ * What a user-initiated stop asked for. `detach` abandons only the aborted
+ * turn; `stop-all` also parks every live continuable descendant; `revert`
+ * parks only the descendants spawned inside the reverted span.
+ */
+export type StopIntent = 'detach' | 'stop-all' | 'revert'
+
 /** Why an active agent driver was cancelled. */
 export type AgentCancelCause =
-  | { readonly kind: 'user'; readonly participant?: ParticipantTag }
+  | {
+    readonly kind: 'user'
+    readonly participant?: ParticipantTag
+    /** What the stop asked for; absent for callers that predate stop intents. */
+    readonly intent?: StopIntent
+    /** Revert anchor whose span the `revert` intent scopes cancellation to. */
+    readonly revertFromSeq?: SessionSeq
+  }
   | { readonly kind: 'parent' }
   | { readonly kind: 'hook'; readonly reason: string }
   | { readonly kind: 'disposed' }

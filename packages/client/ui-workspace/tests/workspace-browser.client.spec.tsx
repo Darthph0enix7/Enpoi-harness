@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
@@ -849,7 +850,7 @@ describe('WorkspaceBrowser', () => {
         projectionsBySession: {
           [sid('session-7')]: {
             state: 'ready', error: null,
-            values: { subagentCatalog: [{ id: child.id, mode: 'continuable', label: 'child', createdAt: 1 }] },
+            values: { subagentCatalog: [{ id: child.id, mode: 'continuable', label: 'child', createdAt: 1, seq: SessionSeq(0) }] },
           },
         },
       })),

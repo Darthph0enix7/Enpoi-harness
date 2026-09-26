@@ -1,5 +1,6 @@
 /** Running-state ownership across the real Controller catalog and UI status source. */
 import { expect, vi } from 'vitest'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { ok } from '@deepseek-ai/dsh-remote-mock'
 import { createClientTest, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { SESSION_FORMAT_VERSION, type SessionId } from '@deepseek-ai/dsh-session/types'
@@ -15,7 +16,7 @@ it('preserves unlisted child status through metadata updates and main view ackno
   }] }))
   mock.remote.session.projections.mockResolvedValue(ok({
     asOfSeq: 0,
-    values: { subagentCatalog: [{ id: childId, createdAt: 1, mode: 'continuable', label: 'Child' }] },
+    values: { subagentCatalog: [{ id: childId, createdAt: 1, seq: SessionSeq(0), mode: 'continuable', label: 'Child' }] },
   }))
   mock.stream('session/follow', (_request, stream) => {
     stream.push({

@@ -94,6 +94,15 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
 })
 
 /**
+ * Filtered-node fallback anchor. Once a revert boundary or shadow range is
+ * active, a key that no longer resolves in the node store cannot be proven to
+ * sit outside the hidden spans, so the filter drops it instead of rendering a
+ * withdrawn node. Named so the drop stays a deliberate decision, never an
+ * accidental `undefined` comparison.
+ */
+const UNRESOLVED_NODE_ANCHOR = Number.POSITIVE_INFINITY
+
+/**
  * The chat view slot entry: pure component over the composed props; each
  * ordered business Node crosses the keyed renderer seat.
  */
@@ -113,7 +122,7 @@ export function ChatView({
     const ranges = revertShadowRanges
     if (revertFromSeq === null && ranges.length === 0) return order
     return order.filter((key) => {
-      const anchorSeq = nodeStore.get(key)?.anchorSeq ?? Number.POSITIVE_INFINITY
+      const anchorSeq = nodeStore.get(key)?.anchorSeq ?? UNRESOLVED_NODE_ANCHOR
       // Strictly less: the boundary message itself is reverted (its text went
       // into the input card), so it hides with the span after it.
       if (revertFromSeq !== null && anchorSeq >= revertFromSeq) return false

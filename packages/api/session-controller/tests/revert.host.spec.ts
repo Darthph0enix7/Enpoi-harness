@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import SessionController from '../src/index.ts'
 import { createSessionTestController, testSessionPersistence } from './test-remote.ts'
 
@@ -79,6 +79,90 @@ describe('SessionController revert RPC', () => {
     expect(revertEvent).toBeDefined()
     expect((revertEvent!.data as { fromSeq: number; cause: string }).fromSeq).toBe(firstUserSeq)
     expect((revertEvent!.data as { cause: string }).cause).toBe('revert')
+  })
+
+  it('preserves child settlement notices across the revert cancel and drops operator queue input', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const firstUserSeq = session.snapshotEvents().find(e => e.type === 'user/message')!.seq
+    const queued = createUserMessage({
+      content: [{ type: 'text', text: 'operator queued' }],
+      source: { kind: 'user' },
+    })
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child was stopped before it finished.' }],
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'Background subagent child was stopped before it finished.',
+        senderSessionId: SessionId('child-notice'),
+      },
+    })
+    const cancelled = Promise.withResolvers<void>()
+    const cancel = vi.fn()
+    const send = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, {
+      status: 'running',
+      inbox: { nextTurn: [queued, notice], nextStep: [] },
+      cancel,
+      send,
+      whenIdle: () => cancelled.promise,
+    })
+
+    await expect(controller.revert({ sessionId, atSeq: firstUserSeq })).resolves.toMatchObject({ accepted: true })
+
+    // The revert cancel carries its own intent and span, and clears the
+    // inbox immediately so no user-queued turn runs mid-revert.
+    expect(cancel).toHaveBeenCalledWith(
+      { kind: 'user', intent: 'revert', revertFromSeq: firstUserSeq },
+      { keepInbox: false },
+    )
+    // The notice is re-queued quietly only after the abort converges; the
+    // operator's queued message is not preserved.
+    expect(send).not.toHaveBeenCalled()
+    cancelled.resolve(undefined)
+    await vi.waitFor(() => { expect(send).toHaveBeenCalledWith(notice, 'next-turn', false) })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(session.snapshotEvents().find(e => e.type === 'revert/state')).toBeDefined()
+  })
+
+  it('lets a revert commit proceed past queued child notices but not operator input', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const firstUserSeq = session.snapshotEvents().find(e => e.type === 'user/message')!.seq
+    const agent = ctx.agents.get(sessionId)!
+    const request = {
+      requestId: 'revert-commit' as never,
+      sessionId,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'edited query' }],
+      revertFromSeq: firstUserSeq,
+    }
+    Object.assign(agent, {
+      status: 'idle',
+      inbox: {
+        nextTurn: [createUserMessage({ content: [{ type: 'text', text: 'queued' }], source: { kind: 'user' } })],
+        nextStep: [],
+      },
+    })
+    const signal = new AbortController().signal
+    await expect(controller.prompt(request, signal)).rejects.toMatchObject({ code: 'revert-invalid' })
+
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child was stopped before it finished.' }],
+      source: {
+        kind: 'subagent-settled', form: 'notice',
+        summary: 'Background subagent child was stopped before it finished.',
+        senderSessionId: SessionId('child-notice'),
+      },
+    })
+    Object.assign(agent, { inbox: { nextTurn: [notice], nextStep: [] } })
+    // The commit proceeds past the revert guard; whatever the bare harness
+    // does next, the quiet notice did not block the operator's resend.
+    await expect(controller.prompt({ ...request, requestId: 'revert-commit-2' as never }, signal).then(
+      () => 'accepted',
+      (error: { code?: string }) => error.code ?? 'unknown',
+    )).resolves.not.toBe('revert-invalid')
   })
 
   it('rejects a non-user anchor', async () => {

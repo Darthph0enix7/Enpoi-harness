@@ -60,9 +60,10 @@ export interface IConversation {
   updateQueue(itemId: MessageId, action: QueueAction): Promise<void>
   /**
    * Cancel the scoped session's in-flight turn while preserving its pending Queue.
+   * @param intent - stop intent forwarded to the Host; absent keeps its default.
    * @returns completion; failures reject as in send.
    */
-  cancel(): Promise<void>
+  cancel(intent?: 'detach' | 'stop-all'): Promise<void>
   /**
    * Pull one older history page for the scoped session.
    * @returns completion of the page pull.
@@ -505,9 +506,9 @@ export class ConversationController extends Service implements IConversation {
   }
 
   /** Cancel the scoped session's in-flight turn while preserving Queue (failures land in promptError and reject, as in send). */
-  async cancel(): Promise<void> {
+  async cancel(intent?: 'detach' | 'stop-all'): Promise<void> {
     const session = this.scopedSession('cancel')
-    const result = await session.cancel()
+    const result = await session.cancel(intent)
     if (!result.ok) throw new Error(`conversation.cancel failed: ${result.error.code}: ${result.error.message}`)
   }
 

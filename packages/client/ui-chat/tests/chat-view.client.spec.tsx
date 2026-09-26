@@ -584,6 +584,21 @@ describe('Chat node rendering', () => {
     expect(h.openFile).toHaveBeenCalledWith('src/index.ts', { line: 24 })
   })
 
+  it('hides only the declared shadow-range node and keeps later history visible', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'first'), assistant(2, 'answer', 1), user(3, 'second'), assistant(4, 'answer', 2), user(5, 'third')],
+      turnEnds: new Map([[1, 2], [2, 4]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).not.toBeNull()
+    act(() => { h.setSession({ revertShadowRanges: [{ start: 3, end: 4 }] }) })
+    // A one-node shadow range hides exactly that node; earlier content and the
+    // later turn stay rendered instead of the range swallowing the tail.
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).toBeNull()
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:1"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-chat-node-key="fixture:user:5"]')).not.toBeNull()
+  })
+
   it('threads the injected file-mention vocabulary into the closing prose only', () => {
     const wrote = (seq: number, callId: string): ToolResultNode => ({
       ...toolResult(seq, callId, 'write'),

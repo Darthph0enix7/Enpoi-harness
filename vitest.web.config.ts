@@ -17,6 +17,13 @@ export default defineConfig({
   // Same resolution note as vitest.config.ts: the tsconfig.base.json paths
   // facade has no include (match-all), so apps/web/tests resolves bare
   // workspace imports to source like every other lane.
+  // Source-first extension order: the tsconfig facade maps bare workspace
+  // imports to a package's `src` DIRECTORY, and Vite's default order picks a
+  // committed `src/index.js` artifact before `src/index.ts`. That stale copy
+  // also sits outside the tsconfig project, so its own imports load `lib/` and
+  // split module singletons (see the 2026-09-26 V3-seed failure). Keep `.ts`
+  // ahead of `.js` until `src/` directories stay artifact-free.
+  resolve: { extensions: ['.mjs', '.mts', '.ts', '.tsx', '.js', '.jsx', '.json'] },
   plugins: [
     tsconfigPaths({ projects: ['./tsconfig.base.json'] }),
     standardDecoratorPlugin(),
