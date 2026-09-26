@@ -468,18 +468,28 @@ describe('AppFrame track easing', () => {
     // Window-driven track updates follow the frame edge instantly.
     resize(1600)
     expect(frame.dataset.animating).toBeUndefined()
-    act(() => { instance.actions.toggleSidebar() })
-    expect(frame.dataset.animating).toBe('true')
-    // Foreign transition ends (e.g. the handle's left) do not settle it...
-    act(() => {
-      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'left' }))
-    })
-    expect(frame.dataset.animating).toBe('true')
-    // ...the track transition's own end does.
-    act(() => {
-      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
-    })
-    expect(frame.dataset.animating).toBeUndefined()
+    vi.useFakeTimers()
+    try {
+      act(() => { instance.actions.toggleSidebar() })
+      expect(frame.dataset.animating).toBe('true')
+      // Foreign transition ends (e.g. the handle's left) do not settle it...
+      act(() => {
+        frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'left' }))
+      })
+      act(() => { vi.advanceTimersByTime(400) })
+      expect(frame.dataset.animating).toBe('true')
+      // ...the track transition's own end does, after the settle grace that
+      // also keeps a spam retarget from clearing the marker mid-ride.
+      act(() => {
+        frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+      })
+      act(() => { vi.advanceTimersByTime(249) })
+      expect(frame.dataset.animating).toBe('true')
+      act(() => { vi.advanceTimersByTime(1) })
+      expect(frame.dataset.animating).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('lands the responsive auto-collapse instantly, keeping user toggles eased', () => {
@@ -500,8 +510,11 @@ describe('AppFrame track easing', () => {
       const { frame, instance } = mountFrame()
       act(() => { instance.actions.openRightbar(true, false) })
       expect(frame.dataset.animating).toBe('true')
-      // Covered or reduced-motion frames fire no transitionend; the timeout settles.
+      // Covered or reduced-motion frames fire no transitionend; the backstop
+      // schedules the reset and the settle grace elapses before it lands.
       act(() => { vi.advanceTimersByTime(600) })
+      expect(frame.dataset.animating).toBe('true')
+      act(() => { vi.advanceTimersByTime(250) })
       expect(frame.dataset.animating).toBeUndefined()
     } finally {
       vi.useRealTimers()
@@ -509,28 +522,89 @@ describe('AppFrame track easing', () => {
   })
 
   it('keeps the marker while a retargeted track transition is still running', () => {
-    const { frame, instance } = mountFrame()
-    act(() => { instance.actions.toggleSidebar() })
-    expect(frame.dataset.animating).toBe('true')
-    // The end event of a replaced transition dispatches into the fresh
-    // listener; the retargeted one is still gliding, so the marker must stay.
-    const running: { playState: string; transitionProperty: string }[] = [
-      { playState: 'running', transitionProperty: '--dsh-sidebar-track' },
-    ]
-    replaceProperty(
-      frame,
-      'getAnimations',
-      (() => running) as unknown as HTMLElement['getAnimations'],
-    )
-    act(() => {
-      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
-    })
-    expect(frame.dataset.animating).toBe('true')
-    running.length = 0
-    act(() => {
-      frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: '--dsh-sidebar-track' }))
-    })
-    expect(frame.dataset.animating).toBeUndefined()
+    vi.useFakeTimers()
+    try {
+      const { frame, instance } = mountFrame()
+      act(() => { instance.actions.toggleSidebar() })
+      expect(frame.dataset.animating).toBe('true')
+      // The end event of a replaced transition dispatches into the fresh
+      // listener; the retargeted one is still gliding when the grace elapses,
+      // so the settle re-arms instead of clearing the marker.
+      const running: { playState: string; transitionProperty: string }[] = [
+        { playState: 'running', transitionProperty: '--dsh-sidebar-track' },
+      ]
+      replaceProperty(
+        frame,
+        'getAnimations',
+        (() => running) as unknown as HTMLElement['getAnimations'],
+      )
+      act(() => {
+        frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+      })
+      act(() => { vi.advanceTimersByTime(500) })
+      expect(frame.dataset.animating).toBe('true')
+      running.length = 0
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(frame.dataset.animating).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels a pending settle when a newer toggle starts its ride', () => {
+    vi.useFakeTimers()
+    try {
+      const { frame, instance } = mountFrame()
+      act(() => { instance.actions.toggleSidebar() })
+      act(() => {
+        frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+      })
+      // The next spam toggle re-runs the effect before the grace elapses: its
+      // cleanup cancels the pending settle, so the marker survives the burst.
+      act(() => { instance.actions.toggleSidebar() })
+      act(() => { vi.advanceTimersByTime(400) })
+      expect(frame.dataset.animating).toBe('true')
+      act(() => {
+        frame.dispatchEvent(Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' }))
+      })
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(frame.dataset.animating).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a settle whose toggle generation was superseded', () => {
+    vi.useFakeTimers()
+    try {
+      const { frame, instance } = mountFrame()
+      const listeners: EventListener[] = []
+      const original = frame.addEventListener.bind(frame)
+      replaceProperty(frame, 'addEventListener', ((type: string, listener: EventListener) => {
+        if (type === 'transitionend') listeners.push(listener)
+        original(type, listener)
+      }) as HTMLElement['addEventListener'])
+      act(() => { instance.actions.toggleSidebar() })
+      act(() => { instance.actions.toggleSidebar() })
+      expect(frame.dataset.animating).toBe('true')
+      replaceProperty(frame, 'getAnimations', (() => []) as unknown as HTMLElement['getAnimations'])
+      const endEvent = () => {
+        const event = Object.assign(new Event('transitionend'), { propertyName: 'grid-template-columns' })
+        Object.defineProperty(event, 'target', { value: frame })
+        return event
+      }
+      // The first generation's listener fires in the same tick as the second
+      // toggle's commit, before its cleanup could cancel the timer; its stale
+      // generation must keep the fresh marker up.
+      act(() => { listeners[0](endEvent()) })
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(frame.dataset.animating).toBe('true')
+      act(() => { listeners[1](endEvent()) })
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(frame.dataset.animating).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

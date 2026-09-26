@@ -5,18 +5,24 @@
  *
  * Method (Oracle-amended): two samplers against a running `dsh web` origin.
  * - Live rAF sampling (never paused) for spam / dock / dock-sidebar / dock-reopen:
- *   frame-to-frame edge continuity, marker continuity, edge alignment.
+ *   frame-to-frame edge continuity, marker continuity, edge alignment. Since
+ *   criterion v3 continuity is transition-clock aware: a move beyond
+ *   NO_TRANSITION_JUMP_PX with no running track transition (and no completion
+ *   tail at the previous frame) is a snap, while the browser's shortened
+ *   reversal on a mid-ride retarget stays a running transition and passes.
+ *   Dock edges keep the v2 fraction-of-span rule (element-owned transform).
  * - Stepped sampling (pause animations, walk currentTime in 10 ms steps) for the
  *   discrete single/both/crossed rides: geometric gap, marker presence, moving
  *   sample count, start skew.
- * The scenario matrix is versioned and its sha256 lands in every verdict so
- * coverage cannot silently shrink. Frozen mid-motion frames (sentinel page
+ * The scenario matrix and the criterion constants are versioned and their
+ * sha256 values land in every verdict so coverage and semantics cannot change
+ * silently (matrixHash, criterionHash). Frozen mid-motion frames (sentinel page
  * background) classify the seam against the skin's own glass tokens; the
  * resting right-panel corridor is asserted against RIGHT_CORRIDOR_TARGET — the
  * one constant to flip when the panel's material choice is made.
  *
  * Usage: node scripts/glass-seam-probe.mjs [--origin=URL] [--out=DIR]
- *        [--width=1440] [--height=900] [--json]
+ *        [--width=1440] [--height=900] [--json] [--only=spam,material,...]
  * Exit: 0 pass, 1 violations, 2 harness error.
  */
 import fs from 'node:fs'
@@ -28,7 +34,7 @@ import { createRequire } from 'node:module'
 const requireFromWeb = createRequire(new URL('../apps/web/package.json', import.meta.url))
 
 /** Probe method version; bump when the sampler or assertions change. */
-const PROBE_VERSION = 2
+const PROBE_VERSION = 3
 
 /**
  * Versioned, append-only scenario matrix. `widths` lists the viewports a
@@ -58,13 +64,38 @@ const MAX_GAP_PX = 0.5
 const MIN_MOVING_SAMPLES = 5
 const MAX_STEP_FRACTION = 0.25
 const MAX_START_SKEW_FRAMES = 1
-/** Live continuity: no frame-to-frame edge jump beyond this fraction of span. */
+/**
+ * Live continuity is transition-clock aware (criterion v3): an edge move is a
+ * snap only when no track transition can explain it. A running track transition
+ * (including the browser's spec-mandated shortened reversal when a click
+ * retargets a ride mid-flight) interpolates every painted value, so any delta it
+ * produces is continuous by construction; the span-fraction test below is kept
+ * for dock scenarios, whose edge is owned by the dock's own transform.
+ */
 const MAX_FRAME_DELTA_FRACTION = 0.25
 /**
- * Frame gaps longer than this make a large delta interpolation, not a snap;
- * a delta beyond 60 % of the span in any single frame is always a snap.
+ * Frame gaps longer than this make a large delta interpolation, not a snap —
+ * used only by the v2 dock fraction rule.
  */
 const MAX_CONTINUITY_DT_MS = 16.7
+/**
+ * A frame-to-frame edge move beyond this many pixels with no running track
+ * transition (and no just-finished one at the previous frame without a target
+ * change) is a snap: nothing interpolated it. Sub-pixel layout noise stays below.
+ */
+const NO_TRANSITION_JUMP_PX = 2
+/** Criterion version: 2 = fraction-of-span only, 3 = transition-clock aware. */
+const CRITERION_VERSION = 3
+const criterionHash = createHash('sha256').update(JSON.stringify({
+  criterionVersion: CRITERION_VERSION,
+  maxGapPx: MAX_GAP_PX,
+  minMovingSamples: MIN_MOVING_SAMPLES,
+  maxStepFraction: MAX_STEP_FRACTION,
+  maxStartSkewFrames: MAX_START_SKEW_FRAMES,
+  maxFrameDeltaFraction: MAX_FRAME_DELTA_FRACTION,
+  maxContinuityDtMs: MAX_CONTINUITY_DT_MS,
+  noTransitionJumpPx: NO_TRANSITION_JUMP_PX,
+})).digest('hex').slice(0, 16)
 /**
  * Resting material for the right-panel corridor, the ONE flip point:
  * 'panel-glass-double' (restored: panel fill + tab-body ground = the browser
@@ -89,6 +120,8 @@ const OUT = flag('out', '')
 const WIDTH = Number(flag('width', '1440'))
 const HEIGHT = Number(flag('height', '900'))
 const JSON_ONLY = args.includes('--json')
+/** Optional comma-separated scenario filter for diagnosis; absent = full matrix. */
+const ONLY = flag('only', '').split(',').filter(Boolean)
 const { chromium } = requireFromWeb('playwright')
 
 /** Minimal PNG decoder: 8-bit RGB/RGBA, non-interlaced, all filter types. */
@@ -166,9 +199,13 @@ const LIVE_SAMPLER = `
     return { el: center, cls: 'center' };
   };
   window.__liveProbe = {
-    frames: [], running: false,
+    frames: [], clicks: [], running: false,
     start() {
-      this.frames = []; this.running = true;
+      this.frames = []; this.clicks = []; this.running = true;
+      document.addEventListener('click', event => {
+        const item = event.target?.closest?.('[data-sidebar-right-rail-item]');
+        if (item) this.clicks.push(+performance.now().toFixed(1));
+      }, true);
       const loop = () => {
         if (!this.running) return;
         const f = frame();
@@ -182,12 +219,28 @@ const LIVE_SAMPLER = `
           panel: panel ? { left: +panel.getBoundingClientRect().left.toFixed(2), open: panel.hasAttribute('data-sidebar-right-open') } : null,
           dock: dock ? { rect: rect(dock), open: dock.hasAttribute('data-enpoi-bottom-dock-open'), marker: document.body.hasAttribute('data-enpoi-bottom-dock-open') } : null,
           anim: f ? f.hasAttribute('data-animating') : false,
+          progress: (() => {
+            if (!f) return null;
+            const raw = getComputedStyle(f).getPropertyValue('--dsh-rightbar-progress').trim();
+            return raw === '' ? null : Number(raw);
+          })(),
+          anims: f ? f.getAnimations().map(a => (a.transitionProperty ?? a.animationName ?? '?') + ':' + a.playState) : [],
+          spec: f ? f.style.getPropertyValue('--dsh-rightbar-progress') : null,
+          specSidebar: f ? f.style.getPropertyValue('--dsh-sidebar-track') : null,
+          trans: f ? f.getAnimations().filter(a => a.transitionProperty === '--dsh-rightbar-progress' || a.transitionProperty === '--dsh-sidebar-track').map(a => ({
+            p: a.transitionProperty,
+            state: a.playState,
+            ct: a.currentTime === null ? null : +a.currentTime.toFixed(1),
+            st: a.startTime === null ? null : +a.startTime.toFixed(1),
+            dur: a.effect ? a.effect.getTiming().duration : null,
+            pr: a.effect ? a.effect.getComputedTiming().progress : null,
+          })) : [],
         });
         requestAnimationFrame(loop);
       };
       requestAnimationFrame(loop);
     },
-    stop() { this.running = false; return this.frames },
+    stop() { this.running = false; return { frames: this.frames, clicks: this.clicks } },
   };
 })();
 `
@@ -197,7 +250,18 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT }, ignoreHTTPSErrors: true })
   const outDir = OUT === '' ? '' : path.resolve(OUT)
   if (outDir !== '') fs.mkdirSync(outDir, { recursive: true })
-  const report = { probeVersion: PROBE_VERSION, matrixHash, width: WIDTH, height: HEIGHT, origin: ORIGIN, scenarios: {}, violations: [] }
+  const report = {
+    probeVersion: PROBE_VERSION,
+    criterionVersion: CRITERION_VERSION,
+    criterionHash,
+    matrixHash,
+    width: WIDTH,
+    height: HEIGHT,
+    origin: ORIGIN,
+    only: ONLY.length > 0 ? ONLY : null,
+    scenarios: {},
+    violations: [],
+  }
   try {
     await page.goto(ORIGIN, { waitUntil: 'load', timeout: 90000 })
     await page.waitForSelector('[data-rightbar-col]', { timeout: 30000, state: 'attached' })
@@ -510,12 +574,12 @@ async function main() {
         await page.screenshot({ path: path.join(outDir, `${scenario.id}-mid.png`) })
       }
       await wait(Math.max(200, (scenario.durationMs ?? 1500) - 200))
-      const frames = await page.evaluate(() => window.__liveProbe.stop())
-      if (outDir !== '') fs.writeFileSync(path.join(outDir, `${scenario.id}-trace.json`), JSON.stringify(frames))
-      return summarizeLive(scenario, frames)
+      const { frames, clicks } = await page.evaluate(() => window.__liveProbe.stop())
+      if (outDir !== '') fs.writeFileSync(path.join(outDir, `${scenario.id}-trace.json`), JSON.stringify({ clicks, frames }))
+      return summarizeLive(scenario, frames, clicks)
     }
 
-    function summarizeLive(scenario, frames) {
+    function summarizeLive(scenario, frames, clicks = []) {
       const edgeOf = row => {
         if (scenario.orient === 'right') return row.glass?.[2] ?? null
         if (scenario.orient === 'left') return row.glass?.[0] ?? null
@@ -527,20 +591,48 @@ async function main() {
         if (scenario.orient === 'left') return row.sidebar === null || row.glass === null ? null : row.glass[0] - row.sidebar[2]
         return row.dock === null || row.glass === null ? null : row.dock.rect[1] - row.glass[3]
       }
+      // Criterion v3: the frame-owned track vars (left sidebar / rightbar
+      // progress) interpolate through the browser's own CSS transitions, so an
+      // edge move is a snap only when no track transition can explain it. The
+      // shortened reversal the engine creates on a mid-ride retarget is still a
+      // running transition and therefore continuous. Dock scenarios measure an
+      // element-owned transform and keep the v2 fraction test.
+      const frameOwnedTrack = scenario.orient === 'left' || scenario.orient === 'right'
+      const trackProp = scenario.orient === 'left' ? '--dsh-sidebar-track' : '--dsh-rightbar-progress'
+      const specOf = row => (scenario.orient === 'left' ? row.specSidebar : row.spec)
+      const runningTrack = row => Array.isArray(row.trans)
+        && row.trans.some(t => (t.p ?? trackProp) === trackProp && t.state === 'running')
       const gaps = frames.map(gapOf).filter(v => v !== null)
       const edges = []
-      let maxDelta = 0, maxDeltaDt = 0
+      let maxDelta = 0, maxDeltaDt = 0, unexplainedJumpPx = 0, unexplainedJumpFrames = 0
+      let previousRow = null, previousEdge = null
       for (let i = 0; i < frames.length; i++) {
-        const edge = edgeOf(frames[i])
-        if (edge === null) { edges.length = 0; continue }
-        const previous = edges[edges.length - 1]
+        const row = frames[i]
+        const edge = edgeOf(row)
+        if (edge === null) { edges.length = 0; previousRow = null; previousEdge = null; continue }
         edges.push(edge)
-        if (previous === undefined) continue
-        // A resolver switch (a different painted element) is a measurement
-        // artifact, never a motion jump.
-        if (frames[i].glassCls !== frames[i - 1]?.glassCls) continue
-        const delta = Math.abs(edge - previous)
-        if (delta > maxDelta) { maxDelta = delta; maxDeltaDt = frames[i].t - frames[i - 1].t }
+        if (previousEdge !== null && previousRow !== null) {
+          // A resolver switch (a different painted element) is a measurement
+          // artifact, never a motion jump.
+          if (row.glassCls === previousRow.glassCls) {
+            const delta = Math.abs(edge - previousEdge)
+            if (delta > maxDelta) { maxDelta = delta; maxDeltaDt = row.t - previousRow.t }
+            if (frameOwnedTrack) {
+              // A running transition interpolates the value; a transition that
+              // just finished at the previous frame without a target change
+              // explains the completion tail. Anything else that moves the edge
+              // is a snap.
+              const targetChanged = specOf(row) !== specOf(previousRow)
+              const explained = runningTrack(row) || (runningTrack(previousRow) && !targetChanged)
+              if (!explained && delta > NO_TRANSITION_JUMP_PX) {
+                unexplainedJumpFrames++
+                unexplainedJumpPx = Math.max(unexplainedJumpPx, delta)
+              }
+            }
+          }
+        }
+        previousRow = row
+        previousEdge = edge
       }
       const span = edges.length < 2 ? 0 : Math.max(...edges) - Math.min(...edges)
       // Continuity window: from the first marker rise (or first move) to the end.
@@ -563,10 +655,13 @@ async function main() {
       return {
         method: 'live',
         frames: frames.length,
+        clicks: clicks.map(t => +t.toFixed(1)),
         span: +span.toFixed(1),
         maxFrameDelta: +maxDelta.toFixed(1),
         maxFrameDeltaFraction: span < 1 ? 0 : +(maxDelta / span).toFixed(3),
         maxDeltaDtMs: +maxDeltaDt.toFixed(1),
+        unexplainedJumpPx: +unexplainedJumpPx.toFixed(1),
+        unexplainedJumpFrames,
         gapMin: gaps.length ? +Math.min(...gaps).toFixed(2) : null,
         gapMax: gaps.length ? +Math.max(...gaps).toFixed(2) : null,
         exposedSamples: gaps.filter(g => g > MAX_GAP_PX).length,
@@ -625,6 +720,7 @@ async function main() {
     for (const scenario of MATRIX) {
       const def = scenarioDefs[scenario.id]
       if (def === undefined) throw new Error(`matrix scenario without definition: ${scenario.id}`)
+      if (ONLY.length > 0 && !ONLY.includes(scenario.id)) continue
       if (!scenario.widths.includes(WIDTH)) {
         report.scenarios[scenario.id] = { skipped: `not run at width ${WIDTH}`, matrixWidths: scenario.widths }
         if (!JSON_ONLY) console.log(`[${scenario.id}] SKIP (width ${WIDTH} not in ${scenario.widths.join('/')})`)
@@ -641,8 +737,14 @@ async function main() {
         if (!result.markerPresentThroughRide) reasons.push('data-animating dropped while the track was moving')
         if (result.startSkewFrames !== null && Math.abs(result.startSkewFrames) > MAX_START_SKEW_FRAMES) reasons.push(`start skew ${result.startSkewFrames} frames`)
       } else {
-        const continuityJump = result.maxFrameDeltaFraction > MAX_FRAME_DELTA_FRACTION && result.maxDeltaDtMs <= MAX_CONTINUITY_DT_MS
-        if (continuityJump) reasons.push(`frame delta ${result.maxFrameDeltaFraction} of span in ${result.maxDeltaDtMs}ms`)
+        // v3: frame-owned tracks use the transition-clock rule; the dock's
+        // element-owned transform keeps the v2 span-fraction rule.
+        if (scenario.orient === 'dock') {
+          const continuityJump = result.maxFrameDeltaFraction > MAX_FRAME_DELTA_FRACTION && result.maxDeltaDtMs <= MAX_CONTINUITY_DT_MS
+          if (continuityJump) reasons.push(`frame delta ${result.maxFrameDeltaFraction} of span in ${result.maxDeltaDtMs}ms`)
+        } else if (result.unexplainedJumpFrames > 0) {
+          reasons.push(`edge jumped ${result.unexplainedJumpPx}px with no track transition running (${result.unexplainedJumpFrames} frame pairs)`)
+        }
         if (result.markerDropWhileMoving > 0) reasons.push(`marker dropped for ${result.markerDropWhileMoving} frames while moving`)
         if (scenario.id === 'dock-sidebar' || scenario.id === 'dock-reopen') {
           if (result.dockAlignLeftMax !== null && result.dockAlignLeftMax > MAX_GAP_PX) reasons.push(`dock left off glass by ${result.dockAlignLeftMax}px`)
@@ -655,7 +757,8 @@ async function main() {
     }
 
     // --- resting material -----------------------------------------------------
-    if (WIDTH > 900) {
+    // 'material' is selectable through --only= like a scenario id.
+    if (WIDTH > 900 && (ONLY.length === 0 || ONLY.includes('material'))) {
       await ensureDock(false)
       await ensureSidebar(true)
       await ensurePanel('files', true)

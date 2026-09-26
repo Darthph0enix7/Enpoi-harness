@@ -48,6 +48,16 @@ export type AppFrameProps =
   & PropsLocale<'common'>
   & InjectFace<AppFrameInjected>
 
+/**
+ * The track marker only drops after no track-owned transition has run for this
+ * long. A settle that landed between a spam toggle and its commit used to clear
+ * the marker mid-retarget, and the browser's shortened reversal left the next
+ * toggle without a transition rule (a snap). The grace also absorbs a toggle
+ * whose effect cleanup has not run yet, and the generation check rejects a
+ * settle a newer toggle superseded.
+ */
+const TRACK_SETTLE_GRACE_MS = 250
+
 /** Center column grid item (session-body building block). */
 function CenterColumn(props: { children?: ReactNode }) {
   return <div className={css.centerCol}>{props.children}</div>
@@ -231,13 +241,13 @@ export function AppFrame({
     const frame = frameRef.current
     /* v8 ignore next -- the ref is always attached by effect time: the frame div renders unconditionally. */
     if (frame === null) return
-    // The marker may only drop when no track-owned transition still runs: a
-    // toggle landing on a completed end restarts the effect, and the queued end
-    // event of the replaced transition would otherwise dispatch into the fresh
-    // listener and clear the marker while the retargeted transition is still
-    // gliding — the retargeted grid/padding then snap without their transition
-    // declarations while the panel keeps moving. The 600 ms timer is the
-    // backstop for reduced motion and covered frames.
+    // The marker may only drop when no track-owned transition has run for
+    // TRACK_SETTLE_GRACE_MS. A toggle landing on a completed end restarts the
+    // effect, and an end event of the replaced transition used to clear the
+    // marker while the retargeted transition was still gliding — the retargeted
+    // grid/padding then snap without their transition declarations while the
+    // panel keeps moving. The 600 ms backstop covers reduced motion and covered
+    // frames.
     const trackProperties = new Set(['grid-template-columns', 'padding-right', '--dsh-sidebar-track', '--dsh-rightbar-progress'])
     const stillRunning = () => {
       const centre = frame.children[1] ?? null
@@ -251,17 +261,32 @@ export function AppFrame({
       }
       return false
     }
-    const settleIfDone = () => { if (!stillRunning()) setAnimating(0) }
+    // The grace is a timer owned by this effect: the next toggle's cleanup
+    // cancels it, and while transitions run the check re-arms, so the marker
+    // can neither outlive a newer toggle nor drop inside the window between a
+    // newer toggle's commit and its effect cleanup. `current === animating`
+    // rejects a settle that still fires in that window.
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
+    const settleIfDone = () => {
+      settleTimer = null
+      if (stillRunning()) { settleTimer = setTimeout(settleIfDone, TRACK_SETTLE_GRACE_MS); return }
+      setAnimating(current => current === animating ? 0 : current)
+    }
+    const scheduleSettle = () => {
+      if (settleTimer !== null) return
+      settleTimer = setTimeout(settleIfDone, TRACK_SETTLE_GRACE_MS)
+    }
     const onTransitionEnd = (event: TransitionEvent) => {
       if (event.target !== frame && event.target !== frame.children[1]) return
       if (!trackProperties.has(event.propertyName)) return
-      settleIfDone()
+      scheduleSettle()
     }
     frame.addEventListener('transitionend', onTransitionEnd)
-    const timer = setTimeout(settleIfDone, 600)
+    const backstop = setTimeout(scheduleSettle, 600)
     return () => {
       frame.removeEventListener('transitionend', onTransitionEnd)
-      clearTimeout(timer)
+      clearTimeout(backstop)
+      if (settleTimer !== null) clearTimeout(settleTimer)
     }
   }, [animating])
   const onDragEnd = useCallback(() => { setDragging(false) }, [])
