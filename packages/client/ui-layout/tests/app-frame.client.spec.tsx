@@ -596,10 +596,10 @@ describe('AppFrame track easing', () => {
       // The first generation's listener fires in the same tick as the second
       // toggle's commit, before its cleanup could cancel the timer; its stale
       // generation must keep the fresh marker up.
-      act(() => { listeners[0](endEvent()) })
+      act(() => { listeners[0]!(endEvent()) })
       act(() => { vi.advanceTimersByTime(250) })
       expect(frame.dataset.animating).toBe('true')
-      act(() => { listeners[1](endEvent()) })
+      act(() => { listeners[1]!(endEvent()) })
       act(() => { vi.advanceTimersByTime(250) })
       expect(frame.dataset.animating).toBeUndefined()
     } finally {
