@@ -25,13 +25,21 @@ const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 /**
  * Per-Session projection keys excluded from list rows. A list page carries
  * every row's title and small routing facts; these values are per-Session
- * workspace payloads (context-lens timelines, generated-title input) whose
- * measured wire size dominated the cold list (tens of KB per Session). They
- * arrive with the Session's own history opening or control frames instead.
+ * workspace payloads (context-lens and request-header bodies, generated-title
+ * input) whose measured wire size dominated the cold list (tens of KB per
+ * Session). They arrive with the Session's own history opening or control
+ * frames instead.
+ *
+ * `contextTimeline` deliberately stays IN list rows: the dsh-context Context
+ * Insights dashboard derives every per-session insight (billed tokens, turns,
+ * composition, cost) from that value across the rows it holds, and a
+ * cross-session surface has no on-demand path to it. Excluding it left that
+ * dashboard empty until each session was opened once. The list is windowed
+ * (deployment page size, 50 by default), so its cost is bounded to loaded
+ * pages.
  */
 const LIST_EXCLUDED_PROJECTION_KEYS: ReadonlySet<string> = new Set([
   'contextLens',
-  'contextTimeline',
   'contextHeaders',
   'titleInput',
 ])

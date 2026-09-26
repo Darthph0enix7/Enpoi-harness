@@ -126,6 +126,8 @@ interface PendingRemoteEvent {
   readonly source: TypertRemoteEventInvocation
   readonly frame: RemoteEventInvocationFrame
   readonly deliveries: Set<RemoteEventClient>
+  /** Host time the event was dispatched; bounds replay to a later Client. */
+  readonly since: number
   releaseContext: () => void
   releaseSignal: () => void
 }
@@ -135,6 +137,14 @@ type ConnectionRpcError = Extract<ConnectionRpcResult, { readonly ok: false }>['
 const NEVER_ABORTED_SIGNAL = new AbortController().signal
 const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
 const DEFAULT_STREAM_INBOX_BYTES = 262_144
+/**
+ * Default bound on replaying a pending forwarded invocation to a Client that
+ * connects after the event was dispatched. A pending ask is answerable only
+ * while its producer still waits; past the approval seam's own bounded wait
+ * (15 minutes) a replay can only offer an answer nobody accepts, so an older
+ * entry self-heals instead of re-appearing on every connect. `0` disables it.
+ */
+const DEFAULT_REMOTE_EVENT_REPLAY_MAX_AGE_MS = 15 * 60 * 1000
 const EMPTY_ASYNC_ITERABLE: AsyncIterable<never> = {
   [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
 }
@@ -147,11 +157,19 @@ export interface Config {
   readonly websocketHeartbeatIntervalMs?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /**
+   * Milliseconds a pending forwarded invocation may wait before a Client
+   * connecting later receives a replay of it; older entries are cancelled and
+   * removed instead (self-healing crash-tail asks). `0` replays without a
+   * bound. @default 900000
+   */
+  readonly remoteEventReplayMaxAgeMs?: number
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
+  readonly remoteEventReplayMaxAgeMs: number
 }
 
 /**
@@ -201,6 +219,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
     websocketHeartbeatIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
+    remoteEventReplayMaxAgeMs: z.number().step(1).min(0).default(DEFAULT_REMOTE_EVENT_REPLAY_MAX_AGE_MS),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -215,6 +234,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
   private remoteEvents: RegisteredRemoteEventSource | undefined
   private readonly remoteEventClients = new Map<RemoteEventClientId, RemoteEventClient>()
   private readonly pendingRemoteEvents = new Map<RemoteEventId, PendingRemoteEvent>()
+  private readonly remoteEventReplayMaxAgeMs: number
 
   /**
    * Register the Gateway against the active Typert registry.
@@ -226,6 +246,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'typertGateway')
     const resolved = config as ResolvedConfig
+    this.remoteEventReplayMaxAgeMs = resolved.remoteEventReplayMaxAgeMs
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -498,7 +519,19 @@ export class TypertGatewayService extends Service implements TypertGateway {
       deliveries: new Map(),
     }
     this.remoteEventClients.set(clientId, client)
-    for (const pending of this.pendingRemoteEvents.values()) this.deliverRemoteEvent(pending, client)
+    for (const pending of this.pendingRemoteEvents.values()) {
+      // Self-healing replay: a crash-tail ask older than the sane window is
+      // cancelled rather than re-offered to every connecting Client.
+      if (this.remoteEventReplayMaxAgeMs > 0
+        && Date.now() - pending.since > this.remoteEventReplayMaxAgeMs) {
+        this.cancelRemoteEvent(
+          pending,
+          new Error('typert gateway: pending Remote event expired before a Client could answer it'),
+        )
+        continue
+      }
+      this.deliverRemoteEvent(pending, client)
+    }
     try {
       yield { ...REMOTE_EVENT_STREAM_READY, clientId, host: registration.host }
       yield* client.queue.iterate(lifetime)
@@ -579,6 +612,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
           request: projected.request,
         },
         deliveries: new Set(),
+        since: Date.now(),
         releaseContext,
         releaseSignal: () => {
           for (const signal of signals) signal.removeEventListener('abort', abort)

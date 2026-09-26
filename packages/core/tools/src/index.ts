@@ -1763,7 +1763,9 @@ export class ToolRuntime extends Service {
       case 'allowed-once': return { decision: { kind: 'allow' }, approvalCancelled: false }
       case 'allowed-always': return { decision: { kind: 'allow' }, approvalCancelled: false }
       case 'rejected': return {
-        decision: { kind: 'deny', reason: `the user rejected tool "${exec.name}"` },
+        decision: { kind: 'deny', reason: ask.reason === undefined
+          ? `the user rejected tool "${exec.name}"`
+          : `the user rejected tool "${exec.name}": it required approval because: ${ask.reason}` },
         approvalCancelled: false,
       }
       case 'cancelled': return {

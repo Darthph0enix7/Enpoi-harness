@@ -124,7 +124,8 @@ describe('session.list windowing', () => {
     expect(row?.projections?.values.agentPreset).toBe('minimal')
     expect(row?.projections?.values.sessionListMetadata).toEqual({ blank: false, lastPromptAt: 6 })
     expect('contextLens' in (row?.projections?.values ?? {})).toBe(false)
-    expect('contextTimeline' in (row?.projections?.values ?? {})).toBe(false)
+    // The Context Insights dashboard reads contextTimeline from list rows.
+    expect(row?.projections?.values.contextTimeline).toEqual([{ huge: 'y'.repeat(2048) }])
     expect('titleInput' in (row?.projections?.values ?? {})).toBe(false)
   })
 

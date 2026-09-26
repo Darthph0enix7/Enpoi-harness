@@ -63,6 +63,9 @@ describe('Fix 1 — a focused draft survives a pushed refresh', () => {
         return describeResponse({ roles: { fixer: { label: serverLabel } } }, 1)
       }
       if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
+      if (body.method === 'enpoiCapabilities.registeredTools') {
+        return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+      }
       mutations.push(body)
       return mutateOk(1)
     }))
@@ -99,6 +102,9 @@ describe('Fix 2 — a hung write times out and releases the queue', () => {
       const body = JSON.parse(String(init.body)) as RequestBody
       if (body.method === 'settings.describe') return describeResponse({ roles: {} }, 1)
       if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
+      if (body.method === 'enpoiCapabilities.registeredTools') {
+        return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+      }
       mutations.push(body)
       if (hanging) return new Promise<Response>(() => { /* never settles */ })
       return mutateOk(1)
@@ -133,6 +139,9 @@ describe('Fix 3 — a write failure survives a tab switch', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as RequestBody
       if (body.method === 'settings.describe') return describeResponse({ roles: {} }, 1)
+      if (body.method === 'enpoiCapabilities.registeredTools') {
+        return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+      }
       return mutateRejected()
     }))
     const mod = await import('../src/client/dynamic/DynamicSettings.tsx')
@@ -165,6 +174,9 @@ describe('Fix 4 — unchanged pushes do not re-describe', () => {
         return describeResponse({ roles: serverRoles }, revision)
       }
       if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
+      if (body.method === 'enpoiCapabilities.registeredTools') {
+        return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+      }
       return mutateOk(revision)
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')

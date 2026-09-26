@@ -364,14 +364,21 @@ describe('Typert Remote streams', () => {
   })
 
   it('validates the WebSocket heartbeat timer range and the stream inbox bound', () => {
-    expect(TypertGatewayService.Config({})).toEqual({ websocketHeartbeatIntervalMs: 2_000, streamInboxBytes: 262_144 })
-    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 }))
-      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 })
+    expect(TypertGatewayService.Config({})).toEqual({
+      websocketHeartbeatIntervalMs: 2_000,
+      streamInboxBytes: 262_144,
+      remoteEventReplayMaxAgeMs: 900_000,
+    })
+    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 }))
+      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 })
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
     }
     for (const streamInboxBytes of [0, 1.5]) {
       expect(() => TypertGatewayService.Config({ streamInboxBytes })).toThrow()
+    }
+    for (const remoteEventReplayMaxAgeMs of [-1, 1.5]) {
+      expect(() => TypertGatewayService.Config({ remoteEventReplayMaxAgeMs })).toThrow()
     }
   })
 
@@ -1327,6 +1334,32 @@ describe('Typert Remote streams', () => {
 
     await sendEventResult(client, frame, { kind: 'result', value: 'allowed' })
     await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+
+    client.socket.close()
+    await unregister()
+  })
+
+  it('self-heals a stale pending waterfall instead of replaying it to a late Client', async () => {
+    const { ctx } = await setup(true, { remoteEventReplayMaxAgeMs: 1 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const agent = ctx.extend()
+    const pending = pendingInvocation(agent, undefined, 'stale', agentId('agent-stale'))
+
+    // Dispatched with no Client connected, then left to age past the window.
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(randomUuid).toHaveBeenCalledTimes(1) })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const staleOutcome = expect(pending.outcome).rejects.toThrow('expired before a Client could answer')
+    const client = await openEventClient(ctx, 'events-stale-late')
+    await staleOutcome
+    expect(pending.reject).toHaveBeenCalledTimes(1)
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    // The late Client gets its ready frame but no replay of the dead ask.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(deliveredInvocation(client)).toBeUndefined()
 
     client.socket.close()
     await unregister()

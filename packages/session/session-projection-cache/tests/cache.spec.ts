@@ -784,6 +784,42 @@ describe('SessionProjectionCache cold-read seeding', () => {
     expect((await storedRows(root, fresh.id))?.['cache-test/count']?.seq).toBe(4)
   })
 
+  it('reindex awaits the durable write and replaces a stale-identity record', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    // A record whose absent format generation can never seed the current fold.
+    await seedRecord(root, 'reindex-stale', {
+      'cache-test/marks': { ver: 1, seq: SessionSeq(0), val: { marks: ['old'] } },
+    }, { createdAt: 0, isSeeded: false })
+    const { cache } = await harness({ root })
+    const meta = headerOf(SessionId('reindex-stale'))
+    const events = [0, 1].map(seq => ({
+      type: 'cache-test/mark', seq: SessionSeq(seq), time: seq, data: { marks: [`m${seq}`] },
+    })) as SessionEvent[]
+
+    const snapshot = await cache.reindex(meta, SessionLogOffset(0), events)
+
+    expect(snapshot.values['cache-test/marks']).toEqual({ marks: ['m1'] })
+    // Awaited settlement: the replacement is on the medium when reindex resolves.
+    expect((await storedRows(root, meta.id))?.['cache-test/marks'])
+      .toEqual({ ver: 1, seq: SessionSeq(1), val: { marks: ['m1'] } })
+    expect((await storedRecord(root, meta.id))?.identity.formatVersion).toBe(SESSION_FORMAT_VERSION)
+    // The rebuilt row now serves the key.
+    expect(cache.cachedSnapshot(meta, ['cache-test/marks'])).toBeDefined()
+  })
+
+  it('reindex propagates a failed durable write to its caller', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const { cache } = await harness({ root })
+    const meta = headerOf(SessionId('reindex-fail'))
+    // A directory where the record document must land makes the write fail.
+    await mkdir(recordPath(root, meta.id), { recursive: true })
+    // Unlike coldSnapshot's fail-soft write-back, a maintenance reindex is
+    // allowed to fail loud: the caller must know the row did not land.
+    await expect(cache.reindex(meta, SessionLogOffset(0), [])).rejects.toThrow()
+  })
+
   it('coldSnapshot write-back is fail-soft: a failed durable write logs and never throws', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)

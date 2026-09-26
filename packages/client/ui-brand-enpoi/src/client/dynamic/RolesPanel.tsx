@@ -33,6 +33,10 @@ import {
 import {
   buildPermissionToolRows,
   BUILT_ROLE_SURFACE,
+  fetchRegisteredToolNames,
+  KEPT_BY_EVERY_ROLE,
+  roleRowChecked,
+  rowTargets,
   type McpServerRef,
   type PermissionToolRow,
 } from '../permissions-model.ts'
@@ -425,7 +429,11 @@ export function buildRoleBaseline(
   if (group !== undefined) baseline.group = group
   if (override.tools?.available !== undefined) baseline.available = override.tools.available
   else if (host?.available !== undefined) baseline.available = host.available
-  else if (BUILT_ROLE_SURFACE[id] !== undefined) baseline.available = [...BUILT_ROLE_SURFACE[id]]
+  else if (BUILT_ROLE_SURFACE[id] !== undefined) {
+    // The child-keep floor (whiteboard) is unioned into every role surface, so
+    // the built-in baseline shows it checked for the same reason the runtime keeps it.
+    baseline.available = [...new Set([...BUILT_ROLE_SURFACE[id], ...KEPT_BY_EVERY_ROLE])]
+  }
   return baseline
 }
 
@@ -466,7 +474,9 @@ export function buildRoleRows(roles: RoleRegistryMap, effective: EffectiveRoleMa
 /** The tool checkboxes one role shows: the permission rows plus allowlist ids outside them. */
 function buildRoleToolRows(rows: PermissionToolRow[], entry: RoleEntry, baseline: readonly string[] = []): PermissionToolRow[] {
   const available = [...new Set([...(entry.tools?.available ?? []), ...baseline])]
-  const known = new Set(rows.map(row => row.id))
+  // Covered ids include every aggregate's concrete members, so a family row
+  // does not leave duplicate per-tool checkboxes beside it.
+  const known = new Set(rows.flatMap(row => [row.id, ...rowTargets(row)]))
   const extras = available.filter(id => !known.has(id)).map(id => ({ id, name: id }))
   return [...rows, ...extras]
 }
@@ -587,7 +597,8 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
   onEditGroup: (next: RoleGroup) => void
   onToggleSeat: () => void
   onToggleRetired: () => void
-  onToggleTool: (tool: string) => void
+  /** Toggles the row: an aggregate flips every concrete member at once. */
+  onToggleTool: (row: PermissionToolRow) => void
   onDelete: () => void
 }) {
   const label = row.entry.label ?? row.baseline.label ?? titleCaseRoleId(row.id)
@@ -693,9 +704,9 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
                 <label key={tool.id} className={c('toolItem')}>
                   <input
                     type="checkbox"
-                    checked={available.includes(tool.id)}
+                    checked={roleRowChecked(tool, available)}
                     aria-label={`${tool.name} for ${label}`}
-                    onChange={() => { onToggleTool(tool.id) }}
+                    onChange={() => { onToggleTool(tool) }}
                   />
                   <span>{tool.name}</span>
                 </label>
@@ -737,7 +748,20 @@ export function RolesPanel() {
       rows: rows.filter(row => (row.entry.group ?? 'custom') === group),
     }))
     .filter(entry => entry.rows.length > 0), [rows])
-  const toolRows = useMemo(() => buildPermissionToolRows(snapshot.mcpServers), [snapshot.mcpServers])
+  // The tool grid follows the LIVE registry projection (whiteboard, MCP, any
+  // future plugin tool), refetched when the catalog slice moves.
+  const [liveToolNames, setLiveToolNames] = useState<readonly string[]>([])
+  useEffect(() => {
+    let cancelled = false
+    void fetchRegisteredToolNames().then((names) => {
+      if (!cancelled && names !== undefined) setLiveToolNames(names)
+    })
+    return () => { cancelled = true }
+  }, [snapshot.mcpServers])
+  const toolRows = useMemo(
+    () => buildPermissionToolRows(snapshot.mcpServers, [], liveToolNames),
+    [snapshot.mcpServers, liveToolNames],
+  )
 
   /** Commit one field edit through the shared optimistic/fenced writer. */
   const commit = (id: string, build: (fresh: RoleEntry) => RoleEntry | undefined): void => {
@@ -766,11 +790,16 @@ export function RolesPanel() {
     commit(id, fresh => fresh.disabled === true ? withoutRoleKey(fresh, 'disabled') : { ...fresh, disabled: true })
   }
 
-  const toggleRoleTool = (id: string, tool: string, baseline: readonly string[]): void => {
+  const toggleRoleTool = (id: string, row: PermissionToolRow, baseline: readonly string[]): void => {
+    const targets = rowTargets(row)
+    if (targets.length === 0) return
     commit(id, (fresh) => {
       const members = new Set(fresh.tools?.available ?? baseline)
-      if (members.has(tool)) members.delete(tool)
-      else members.add(tool)
+      const present = targets.every(target => members.has(target))
+      for (const target of targets) {
+        if (present) members.delete(target)
+        else members.add(target)
+      }
       const available = [...members].sort((left, right) => left.localeCompare(right))
       return available.length === 0 ? withoutRoleKey(fresh, 'tools') : { ...fresh, tools: { available } }
     })
@@ -841,7 +870,7 @@ export function RolesPanel() {
                 onEditGroup={(next) => { setRoleGroup(row.id, next) }}
                 onToggleSeat={() => { toggleRoleSeat(row.id) }}
                 onToggleRetired={() => { toggleRoleRetired(row.id) }}
-                onToggleTool={(tool) => { toggleRoleTool(row.id, tool, row.baseline.available ?? []) }}
+                onToggleTool={(toolRow) => { toggleRoleTool(row.id, toolRow, row.baseline.available ?? []) }}
                 onDelete={() => { deleteRole(row.id) }}
               />
             ))}

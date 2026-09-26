@@ -93,13 +93,23 @@ const SHIPPED_ALLOW_TOOLS: readonly string[] = [
   // session, its history, diagnostics, or the board and never write.
   'session_debug', 'diagnostics_report', 'fast_report',
   'session_search', 'session_trace', 'session_event_search', 'session_event_read', 'session_event_trace',
-  'council_list', 'whiteboard_read',
+  'council_list',
+  // The whiteboard family ships allowed as ONE permanent policy (the curated
+  // `whiteboard_*` row below); mirrors SHIPPED_TOOL_DEFAULTS in the host
+  // policy resolver.
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget',
 ]
 
 /** Shipped code defaults: destructive-but-expected tools ask. */
 const SHIPPED_ASK_TOOLS: readonly string[] = ['bash', 'str_replace_editor']
 
-/** The core tool surface one policy row can name (doc 55 static list). */
+/**
+ * The curated row ORDER and labels of the core tool surface (doc 55). This is
+ * a presentation overlay only: PRESENCE comes from the live registry
+ * projection (`buildPermissionToolRows` appends every registered tool this
+ * list does not name), so a tool added by any plugin or upstream build shows
+ * up with no code change here.
+ */
 export const CORE_PERMISSION_TOOLS: readonly string[] = [
   'bash', 'read', 'glob', 'grep', 'edit', 'write', 'str_replace_editor', 'todo_write',
   'web_search', 'web_fetch', 'skill', 'plan_mode', 'subagent', 'task', 'workflow',
@@ -107,6 +117,13 @@ export const CORE_PERMISSION_TOOLS: readonly string[] = [
   'roundtable', 'chorus', 'memory_save', 'memory_search', 'memory_rescind',
   'memory_confirm', 'ask_user_question',
 ]
+
+/**
+ * The agents that act, delegate, and configure — the main agents. They lead
+ * the Permissions rail under a distinct treatment; every other subject is a
+ * sub-agent.
+ */
+export const MAIN_AGENT_IDS: readonly string[] = ['orchestrator', 'sysadmin', 'creator']
 
 /** The shipped agent roster; agents present in `permissions.agents` merge in. */
 export const AGENT_ROSTER: readonly string[] = [
@@ -151,10 +168,13 @@ export function buildAgentList(roster: readonly string[], extraNames: Iterable<s
 export interface PermissionSubject {
   id: string
   label: string
+  /** True for the main agents (orchestrator/sysadmin/creator) — rail-top group. */
+  main?: boolean
 }
 
 /**
- * Build the subject rail: registry roles (labelled) first, then the shipped
+ * Build the subject rail: the main agents first (fixed order, flagged for the
+ * distinct treatment), then registry roles (labelled), then the shipped
  * roster, then names found only in `permissions.agents` — deduped by id.
  * @param registry - the effective role registry.
  * @param roster - shipped agent names in display order.
@@ -168,6 +188,11 @@ export function buildAgentSubjects(
 ): PermissionSubject[] {
   const subjects: PermissionSubject[] = []
   const seen = new Set<string>()
+  for (const id of MAIN_AGENT_IDS) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    subjects.push({ id, label: registry[id]?.label ?? id, main: true })
+  }
   for (const [id, entry] of Object.entries(registry)) {
     if (id === '' || seen.has(id)) continue
     seen.add(id)
@@ -222,18 +247,68 @@ export function grantScopeHint(grant: PermissionGrant): string {
   return agent === undefined ? 'all agents · allow always' : `agent: ${agent} · allow always`
 }
 
+/**
+ * How one policy row behaves. `tool` is a concrete key. `mcp-group` (a server
+ * wildcard), `mcp-master` (`mcp__*`), and `family` (a curated prefix family
+ * such as `whiteboard_*`) are DERIVED aggregates: they own no settings key of
+ * their own — their chip state is computed from {@link PermissionToolRow.members}
+ * and a click fans the policy out to every member.
+ */
+export type PermissionRowKind = 'tool' | 'mcp-group' | 'mcp-master' | 'family'
+
 /** One policy row: the tools-map key plus a display label. */
 export interface PermissionToolRow {
   id: string
   name: string
-  /** `mcp-group` is the server-level header row (its id is the resolver wildcard). */
-  kind?: 'tool' | 'mcp-group'
+  kind?: PermissionRowKind
+  /**
+   * Concrete tool names a derived aggregate row covers. Only set for
+   * `mcp-group` (that server's live tools), `mcp-master` (every concrete MCP
+   * tool), and `family` (the curated members plus live prefix matches).
+   */
+  members?: readonly string[]
 }
 
-/** The `enpoiCapabilities.mcpTools` answer: the live registered tool names. */
+/** The `enpoiCapabilities.mcpTools` answer: the live MCP tool names. */
 export interface McpToolsView {
   tools: string[]
 }
+
+/** The `enpoiCapabilities.registeredTools` answer: every live tool name. */
+export interface RegisteredToolsView {
+  tools: string[]
+}
+
+/**
+ * One curated tool family: a presentation overlay that folds a tool prefix
+ * into ONE permanent policy row. Membership is derived from the live registry
+ * (any registered name with the prefix) plus {@link PolicyFamilyOverlay.members};
+ * the row itself owns no independent settings key — its chip fans out to the
+ * concrete member keys.
+ */
+export interface PolicyFamilyOverlay {
+  /** The row id (also the resolver-independent display key), e.g. `whiteboard_*`. */
+  id: string
+  name: string
+  prefix: string
+  /** Tools the family always names, so the permanent policy survives an unmounted plugin. */
+  members: readonly string[]
+}
+
+/**
+ * Curated families. The whiteboard is one permanent policy: its per-feature
+ * asks (read/write/pin/unpin/forget) fold into this single row, which fans the
+ * chosen policy out to all five concrete keys. Add a family here only for
+ * grouping/labelling — presence of ordinary tools follows the live registry.
+ */
+export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = [
+  {
+    id: 'whiteboard_*',
+    name: 'Whiteboard',
+    prefix: 'whiteboard_',
+    members: ['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget'],
+  },
+]
 
 /** One MCP server group: the server wildcard key plus its live public tools. */
 export interface McpToolGroup {
@@ -286,39 +361,110 @@ export function groupMcpToolNames(
 }
 
 /**
- * Build the tool-row list for one subject: the static core list, then one
- * header row per MCP server keyed by the wildcard the resolver honors
- * (`mcp__<server>__*`) followed by one row per REAL tool that server
- * currently registers (`mcp__<server>__<tool>`), then the generic `mcp__*`
- * family row. The MCP rows are a live projection of the tool registry, so
- * mounting or unmounting a server changes the list with no code change.
+ * Build the tool-row list for one subject from the LIVE tool registry:
+ * the curated core rows (order/labels only), then one curated family row per
+ * {@link POLICY_FAMILIES} overlay, then every other registered tool this list
+ * does not name, then one derived server row + one row per REAL tool per
+ * mounted MCP server, and finally the derived `mcp__*` master row. Presence is
+ * never gated by the curated list: a tool registered by any plugin, a future
+ * MCP server, or an upstream addition appears automatically. The aggregate
+ * rows own no settings key — their chips derive from and fan out to their
+ * `members`.
  * @param mcpServers - the enpoi-orchestration.mcpServers describe data.
- * @param mcpToolNames - live names from `enpoiCapabilities.mcpTools` (empty when unavailable).
- * @param _known - catalog descriptors; unused by the matrix row builder.
- * @returns ordered rows, `mcp__*` last.
+ * @param mcpToolNames - live MCP names from `enpoiCapabilities.mcpTools` (empty when unavailable).
+ * @param liveToolNames - every live name from `enpoiCapabilities.registeredTools`.
+ * @returns ordered rows, the `mcp__*` master last.
  */
 export function buildPermissionToolRows(
   mcpServers: Record<string, McpServerRef> | undefined,
   mcpToolNames: readonly string[] = [],
-  _known: readonly { id: string; name: string; kind?: 'tool' | 'skill' | 'mcp' }[] = [],
+  liveToolNames: readonly string[] = [],
 ): PermissionToolRow[] {
   // The matrix rows are REAL tools (doc 55 P2 redesign). Specialist names
   // (fixer/explorer/…) are ROLE SUBJECTS in the left rail, not tool rows;
   // the context keeper is a background service, not an agent-dispatchable
   // tool. The old `mcp__<server>*` key never matched the host resolver's
   // ladder (`mcp__<server>__*`); the group-header key now does.
+  const live = [...new Set(liveToolNames.filter(name => typeof name === 'string' && name !== ''))]
+  const mcpNames = [...new Set([...mcpToolNames, ...live])]
+    .filter(name => name.startsWith('mcp__'))
+    .sort((left, right) => left.localeCompare(right))
+  const nonMcp = live.filter(name => !name.startsWith('mcp__'))
+
   const rows = new Map<string, PermissionToolRow>()
+  const families = POLICY_FAMILIES.map((family) => {
+    const liveMembers = nonMcp.filter(name => name.startsWith(family.prefix))
+    const members = [...new Set([...family.members, ...liveMembers])]
+      .sort((left, right) => left.localeCompare(right))
+    return { family, members }
+  })
+  const folded = new Set(families.flatMap(entry => entry.members))
+
   for (const id of CORE_PERMISSION_TOOLS) {
+    if (folded.has(id)) continue
     rows.set(id, { id, name: prettyToolName(id), kind: 'tool' })
   }
-  for (const group of groupMcpToolNames(mcpServers, mcpToolNames)) {
-    rows.set(group.wildcard, { id: group.wildcard, name: `${group.server} (MCP)`, kind: 'mcp-group' })
+  for (const { family, members } of families) {
+    rows.set(family.id, { id: family.id, name: family.name, kind: 'family', members })
+  }
+  for (const id of nonMcp) {
+    if (rows.has(id) || folded.has(id)) continue
+    rows.set(id, { id, name: prettyToolName(id), kind: 'tool' })
+  }
+
+  const groups = groupMcpToolNames(mcpServers, mcpNames).filter(group => group.tools.length > 0)
+  const concreteMcp: string[] = []
+  for (const group of groups) {
+    rows.set(group.wildcard, {
+      id: group.wildcard,
+      name: `${group.server} (MCP)`,
+      kind: 'mcp-group',
+      members: group.tools,
+    })
     for (const tool of group.tools) {
       rows.set(tool, { id: tool, name: tool, kind: 'tool' })
+      concreteMcp.push(tool)
     }
   }
-  rows.set('mcp__*', { id: 'mcp__*', name: 'All MCP tools', kind: 'tool' })
+  concreteMcp.sort((left, right) => left.localeCompare(right))
+  // Derived master: never an independently persisted key. Its members are the
+  // concrete MCP tool names; the server rows above pre-cover a server's future
+  // tools only through their own derived chips.
+  rows.set('mcp__*', { id: 'mcp__*', name: 'All MCP tools', kind: 'mcp-master', members: concreteMcp })
   return [...rows.values()]
+}
+
+/**
+ * Read EVERY live tool name from the host registry
+ * (`enpoiCapabilities.registeredTools`). The host projects
+ * `ctx.tools.schemas()` on every call, so the answer follows mounts and new
+ * plugins; a failed read is `undefined` and the caller keeps the previous rows.
+ * @returns sorted tool names, or undefined when the RPC fails.
+ */
+export async function fetchRegisteredToolNames(): Promise<string[] | undefined> {
+  try {
+    const res = await fetch('/api/enpoiCapabilities.registeredTools', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'enpoiCapabilities.registeredTools',
+        rpcId: nextRpcId('registered-tools'),
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) return undefined
+    const json = await res.json() as { result?: { ok?: boolean; value?: { tools?: unknown } } }
+    if (json.result?.ok !== true) return undefined
+    const tools = json.result.value?.tools
+    if (!Array.isArray(tools)) return undefined
+    return tools
+      .filter((name): name is string => typeof name === 'string' && name !== '')
+      .sort((left, right) => left.localeCompare(right))
+  } catch {
+    // Transport failure: the matrix keeps the curated core rows.
+    return undefined
+  }
 }
 
 /**
@@ -355,7 +501,35 @@ export async function fetchMcpToolNames(): Promise<string[] | undefined> {
 }
 
 /** Which layer owns a subject's effective tool policy. */
-export type PermissionProvenance = 'agent rule' | 'global rule' | 'inherit (default)'
+export type PermissionProvenance = 'agent rule' | 'global rule' | 'standing grant' | 'inherit (default)'
+
+/**
+ * Tools every child keeps regardless of role surface: the pinned whiteboard
+ * keep list of the subagent runtime (`SHARED_CHILD_KEEP` in
+ * tool-subagent). Mirrored here so the availability eye tells the truth for
+ * roles whose shipped surface predates the keep list.
+ */
+export const KEPT_BY_EVERY_ROLE: readonly string[] = [
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin',
+]
+
+/**
+ * Whether a tool-level standing grant absorbs an ask for this tool under this
+ * subject — the same test the host resolver's `grantsShortCircuit` uses for
+ * tier 'tool': no pattern, and either global or scoped to the asking agent.
+ * @param perms - the live permissions section.
+ * @param agent - the selected agent, or undefined for the Global subject.
+ * @param tool - the tools-map key.
+ * @returns true when an allow-always grant covers this tool.
+ */
+export function toolGrantApplies(perms: PermissionsConfig, agent: string | undefined, tool: string): boolean {
+  for (const grant of Object.values(perms.grants ?? {})) {
+    if (grant.tool !== tool) continue
+    if (grant.pattern !== undefined) continue
+    if (grant.global === true || grant.agent === undefined || grant.agent === agent) return true
+  }
+  return false
+}
 
 /**
  * Resolve the provenance shown beside one policy chip: the agent's own rule
@@ -427,8 +601,9 @@ export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
 export function roleSurfaceFor(agent: string | undefined, registry?: RoleRegistryMap): readonly string[] | undefined {
   if (agent === undefined) return undefined
   const available = registry?.[agent]?.tools?.available
-  if (Array.isArray(available)) return available
-  return BUILT_ROLE_SURFACE[agent]
+  const surface = Array.isArray(available) ? available : BUILT_ROLE_SURFACE[agent]
+  if (surface === undefined) return undefined
+  return [...new Set([...surface, ...KEPT_BY_EVERY_ROLE])]
 }
 
 /**
@@ -449,6 +624,8 @@ export function builtRoleAvailability(agent: string | undefined, tool: string, r
 export function provenanceFor(perms: PermissionsConfig, agent: string | undefined, tool: string): PermissionProvenance {
   if (agent !== undefined && perms.agents?.[agent]?.tools?.[tool] !== undefined) return 'agent rule'
   if (perms.tools?.[tool] !== undefined) return 'global rule'
+  // A standing grant only matters where the shipped/configured answer asks.
+  if (effectivePolicy(perms, agent, tool) === 'allow' && toolGrantApplies(perms, agent, tool)) return 'standing grant'
   return 'inherit (default)'
 }
 
@@ -467,7 +644,9 @@ export function shippedPolicyFor(tool: string): PolicyValue | undefined {
 /**
  * The effective policy a subject receives for one tool: agent rule, then
  * global rule, then the shipped default, then `defaults.unknownTools`, then
- * the shipped unknown-tools answer (ask).
+ * the shipped unknown-tools answer (ask). An answer of `ask` is absorbed by a
+ * matching tool-level standing grant — exactly what the host resolver does —
+ * so a granted tool reads `allow · standing grant` instead of a bare ask.
  * @param perms - the live permissions section.
  * @param agent - the selected agent, or undefined for the Global subject.
  * @param tool - the tools-map key.
@@ -479,7 +658,147 @@ export function effectivePolicy(perms: PermissionsConfig, agent: string | undefi
   }
   const globalPolicy = perms.tools?.[tool]
   if (globalPolicy !== undefined) return globalPolicy
-  return shippedPolicyFor(tool) ?? perms.defaults?.unknownTools ?? 'ask'
+  const fallback = shippedPolicyFor(tool) ?? perms.defaults?.unknownTools ?? 'ask'
+  if (fallback === 'ask' && toolGrantApplies(perms, agent, tool)) return 'allow'
+  return fallback
+}
+
+/** One subject's own override for a key (agent tier when the subject is an agent). */
+function ownOverrideOf(perms: PermissionsConfig, agent: string | undefined, tool: string): PolicyValue | undefined {
+  if (agent !== undefined) return perms.agents?.[agent]?.tools?.[tool]
+  return perms.tools?.[tool]
+}
+
+/**
+ * Whether a row is a DERIVED aggregate: it owns no settings key of its own,
+ * its chip state comes from its members, and a click fans out to them.
+ * @param row - the policy row.
+ * @returns true for `mcp-group`, `mcp-master`, and `family` rows.
+ */
+export function isAggregateRow(row: PermissionToolRow): boolean {
+  return row.kind === 'mcp-group' || row.kind === 'mcp-master' || row.kind === 'family'
+}
+
+/**
+ * The concrete keys a row's toggle writes: the members for aggregate rows,
+ * the row id itself for a plain tool row.
+ * @param row - the policy row.
+ * @returns the concrete tools-map keys.
+ */
+export function rowTargets(row: PermissionToolRow): string[] {
+  if (isAggregateRow(row)) return [...(row.members ?? [])]
+  return [row.id]
+}
+
+/** What one row's chips show. */
+export interface RowPolicyState {
+  /** The subject's own rule shown as the filled chip (undefined = inherit). */
+  ownOverride: PolicyValue | undefined
+  /** The effective policy (dashed chip when ownOverride is undefined). */
+  effective: PolicyValue
+  /** True when an aggregate's members disagree — no chip is highlighted. */
+  mixed: boolean
+  provenance: PermissionProvenance | 'derived' | 'legacy aggregate' | 'mixed'
+}
+
+/**
+ * The display state of one row for one subject. A plain row resolves exactly
+ * as before. An aggregate resolves uniformly when every member carries the
+ * same own rule (or none does), and is `mixed` otherwise; a legacy persisted
+ * aggregate key (the row's own id) is surfaced as `legacy aggregate` until the
+ * operator's next click folds it into the concrete member keys.
+ * @param perms - the live permissions section.
+ * @param agent - the selected agent, or undefined for the Global subject.
+ * @param row - the policy row.
+ * @returns the row's chip state.
+ */
+export function rowPolicyState(perms: PermissionsConfig, agent: string | undefined, row: PermissionToolRow): RowPolicyState {
+  if (!isAggregateRow(row)) {
+    return {
+      ownOverride: ownOverrideOf(perms, agent, row.id),
+      effective: effectivePolicy(perms, agent, row.id),
+      mixed: false,
+      provenance: provenanceFor(perms, agent, row.id),
+    }
+  }
+  const targets = rowTargets(row)
+  const legacy = ownOverrideOf(perms, agent, row.id)
+  if (targets.length === 0) {
+    return {
+      ownOverride: legacy,
+      effective: legacy ?? effectivePolicy(perms, agent, row.id),
+      mixed: false,
+      provenance: legacy === undefined ? 'inherit (default)' : 'legacy aggregate',
+    }
+  }
+  const overrides = targets.map(target => ownOverrideOf(perms, agent, target))
+  const defined = [...new Set(overrides.filter((value): value is PolicyValue => value !== undefined))]
+  const uniform = defined.length <= 1 && (defined.length === 0 || overrides.every(value => value !== undefined))
+  const only = defined[0]
+  if (!uniform) {
+    return { ownOverride: undefined, effective: commonEffectivePolicy(perms, agent, targets) ?? legacy ?? 'ask', mixed: true, provenance: 'mixed' }
+  }
+  if (only !== undefined) {
+    return { ownOverride: only, effective: only, mixed: false, provenance: 'derived' }
+  }
+  if (legacy !== undefined) {
+    return { ownOverride: legacy, effective: legacy, mixed: false, provenance: 'legacy aggregate' }
+  }
+  const common = commonEffectivePolicy(perms, agent, targets)
+  return {
+    ownOverride: undefined,
+    effective: common ?? 'ask',
+    mixed: common === undefined,
+    provenance: common === undefined ? 'mixed' : 'derived',
+  }
+}
+
+/** The one effective policy every target shares, or undefined when they differ. */
+function commonEffectivePolicy(perms: PermissionsConfig, agent: string | undefined, targets: readonly string[]): PolicyValue | undefined {
+  const values = [...new Set(targets.map(target => effectivePolicy(perms, agent, target)))]
+  return values.length === 1 ? values[0] : undefined
+}
+
+/** One path op a row toggle persists (inside the permissions section). */
+export interface RowPolicyOp {
+  op: 'set' | 'unset'
+  path: (string | number)[]
+  value?: PolicyValue
+}
+
+/**
+ * The persistence ops for one row toggle: set/unset every concrete member key
+ * (or the row's own key for a plain row) and, for an aggregate, unset the
+ * legacy aggregate key when it exists — the aggregate is never an independent
+ * second key. Existing standing grants are untouched.
+ * @param row - the policy row.
+ * @param basePath - `['tools']` (Global) or `['agents', agent, 'tools']`.
+ * @param next - the chosen policy, or undefined for inherit.
+ * @returns the ops to persist.
+ */
+export function rowPolicyOps(row: PermissionToolRow, basePath: readonly (string | number)[], next: PolicyValue | undefined): RowPolicyOp[] {
+  const targets = rowTargets(row)
+  const ops: RowPolicyOp[] = targets.map(target => (
+    next === undefined
+      ? { op: 'unset', path: [...basePath, target] }
+      : { op: 'set', path: [...basePath, target], value: next }
+  ))
+  if (isAggregateRow(row) && !targets.includes(row.id)) {
+    ops.push({ op: 'unset', path: [...basePath, row.id] })
+  }
+  return ops
+}
+
+/**
+ * Whether a role's tool checkbox for one row reads checked: every concrete
+ * member of an aggregate (or the row itself) is in the allowlist.
+ * @param row - the policy row.
+ * @param available - the role's effective allowlist.
+ * @returns true when all members are present.
+ */
+export function roleRowChecked(row: PermissionToolRow, available: readonly string[]): boolean {
+  const targets = rowTargets(row)
+  return targets.length > 0 && targets.every(target => available.includes(target))
 }
 
 let rpcSeq = 0
@@ -721,6 +1040,20 @@ export function unsetPermissionPath(path: readonly (string | number)[]): Promise
     const outcome = await postMutation({ op: 'unset', path: ['permissions', ...path] }, undefined)
     return outcome.ok
   })
+}
+
+/**
+ * Persist one row toggle's fan-out ops (aggregate rows write several concrete
+ * keys plus the legacy-key removal). Every op is an atomic leaf write; the
+ * caller rolls its optimistic state back when any op reports failure.
+ * @param ops - the ops from {@link rowPolicyOps}.
+ * @returns whether every op was persisted.
+ */
+export async function persistRowPolicyOps(ops: readonly RowPolicyOp[]): Promise<boolean> {
+  const outcomes = await Promise.all(ops.map(op => (
+    op.op === 'set' ? setPermissionPath(op.path, op.value) : unsetPermissionPath(op.path)
+  )))
+  return outcomes.every(Boolean)
 }
 
 /** How many times a fenced whole-array write re-reads and retries on conflict. */

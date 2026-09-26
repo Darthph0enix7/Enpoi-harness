@@ -16,15 +16,20 @@ import {
   AGENT_ROSTER,
   buildAgentSubjects,
   buildPermissionToolRows,
-  effectivePolicy,
-  fetchMcpToolNames,
+  builtRoleAvailability,
+  fetchRegisteredToolNames,
   getPermissionsViewState,
   grantScopeHint,
+  isAggregateRow,
   mergeServerPermissionsWithPending,
   persistAgentAvailable,
   persistBashPatterns,
-  provenanceFor,
+  persistRowPolicyOps,
   refreshFromServer,
+  roleSurfaceFor,
+  rowPolicyOps,
+  rowPolicyState,
+  rowTargets,
   setPermissionPath,
   subscribePermissionsView,
   unsetPermissionPath,
@@ -35,8 +40,6 @@ import {
   type PermissionsConfig,
   type PermissionToolRow,
   type PolicyValue,
-  builtRoleAvailability,
-  roleSurfaceFor,
 } from './permissions-model.ts'
 import {
   getRoleRegistry,
@@ -97,22 +100,24 @@ function Group({ title, icon, action, children }: { title: string; icon: string;
 }
 
 /** One tool policy row: label + provenance, availability eye (agents), cycle chip. */
-function PolicyRow({ row, provenance, effective, ownOverride, onCycle, available, onToggleAvailable }: {
+function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, available, onToggleAvailable }: {
   row: PermissionToolRow
   provenance: string
   effective: PolicyValue
   /** The subject's OWN override for this tool (undefined = inherit). The chip shows and cycles THIS. */
   ownOverride: PolicyValue | undefined
+  /** True for an aggregate row whose members disagree — no chip is highlighted. */
+  mixed?: boolean
   onCycle: (next: PolicyValue | undefined) => void
   available?: boolean
   onToggleAvailable?: () => void
 }) {
-  const isGroup = row.kind === 'mcp-group'
+  const isGroup = isAggregateRow(row)
   return (
     <div className={isGroup ? `${c('row')} ${c('rowGroup')}` : c('row')}>
       <div className={c('rowLabel')}>
         <span className={c('rowName')}>{row.name}</span>
-        <span className={c('rowHint')}>{provenance}</span>
+        <span className={c('rowHint')}>{mixed === true ? `${provenance} — click to set every tool in this row` : provenance}</span>
       </div>
       <div className={c('rowTools')}>
         {onToggleAvailable !== undefined && (
@@ -131,11 +136,13 @@ function PolicyRow({ row, provenance, effective, ownOverride, onCycle, available
             <button
               key={policy}
               type="button"
-              className={`${c('segBtn')} ${ownOverride === policy ? c('segActive') : ''} ${ownOverride === undefined && effective === policy ? c('segDefault') : ''}`}
+              className={`${c('segBtn')} ${mixed !== true && ownOverride === policy ? c('segActive') : ''} ${mixed !== true && ownOverride === undefined && effective === policy ? c('segDefault') : ''}`}
               title={
-                ownOverride === policy
-                  ? `Clear this rule (return to ${effective === policy && provenance === 'inherit (default)' ? 'the shipped default' : 'inherit'})`
-                  : `Set ${policy} for this subject. Effective now: ${effective}`
+                mixed === true
+                  ? `Set ${policy} for every tool in this row (currently mixed)`
+                  : ownOverride === policy
+                    ? `Clear this rule (return to ${effective === policy && provenance === 'inherit (default)' ? 'the shipped default' : 'inherit'})`
+                    : `Set ${policy} for this subject. Effective now: ${effective}`
               }
               onClick={() => { onCycle(ownOverride === policy ? undefined : policy) }}
             >
@@ -166,10 +173,10 @@ function GrantRow({ grant, onRevoke }: { grant: PermissionGrant; onRevoke: (gran
 }
 
 /** Global subject: unknown-tools default, tool policy, bash patterns, all grants. */
-function GlobalPane({ perms, toolRows, onCycleTool, onSetUnknownTools, onAddPattern, onRemovePattern, onRevokeGrant }: {
+function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPattern, onRemovePattern, onRevokeGrant }: {
   perms: PermissionsConfig
   toolRows: readonly PermissionToolRow[]
-  onCycleTool: (tool: string, next: PolicyValue | undefined) => void
+  onCycleRow: (row: PermissionToolRow, next: PolicyValue | undefined) => void
   onSetUnknownTools: (next: PolicyValue) => void
   onAddPattern: (pattern: string, policy: PolicyValue) => void
   onRemovePattern: (pattern: string) => void
@@ -208,16 +215,20 @@ function GlobalPane({ perms, toolRows, onCycleTool, onSetUnknownTools, onAddPatt
         </div>
       </Group>
       <Group title="Tool policy" icon={ICONS.globe}>
-        {toolRows.map(row => (
-          <PolicyRow
-            key={row.id}
-            row={row}
-            provenance={provenanceFor(perms, undefined, row.id)}
-            effective={effectivePolicy(perms, undefined, row.id)}
-            ownOverride={perms.tools?.[row.id]}
-            onCycle={(next) => { onCycleTool(row.id, next) }}
-          />
-        ))}
+        {toolRows.map(row => {
+          const state = rowPolicyState(perms, undefined, row)
+          return (
+            <PolicyRow
+              key={row.id}
+              row={row}
+              provenance={state.provenance}
+              effective={state.effective}
+              ownOverride={state.ownOverride}
+              mixed={state.mixed}
+              onCycle={(next) => { onCycleRow(row, next) }}
+            />
+          )
+        })}
       </Group>
       <Group title="Bash patterns" icon={ICONS.pattern}>
         {patterns.length === 0 && (
@@ -269,7 +280,7 @@ function GlobalPane({ perms, toolRows, onCycleTool, onSetUnknownTools, onAddPatt
 }
 
 /** One agent subject: overlay tool rules with provenance, allowlist eyes, agent-scoped grants. */
-function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubject, onCycleTool, onToggleAvailable, onRevokeGrant }: {
+function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubject, onCycleRow, onToggleRow, onRevokeGrant }: {
   agent: string
   registry: RoleRegistryMap
   perms: PermissionsConfig
@@ -277,12 +288,18 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
   /** True when the subject exists only in `permissions.agents` (never a shipped roster row). */
   removable: boolean
   onRemoveSubject: (agent: string) => void
-  onCycleTool: (agent: string, tool: string, next: PolicyValue | undefined) => void
-  onToggleAvailable: (agent: string, tool: string) => void
+  onCycleRow: (agent: string, row: PermissionToolRow, next: PolicyValue | undefined) => void
+  onToggleRow: (agent: string, row: PermissionToolRow) => void
   onRevokeGrant: (grantId: string) => void
 }) {
   const available = perms.agents?.[agent]?.available
   const agentGrants = Object.values(perms.grants ?? {}).filter(grant => grant.agent === agent)
+  /** Every concrete member of the row (or the row itself) is on the role's surface. */
+  const rowAvailable = (row: PermissionToolRow): boolean => {
+    const targets = rowTargets(row)
+    return targets.length > 0 && targets.every(target =>
+      (available !== undefined && available.includes(target)) || builtRoleAvailability(agent, target, registry) === true)
+  }
   return (
     <>
       <Group
@@ -302,24 +319,29 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
       >
         <div className={c('paneHint')}>
           Rules refine the global policy. The eye marks a tool in this role allowlist — the hard gate: it wins over the
-          role's Dynamic surface for the tools it names.
+          role's Dynamic surface for the tools it names. MCP rows follow the live registry; their server and "All MCP
+          tools" rows set every tool below them at once.
           {' '}
           <button type="button" className={c('crossLink')} onClick={() => { openSettingsSection('dynamic') }}>
             Open Dynamic → Roles
           </button>
         </div>
-        {toolRows.filter(row => !row.id.startsWith('mcp__')).map(row => (
-          <PolicyRow
-            key={row.id}
-            row={row}
-            provenance={provenanceFor(perms, agent, row.id)}
-            effective={effectivePolicy(perms, agent, row.id)}
-            ownOverride={perms.agents?.[agent]?.tools?.[row.id]}
-            onCycle={(next) => { onCycleTool(agent, row.id, next) }}
-            available={(available !== undefined && available.includes(row.id)) || builtRoleAvailability(agent, row.id, registry) === true}
-            onToggleAvailable={() => { onToggleAvailable(agent, row.id) }}
-          />
-        ))}
+        {toolRows.map(row => {
+          const state = rowPolicyState(perms, agent, row)
+          return (
+            <PolicyRow
+              key={row.id}
+              row={row}
+              provenance={state.provenance}
+              effective={state.effective}
+              ownOverride={state.ownOverride}
+              mixed={state.mixed}
+              onCycle={(next) => { onCycleRow(agent, row, next) }}
+              available={rowAvailable(row)}
+              onToggleAvailable={() => { onToggleRow(agent, row) }}
+            />
+          )
+        })}
       </Group>
       <Group title="Standing grants" icon={ICONS.grant}>
         {agentGrants.length === 0 && (
@@ -337,7 +359,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
 export function PermissionsSettings(_props: { close: () => void }): React.ReactNode {
   const [perms, setPerms] = useState<PermissionsConfig | null>(null)
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerRef>>({})
-  const [mcpToolNames, setMcpToolNames] = useState<readonly string[]>([])
+  const [liveToolNames, setLiveToolNames] = useState<readonly string[]>([])
   const [registry, setRegistry] = useState<RoleRegistryMap>(() => getRoleRegistry())
   const [failed, setFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -361,8 +383,8 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       setFailed(false)
       setPerms(state.view.value?.permissions ?? {})
       setMcpServers(state.view.value?.mcpServers ?? {})
-      const names = await fetchMcpToolNames()
-      if (names !== undefined) setMcpToolNames(names)
+      const names = await fetchRegisteredToolNames()
+      if (names !== undefined) setLiveToolNames(names)
     })()
   }, [])
 
@@ -391,14 +413,17 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
     )
     if (fingerprint !== mcpFingerprint.current) {
       mcpFingerprint.current = fingerprint
-      void fetchMcpToolNames().then((names) => { if (names !== undefined) setMcpToolNames(names) })
+      void fetchRegisteredToolNames().then((names) => { if (names !== undefined) setLiveToolNames(names) })
     }
   }), [])
 
   // The role registry is its own store: rebuild the rail whenever it changes.
   useEffect(() => subscribeRoleRegistry(() => { setRegistry(getRoleRegistry()) }), [])
 
-  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, mcpToolNames), [mcpServers, mcpToolNames])
+  // Rows are derived from the LIVE registry projection (every registered tool
+  // plus the curated order/family overlay), so a new tool appears with no code
+  // change. MCP names are routed into their server groups inside the builder.
+  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, [], liveToolNames), [mcpServers, liveToolNames])
   const subjects = useMemo(
     () => buildAgentSubjects(registry, AGENT_ROSTER, Object.keys(perms?.agents ?? {})),
     [registry, perms],
@@ -406,34 +431,37 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
 
   // --- writes (0ms optimistic, rollback on rejected persistence) ---
 
-  /** Cycle one tool override on the Global subject: ['tools', tool]. */
-  const cycleGlobalTool = (tool: string, next: PolicyValue | undefined) => {
+  /**
+   * Apply one row's toggle to a tools map locally: every concrete member for
+   * an aggregate, the row itself for a plain tool, and the legacy aggregate
+   * key dropped (the aggregate is never an independent second key).
+   */
+  const applyRowPolicy = (tools: Record<string, PolicyValue>, row: PermissionToolRow, next: PolicyValue | undefined): Record<string, PolicyValue> => {
+    const updated = { ...tools }
+    for (const target of rowTargets(row)) {
+      if (next === undefined) delete updated[target]
+      else updated[target] = next
+    }
+    if (isAggregateRow(row)) delete updated[row.id]
+    return updated
+  }
+
+  /** Cycle one row override on the Global subject: ['tools', …]. */
+  const cycleGlobalRow = (row: PermissionToolRow, next: PolicyValue | undefined) => {
     const previous = perms
     if (perms === null) return
-    const tools: Record<string, PolicyValue> = { ...(perms.tools ?? {}) }
-    if (next === undefined) {
-      const { [tool]: _drop, ...rest } = tools
-      void _drop
-      setPerms({ ...perms, tools: rest })
-    } else {
-      tools[tool] = next
-      setPerms({ ...perms, tools })
-    }
-    void (next === undefined ? unsetPermissionPath(['tools', tool]) : setPermissionPath(['tools', tool], next))
+    setPerms({ ...perms, tools: applyRowPolicy(perms.tools ?? {}, row, next) })
+    void persistRowPolicyOps(rowPolicyOps(row, ['tools'], next))
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Cycle one tool override on an agent subject: ['agents', agent, 'tools', tool]. */
-  const cycleAgentTool = (agent: string, tool: string, next: PolicyValue | undefined) => {
+  /** Cycle one row override on an agent subject: ['agents', agent, 'tools', …]. */
+  const cycleAgentRow = (agent: string, row: PermissionToolRow, next: PolicyValue | undefined) => {
     const previous = perms
     if (perms === null) return
-    const agentCfg = { ...(perms.agents?.[agent] ?? {}), tools: { ...(perms.agents?.[agent]?.tools ?? {}) } }
-    if (next === undefined) delete agentCfg.tools?.[tool]
-    else agentCfg.tools = { ...agentCfg.tools, [tool]: next }
+    const agentCfg = { ...(perms.agents?.[agent] ?? {}), tools: applyRowPolicy(perms.agents?.[agent]?.tools ?? {}, row, next) }
     setPerms({ ...perms, agents: { ...(perms.agents ?? {}), [agent]: agentCfg } })
-    void (next === undefined
-      ? unsetPermissionPath(['agents', agent, 'tools', tool])
-      : setPermissionPath(['agents', agent, 'tools', tool], next))
+    void persistRowPolicyOps(rowPolicyOps(row, ['agents', agent, 'tools'], next))
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
@@ -482,26 +510,35 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
-  /** Toggle one tool in an agent allowlist — 0ms optimistic, fenced background write. */
-  const toggleAgentToolAvailable = (agent: string, tool: string) => {
+  /**
+   * Toggle one row in an agent allowlist — 0ms optimistic, fenced background
+   * write. An aggregate row flips every concrete member together (present only
+   * when all members are), so the server/master/family rows stay one control.
+   */
+  const toggleAgentRow = (agent: string, row: PermissionToolRow) => {
     const previous = perms
     if (perms === null) return
+    const targets = rowTargets(row)
+    if (targets.length === 0) return
+    const toggle = (base: readonly string[]): string[] => {
+      const present = targets.every(target => base.includes(target))
+      const next = present
+        ? base.filter(name => !targets.includes(name))
+        : [...base, ...targets.filter(target => !base.includes(target))]
+      return next.sort((left, right) => left.localeCompare(right))
+    }
     // Seed the allowlist from the built-in role surface (then the registry
     // role's surface, then empty), so the FIRST flip writes a complete list
-    // (the built-in visible set plus/minus this tool) instead of a bare [tool].
+    // (the built-in visible set plus/minus this row) instead of a bare set.
     const seed = roleSurfaceFor(agent, registry)
     const members = [...(perms.agents?.[agent]?.available ?? (seed !== undefined ? [...seed] : []))]
-    const available = members.includes(tool)
-      ? members.filter(name => name !== tool).sort((left, right) => left.localeCompare(right))
-      : [...members, tool].sort((left, right) => left.localeCompare(right))
-    const agentCfg = { ...(perms.agents?.[agent] ?? {}), available }
+    const agentCfg = { ...(perms.agents?.[agent] ?? {}), available: toggle(members) }
     setPerms({ ...perms, agents: { ...(perms.agents ?? {}), [agent]: agentCfg } })
     // Re-apply the toggle to the freshest server list on every attempt; an
     // explicit empty override stays empty, an absent one seeds from the role surface.
     void persistAgentAvailable(agent, (fresh) => {
       const base = fresh ?? (seed !== undefined ? [...seed] : [])
-      const next = base.includes(tool) ? base.filter(name => name !== tool) : [...base, tool]
-      return next.sort((left, right) => left.localeCompare(right))
+      return toggle(base)
     }).then((writeOk) => { if (!writeOk) setPerms(previous) })
   }
 
@@ -565,7 +602,9 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
           <b>Global is the source of truth</b> — agent panes inherit it and override only where you set a rule.
           Legend: <b>filled segment</b> = your rule · <b>dashed segment</b> = shipped default applying · the eye = whether the
           role sees the tool at all (unavailable tools are stripped — their policy is irrelevant). Reads and web ship
-          allow; bash and unknown tools ship ask. Everything is settings-backed and applies from the next dispatch.
+          allow; bash and unknown tools ship ask. Rows grouped under a server, <b>Whiteboard</b>, or <b>All MCP tools</b> are
+          derived: they set every tool they cover at once, while the per-tool rows stay the source of truth. Everything is
+          settings-backed and applies from the next dispatch.
         </span>
       </div>
       <div className={c('layout')}>
@@ -577,15 +616,20 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
           >
             Global (all agents)
           </button>
-          {subjects.map(subject => (
-            <button
-              type="button"
-              key={subject.id}
-              className={`${c('railCell')} ${selected === subject.id ? c('railCellActive') : ''}`}
-              onClick={() => { setSelected(subject.id) }}
-            >
-              {subject.label}
-            </button>
+          {subjects.map((subject, index) => (
+            <span key={subject.id} className={c('railEntry')}>
+              {subject.main !== true && subjects[index - 1]?.main === true && (
+                <span className={c('railDivider')} role="separator" aria-label="Sub-agents" />
+              )}
+              <button
+                type="button"
+                className={`${c('railCell')} ${selected === subject.id ? c('railCellActive') : ''} ${subject.main === true ? c('railCellMain') : ''}`}
+                onClick={() => { setSelected(subject.id) }}
+              >
+                {subject.main === true && <span className={c('railMainTag')}>main</span>}
+                {subject.label}
+              </button>
+            </span>
           ))}
           <div className={c('railAdd')}>
             <input
@@ -613,7 +657,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
             <GlobalPane
               perms={perms}
               toolRows={toolRows}
-              onCycleTool={cycleGlobalTool}
+              onCycleRow={cycleGlobalRow}
               onSetUnknownTools={setUnknownToolsDefault}
               onAddPattern={addBashPattern}
               onRemovePattern={removeBashPattern}
@@ -627,8 +671,8 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
               toolRows={toolRows}
               removable={!AGENT_ROSTER.includes(selected) && Object.hasOwn(perms.agents ?? {}, selected)}
               onRemoveSubject={removeSubject}
-              onCycleTool={cycleAgentTool}
-              onToggleAvailable={toggleAgentToolAvailable}
+              onCycleRow={cycleAgentRow}
+              onToggleRow={toggleAgentRow}
               onRevokeGrant={revokeGrant}
             />
           )}

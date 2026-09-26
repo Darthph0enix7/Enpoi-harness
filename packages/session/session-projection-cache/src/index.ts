@@ -305,6 +305,33 @@ export class SessionProjectionCache extends Service {
     return restored.snapshot
   }
 
+  /**
+   * Rebuild one session's checkpoint from its complete log and AWAIT the
+   * durable write-back. The fold is exactly {@link coldSnapshot}'s; the
+   * difference is settlement — a maintenance backfill must know each
+   * session's replacement landed before it reports progress or resumes, so a
+   * failed write is observable to the caller instead of a swallowed warning.
+   * @param meta - the stored session header (identity witness).
+   * @param inheritedEventCount - exact inherited prefix length for projection initialization and identity.
+   * @param events - the session's complete log, in seq order.
+   * @returns the projection cut at the log end, after the durable write.
+   */
+  async reindex(
+    meta: SessionHeader,
+    inheritedEventCount: SessionLogOffset,
+    events: readonly SessionEvent[],
+  ): Promise<ProjectionSnapshot> {
+    const identity = identityOf(meta, inheritedEventCount)
+    const restored = this.ctx.sessionProjections.restore(
+      this.recordFor(meta.id, identity)?.rows ?? {},
+      events,
+      SessionLogOffset(0),
+      meta,
+      inheritedEventCount,
+    )
+    await this.put(meta.id, identity, restored.checkpoint)
+    return restored.snapshot
+  }
 
   // --- write-behind (throttle + mandatory points) ---
 

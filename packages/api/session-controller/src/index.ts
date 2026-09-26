@@ -28,6 +28,7 @@ import { installExecutionStateProjection, SessionExecutionStateReader } from './
 import { installModelSelectionProjection, chainOfRequestConfig } from './model-selection-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
+import { SessionProjectionBackfill } from './projection-backfill.ts'
 import { readSessionRequestSnapshot } from './request-snapshot.ts'
 import { ArchivedSessionGate } from './archived-session-gate.ts'
 import type {
@@ -184,6 +185,7 @@ export class SessionController extends TypertRemoteService {
     this.wireLogRoot = internals.wireLogRoot
     ctx.plugin(SessionFileReferences)
     ctx.plugin(SessionMediaReferences)
+    ctx.plugin(SessionProjectionBackfill)
     ctx.plugin(SessionSkillCatalog)
     // An archived Session, or a subagent descendant of one, runs no model step
     // until it is restored; what it still runs is stopped by the owners that
@@ -547,7 +549,7 @@ export class SessionController extends TypertRemoteService {
    * @throws RemoteError `session/not-found` when no live Session owns the id.
    */
   @Remote('digest')
-  digest(request: SessionDigestRequest): SessionDigestValue {
+  digest(request: SessionDigestRequest): Promise<SessionDigestValue> {
     return this.execution.digest(request)
   }
 

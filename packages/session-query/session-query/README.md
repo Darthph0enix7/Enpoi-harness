@@ -44,6 +44,19 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 
 Body-free records expose only `SessionHeader.isSeeded`. Reads that return event bodies (`readSession`, `readSurface`, `readEvent`) and retained `SessionObservation` values also carry the exact `inheritedEventCount`, so callers can distinguish inherited and owned events without inferring a cut from the log.
 
+### Backfilling the projection cache
+
+`backfillProjectionCache(ctx, options)` rebuilds persisted projection checkpoints for existing sessions without opening them, so surfaces that read cached rows — the Session list's projection column, the dsh-context dashboard — recover after a Session-format migration or a projection `stateVersion` bump instead of staying blank until every session is opened once. It lists the logical corpus (or takes exact `sessionIds`), skips attached sessions because their own write path owns their checkpoints, skips rows that already serve every requested `keys` entry, and folds the rest through the projection cache's awaited `reindex`. The pass is idempotent and resumable: a re-run folds only what is still unserved, and `limit` bounds each call. An unsupported stored log counts as `skippedUnsupported` and never aborts the pass; a session whose read or write fails counts as `failed` and the pass continues. The function throws when the projection-cache or persistence service is absent, and returns a `ProjectionBackfillReport` with `total`, `folded`, `skippedLive`, `skippedServed`, `skippedMissing`, `skippedUnsupported`, `failed`, and `stoppedEarly`.
+
+| Option | Meaning |
+|---|---|
+| `sessionIds` | Exact sessions to rebuild; absent lists and rebuilds the whole logical corpus |
+| `keys` | Wire keys a stored row must already serve for the session to be skipped; absent forces a full reindex |
+| `delayMs` | Milliseconds to yield between sessions (default `0`) |
+| `limit` | Stop after this many folds; the next run resumes from the unserved remainder |
+| `signal` | Cancellation checked between sessions; an abort returns the partial report |
+| `onProgress` | Synchronous per-session `{ index, total, sessionId, outcome }` sink |
+
 ### Filters
 
 `SessionResultFilter` narrows sessions by id, nullable cwd, created-at range, nullable parent, or source availability; `SessionEventResultFilter` narrows events by seq/time range, event type, surface, or literal text. Filter arrays are ANDed and list values within one clause are ORed; empty list values match nothing, ranges are inclusive, and malformed ranges or unknown closed-union values fail with `SESSION_QUERY_INVALID_FILTER`.

@@ -44,6 +44,19 @@ kind: "package-reference"
 
 不带正文的记录只公开 `SessionHeader.isSeeded`。返回事件正文的读取（`readSession`、`readSurface`、`readEvent`）与保留的 `SessionObservation` 值还携带精确 `inheritedEventCount`，因此调用方无需从日志推断切点即可区分继承事件与自有事件。
 
+### 回填投影缓存
+
+`backfillProjectionCache(ctx, options)` 在不打开会话的情况下为既有会话重建持久化投影检查点，使读取缓存行的界面——Session 列表的投影列、dsh-context 仪表盘——在一次 Session 格式迁移或某个投影 `stateVersion` 提升之后得以恢复，而不必等到每个会话都被打开一次。它列出逻辑语料库（或接受精确的 `sessionIds`），跳过已挂接的会话（其检查点由自身写入路径负责），跳过已提供全部所请求 `keys` 的记录，并将其余记录通过投影缓存的等待式 `reindex` 折叠。该过程幂等且可续跑：重跑只折叠仍未提供服务的部分，`limit` 限制每次调用的折叠数。无法支持的存量日志计入 `skippedUnsupported`，绝不中止本轮；读取或写入失败的会话计入 `failed`，本轮继续。投影缓存或持久化服务缺失时函数抛错，成功时返回 `ProjectionBackfillReport`，包含 `total`、`folded`、`skippedLive`、`skippedServed`、`skippedMissing`、`skippedUnsupported`、`failed` 与 `stoppedEarly`。
+
+| 选项 | 含义 |
+|---|---|
+| `sessionIds` | 要重建的精确会话；缺省则列出并重建整个逻辑语料库 |
+| `keys` | 存量记录必须已提供哪些 wire key 才跳过该会话；缺省则强制全量重建 |
+| `delayMs` | 会话之间让出的毫秒数（默认 `0`） |
+| `limit` | 折叠该数量后停止；下一次运行从仍未提供服务的剩余部分继续 |
+| `signal` | 会话之间检查的取消信号；中止时返回部分报告 |
+| `onProgress` | 逐会话的同步 `{ index, total, sessionId, outcome }` 回调 |
+
 ### 过滤器
 
 `SessionResultFilter` 按 id、可空 cwd、创建时间范围、可空父级或来源可用性缩小会话范围；`SessionEventResultFilter` 按 seq/时间范围、事件类型、表层或字面文本缩小事件范围。过滤器数组使用 AND 连接，同一子句内的列表值使用 OR；空列表值不匹配任何内容，范围包含端点，格式错误的范围或未知的封闭联合值以 `SESSION_QUERY_INVALID_FILTER` 失败。

@@ -857,6 +857,19 @@ describe('ToolRuntime', () => {
       expect(result.content[0]).toMatchObject({ text: 'Error: the user rejected tool "echo"' })
     })
 
+    it('echoes the ask reason when the user rejects an ask that carried one', async () => {
+      const ctx = await approvalSetup()
+      ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('rejected'))
+      ctx.on('tools/pre-execute', async (_exec, _next): Promise<PreToolDecision> =>
+        ({ kind: 'ask', reason: 'bash rule "rm" requires approval' }))
+
+      const result = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('c1'), name: 'echo', arguments: {}, agent: fakeAgent() })
+      expect(result.isError).toBe(true)
+      expect(result.content[0]).toMatchObject({
+        text: 'Error: the user rejected tool "echo": it required approval because: bash rule "rm" requires approval',
+      })
+    })
+
     it('denies with the cancellation reason on cancelled', async () => {
       const ctx = await approvalSetup()
       ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('cancelled'))

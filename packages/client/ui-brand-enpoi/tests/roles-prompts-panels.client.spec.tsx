@@ -71,6 +71,9 @@ function installFakeSettings(initial: Record<string, unknown>, effective: unknow
     }
     if (body.method === 'settings.describe') return describeResponse(structuredClone(value), revision)
     if (body.method === 'enpoiRoles.list') return effectiveRolesResponse(effective)
+    if (body.method === 'enpoiCapabilities.registeredTools') {
+      return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+    }
     mutations.push(body as unknown as MutateBody)
     for (const op of body.payload.args.ops ?? []) {
       const [section, id] = op.path
@@ -173,9 +176,12 @@ describe('RolesPanel', () => {
     expect(mutations[0]?.payload.args.ops[0]?.value).toEqual({
       label: 'Fixer', group: 'specialists', seat: true,
       tools: {
+        // The built-in fixer surface plus the child-keep whiteboard floor
+        // (SHARED_CHILD_KEEP in tool-subagent).
         available: [
           'bash', 'edit', 'glob', 'grep', 'memory_save', 'memory_search', 'read_image', 'skill',
-          'str_replace_editor', 'todo_read', 'todo_write', 'web_fetch', 'web_search', 'write',
+          'str_replace_editor', 'todo_read', 'todo_write', 'web_fetch', 'web_search',
+          'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'write',
         ],
       },
     })
@@ -263,6 +269,9 @@ describe('RolesPanel', () => {
         return describeResponse({ roles: { fixer: { label: serverLabel } } }, revision)
       }
       if (body.method === 'enpoiRoles.list') return effectiveRolesResponse()
+      if (body.method === 'enpoiCapabilities.registeredTools') {
+        return jsonResponse({ result: { ok: true, value: { tools: [] } } })
+      }
       mutations.push(body as unknown as MutateBody)
       if (mutations.length === 1) {
         serverLabel = 'Remote'

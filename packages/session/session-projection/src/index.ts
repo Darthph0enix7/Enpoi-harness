@@ -482,7 +482,11 @@ export class SessionProjectionRegistry extends Service {
    * and its key refolds from `init` — which is only sound over the full
    * log, so a discarded row with `baseSeq > 0` throws (the caller re-reads
    * from seq 0, e.g. after a crash-repair truncation shrank the log below
-   * a row's watermark).
+   * a row's watermark). One unit's own schema rejecting either its seed row
+   * or the state its fold produces drops THAT key from the cut (absent from
+   * both `snapshot.values` and the refreshed checkpoint, so the next full
+   * read refolds it) and never fails the other units: a unit whose value
+   * cannot be produced is absent, never wrong.
    * @param checkpoint - persisted rows for one session (possibly stale or empty).
    * @param events - the stored events with `seq >= baseSeq`, in seq order.
    * @param baseSeq - the seq `events` starts at (its first event's seq when non-empty).
@@ -504,6 +508,14 @@ export class SessionProjectionRegistry extends Service {
     const beforeBase = cursorBefore(baseSeq)
     const values: Record<string, unknown> = {}
     const refreshed: ProjectionCheckpoint = {}
+    // The supplied slice must be contiguous from baseSeq: a gap is a caller
+    // log-integrity error for every unit, never a per-unit fault to drop.
+    for (let index = 0; index < events.length; index++) {
+      const event = events[index]
+      if (event === undefined || event.seq !== SessionSeq(baseSeq + index)) {
+        throw new Error(`session projection restore cannot restore across missing seq ${String(baseSeq + index)}`)
+      }
+    }
     for (const registration of this.registrations.values()) {
       const def = registration.def
       const row = checkpoint[def.key]
@@ -511,32 +523,57 @@ export class SessionProjectionRegistry extends Service {
         && row.ver === def.stateVersion
         && row.seq >= beforeBase
         && row.seq <= endSeq
-      if (!usable && baseSeq > 0) {
-        throw new Error(
-          `session projection ${JSON.stringify(def.key)} cannot restore from seq ${baseSeq}: `
-          + 'its checkpoint row is missing, version-mismatched, or beyond the supplied log end; re-read from seq 0',
-        )
-      }
-      let state = usable
-        ? def.stateSchema.parse(row.val)
-        : def.init(header, inheritedEventCount)
-      const from = usable ? row.seq : beforeBase
-      const startIndex = from - baseSeq + 1
-      for (let index = startIndex; index < events.length; index++) {
-        const event = events[index]
-        const expectedSeq = SessionSeq(baseSeq + index)
-        if (event === undefined || event.seq !== expectedSeq) {
-          throw new Error(`session projection ${JSON.stringify(def.key)} cannot restore across missing seq ${String(expectedSeq)}`)
+      if (!usable && baseSeq > 0) throw this.cannotRestoreError(def.key, baseSeq)
+      let state: unknown
+      let from = beforeBase
+      if (usable) {
+        try {
+          state = def.stateSchema.parse(row.val)
+          from = row.seq
+        } catch (error: unknown) {
+          // A version-matching row the unit's own schema rejects is a broken
+          // seed. Over a suffix no refold is sound (same rule as an unusable
+          // row); over the full log the key refolds from init instead.
+          if (baseSeq > 0) throw this.cannotRestoreError(def.key, baseSeq)
+          this.reportUnitDrop(def.key, header, error)
+          state = def.init(header, inheritedEventCount)
         }
-        state = def.apply(state, event)
+      } else {
+        state = def.init(header, inheritedEventCount)
       }
-      if (def.wire !== undefined) values[def.key] = def.wire.viewSchema.parse(def.wire.view(state))
+      const startIndex = from - baseSeq + 1
+      try {
+        let index = 0
+        for (const event of events) {
+          if (index >= startIndex) state = def.apply(state, event)
+          index += 1
+        }
+        if (def.wire !== undefined) values[def.key] = def.wire.viewSchema.parse(def.wire.view(state))
+      } catch (error: unknown) {
+        this.reportUnitDrop(def.key, header, error)
+        continue
+      }
       refreshed[def.key] = { ver: def.stateVersion, seq: endSeq, val: state }
     }
     return {
       snapshot: { asOfSeq: endSeq, values: values },
       checkpoint: refreshed,
     }
+  }
+
+  /** The caller-supplied suffix cannot rebuild one key; a full re-read from seq 0 is required. */
+  private cannotRestoreError(key: string, baseSeq: SessionLogOffset): Error {
+    return new Error(
+      `session projection ${JSON.stringify(key)} cannot restore from seq ${baseSeq}: `
+      + 'its checkpoint row is missing, version-mismatched, or beyond the supplied log end; re-read from seq 0',
+    )
+  }
+
+  /** Record one unit dropped from a cold cut: its value and refreshed row are omitted. */
+  private reportUnitDrop(key: string, header: SessionHeader, error: unknown): void {
+    this.ctx.logger.warn(
+      `session projection ${JSON.stringify(key)} dropped for "${header.id}" (value cannot be produced): ${String(error)}`,
+    )
   }
 
   /**

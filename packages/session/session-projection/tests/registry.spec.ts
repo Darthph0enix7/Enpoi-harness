@@ -712,6 +712,51 @@ describe('SessionProjectionRegistry drive', () => {
     )).toThrow()
   })
 
+  it('refolds a schema-rejected seed row from init over the full log', async () => {
+    const { ctx } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+    const drifted = {
+      'test/marks': { ver: 1, seq: SessionSeq(2), val: { marks: 'not-an-array' } },
+    }
+    const events: SessionEvent[] = [
+      { type: 'test/mark', seq: SessionSeq(0), time: 0, data: { marks: ['a'] } },
+      { type: 'test/mark', seq: SessionSeq(1), time: 1, data: { marks: ['a', 'b'] } },
+    ]
+    const { snapshot, checkpoint } = ctx.sessionProjections.restore(
+      drifted,
+      events,
+      SessionLogOffset(0),
+      RESTORE_HEADER,
+      SessionLogOffset(0),
+    )
+    expect(snapshot.values['test/marks']).toEqual({ marks: ['a', 'b'] })
+    expect(checkpoint['test/marks']).toEqual({ ver: 1, seq: 1, val: { marks: ['a', 'b'] } })
+  })
+
+  it('drops only the unit whose fold cannot produce a valid value and serves the rest', async () => {
+    const { ctx } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+    ctx.sessionProjections.register(countUnit())
+    ctx.sessionProjections.register(stableViewUnit(() => { throw new Error('view exploded') }))
+    const events: SessionEvent[] = [
+      { type: 'test/mark', seq: SessionSeq(0), time: 0, data: { marks: ['a'] } },
+    ]
+    const { snapshot, checkpoint } = ctx.sessionProjections.restore(
+      {},
+      events,
+      SessionLogOffset(0),
+      RESTORE_HEADER,
+      SessionLogOffset(0),
+    )
+    expect(snapshot.values['test/marks']).toEqual({ marks: ['a'] })
+    expect('test/stable-view' in snapshot.values).toBe(false)
+    // The dropped key is absent from the refreshed checkpoint too, so the
+    // next full read refolds it instead of persisting an unproducible state.
+    expect('test/stable-view' in checkpoint).toBe(false)
+    expect(checkpoint['test/marks']).toEqual({ ver: 1, seq: 0, val: { marks: ['a'] } })
+    expect(checkpoint['test/count']).toEqual({ ver: 1, seq: 0, val: 1 })
+  })
+
   it('restore rejects a row claiming events past the supplied log end (shrunk log ⇒ re-read)', async () => {
     const { ctx } = await harness()
     ctx.sessionProjections.register(countUnit())

@@ -26,7 +26,7 @@ import type {
   SessionRequestId,
 } from '../src/types.ts'
 import type { TestSessionRemote } from './test-remote.ts'
-import { createSessionTestRemote } from './test-remote.ts'
+import { createSessionTestRemote, testSessionPersistence } from './test-remote.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
@@ -462,6 +462,53 @@ describe('session digest', () => {
 
     childHold.release()
     void adapter
+  })
+
+  it('reads a settled child quiet flag from its durable descriptor', async () => {
+    const test = await harness()
+    const { ctx, remote, sessionId } = test
+    const session = ctx.sessions.get(sessionId)
+    expect(session).toBeDefined()
+    if (session === undefined) return
+
+    // One child that parks (settles) while its descriptor stays durable.
+    const childId = brandString<SessionId>('settled-child')
+    const child = await ctx.agents.create({
+      sessionId: childId,
+      parentAgent: test.parent,
+      agentOptions: { provider: 'scripted', model: 'mock' },
+      meta: { parentSession: sessionId, origin: 'subagent', delegationDepth: 1, cwd: test.root },
+    })
+    child.agent.session.append('subagent/descriptor', {
+      version: 3,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: childId,
+      quiet: true,
+    })
+    const childEvents = [...child.agent.session.snapshotEvents()]
+    const childHeader = child.agent.session.header
+    appendForkEvent(session, 'subagent/catalog', {
+      version: 0,
+      childId,
+      childCreatedAt: Date.now(),
+      mode: 'continuable',
+      label: 'settled-child',
+    })
+    await child.dispose()
+    ctx.sessions.dispose(childId)
+    expect(ctx.sessions.get(childId)).toBeUndefined()
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: async () => [childHeader],
+      inspect: async () => ({ meta: childHeader, events: childEvents }),
+    }) as never)
+
+    const digest = valueOf(await remote.digest({ sessionId, recentTools: 1 }))
+    expect(digest.subagentTree.find(row => row.childSessionId === childId)).toMatchObject({
+      mode: 'continuable',
+      quiet: true,
+      status: 'inactive',
+    })
   })
 })
 

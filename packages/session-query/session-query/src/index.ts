@@ -70,6 +70,15 @@ export {
 } from './config.ts'
 export { readColdSessionLog } from './cold-read.ts'
 export type { ColdSessionLog } from './cold-read.ts'
+export { backfillProjectionCache } from './projection-backfill.ts'
+export type {
+  ProjectionBackfillKey,
+  ProjectionBackfillOptions,
+  ProjectionBackfillOutcome,
+  ProjectionBackfillProgress,
+  ProjectionBackfillReport,
+  ProjectionBackfillFailure,
+} from './projection-backfill.ts'
 export { extractSessionEventText } from './extraction.ts'
 export { buildSessionEventRecords, buildSessionEventSearchDocuments } from './documents.ts'
 export {

@@ -805,10 +805,11 @@ describe('native review request', () => {
       expect(result.isError).toBe(!item.allowed)
       expect(JSON.stringify(result)).not.toContain('"risk"')
       if (item.allowed) continue
-      expect(result).toMatchObject({ error: { message: 'the user rejected tool "probe"' } })
-      expect(approvalReasons.at(-1)).toBe(item.expectedReason === undefined
+      const askReason = item.expectedReason === undefined
         ? 'Auto review denied tool "probe"'
-        : `Auto review denied tool "probe": ${item.expectedReason}`)
+        : `Auto review denied tool "probe": ${item.expectedReason}`
+      expect(result).toMatchObject({ error: { message: `the user rejected tool "probe": it required approval because: ${askReason}` } })
+      expect(approvalReasons.at(-1)).toBe(askReason)
       expect(displayReasons.at(-1)).toEqual(item.expectedReason === undefined
         ? { en: 'Auto review denied this call.', zh: 'Auto review 拒绝了此调用。' }
         : { en: `Auto review denied this call: ${item.expectedReason}`, zh: `Auto review 拒绝了此调用：${item.expectedReason}` })
@@ -821,7 +822,7 @@ describe('native review request', () => {
 
   it.each([
     { outcome: 'allowed-once', runs: 1, error: undefined },
-    { outcome: 'rejected', runs: 0, error: 'the user rejected tool "probe"' },
+    { outcome: 'rejected', runs: 0, error: 'the user rejected tool "probe": it required approval because: Auto review denied tool "probe": not authorized' },
     { outcome: 'cancelled', runs: 0, error: 'approval for tool "probe" was cancelled' },
   ] as const)('executes a reviewer-denied call only when the user answers $outcome with a grant', async ({ outcome, runs, error }) => {
     const { ctx } = await harness([decisionChunks('{"risk":"medium","decision":"deny","reason":"not authorized"}')])

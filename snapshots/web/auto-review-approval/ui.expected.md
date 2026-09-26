@@ -13,7 +13,7 @@
 - button "Took {{duration}}" [expanded]
 - button "Called tools" [expanded]
 - text: Failed
-- 'button "Tool call Error: the user rejected tool \"mystery\""'
+- 'button "Tool call Error: the user rejected tool \"mystery\": it required approval because: Auto review denied tool \"mystery\": the exact target was not authorized"'
 - text: Failed
 - 'button "Tool call Error: Auto review of tool \"mystery\" failed; its body was not executed: auto-review: reviewer ended with error UNKNOWN: provider unavailable"'
 - textbox "Message or run a task, / commands, @ files or sessions"
@@ -40,8 +40,8 @@
 - button "Took {{duration}}" [expanded]
 - button "Called tools" [expanded]
 - text: Failed
-- 'button "Tool call Error: the user rejected tool \"mystery\"" [expanded]'
-- text: "IN { \"target\": \"old-build.log\" } OUT Error: the user rejected tool \"mystery\""
+- 'button "Tool call Error: the user rejected tool \"mystery\": it required approval because: Auto review denied tool \"mystery\": the exact target was not authorized" [expanded]'
+- text: "IN { \"target\": \"old-build.log\" } OUT Error: the user rejected tool \"mystery\": it required approval because: Auto review denied tool \"mystery\": the exact target was not authorized"
 - button "Inspect"
 - text: Failed
 - 'button "Tool call Error: Auto review of tool \"mystery\" failed; its body was not executed: auto-review: reviewer ended with error UNKNOWN: provider unavailable" [expanded]'

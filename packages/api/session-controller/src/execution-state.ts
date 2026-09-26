@@ -22,6 +22,7 @@ import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { SubagentRunEndInfo, SubagentRunId, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
@@ -355,14 +356,14 @@ export class SessionExecutionStateReader {
    * @returns latch, model, attribution, recent tool traffic, injections, tree, and pending asks.
    * @throws {RemoteError} `session/not-found` when no live Session owns the id.
    */
-  digest(request: SessionDigestRequest): SessionDigestValue {
+  digest(request: SessionDigestRequest): Promise<SessionDigestValue> {
     const sessionId = request.sessionId
     const session = this.requireAttached(sessionId)
     const state = this.executionState(sessionId)
     const maxTools = clampRecentTools(request.recentTools)
     const { ids } = this.descendants(sessionId)
     const tail = this.scanTail(session, maxTools)
-    return {
+    return this.subagentTree(tail.catalog, ids).then(subagentTree => ({
       sessionId,
       state,
       ...state.model === undefined ? {} : { model: state.model },
@@ -370,9 +371,9 @@ export class SessionExecutionStateReader {
       recentFailures: tail.failures.slice(0, maxTools),
       recentToolCalls: this.recentToolCalls(tail, maxTools),
       injectionIndex: tail.injections,
-      subagentTree: this.subagentTree(tail.catalog, ids),
+      subagentTree,
       pendingInteractions: state.pendingAsks,
-    }
+    }))
   }
 
   /** Attach + live-registry check for one addressed Session. */
@@ -634,10 +635,10 @@ export class SessionExecutionStateReader {
   }
 
   /** Merge the durable spawn catalog with visible live/tracked children. */
-  private subagentTree(
+  private async subagentTree(
     catalog: readonly ScannedCatalogEntry[],
     visible: ReadonlySet<SessionId>,
-  ): readonly SessionDigestSubagent[] {
+  ): Promise<readonly SessionDigestSubagent[]> {
     const rows = new Map<SessionId, SessionDigestSubagent>()
     for (const entry of catalog) {
       const queryPreview = entry.label === undefined ? undefined : preview(entry.label)
@@ -660,7 +661,7 @@ export class SessionExecutionStateReader {
     }
     const tree: SessionDigestSubagent[] = []
     for (const [childId, row] of rows) {
-      tree.push({ ...row, ...this.childFacts(childId) })
+      tree.push({ ...row, ...await this.childFacts(childId) })
       if (tree.length >= DIGEST_TREE_LIMIT) break
     }
     return tree
@@ -676,33 +677,62 @@ export class SessionExecutionStateReader {
     return 'inactive'
   }
 
-  /** Descriptor mode/quiet and first prompt of one live child, from a bounded prefix. */
-  private childFacts(childId: SessionId): Partial<SessionDigestSubagent> {
+  /**
+   * Descriptor mode/quiet and first prompt of one child. Live state wins where
+   * it exists; a settled child falls back to the durable log's bounded prefix,
+   * so its descriptor `quiet` flag survives eviction instead of reading as the
+   * `false` default.
+   */
+  private async childFacts(childId: SessionId): Promise<Partial<SessionDigestSubagent>> {
     const session = this.ctx.sessions.get(childId)
-    if (session === undefined) return {}
-    const start = Number(session.inheritedEventCount)
-    const end = Math.min(Number(session.seq) - 1, start + CHILD_PREFIX_EVENTS - 1)
-    let mode: SessionDigestSubagent['mode'] | undefined
-    let quiet: boolean | undefined
-    let prompt: string | undefined
-    for (let seq = start; seq <= end; seq += 1) {
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-      const event = session.eventAt(SessionSeq(seq))
-      if (event === undefined) continue
-      if (event.type === 'subagent/descriptor') {
-        mode = event.data.mode
-        if (event.data.mode === 'continuable' && event.data.quiet !== undefined) quiet = event.data.quiet
-        continue
+    if (session !== undefined) {
+      const start = Number(session.inheritedEventCount)
+      const end = Math.min(Number(session.seq) - 1, start + CHILD_PREFIX_EVENTS - 1)
+      const events: SessionEvent[] = []
+      for (let seq = start; seq <= end; seq += 1) {
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+        const event = session.eventAt(SessionSeq(seq))
+        if (event !== undefined) events.push(event)
       }
-      if (prompt === undefined && event.type === 'user/message' && event.data.source.kind === 'user') {
-        prompt = preview(messageText(event.data))
+      return childFactsFromEvents(events)
+    }
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistence | undefined
+    if (persistence === undefined) return {}
+    try {
+      const handle = await persistence.open(childId, 'read')
+      try {
+        const start = Number(handle.inheritedEventCount)
+        const { events } = await handle.read(start, CHILD_PREFIX_EVENTS)
+        return childFactsFromEvents(events)
+      } finally {
+        await handle.close()
       }
+    } catch {
+      // A missing or unreadable stored child contributes no durable facts.
+      return {}
     }
-    return {
-      ...mode === undefined ? {} : { mode },
-      ...quiet === undefined ? {} : { quiet },
-      ...prompt === undefined ? {} : { queryPreview: prompt },
+  }
+}
+
+/** Descriptor mode/quiet and first prompt from one bounded child event prefix. */
+function childFactsFromEvents(events: readonly SessionEvent[]): Partial<SessionDigestSubagent> {
+  let mode: SessionDigestSubagent['mode'] | undefined
+  let quiet: boolean | undefined
+  let prompt: string | undefined
+  for (const event of events) {
+    if (event.type === 'subagent/descriptor') {
+      mode = event.data.mode
+      if (event.data.mode === 'continuable' && event.data.quiet !== undefined) quiet = event.data.quiet
+      continue
     }
+    if (prompt === undefined && event.type === 'user/message' && event.data.source.kind === 'user') {
+      prompt = preview(messageText(event.data))
+    }
+  }
+  return {
+    ...mode === undefined ? {} : { mode },
+    ...quiet === undefined ? {} : { quiet },
+    ...prompt === undefined ? {} : { queryPreview: prompt },
   }
 }
 
