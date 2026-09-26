@@ -96,6 +96,28 @@ export function withContinuableReturnGuidance(
   ]
 }
 
+/** Tool-call budget a delegated child keeps unless its parent sets another. */
+export const CHILD_TOOL_BUDGET = 20
+
+/**
+ * Append the standing delegation budget to a child's initial task. Applied to
+ * every continuable child so the stop rule does not depend on the parent
+ * remembering to write one into its Task Card.
+ * @param prompt - initial model-visible task blocks.
+ * @returns task blocks followed by the budget guidance.
+ */
+export function withChildBudgetGuidance(prompt: ContentBlock[]): ContentBlock[] {
+  return [
+    ...prompt,
+    {
+      type: 'text',
+      text: `Delegation budget: use at most ${String(CHILD_TOOL_BUDGET)} tool calls unless the parent names a `
+        + 'different budget. Answer the question asked, cite the files and lines that ground it, and stop — do '
+        + 'not broaden the search, audit adjacent code, or re-verify what the answer already established.',
+    },
+  ]
+}
+
 /**
  * One line telling a parent that a background child is finished and why, in
  * the parent's own task vocabulary.

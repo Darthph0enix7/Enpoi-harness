@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createSettlementMessage } from '../src/continuation-messages.ts'
+import { CHILD_TOOL_BUDGET, createSettlementMessage, withChildBudgetGuidance } from '../src/continuation-messages.ts'
 
 const childId = SessionId('settled-child')
 const summary = { type: 'text', text: `Background subagent ${childId} finished.` }
@@ -53,5 +53,20 @@ describe('continuable settlement content', () => {
       first,
       second,
     ])
+  })
+})
+
+describe('delegation budget guidance', () => {
+  it('appends the standing budget and stop rule to a child task', () => {
+    const prompt: ContentBlock[] = [{ type: 'text', text: 'Map the registry.' }]
+    const original = structuredClone(prompt)
+    const guided = withChildBudgetGuidance(prompt)
+    expect(guided).toHaveLength(2)
+    expect(guided[0]).toEqual(prompt[0])
+    const guidance = guided[1]
+    expect(guidance?.type).toBe('text')
+    expect((guidance as { text: string }).text).toContain(`at most ${String(CHILD_TOOL_BUDGET)} tool calls`)
+    expect((guidance as { text: string }).text).toContain('stop')
+    expect(prompt).toEqual(original)
   })
 })

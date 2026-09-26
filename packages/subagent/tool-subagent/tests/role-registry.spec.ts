@@ -81,6 +81,37 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model' })
   })
 
+  it('resolves a chain-assigned persona route through the live chain links', async () => {
+    const request = await captureRequest('Review the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.' } },
+      // A stale model id must never leak: the first enabled link is the route.
+      personas: { auditor: { provider: 'stale', model: 'stale-model', chain: 'grp' } },
+      chains: {
+        grp: {
+          links: [
+            { provider: 'alpha', model: 'fast-model' },
+            { provider: 'other-model', model: 'other-model' },
+          ],
+        },
+      },
+    }, { role: 'auditor' })
+    expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model', chain: 'grp' })
+  })
+
+  it('falls back to the parent route when a persona chain is missing or disabled', async () => {
+    const missing = await captureRequest('Review the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.' } },
+      personas: { auditor: { provider: 'stale', model: 'stale-model', chain: 'gone' } },
+    }, { role: 'auditor' })
+    expect(missing.agentOptions).toBeUndefined()
+    const disabled = await captureRequest('Review the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.' } },
+      personas: { auditor: { provider: 'stale', model: 'stale-model', chain: 'grp' } },
+      chains: { grp: { links: [{ provider: 'alpha', model: 'fast-model' }], disabled: true } },
+    }, { role: 'auditor' })
+    expect(disabled.agentOptions).toBeUndefined()
+  })
+
   it('retires a built-in role with disabled:true and only hides a seat for seat:false', () => {
     const registry = tool.listRoleRegistry(settingsHandle({
       roles: { oracle: { disabled: true }, designer: { seat: false } },

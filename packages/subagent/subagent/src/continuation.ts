@@ -35,6 +35,7 @@ import {
 import type { Activation } from './continuation-activation.ts'
 import {
   createAgentMessage,
+  withChildBudgetGuidance,
   withContinuableReturnGuidance,
 } from './continuation-messages.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
@@ -179,11 +180,12 @@ export class SubagentContinuationManager {
           signal: spec.signal,
         })
         const childHeader = activation.handle.agent.session.header
+        const initialPrompt = isAdjacentAgentSendMessageTool(this.ctx.get('tools')?.get('send_message', activation.handle.agent))
+          ? withContinuableReturnGuidance(parent.id, request.prompt)
+          : request.prompt
         return await this.submitMaterialized(
           activation,
-          isAdjacentAgentSendMessageTool(this.ctx.get('tools')?.get('send_message', activation.handle.agent))
-            ? withContinuableReturnGuidance(parent.id, request.prompt)
-            : request.prompt,
+          withChildBudgetGuidance(initialPrompt),
           { source: { kind: 'user' }, signal: spec.signal, delivery: 'queue' },
           parent,
           () => { establishCatalogChild(parent.session, childHeader, descriptor) },

@@ -295,13 +295,17 @@ interface DelegationRunSpec {
  * Resolve the child route from Settings > enpoi-orchestration.personas for the
  * role selected for this delegation (explicit `role` argument first, then the
  * detected role), falling back to matching any persona key in the delegation
- * text (e.g. "fixer", "librarian", "explorer").
+ * text (e.g. "fixer", "librarian", "explorer"). A persona assigned to a chain
+ * resolves through the live chains document to the first enabled link, so the
+ * child is recorded on the route it actually runs and a stale or disabled
+ * chain falls back to the parent's route instead of failing the spawn.
  * @param personas - the namespace's per-role child routes.
  * @param role - the role selected for this delegation, if any.
  * @param description - the delegated task description.
  * @param prompt - the delegated task prompt.
  * @param registry - the live role registry; a tool-only role's persona route is
  *   never matched from text, so a delegation cannot silently become that role.
+ * @param chains - the namespace's model-group chains, keyed by chain id.
  * @returns the selected role's child route, or undefined when none is configured.
  */
 function resolveSubagentPersonaModel(
@@ -310,18 +314,23 @@ function resolveSubagentPersonaModel(
   description?: string,
   prompt?: string,
   registry?: Record<string, ResolvedRole>,
+  chains?: OrchestrationSettingsDocument['chains'],
 ): AgentOptions | undefined {
   if (personas === undefined) return undefined
   const routeFor = (candidate: string): AgentOptions | undefined => {
     const entry = personas[candidate]
-    if (entry?.provider === undefined || entry.model === undefined) return undefined
-    return {
-      provider: entry.provider,
-      model: entry.model,
-      // A seat assigned to a model group spawns on its first link and keeps the
-      // group id, so the runtime can fail over to the next link.
-      ...entry.chain === undefined ? {} : { chain: entry.chain },
+    if (entry === undefined) return undefined
+    if (entry.chain !== undefined) {
+      const chain = chains?.[entry.chain]
+      const link = chain?.disabled === true ? undefined : chain?.links?.[0]
+      if (link?.provider === undefined || link.model === undefined) return undefined
+      // Resolve the group to its first link: the child starts on a concrete
+      // route (truthful header) and keeps the group id so the runtime can
+      // still fail over to the next link.
+      return { provider: link.provider, model: link.model, chain: entry.chain }
     }
+    if (entry.provider === undefined || entry.model === undefined) return undefined
+    return { provider: entry.provider, model: entry.model }
   }
   if (role !== undefined) {
     const selected = routeFor(role)
@@ -545,6 +554,12 @@ export interface OrchestrationSettingsHandle {
 export interface OrchestrationSettingsDocument {
   /** Per-role child model route, keyed by role id. */
   personas?: Record<string, { provider?: string; model?: string; chain?: string }>
+  /** Model-group chains the persona routes may reference, keyed by chain id. */
+  chains?: Record<string, {
+    /** Ordered failover links; the first enabled link is the initial route. */
+    links?: ReadonlyArray<{ provider?: string; model?: string }>
+    disabled?: boolean
+  }>
   /** Operator role registry, merged over the code defaults. */
   roles?: Record<string, RoleRegistryEntry>
   /** Operator permission overrides, including per-role tool availability. */
@@ -1022,7 +1037,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             configuredChildAgentOptions,
             modelRequest,
             modelSelectionEnabled,
-          ) ?? resolveSubagentPersonaModel(document?.personas, role, args.description, args.prompt, registry)
+          ) ?? resolveSubagentPersonaModel(document?.personas, role, args.description, args.prompt, registry, document?.chains)
           assertAllowedModelSelection(
             modelSelectionPolicy,
             parentOptions,
