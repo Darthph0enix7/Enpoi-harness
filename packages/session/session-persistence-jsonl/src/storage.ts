@@ -360,13 +360,18 @@ export class JsonlSessionHandle implements SessionHandle {
     return next
   }
 
-  /** Serialize one public mutating operation onto this handle's chain. */
+  /**
+   * Serialize one public mutating operation onto this handle's chain. The
+   * open check is admission-time only: an operation accepted before `close()`
+   * must still execute, because close waits for the chain to settle before
+   * releasing the handle (a re-check inside the chained turn lost an
+   * in-flight journal write to a teardown that had already accepted it —
+   * live defect 2026-09-26). Operations STARTED after close still refuse at
+   * the synchronous check.
+   */
   private async run(operation: string, op: () => Promise<void>): Promise<void> {
     this.assertOpen(operation)
-    return this.enqueueChain(async () => {
-      this.assertOpen(operation)
-      return op()
-    })
+    return this.enqueueChain(op)
   }
 
   private assertOpen(operation: string): void {

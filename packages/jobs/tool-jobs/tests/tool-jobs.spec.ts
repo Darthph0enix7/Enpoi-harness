@@ -509,6 +509,15 @@ describe('job_output', () => {
     expect(unknown.isError).toBe(true)
     expect(text(unknown)).toContain('unknown job bash-99')
   })
+
+  it('names the id class when a subagent session id is passed to job_output', async () => {
+    const { ctx } = await setup()
+    const orphan = await call(ctx, 'job_output', { job_id: 'session-deadbeef-cafe-4000-8000-000000000000' })
+    expect(orphan.isError).toBe(true)
+    const body = text(orphan)
+    expect(body).toContain('A subagent child is not a job')
+    expect(body).toContain('job_output/job_list/job_kill cover background shell jobs')
+  })
 })
 
 describe('job_list', () => {

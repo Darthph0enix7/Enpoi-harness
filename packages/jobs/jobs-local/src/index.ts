@@ -393,7 +393,17 @@ export class LocalJobRegistry extends JobRegistry {
   /** Look up a job and enforce caller access. */
   private expect(id: JobId, caller?: SessionId): TrackedJob {
     const job = this.store.get(id)
-    if (job === undefined) throw new Error(`unknown job ${id}`)
+    if (job === undefined) {
+      // Name the id class: the observed orphan call passed a continuable
+      // subagent session id (live defect 2026-09-26), which is not a job and
+      // never had a producer. The old bare "unknown job <id>" left the model
+      // to guess whether the registry or the id was wrong.
+      throw new Error(
+        `unknown job ${id}: no background job with this id is registered.`
+        + ' A subagent child is not a job (its report arrives as a settlement notice);'
+        + ' job_output/job_list/job_kill cover background shell jobs started with run_in_background.',
+      )
+    }
     this.assertAccess(job, caller)
     return job
   }

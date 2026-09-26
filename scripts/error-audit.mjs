@@ -28,11 +28,17 @@
  *   node scripts/error-audit.mjs [--out DIR] [--adam-limit N] [--journal-hours N]
  *                                [--json-only] [--eval-root DIR] [--comms-root DIR]
  *                                [--sessions-home DIR] [--journals-dir DIR]
- *                                [--include-historical]
+ *                                [--include-historical] [--ack FILE]
  *
  * Companion inputs:
  *   --session FILE[:corpus]  add one explicit session log (repeatable)
  *   --no-comms --no-adam --no-journals  disable a default source
+ *
+ * `--ack FILE` reads a reviewed acknowledgement list
+ * (`{ "acknowledged": [{ class, session?, seq?, witnessIncludes, reason }] }`)
+ * and reclassifies matching signals as `acknowledged` — the documented
+ * historical remainder after a fix. Each entry MUST name the defect and the
+ * shipped fix; the gate still fails on any unexplained signal not listed.
  */
 
 import fs from 'node:fs'
@@ -57,6 +63,7 @@ const opt = {
   noAdam: false,
   noJournals: false,
   includeHistorical: false,
+  ack: null,
   explicit: [],
 }
 for (let i = 0; i < argv.length; i++) {
@@ -71,6 +78,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--adam-limit') opt.adamLimit = Number(next())
   else if (a === '--journal-hours') opt.journalHours = Number(next())
   else if (a === '--include-historical') opt.includeHistorical = true
+  else if (a === '--ack') opt.ack = next()
   else if (a === '--no-comms') opt.noComms = true
   else if (a === '--no-adam') opt.noAdam = true
   else if (a === '--no-journals') opt.noJournals = true
@@ -495,16 +503,23 @@ if (!opt.noComms && fs.existsSync(opt.commsRoot)) {
 if (!opt.noAdam && opt.adamLimit > 0) {
   const root = path.join(opt.sessionsHome, '--home-adam--')
   let candidates = []
+  // v3 logs sit beside v4 in the same session dirs. They are a frozen
+  // predecessor generation: the v4 log is the authoritative record for the
+  // session, so scanning both would double-count every event. Counted here so
+  // the scope decision is visible in the report instead of silent.
+  let v3OutOfScope = 0
   try {
     for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
       if (!ent.isDirectory()) continue
       const p = path.join(root, ent.name, 'session.v4.jsonl.zstd')
       if (fs.existsSync(p)) candidates.push({ p, mtime: fs.statSync(p).mtimeMs })
+      if (fs.existsSync(path.join(root, ent.name, 'session.v3.jsonl.zstd'))) v3OutOfScope++
     }
   } catch (e) { inputs.skipped.push({ file: root, reason: `adam sessions scan failed: ${e.message}` }) }
   candidates.sort((a, b) => b.mtime - a.mtime)
   const chosen = candidates.slice(0, opt.adamLimit)
   inputs.corpora.adam = chosen.length
+  inputs.corpora.v3OutOfScope = v3OutOfScope
   for (const c of chosen) inputs.files.push({ file: c.p, corpus: 'adam' })
 }
 
@@ -563,6 +578,29 @@ for (const s of sessions) {
 allSignals.length = 0
 for (const s of sessions) { if (s.skipped) continue; for (const sig of s.signals ?? []) allSignals.push({ ...sig, corpus: s.corpus, session: s.session }) }
 
+// Reviewed acknowledgements: reclassify exact historical signals already fixed
+// in code, so the gate measures NEW defects instead of permanently failing on
+// a frozen baseline. The acknowledgement names the defect and the fix; it is
+// never a blanket class waiver (class + optional session/seq + witness text).
+const acknowledged = []
+if (opt.ack) {
+  let doc
+  try { doc = JSON.parse(fs.readFileSync(opt.ack, 'utf8')) } catch (e) { fail(`--ack ${opt.ack} is unreadable: ${e.message}`) }
+  const entries = Array.isArray(doc?.acknowledged) ? doc.acknowledged : []
+  if (entries.length === 0) fail(`--ack ${opt.ack} lists no acknowledged signals`)
+  for (const s of allSignals) {
+    if (s.verdict !== 'unexplained') continue
+    const hit = entries.find(entry => entry.class === s.class
+      && (entry.session === undefined || entry.session === s.session)
+      && (entry.seq === undefined || entry.seq === s.seq)
+      && (entry.witnessIncludes === undefined || String(s.witness ?? '').includes(entry.witnessIncludes)))
+    if (hit === undefined) continue
+    s.verdict = 'acknowledged'
+    s.ackReason = hit.reason ?? 'acknowledged'
+    acknowledged.push(s)
+  }
+}
+
 const byClass = new Map()
 for (const s of allSignals) {
   const c = byClass.get(s.class) ?? { class: s.class, verdict: s.verdict, count: 0, calls: 0, tokens: 0, attempts: 0, sessions: new Set(), signals: [] }
@@ -575,7 +613,13 @@ for (const s of allSignals) {
   c.signals.push(s)
   byClass.set(s.class, c)
 }
-for (const c of byClass.values()) { c.impact = c.tokens + 400 * c.calls; c.sessionCount = c.sessions.size; delete c.sessions }
+for (const c of byClass.values()) {
+  const verdicts = new Set(c.signals.map(s => s.verdict))
+  c.verdict = verdicts.has('unexplained') ? 'unexplained' : verdicts.has('acknowledged') ? 'acknowledged' : 'expected'
+  c.impact = c.tokens + 400 * c.calls
+  c.sessionCount = c.sessions.size
+  delete c.sessions
+}
 
 // sanity: CLASS map must cover every produced class
 for (const c of byClass.keys()) if (!CLASS[c]) { CLASS[c] = { verdict: 'unexplained', hyp: 'unregistered class (script bug)' } }
@@ -603,7 +647,8 @@ const report = {
     parseWarningLines: sessions.reduce((n, s) => n + (s.badLines ?? 0), 0),
     skipped: inputs.skipped,
   },
-  totals: { signals: allSignals.length, expected: expected.length, unexplained: unexplained.length, classes: byClass.size },
+  totals: { signals: allSignals.length, expected: expected.length, acknowledged: acknowledged.length, unexplained: unexplained.length, classes: byClass.size },
+  acknowledged: acknowledged.map((s) => ({ class: s.class, session: s.session, seq: s.seq, corpus: s.corpus, witness: s.witness, reason: s.ackReason })),
   classes: ranked.map((c) => ({
     class: c.class, verdict: c.verdict, count: c.count, sessionCount: c.sessionCount,
     wastedCalls: c.calls, wastedAttempts: c.attempts, estimatedTokens: c.tokens, impact: c.impact,
@@ -621,7 +666,7 @@ const pad = (s, n) => String(s).padEnd(n)
 const lines = []
 lines.push(`# Error audit — ${report.generatedAt}`)
 lines.push('')
-lines.push(`Contract: **exit ${report.exitCode}** — ${unexplained.length} unexplained / ${expected.length} expected signals across ${totalSessions} sessions, ${totalCalls} tool calls, ${totalEvents} events.`)
+lines.push(`Contract: **exit ${report.exitCode}** — ${unexplained.length} unexplained / ${acknowledged.length} acknowledged / ${expected.length} expected signals across ${totalSessions} sessions, ${totalCalls} tool calls, ${totalEvents} events.`)
 lines.push('')
 lines.push('## Per-class baseline')
 lines.push('')
@@ -642,6 +687,14 @@ else {
   }
 }
 lines.push('')
+if (acknowledged.length > 0) {
+  lines.push('## Acknowledged (fixed historical remainder)')
+  lines.push('')
+  for (const s of acknowledged) {
+    lines.push(`- [${s.class}] session \`${s.session ?? 'journal'}\`${s.seq != null ? ` seq ${s.seq}` : ''} — ${s.ackReason ?? 'acknowledged'}`)
+  }
+  lines.push('')
+}
 lines.push('## Expected (designed denials, deliberate refusals, fixtures, failovers)')
 lines.push('')
 for (const c of ranked.filter((c) => c.verdict === 'expected')) lines.push(`- ${c.class}: ${c.count} (${c.calls} calls, ${c.attempts} attempts, ~${c.tokens} tok) — ${CLASS[c.class].hyp}`)
@@ -649,6 +702,7 @@ lines.push('')
 lines.push('## Inputs & unclassifiable')
 lines.push('')
 lines.push(`- corpora: ${JSON.stringify(inputs.corpora)}`)
+if (inputs.corpora.v3OutOfScope !== undefined) lines.push(`- v3 out of scope: ${inputs.corpora.v3OutOfScope} session.v3.jsonl.zstd logs (frozen predecessor generation; the v4 log in the same dir is authoritative, so scanning both would double-count. Any future v3 read must decode with \`zstd -dc\` frame loops — one zstd frame per event — never \`zlib.zstdDecompressSync\`.)`)
 lines.push(`- skipped/unreadable: ${inputs.skipped.length}`)
 for (const s of inputs.skipped.slice(0, 20)) lines.push(`  - ${path.basename(String(s.file))}: ${s.reason}`)
 if (inputs.skipped.length > 20) lines.push(`  - … ${inputs.skipped.length - 20} more (see report.json)`)

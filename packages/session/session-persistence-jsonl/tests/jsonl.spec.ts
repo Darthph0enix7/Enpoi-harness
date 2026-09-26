@@ -1417,6 +1417,46 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await reopened.fiber.dispose()
   })
 
+  it('close lets an operation admitted before it run instead of refusing a queued journal write', async () => {
+    const m = meta('queued-closer', '/work')
+    const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
+    const service = ctx.sessionPersistence as unknown as {
+      persistBatch: (...args: [SessionHeader, readonly SessionEvent[], boolean]) => Promise<void>
+    }
+    const original = service.persistBatch.bind(service)
+    const gate = Promise.withResolvers<undefined>()
+    const entered = Promise.withResolvers<undefined>()
+    vi.spyOn(service, 'persistBatch').mockImplementationOnce(async (...args) => {
+      entered.resolve(undefined)
+      await gate.promise
+      return original(...args)
+    })
+
+    const [start, ...rest] = oneTurnLog()
+    // The FIRST append blocks inside the storage write; the flush and the
+    // second append are ADMITTED before close (their synchronous open check
+    // passed) but still queued behind it. close() must let them run — the
+    // teardown may not lose a write it already accepted. Before the fix the
+    // chained re-check rejected them with SessionHandleClosedError.
+    const inflight = handle.append([start!])
+    await entered.promise
+    const queuedAppend = handle.append(rest)
+    const queuedFlush = handle.flush()
+    const closing = handle.close()
+    gate.resolve(undefined)
+    await expect(inflight).resolves.toBeUndefined()
+    await expect(queuedAppend).resolves.toBeUndefined()
+    await expect(queuedFlush).resolves.toBeUndefined()
+    await closing
+    await expect(handle.append(rest)).rejects.toThrow(/on a closed handle/)
+
+    const reopened = new Context()
+    await reopened.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await expect(readAll(reopened.sessionPersistence, m.id))
+      .resolves.toMatchObject({ events: oneTurnLog() })
+    await reopened.fiber.dispose()
+  })
+
   it('service flush skips a write claim whose handle is still opening', async () => {
     const m = meta('opening-claim', '/work')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())

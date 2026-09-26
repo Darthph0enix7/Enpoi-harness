@@ -49,6 +49,21 @@ export const DEEPSEEK_DEFAULT_MAX_USES = 5
 const USER_AGENT = 'deepseek-harness/0.0.1'
 
 /**
+ * How long one identity/model pair stays quarantined after an auth or capacity
+ * response. A 401/402/403/429 from the search endpoint is a property of the
+ * resolved credential or plan, not of the query, so re-dispatching the same
+ * identity cannot succeed and the model pays for every retry (observed live
+ * 2026-09-26: three `web_search` calls surfaced `402 Insufficient Balance`
+ * from a depleted identity). The seam's provider selection skips an
+ * unavailable provider, so the next call either uses another registered
+ * provider or fails before dispatch.
+ */
+const CAPACITY_QUARANTINE_MS = 5 * 60_000
+
+/** HTTP statuses that mark the resolved identity as out of balance or misconfigured. */
+const CAPACITY_STATUSES = new Set([401, 402, 403, 429])
+
+/**
  * Exact secret-free DeepSeek Messages request recorded immediately before one
  * auxiliary search dispatch.
  */
@@ -178,6 +193,8 @@ export function mapAnthropicResponse(response: AnthropicResponse): WebSearchResu
  */
 export class DeepSeekSearchProvider implements WebSearchProvider {
   readonly id = DEEPSEEK_PROVIDER_ID
+  /** Epoch ms until which a capacity-failed identity is skipped by provider selection. */
+  private capacityQuarantineUntil = 0
 
   /**
    * @param resolveOptions - the options for the NEXT operation, snapshotted
@@ -189,6 +206,7 @@ export class DeepSeekSearchProvider implements WebSearchProvider {
   constructor(private readonly resolveOptions: () => DeepSeekSearchProviderOptions) {}
 
   available(): boolean {
+    if (Date.now() < this.capacityQuarantineUntil) return false
     const options = this.resolveOptions()
     return ((options.apiKey?.length ?? 0) > 0 || options.resolveApiKey !== undefined)
       && URL.canParse(options.baseURL)
@@ -261,6 +279,14 @@ export class DeepSeekSearchProvider implements WebSearchProvider {
         // Otherwise: the HTTP status is already captured in `message` above; a
         // malformed/non-JSON error body (normal for gateway 5xx/429s) can only
         // cost a richer provider message, never the real error.
+      }
+      if (CAPACITY_STATUSES.has(status)) {
+        this.capacityQuarantineUntil = Date.now() + CAPACITY_QUARANTINE_MS
+        throw searchEndpointError(
+          endpoint,
+          `${message}\nThis DeepSeek search identity is now skipped for ${CAPACITY_QUARANTINE_MS / 60_000} minutes`
+          + ' (an out-of-balance or misconfigured credential is not fixed by retrying the query).',
+        )
       }
       throw searchEndpointError(endpoint, message)
     }

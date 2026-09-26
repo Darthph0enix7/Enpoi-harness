@@ -175,6 +175,21 @@ describe('DeepSeekSearchProvider availability', () => {
     expect(searchProvider({ ...options, maxUses: 0 }).available()).toBe(false)
     expect(searchProvider({ ...options, maxUses: 1.5 }).available()).toBe(false)
   })
+
+  it('quarantines an out-of-balance identity so provider selection skips it', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: { message: 'Insufficient Balance' } }, { status: 402 })))
+      const provider = searchProvider(options)
+      expect(provider.available()).toBe(true)
+      await expect(provider.search({ query: 'q' })).rejects.toThrow(/HTTP 402/)
+      expect(provider.available()).toBe(false)
+      vi.advanceTimersByTime(5 * 60_000 + 1)
+      expect(provider.available()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('DeepSeekSearchProvider request mapping', () => {
@@ -335,7 +350,9 @@ describe('DeepSeekSearchProvider error handling', () => {
     await expect(searchProvider(options).search({ query: 'q' }))
       .rejects.toThrow(expect.objectContaining({
         code: 'WEB_PROVIDER_ERROR',
-        message: 'DeepSeek API error (HTTP 429): rate limited\n\n'
+        message: 'DeepSeek API error (HTTP 429): rate limited\n'
+          + 'This DeepSeek search identity is now skipped for 5 minutes'
+          + ' (an out-of-balance or misconfigured credential is not fixed by retrying the query).\n\n'
           + 'The web search request used endpoint "https://api.deepseek.test/anthropic/v1/messages". '
           + 'Search endpoint configuration is separate from chat. If that endpoint is not intended, '
           + 'guide the user to Settings > Plugins > Plugin configuration > Web search, where they can '
