@@ -3,6 +3,11 @@
 // name; the fork card (`data-mark-task-card`) must be present inside each call
 // wrapper and no upstream Tool row (`data-tool`, the Generic/Details row) may
 // render there. Keyless replay: the fixture is the whole world, no model call.
+//
+// The fixture is current-format (v4). A v3 seed would need the replay loader's
+// explicit historical child facts (`createSessionFormatCatalogWithChildren`),
+// which is the wrong layer for a self-contained probe; current-format fixtures
+// are what the other cold-seed scenarios (skill-tool-row, code-language) use.
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
@@ -16,13 +21,17 @@ interface MarkCall {
   readonly result: string
 }
 
-/** One settled call per registered key; subagent/oracle carry a child session id. */
+/**
+ * One settled call per registered key. The subagent result is the exact String
+ * `tool-subagent` renders (`started subagent ${subagentId}`), so this fixture
+ * also pins the wording the card's child-id extraction depends on.
+ */
 const CALLS: readonly MarkCall[] = [
   {
     callId: 'mark-subagent',
     name: 'subagent',
     args: { description: 'Map the right sidebar seats', subagent_type: 'explorer', prompt: 'Map the seats.' },
-    result: 'Started subagent session-11111111-2222-3333-4444-555555555555.',
+    result: 'started subagent 11111111-2222-3333-4444-555555555555',
   },
   {
     callId: 'mark-dispatch',
@@ -40,7 +49,7 @@ const CALLS: readonly MarkCall[] = [
     callId: 'mark-oracle',
     name: 'oracle_review',
     args: { query: 'Review the merged slot contract' },
-    result: 'Oracle session session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee returned a verdict.',
+    result: 'Oracle verdict: APPROVED',
   },
   {
     callId: 'mark-roundtable',
@@ -56,21 +65,26 @@ const CALLS: readonly MarkCall[] = [
   },
 ]
 
-/** Build the seed fixture: one closed turn with one settled call per Tool name. */
+/**
+ * Build the seed fixture: one closed turn with one settled call per Tool name.
+ * Rows are projected (no seq/time), so the loader assigns dense sequences in
+ * file order; `tool/result` cites its call by that number.
+ */
 function markFixture(): string {
   const events: unknown[] = [
-    {
-      type: 'session', version: 3, id: '{{session:1}}', createdAt: 0, cwd: '{{cwd}}',
-      isSeeded: false, delegationDepth: 0, agentPreset: 'orchestrator',
-    },
+    { type: 'session', version: 4, id: '{{session:1}}', createdAt: 0, cwd: '{{cwd}}', isSeeded: false, delegationDepth: 0 },
     { type: 'permission/preset', data: { preset: 'danger-full-access' } },
     { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
-    { type: 'approval/policy', data: { policy: 'ask' } },    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'approval/policy', data: { policy: 'ask' } },
+    { type: 'turn/start', data: { turn: 1 } },
     { type: 'user/message', data: { content: [{ type: 'text', text: 'Render every delegation card.' }], source: { kind: 'user' }, role: 'user', id: '{{message:1}}' }, surfaceOp: 'append' },
   ]
   let message = 2
   for (const [index, call] of CALLS.entries()) {
     const step = index + 1
+    // Rows: step/start, assistant/message, tool/call, tool/result, step/end —
+    // after the five leading rows, the call row of iteration N sits at 7 + 4N.
+    const callSeq = 7 + index * 4
     const args = JSON.stringify(call.args)
     events.push(
       { type: 'step/start', data: { turn: 1, step } },
@@ -96,12 +110,14 @@ function markFixture(): string {
           turn: 1,
           step,
           message: {
+            role: 'tool',
             source: { kind: 'tool', callId: call.callId },
-            content: [{ type: 'tool-result', toolCallId: call.callId, content: [{ type: 'text', text: call.result }], isError: false }],
-            role: 'user',
+            toolCallId: call.callId,
+            content: [{ type: 'text', text: call.result }],
+            isError: false,
             id: `{{message:${String(message++)}}}`,
           },
-          sourceEventSeqs: [],
+          sourceEventSeqs: [callSeq],
         },
         surfaceOp: 'append',
       },
@@ -153,10 +169,9 @@ describe.skipIf(MODE === 'record')('web e2e: The Mark tool cards own every deleg
     for (const call of CALLS) {
       const wrapper = page.locator(`[data-chat-call-id="${call.callId}"]`)
       await wrapper.waitFor({ state: 'visible', timeout: 15_000 })
-      await expect.poll(
-        () => wrapper.locator('[data-mark-task-tool]').getAttribute('data-mark-task-tool'),
-        { timeout: 10_000 },
-      ).toBe(call.name)
+      const card = wrapper.locator(`[data-mark-task-tool="${call.name}"]`)
+      await expect.poll(() => card.count(), { timeout: 10_000 }).toBe(1)
+      expect(await card.locator('[data-mark-task-head]').count()).toBe(1)
       expect(await wrapper.locator('[data-tool]').count()).toBe(0)
     }
     expect(tripwire.pageErrors).toEqual([])
@@ -168,7 +183,10 @@ describe.skipIf(MODE === 'record')('web e2e: The Mark tool cards own every deleg
     await expect.poll(() => head.getAttribute('aria-expanded')).toBe('false')
     await head.click()
     await expect.poll(() => head.getAttribute('aria-expanded')).toBe('true')
+    // The child id came from the result text alone ("started subagent <id>"): a
+    // reword upstream loses the affordance, and this probe must then fail.
     await page.getByText('Open Subagent Session', { exact: true }).waitFor({ timeout: 10_000 })
+    await page.getByText('ID: 11111111...', { exact: true }).waitFor({ timeout: 10_000 })
     expect(tripwire.pageErrors).toEqual([])
   })
 })
