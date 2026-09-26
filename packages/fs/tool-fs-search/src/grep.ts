@@ -284,7 +284,8 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
   const tool = defineTool({
     name: 'grep',
     description: 'Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. '
-      + `Returns up to ${caps.maxMatches} matches; a larger result reports where the complete match list was saved.`,
+      + `Returns up to ${caps.maxMatches} matches; a larger result reports where the complete match list was saved. `
+      + 'Prefer this over `bash grep`/`rg`: matches arrive grouped and line-numbered instead of a truncated shell blob.',
     parameters: {
       pattern: { type: 'string', required: true, description: 'Regular expression to search for (ripgrep syntax).' },
       path: { type: 'string', description: 'File or directory to search. Defaults to the session workspace; a relative path resolves against it.' },

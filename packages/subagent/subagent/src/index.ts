@@ -129,6 +129,7 @@ export {
 } from './child-agent.ts'
 export type { ChildComposition, DelegatedPolicyOverrides } from './child-agent.ts'
 export type { AgentMessageSource, SubagentSettledMessageSource } from './continuation-messages.ts'
+export { CHILD_TOOL_BUDGET, withChildBudgetGuidance } from './continuation-messages.ts'
 export type * from './control-types.ts'
 export type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 export type { SubagentRunEndInfo, SubagentRunInfo } from './types.ts'

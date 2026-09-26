@@ -30,6 +30,7 @@ import type { SubagentPromptRequestId } from '../src/control-types.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 import { loadStoredSession } from './persistence-helpers.ts'
+import { withChildBudgetGuidance } from '../src/continuation-messages.ts'
 import {
   continuationActivations,
   continuationManager,
@@ -150,6 +151,10 @@ function message(text: string) {
   return [{ type: 'text' as const, text }]
 }
 
+/** The standing delegation budget block every child task carries; assertions read task texts only. */
+const BUDGET_BLOCK = withChildBudgetGuidance([])[0]
+const BUDGET_GUIDANCE = BUDGET_BLOCK?.type === 'text' ? BUDGET_BLOCK.text : ''
+
 function hasUserText(events: readonly SessionEvent[], text: string): boolean {
   return events.some(event => event.type === 'user/message'
     && event.data.content.some(block => block.type === 'text' && block.text === text))
@@ -165,6 +170,7 @@ function userTexts(events: readonly SessionEvent[]): string[] {
   return events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'runtime-context'
     ? event.data.content.flatMap(block => block.type === 'text'
       && !block.text.startsWith('Your parent agent id is ')
+      && block.text !== BUDGET_GUIDANCE
       ? [block.text]
       : [])
     : [])

@@ -57,7 +57,7 @@ describe('continuable settlement content', () => {
 })
 
 describe('delegation budget guidance', () => {
-  it('appends the standing budget and stop rule to a child task', () => {
+  it('appends the ceiling and outcome stop to a child task', () => {
     const prompt: ContentBlock[] = [{ type: 'text', text: 'Map the registry.' }]
     const original = structuredClone(prompt)
     const guided = withChildBudgetGuidance(prompt)
@@ -65,8 +65,12 @@ describe('delegation budget guidance', () => {
     expect(guided[0]).toEqual(prompt[0])
     const guidance = guided[1]
     expect(guidance?.type).toBe('text')
-    expect((guidance as { text: string }).text).toContain(`at most ${String(CHILD_TOOL_BUDGET)} tool calls`)
-    expect((guidance as { text: string }).text).toContain('stop')
+    const body = (guidance as { text: string }).text
+    expect(body).toContain(`${String(CHILD_TOOL_BUDGET)} tool calls is a ceiling for exploration`)
+    expect(body).toContain('not a counter to satisfy')
+    expect(body).toContain('most tasks finish well under it')
+    expect(body).toContain('Stop as soon as the answer is complete')
+    expect(body).toContain('report what you tried and what is still missing')
     expect(prompt).toEqual(original)
   })
 })

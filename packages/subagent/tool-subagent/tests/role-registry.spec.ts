@@ -81,6 +81,15 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model' })
   })
 
+  it('carries the delegation budget clause on a foreground child start prompt', async () => {
+    const request = await captureRequest('Fix the parser bug', {})
+    const promptText = request.prompt
+      .map(part => part.type === 'text' ? part.text : '')
+      .join('')
+    expect(promptText).toContain('20 tool calls is a ceiling for exploration')
+    expect(promptText).toContain('Stop as soon as the answer is complete')
+  })
+
   it('resolves a chain-assigned persona route through the live chain links', async () => {
     const request = await captureRequest('Review the parser diff', {
       roles: { auditor: { persona: 'You are the Auditor.' } },

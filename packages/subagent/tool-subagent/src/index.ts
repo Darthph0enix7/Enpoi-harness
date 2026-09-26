@@ -22,6 +22,7 @@ import {
   assertSubagentMaxDepth,
   parentAgentOptionsForDelegation,
   settleRun,
+  withChildBudgetGuidance,
 } from '@deepseek-ai/dsh-subagent'
 import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
@@ -1114,7 +1115,13 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
               owner: parent.id,
               run: () => {
                 const controller = new AbortController()
-                const start = runtimeCtx.subagents.start(config.provider, { ...request, signal: controller.signal })
+                const start = runtimeCtx.subagents.start(config.provider, {
+                  ...request,
+                  // One-shot children bypass the continuable create path, so the
+                  // standing budget clause is applied here too.
+                  prompt: withChildBudgetGuidance(request.prompt),
+                  signal: controller.signal,
+                })
                 return {
                   cancel: (reason?: string) => {
                     controller.abort(reason ?? 'background subagent task killed')
@@ -1129,6 +1136,9 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
 
           const run: SubagentRun = await runtimeCtx.subagents.start(config.provider, {
             ...request,
+            // Foreground children bypass the continuable create path; apply the
+            // same standing budget clause here so every delegation inherits it.
+            prompt: withChildBudgetGuidance(request.prompt),
             signal: exec.signal,
           })
           return settleForegroundRun(run)

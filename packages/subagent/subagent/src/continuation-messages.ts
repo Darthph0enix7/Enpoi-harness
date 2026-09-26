@@ -111,9 +111,10 @@ export function withChildBudgetGuidance(prompt: ContentBlock[]): ContentBlock[] 
     ...prompt,
     {
       type: 'text',
-      text: `Delegation budget: use at most ${String(CHILD_TOOL_BUDGET)} tool calls unless the parent names a `
-        + 'different budget. Answer the question asked, cite the files and lines that ground it, and stop — do '
-        + 'not broaden the search, audit adjacent code, or re-verify what the answer already established.',
+      text: `Delegation budget: ${String(CHILD_TOOL_BUDGET)} tool calls is a ceiling for exploration, not a `
+        + 'counter to satisfy — most tasks finish well under it. Stop as soon as the answer is complete: cite '
+        + 'the files and lines that ground it and report. If you cannot answer inside the budget, report what '
+        + 'you tried and what is still missing instead of continuing.',
     },
   ]
 }

@@ -307,7 +307,8 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     name: 'glob',
     description: 'Find files, not directories, whose paths match a glob pattern, including hidden and ignored files. '
       + `Returns up to ${caps.maxResults} paths in modification-time order; a larger result ${overCapDescription} `
-      + 'and reports where the complete list was saved.',
+      + 'and reports where the complete list was saved. '
+      + 'Prefer this over `bash find`: the result is a bounded, sorted path list instead of a truncated shell blob.',
     parameters: {
       pattern: {
         type: 'string',

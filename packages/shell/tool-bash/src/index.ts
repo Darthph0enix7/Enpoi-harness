@@ -92,6 +92,7 @@ function bashDescription(): string {
     + 'Each call runs in a fresh shell; pass `workdir` instead of using `cd`. '
     + `Managed \`$${DSH_ENV_PREFIX}*\` variables expose current harness environment facts. `
     + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
+    + 'For reading a file or searching paths/content, prefer `read`, `grep`, or `glob`: their output is bounded and line-numbered, while shell output is truncated to its tail. '
     + 'Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.'
 }
 
