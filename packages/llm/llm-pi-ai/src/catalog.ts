@@ -14,6 +14,7 @@
 
 import { builtinProviders, getBuiltinModels, getBuiltinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { BuiltinProvider } from '@earendil-works/pi-ai/providers/all'
+import type { DiscoveredModelRecord } from './discovered.ts'
 import type {
   AnthropicMessagesCompat,
   Api,
@@ -630,6 +631,14 @@ export interface RouteCatalogRequest {
   models?: readonly PiAiModelProfile[]
   /** Installed-catalog customizations by model id; only meaningful while `models` is absent. */
   modelOverrides?: Readonly<Record<string, PiAiModelOverride>>
+  /**
+   * Models an endpoint listing disclosed for a route the installed catalog
+   * does not describe, when configuration lists none. The profile-side sync
+   * writes these to the discovered-model cache; they materialize through the
+   * same path as configured entries, with the route's defaults standing in
+   * for capacities and modalities nothing disclosed.
+   */
+  discoveredModels?: readonly DiscoveredModelRecord[]
   /** Route-level wire-compatibility switches, landing on each model whose protocol declares them; entries override per field. */
   compat?: PiAiCompatProfile
   /** Context capacity for a model neither the entry nor the catalog sizes. */
@@ -865,12 +874,27 @@ export function resolveRouteModels(
   // An override becomes the catalog entry's configuration, so everything a
   // models entry may declare — capacities, efforts, compat — resolves through
   // the same path with the same diagnostics and request-default semantics.
+  // Three sources answer "which models does this route serve?", in order:
+  // configuration, the installed catalog, and — only when neither says
+  // anything — the discovered cache. A discovered record contributes only what
+  // it disclosed; capacities and modalities nothing reported fall through to
+  // the route's defaults below, so an unverified model is never credited with
+  // a vision or reasoning capability it merely might have.
   const entries: readonly PiAiModelProfile[] = configured.length > 0
     ? configured
-    : [...defaults.values()].map(model => ({ id: model.id, ...overrides[model.id] }))
+    : defaults.size > 0
+      ? [...defaults.values()].map(model => ({ id: model.id, ...overrides[model.id] }))
+      : (request.discoveredModels ?? []).map(record => ({
+        id: record.id,
+        ...record.name === undefined ? {} : { name: record.name },
+        ...record.contextWindow === undefined ? {} : { contextWindow: record.contextWindow },
+        ...record.maxTokens === undefined ? {} : { maxTokens: record.maxTokens },
+        ...record.input === undefined ? {} : { input: [...record.input] },
+      }))
   if (entries.length === 0) {
     invalid(provider, 'resolves no models; the installed catalog does not describe this route, so its models'
-      + ' must be listed in configuration')
+      + ' must be listed in configuration, fetched from its endpoint\'s /models listing, or added manually on the'
+      + ' Models page')
   }
   const routeApi = sharedCatalogApi(defaults)
   // Vocabulary before protocols: a withheld or undeclared switch is refused

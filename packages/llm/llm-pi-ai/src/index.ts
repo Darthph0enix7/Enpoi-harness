@@ -79,6 +79,7 @@ import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 import type { StoredModelDiscoveryProfile } from './discovery.ts'
+import { discoveredModelsStamp } from './discovered.ts'
 import { registerPiAiFlows } from './login.ts'
 import { PoolEngine } from './pool.ts'
 
@@ -159,11 +160,15 @@ export function apply(ctx: Context, config: Config): void {
   ctx.inject(['settings'], (child) => { child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)) })
   const settingsNs = ctx.fiber.entry?.options.id ?? NS
   let lastRaw: ReturnType<Config['providers']['get']> | undefined
+  let lastStamp = ''
   let memoized: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
   /**
    * The resolved profiles for the current configuration, memoized by the raw
    * snapshot's identity — which is also what makes the adapter's own snapshot
-   * stable across operations that observe no change.
+   * stable across operations that observe no change. The discovered-model
+   * cache's file stamp joins the key: the sync plugin's hourly pass rewrites
+   * that file without touching configuration, and the routes it describes
+   * must appear on the next resolution rather than after a restart.
    *
    * Catalog diagnostics stay in the snapshot beside serviceable models, so
    * stored configuration remains visible after an installed catalog changes.
@@ -171,9 +176,11 @@ export function apply(ctx: Context, config: Config): void {
    */
   const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
     const raw = config.providers.get()
-    if (raw === lastRaw && memoized !== undefined) return memoized
+    const stamp = discoveredModelsStamp()
+    if (raw === lastRaw && stamp === lastStamp && memoized !== undefined) return memoized
     const next = resolveProfiles(structuredClone(raw) as import('./config.ts').Options['providers'], 'deferred')
     lastRaw = raw
+    lastStamp = stamp
     memoized = next
     return next
   }

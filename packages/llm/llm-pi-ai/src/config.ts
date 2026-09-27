@@ -42,6 +42,7 @@ import type {
   RouteCatalog,
 } from './catalog.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
+import { discoveredModelsFor } from './discovered.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -535,6 +536,7 @@ export function resolveProfiles(
     let catalog: RouteCatalog | undefined
     let piProvider: Provider | undefined
     let catalogError: string | undefined
+    const discovered = discoveredModelsFor(provider)
     try {
       catalog = resolveRouteModels({
         provider,
@@ -543,6 +545,10 @@ export function resolveProfiles(
         ...source.models === undefined ? {} : { models: source.models },
         ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
         ...source.compat === undefined ? {} : { compat: source.compat },
+        // Only a route no configured or installed model describes is answered
+        // from the discovered cache; the installed catalog always wins, so a
+        // pi-ai upgrade silently supersedes stale discovery.
+        ...discovered === undefined ? {} : { discoveredModels: discovered },
         defaultInput,
         defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
         defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
