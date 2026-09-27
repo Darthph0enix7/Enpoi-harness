@@ -62,23 +62,23 @@ export interface DiscoveredModelRecord {
   /** Model id the endpoint accepts. */
   readonly id: string
   /** Human-readable name, when one was disclosed. */
-  readonly name?: string
+  readonly name?: string | undefined
   /** Maximum combined request and response context, when disclosed. */
-  readonly contextWindow?: number
+  readonly contextWindow?: number | undefined
   /** Maximum output tokens, when disclosed. */
-  readonly maxTokens?: number
+  readonly maxTokens?: number | undefined
   /** Accepted input types; absent means undisclosed, never "text only" as a claim. */
-  readonly input?: readonly ('text' | 'image')[]
+  readonly input?: readonly ('text' | 'image')[] | undefined
   /** Whether the endpoint advertised tool calling; absent means undisclosed. */
-  readonly tools?: boolean
+  readonly tools?: boolean | undefined
   /** Whether the endpoint advertised reasoning; absent means undisclosed. */
-  readonly reasoning?: boolean
+  readonly reasoning?: boolean | undefined
   /** The listing's own price fields, kept verbatim for future consumers. */
-  readonly pricing?: Readonly<Record<string, string>>
+  readonly pricing?: Readonly<Record<string, string>> | undefined
   /** Whether the endpoint's directory marked the model free. */
-  readonly isFree?: boolean
+  readonly isFree?: boolean | undefined
   /** True when neither models.dev, the installed catalog, nor the listing disclosed any capability. */
-  readonly unverified?: boolean
+  readonly unverified?: boolean | undefined
   /** Provenance marker: this record came from an endpoint listing, not configuration. */
   readonly source: 'discovered'
   /** Epoch milliseconds of the discovery that produced this record's content. */
@@ -88,7 +88,7 @@ export interface DiscoveredModelRecord {
 /** One route's discovered models plus the fetch that produced them. */
 export interface DiscoveredRouteRecord {
   /** The endpoint that was interrogated, when the writer knew it. */
-  readonly baseURL?: string
+  readonly baseURL?: string | undefined
   /** Epoch milliseconds of the most recent successful fetch for the route. */
   readonly fetchedAt: number
   /** The normalized listing in endpoint order, deduplicated by id. */
