@@ -26,11 +26,14 @@ export function ApprovalRequestId(id: string): ApprovalRequestId {
 }
 
 /**
- * Closed approval outcomes: a one-shot grant, a one-shot grant plus a
- * standing allow-always decision, explicit rejection, withdrawn request, or
- * unavailable answerer. Callers fail closed on `unavailable`.
+ * Closed approval outcomes: a one-shot grant, the DEFAULT standing
+ * allow-always decision, the answerer's explicit BROAD standing decision (the
+ * card's separate "allow all" action, offered only when the asker supplies
+ * {@link ApprovalRequestEvent.broadAllow}), explicit rejection, withdrawn
+ * request, or unavailable answerer. Both standing outcomes grant the call;
+ * the asker decides what each pin covers. Callers fail closed on `unavailable`.
  */
-export type ApprovalOutcome = 'allowed-once' | 'allowed-always' | 'rejected' | 'cancelled' | 'unavailable'
+export type ApprovalOutcome = 'allowed-once' | 'allowed-always' | 'allowed-always-broad' | 'rejected' | 'cancelled' | 'unavailable'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -72,6 +75,12 @@ export interface ApprovalRequestEvent {
   readonly reason?: string
   /** Localized presentation only; never persisted in approval audit events. */
   readonly displayReason?: { readonly en: string; readonly [locale: string]: string }
+  /**
+   * Presentation-only offer of the explicit broad standing action: the card
+   * adds a separate "allow all {label}" button that answers
+   * `'allowed-always-broad'`. Absent means the card offers only once/default.
+   */
+  readonly broadAllow?: { readonly label: string }
   /** Cancellation lifetime of the pending request. */
   readonly signal?: AbortSignal
 }

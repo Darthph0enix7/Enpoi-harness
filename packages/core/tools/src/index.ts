@@ -612,7 +612,13 @@ export type PreToolDecision =
   | { kind: 'allow' }
   | { kind: 'deny'; reason: string; info?: ToolErrorInfo }
   | { kind: 'cancel' }
-  | { kind: 'ask'; reason?: string; displayReason?: { readonly en: string; readonly [locale: string]: string } }
+  | {
+    kind: 'ask'
+    reason?: string
+    displayReason?: { readonly en: string; readonly [locale: string]: string }
+    /** Presentation-only broad standing-grant offer forwarded to the approval card. */
+    broadAllow?: { readonly label: string }
+  }
 
 /**
  * Post-dispatch decision: accept, replace one projection, attach context for the
@@ -1757,11 +1763,16 @@ export class ToolRuntime extends Service {
       callId: exec.callId,
       ...ask.reason !== undefined ? { reason: ask.reason } : {},
       ...ask.displayReason !== undefined ? { displayReason: ask.displayReason } : {},
+      ...ask.broadAllow !== undefined ? { broadAllow: ask.broadAllow } : {},
       signal: exec.signal,
     })
     switch (outcome) {
       case 'allowed-once': return { decision: { kind: 'allow' }, approvalCancelled: false }
       case 'allowed-always': return { decision: { kind: 'allow' }, approvalCancelled: false }
+      // The explicit broad standing decision grants this call like the default
+      // one; what the pin covers is the asker's interpretation of its own
+      // proposal, not this generic seam's.
+      case 'allowed-always-broad': return { decision: { kind: 'allow' }, approvalCancelled: false }
       case 'rejected': return {
         decision: { kind: 'deny', reason: ask.reason === undefined
           ? `the user rejected tool "${exec.name}"`

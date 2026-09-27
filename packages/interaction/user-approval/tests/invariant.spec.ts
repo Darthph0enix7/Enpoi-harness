@@ -26,6 +26,9 @@ describe('approval invariants', () => {
     session.append('approval/asked', { id, toolName: 'bash' })
     session.append('approval/decided', { id, outcome: 'allowed-once' })
     session.append('approval/policy', { policy: 'never' })
+    const broad = ApprovalRequestId('ask-2')
+    session.append('approval/asked', { id: broad, toolName: 'bash' })
+    session.append('approval/decided', { id: broad, outcome: 'allowed-always-broad' })
   })
 
   it('rebuilds an unmatched question from an existing session', async () => {

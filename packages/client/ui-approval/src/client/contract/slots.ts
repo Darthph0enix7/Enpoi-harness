@@ -58,12 +58,14 @@ export interface ApprovalPresentationRequest {
   readonly reason?: string
   /** Localized presentation copy; the audit reason remains unchanged. */
   readonly displayReason?: { readonly en: string; readonly [locale: string]: string }
+  /** Broad standing-grant offer projected from the Host waterfall; the card labels its extra action with `label`. */
+  readonly broadAllow?: { readonly label: string }
   /** Cancellation projected from the Host waterfall. */
   readonly signal?: AbortSignal
 }
 
 /** Decisions this interactive Client presentation can return. */
-export type ApprovalDecision = 'allowed-once' | 'allowed-always' | 'rejected'
+export type ApprovalDecision = 'allowed-once' | 'allowed-always' | 'allowed-always-broad' | 'rejected'
 
 let nextApprovalKey = 0
 
@@ -84,6 +86,8 @@ export class PendingApproval {
   readonly reason: string | undefined
   /** Localized presentation copy, when supplied by the asker. */
   readonly displayReason: ApprovalPresentationRequest['displayReason']
+  /** Broad standing-grant offer, when the asker supplied one. */
+  readonly broadAllow: ApprovalPresentationRequest['broadAllow']
   /** Result returned by the Remote Event listener to the Host waterfall. */
   readonly result: Promise<ApprovalDecision>
 
@@ -106,6 +110,7 @@ export class PendingApproval {
     this.callId = request.callId
     this.reason = request.reason
     this.displayReason = request.displayReason
+    this.broadAllow = request.broadAllow
     const completion = Promise.withResolvers<ApprovalDecision>()
     this.result = completion.promise
     this.#resolve = completion.resolve

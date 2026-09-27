@@ -847,6 +847,27 @@ describe('ToolRuntime', () => {
       expect(seen[0]?.signal?.aborted).toBe(true)
     })
 
+    it('dispatches on the explicit broad standing grant and forwards the broad offer', async () => {
+      const ctx = await approvalSetup()
+      const agent = fakeAgent()
+      const seen: ApprovalRequest[] = []
+      ctx.on('approval/request', (req) => {
+        seen.push(req)
+        return Promise.resolve<ApprovalOutcome>('allowed-always-broad')
+      })
+      ctx.on('tools/pre-execute', async (_exec, _next): Promise<PreToolDecision> =>
+        ({ kind: 'ask', reason: 'bash rule "rm *" requires approval', broadAllow: { label: 'rm' } }))
+
+      const result = await ctx.tools.execute({
+        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
+      })
+
+      expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
+      expect(seen[0]).toMatchObject({
+        toolName: 'echo', callId: 'c1', broadAllow: { label: 'rm' },
+      })
+    })
+
     it('denies with the user-rejection reason on rejected', async () => {
       const ctx = await approvalSetup()
       ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('rejected'))

@@ -8,6 +8,7 @@ export const zh = {
   reject: '拒绝',
   allowOnce: '允许一次',
   allowAlways: '始终允许',
+  allowAll: '全部允许 {label}',
 } satisfies Record<string, string>
 
 /** Approval dictionary key union. */
@@ -21,4 +22,5 @@ export const en = {
   reject: 'Reject',
   allowOnce: 'Allow once',
   allowAlways: 'Always allow',
+  allowAll: 'Allow all {label}',
 } satisfies Record<ApprovalKey, string>

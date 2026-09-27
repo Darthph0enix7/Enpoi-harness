@@ -346,12 +346,17 @@ function panelProps(
     escalation: `Tool ${pending.toolName} asks`,
     reject: 'Reject',
     allowOnce: 'Allow once',
+    allowAlways: 'Always allow',
+    allowAll: 'Allow all {label}',
   }
   return {
     matched: pending,
     renderSlot,
     resolveReason: (reason: NonNullable<PendingApproval['displayReason']>) => reason.en,
-    t: (key: string) => messages[key] ?? key,
+    t: (key: string, params?: Record<string, string>) => {
+      const text = messages[key] ?? key
+      return Object.entries(params ?? {}).reduce((out, [name, value]) => out.replaceAll(`{${name}}`, value), text)
+    },
   } as ApprovalComposerProps
 }
 
@@ -392,6 +397,21 @@ describe('ApprovalPanel', () => {
     expect(document.querySelector('[data-approval-key]')?.getAttribute('aria-busy')).toBe('true')
 
     await expect(pending.result).resolves.toBe('allowed-once')
+  })
+
+  it('offers the labelled broad action only when the ask supplies one', async () => {
+    const plain = new PendingApproval(id('s1'), { toolName: 'bash' })
+    const plainView = render(<ApprovalPanel {...panelProps(plain)} />)
+    expect(screen.queryByRole('button', { name: 'Allow all rm' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Always allow' })).toBeTruthy()
+    plainView.unmount()
+
+    const pending = new PendingApproval(id('s1'), { toolName: 'bash', broadAllow: { label: 'rm' } })
+    render(<ApprovalPanel {...panelProps(pending)} />)
+    expect(screen.getByRole('button', { name: 'Allow all rm' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Allow all rm' }))
+
+    await expect(pending.result).resolves.toBe('allowed-always-broad')
   })
 
   it('keeps the audit reason intact and follows the UI language for presentation copy', () => {
