@@ -15,7 +15,11 @@
 #      --source for a local path/tarball/URL) into  <prefix>/harness/<version>;
 #   4. pnpm install --frozen-lockfile + pnpm run build (host), then the
 #      profile's own plugin build when the profile ships one;
-#   5. seeds $DSH_HOME from the shipped templates (initProfile path), installs
+#   5. when --profile-source / DSH_PROFILE_SOURCE names the companion profile
+#      (default: the Enpoi web profile repo for --profile web), fetches it into
+#      $DSH_HOME/profiles/<name> before the template seed, seeds the shared
+#      settings/presets/skills, and installs the profile's dependencies;
+#   6. seeds $DSH_HOME from the shipped templates (initProfile path), installs
 #      the `dsh` shim into ~/.local/bin, and prints the PATH line (only writes
 #      the shell rc when --write-rc is given).
 #
@@ -44,6 +48,7 @@ DSH_MIN_NODE_MINOR=19
 INSTALL_TIMEOUT="${DSH_INSTALL_TIMEOUT:-1800}"
 BUILD_TIMEOUT="${DSH_BUILD_TIMEOUT:-3600}"
 PROFILE_BUILD_TIMEOUT="${DSH_PROFILE_BUILD_TIMEOUT:-1200}"
+PROFILE_INSTALL_TIMEOUT="${DSH_PROFILE_INSTALL_TIMEOUT:-900}"
 
 # ── Defaults (empty means "fill from state / default" below) ────────────────
 PREFIX="${PREFIX:-}"
@@ -52,6 +57,12 @@ SOURCE=""
 SOURCE_URL=""
 REF=""
 PROFILE=""
+PROFILE_SOURCE="${DSH_PROFILE_SOURCE:-}"
+PROFILE_REF="${DSH_PROFILE_REF:-}"
+PROFILE_TOKEN="${DSH_PROFILE_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+PROFILE_SOURCE_REQUIRED=0
+PROFILE_STAGE=""
+DEFAULT_PROFILE_SOURCE="${DSH_DEFAULT_PROFILE_SOURCE:-https://github.com/Darthph0enix7/dsh-enpoi-web-profile.git}"
 BIN_DIR=""
 SERVICE_UNIT=""
 MERGE_BASELINE=""
@@ -106,6 +117,10 @@ Options:
                       (default: the GitHub archive of the channel ref)
   --ref REF           override the git ref fetched from GitHub (default: channel)
   --profile NAME      profile to seed (default: web)
+  --profile-source SRC  companion profile: local dir, local tarball, tarball
+                      URL, or git URL (default for --profile web: the Enpoi
+                      profile repo; empty disables the profile fetch)
+  --profile-ref REF   git ref fetched from a git profile source (default: HEAD)
   --service-unit U    systemd user unit / launchd label to restart on update
                       (default: auto-detected only when it references --prefix)
   --merge-baseline F  run the profile's three-way merge engine against F
@@ -124,12 +139,17 @@ Environment:
   DSH_NODE_VERSION                   Node version fetched when PATH has none
   DSH_INSTALL_TIMEOUT/BUILD_TIMEOUT  command budgets in seconds
   DSH_HOME                           harness home (default: $HOME/.dsh)
+  DSH_PROFILE_SOURCE / DSH_PROFILE_REF   profile source and git ref
+  DSH_PROFILE_TOKEN                  bearer token for a private profile source
+                                     (falls back to GH_TOKEN / GITHUB_TOKEN / gh)
+  DSH_DEFAULT_PROFILE_SOURCE         built-in default profile source
+  DSH_PROFILE_INSTALL_TIMEOUT        profile `pnpm install` budget in seconds
 
 Exit codes: 0 success, 1 failure (update rolls back first), 42 sudo trap fired.
 USAGE
 }
 
-trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi' EXIT
+trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -148,6 +168,10 @@ while [ "$#" -gt 0 ]; do
     --ref=*) REF="${arg#*=}"; shift;;
     --profile) need_value "$@"; PROFILE="$2"; shift 2;;
     --profile=*) PROFILE="${arg#*=}"; shift;;
+    --profile-source) need_value "$@"; PROFILE_SOURCE="$2"; shift 2;;
+    --profile-source=*) PROFILE_SOURCE="${arg#*=}"; shift;;
+    --profile-ref) need_value "$@"; PROFILE_REF="$2"; shift 2;;
+    --profile-ref=*) PROFILE_REF="${arg#*=}"; shift;;
     --service-unit) need_value "$@"; SERVICE_UNIT="$2"; shift 2;;
     --service-unit=*) SERVICE_UNIT="${arg#*=}"; shift;;
     --merge-baseline) need_value "$@"; MERGE_BASELINE="$2"; shift 2;;
@@ -521,6 +545,178 @@ run_profile_plugin_build() {
   return 0
 }
 
+# ── Companion profile source (distribution) ─────────────────────────────────
+# The profile is a separate versioned repo: plugin sources, patches, presets,
+# skills, and build scripts. The installer fetches it into $DSH_HOME/profiles/
+# <name> before the template seed, never overwrites user state (`settings.yaml`,
+# `cordis.patch.yml`, `device-patches/`), and installs its dependencies.
+profile_source_kind() { # src -> dir|tarball|git|unknown
+  local src="$1"
+  if [ -d "$src" ]; then printf 'dir'; return 0; fi
+  if [ -f "$src" ]; then printf 'tarball'; return 0; fi
+  case "$src" in
+    *.tar.gz|*.tgz|*.tar|*.zip) printf 'tarball';;
+    *.git) printf 'git';;
+    http://*|https://*) printf 'git';;
+    git://*|ssh://*|git@*) printf 'git';;
+    *) printf 'unknown';;
+  esac
+}
+
+resolve_profile_token() {
+  if [ -z "$PROFILE_TOKEN" ] && command -v gh >/dev/null 2>&1; then
+    PROFILE_TOKEN="$(run_limited 10 gh auth token 2>/dev/null || true)"
+  fi
+  return 0
+}
+
+profile_auth_header() { # HTTP Basic with x-access-token, for private GitHub sources
+  [ -n "$PROFILE_TOKEN" ] || return 0
+  local b64
+  b64="$(printf 'x-access-token:%s' "$PROFILE_TOKEN" | base64 2>/dev/null | tr -d '\n')"
+  [ -n "$b64" ] || return 0
+  printf 'Authorization: Basic %s' "$b64"
+}
+
+stage_profile_source() { # src kind stage
+  local src="$1" kind="$2" stage="$3" tarball args
+  case "$kind" in
+    dir)
+      ( cd "$src" && tar -cf - --exclude='./.git' --exclude='.git' \
+          --exclude='./node_modules' --exclude='node_modules' --exclude='*/node_modules' . ) \
+        | tar -C "$stage" -xf - || return 1
+      ;;
+    tarball)
+      tarball="$src"
+      if [ ! -f "$tarball" ]; then
+        tarball="$stage/.profile-download"
+        if [ -n "$PROFILE_TOKEN" ]; then
+          curl -fsSL --retry 2 --connect-timeout 20 -H "$(profile_auth_header)" "$src" -o "$tarball" || return 1
+        else
+          curl -fsSL --retry 2 --connect-timeout 20 "$src" -o "$tarball" || return 1
+        fi
+      fi
+      tar -xzf "$tarball" -C "$stage" --strip-components=1 2>/dev/null \
+        || tar -xf "$tarball" -C "$stage" || return 1
+      [ "$tarball" = "$src" ] || rm -f "$tarball"
+      ;;
+    git)
+      args=(-c advice.detachedHead=false)
+      [ -n "$PROFILE_TOKEN" ] && args+=(-c "http.extraheader=$(profile_auth_header)")
+      args+=(clone --depth 1)
+      [ -n "$PROFILE_REF" ] && args+=(--branch "$PROFILE_REF")
+      GIT_TERMINAL_PROMPT=0 run_limited 600 git "${args[@]}" "$src" "$stage" || return 1
+      ;;
+    *)
+      warn "unsupported profile source: $src"; return 1;;
+  esac
+  return 0
+}
+
+copy_profile_tree() { # src dst mode(seed|refresh)
+  # seed: first install, all shipped files land (the dir is fresh).
+  # refresh: user state survives — settings.yaml, cordis.patch.yml (the
+  # config-editor document), device-patches/, node_modules/, backups.
+  local src="$1" dst="$2" mode="${3:-seed}" rel d
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    case "$rel" in
+      .git|.git/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*) continue;;
+      .backup-*|.backup-*/*) continue;;
+      settings.yaml|device-patches|device-patches/*) continue;;
+      fresh-settings.yaml|fish|fish/*|presets|presets/*|skills|skills/*|systemd|systemd/*) continue;;
+    esac
+    if [ "$mode" = refresh ]; then
+      case "$rel" in cordis.patch.yml) continue;; esac
+    fi
+    d="$dst/$rel"
+    if [ -d "$src/$rel" ]; then
+      mkdir -p "$d" || return 1
+    else
+      mkdir -p "$(dirname "$d")" || return 1
+      cp -p "$src/$rel" "$d" || return 1
+    fi
+  done < <( cd "$src" && find . -mindepth 1 -print0 )
+  return 0
+}
+
+seed_file_once() { # src dst
+  local src="$1" dst="$2"
+  [ -f "$src" ] || return 0
+  [ -f "$dst" ] && return 0
+  mkdir -p "$(dirname "$dst")" 2>/dev/null || return 0
+  if cp -p "$src" "$dst" 2>/dev/null; then log "seeded $dst"; fi
+  return 0
+}
+
+seed_dir_once() { # src-dir dst-dir
+  local src="$1" dst="$2" rel
+  [ -d "$src" ] || return 0
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    seed_file_once "$src/$rel" "$dst/$rel"
+  done < <( cd "$src" && find . -type f -print0 )
+  return 0
+}
+
+seed_profile_home() { # stage
+  local stage="$1" fish_dir="$HOME/.config/fish"
+  seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
+  seed_dir_once "$stage/presets" "$DSH_HOME/.agent-presets"
+  seed_dir_once "$stage/skills" "$DSH_HOME/skills"
+  if [ -d "$fish_dir" ]; then
+    seed_file_once "$stage/fish/ds.fish" "$fish_dir/functions/ds.fish"
+    seed_file_once "$stage/fish/completions/ds.fish" "$fish_dir/completions/ds.fish"
+  fi
+  return 0
+}
+
+prepare_profile() {
+  [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; return 0; }
+  local kind rc=0 mode=seed
+  kind="$(profile_source_kind "$PROFILE_SOURCE")"
+  log "profile source: $PROFILE_SOURCE ($kind)"
+  PROFILE_STAGE="$PREFIX/harness/.profile-staging-$$"
+  rm -rf "$PROFILE_STAGE"
+  mkdir -p "$PROFILE_STAGE" || return 1
+  resolve_profile_token
+  stage_profile_source "$PROFILE_SOURCE" "$kind" "$PROFILE_STAGE" || rc=1
+  if [ "$rc" = 0 ] && [ ! -f "$PROFILE_STAGE/package.json" ]; then
+    flatten_stage "$PROFILE_STAGE"
+    [ -f "$PROFILE_STAGE/package.json" ] || rc=1
+  fi
+  if [ "$rc" != 0 ]; then
+    rm -rf "$PROFILE_STAGE"; PROFILE_STAGE=""
+    if [ "$PROFILE_SOURCE_REQUIRED" = 1 ]; then die "profile fetch failed: $PROFILE_SOURCE"; fi
+    warn "profile fetch failed: $PROFILE_SOURCE (continuing with the shipped template)"
+    return 0
+  fi
+  resolve_home
+  [ -f "$PROFILE_DIR/package.json" ] && mode=refresh
+  log "profile seed: $PROFILE_DIR ($mode)"
+  if ! copy_profile_tree "$PROFILE_STAGE" "$PROFILE_DIR" "$mode"; then
+    warn "profile seed did not complete for $PROFILE_DIR"
+  fi
+  seed_profile_home "$PROFILE_STAGE"
+  rm -rf "$PROFILE_STAGE"; PROFILE_STAGE=""
+  return 0
+}
+
+profile_install() {
+  resolve_home
+  [ -n "$PROFILE_SOURCE" ] || return 0
+  [ -f "$PROFILE_DIR/package.json" ] || { log "profile deps: no package.json at $PROFILE_DIR; skipping"; return 0; }
+  if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
+  [ -n "$PNPM" ] || { warn "profile deps: no pnpm available"; return 1; }
+  export HARNESS_ROOT="${HARNESS:-$PREFIX/harness/current}"
+  log "profile deps: pnpm install in $PROFILE_DIR (minutes)"
+  if ! ( cd "$PROFILE_DIR" && run_limited "$PROFILE_INSTALL_TIMEOUT" "$PNPM" install ) >&2; then
+    warn "profile pnpm install failed"
+    return 1
+  fi
+  return 0
+}
+
 # ── Shim, state, rc ─────────────────────────────────────────────────────────
 write_shim() {
   local body tmp
@@ -577,6 +773,8 @@ write_state() {
     printf '  "source": "%s",\n' "$(json_escape "$SOURCE")"
     printf '  "sourceUrl": "%s",\n' "$(json_escape "$SOURCE_URL")"
     printf '  "profile": "%s",\n' "$(json_escape "$PROFILE")"
+    printf '  "profileSource": "%s",\n' "$(json_escape "$PROFILE_SOURCE")"
+    printf '  "profileRef": "%s",\n' "$(json_escape "$PROFILE_REF")"
     printf '  "binDir": "%s",\n' "$(json_escape "$BIN_DIR")"
     printf '  "dshHome": "%s",\n' "$(json_escape "$DSH_HOME")"
     printf '  "node": "%s",\n' "$(json_escape "$NODE")"
@@ -693,6 +891,7 @@ write_diagnostics() { # status
 
 run_migrations() {
   seed_home || return 1
+  profile_install || return 1
   run_profile_plugin_build || return 1
   local engine="$PROFILE_DIR/scripts/dsh-sync-merge.mjs" m rc
   if [ -n "$MERGE_BASELINE" ] && [ -f "$engine" ]; then
@@ -770,11 +969,12 @@ selfcheck() {
 # ── JSON / summary output ───────────────────────────────────────────────────
 emit_json() { # action ok
   [ "$JSON_OUT" = 1 ] || return 0
-  printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}}\n' \
+  printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "profileSource": "%s", "profileRef": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}}\n' \
     "$2" "$1" "$DRY_RUN" "$(json_escape "$PREFIX")" "$(json_escape "$VERSION")" "$(json_escape "${PREV_VERSION:-}")" \
     "$(json_escape "$CHANNEL")" "$(json_escape "$SOURCE")" "$(json_escape "$SOURCE_URL")" "$(json_escape "$HARNESS")" \
     "$(json_escape "$PREFIX/harness/current")" "$(json_escape "$NODE")" "$(json_escape "$NODE_ORIGIN")" "$(json_escape "$PNPM")" \
-    "$(json_escape "$DSH_HOME")" "$(json_escape "$PROFILE")" "$(json_escape "$SERVICE_UNIT")" "$(json_escape "$BACKFILL")" \
+    "$(json_escape "$DSH_HOME")" "$(json_escape "$PROFILE")" "$(json_escape "$PROFILE_SOURCE")" "$(json_escape "$PROFILE_REF")" \
+    "$(json_escape "$SERVICE_UNIT")" "$(json_escape "$BACKFILL")" \
     "$ROLLED_BACK" "$CHECK_VERSION" "$CHECK_HELP" "$CHECK_SMOKE" "$(json_escape "$CHECK_AUDIT")"
   return 0
 }
@@ -791,6 +991,7 @@ print_summary() { # action
   say "  pnpm:      ${PNPM} (corepack)"
   say "  dsh home:  ${DSH_HOME} (seeded only; your files are never overwritten)"
   say "  profile:   ${PROFILE}"
+  if [ -n "$PROFILE_SOURCE" ]; then say "  profile source: ${PROFILE_SOURCE}"; else say "  profile source: (none; shipped template)"; fi
   say "  shim:      ${BIN_DIR}/dsh"
   say ""
   say "Add to PATH:  export PATH=\"${BIN_DIR}:\$PATH\""
@@ -807,6 +1008,7 @@ dry_run_plan() {
   say "  bin dir:   $BIN_DIR"
   say "  channel:   $CHANNEL (ref: $ref)"
   if [ -n "$SOURCE" ]; then say "  source:    $SOURCE"; else say "  source:    $DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"; fi
+  if [ -n "$PROFILE_SOURCE" ]; then say "  profile:   $PROFILE (source: $PROFILE_SOURCE)"; else say "  profile:   $PROFILE (shipped template)"; fi
   if detect_os_arch >/dev/null 2>&1; then :; fi
   if resolve_node 0 >/dev/null 2>&1; then
     say "  node:      $NODE ($NODE_ORIGIN)"
@@ -819,7 +1021,8 @@ dry_run_plan() {
     [ -n "$v" ] && say "  version:   $v"
   fi
   say "  steps:     fetch -> pnpm install --frozen-lockfile -> pnpm run build"
-  say "             -> seed \$DSH_HOME (initProfile) -> profile plugin build (if present)"
+  say "             -> fetch+seed profile (if a source is set) -> seed \$DSH_HOME (initProfile)"
+  say "             -> profile deps (pnpm install) -> profile plugin build (if present)"
   say "             -> shim $BIN_DIR/dsh -> install-state.json"
   [ "$WRITE_RC" = 1 ] && say "  rc:        would add the PATH line to ~/.profile / fish config"
   [ "$UPDATE_MODE" = 1 ] && say "  update:    migrations -> switch current -> service (if unit) -> backfill (if present) -> self-check -> rollback on failure"
@@ -845,7 +1048,9 @@ do_install() {
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
   fi
   ln -sfn "$VERSION" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $VERSION"
+  prepare_profile
   seed_home
+  profile_install || die "profile dependency install failed"
   run_profile_plugin_build || die "profile plugin build failed"
   write_shim || die "could not write the dsh shim into $BIN_DIR"
   [ "$WRITE_RC" = 1 ] && write_rc
@@ -909,6 +1114,8 @@ do_update() {
   if [ -z "$SOURCE" ]; then SOURCE="$(json_field "$state" source)"; fi
   if [ -z "$REF" ]; then REF="$(json_field "$state" ref)"; fi
   if [ -z "$PROFILE" ]; then PROFILE="$(json_field "$state" profile)"; [ -n "$PROFILE" ] || PROFILE=web; fi
+  if [ -z "$PROFILE_SOURCE" ]; then PROFILE_SOURCE="$(json_field "$state" profileSource)"; fi
+  if [ -z "$PROFILE_REF" ]; then PROFILE_REF="$(json_field "$state" profileRef)"; fi
   if [ -z "$BIN_DIR" ]; then BIN_DIR="$(json_field "$state" binDir)"; [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"; fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(json_field "$state" serviceUnit)"; fi
   resolve_home
@@ -929,7 +1136,8 @@ do_update() {
     say "dsh update dry run (no writes)"
     say "  active:   $current ($CHANNEL channel)"
     [ -n "$target_value" ] && say "  target:   $target_value"
-    say "  steps:    install+build -> migrations -> switch current -> service restart ($([ -n "$SERVICE_UNIT" ] && printf '%s' "$SERVICE_UNIT" || printf 'none recorded')) -> backfill -> self-check"
+    if [ -n "$PROFILE_SOURCE" ]; then say "  profile:  $PROFILE (source: $PROFILE_SOURCE)"; else say "  profile:  $PROFILE (no recorded source)"; fi
+    say "  steps:    fetch -> install+build -> profile refresh+deps -> migrations -> switch current -> service restart ($([ -n "$SERVICE_UNIT" ] && printf '%s' "$SERVICE_UNIT" || printf 'none recorded')) -> backfill -> self-check"
     say "  rollback: current link + user-file backups would be restored on failure"
     emit_json update 1
     return 0
@@ -949,7 +1157,10 @@ do_update() {
     fi
     log "already up to date at $VERSION; nothing to fetch/build"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
+    prepare_profile
     seed_home
+    profile_install || warn "profile dependency refresh failed"
+    run_profile_plugin_build || warn "profile plugin build failed"
     if ! selfcheck; then
       warn "self-check of the active tree failed"
       emit_json noop 0
@@ -975,6 +1186,7 @@ do_update() {
     emit_json update 0
     exit 1
   fi
+  prepare_profile
   if ! run_migrations; then
     warn "migrations failed before switching; $current remains active"
     write_diagnostics migrations-failed
@@ -1004,6 +1216,10 @@ if [ -z "$BIN_DIR" ]; then BIN_DIR="$HOME/.local/bin"; fi
 if [ "$UPDATE_MODE" = 0 ]; then
   if [ -z "$CHANNEL" ]; then CHANNEL=stable; fi
   if [ -z "$PROFILE" ]; then PROFILE=web; fi
+  if [ -n "$PROFILE_SOURCE" ]; then PROFILE_SOURCE_REQUIRED=1; fi
+  if [ -z "$PROFILE_SOURCE" ] && [ "$PROFILE" = web ] && [ -n "$DEFAULT_PROFILE_SOURCE" ]; then
+    PROFILE_SOURCE="$DEFAULT_PROFILE_SOURCE"
+  fi
 else
   if [ -z "$CHANNEL" ]; then CHANNEL=stable; fi
   if [ -z "$PROFILE" ]; then PROFILE=web; fi

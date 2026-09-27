@@ -19,6 +19,26 @@ it('persists a model edit, updates the real consumer without remounting, and res
   expect(restored.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'changed' })
 })
 
+it('drops a retired chain the live row carries when a settings write merges it', async () => {
+  const { ctx, profile, start } = await fixture()
+  await ctx.fiber.dispose()
+  // A previous model pick left the retired group in the live seat row.
+  writeFileSync(profile.patchPath, JSON.stringify([
+    { id: 'default-model', name: 'cordis:model', config: { provider: 'test', model: 'original', chain: 'free' } },
+  ]))
+  const restored = await start()
+  restored.provide('modelChains', {
+    resolve: (id: string) => id === 'stable' ? { id, links: [{ provider: 'p', model: 'm' }] } : undefined,
+  })
+  expect(restored.agentDefaultModel.currentSelection()).toMatchObject({ chain: 'free' })
+  await restored.settings.update('default-model', { model: 'changed' })
+  expect(restored.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'changed' })
+  expect(readFileSync(profile.patchPath, 'utf8')).not.toContain('chain')
+  await restored.settings.update('default-model', { chain: 'stable' })
+  expect(restored.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'changed', chain: 'stable' })
+  expect(readFileSync(profile.patchPath, 'utf8')).toContain('chain: stable')
+})
+
 it('isolates instances, hides ordinary fields, rejects invalid edits, and redacts secrets', async () => {
   const { ctx, profile } = await fixture()
   const before = readFileSync(profile.patchPath, 'utf8')

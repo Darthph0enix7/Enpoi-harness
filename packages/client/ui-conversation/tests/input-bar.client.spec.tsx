@@ -190,19 +190,21 @@ function bench(over?: BenchOptions) {
     if (key === 'conversation.input.activity') return over?.activityEntry?.(owner as InputActivityOwnerProps) ?? null
     return null
   }) as never
+  const statusesStore = createSnapshotStore<ReadonlyMap<SessionId, SessionStatus>>(over?.statuses ?? new Map<SessionId, SessionStatus>())
+  const sessionsStore = createSnapshotStore<SessionListState>(over?.sessions ?? {
+    ids: [], byId: {}, phase: 'ready',
+    projectionsBySession: {},
+  })
   const props: InputBarProps = {
     usePanelInfo: selector => selector({ activePanelId: null }),
     sessionId: SID,
     SessionProvider: ({ children }) => children,
     useSession: bindSnapshotSelector(session),
     useConversation: bindSnapshotSelector(createSnapshotStore(conversationFixture())),
-    useSessionStatus: bindSnapshotSelector(createSnapshotStore(over?.statuses ?? new Map<SessionId, SessionStatus>())),
+    useSessionStatus: bindSnapshotSelector(statusesStore),
     useSessionRetainInfo: () => undefined,
     useResource,
-    useSessions: bindSnapshotSelector(createSnapshotStore<SessionListState>(over?.sessions ?? {
-      ids: [], byId: {}, phase: 'ready',
-      projectionsBySession: {},
-    })),
+    useSessions: bindSnapshotSelector(sessionsStore),
     useWorkspaces: bindSnapshotSelector(createSnapshotStore({
       items: [], archivedSessionIds: [], pinnedSessionIds: [], state: 'idle', phase: 'ready', error: null,
     })),
@@ -269,7 +271,7 @@ function bench(over?: BenchOptions) {
   const interruptButton = view.container.querySelector<HTMLButtonElement>('button[aria-label="停止生成"]')
   return {
     view, textarea, button, interruptButton, props, sink, shell, wiring: shell, session, stop, stopAll, removeAttachment, slotCalls,
-    menuLauncher, busyEnter, stopShortcut,
+    menuLauncher, busyEnter, stopShortcut, statusesStore, sessionsStore,
     steerQueue: over?.steerQueue,
     get placeholder() { return placeholderOf(view.container) },
     get inputDisabled() { return textarea.getAttribute('aria-disabled') === 'true' },
@@ -968,6 +970,51 @@ describe('running and lock semantics', () => {
     // A descendant whose list row says running still needs a live status/live
     // row combination; the distant unrelated root never counts either.
     expect(stopAll).not.toHaveBeenCalled()
+  })
+
+  it('keeps stop-all offered after the main turn settles while descendants stay live', () => {
+    const rows = [childRow('child-a', SID, true), childRow('child-b', SID, true)]
+    const sessions: SessionListState = {
+      ids: rows.map(row => row.id),
+      phase: 'ready',
+      projectionsBySession: {},
+      byId: Object.fromEntries(rows.map(row => [row.id, row])) as SessionListState['byId'],
+    }
+    const live = new Map<SessionId, SessionStatus>([
+      ['child-a' as SessionId, { running: true, pendingInteraction: undefined, completionUnread: false }],
+      ['child-b' as SessionId, { running: true, pendingInteraction: undefined, completionUnread: false }],
+    ])
+    // The regression: the main turn is idle (a detach), the children still run.
+    const { view, stopAll, statusesStore } = bench({ running: false, sessions, statuses: live })
+    expect(view.getByRole('button', { name: '发送消息' })).not.toBeNull()
+    expect(view.getByRole('button', { name: '停止全部智能体（2 个运行中）' })).not.toBeNull()
+
+    // The badge follows the live count as one child settles.
+    act(() => {
+      statusesStore.set(new Map([
+        ['child-a' as SessionId, { running: true, pendingInteraction: undefined, completionUnread: false }],
+        ['child-b' as SessionId, { running: false, pendingInteraction: undefined, completionUnread: false }],
+      ]))
+    })
+    expect(view.getByRole('button', { name: '停止全部智能体（1 个运行中）' })).not.toBeNull()
+
+    fireEvent.click(view.getByRole('button', { name: '停止全部智能体（1 个运行中）' }))
+    fireEvent.click(view.getByRole('menuitem', { name: '停止全部智能体（1 个运行中）' }))
+    expect(stopAll).toHaveBeenCalledTimes(1)
+
+    // Stop-all parks every child: the split control leaves with the count.
+    act(() => {
+      statusesStore.set(new Map([
+        ['child-a' as SessionId, { running: false, pendingInteraction: undefined, completionUnread: false }],
+        ['child-b' as SessionId, { running: false, pendingInteraction: undefined, completionUnread: false }],
+      ]))
+    })
+    expect(view.queryByRole('button', { name: /停止全部智能体/ })).toBeNull()
+  })
+
+  it('hides stop-all on an idle composer with no live descendant', () => {
+    const { view } = bench({ running: false })
+    expect(view.queryByRole('button', { name: /停止全部智能体/ })).toBeNull()
   })
 
   it('running Send follows the busy-state Steer preference and labels the delivery', () => {

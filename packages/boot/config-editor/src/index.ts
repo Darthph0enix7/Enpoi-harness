@@ -22,6 +22,65 @@ function flatten(rows: EntryOptions[]): EntryOptions[] {
   return rows.flatMap(row => [row, ...row.group && Array.isArray(row.config) ? flatten(row.config as EntryOptions[]) : []])
 }
 
+/** Structural view of the optional `modelChains` registry the LLM runtime reads. */
+export interface ModelChainRegistry {
+  /**
+   * Resolve one model-group id.
+   * @param id - group id a config's `chain` field carries.
+   * @returns the group when it is routable; `undefined` for unknown, disabled, or malformed ids.
+   */
+  resolve(id: string): unknown
+}
+
+/** Whether one value is a non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Drop every `chain` reference the LLM runtime cannot route. The runtime
+ * resolves a carried group through the optional `modelChains` registry and
+ * fails open when that registry is absent, the id is unknown or disabled, or
+ * resolution throws, so persisting such a reference would record a route that
+ * never runs — and a stale reference in a live config survives a merge that
+ * does not set `chain` itself, which is how a retired group id reappears.
+ * @param config - candidate entry config about to be persisted.
+ * @param registry - optional `modelChains` service read from the owning Context.
+ * @param onDrop - diagnostic per removed reference; receives its config path and raw value.
+ * @returns a detached config without unusable `chain` references.
+ */
+export function pruneUnusableChains(
+  config: Record<string, unknown>,
+  registry: ModelChainRegistry | undefined,
+  onDrop: (path: string, value: string) => void,
+): Record<string, unknown> {
+  const usable = (value: unknown): boolean => {
+    if (typeof value !== 'string' || value.trim() === '') return false
+    if (registry === undefined || typeof registry.resolve !== 'function') return false
+    try {
+      return registry.resolve(value.trim()) !== undefined
+    } catch {
+      // A throwing registry is unusable like an unknown id; the runtime fails open the same way.
+      return false
+    }
+  }
+  const walk = (value: unknown, path: string): unknown => {
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, `${path}[${String(index)}]`))
+    if (!isRecord(value)) return value
+    const result: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path === '' ? key : `${path}.${key}`
+      if (key === 'chain' && !usable(child)) {
+        onDrop(childPath, typeof child === 'string' ? child : String(child))
+        continue
+      }
+      result[key] = walk(child, childPath)
+    }
+    return result
+  }
+  return walk(config, '') as Record<string, unknown>
+}
+
 /** Persist complete raw configs and apply them through the normal Loader path. */
 export class ConfigEditor extends Service {
   static inject = ['loader', 'profileContext']
@@ -120,6 +179,7 @@ export class ConfigEditor extends Service {
   }
 
   /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
+   * References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.
    * @param entry Current Loader entry, also used to detect replacement during the write.
    * @param change Derive a raw config from the current entry and its inherited layer.
    * @returns Fulfillment after Loader reconciliation completes.
@@ -137,7 +197,16 @@ export class ConfigEditor extends Service {
         if (!this.entries().includes(entry)) throw new Error('Configuration entry changed during reload')
         const current = structuredClone((entry.options.config ?? {}) as Record<string, unknown>)
         const inherited = this.inherited(entry, loadProfileDirectory('dsh', this.ownerContext.profileContext.dir, this.ownerContext.profileContext.installAnchor))
-        const next = change(current, inherited)
+        // Every profile write re-applies this idempotent check, so a stale
+        // `chain` reference a merge would otherwise carry over is repaired on
+        // the write that would have resurrected it — not only at boot.
+        const next = pruneUnusableChains(
+          change(current, inherited),
+          this.ownerContext.get('modelChains') as ModelChainRegistry | undefined,
+          (fieldPath, value) => {
+            this.ownerContext.logger.warn(`config-editor: dropped unusable chain "${value}" at ${fieldPath} of "${entry.options.id}": the model group is disabled, unknown, or unregistered`)
+          },
+        )
         const fiber = entry.fiber
         if (fiber.state !== FiberState.ACTIVE) throw new Error('Configuration plugin is no longer active')
         const resolved: unknown = fiber.ctx.waterfall(fiber, 'internal/config', next, () => next)

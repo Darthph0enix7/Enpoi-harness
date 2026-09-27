@@ -47,7 +47,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### Read and change the default
 
-`currentSelection()` returns a detached `{ provider, model, reasoningEffort? }` for a newly created agent; `saveSelection()` stores the complete selection for later agents.
+`currentSelection()` returns a detached `{ provider, model, reasoningEffort? }` for a newly created agent; `saveSelection()` stores the complete selection for later agents. A `chain` the optional `modelChains` registry cannot route is dropped with a warning before the profile write, so a pick that echoes a retired group cannot persist the reference.
 
 ```text
 const selection = ctx.agentDefaultModel.currentSelection()

@@ -1,4 +1,5 @@
 /** Default model references remain live without a settings service. */
+import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import DefaultModel from '../src/index.ts'
@@ -30,6 +31,23 @@ it('persists complete selections through its owning profile entry', async () => 
   await standalone.plugin(DefaultModel, { provider: 'test', model: 'original' })
   await standalone.agentDefaultModel.saveSelection({ provider: 'test', model: 'ignored' })
   expect(standalone.agentDefaultModel.currentSelection().model).toBe('original')
+})
+
+it('drops a selection that echoes a group the runtime cannot route', async () => {
+  const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
+  const { ctx, profile } = await configurationFixture({ hmr: false })
+  ctx.provide('modelChains', {
+    resolve: (id: string) => id === 'stable' ? { id, links: [{ provider: 'p', model: 'm' }] } : undefined,
+  })
+  // The UI pick carries the current selection's group; `free` is retired, so
+  // the pick must persist the route without resurrecting the reference.
+  await ctx.agentDefaultModel.saveSelection({ provider: 'test', model: 'next', chain: 'free' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'next' })
+  expect(readFileSync(profile.patchPath, 'utf8')).not.toContain('chain: free')
+  // An enabled group still persists through the same path.
+  await ctx.agentDefaultModel.saveSelection({ provider: 'test', model: 'next', chain: 'stable' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'next', chain: 'stable' })
+  expect(readFileSync(profile.patchPath, 'utf8')).toContain('chain: stable')
 })
 
 it('serializes overlapping saves and continues after a rejected write', async () => {

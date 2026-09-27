@@ -343,9 +343,10 @@ export const InputBar = memo(function InputBar({
   const primaryDisabled = primaryStops ? stop === undefined : empty || disabled || machineBusy || uploadsPending
   const interruptible = running && continuable
   // The split stop control: the count badge and "Stop all agents" sit beside
-  // the ✕ whenever the running main turn has live subagent descendants. With
-  // none, ✕ stays a plain detach.
-  const stopAllAvailable = primaryStops && liveChildren > 0 && stopAll !== undefined
+  // the primary whenever live subagent descendants exist, whether or not the
+  // main turn itself is running — detach keeps children alive, so the
+  // affordance must outlive the turn it was split from. With none it hides.
+  const stopAllAvailable = liveChildren > 0 && stopAll !== undefined
   useEffect(() => {
     if (!stopAllAvailable) setStopAllOpen(false)
   }, [stopAllAvailable])

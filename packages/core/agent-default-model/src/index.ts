@@ -11,7 +11,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-config-editor'
+import { pruneUnusableChains, type ModelChainRegistry } from '@deepseek-ai/dsh-config-editor'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -86,7 +86,8 @@ export class AgentDefaultModelConfig extends Service {
   /**
    * Save the complete default model selection. A deployment without a configuration
    * editor keeps its composition entry. Saves commit in submission order; a failed
-   * save rejects its caller without blocking later saves.
+   * save rejects its caller without blocking later saves. A `chain` the optional
+   * `modelChains` registry cannot route is dropped before the profile write.
    * @param next - resolved selection accepted by an entry point.
    * @returns fulfillment after the optional profile write settles.
    */
@@ -95,11 +96,20 @@ export class AgentDefaultModelConfig extends Service {
     if (entry === undefined) return
     const editor = this.ctx.get('configEditor')
     if (editor === undefined) return
-    const config = {
+    const fields = {
       provider: next.provider, model: next.model,
       ...next.chain === undefined ? {} : { chain: next.chain },
       ...next.reasoningEffort === undefined ? {} : { reasoningEffort: String(next.reasoningEffort) },
     }
+    // A pick can echo the seat's live `chain`; a group the runtime cannot
+    // route must not reach the profile through this path either.
+    const config = pruneUnusableChains(
+      fields,
+      this.ctx.get('modelChains') as ModelChainRegistry | undefined,
+      (fieldPath, value) => {
+        this.ctx.logger.warn(`agent-default-model: dropped unusable chain "${value}" at ${fieldPath}: the model group is disabled, unknown, or unregistered`)
+      },
+    )
     const saved = this.saves.then(() => editor.edit(entry, () => config))
     this.saves = saved.catch(() => {})
     await saved
