@@ -6,7 +6,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { contentHasImage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, BlockAssembler, LlmError, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, RequestUserInput, TokenUsage, ToolSchema,
@@ -257,37 +257,60 @@ export async function summarizeWithLlm(
     ? { messages: input.messages, windowClipped: false }
     : clipReplayToBudget(ctx, input.messages, fixedTokens, budget)
 
-  const assembler = new BlockAssembler()
-  const messages: RequestMessage[] = [...replay.messages, instruction]
-  const options: GenerateOptions = {
-    provider: target.provider,
-    model: target.model,
-    ...config.summarizationChain === undefined ? {} : { chain: config.summarizationChain },
-    messages,
-    toolHistory: agent.session.toolHistory(),
-    ...input.tools === undefined ? {} : { tools: [...input.tools] },
-    maxTokens: config.maxTokens,
-    sessionId: agent.session.id,
-    purpose: 'compaction',
-    ...signal === undefined ? {} : { signal },
+  const dispatch = async (
+    replayMessages: readonly Message[],
+  ): Promise<{ rawOutput: ContentBlock[]; usage?: TokenUsage; provider: string; model: string }> => {
+    const assembler = new BlockAssembler()
+    const messages: RequestMessage[] = [...replayMessages, instruction]
+    const options: GenerateOptions = {
+      provider: target.provider,
+      model: target.model,
+      ...config.summarizationChain === undefined ? {} : { chain: config.summarizationChain },
+      messages,
+      toolHistory: agent.session.toolHistory(),
+      ...input.tools === undefined ? {} : { tools: [...input.tools] },
+      maxTokens: config.maxTokens,
+      sessionId: agent.session.id,
+      purpose: 'compaction',
+      ...signal === undefined ? {} : { signal },
+    }
+    for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
+    const error = finishError(assembler.finish)
+    if (error !== undefined) throw error
+    // A `llm/stream` listener may have rerouted the one-shot call; the
+    // dispatched pair, not the requested one, is what the checkpoint records.
+    return {
+      rawOutput: assembler.blocks(),
+      provider: options.provider,
+      model: options.model,
+      ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+    }
   }
-  for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
-  const error = finishError(assembler.finish)
-  if (error !== undefined) throw error
 
-  const rawOutput = assembler.blocks()
-  const summary = summaryText(rawOutput)
+  const replayHasImages = replay.messages.some(message => contentHasImage(message.content))
+  let dispatched: { rawOutput: ContentBlock[]; usage?: TokenUsage; provider: string; model: string }
+  try {
+    dispatched = await dispatch(replay.messages)
+  } catch (error: unknown) {
+    // A route refusing media is a request-level fact, never a summariser
+    // failure: retry once with every image occurrence replaced by its stable
+    // text placeholder so a text-only summariser still condenses the span.
+    if (!replayHasImages || !(error instanceof LlmError) || error.code !== 'UNSUPPORTED_CONTENT') throw error
+    dispatched = await dispatch(projectImagesForTextModel(replay.messages))
+  }
+
+  const summary = summaryText(dispatched.rawOutput)
   if (!summary.some(block => block.text.trim().length > 0)) {
     throw new Error('summarization produced no text summary content')
   }
   return {
     summary,
-    rawOutput,
+    rawOutput: dispatched.rawOutput,
     llmStreamCall: true,
-    provider: options.provider,
-    model: options.model,
+    provider: dispatched.provider,
+    model: dispatched.model,
     maxTokens: config.maxTokens,
-    ...(assembler.usage === undefined ? {} : { usage: assembler.usage }),
+    ...dispatched.usage === undefined ? {} : { usage: dispatched.usage },
     ...(replay.windowClipped ? { windowClipped: true } : {}),
   }
 }

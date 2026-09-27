@@ -63,6 +63,25 @@ export async function runCli(): Promise<void> {
   }
 }
 
+/**
+ * The oldest supported Node.js: `import.meta.main` exists since 22.18, so any
+ * older runtime would otherwise install and exit without running `runCli`.
+ */
+const MINIMUM_NODE = [22, 19] as const
+
+/** Exit loudly when the running Node.js predates the supported floor. */
+function assertSupportedNode(): void {
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number)
+  const [minimumMajor, minimumMinor] = MINIMUM_NODE
+  if (major > minimumMajor || (major === minimumMajor && minor >= minimumMinor)) return
+  process.stderr.write(
+    `dsh: Node.js ${process.versions.node} is unsupported: dsh requires Node.js >=${minimumMajor}.${minimumMinor}\n`,
+  )
+  process.exit(1)
+}
+
+assertSupportedNode()
+
 if (import.meta.main) {
   await runCli()
 }

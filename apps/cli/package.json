@@ -1,13 +1,16 @@
 {
-  "name": "@deepseek-ai/dsh",
+  "name": "@__OWNER__/dsh",
   "description": "dsh CLI: profile launch, plugin management, and configuration inspection",
-  "version": "0.1.7-rc.2",
+  "version": "0.1.7-enpoi.1",
   "publishConfig": {
     "access": "public"
   },
+  "engines": {
+    "node": ">=22.19"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
+    "url": "git+https://github.com/Darthph0enix7/deepseek-harness.git",
     "directory": "apps/cli"
   },
   "type": "module",

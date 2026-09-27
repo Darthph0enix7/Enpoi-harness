@@ -347,6 +347,15 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+/* The per-link picker (route + effort pill) takes the row's free width; the
+   fallback text above keeps the same slot when the picker is unavailable. */
+.linkPicker {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
 .addLinkRow {
   display: flex;
   align-items: center;

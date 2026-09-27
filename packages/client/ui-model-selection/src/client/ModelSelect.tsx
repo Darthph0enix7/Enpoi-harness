@@ -554,7 +554,17 @@ export function ModelSelect(
                       className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
                       data-model-row=""
                       title={group.links.map(link => `${link.provider}/${link.model}`).join('\n')}
-                      onClick={() => choose({ provider: first.provider, model: first.model, chain: group.id })}
+                      onClick={() => {
+                        choose({
+                          provider: first.provider,
+                          model: first.model,
+                          // The head link's declared effort is what the runtime
+                          // applies to this route; logging it keeps the recorded
+                          // request header in step with the dispatched request.
+                          ...first.effort === undefined ? {} : { reasoningEffort: first.effort },
+                          chain: group.id,
+                        })
+                      }}
                     >
                       <div className={css.modelRowLeft}>
                         <span className={css.chainRowIcon}>

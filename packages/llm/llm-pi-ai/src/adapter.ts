@@ -41,6 +41,8 @@ import {
   appendAttemptFailedRecord,
   attributionHeaders,
   contentHasImage,
+  FREE_TIER_GATED_CODE,
+  FREE_TIER_GATED_EXPLANATION,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -545,11 +547,16 @@ export class PiAiAdapter extends LlmAdapter {
           engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure?.message ?? 'unknown failure')
           lastFailure = failure?.message ?? lastFailure
           if (!ROTATING_CLASSES.has(failureClass)) {
-            // GATEWAY_OUTAGE / INVALID_REQUEST: rotating cannot help — every
-            // identity hits the same gateway with the same payload.
+            // GATEWAY_OUTAGE / INVALID_REQUEST / POLICY: rotating cannot help —
+            // every identity hits the same gateway, payload, or server-side
+            // policy. POLICY keeps its own terminal code and carries the
+            // free-tier client-gate explanation to the caller.
             throw new LlmError(
-              `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`,
-              failureClass === 'GATEWAY_OUTAGE' ? 'PROVIDER_MODEL_OUTAGE' : 'INVALID_REQUEST',
+              `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`
+              + (failureClass === 'POLICY' ? ` — ${FREE_TIER_GATED_EXPLANATION}` : ''),
+              failureClass === 'GATEWAY_OUTAGE' ? 'PROVIDER_MODEL_OUTAGE'
+                : failureClass === 'POLICY' ? FREE_TIER_GATED_CODE
+                  : 'INVALID_REQUEST',
             )
           }
           // A rotation the pool will actually make: another resolvable identity

@@ -9,7 +9,11 @@
  */
 
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import {
+  STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, FREE_TIER_GATED_CODE,
+  FREE_TIER_GATED_EXPLANATION, isContextWindowExceededError, isFreeTierGatedError, isQuotaExceededError,
+  LlmError, QUOTA_EXCEEDED_CODE,
+} from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -40,6 +44,11 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): string {
+  // OpenCode's `-free` models answer 403 FreeTierError to non-OpenCode
+  // clients; the team states the rule directly ("You cannot use the free tier
+  // in other harnesses", anomalyco/opencode#49621). Policy, not auth: the code
+  // stays terminal so the chain neither retries nor rotates keys over it.
+  if (isFreeTierGatedError(message)) return FREE_TIER_GATED_CODE
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
@@ -122,7 +131,12 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     }
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
+      const code = classifyPiAiError(text)
+      // A gated free-tier route fails identically on every attempt, so the
+      // user-facing failure carries the policy explanation, not just the
+      // provider's raw 403 envelope.
+      const explained = code === FREE_TIER_GATED_CODE ? `${text} — ${FREE_TIER_GATED_EXPLANATION}` : text
+      return { kind: 'error', failure: { message: explained, code } }
     }
   }
 }

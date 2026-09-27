@@ -1,12 +1,12 @@
 /** Release family discovery, publish order, tag naming, and the bump judgements. */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { officialClientBuildEnvironment, writeClientBuildRecord } from '../client-build-environment.ts'
 import { releaseFamily, type ReleaseMember } from './families.ts'
-import { compareVersions, nextVendorVersion, planShared, reachesPayload } from './bump.ts'
+import { compareVersions, isChannelDowngrade, nextVendorVersion, planShared, prereleaseChannel, reachesPayload } from './bump.ts'
 
 /**
  * A release member standing in for a manifest on disk.
@@ -156,6 +156,7 @@ describe('release families', () => {
     expect(dsh.distTagForVersion('0.0.2-alpha.1')).toBe('alpha')
     expect(dsh.distTagForVersion('0.0.2-canary.1')).toBe('canary')
     expect(dsh.distTagForVersion('0.0.2-rc.1')).toBe('next')
+    expect(dsh.distTagForVersion('0.1.7-enpoi.1')).toBe('beta')
     expect(dsh.distTagForVersion('0.0.2')).toBeUndefined()
     expect(vendor.distTagForVersion('4.0.1-alpha.1')).toBe('next')
     expect(vendor.distTagForVersion('4.0.1-canary.1')).toBe('next')
@@ -323,7 +324,10 @@ describe('release families', () => {
   })
 
   it('drives the installed entry only for the family that publishes one', () => {
-    expect(releaseFamily('dsh').installedEntry).toEqual({ packageName: '@deepseek-ai/dsh', binPath: 'lib/bin.js' })
+    // The entry name follows the manifest: the fork chooses its npm owner.
+    const cliManifest: unknown = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../apps/cli/package.json'), 'utf8'))
+    const { name } = cliManifest as { name: string }
+    expect(releaseFamily('dsh').installedEntry).toEqual({ packageName: name, binPath: 'lib/bin.js' })
     expect(releaseFamily('vendor').installedEntry).toBeUndefined()
   })
 
@@ -380,6 +384,21 @@ describe('version precedence', () => {
     expect(compareVersions('4.0.1-rc', '4.0.1-rc.1')).toBeLessThan(0)
     expect(compareVersions('4.0.2', '4.0.1')).toBeGreaterThan(0)
     expect(compareVersions('4.0.1-rc.1', '4.0.1-rc.1')).toBe(0)
+  })
+
+  it('treats an upstream-line to fork-line switch as a channel switch, not a semver downgrade', () => {
+    // 0.1.7-enpoi.1 sorts below 0.1.7-rc.2 by semver, because `enpoi` < `rc`
+    // as strings; the update path must not read the fork's first beta as a
+    // downgrade from upstream's `next` train.
+    expect(compareVersions('0.1.7-enpoi.1', '0.1.7-rc.2')).toBeLessThan(0)
+    expect(prereleaseChannel('0.1.7-enpoi.1')).toBe('enpoi')
+    expect(prereleaseChannel('0.1.7-rc.2')).toBe('rc')
+    expect(isChannelDowngrade('0.1.7-rc.2', '0.1.7-enpoi.1')).toBe(false)
+    expect(isChannelDowngrade('0.1.7-enpoi.1', '0.1.7-rc.2')).toBe(false)
+    // Within the approved line the guard still holds.
+    expect(isChannelDowngrade('0.1.7-enpoi.2', '0.1.7-enpoi.1')).toBe(true)
+    expect(isChannelDowngrade('0.1.7-enpoi.1', '0.1.7-enpoi.2')).toBe(false)
+    expect(isChannelDowngrade('0.1.7', '0.1.7-enpoi.1')).toBe(true)
   })
 })
 

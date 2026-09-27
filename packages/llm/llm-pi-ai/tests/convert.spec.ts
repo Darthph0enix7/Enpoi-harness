@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
@@ -908,6 +908,27 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+  })
+
+  it('classifies the OpenCode free-tier client gate as terminal and explains it', () => {
+    const body = '403 {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: `${body} — ${FREE_TIER_GATED_EXPLANATION}`,
+        code: FREE_TIER_GATED_CODE,
+      },
+    })
+    // The policy phrase alone decides even where no 403 is spelled out.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'free tier can only be used from within OpenCode',
+    }))).toMatchObject({ kind: 'error', failure: { code: FREE_TIER_GATED_CODE } })
+    // A generic free-tier mention never hijacks a real auth failure.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'HTTP 401: bad key on the free tier route',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
   })
 
   it.each([

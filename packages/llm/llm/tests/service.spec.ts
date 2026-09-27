@@ -1172,6 +1172,76 @@ describe('LlmRuntime', () => {
     expect(Object.isFrozen(seen[1]?.messages)).toBe(true)
   })
 
+  it('reprojects images when a mid-session model switch turns the route text-only', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    let modalities: readonly ('text' | 'image')[] = ['text', 'image']
+    const seen: GenerateOptions[] = []
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, inputModalities: modalities })
+      }
+
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seen.push(options)
+        yield * super.stream(options)
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+    const attachment = {
+      attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+      mediaType: 'image/png' as const,
+      bytes: 3,
+      width: 1,
+      height: 1,
+    }
+    const messages = [createUserMessage({
+      content: [{ type: 'image', attachment }],
+      source: { kind: 'test' },
+    })]
+
+    await collect(ctx.llm.stream({ provider: 'route', model: 'switchable', messages }))
+    modalities = ['text']
+    await collect(ctx.llm.stream({ provider: 'route', model: 'switchable', messages }))
+
+    expect(seen[0]?.messages[0]?.content).toEqual([{ type: 'image', attachment }])
+    expect(seen[1]?.messages[0]?.content).toEqual([{
+      type: 'text',
+      text: '[image omitted because this model accepts text only; attachment sha256:aaaaaaaa]',
+    }])
+  })
+
+  it('caps an oversized embedded base64 payload before adapter dispatch', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    let seen: GenerateOptions | undefined
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text'] })
+      }
+
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seen = options
+        yield * super.stream(options)
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await collect(ctx.llm.stream({
+      provider: 'route',
+      model: 'text-only',
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: `data:image/png;base64,${'A'.repeat(70_000)}` }],
+        source: { kind: 'test' },
+      })],
+    }))
+
+    const block = seen?.messages[0]?.content[0]
+    expect(block?.type === 'text' ? block.text : '').toBe(
+      'data:image/png;base64,[embedded base64 payload omitted: ~68 KB]',
+    )
+  })
+
   it('passes cancellation through exact-model resolution', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)

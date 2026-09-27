@@ -110,7 +110,7 @@ function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, av
   mixed?: boolean
   onCycle: (next: PolicyValue | undefined) => void
   available?: boolean
-  onToggleAvailable?: () => void
+  onToggleAvailable?: (() => void) | undefined
 }) {
   const isGroup = isAggregateRow(row)
   return (
@@ -294,11 +294,17 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
 }) {
   const available = perms.agents?.[agent]?.available
   const agentGrants = Object.values(perms.grants ?? {}).filter(grant => grant.agent === agent)
-  /** Every concrete member of the row (or the row itself) is on the role's surface. */
+  /**
+   * Every concrete member of the row (or the row itself) is available to the
+   * role. An explicit allowlist IS the answer (the hard gate); only without
+   * one does the shipped/registry surface decide — OR-ing the surface back in
+   * would leave every toggle of a shipped-surface tool looking inert.
+   */
   const rowAvailable = (row: PermissionToolRow): boolean => {
     const targets = rowTargets(row)
-    return targets.length > 0 && targets.every(target =>
-      (available !== undefined && available.includes(target)) || builtRoleAvailability(agent, target, registry) === true)
+    return targets.length > 0 && targets.every(target => available !== undefined
+      ? available.includes(target)
+      : builtRoleAvailability(agent, target, registry) === true)
   }
   return (
     <>
@@ -328,6 +334,8 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
         </div>
         {toolRows.map(row => {
           const state = rowPolicyState(perms, agent, row)
+          // An aggregate with no live members has nothing to toggle: no eye.
+          const targets = rowTargets(row)
           return (
             <PolicyRow
               key={row.id}
@@ -338,7 +346,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
               mixed={state.mixed}
               onCycle={(next) => { onCycleRow(agent, row, next) }}
               available={rowAvailable(row)}
-              onToggleAvailable={() => { onToggleRow(agent, row) }}
+              onToggleAvailable={targets.length > 0 ? () => { onToggleRow(agent, row) } : undefined}
             />
           )
         })}

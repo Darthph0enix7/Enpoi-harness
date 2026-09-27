@@ -4,7 +4,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
-import { frameSummary } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
+import { frameSummary, summarizeWithLlm } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -2340,5 +2340,118 @@ describe('route-priced image pressure', () => {
       .filter(node => result?.shadowedSeqs.includes(node.seq))
       .reduce((total, node) => total + node.heuristicTokens, 0)
     expect(summaryEvent?.data.shadowedTokenCount).toBe(shadowedHeuristic)
+  })
+})
+
+describe('summarizer media resilience', () => {
+  const IMAGE_INPUT: SummarizationInput = { messages: [createUserMessage({
+    content: [
+      { type: 'text', text: 'look at this screenshot and the failure text' },
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+          mediaType: 'image/png',
+          bytes: 3,
+          width: 1,
+          height: 1,
+        },
+      },
+    ],
+    source: { kind: 'test' },
+  })] }
+
+  function summaryChunks(text: string): StreamChunk[] {
+    return [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'block-end', index: 0, block: { type: 'text', text } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+  }
+
+  it('replaces images with placeholders for a declared text-only summariser', async () => {
+    const ctx = new Context()
+    void new LlmRuntime(ctx)
+    const seen: GenerateOptions[] = []
+    const adapter = new class extends LlmAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text'] })
+      }
+
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seen.push(options)
+        yield* summaryChunks('## Checkpoint\n- condensed')
+      }
+    }()
+    ctx.llm.registerAdapter(['vision-mock'], adapter)
+    const session = Session.create(SessionId('text-only-summary'))
+
+    const result = await summarizeWithLlm(
+      ctx,
+      { summarizationProvider: 'vision-mock', summarizationModel: 'summary', maxTokens: 256 },
+      IMAGE_INPUT,
+      agent(session),
+      SIGNAL,
+    )
+
+    expect(result.summary.map(block => block.type === 'text' ? block.text : '')).toEqual(['## Checkpoint\n- condensed'])
+    expect(seen).toHaveLength(1)
+    const content = seen[0]?.messages[0]?.content ?? []
+    expect(content.some(block => block.type === 'image')).toBe(false)
+    expect(content).toContainEqual({
+      type: 'text',
+      text: '[image omitted because this model accepts text only; attachment sha256:aaaaaaaa]',
+    })
+  })
+
+  it('retries with placeholders when the summariser route refuses media', async () => {
+    const ctx = new Context()
+    void new LlmRuntime(ctx)
+    const seen: GenerateOptions[] = []
+    const adapter = new class extends LlmAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        // No modality metadata: the runtime cannot pre-project, so the route
+        // refuses the image request itself.
+        return Promise.resolve({ provider, id: model, name: model })
+      }
+
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seen.push(options)
+        const hasImage = options.messages.some(message => message.content.some(block => block.type === 'image'))
+        if (hasImage) {
+          yield {
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: {
+                message: 'pi-ai image conversion requires the durable attachment service',
+                code: 'UNSUPPORTED_CONTENT',
+              },
+            },
+          }
+          return
+        }
+        yield* summaryChunks('## Checkpoint\n- condensed without the image')
+      }
+    }()
+    ctx.llm.registerAdapter(['vision-mock'], adapter)
+    const session = Session.create(SessionId('refusing-summary'))
+
+    const result = await summarizeWithLlm(
+      ctx,
+      { summarizationProvider: 'vision-mock', summarizationModel: 'summary', maxTokens: 256 },
+      IMAGE_INPUT,
+      agent(session),
+      SIGNAL,
+    )
+
+    expect(result.summary.map(block => block.type === 'text' ? block.text : ''))
+      .toEqual(['## Checkpoint\n- condensed without the image'])
+    expect(seen).toHaveLength(2)
+    expect(seen[0]?.messages[0]?.content.some(block => block.type === 'image')).toBe(true)
+    expect(seen[1]?.messages[0]?.content).toContainEqual({
+      type: 'text',
+      text: '[image omitted because this model accepts text only; attachment sha256:aaaaaaaa]',
+    })
   })
 })

@@ -345,6 +345,107 @@ function replaceImagesForTextModel(blocks: readonly ContentBlock[]): ContentBloc
   return next ?? blocks as ContentBlock[]
 }
 
+/** Base64 payload length (characters) above which one embedded `data:` payload is omitted. */
+export const EMBEDDED_BASE64_PAYLOAD_LIMIT_CHARS = 64 * 1024
+
+/** Matches the `data:<media-type>;base64,` prefix of one embedded payload, in text order. */
+const EMBEDDED_BASE64_PREFIX = /data:[^,;\s]{1,128};base64,/gi
+
+/** One base64 payload run; matches greedily at the current position. */
+const BASE64_PAYLOAD_RUN = /[A-Za-z0-9+/=]+/y
+
+/** One whitespace run; matches greedily at the current position. */
+const WHITESPACE_RUN = /\s+/y
+
+/** Minimum base64 run after a line break that can continue one wrapped payload. */
+const BASE64_CONTINUATION_MIN_CHARS = 16
+
+/** Replaces every oversized embedded base64 payload with its honest omission marker. */
+function capEmbeddedBase64(text: string): string {
+  let result: string | undefined
+  let cursor = 0
+  while (true) {
+    EMBEDDED_BASE64_PREFIX.lastIndex = cursor
+    const match = EMBEDDED_BASE64_PREFIX.exec(text)
+    if (match === null) break
+    let end = match.index + match[0].length
+    let payloadChars = 0
+    while (end < text.length) {
+      BASE64_PAYLOAD_RUN.lastIndex = end
+      const line = BASE64_PAYLOAD_RUN.exec(text)
+      if (line !== null) {
+        payloadChars += line[0].length
+        end = BASE64_PAYLOAD_RUN.lastIndex
+      }
+      // Wrapped payloads continue after a line break; a short run after the
+      // gap is following prose (or a tail), not payload.
+      WHITESPACE_RUN.lastIndex = end
+      const gap = WHITESPACE_RUN.exec(text)
+      const probe = gap === null ? end : WHITESPACE_RUN.lastIndex
+      BASE64_PAYLOAD_RUN.lastIndex = probe
+      const next = BASE64_PAYLOAD_RUN.exec(text)
+      if (next === null || next[0].length < BASE64_CONTINUATION_MIN_CHARS) break
+      end = probe
+    }
+    if (payloadChars > EMBEDDED_BASE64_PAYLOAD_LIMIT_CHARS) {
+      const marker = `[embedded base64 payload omitted: ~${Math.round(payloadChars / 1024)} KB]`
+      result = (result ?? '') + text.slice(cursor, match.index) + match[0] + marker
+      cursor = end
+    } else if (result !== undefined) {
+      result += text.slice(cursor, end)
+      cursor = end
+    } else {
+      cursor = end
+    }
+  }
+  return result === undefined ? text : result + text.slice(cursor)
+}
+
+/** Replace every oversized embedded base64 payload in one message's text blocks. */
+function capMessageEmbeddedBase64(blocks: readonly ContentBlock[]): ContentBlock[] {
+  let next: ContentBlock[] | undefined
+  for (const [index, block] of blocks.entries()) {
+    if (block.type !== 'text' || !block.text.includes('base64,')) {
+      next?.push(block)
+      continue
+    }
+    const text = capEmbeddedBase64(block.text)
+    if (text === block.text) {
+      next?.push(block)
+      continue
+    }
+    next ??= blocks.slice(0, index)
+    next.push({ type: 'text', text })
+  }
+  return next ?? blocks as ContentBlock[]
+}
+
+/**
+ * Cap oversized base64 payloads embedded in message text. A pasted or
+ * file-read `data:...;base64,` payload carrying megabytes as text is almost
+ * never useful to read literally and, unlike a typed image block, has no
+ * attachment to resolve; it is replaced in place by its omission marker.
+ * @param messages - complete request history.
+ * @returns the original list when nothing is oversized, otherwise shallow message copies.
+ */
+export function projectEmbeddedBase64Text(messages: readonly Message[]): readonly Message[]
+/**
+ * Project embedded base64 in mixed durable and request-only inputs.
+ * @param messages - complete request inputs.
+ * @returns the original list when nothing is oversized, otherwise shallow message copies.
+ */
+export function projectEmbeddedBase64Text(messages: readonly RequestMessage[]): readonly RequestMessage[]
+export function projectEmbeddedBase64Text(messages: readonly RequestMessage[]): readonly RequestMessage[] {
+  let changed = false
+  const projected = messages.map((message) => {
+    const content = capMessageEmbeddedBase64(message.content)
+    if (content === message.content) return message
+    changed = true
+    return { ...message, content }
+  })
+  return changed ? projected : messages
+}
+
 /**
  * Project request image content into deterministic text for an exact text-only model.
  * @param messages - complete request history.

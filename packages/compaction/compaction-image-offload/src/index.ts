@@ -23,7 +23,13 @@ export const inject = ['agents', 'sessions']
  * @param ctx - the plugin context.
  */
 export function apply(ctx: Context): void {
-  ctx.sessions.registerMessageProjection(imageOffloadProjection)
+  try {
+    ctx.sessions.registerMessageProjection(imageOffloadProjection)
+  } catch (error) {
+    // The projection registry is process-global while this plugin mounts once per
+    // preset group; a second mount must be a no-op, not a dead fiber.
+    if (!/already registered/.test(String(error instanceof Error ? error.message : error))) throw error
+  }
   ctx.on('agent/request-error', ({ agent, failure }, next): Promise<RequestErrorAction> => {
     if (failure.code !== IMAGE_OFFLOAD_REQUIRED_CODE || failure.offloadImages === undefined) return next()
     // A durable surface repair, not a provider retry: it spends no retry budget and logs no retry event.

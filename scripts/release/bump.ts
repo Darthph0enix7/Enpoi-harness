@@ -130,6 +130,47 @@ export function compareVersions(left: string, right: string): number {
   return 0
 }
 
+/** The fork's prerelease channel identifier, the one the approved scheme reserves for its beta line. */
+export const FORK_CHANNEL = 'enpoi'
+
+/**
+ * The prerelease channel identifier of a version, or undefined for a stable release.
+ * @param version - the version to read.
+ * @returns `enpoi` for `0.1.7-enpoi.1`, `rc` for `0.1.7-rc.2`, undefined for `0.1.7`.
+ */
+export function prereleaseChannel(version: string): string | undefined {
+  const pre = prereleaseOf(version)
+  return pre === undefined ? undefined : pre.split('.')[0]
+}
+
+/**
+ * Whether moving from `from` to `to` is a downgrade within one publisher's line.
+ *
+ * Semver orders `0.1.7-enpoi.1` below `0.1.7-rc.2`, because prerelease identifiers
+ * compare as ASCII strings and `enpoi` < `rc`. A plain semver comparison would
+ * therefore report installing the fork's first beta over upstream's `next` as a
+ * downgrade, although the two lines share release numbers without sharing a
+ * publisher. Crossing between the fork's line and an upstream prerelease train
+ * is a channel switch, which the update path reports and protects with the
+ * pre-write backup instead of a downgrade refusal. Every other ordering keeps
+ * the guard: an older `enpoi.N`, and a stable release replacing either line's
+ * prerelease, both remain downgrades.
+ * @param from - the installed version.
+ * @param to - the channel's resolved target version.
+ * @returns True when `to` orders below `from` without changing publisher lines.
+ */
+export function isChannelDowngrade(from: string, to: string): boolean {
+  const fromFork = prereleaseChannel(from) === FORK_CHANNEL
+  const toFork = prereleaseChannel(to) === FORK_CHANNEL
+  if (fromFork !== toFork) {
+    const other = fromFork ? prereleaseChannel(to) : prereleaseChannel(from)
+    // A stable version names no line, so only a prerelease train can mark the
+    // other side of a deliberate publisher switch.
+    if (other !== undefined) return false
+  }
+  return compareVersions(to, from) < 0
+}
+
 /**
  * The next dsh version.
  * @param current - the family's current shared version.

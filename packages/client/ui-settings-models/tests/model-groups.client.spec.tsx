@@ -77,6 +77,38 @@ function pickerFace(): ModelPickerFace {
   }
 }
 
+/** The same face, but the model advertises reasoning levels like a seat route. */
+function reasoningPickerFace(): ModelPickerFace {
+  return {
+    available: true,
+    directory: createSnapshotStore<ModelDirectoryState>({
+      current: null,
+      routable: null,
+      groups: [{
+        id: 'antigravity',
+        name: 'Antigravity',
+        models: [{
+          id: 'gemini-3.8-flash-tiered',
+          name: 'Gemini 3.8 Flash',
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'high', name: 'High' },
+              { id: 'max', name: 'Max' },
+            ],
+            defaultEffort: 'high',
+          },
+        }],
+      }],
+      failures: [],
+      pending: null,
+      status: 'ready',
+      error: null,
+    }),
+    load: vi.fn(),
+  }
+}
+
 beforeEach(() => {
   localStorage.clear()
 })
@@ -113,6 +145,37 @@ describe('model groups registry', () => {
         links: [{ provider: 'a', model: 'm' }],
         attempts: 3,
         onCut: 'continue',
+        disabled: false,
+      },
+    }])
+  })
+
+  it('keeps a valid link effort, drops an invalid one, and writes effort only when set', () => {
+    const groups = parseModelGroups({
+      stable: {
+        links: [
+          { provider: 'a', model: 'm', effort: ' high ' },
+          { provider: 'b', model: 'm', effort: 7 },
+          { provider: 'c', model: 'm', effort: '   ' },
+        ],
+      },
+    })
+    // A non-string or blank effort is absent, never a stored empty string.
+    expect(groups[0]!.links).toEqual([
+      { provider: 'a', model: 'm', effort: 'high' },
+      { provider: 'b', model: 'm' },
+      { provider: 'c', model: 'm' },
+    ])
+    expect(groupWriteOps({
+      id: 'stable', label: 'Stable', links: [{ provider: 'a', model: 'm', effort: 'max' }, { provider: 'b', model: 'm' }], attempts: 2, onCut: 'failover', disabled: false,
+    })).toEqual([{
+      op: 'set',
+      path: ['chains', 'stable'],
+      value: {
+        label: 'Stable',
+        links: [{ provider: 'a', model: 'm', effort: 'max' }, { provider: 'b', model: 'm' }],
+        attempts: 2,
+        onCut: 'failover',
         disabled: false,
       },
     }])
@@ -234,6 +297,58 @@ describe('Model groups row', () => {
       }], 3)
     })
     expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('mirrors the seat effort pill on a link and saves the chosen effort', async () => {
+    const mutate = vi.fn(async () => ({ ok: true, value: {} }))
+    render(<ModelGroupsRow
+      namespace={namespaceOf({
+        stable: {
+          label: 'Stable',
+          links: [
+            { provider: 'antigravity', model: 'gemini-3.8-flash-tiered', effort: 'low' },
+            { provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
+          ],
+          attempts: 2,
+          onCut: 'failover',
+        },
+      })}
+      api={wire(mutate)}
+      readOnly={false}
+      picker={reasoningPickerFace()}
+      t={t}
+      modelT={key => key}
+      onSaved={vi.fn()}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    // The link row carries the shared picker's effort pill: the stored effort
+    // paints verbatim and stays editable while the group is in edit mode; a
+    // link without one shows the model default (High), like a seat row.
+    const effortTrigger = await screen.findByRole('button', { name: 'Low' })
+    expect((effortTrigger as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
+    fireEvent.click(effortTrigger)
+    fireEvent.click(screen.getByRole('button', { name: 'Max' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => {
+      expect(mutate).toHaveBeenCalledWith('enpoi-orchestration', [{
+        op: 'set',
+        path: ['chains', 'stable'],
+        value: {
+          label: 'Stable',
+          links: [
+            { provider: 'antigravity', model: 'gemini-3.8-flash-tiered', effort: 'max' },
+            { provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
+          ],
+          attempts: 2,
+          onCut: 'failover',
+          disabled: false,
+        },
+      }], 3)
+    })
   })
 
   it('edits an existing group label and keeps the stored links', async () => {

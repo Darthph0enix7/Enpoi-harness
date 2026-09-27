@@ -10,6 +10,7 @@ import {
   fileHandleText,
   projectFilesToText,
   offloadedImageText,
+  projectEmbeddedBase64Text,
   projectImagesForTextModel,
   projectOffloadedImages,
   projectToolUpdates,
@@ -311,6 +312,45 @@ describe('projectImagesForTextModel', () => {
       { type: 'text', text: '[image omitted because this model accepts text only; attachment sha256:aaaaaaaa]' },
       { type: 'text', text: 'after' },
     ])
+  })
+})
+
+describe('projectEmbeddedBase64Text', () => {
+  const small = 'data:image/png;base64,AAAA'
+  const oversizedPayload = 'A'.repeat(64 * 1024 + 1)
+
+  it('returns message history without embedded base64 unchanged', () => {
+    const messages = [createUserMessage({ content: [{ type: 'text', text: 'plain' }], source })]
+    expect(projectEmbeddedBase64Text(messages)).toBe(messages)
+  })
+
+  it('keeps small data URIs and caps an oversized payload with its KB marker', () => {
+    const plain = createUserMessage({ content: [{ type: 'text', text: `icon ${small}` }], source })
+    const pasted = createUserMessage({
+      content: [{ type: 'text', text: `before data:image/png;base64,${oversizedPayload} after` }],
+      source,
+    })
+
+    const projected = projectEmbeddedBase64Text([plain, pasted])
+    expect(projected[0]).toBe(plain)
+    expect(projected[1]?.content).toEqual([{
+      type: 'text',
+      text: 'before data:image/png;base64,[embedded base64 payload omitted: ~64 KB] after',
+    }])
+  })
+
+  it('caps a whitespace-wrapped payload as one occurrence and preserves later text', () => {
+    const wrapped = `${oversizedPayload.slice(0, 32 * 1024)}\n${oversizedPayload.slice(32 * 1024)}`
+    const message = createUserMessage({
+      content: [{ type: 'text', text: `data:application/octet-stream;base64,${wrapped}\nend` }],
+      source,
+    })
+
+    const [projected] = projectEmbeddedBase64Text([message])
+    const text = projected?.content[0]
+    expect(text?.type === 'text' ? text.text : '').toBe(
+      'data:application/octet-stream;base64,[embedded base64 payload omitted: ~64 KB]\nend',
+    )
   })
 })
 

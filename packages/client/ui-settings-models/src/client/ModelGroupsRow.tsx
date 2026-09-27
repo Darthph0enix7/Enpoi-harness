@@ -6,14 +6,16 @@
  * groups (label, link count, ordered provider preview, enable/disable, edit,
  * delete) plus an editor drawer whose link list adds and reorders links through
  * the shared model picker, with `attempts` and `onCut` behind an Advanced
- * disclosure. The row renders nothing at all while the namespace carries no
+ * disclosure. Every link row keeps that picker mounted over the stored route,
+ * so its reasoning-effort pill (same catalog levels and names as a seat row)
+ * edits `links[].effort` in place. The row renders nothing at all while the namespace carries no
  * group and this browser has never shown one, so a zero-group install looks
  * exactly as it did before the feature.
  */
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import { ModelSelect } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
   groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
   readModelGroups, writeGroupOps,
@@ -49,6 +51,26 @@ interface GroupDraft {
   links: ModelGroupLink[]
   attempts: string
   onCut: 'failover' | 'continue'
+}
+
+/** One picker submission: the shared picker's own selection type. */
+type PickerSelection = Parameters<ModelSelectOverride['select']>[0]
+
+/**
+ * Fold one picker submission onto a stored link. The seat rows persist the
+ * picker's `reasoningEffort` verbatim; a group link stores the same value as
+ * its `effort`, and absence keeps the adapter's own default (inherit).
+ * @param selection - the picker's provider/model/effort choice.
+ * @returns the link as `chains.<id>.links[]` stores it.
+ */
+function linkOfSelection(selection: PickerSelection): ModelGroupLink {
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...selection.reasoningEffort === undefined || selection.reasoningEffort === ''
+      ? {}
+      : { effort: selection.reasoningEffort },
+  }
 }
 
 /** Monochrome chain glyph (stroke currentColor, same style as the picker icons). */
@@ -208,10 +230,16 @@ export function ModelGroupsRow({
     if (await persist(groupWriteOps(group), previous)) closeEditor()
   }
 
-  const addLink = (selection: { provider: string; model: string }): void => {
+  const addLink = (selection: PickerSelection): void => {
     setDraft(current => current === null
       ? current
-      : { ...current, links: [...current.links, { provider: selection.provider, model: selection.model }] })
+      : { ...current, links: [...current.links, linkOfSelection(selection)] })
+  }
+
+  const replaceLink = (index: number, selection: PickerSelection): void => {
+    setDraft(current => current === null
+      ? current
+      : { ...current, links: current.links.map((link, i) => i === index ? linkOfSelection(selection) : link) })
   }
 
   const removeLink = (index: number): void => {
@@ -236,10 +264,10 @@ export function ModelGroupsRow({
     setDragLink(null)
   }
 
-  const addLinkOverride = {
+  const addLinkOverride: ModelSelectOverride = {
     current: null,
     placeholder: t('groupsAddModel'),
-    select: (selection: { provider: string; model: string }) => {
+    select: (selection) => {
       addLink(selection)
       return Promise.resolve(true)
     },
@@ -381,7 +409,35 @@ export function ModelGroupsRow({
                   onDrop={(event) => { handleLinkDrop(event, index) }}
                 >
                   <span className={css.linkDrag} title={t('groupsDragLink')}><GripGlyph /></span>
-                  <span className={css.linkText}>{linkLabel(link)}</span>
+                  {picker !== null ? (
+                    // Each link row mirrors a seat row: the shared picker owns
+                    // the route AND its effort pill, so the levels and their
+                    // names come from the same catalog metadata the seats use.
+                    <div className={css.linkPicker}>
+                      <ModelSelect
+                        locked={readOnly}
+                        available
+                        directory={picker.directory}
+                        load={picker.load}
+                        select={() => Promise.resolve(true)}
+                        compact
+                        override={{
+                          current: {
+                            provider: link.provider,
+                            model: link.model,
+                            ...link.effort === undefined ? {} : { reasoningEffort: link.effort },
+                          },
+                          select: (selection) => {
+                            replaceLink(index, selection)
+                            return Promise.resolve(true)
+                          },
+                        }}
+                        t={modelT}
+                      />
+                    </div>
+                  ) : (
+                    <span className={css.linkText}>{linkLabel(link)}</span>
+                  )}
                   <button
                     type="button"
                     className={css.removeBtn}

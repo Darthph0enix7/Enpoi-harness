@@ -5,14 +5,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
   createUserMessage,
+  FREE_TIER_GATED_CODE,
+  FREE_TIER_GATED_EXPLANATION,
   LLM_ATTEMPT_FAILED_EVENT,
   LlmAdapter,
   LlmError,
   MODEL_CHAIN_EXHAUSTED_CODE,
+  ReasoningEffortId,
   resolveRetryPolicy,
   STREAM_CLOSED_CODE,
   type GenerateOptions,
   type LlmAttemptFailedEventData,
+  type LlmResolvedModelInfo,
   type ResolvedModelChain,
   type ResolvedRetryPolicy,
   type StreamChunk,
@@ -55,6 +59,49 @@ class FailingAdapter extends LlmAdapter {
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls.push(options)
     throw this.failure
+  }
+}
+
+/** Every model of an effort-test adapter advertises the same three levels. */
+function effortReasoning(): NonNullable<LlmResolvedModelInfo['reasoning']> {
+  return {
+    efforts: [
+      { id: ReasoningEffortId('low'), name: 'Low' },
+      { id: ReasoningEffortId('high'), name: 'High' },
+      { id: ReasoningEffortId('max'), name: 'Max' },
+    ],
+  }
+}
+
+/** {@link ScriptedAdapter} whose models expose adapter-owned reasoning levels. */
+class EffortScriptedAdapter extends ScriptedAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model, reasoning: effortReasoning() })
+  }
+}
+
+/** {@link FailingAdapter} whose models expose adapter-owned reasoning levels. */
+class EffortFailingAdapter extends FailingAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model, reasoning: effortReasoning() })
+  }
+}
+
+/**
+ * {@link ScriptedAdapter} advertising one level of its own and no other: a
+ * request carrying any foreign effort id is rejected before provider I/O.
+ */
+class DefaultOnlyAdapter extends ScriptedAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [{ id: ReasoningEffortId('standard'), name: 'Standard' }],
+        defaultEffort: ReasoningEffortId('standard'),
+      },
+    })
   }
 }
 
@@ -198,6 +245,135 @@ describe('model-group failover', () => {
     expect(stderr.text()).toContain(
       '[model-chain] stale: link 1 chain-a/stale-model → RETRYABLE (UNKNOWN_MODEL) → link 2 chain-b/m-b',
     )
+  })
+
+  it('dispatches a link with its declared effort over the request effort', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new EffortFailingAdapter(new LlmError('link a is down', 'RATE_LIMIT'))
+    const answering = new EffortScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'efforts' ? {
+      id: 'efforts',
+      links: [
+        { provider: 'chain-a', model: 'm-a', effort: 'high' },
+        { provider: 'chain-b', model: 'm-b', effort: 'max' },
+      ],
+    } : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'efforts',
+      reasoningEffort: ReasoningEffortId('low'),
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    // The running link's own effort wins over the request's; the fallback link
+    // carries its declared effort too.
+    expect(failing.calls[0]?.reasoningEffort).toBe('high')
+    expect(answering.calls[0]?.reasoningEffort).toBe('max')
+  })
+
+  it('runs a fallback link on its own default when it declares no effort and cannot accept the request effort', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new EffortFailingAdapter(new LlmError('link a is down', 'RATE_LIMIT'))
+    const answering = new DefaultOnlyAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'foreign-effort' ? group('foreign-effort', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'foreign-effort',
+      reasoningEffort: ReasoningEffortId('low'),
+      messages: [],
+    }))
+
+    // The active link keeps the request's effort; the fallback declares none
+    // and its adapter does not advertise "low", so it must run on its own
+    // default instead of rejecting the inherited id.
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    expect(failing.calls[0]?.reasoningEffort).toBe('low')
+    expect(answering.calls[0]?.reasoningEffort).toBe('standard')
+  })
+
+  it('inherits the request effort on the active link when the group declares none', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new EffortFailingAdapter(new LlmError('link a is down', 'RATE_LIMIT'))
+    const answering = new EffortScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'inherit' ? {
+      id: 'inherit',
+      links: [
+        { provider: 'chain-a', model: 'm-a' },
+        { provider: 'chain-b', model: 'm-b', effort: 'max' },
+      ],
+    } : undefined)
+    captureStderr()
+
+    await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'inherit',
+      reasoningEffort: ReasoningEffortId('low'),
+      messages: [],
+    }))
+
+    // The active link keeps inheriting the request's effort; the fallback
+    // link carries its own declared effort.
+    expect(failing.calls[0]?.reasoningEffort).toBe('low')
+    expect(answering.calls[0]?.reasoningEffort).toBe('max')
+  })
+
+  it('rejects a link effort the link model does not advertise before provider I/O', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const named = new EffortScriptedAdapter(SCRIPT)
+    const fallback = new EffortScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], named)
+    ctx.llm.registerAdapter(['chain-b'], fallback)
+    provideChains(ctx, id => id === 'invalid-effort' ? {
+      id: 'invalid-effort',
+      links: [
+        { provider: 'chain-a', model: 'm-a', effort: 'ultra' },
+        { provider: 'chain-b', model: 'm-b' },
+      ],
+    } : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'invalid-effort',
+      messages: [],
+    }))
+
+    // The exact-model check is the same one a seat's effort passes: an
+    // unadvertised level fails before provider I/O instead of clamping,
+    // and it is not a failover class.
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          message: 'provider "chain-a" model "m-a" does not support reasoning effort "ultra"',
+          code: 'UNSUPPORTED_REASONING_EFFORT',
+          provider: 'chain-a',
+          model: 'm-a',
+        },
+      },
+    })
+    expect(named.calls).toHaveLength(0)
+    expect(fallback.calls).toHaveLength(0)
   })
 
   it('does not report an answering link when the request route answered its own link', async () => {
@@ -585,5 +761,47 @@ describe('model-group failover', () => {
       },
     })
     expect(records).toHaveLength(0)
+  })
+
+  it('treats the OpenCode free-tier gate as terminal and explained, never cycling the next link', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    const gated = `403 {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}`
+    const failing = new FailingAdapter(new LlmError(
+      `${gated} — ${FREE_TIER_GATED_EXPLANATION}`,
+      FREE_TIER_GATED_CODE,
+    ))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'gated' ? group('gated', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'gated',
+      messages: [],
+    })))
+
+    // Policy, not a dead route: the next link is not tried, the link is not
+    // recorded as an attempt left behind, and the explanation reaches the user.
+    expect(answering.calls).toHaveLength(0)
+    expect(records).toHaveLength(0)
+    expect(stderr.text()).not.toContain('RETRYABLE')
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          message: `${gated} — ${FREE_TIER_GATED_EXPLANATION}`,
+          code: FREE_TIER_GATED_CODE,
+          provider: 'chain-a',
+          model: 'm-a',
+        },
+      },
+    })
   })
 })

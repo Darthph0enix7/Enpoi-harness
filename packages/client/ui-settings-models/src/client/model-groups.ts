@@ -41,10 +41,13 @@ function parseLink(raw: unknown): ModelGroupLink | undefined {
   const rec = raw as Record<string, unknown>
   if (typeof rec.provider !== 'string' || rec.provider === '') return undefined
   if (typeof rec.model !== 'string' || rec.model === '') return undefined
+  // The effort is adapter-owned: a non-string or blank value is absent, so the
+  // link keeps inheriting exactly as a link that never declared one.
+  const effort = typeof rec.effort === 'string' ? rec.effort.trim() : ''
   return {
     provider: rec.provider,
     model: rec.model,
-    ...typeof rec.effort === 'string' && rec.effort !== '' ? { effort: rec.effort } : {},
+    ...effort === '' ? {} : { effort },
   }
 }
 

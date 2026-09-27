@@ -36,6 +36,14 @@ const PEER_SECTIONS = ['peerDependencies'] as const
 /** The workspace root manifest, which is never a release member. */
 const WORKSPACE_ROOT_PACKAGE = '@deepseek-ai/dsh-root'
 
+/**
+ * The CLI entry manifest, the one member the fork may republish under its own
+ * npm owner. Every other member keeps the upstream scope until a coordinated
+ * rename; the entry name is chosen at publish time and read from the manifest
+ * rather than fixed here.
+ */
+const CLI_ENTRY_MANIFEST = 'apps/cli/package.json'
+
 /** One peer declaration the publish order leaves unordered. */
 interface DroppedPeerEdge {
   readonly consumer: string
@@ -132,7 +140,9 @@ export abstract class ReleaseFamily {
       const name = requireString(manifest, 'name', normalized)
       const version = requireString(manifest, 'version', normalized)
       if (name === WORKSPACE_ROOT_PACKAGE) throw new Error(`${normalized} selected the workspace root`)
-      if (!name.startsWith('@deepseek-ai/')) throw new Error(`${normalized} must name an @deepseek-ai package`)
+      if (!name.startsWith('@deepseek-ai/') && normalized !== CLI_ENTRY_MANIFEST) {
+        throw new Error(`${normalized} must name an @deepseek-ai package`)
+      }
       if (seen.has(name)) throw new Error(`${name} appears twice in release family ${this.id}`)
       seen.add(name)
       members.push({
@@ -357,6 +367,9 @@ class DshFamily extends ReleaseFamily {
     if (separator === -1) return undefined
     const [channel] = version.slice(separator + 1).split('.')
     if (channel === 'alpha' || channel === 'canary') return channel
+    // The fork's `-enpoi.N` line publishes to its own `beta` channel; upstream's
+    // `rc` line keeps publishing to upstream's `next`.
+    if (channel === 'enpoi') return 'beta'
     return 'next'
   }
 
@@ -369,7 +382,16 @@ class DshFamily extends ReleaseFamily {
     validateTarballPayload(files, member.name)
   }
 
-  readonly installedEntry = { packageName: '@deepseek-ai/dsh', binPath: 'lib/bin.js' }
+  /**
+   * The CLI entry's packed identity, following whatever owner its manifest
+   * names. Read from `apps/cli/package.json` under the working directory,
+   * which is the repository root every release step runs from.
+   */
+  get installedEntry(): InstalledEntry {
+    const manifest = readManifest(resolve(process.cwd(), CLI_ENTRY_MANIFEST))
+    const name = requireString(manifest, 'name', CLI_ENTRY_MANIFEST)
+    return { packageName: name, binPath: 'lib/bin.js' }
+  }
 }
 
 /** `vendor/*`: every package keeps its own version line, so every package has its own tag. */

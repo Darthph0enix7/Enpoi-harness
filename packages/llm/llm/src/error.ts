@@ -180,3 +180,36 @@ export function isHarnessError(value: unknown): value is HarnessError {
  * the agent or summarizer retries with freshly derived input.
  */
 export const IMAGE_OFFLOAD_REQUIRED_CODE = 'IMAGE_OFFLOAD_REQUIRED'
+
+/**
+ * Canonical code for a server-side policy rejection that no retry, credential
+ * rotation, or route change can satisfy. OpenCode's console service gates its
+ * `-free` models to OpenCode's own clients; the team states the rule directly:
+ * "You cannot use the free tier in other harnesses (this is only a limitation
+ * for the free tier nothing else)" (rekram1-node, anomalyco/opencode#49621,
+ * 2026-09-18). The paid OpenCode Go route is the sanctioned client path. A
+ * failure carrying this code is terminal: it must not cycle the pool's keys,
+ * cool an identity down, quarantine the route, or escalate a model group.
+ */
+export const FREE_TIER_GATED_CODE = 'FREE_TIER_GATED'
+
+/**
+ * User-facing explanation carried with {@link FREE_TIER_GATED_CODE}: the
+ * rejection is policy, not an account or key defect, so the caller switches to
+ * a paid route or another provider instead of retrying the gated one.
+ */
+export const FREE_TIER_GATED_EXPLANATION =
+  "OpenCode's free tier can only be used from within OpenCode (server-side policy);"
+  + ' use a paid OpenCode Go key or another provider.'
+
+/**
+ * Recognize the `403 FreeTierError` body OpenCode returns to third-party
+ * harnesses. Deliberately narrow (`FreeTierError` or the exact policy phrase
+ * "free tier can only be used"): a generic mention of some free tier must keep
+ * whatever class its own adapter would otherwise assign.
+ * @param detail - provider error code/type/message text joined into one string.
+ * @returns true when the detail is OpenCode's free-tier client gate.
+ */
+export function isFreeTierGatedError(detail: string): boolean {
+  return /FreeTierError/i.test(detail) || /free tier can only be used/i.test(detail)
+}

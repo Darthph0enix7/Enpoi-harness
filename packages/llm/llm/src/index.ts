@@ -44,7 +44,7 @@ import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
 import { writeSessionWireCapture } from './wire-sessions.ts'
 import {
-  contentHasFile, contentHasImage, fileHandleText, projectFilesToText, projectImagesForTextModel, projectToolUpdates,
+  contentHasFile, contentHasImage, fileHandleText, projectEmbeddedBase64Text, projectFilesToText, projectImagesForTextModel, projectToolUpdates,
 } from './content.ts'
 import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
@@ -207,6 +207,10 @@ const CHAIN_BUDGET_MS = 60_000
  * absent on purpose: they never rotate. A provider stream that ended without
  * a terminal event is the same provider-side truncation as a cut, so it
  * rotates even when the link's own policy does not list it.
+ * `FREE_TIER_GATED` is absent for the same reason: OpenCode's free-tier client
+ * gate is a server-side policy rejection ("You cannot use the free tier in
+ * other harnesses", anomalyco/opencode#49621), so cycling the group's other
+ * gated links only repeats the same 403 while hiding the explanation.
  */
 const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
   'EMPTY_RESPONSE',
@@ -1408,6 +1412,10 @@ export class LlmRuntime extends TypertRemoteService {
         && projectedMessages.some(message => contentHasImage(message.content))) {
         projectedMessages = projectImagesForTextModel(projectedMessages)
       }
+      // Embedded base64 in message text has no attachment identity to resolve
+      // and no route accepts it as media; oversized payloads are omitted so a
+      // paste cannot ride megabytes of text into every request.
+      projectedMessages = projectEmbeddedBase64Text(projectedMessages)
       // Tool changes are logged on every route; the route's declared mode selects what it receives.
       const projectedTools = projectToolUpdates(projectedMessages, resolvedOptions.tools, modelInfo.toolUpdate, resolvedOptions.toolHistory)
       projectedMessages = projectedTools.messages
@@ -1718,8 +1726,13 @@ export class LlmRuntime extends TypertRemoteService {
     const effort = link.effort !== undefined
       ? link.effort as ReasoningEffortId
       : onRequestLink ? options.reasoningEffort : undefined
+    // The caller's effort belongs to the caller's own route: a link that
+    // declares none and is not that route resolves its model's own default
+    // rather than inheriting an id its adapter may not advertise.
+    const base = { ...options }
+    delete base.reasoningEffort
     const next: GenerateOptions = {
-      ...options,
+      ...base,
       provider: link.provider,
       model: link.model,
       signal,

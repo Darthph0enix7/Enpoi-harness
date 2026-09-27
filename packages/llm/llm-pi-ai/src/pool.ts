@@ -19,6 +19,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { isContextWindowExceededError, isFreeTierGatedError } from '@deepseek-ai/dsh-llm'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm'
 import type { PiAiPoolIdentity, PoolStrategy } from './config.ts'
 
@@ -29,6 +30,7 @@ export type PoolFailureClass =
   | 'CAPACITY'
   | 'GATEWAY_OUTAGE'
   | 'INVALID_REQUEST'
+  | 'POLICY'
   | 'UPSTREAM'
 
 /** Failure classes that justify moving to the next identity. */
@@ -44,6 +46,10 @@ export const CLASS_COOLDOWN_MS: Readonly<Record<PoolFailureClass, number>> = {
   CAPACITY: 60_000,
   GATEWAY_OUTAGE: 0,
   INVALID_REQUEST: 0,
+  // A server-side policy rejection (OpenCode's free-tier client gate) is a
+  // property of the route itself, not of this credential: the key is healthy,
+  // so cooling it down records nothing a later request could act on.
+  POLICY: 0,
   UPSTREAM: 30_000,
 }
 
@@ -127,13 +133,22 @@ export function parseResetMs(message: string): number | undefined {
  */
 export function classifyFailure(message: string): PoolFailureClass {
   if (TRANSIENT_MODEL_RE.test(message)) return 'GATEWAY_OUTAGE'
+  // OpenCode's free tier is gated server-side to OpenCode's own clients
+  // ("You cannot use the free tier in other harnesses", anomalyco/opencode#49621).
+  // Checked before the 403→AUTH vocabulary below: rotating keys or cooling an
+  // identity down cannot satisfy a policy gate, and the class deliberately
+  // stays out of ROTATING_CLASSES.
+  if (isFreeTierGatedError(message)) return 'POLICY'
   if (/\b503\b|\b529\b/i.test(message)) return 'CAPACITY'
   if (QUOTA_RE.test(message)) return 'QUOTA'
   if (CAPACITY_RE.test(message)) return 'CAPACITY'
   // Auth before payload errors: real 401 bodies often embed an
   // `invalid_request_error` code field (DeepSeek does exactly that).
   if (AUTH_RE.test(message)) return 'AUTH'
-  if (INVALID_REQUEST_RE.test(message)) return 'INVALID_REQUEST'
+  // The shared classifier catches context-overflow bodies the narrow regex
+  // misses (e.g. "prompt is too long for this model"), so a request-shaped
+  // 400 never rotates identities or cools a healthy key down.
+  if (INVALID_REQUEST_RE.test(message) || isContextWindowExceededError(message)) return 'INVALID_REQUEST'
   if (TRANSPORT_RE.test(message)) return 'UPSTREAM'
   return 'UPSTREAM'
 }

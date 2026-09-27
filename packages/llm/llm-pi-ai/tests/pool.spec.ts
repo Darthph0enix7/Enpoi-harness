@@ -57,6 +57,13 @@ describe('classifyFailure', () => {
     expect(classifyFailure('503 overloaded')).toBe('CAPACITY')
     expect(classifyFailure('400 invalid_request_error: max_tokens above limit')).toBe('INVALID_REQUEST')
     expect(classifyFailure('terminated before headers')).toBe('UPSTREAM')
+    // Context-overflow wording without a literal status code is request-level:
+    // rotating identities or cooling a healthy key cannot shrink the payload.
+    expect(classifyFailure('prompt is too long for this model')).toBe('INVALID_REQUEST')
+    expect(classifyFailure("This model's maximum context length is 32768 tokens, however you requested 41000 tokens"))
+      .toBe('INVALID_REQUEST')
+    expect(ROTATING_CLASSES.has(classifyFailure('prompt is too long for this model'))).toBe(false)
+    expect(CLASS_COOLDOWN_MS[classifyFailure('prompt is too long for this model')]).toBe(0)
   })
 
   it('lets transient gateway model rejections win over everything else', () => {
@@ -66,6 +73,17 @@ describe('classifyFailure', () => {
     expect(classifyFailure('model is unavailable right now')).toBe('GATEWAY_OUTAGE')
     // Even quota-flavoured text naming an unavailable model must not rotate keys.
     expect(ROTATING_CLASSES.has(classifyFailure('model is unavailable after 429'))).toBe(false)
+  })
+
+  it('classifies the OpenCode free-tier client gate as a non-rotating POLICY failure', () => {
+    const body = '403 {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}'
+    expect(classifyFailure(body)).toBe('POLICY')
+    // Policy, not credential: no rotation and no cooldown on a healthy key.
+    expect(ROTATING_CLASSES.has('POLICY')).toBe(false)
+    expect(CLASS_COOLDOWN_MS.POLICY).toBe(0)
+    expect(classifyFailure('free tier can only be used from within OpenCode')).toBe('POLICY')
+    // A generic free-tier mention must not hijack a real auth failure.
+    expect(classifyFailure('401 Unauthorized: invalid api key on the free tier route')).toBe('AUTH')
   })
 })
 
