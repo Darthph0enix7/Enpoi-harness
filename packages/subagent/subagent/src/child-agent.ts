@@ -214,6 +214,16 @@ export function applyChildComposition(
       order: childCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
       text: composition.persona,
     })
+    // A parent preset may carry a per-preset persona suffix (its doctrine tail). The child
+    // persona is complete on its own, so shadow the inherited tail away for this child alone —
+    // the same nearest-scope shadow the prefix uses. Without this, a profile whose presets
+    // split shared base (prefix) from per-preset tail (suffix) would leak the parent's doctrine
+    // into every delegated child.
+    childCtx.systemPrompt.section({
+      name: 'deployment:persona-suffix',
+      order: childCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX'),
+      text: '',
+    })
   }
   if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
 }

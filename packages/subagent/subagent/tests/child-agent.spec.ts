@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { resolveChildAgentOptions } from '../src/child-agent.ts'
+import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { applyChildComposition, resolveChildAgentOptions } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
   const id = SessionId('parent')
@@ -98,5 +101,48 @@ describe('child Agent options', () => {
       maxTokens: 512,
       subagentDepth: 1,
     })
+  })
+})
+
+describe('child composition persona shadow', () => {
+  it('shadows the parent preset suffix so a persona-carrying child never carries the parent doctrine', async () => {
+    const ctx = new Context()
+    const parentKey = { id: 'parent-preset' }
+    const childKey = { id: 'child-session' }
+    const scopes: Array<ReturnType<typeof createScope>> = []
+    try {
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin({
+        name: 'parent-preset-fixture',
+        inject: ['systemPrompt'],
+        apply(pluginCtx: Context): void {
+          // Stand-in for a parent preset that splits a shared base (prefix) from a doctrine tail (suffix).
+          const parent = createScope(pluginCtx, parentKey)
+          scopes.push(parent)
+          parent.ctx.systemPrompt.section({
+            name: 'deployment:persona-prefix',
+            order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+            text: 'PARENT PERSONA',
+          })
+          parent.ctx.systemPrompt.section({
+            name: 'deployment:persona-suffix',
+            order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX'),
+            text: 'PARENT PRESET DOCTRINE',
+          })
+          const child = createScope(pluginCtx, childKey, { parent: parentKey })
+          scopes.push(child)
+          applyChildComposition(child.ctx, {} as Agent, { persona: 'You are Fixer.' })
+        },
+      } as never)
+      const childRendered = renderPrompt(await ctx.systemPrompt.assemble({ scope: childKey }))
+      expect(childRendered).toContain('You are Fixer.')
+      expect(childRendered).not.toContain('PARENT PRESET DOCTRINE')
+      expect(childRendered).not.toContain('PARENT PERSONA')
+      const parentRendered = renderPrompt(await ctx.systemPrompt.assemble({ scope: parentKey }))
+      expect(parentRendered).toContain('PARENT PRESET DOCTRINE')
+    } finally {
+      for (const scope of scopes) await scope.dispose()
+      await ctx.fiber.dispose()
+    }
   })
 })
