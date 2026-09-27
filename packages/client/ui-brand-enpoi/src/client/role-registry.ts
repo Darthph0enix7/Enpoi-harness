@@ -15,6 +15,7 @@
  * or a stale mount). A read answering the revision this store last applied
  * notifies nobody.
  */
+import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 import { readEnpoiNamespace } from './settings-refresh.ts'
 
 /** Fleet group a registry role belongs to. */
@@ -67,9 +68,27 @@ export interface FleetSeat {
   name: string
   /** Micro-icon path data. */
   icon: string
-  /** Seats without a parent turn show "Default" instead of "Inherit". */
+  /** The unassigned-state label; `Inherit` when the seat follows the session model. */
   defaultLabel?: string
   defaultHint?: string
+  /** Unassigned routing: `inherit` follows the dispatch/session model; `builtin-default` uses the seat's own route. */
+  defaultKind?: FleetSeatState
+}
+
+/** How one seat routes when it has no explicit assignment. */
+export type FleetSeatState = 'inherit' | 'builtin-default'
+
+/**
+ * The routing state one fleet row labels: an explicit assignment, or the
+ * seat's unassigned fallback — the dispatching/session model (`inherit`) or
+ * the seat's own plugin route (`builtin-default`).
+ * @param assignment - the live persona assignment (null/undefined = unassigned).
+ * @param seat - the resolved fleet seat.
+ * @returns the explicit state the row shows.
+ */
+export function fleetSeatState(assignment: ModelSelection | null | undefined, seat: FleetSeat): 'assigned' | FleetSeatState {
+  if (assignment !== null && assignment !== undefined && assignment.model !== '') return 'assigned'
+  return seat.defaultKind ?? 'inherit'
 }
 
 /** One rendered fleet group. */
@@ -127,16 +146,25 @@ interface LegacySeatMeta {
   group: RoleGroup
   defaultLabel?: string
   defaultHint?: string
+  defaultKind?: FleetSeatState
 }
 
 const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
-  keeper: { name: 'Context Keeper', icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z', group: 'supervision', defaultLabel: 'Default', defaultHint: KEEPER_DEFAULT_ROUTE },
+  keeper: {
+    name: 'Context Keeper',
+    icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z',
+    group: 'supervision',
+    defaultLabel: `built-in default: ${KEEPER_DEFAULT_ROUTE}`,
+    defaultHint: 'the keeper runs outside a conversation, so it cannot inherit — its own route is always used',
+    defaultKind: 'builtin-default',
+  },
   compaction: {
     name: 'Compaction Summariser',
     icon: 'M3 3h10v10H3zM3 6h10M3 10h4m2 2v3m0 0l-1.5-1.5M9 15l1.5-1.5',
     group: 'supervision',
     defaultLabel: 'Inherit',
     defaultHint: 'the session model — keeps the prefix cache',
+    defaultKind: 'inherit',
   },
   oracle: { name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2', group: 'supervision' },
   fixer: { name: 'Fixer', icon: 'M10.5 2.5l3 3L6 13H3v-3z', group: 'specialists' },
@@ -152,20 +180,6 @@ const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
   experiencer: { name: 'Experiencer', icon: 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z', group: 'council' },
   integrator: { name: 'Integrator', icon: 'M4 4h4v4H4zM8 8h4v4H8z', group: 'council' },
   curator: { name: 'Curator', icon: DEFAULT_SEAT_ICON, group: 'council' },
-}
-
-/**
- * Whether a persona id is a fleet seat the operator is expected to see — a
- * registry role (built-in or server) OR one of the legacy persona-only seats
- * the councils and the keeper use. Clearing an assignment on such a seat keeps
- * its fleet row (the key stays as an explicit `null`); clearing an id that is
- * neither removes the stray key entirely.
- * @param id - persona id as typed or stored.
- * @returns true when the seat should survive a cleared assignment.
- */
-export function isKnownFleetSeat(id: string): boolean {
-  const key = normalizeRoleId(id)
-  return Object.hasOwn(BUILT_IN_ROLES, key) || Object.hasOwn(LEGACY_SEAT_META, key)
 }
 
 /** Normalize an operator-typed role id (lowercase, no leading article). */
@@ -258,10 +272,12 @@ export const DESIGNATED_SEATS: ReadonlySet<string> = new Set(['compaction'])
  * registry order, one group per registered council titled by the council's own
  * label, the shared arbiter group, then persona-only seats no registry or
  * council claims, plus the harness-designated seats that must always render.
- * Council seats are claimed by normalized id — the first council that lists an
- * id owns its row, so a duplicate appears once; a council with zero seats
- * renders no group; a role hidden with `seat: false` stays hidden even when a
- * council lists it. The shipped pre-registry seat metadata (keeper, compaction,
+ * Every arbiter a council declares renders in the shared group with no persona
+ * assignment, because the declaration itself is the row's source. Council
+ * seats are claimed by normalized id — the first council that lists an id owns
+ * its row, so a duplicate appears once; a council with zero seats renders no
+ * group; a role hidden with `seat: false` stays hidden even when a council
+ * lists it. The shipped pre-registry seat metadata (keeper, compaction,
  * arbiters, legacy debaters) counts as a registry claim.
  * @param registry - the effective role registry.
  * @param personaKeys - keys of the persona assignment map.
@@ -322,6 +338,7 @@ export function buildFleetCategories(
     }
     if (legacy?.defaultLabel !== undefined) seat.defaultLabel = legacy.defaultLabel
     if (legacy?.defaultHint !== undefined) seat.defaultHint = legacy.defaultHint
+    if (legacy?.defaultKind !== undefined) seat.defaultKind = legacy.defaultKind
     return seat
   }
 
@@ -349,6 +366,15 @@ export function buildFleetCategories(
     push(entry.group ?? LEGACY_SEAT_META[id]?.group ?? 'custom', resolveSeat(id, entry.label))
   }
 
+  // Declared arbiters (`referee`, `chair`) render in the shared council group
+  // from the council registry itself, with no persona row at all: their seat
+  // is registry data, so an unassigned or cleared seat never loses its row.
+  for (const id of arbiters) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    push('council', resolveSeat(id, undefined))
+  }
+
   const extras = [...new Set(personaKeys)]
     .map(key => normalizeRoleId(key))
     .filter(key => key !== '' && !seen.has(key))
@@ -356,7 +382,7 @@ export function buildFleetCategories(
   for (const id of extras) {
     seen.add(id)
     const legacy = LEGACY_SEAT_META[id]
-    if (arbiters.has(id) || (legacy?.group ?? 'custom') === 'council') {
+    if ((legacy?.group ?? 'custom') === 'council') {
       push('council', resolveSeat(id, undefined))
       continue
     }

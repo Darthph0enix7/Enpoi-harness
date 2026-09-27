@@ -94,12 +94,12 @@ export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
   /**
-   * Keyless (anonymous) route: no credential is required to serve requests,
-   * and an `apiKeyEnv` beside it turns optional — a resolvable value authenticates
-   * the paid/BYOK path, an unset one sends the request without an Authorization
-   * header instead of failing. Keys supplied through pi-ai's own stored
-   * credentials are superseded by the keyless request path; name an `apiKeyEnv`
-   * for BYOK.
+   * Keyless (anonymous) route: no credential is required to serve requests.
+   * Every request it sends is anonymous — a stored, ambient, or env-provided
+   * key never reaches its wire, because a gateway's anonymous path may reject
+   * any Authorization header it sees. Byok (bring your own key) on such a
+   * gateway is an explicit configuration: drop `keyless` and keep the
+   * `apiKeyEnv` reference, which then resolves and sends as usual.
    */
   keyless?: boolean
   /**

@@ -82,6 +82,23 @@ export function readModelGroups(namespace: SettingsNamespaceView | undefined): M
   return parseModelGroups((value as Record<string, unknown>)['chains'])
 }
 
+/** Whether two parsed group lists carry the same editable values. */
+export function sameModelGroups(left: readonly ModelGroup[], right: readonly ModelGroup[]): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  return left.every((group, index) => {
+    const other = right[index]
+    if (other === undefined || group.id !== other.id || group.label !== other.label
+      || group.attempts !== other.attempts || group.onCut !== other.onCut
+      || group.disabled !== other.disabled || group.links.length !== other.links.length) return false
+    return group.links.every((link, linkIndex) => {
+      const otherLink = other.links[linkIndex]
+      return otherLink !== undefined && link.provider === otherLink.provider
+        && link.model === otherLink.model && link.effort === otherLink.effort
+    })
+  })
+}
+
 /** The stored JSON value of one link. */
 export type GroupSpecLink = { provider: string; model: string; effort?: string }
 

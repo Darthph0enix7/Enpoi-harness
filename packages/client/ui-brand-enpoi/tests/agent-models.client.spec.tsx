@@ -145,6 +145,30 @@ describe('AgentModelsBody — dynamic fleet', () => {
     expect(screen.getByText('Stray Seat')).toBeTruthy()
   })
 
+  it('keeps every cleared seat row and labels the unassigned state', () => {
+    // Explicit nulls are the cleared (inherit) state — the row must stay.
+    mount(mergeRoleRegistry(undefined), { oracle: null, fixer: null, keeper: null }, directoryFace())
+
+    expect(screen.getByText('The Oracle')).toBeTruthy()
+    expect(screen.getByText('Fixer')).toBeTruthy()
+    expect(screen.getByText('Context Keeper')).toBeTruthy()
+    // The compaction seat is always rendered, assigned or not.
+    expect(screen.getByText('Compaction Summariser')).toBeTruthy()
+    // Cleared registry rows + the always-rendered compaction row show the
+    // explicit inherit placeholder (5 registry seats + compaction).
+    expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBe(6)
+    // The keeper names its built-in route instead of claiming inherit.
+    expect(screen.getByRole('button', { name: 'built-in default: freellmapi/auto' })).toBeTruthy()
+  })
+
+  it('labels the keeper built-in default exactly', () => {
+    mount(mergeRoleRegistry(undefined), { keeper: null }, directoryFace())
+
+    expect(screen.getByRole('button', { name: 'built-in default: freellmapi/auto' })).toBeTruthy()
+    // Every other unassigned seat keeps the inherit label.
+    expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBe(6)
+  })
+
   it('renders the embedded picker through the injected model translator, not raw keys', async () => {
     const CHAINS = {
       stable: {

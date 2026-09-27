@@ -35,6 +35,32 @@ export interface SettingsDescribeOptions {
   redactSecrets?: boolean
 }
 
+/** One derived artifact published beside the configuration document. */
+export interface SettingsArtifact {
+  /** Content revision: equal serialized values share one revision across host restarts. */
+  revision: number
+  /** The last published value, detached from the caller's copy. */
+  value: unknown
+}
+
+/**
+ * Stable content revision of one serialized artifact. Equal values answer the
+ * same revision from any host process, so a client's held revision stays valid
+ * across a restart and a moved value always answers a different revision.
+ * @param serialized - the artifact's `JSON.stringify` output.
+ * @returns a 52-bit FNV-1a pair as a safe integer.
+ */
+function artifactRevisionOf(serialized: string): number {
+  let low = 0x811c9dc5
+  let high = 0x811c9dc5
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index)
+    low = Math.imul(low ^ code, 0x01000193)
+    high = Math.imul(high ^ code, 0x811c9dc5)
+  }
+  return (high >>> 11) * 0x200000 + ((low >>> 0) & 0x1fffff)
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Schema-derived plugin configuration forms. */
@@ -233,6 +259,8 @@ export class SettingsForms extends Service {
    * `readOrchestrationDocument`, every settings page) share one projection.
    */
   private generation = 0
+  /** Derived artifacts published outside the document; never described or persisted. */
+  private readonly artifacts = new Map<string, { revision: number; value: unknown }>()
   private described: {
     generation: number
     /** Active-entry identities and lifecycle states the projections were built from. */
@@ -374,6 +402,49 @@ export class SettingsForms extends Service {
       raw: withRedaction ? previous?.raw : descriptors,
     }
     return [...descriptors]
+  }
+
+  /**
+   * Project one namespace from the same cached generation `describe()` serves.
+   * Readers that consume one namespace use this instead of projecting the whole
+   * set, so a narrow read stays correct while costing one row.
+   * @param ns - profile entry id.
+   * @param options - redaction required for remote callers.
+   * @returns the namespace's descriptor, or undefined when no active entry carries it.
+   */
+  describeNamespace(ns: string, options?: SettingsDescribeOptions): SettingsDescriptor | undefined {
+    return this.describe(options).find(row => row.ns === ns)
+  }
+
+  /**
+   * Publish one derived artifact beside the configuration document. Artifacts
+   * never enter `describe()`, so a publish costs no document revision, profile
+   * write, Loader reload, or forwarded settings event; clients read them
+   * through the Remote `describeArtifact` method. The revision is derived from
+   * the serialized value, so a republish of the same value keeps it — the basis
+   * for revision-aware reads — and a client's held revision stays meaningful
+   * across a host restart.
+   * @param key - artifact name, e.g. `catalogRules.resolved`.
+   * @param value - JSON-serializable value; stored detached from the caller's copy.
+   * @returns the artifact revision after the publish.
+   */
+  publishArtifact(key: string, value: unknown): number {
+    if (key.length === 0) throw new TypeError('settings artifact key must not be empty')
+    const serialized = JSON.stringify(value)
+    if (serialized === undefined) throw new TypeError(`settings artifact "${key}" is not JSON-serializable`)
+    const revision = artifactRevisionOf(serialized)
+    this.artifacts.set(key, { revision, value: JSON.parse(serialized) as unknown })
+    return revision
+  }
+
+  /**
+   * Read one published artifact.
+   * @param key - artifact name.
+   * @returns the current value and revision, or undefined when never published.
+   */
+  readArtifact(key: string): SettingsArtifact | undefined {
+    const artifact = this.artifacts.get(key)
+    return artifact === undefined ? undefined : { revision: artifact.revision, value: artifact.value }
   }
 
   /** Active-entry identities and lifecycle states; a change invalidates cached projections. */

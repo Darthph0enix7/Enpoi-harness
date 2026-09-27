@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
  * The shipped Session row actions rendered directly with hand-built props:
- * the pin, rename, fork, and archive menu rows, the archive and pin hover
- * buttons, and the two `shell.overlay` surfaces they raise (rename dialog,
- * row notice). Every action reads its own injected hooks and calls its own
+ * the pin, rename, and fork menu rows, the archive and pin hover buttons,
+ * and the two `shell.overlay` surfaces they raise (rename dialog, row
+ * notice). Every action reads its own injected hooks and calls its own
  * injected callbacks; what those callbacks do is apply.client.spec's
  * subject. The browser and the slot machinery stay out; the assembled
  * chain lives in rename-assembly.client.spec.
@@ -24,7 +24,7 @@ import type {
   SessionRenameDialogInjected, SessionRenameTarget,
 } from '../src/client/contract/slots.ts'
 import {
-  ArchiveSessionMenuItem, ArchiveSessionRowButton, SessionArchiveConfirmDialog,
+  ArchiveSessionRowButton, SessionArchiveConfirmDialog,
 } from '../src/client/session-actions/ArchiveSession.tsx'
 import { ForkSessionMenuItem } from '../src/client/session-actions/ForkSession.tsx'
 import { PinSessionMenuItem, PinSessionRowButton } from '../src/client/session-actions/PinSession.tsx'
@@ -170,31 +170,6 @@ describe('archive action', () => {
     useArchived: hook(idSet(...archived)),
     archiveSession: vi.fn(),
     unarchiveSession: vi.fn(),
-  })
-
-  it('menu row closes the menu, then archives', () => {
-    const { state, setMenuOpen } = openMenu()
-    const archive = archiveShare()
-    render(<ArchiveSessionMenuItem {...menuRow(state)} {...archive} />)
-    const row = screen.getByRole('menuitem', { name: '归档会话' })
-    // Archive is not destructive (log and accounting slot remain): no danger styling.
-    expect(row.className).not.toMatch(/danger/)
-    fireEvent.click(row)
-    expect(archive.archiveSession).toHaveBeenCalledWith(sid('one'))
-    expect(archive.unarchiveSession).not.toHaveBeenCalled()
-    expect(setMenuOpen).toHaveBeenCalledWith(false)
-    expect(callOrder(setMenuOpen)).toBeLessThan(callOrder(archive.archiveSession))
-  })
-
-  it('menu row closes the menu, then restores an archived Session', () => {
-    const { state, setMenuOpen } = openMenu()
-    const archive = archiveShare(['one'])
-    render(<ArchiveSessionMenuItem {...menuRow(state)} {...archive} />)
-    fireEvent.click(screen.getByRole('menuitem', { name: '取消归档' }))
-    expect(archive.unarchiveSession).toHaveBeenCalledWith(sid('one'))
-    expect(archive.archiveSession).not.toHaveBeenCalled()
-    expect(setMenuOpen).toHaveBeenCalledWith(false)
-    expect(callOrder(setMenuOpen)).toBeLessThan(callOrder(archive.unarchiveSession))
   })
 
   it('row button archives and restores', () => {
@@ -628,30 +603,26 @@ describe('RowActionToast', () => {
 
 it('shows effective Session shortcuts while menu clicks keep the row target', () => {
   const shortcuts = new ShortcutRegistry('desktop', 'macos')
-  for (const [action, code] of [['rename', 'KeyR'], ['fork', 'KeyF'], ['archive', 'KeyA']] as const) {
+  for (const [action, code] of [['rename', 'KeyR'], ['fork', 'KeyF']] as const) {
     shortcuts.register({ id: `session.${action}` as ShortcutCommandId, label: () => action, aliases: [],
       defaults: {
-        'desktop:macos': { code, modifiers: ['primary', action === 'archive' ? 'shift' : 'alt'] },
-        'desktop:windows': { code, modifiers: ['primary', action === 'archive' ? 'shift' : 'alt'] },
-        'desktop:linux': { code, modifiers: ['primary', action === 'archive' ? 'shift' : 'alt'] },
+        'desktop:macos': { code, modifiers: ['primary', 'alt'] },
+        'desktop:windows': { code, modifiers: ['primary', 'alt'] },
+        'desktop:linux': { code, modifiers: ['primary', 'alt'] },
       },
       regions: ['page'], modals: [], resolve: () => ({ status: 'pass' }) })
   }
   const requestSessionRename = vi.fn()
   const forkSession = vi.fn()
-  const archiveSession = vi.fn()
   const props = { ...menuRow([true, vi.fn()]), useShortcuts: hook(shortcuts.catalog.getSnapshot()) }
   render(<>
     <RenameSessionMenuItem {...props} requestSessionRename={requestSessionRename} />
     <ForkSessionMenuItem {...props} forkSession={forkSession} />
-    <ArchiveSessionMenuItem {...props} useArchived={hook(idSet())} archiveSession={archiveSession} unarchiveSession={vi.fn()} />
   </>)
   expect(screen.getAllByRole('menuitem').map(item => item.getAttribute('aria-keyshortcuts')))
-    .toEqual(['Alt+Meta+R', 'Alt+Meta+F', 'Shift+Meta+A'])
+    .toEqual(['Alt+Meta+R', 'Alt+Meta+F'])
   fireEvent.click(screen.getByRole('menuitem', { name: '重命名' }))
   fireEvent.click(screen.getByRole('menuitem', { name: '分叉会话' }))
-  fireEvent.click(screen.getByRole('menuitem', { name: '归档会话' }))
   expect(requestSessionRename).toHaveBeenCalledWith(ROW.sessionId, ROW.displayTitle)
   expect(forkSession).toHaveBeenCalledWith(ROW.sessionId)
-  expect(archiveSession).toHaveBeenCalledWith(ROW.sessionId)
 })

@@ -180,33 +180,43 @@ export class ConfigEditor extends Service {
 
   /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
    * References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.
+   * A derived candidate equal to the live entry config returns before the profile reload, so a no-op
+   * edit raises no reload, document write, or update notification.
    * @param entry Current Loader entry, also used to detect replacement during the write.
-   * @param change Derive a raw config from the current entry and its inherited layer.
-   * @returns Fulfillment after Loader reconciliation completes.
+   * @param change Derive a raw config from the current entry and its inherited layer; it must be
+   * side-effect free because a committed edit invokes it for the no-op probe and again after the reload.
+   * @returns Fulfillment after Loader reconciliation completes, or immediately for a no-op candidate.
    */
   async edit(
     entry: Entry,
     change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
   ): Promise<void> {
+    // Every profile write re-applies this idempotent check, so a stale `chain`
+    // reference a merge would otherwise carry over is repaired on the write
+    // that would have resurrected it — not only at boot.
+    const candidateOf = (current: Record<string, unknown>, inherited: Record<string, unknown>): Record<string, unknown> =>
+      pruneUnusableChains(change(current, inherited), this.ownerContext.get('modelChains') as ModelChainRegistry | undefined, (fieldPath, value) => {
+        this.ownerContext.logger.warn(`config-editor: dropped unusable chain "${value}" at ${fieldPath} of "${entry.options.id}": the model group is disabled, unknown, or unregistered`)
+      })
+    const loadInherited = (): Record<string, unknown> => this.inherited(entry, loadProfileDirectory('dsh', this.ownerContext.profileContext.dir, this.ownerContext.profileContext.installAnchor))
     const run = async (): Promise<void> => {
       const path = this.documentPath
       await withFileLock(join(this.ownerContext.profileContext.dir, 'package.json'), async () => {
         if (!this.entries().includes(entry) || entry.fiber === undefined) throw new Error('Configuration entry is no longer available')
+        // The no-op probe runs before the profile reload: a candidate equal to
+        // the live config has nothing to persist, so returning here skips both
+        // reconciles, the atomic patch write, the descriptor projection, and
+        // the `app-boot/config-reload` / `settings/document-updated`
+        // notifications that a committed write would raise.
+        const probe = structuredClone((entry.options.config ?? {}) as Record<string, unknown>)
+        if (isDeepStrictEqual(candidateOf(probe, loadInherited()), probe)) return
         const beforePatches = readProfilePatches('dsh', this.ownerContext.profileContext)
         await reconcileProfilePatches(this.ownerContext.root, beforePatches, 'dsh')
         if (!this.entries().includes(entry)) throw new Error('Configuration entry changed during reload')
         const current = structuredClone((entry.options.config ?? {}) as Record<string, unknown>)
-        const inherited = this.inherited(entry, loadProfileDirectory('dsh', this.ownerContext.profileContext.dir, this.ownerContext.profileContext.installAnchor))
-        // Every profile write re-applies this idempotent check, so a stale
-        // `chain` reference a merge would otherwise carry over is repaired on
-        // the write that would have resurrected it — not only at boot.
-        const next = pruneUnusableChains(
-          change(current, inherited),
-          this.ownerContext.get('modelChains') as ModelChainRegistry | undefined,
-          (fieldPath, value) => {
-            this.ownerContext.logger.warn(`config-editor: dropped unusable chain "${value}" at ${fieldPath} of "${entry.options.id}": the model group is disabled, unknown, or unregistered`)
-          },
-        )
+        const inherited = loadInherited()
+        const next = candidateOf(current, inherited)
+        if (isDeepStrictEqual(next, current)) return
         const fiber = entry.fiber
         if (fiber.state !== FiberState.ACTIVE) throw new Error('Configuration plugin is no longer active')
         const resolved: unknown = fiber.ctx.waterfall(fiber, 'internal/config', next, () => next)

@@ -1,5 +1,6 @@
 /** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
+import Schema from '@deepseek-ai/schemastery'
 import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { SettingsDescribeMirror } from '@deepseek-ai/dsh-client-ui-settings/src/client/settings-mirror.ts'
@@ -169,6 +170,40 @@ describe('ModelsSettingsStore', () => {
     expect(byProvider.get('anthropic')?.apiKeyEnv).toBeUndefined()
     expect(byProvider.get('ghost')).toMatchObject({ configured: false, removable: false })
     expect(state.namespaces.get('llm-pi-ai')?.ns).toBe('llm-pi-ai')
+  })
+
+  it('offers removal for a shipped whole-section route whose namespace declares the disabled flag', async () => {
+    // llm-deepseek's own schema, with the removal flag its plugin declares.
+    const deepseekConfig = Schema.object({
+      apiKeyEnv: Schema.string().role('credential-ref'),
+      baseURL: Schema.string(),
+      disabled: Schema.boolean().default(false),
+    })
+    const { ctx, mirror } = api({
+      describeSettings: () => Promise.resolve(remoteOk({
+        writable: true,
+        hasDocument: false,
+        namespaces: NAMESPACES.map(namespace => namespace.ns === 'llm-deepseek'
+          ? { ...namespace, schema: JSON.parse(JSON.stringify(deepseekConfig.toJSON())) as never }
+          : namespace),
+      })),
+    })
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    await store.load()
+    const byProvider = new Map(store.store.getSnapshot().rows.map(row => [row.entry.provider, row]))
+    // The shipped route's whole address is the namespace, so the declared flag
+    // is what makes removal possible; its credential reference is untouched.
+    expect(byProvider.get('deepseek-official')).toMatchObject({ removable: true, apiKeyEnv: 'DEEPSEEK_API_KEY' })
+    // Our own pi-ai route keeps profile-path removal and stays removable too.
+    expect(byProvider.get('openai')).toMatchObject({ removable: true })
+  })
+
+  it('keeps a shipped route without the declared removal flag non-removable', async () => {
+    const { ctx, mirror } = api()
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    await store.load()
+    const row = store.store.getSnapshot().rows.find(candidate => candidate.entry.provider === 'deepseek-official')!
+    expect(row.removable).toBe(false)
   })
 
   it('degrades the credential badge, not the page, when the credential domain fails', async () => {

@@ -128,9 +128,10 @@ export function displayFailure(failure: unknown): DisplayFailure {
   if (failure === null || typeof failure !== 'object') return { message: String(failure) }
   const record = failure as { code?: unknown; message?: unknown }
   const code = typeof record.code === 'string' ? record.code : undefined
-  // Provider AUTH messages may echo a masked or partially preserved credential.
-  // Keep the raw diagnostic in the Session log, but never retain it in UI state.
-  if (code === 'AUTH') return { code, message: '' }
+  // The message is retained for every class, AUTH included: the adapter carries
+  // the provider's own `code: message` pair there (e.g. `PAID_MODEL_AUTH_REQUIRED:
+  // You need to sign in to use this model.`) instead of a raw envelope, and the
+  // table headlines the localized copy beside this detail.
   return {
     ...(code === undefined ? {} : { code }),
     message: typeof record.message === 'string' ? record.message : JSON.stringify(failure),

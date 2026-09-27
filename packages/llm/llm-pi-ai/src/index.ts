@@ -200,6 +200,14 @@ export function apply(ctx: Context, config: Config): void {
     provider: string,
     profile: ResolvedPiAiProviderProfile,
   ): Promise<string | undefined> => {
+    // A keyless route is anonymous by definition: neither a stored record, an
+    // ambient environment value, nor the process env may reach its wire. Kilo
+    // proves why — an anonymous call is 200, and any Authorization header
+    // (even a dummy) turns it into 401 INVALID_TOKEN. The reference is never
+    // resolved here; sending a key is an explicit BYOK configuration, which is
+    // a route without `keyless` that names its `apiKeyEnv`. The adapter clears
+    // the Authorization header on every attempt of this route.
+    if (profile.keyless) return undefined
     const ref = profile.apiKeyEnv
     // Only a profile that names no credential at all defers to pi-ai's
     // provider-native discovery. Once one is named, a miss must fail loud:
@@ -213,10 +221,6 @@ export function apply(ctx: Context, config: Config): void {
       // Without the seam the environment is the whole credential plane.
       : launchEnvironmentOf(ctx).get(ref)?.value
     if (hit !== undefined && hit.length > 0) return assertUsableApiKey(hit, 'llm-pi-ai', ref)
-    // A keyless route keeps the reference optional: a set value buys the
-    // paid/BYOK path, an unset one serves anonymously. The adapter clears the
-    // Authorization header for such an attempt.
-    if (profile.keyless) return undefined
     throw new LlmError(
       `llm-pi-ai: no credential for provider route "${provider}"; its profile resolves ${ref}, which is not`
       + ` set — store ${ref} through the credentials service (the web Models page writes it) or export it,`

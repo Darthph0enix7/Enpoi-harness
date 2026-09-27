@@ -87,7 +87,11 @@ export function apply(ctx: Context): void {
   const mirror = new SettingsDescribeMirror(ctx, persistence)
   ctx.effect(() => {
     const disposers = [
-      ctx.remote.$on('settings/document-updated', () => { void mirror.load() }),
+      // The event names one namespace and its new revision. The mirror drops
+      // revisions it already holds (this client's own folded answer) and
+      // defers ones announced while a local write for that namespace is in
+      // flight, so a self-echo never costs the 926 KB re-read.
+      ctx.remote.$on('settings/document-updated', (ns, revision) => { mirror.invalidate(ns, revision) }),
       ctx.on('connection/reset', () => { void mirror.load() }),
     ]
     // The first connection also emits connection/reset, so startup normally

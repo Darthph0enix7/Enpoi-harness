@@ -19,6 +19,28 @@ it('persists a model edit, updates the real consumer without remounting, and res
   expect(restored.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'changed' })
 })
 
+it('keeps a shipped-route removal across a later rewrite of the same entry and a restart', async () => {
+  const { ctx, profile, start } = await fixture({
+    schema: z.object({
+      ordinary: z.string().required(),
+      disabled: z.boolean().default(false).volatile(),
+      count: z.number().min(1).default(2).volatile(),
+    }),
+  })
+  // The Models page's shipped-route removal: the route's own namespace flag.
+  await ctx.settings.mutate('first', [{ op: 'set', path: ['disabled'], value: true }])
+  expect(ctx.settings.describe().find(row => row.ns === 'first')!.value).toMatchObject({ disabled: true })
+  // The later rewrite: an unrelated volatile edit on the same entry.
+  await ctx.settings.update('first', { count: 7 })
+  const rows = parse(readFileSync(profile.patchPath, 'utf8')) as Array<{ id?: string; config?: Record<string, unknown> }>
+  expect(rows.findLast(row => row.id === 'first')?.config).toMatchObject({ disabled: true, count: 7 })
+  // A sibling entry is untouched by the removal.
+  expect(ctx.settings.describe().find(row => row.ns === 'second')!.value).toMatchObject({ disabled: false })
+  await ctx.fiber.dispose()
+  const restored = await start()
+  expect(restored.settings.describe().find(row => row.ns === 'first')!.value).toMatchObject({ disabled: true, count: 7 })
+})
+
 it('drops a retired chain the live row carries when a settings write merges it', async () => {
   const { ctx, profile, start } = await fixture()
   await ctx.fiber.dispose()
@@ -227,16 +249,20 @@ it('invalidates removed forms once and rejects writes held across entry removal'
 })
 
 it('restores inherited array elements and preserves metadata during a full reset', async () => {
-  const { ctx, profile } = await fixture({ hmr: false })
+  const { ctx, profile, start } = await fixture({ hmr: false })
+  await ctx.fiber.dispose()
   writeFileSync(profile.patchPath, '- id: first\n  name: cordis:probe\n  disabled: false\n  config:\n    ordinary: fixed\n    token: private\n    count: 8\n- id: second\n  disabled: false\n')
-  await ctx.settings.replace('first', {})
+  // The row is applied at boot: a live no-op reset is short-circuited before
+  // the profile reload, so it intentionally leaves out-of-band edits alone.
+  const restored = await start()
+  await restored.settings.replace('first', {})
   expect(parse(readFileSync(profile.patchPath, 'utf8'))).toEqual([
     { id: 'first', name: 'cordis:probe', disabled: false }, { id: 'second', disabled: false },
   ])
-  await ctx.settings.mutate('first', [{ op: 'set', path: ['list', '0'], value: { name: 'one' } }])
-  await ctx.settings.mutate('first', [{ op: 'unset', path: ['list', '0', 'token'] }])
-  expect(ctx.settings.describe().find(row => row.ns === 'first')!.value).toMatchObject({ list: [{ name: 'one' }] })
-  await expect(ctx.settings.update('first', [])).rejects.toThrow('non-plain root')
+  await restored.settings.mutate('first', [{ op: 'set', path: ['list', '0'], value: { name: 'one' } }])
+  await restored.settings.mutate('first', [{ op: 'unset', path: ['list', '0', 'token'] }])
+  expect(restored.settings.describe().find(row => row.ns === 'first')!.value).toMatchObject({ list: [{ name: 'one' }] })
+  await expect(restored.settings.update('first', [])).rejects.toThrow('non-plain root')
 })
 
 it('resolves group-owned entries and preserves defaults for an entry without raw config', async () => {
@@ -260,7 +286,7 @@ it('refuses an entry removed by an external bundle edit before commit', async ()
   const document = JSON.parse(readFileSync(path, 'utf8')) as Array<{ insert: Array<{ id: string }> }>
   document[0]!.insert = document[0]!.insert.filter(row => row.id !== 'first')
   writeFileSync(path, JSON.stringify(document))
-  await expect(ctx.configEditor.edit(entry, raw => raw)).rejects.toThrow('changed during reload')
+  await expect(ctx.configEditor.edit(entry, raw => ({ ...raw, ordinary: 'changed' }))).rejects.toThrow('changed during reload')
 })
 
 it('refuses an entry disabled after a form was read', async () => {
@@ -269,7 +295,7 @@ it('refuses an entry disabled after a form was read', async () => {
   writeFileSync(profile.patchPath, '- id: first\n  disabled: true\n')
   await expect(ctx.settings.update('first', { count: 8 })).rejects.toThrow('no longer configurable')
   expect(ctx.settings.describe().some(row => row.ns === 'first')).toBe(false)
-  await expect(ctx.configEditor.edit(entry, raw => raw)).rejects.toThrow('no longer active')
+  await expect(ctx.configEditor.edit(entry, raw => ({ ...raw, ordinary: 'changed' }))).rejects.toThrow('no longer active')
 })
 
 it('edits schema-default array rows without dropping secrets and removes rows instead of restoring them', async () => {

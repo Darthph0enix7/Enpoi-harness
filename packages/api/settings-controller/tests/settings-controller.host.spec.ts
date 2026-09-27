@@ -16,7 +16,7 @@ describe('settings Remote', () => {
     const { ctx, controller } = await boot()
     expect(controller.typertRemote.namespace).toBe('settings')
     expect(remoteMethods(controller).map(method => method.method)).toEqual([
-      'describe', 'update', 'replace', 'mutate', 'openSettingsDocument',
+      'describe', 'describeNamespace', 'describeArtifact', 'update', 'replace', 'mutate', 'openSettingsDocument',
     ])
     expect(ctx.get('credentialsController')).toBeDefined()
   })
@@ -35,6 +35,57 @@ describe('settings Remote', () => {
     await expect(controller.update('', {}, undefined)).rejects.toMatchObject({ code: 'gateway/bad-request' })
     await expect(controller.update('missing', {}, undefined)).rejects.toMatchObject({ code: 'settings/rejected' })
     expect((await controller.replace('default-model', {}, undefined)).value).toEqual({ provider: 'test', model: 'original' })
+  })
+
+  it('reads one namespace and serves revision-aware artifacts outside the document', async () => {
+    const { ctx, controller } = await boot()
+    const view = controller.describeNamespace('first')
+    expect(view).toMatchObject({ ns: 'first', revision: 0 })
+    expect(JSON.stringify(view)).not.toContain('private')
+    expect(controller.describeNamespace('missing')).toBeUndefined()
+    expect(() => controller.describeNamespace('')).toThrow('invalid payload')
+
+    // The artifact channel starts empty, then serves content revisions.
+    expect(controller.describeArtifact('catalogRules.resolved', undefined)).toBeUndefined()
+    const revision = ctx.settings.publishArtifact('catalogRules.resolved', { 'p/x': { state: 'hidden' } })
+    expect(controller.describeArtifact('catalogRules.resolved', undefined)).toEqual({
+      key: 'catalogRules.resolved', revision, changed: true, value: { 'p/x': { state: 'hidden' } },
+    })
+    expect(controller.describeArtifact('catalogRules.resolved', revision)).toEqual({
+      key: 'catalogRules.resolved', revision, changed: false,
+    })
+    // The same value republished keeps the revision; a moved value answers another one.
+    expect(ctx.settings.publishArtifact('catalogRules.resolved', { 'p/x': { state: 'hidden' } })).toBe(revision)
+    const moved = ctx.settings.publishArtifact('catalogRules.resolved', { 'p/x': { state: 'visible' } })
+    expect(moved).not.toBe(revision)
+    expect(controller.describeArtifact('catalogRules.resolved', revision)).toMatchObject({ revision: moved, changed: true })
+    expect(() => controller.describeArtifact('', undefined)).toThrow('invalid payload')
+  })
+
+  it('coalesces queued same-revision mutations into one seam commit', async () => {
+    const { ctx, controller } = await boot()
+    const gate = Promise.withResolvers<void>()
+    const seam = vi.spyOn(ctx.settings, 'mutate').mockImplementation(async () => { await gate.promise })
+    const revision = controller.describeNamespace('first')!.revision
+    const first = controller.mutate('first', [{ op: 'set', path: ['count'], value: 3 }], revision)
+    const second = controller.mutate('first', [{ op: 'set', path: ['list'], value: [] }], revision)
+    await Promise.resolve()
+    expect(seam).toHaveBeenCalledTimes(1)
+    expect(seam.mock.calls[0]![1]).toEqual([
+      { op: 'set', path: ['count'], value: 3 },
+      { op: 'set', path: ['list'], value: [] },
+    ])
+    gate.resolve()
+    const answers = await Promise.all([first, second])
+    expect(answers[0]).toEqual(answers[1])
+    // A different revision fence cannot ride the same commit.
+    const other = vi.spyOn(ctx.settings, 'mutate').mockResolvedValue(undefined)
+    other.mockClear()
+    await Promise.all([
+      controller.mutate('first', [{ op: 'set', path: ['count'], value: 4 }], revision),
+      controller.mutate('first', [{ op: 'set', path: ['count'], value: 5 }], revision + 1),
+    ])
+    expect(other).toHaveBeenCalledTimes(2)
   })
 
   it('reports an absent Config form service', async () => {

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 /** Model groups registry parse/write and the Providers-page row behavior. */
+import type { ReactElement } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
@@ -8,7 +9,7 @@ import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selec
 import { ModelGroupsRow } from '../src/client/ModelGroupsRow.tsx'
 import type { ModelGroupsRowProps } from '../src/client/ModelGroupsRow.tsx'
 import {
-  groupWriteOps, parseModelGroups, writeGroupOps,
+  groupWriteOps, parseModelGroups, sameModelGroups, writeGroupOps,
 } from '../src/client/model-groups.ts'
 import type { ModelPickerFace } from '../src/client/picker-face.ts'
 import { en } from '../src/client/locales.ts'
@@ -181,6 +182,16 @@ describe('model groups registry', () => {
     }])
   })
 
+  it('compares parsed groups by value, not by object identity', () => {
+    const before = parseModelGroups({ stable: STABLE })
+    const echoed = parseModelGroups({ stable: STABLE })
+    expect(sameModelGroups(before, echoed)).toBe(true)
+    expect(sameModelGroups(before, parseModelGroups({ stable: { ...STABLE, label: 'Renamed' } }))).toBe(false)
+    expect(sameModelGroups(before, parseModelGroups({ stable: { ...STABLE, attempts: 3 } }))).toBe(false)
+    expect(sameModelGroups(before, parseModelGroups({ stable: { ...STABLE, links: [] } }))).toBe(false)
+    expect(sameModelGroups(before, parseModelGroups({ stable: STABLE, extra: STABLE }))).toBe(false)
+  })
+
   it('retries a conflict and reports a persistent rejection', async () => {
     const mutate = vi.fn()
       .mockResolvedValueOnce({ ok: false, error: { code: 'settings/conflict', message: 'stale' } })
@@ -239,6 +250,61 @@ describe('Model groups row', () => {
         value: true,
       }], 3)
     })
+  })
+
+  it('keeps the optimistic overlay across a settings echo with the same groups', async () => {
+    const gate = { promise: undefined as unknown as Promise<{ ok: true; value: unknown }>, resolve: () => {} }
+    gate.promise = new Promise((resolve) => { gate.resolve = () => resolve({ ok: true, value: {} }) })
+    const mutate = vi.fn(() => gate.promise)
+    const element = (): ReactElement => <ModelGroupsRow
+      namespace={namespaceOf({ stable: STABLE })}
+      api={wire(mutate)}
+      readOnly={false}
+      picker={null}
+      t={t}
+      modelT={key => key}
+      onSaved={vi.fn()}
+    />
+    const view = render(element())
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy() })
+
+    // The settings echo republishes a fresh namespace object carrying the same
+    // stored groups: the optimistic Disable must survive it.
+    view.rerender(element())
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy()
+
+    gate.resolve()
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  })
+
+  it('clears the overlay when the stored groups actually move', async () => {
+    const gate = { promise: undefined as unknown as Promise<{ ok: true; value: unknown }>, resolve: () => {} }
+    gate.promise = new Promise((resolve) => { gate.resolve = () => resolve({ ok: true, value: {} }) })
+    const mutate = vi.fn(() => gate.promise)
+    const element = (chains: Record<string, unknown>): ReactElement => <ModelGroupsRow
+      namespace={namespaceOf(chains)}
+      api={wire(mutate)}
+      readOnly={false}
+      picker={null}
+      t={t}
+      modelT={key => key}
+      onSaved={vi.fn()}
+    />
+    const view = render(element({ stable: STABLE }))
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy() })
+
+    // Another client renamed the group: the stored value moved, so the server
+    // truth replaces the optimistic overlay.
+    view.rerender(element({ stable: { ...STABLE, label: 'Renamed' } }))
+    expect(screen.getByText('Renamed')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Disable' })).toBeTruthy()
+
+    gate.resolve()
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
   })
 
   it('flags a dangling group (no valid links) instead of offering it as an assignment', () => {

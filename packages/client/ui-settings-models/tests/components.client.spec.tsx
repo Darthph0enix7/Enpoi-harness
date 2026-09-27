@@ -32,6 +32,8 @@ afterEach(cleanup)
 const t: ModelsSectionInjected['t'] = key => en[key]
 const OPENAI_TARGET = { provider: 'openai', displayName: 'openai' }
 const openaiCopy = (template: string): string => providerCopy(template, OPENAI_TARGET)
+const DEEPSEEK_TARGET = { provider: 'deepseek-official', displayName: 'DeepSeek' }
+const deepseekCopy = (template: string): string => providerCopy(template, DEEPSEEK_TARGET)
 
 /** Open one row's capacity disclosure (1-based, as the labels read). */
 function expandRow(position: number): void {
@@ -1212,6 +1214,38 @@ describe('ModelsSection', () => {
       [{ op: 'unset', path: ['providers', 'openai'] }],
       undefined,
     ])
+  })
+
+  it('removes a shipped whole-section route by setting its disabled flag and keeps its credential', async () => {
+    const scripted = scriptedFace()
+    // The shipped route's namespace declares the removal flag its plugin reads.
+    const disabledFlag = Schema.object({ disabled: Schema.boolean().default(false) })
+    scripted.face.settings.describe.mockResolvedValue(remoteOk({
+      writable: true,
+      hasDocument: false,
+      namespaces: wireNamespaces().map(view => view.ns === 'llm-deepseek'
+        ? { ...view, schema: JSON.parse(JSON.stringify(disabledFlag.toJSON())) as JsonValue }
+        : view),
+    }))
+    const { mutate, unset } = await mountFace(scripted)
+    fireEvent.click(providerRow('deepseek-official'))
+    fireEvent.click(screen.getByRole('button', { name: en.remove }))
+    const dialog = screen.getByRole('dialog', { name: deepseekCopy(en.deleteTitle) })
+    // DEEPSEEK_API_KEY is shared with the fork's llm-pi-ai deepseek route, so
+    // the dialog must not promise to remove the credential.
+    expect(dialog.textContent).toContain(deepseekCopy(en.deleteDescription))
+    expect(dialog.textContent).not.toContain(deepseekCopy(en.deleteDescriptionWithCredential))
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(unset).not.toHaveBeenCalled()
+    expect(mutate.mock.calls[0]).toEqual([
+      'llm-deepseek',
+      [{ op: 'set', path: ['disabled'], value: true }],
+      undefined,
+    ])
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: deepseekCopy(en.deleteTitle) })).toBeNull()
+    })
   })
 
   it('blocks duplicate deletion while the confirmed removal is pending', async () => {

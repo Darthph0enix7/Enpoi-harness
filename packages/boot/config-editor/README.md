@@ -38,7 +38,7 @@ Use [settings](../../settings/settings/README.md) for forms restricted to live f
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The [editor](src/index.ts) reconciles external changes before deriving a candidate, locks the profile manifest alongside other profile operations, and atomically replaces its config override. It preserves YAML comments and `!!js` expressions outside replaced values. A failed reconciliation restores the prior document and reloads the prior patches.
+The [editor](src/index.ts) reconciles external changes before deriving a candidate, locks the profile manifest alongside other profile operations, and atomically replaces its config override. It preserves YAML comments and `!!js` expressions outside replaced values. A failed reconciliation restores the prior document and reloads the prior patches. A candidate equal to the live entry config returns before the profile reload, so a no-op edit costs no lock-held reconciliation, document write, or reload; the live in-memory state is the comparison base, and the HMR watcher reconciles out-of-band document changes.
 
 Every write drops `chain` references the optional `modelChains` registry cannot route — an absent registry, an unknown or disabled group id, and a blank id — with a warning, because the LLM runtime fails such a reference open to the request's own model. The check runs inside the write, so a merge that would carry a stale reference from live config repairs it instead of resurrecting it.
 

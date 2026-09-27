@@ -72,6 +72,18 @@ describe('discovered-model cache parsing', () => {
     expect(discoveredModelsStamp()).not.toBe('')
   })
 
+  it('keeps the sync gate flag with its reason, and drops a reason without the gate', async () => {
+    await cacheFile(cacheWith([
+      { id: 'kilo-auto/efficient', isFree: false, gated: true, gateReason: 'sign-in required', source: 'discovered', discoveredAt: 3 },
+      { id: 'reason-only', gateReason: 'sign-in required', source: 'discovered', discoveredAt: 4 },
+    ]))
+    const models = discoveredModelsFor('acme-gateway')
+    expect(models?.[0]).toMatchObject({ id: 'kilo-auto/efficient', isFree: false, gated: true, gateReason: 'sign-in required' })
+    expect(models?.[1]).toMatchObject({ id: 'reason-only' })
+    expect(models?.[1]?.gated).toBeUndefined()
+    expect(models?.[1]?.gateReason).toBeUndefined()
+  })
+
   it('reads an unreadable or malformed cache as empty instead of failing resolution', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-discovered-'))
     directories.push(directory)

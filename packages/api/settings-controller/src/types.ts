@@ -7,6 +7,8 @@
  * @module @deepseek-ai/dsh-api-settings-controller/types
  */
 
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
     /**
@@ -31,4 +33,20 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 /** Confirmation that the settings document was handed to the native editor. */
 export interface SettingsDocumentOpenValue {
   readonly opened: true
+}
+
+/**
+ * One published settings artifact read. `value` is present only when the
+ * artifact's revision differs from the `knownRevision` the caller sent, so a
+ * repeat read of an unchanged artifact answers without the payload.
+ */
+export interface SettingsArtifactView {
+  /** Artifact name the caller asked for. */
+  readonly key: string
+  /** Current artifact revision; moves only when a publish changed the value. */
+  readonly revision: number
+  /** Whether this read carries a value the caller had not seen. */
+  readonly changed: boolean
+  /** The published value; absent when `changed` is false. */
+  readonly value?: JsonValue
 }

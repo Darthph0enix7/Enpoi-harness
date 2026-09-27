@@ -214,6 +214,27 @@ function getCapsCached(model: ModelItem): ReturnType<typeof detectCapabilities> 
   return c
 }
 
+/** One provider's stored key-pool value, as the panel reads and edits it. */
+type PoolShape = {
+  strategy?: string
+  identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }>
+} | undefined
+
+/** Whether two stored pools carry the same strategy and ordered identity rows. */
+function samePool(left: PoolShape, right: PoolShape): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  if (left.strategy !== right.strategy) return false
+  const leftRows = left.identities ?? []
+  const rightRows = right.identities ?? []
+  if (leftRows.length !== rightRows.length) return false
+  return leftRows.every((entry, index) => {
+    const other = rightRows[index]
+    return other !== undefined && entry.id === other.id && entry.credentialRef === other.credentialRef
+      && entry.priority === other.priority && entry.enabled === other.enabled
+  })
+}
+
 /** 0ms hidden-map reader: parse once per prefsVersion like ModelSelect */
 function readHiddenMap(): Record<string, string[]> {
   try {
@@ -279,11 +300,6 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const [saveSuccess, setSaveSuccess] = useState(false)
 
   // Pool State
-  type PoolShape = {
-    strategy?: string
-    identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }>
-  } | undefined
-
   const serverPool = useMemo<PoolShape>(() => {
     const p = rawProfile.pool as PoolShape
     return p && Array.isArray(p.identities) ? p : undefined
@@ -291,7 +307,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   const [localPool, setLocalPool] = useState<PoolShape>(serverPool)
 
+  // Reconcile against the stored pool VALUE, not the object identity a settings
+  // echo republishes: an unrelated write (or our own hidden-model toggle) must
+  // not reset an in-progress pool edit. Only a moved pool applies.
+  const lastServerPool = useRef<PoolShape>(serverPool)
   useEffect(() => {
+    const previous = lastServerPool.current
+    lastServerPool.current = serverPool
+    if (samePool(previous, serverPool)) return
     setLocalPool(serverPool)
   }, [serverPool])
 

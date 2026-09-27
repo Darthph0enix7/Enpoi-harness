@@ -12,13 +12,13 @@
  * group and this browser has never shown one, so a zero-group install looks
  * exactly as it did before the feature.
  */
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
   groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
-  readModelGroups, writeGroupOps,
+  readModelGroups, sameModelGroups, writeGroupOps,
   type GroupWriteFailure, type ModelGroup, type ModelGroupLink,
 } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
@@ -123,8 +123,18 @@ export function ModelGroupsRow({
 
   const groups = optimistic ?? stored
 
-  // The mirror refresh after a write replaces the optimistic overlay.
-  useEffect(() => { setOptimistic(null) }, [namespace])
+  // The settings echo republishes a fresh namespace object for the same stored
+  // registry. The overlay is owned by the governed value moving, not by object
+  // identity: an echo carrying the same parsed groups keeps the optimistic
+  // value (the provider panel's Fix-44 reconciliation), and only a real group
+  // move — our own commit landing, or another client's edit — clears it.
+  const lastStored = useRef<ModelGroup[]>(stored)
+  useEffect(() => {
+    const previous = lastStored.current
+    lastStored.current = stored
+    if (sameModelGroups(previous, stored)) return
+    setOptimistic(null)
+  }, [stored])
 
   // The row is always rendered: it is the ONLY creation surface for groups, so
   // hiding it while the registry is empty would make the first group impossible

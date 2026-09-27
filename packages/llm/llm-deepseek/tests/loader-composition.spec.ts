@@ -1,6 +1,6 @@
 /** Profile patch edits and credential updates reach the next real adapter request. */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -198,6 +198,35 @@ describe('llm-deepseek real dynamic composition', () => {
     await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(serverA.requests).toHaveLength(1)
     expect(serverB.headers[0]?.['x-api-key']).toBe('rotated-key')
+  })
+
+  it('removes the shipped route through its disabled flag and keeps it removed across a rewrite and restart', async () => {
+    vi.stubEnv('DEEPSEEK_API_KEY', 'entry-key')
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const { ctx, settingsPath } = await loadComposition({ withDynamic: true, baseURL: server.url })
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toContain('deepseek-official')
+    expect(ctx.llm.listConfigurableProviders().map(entry => entry.provider)).toContain('deepseek-official')
+
+    // The Models page's shipped-route removal: the route's own namespace flag.
+    await ctx.settings.mutate(NS, [{ op: 'set', path: ['disabled'], value: true }])
+    await vi.waitFor(() => {
+      expect(ctx.llm.listProviders().map(provider => provider.id)).not.toContain('deepseek-official')
+      expect(ctx.llm.listConfigurableProviders().map(entry => entry.provider)).not.toContain('deepseek-official')
+    })
+
+    // A later settings rewrite of the same entry keeps the removal.
+    await ctx.settings.update(NS, { maxTokens: 128 })
+    await vi.waitFor(() => {
+      expect((ctx.settings.describe().find(row => row.ns === NS)!.value as { disabled?: boolean }).disabled).toBe(true)
+    })
+    expect(ctx.llm.listProviders().map(provider => provider.id)).not.toContain('deepseek-official')
+    expect(await readFile(settingsPath, 'utf8')).toContain('disabled: true')
+
+    const home = root!
+    await ctx.fiber.dispose()
+    context = undefined
+    const restarted = await loadComposition({ withDynamic: true, baseURL: server.url, reuseRoot: home })
+    expect(restarted.ctx.llm.listProviders().map(provider => provider.id)).not.toContain('deepseek-official')
   })
 
   it('keeps a stored key writable and rotatable across a real restart', async () => {

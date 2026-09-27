@@ -1,14 +1,20 @@
 /**
- * Resolved catalogue visibility (`enpoi-orchestration.catalogRules.resolved`)
- * as the composer picker consumes it.
+ * Resolved catalogue visibility (`catalogRules.resolved`) as the composer
+ * picker consumes it.
  *
  * The host rules engine evaluates every catalogue entry against the current
  * `catalogRules` document after each settings update and publishes only the
  * decisions that differ from default-visible: hidden entries (with the reason
  * the picker renders) and manual pins (with the rule or gate they override).
- * One `settings.describe` primes a module-level cache at load; the host's
- * `settings/document-updated` push re-reads it, and the payload is mirrored
- * into {@link CATALOG_VISIBILITY_STORAGE_KEY} so a surface that must not fetch
+ * The map rides the host's `settings.describeArtifact` channel, not the
+ * settings document, so a rules change no longer forces every client to re-read
+ * the whole document; the revision-aware read answers `changed: false` without
+ * a payload when the map did not move. `settings/document-updated` is still the
+ * push signal: the host republishes the artifact synchronously before the
+ * forwarded event, so this re-read sees the new map. A host without the
+ * artifact channel is read through the legacy `settings.describe` document
+ * (`enpoi-orchestration.catalogRules.resolved`). The payload is mirrored into
+ * {@link CATALOG_VISIBILITY_STORAGE_KEY} so a surface that must not fetch
  * settings itself can resolve a decision synchronously. The
  * `dsh:catalog-visibility-changed` event announces a map that actually moved:
  * a read resolving to the already-published map keeps the same reference and
@@ -155,17 +161,59 @@ export function ensureCatalogVisibility(): Promise<void> {
   return loaded ? Promise.resolve() : refreshCatalogVisibility()
 }
 
+/** Artifact name the host publishes the decision map under. */
+const ARTIFACT_KEY = 'catalogRules.resolved'
+
+/** Host artifact revision already folded into the cache; absent before the first read. */
+let artifactRevision: number | undefined
+
 /**
- * Re-read `enpoi-orchestration.catalogRules.resolved` through the live gateway.
- * A missing namespace publishes the empty map, so a profile without the host
- * engine clears any stale mirror instead of hiding models forever.
- * @returns nothing; the cache and its event carry the outcome.
+ * Read the host artifact channel. `unavailable` means the host does not serve
+ * `settings.describeArtifact` (or the read failed), and the caller falls back
+ * to the legacy document read.
+ * @returns the changed flag with its value, or `unavailable`.
  */
-export function refreshCatalogVisibility(): Promise<void> {
-  if (inflight !== undefined) return inflight
-  const readNamespaces = async (): Promise<unknown> => {
-    const shared = sharedDescribe()
-    if (shared !== undefined) return (await shared())?.namespaces
+async function readArtifact(): Promise<{ changed: boolean; value?: unknown } | 'unavailable'> {
+  try {
+    const res = await fetch('/api/settings.describeArtifact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.describeArtifact',
+        rpcId: 'catalog-visibility-artifact',
+        payload: {
+          args: {
+            key: ARTIFACT_KEY,
+            ...artifactRevision === undefined ? {} : { knownRevision: artifactRevision },
+          },
+        },
+      }),
+    })
+    if (!res.ok) return 'unavailable'
+    const json: unknown = await res.json()
+    const result = (json as { result?: { ok?: unknown; value?: unknown } } | null)?.result
+    if (result?.ok !== true || result.value === null || typeof result.value !== 'object') return 'unavailable'
+    const read = result.value as { revision?: unknown; changed?: unknown; value?: unknown }
+    if (typeof read.revision !== 'number' || typeof read.changed !== 'boolean') return 'unavailable'
+    artifactRevision = read.revision
+    return { changed: read.changed, ...read.changed ? { value: read.value } : {} }
+  } catch {
+    return 'unavailable'
+  }
+}
+
+/**
+ * Legacy read: the decision map carried inside the settings document, through
+ * the shared coalesced describe or a standalone fetch.
+ * @returns the resolved map, or undefined when no document carries one.
+ */
+async function readDocumentMap(): Promise<unknown> {
+  const shared = sharedDescribe()
+  let namespaces: unknown
+  if (shared !== undefined) {
+    namespaces = (await shared())?.namespaces
+  } else {
     const res = await fetch('/api/settings.describe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -179,18 +227,35 @@ export function refreshCatalogVisibility(): Promise<void> {
     if (!res.ok) return undefined
     const json: unknown = await res.json()
     const response = json as { result?: { value?: { namespaces?: unknown } } } | null
-    return response?.result?.value?.namespaces
+    namespaces = response?.result?.value?.namespaces
   }
-  const operation = readNamespaces()
-    .then((namespaces) => {
-      if (!Array.isArray(namespaces)) return
-      const namespace = (namespaces as Array<{ ns?: string; value?: unknown; user?: unknown }>)
-        .find(entry => entry.ns === 'enpoi-orchestration')
-      const rules = namespace === undefined
-        ? undefined
-        : ((namespace.value as { catalogRules?: { resolved?: unknown } } | undefined)?.catalogRules
-          ?? (namespace.user as { catalogRules?: { resolved?: unknown } } | undefined)?.catalogRules)
-      publish(parseCatalogVisibility(rules?.resolved))
+  if (!Array.isArray(namespaces)) return undefined
+  const namespace = (namespaces as Array<{ ns?: string; value?: unknown; user?: unknown }>)
+    .find(entry => entry.ns === 'enpoi-orchestration')
+  const rules = namespace === undefined
+    ? undefined
+    : ((namespace.value as { catalogRules?: { resolved?: unknown } } | undefined)?.catalogRules
+      ?? (namespace.user as { catalogRules?: { resolved?: unknown } } | undefined)?.catalogRules)
+  return rules?.resolved
+}
+
+/**
+ * Re-read the resolved decision map. Prefers the host artifact channel; a host
+ * without it (or a failed artifact read) falls back to the legacy
+ * `enpoi-orchestration.catalogRules.resolved` document read. A missing map
+ * publishes the empty map, so a profile without the host engine clears any
+ * stale mirror instead of hiding models forever.
+ * @returns nothing; the cache and its event carry the outcome.
+ */
+export function refreshCatalogVisibility(): Promise<void> {
+  if (inflight !== undefined) return inflight
+  const operation = readArtifact()
+    .then(async (artifact) => {
+      if (artifact === 'unavailable') {
+        publish(parseCatalogVisibility(await readDocumentMap()))
+        return
+      }
+      if (artifact.changed) publish(parseCatalogVisibility(artifact.value))
     })
     .catch(() => {
       // Offline answer: the last published map stays until the next read.

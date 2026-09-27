@@ -1,6 +1,7 @@
 /** API-key authentication and discovery for the official DeepSeek route. */
 import type { Context } from '@deepseek-ai/cordis'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
+import type { LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { registerDeepSeekProvider, catalogModelInfo } from '@deepseek-ai/dsh-llm-deepseek'
@@ -33,15 +34,39 @@ export function apply(ctx: Context, config: Config): void {
       'MISSING_CREDENTIAL',
     )
   }
-  ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: 'DeepSeek', settingsNs: ctx.fiber.entry?.options.id ?? name, settingsPath: [] },
-  ])
+  /** Whether the Models page has removed this shipped route. */
+  const enabled = (): boolean => !config.disabled.get()
+  const entry: LlmConfigurableProvider = {
+    provider: PROVIDER,
+    displayName: 'DeepSeek',
+    settingsNs: ctx.fiber.entry?.options.id ?? name,
+    settingsPath: [],
+  }
+  // `registerConfigurableProviders` refuses an empty initial set, so a route
+  // disabled at boot registers and withdraws in one synchronous step — before
+  // any remote reader can observe the directory. Later flips reconcile here;
+  // the adapter side reconciles through the shared Host wiring. A replace only
+  // runs on an actual flip, so an unrelated volatile update publishes no
+  // topology event.
+  const directory = ctx.llm.registerConfigurableProviders([entry])
+  let directoryEnabled = true
+  const syncDirectory = (): void => {
+    const next = enabled()
+    if (next === directoryEnabled) return
+    directory.replace(next ? [entry] : [])
+    directoryEnabled = next
+  }
+  if (!enabled()) syncDirectory()
   registerDeepSeekProvider(ctx, PROVIDER, {
     options, providerName: 'DeepSeek',
+    enabled,
     resolveAuth: async connection => ({ headers: { 'x-api-key': await resolveApiKey(connection) } }),
     discoverModels: (provider) => {
       const connection = options()
       return Promise.resolve(connection.models.map(model => catalogModelInfo(provider, model)))
     },
+  })
+  ctx.on('loader/volatile-update', () => {
+    try { syncDirectory() } catch (error) { ctx.logger.error(error) }
   })
 }

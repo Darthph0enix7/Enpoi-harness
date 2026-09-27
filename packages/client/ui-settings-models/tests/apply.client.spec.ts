@@ -350,7 +350,11 @@ describe('pushed invalidations', () => {
     const describe = mock.remote.settings.describe
     describe.mockResolvedValue(ok(document))
     const listProviders = vi.fn(() => Promise.resolve({ ok: true as const, value: [] }))
-    const b = await bench(true, mock, { listProviders })
+    const listConfigurableProviders = vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: [{ provider: 'test', displayName: 'Test', settingsNs: 'llm-test', settingsPath: [] }],
+    }))
+    const b = await bench(true, mock, { listProviders, listConfigurableProviders })
     declare(b.slots)
     await b.ctx.plugin({ inject: [...inject], apply }).await()
     const entry = b.slots.entries('settings.section')
@@ -369,5 +373,36 @@ describe('pushed invalidations', () => {
       expect(injected.hooks.snapshot.getSnapshot().namespaces.get('llm-test')?.revision).toBe(2)
     })
     expect(describe).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores a settings commit outside the page join', async () => {
+    const mock = RemoteMock.create().load(remoteDefaultResponses)
+    const namespace = { ns: 'llm-test', schema: {}, value: {}, autoGenerate: true, applies: 'live' as const, secrets: [], revision: 1 }
+    const document = { writable: true, hasDocument: false, namespaces: [namespace] }
+    mock.remote.settings.describe.mockResolvedValue(ok(document))
+    const listConfigurableProviders = vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: [{ provider: 'test', displayName: 'Test', settingsNs: 'llm-test', settingsPath: [] }],
+    }))
+    const b = await bench(true, mock, { listConfigurableProviders })
+    declare(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const entry = b.slots.entries('settings.section')
+      .find(candidate => candidate.options.id === 'models')!
+    const injected = (
+      entry.inject as unknown as
+      () => import('../src/client/ModelsSection.tsx').ModelsSectionInjected
+    )()
+    await injected.controller.load()
+    expect(injected.controller.store.getSnapshot().rows.map(row => row.entry.settingsNs)).toEqual(['llm-test'])
+    const load = vi.spyOn(injected.controller, 'load').mockResolvedValue()
+
+    // A theme/whiteboard-style write is not in the page's join: no reload.
+    b.remote.emit('settings/document-updated', ['ui-settings-general', 5])
+    expect(load).not.toHaveBeenCalled()
+
+    // The page's own provider namespace moved: reload.
+    b.remote.emit('settings/document-updated', ['llm-test', 2])
+    expect(load).toHaveBeenCalledTimes(1)
   })
 })

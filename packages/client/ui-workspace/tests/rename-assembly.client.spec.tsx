@@ -111,7 +111,7 @@ describe('session rename through the assembled browser', () => {
         },
       )
     }
-    // `order` places plugin rows after the shipped rows (100/200/300/400)
+    // `order` places plugin rows after the shipped rows (100/200/300)
     // even when the later registration has the lower shadowing priority
     // assigned to dynamic browser packages; the first plugin row opens the
     // plugin group with a hairline.
@@ -123,11 +123,14 @@ describe('session rename through the assembled browser', () => {
     const trigger = within(row as HTMLElement).getByLabelText('会话“Session title”的操作')
     fireEvent.click(trigger)
     // The declared entries keep their ascending order; the fork's own row
-    // verbs ride the menu footer after them.
-    expect(view.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
-      '置顶会话', '重命名', '分叉会话', '归档会话', 'Export action', 'Last action',
+    // verbs ride the menu footer after them. Archive is deliberately absent:
+    // its only sidebar affordance is the row's hover button.
+    const labels = view.getAllByRole('menuitem').map(item => item.textContent)
+    expect(labels).toEqual([
+      '置顶会话', '重命名', '分叉会话', 'Export action', 'Last action',
       '复制会话 ID', '导出 Markdown', '移动到文件夹…', '下载日志', '删除会话',
     ])
+    expect(labels).not.toContain('归档会话')
     expect(view.getAllByRole('separator')).toHaveLength(1)
     const last = view.getByRole('menuitem', { name: '删除会话' })
     const exportRow = view.getByRole('menuitem', { name: 'Export action' })

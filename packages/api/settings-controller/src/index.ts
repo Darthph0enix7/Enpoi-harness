@@ -19,12 +19,24 @@ import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typer
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { z } from 'zod'
 import { CredentialsController } from './credentials.ts'
-import type { SettingsDocumentOpenValue } from './types.ts'
+import type { SettingsArtifactView, SettingsDocumentOpenValue } from './types.ts'
 
 export { CredentialsController } from './credentials.ts'
 export type * from './types.ts'
 
 const settingsNamespaceRequestSchema = z.object({ ns: z.string().min(1) })
+const settingsArtifactRequestSchema = z.object({
+  key: z.string().min(1),
+  knownRevision: z.number().int().nonnegative().optional(),
+})
+
+/** One queued host write; coalesced callers settle on the same promise. */
+interface QueuedWrite {
+  mode: 'update' | 'replace' | 'mutate'
+  input: Record<string, JsonValue> | SettingsPathOpView[]
+  expectedRevision: number | undefined
+  readonly settled: PromiseWithResolvers<SettingsNamespaceView>
+}
 
 /** Read abort state afresh after an awaited provider or opener call. */
 function isAborted(signal: AbortSignal): boolean {
@@ -75,6 +87,10 @@ declare module '@deepseek-ai/cordis' {
  */
 export class SettingsController extends TypertRemoteService {
   private readonly openTextFile: (path: string, signal: AbortSignal) => Promise<void>
+  /** Per-namespace write queues; one commit runs at a time. */
+  private readonly writeQueues = new Map<string, QueuedWrite[]>()
+  /** Namespaces with a commit in flight; a running drain picks queued writes up itself. */
+  private readonly writing = new Set<string>()
 
   /**
    * Register the settings namespace and mount the credentials namespace beside
@@ -101,6 +117,49 @@ export class SettingsController extends TypertRemoteService {
       writable: settings.writable,
       hasDocument: true,
       namespaces: settings.describe({ redactSecrets: true }).map(namespaceView),
+    }
+  }
+
+  /**
+   * Answer one namespace's redacted view from the service's cached generation,
+   * so a reader that consumes a single namespace does not transfer the rest.
+   * @param ns - namespace key to read.
+   * @returns the namespace's redacted view, or `undefined` when no active entry carries it.
+   * @throws RemoteError when the request is invalid or no provider is mounted.
+   */
+  @Remote
+  describeNamespace(ns: string): SettingsNamespaceView | undefined {
+    const parsed = settingsNamespaceRequestSchema.safeParse({ ns })
+    if (!parsed.success) {
+      throw new RemoteError('gateway/bad-request', 'invalid payload for settings.describeNamespace', { issues: parsed.error.issues })
+    }
+    const descriptor = this.provider().describeNamespace(parsed.data.ns, { redactSecrets: true })
+    return descriptor === undefined ? undefined : namespaceView(descriptor)
+  }
+
+  /**
+   * Read one published settings artifact. Derived values are published beside
+   * the document through `settings.publishArtifact`, so a change to them never
+   * forces a document revision, reload, or whole-document read.
+   * @param key - artifact name.
+   * @param knownRevision - revision the caller holds; a match answers `changed: false` without the value.
+   * @returns the artifact read, or `undefined` when the key was never published.
+   * @throws RemoteError when the request is invalid or no provider is mounted.
+   */
+  @Remote
+  describeArtifact(key: string, knownRevision: number | undefined): SettingsArtifactView | undefined {
+    const parsed = settingsArtifactRequestSchema.safeParse({ key, knownRevision })
+    if (!parsed.success) {
+      throw new RemoteError('gateway/bad-request', 'invalid payload for settings.describeArtifact', { issues: parsed.error.issues })
+    }
+    const artifact = this.provider().readArtifact(parsed.data.key)
+    if (artifact === undefined) return undefined
+    const changed = parsed.data.knownRevision !== artifact.revision
+    return {
+      key: parsed.data.key,
+      revision: artifact.revision,
+      changed,
+      ...changed ? { value: artifact.value as JsonValue } : {},
     }
   }
 
@@ -184,7 +243,22 @@ export class SettingsController extends TypertRemoteService {
     }
   }
 
-  private async write(
+  /**
+   * Queue one namespace write. Writes to one namespace run one at a time;
+   * requests issued before the queued `mutate` tail starts commit — including a
+   * burst in one turn — fold into that single commit, whose operations run in
+   * arrival order, and every coalesced caller receives its resulting view (or
+   * its refusal). A different mode or a different `expectedRevision` starts its
+   * own queued commit, so a caller's revision fence is never widened by another
+   * caller's write.
+   * @param ns - namespace key to write.
+   * @param mode - seam operation.
+   * @param input - patch, section, or path ops for the operation.
+   * @param expectedRevision - revision the caller read; `undefined` writes unconditionally.
+   * @returns the namespace's redacted view after the commit that carries this request.
+   * @throws RemoteError when the request is invalid, no provider is mounted, or the provider refuses the write.
+   */
+  private write(
     ns: string,
     mode: 'update' | 'replace' | 'mutate',
     input: Record<string, JsonValue> | SettingsPathOpView[],
@@ -192,22 +266,67 @@ export class SettingsController extends TypertRemoteService {
   ): Promise<SettingsNamespaceView> {
     const parsed = settingsNamespaceRequestSchema.safeParse({ ns })
     if (!parsed.success) {
-      throw new RemoteError('gateway/bad-request', `invalid payload for settings.${mode}`, { issues: parsed.error.issues })
+      return Promise.reject(new RemoteError('gateway/bad-request', `invalid payload for settings.${mode}`, { issues: parsed.error.issues }))
     }
-    const settings = this.provider()
     const namespace = parsed.data.ns
+    const queue = this.writeQueues.get(namespace)
+    const tail = queue?.at(-1)
+    // Only a queued-but-not-yet-started request can absorb more operations: one
+    // commit at a time is shifted off the queue before it starts, so the tail is
+    // always still pending.
+    if (tail !== undefined && tail.mode === 'mutate' && mode === 'mutate' && tail.expectedRevision === expectedRevision) {
+      tail.input = [...tail.input as SettingsPathOpView[], ...input as SettingsPathOpView[]]
+      return tail.settled.promise
+    }
+    const entry: QueuedWrite = { mode, input, expectedRevision, settled: Promise.withResolvers() }
+    if (queue === undefined) this.writeQueues.set(namespace, [entry])
+    else queue.push(entry)
+    // Defer the drain one microtask so requests issued together in one turn
+    // fold into the same commit instead of racing it.
+    if (!this.writing.has(namespace)) queueMicrotask(() => { void this.flush(namespace) })
+    return entry.settled.promise
+  }
+
+  /** Run the queue for one namespace until it drains. */
+  private async flush(namespace: string): Promise<void> {
+    this.writing.add(namespace)
+    try {
+      for (;;) {
+        const queue = this.writeQueues.get(namespace)
+        const entry = queue?.shift()
+        if (queue !== undefined && queue.length === 0) this.writeQueues.delete(namespace)
+        if (entry === undefined) return
+        try {
+          entry.settled.resolve(await this.commit(namespace, entry.mode, entry.input, entry.expectedRevision))
+        } catch (error: unknown) {
+          entry.settled.reject(error)
+        }
+      }
+    } finally {
+      this.writing.delete(namespace)
+    }
+  }
+
+  /** Execute one queued write against the settings provider. */
+  private async commit(
+    namespace: string,
+    mode: 'update' | 'replace' | 'mutate',
+    input: Record<string, JsonValue> | SettingsPathOpView[],
+    expectedRevision: number | undefined,
+  ): Promise<SettingsNamespaceView> {
+    const settings = this.provider()
     try {
       if (mode === 'update') await settings.update(namespace, input, expectedRevision)
       else if (mode === 'replace') await settings.replace(namespace, input, expectedRevision)
       else await settings.mutate(namespace, input as SettingsPathOp[], expectedRevision)
     } catch (error: unknown) {
-      throw rejected(ns, error)
+      throw rejected(namespace, error)
     }
     const descriptor = settings.describe({ redactSecrets: true }).find(candidate => candidate.ns === namespace)
     if (descriptor === undefined) {
       // The write committed but the namespace vanished before this read: only a
       // concurrent registrant disposal can produce it.
-      throw new RemoteError('gateway/internal', `settings namespace "${ns}" was disposed after the ${mode}`, {})
+      throw new RemoteError('gateway/internal', `settings namespace "${namespace}" was disposed after the ${mode}`, {})
     }
     return namespaceView(descriptor)
   }

@@ -56,7 +56,15 @@ function failureMessage(
   if (code === 'ACCOUNT_SIGNED_OUT') return t('message.failure.accountSignedOut')
   if (code === 'ACCOUNT_SIGN_IN_REQUIRED') return t('message.failure.accountSignInRequired')
   if (code === 'QUOTA' || code === 'ACCOUNT_QUOTA') return t('message.failure.quota')
-  return code === 'AUTH' ? t('message.failure.auth') : message
+  if (code === 'AUTH') {
+    // The localized headline, then the provider's own detail (usually its
+    // machine code and message, e.g. `PAID_MODEL_AUTH_REQUIRED: You need to
+    // sign in to use this model.`). The detail is what makes a paid-model
+    // sign-in wall distinguishable from a genuinely bad stored key.
+    const headline = t('message.failure.auth')
+    return message.length === 0 || message === headline ? headline : `${headline}: ${message}`
+  }
+  return message
 }
 
 function ModelRetryItem({ node, active, t }: {

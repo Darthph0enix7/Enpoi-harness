@@ -10,10 +10,20 @@ import type { Options as ProtocolOptions, DeepSeekConnectionOptions } from '@dee
 export interface Config extends ProtocolConfig {
   /** Credential reference resolved per request; defaults to DEEPSEEK_API_KEY. */
   apiKeyEnv: Volatile<string>
+  /**
+   * Removed-route override written by the Models page. A shipped route cannot
+   * be removed by unsetting a profile (its settings address is the whole
+   * section), so the operator's delete writes this flag; the plugin withdraws
+   * the directory entry and the adapter route while it is true. The flag is a
+   * volatile config field, so the write lands in the entry's config in the
+   * profile patch and survives later settings rewrites of the same entry.
+   */
+  disabled: Volatile<boolean>
 }
 export const Config = z.object({
   ...deepSeekConfigFields,
   apiKeyEnv: z.string().role('credential-ref').default('DEEPSEEK_API_KEY').volatile(),
+  disabled: z.boolean().default(false).volatile(),
 })
 /** Plain deployment inputs for the API-key provider. */
 export type Options = ProtocolOptions & { apiKeyEnv?: string }

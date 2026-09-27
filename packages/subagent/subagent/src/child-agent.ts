@@ -173,7 +173,10 @@ export const SUBAGENT_DELEGATION_CONTEXT
   = 'You are a delegated subagent: your permission scope was fixed when you were started and cannot be '
     + 'widened from inside this session — operations that require approval are rejected automatically. '
     + 'When the task needs access beyond that scope, do not retry the denied operation; state the '
-    + 'limitation in your reply so the delegating agent can handle it.'
+    + 'limitation in your reply so the delegating agent can handle it. '
+    + 'Use the dedicated read, grep, and glob tools to inspect files. Do not shell out to an interpreter '
+    + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands are '
+    + 'auto-denied, and the dedicated file tools are the supported, approval-free path.'
 
 /**
  * Compose one child inside its creation window: join its parent's preset,

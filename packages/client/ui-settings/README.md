@@ -43,7 +43,7 @@ A settings surface registers into the slot types this package declares. The shel
 
 ### Observable success and failures
 
-A committed write folds its answer into the shared mirror. Refused writes refresh the latest Host values. Browser validation uses the serialized Config schema; the Host validates complete configuration, including checks that cannot be serialized.
+A committed write folds its answer into the shared mirror and publishes its section optimistically while the write crosses the wire (`pending` in the form snapshot); refused writes roll the overlay back through a refresh of the latest Host values. Browser validation uses the serialized Config schema; the Host validates complete configuration, including checks that cannot be serialized.
 
 -----
 
@@ -59,11 +59,11 @@ The package realizes one ownership rule: the browser keeps one shared mirror of 
 
 ### The describe mirror
 
-The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` with its `settings` namespace, resolves Host persistence once from the fixed `remote.$host` facts, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Cross-namespace surfaces read it through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
+The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` with its `settings` namespace, resolves Host persistence once from the fixed `remote.$host` facts, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription) and on a forwarded `settings/document-updated` event that needs a read. The announcement names one namespace and its revision: a revision this client folded from its own write answer needs no read, and one announced while that write is in flight defers to the write's answer, so a self-echo never re-fetches the whole document. A wire re-read reuses the held row of every namespace whose revision and projected value did not move, so only the moved namespace's `subscribeNamespace` listeners wake; `subscribe` stays the whole-document channel. Cross-namespace surfaces read it through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
 
 ### Shared entry writes
 
-The provider owns one controller per Host entry, including its subscription and write queue; repeated `get(entryId)` calls return the same form. Consumers release their own view subscriptions. No caller-scoped configuration binding is created. The startup RPC budget covers the shared describe reader.
+The provider owns one controller per Host entry, including its namespace-slice subscription and write queue; repeated `get(entryId)` calls return the same form. A form derives only when its own namespace row is replaced, skips a row whose revision and value did not move, and holds queued writes' ops over the accepted section until they settle. Consumers release their own view subscriptions. No caller-scoped configuration binding is created. The startup RPC budget covers the shared describe reader.
 
 ### Schema service
 

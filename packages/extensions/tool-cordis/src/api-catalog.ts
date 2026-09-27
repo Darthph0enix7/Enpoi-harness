@@ -701,9 +701,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, ): Promise<void>',
-        description: 'Validate, persist, and reconcile a plugin\'s next config; ordinary fields keep normal lifecycle rules. References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.',
-        parameters: [{ name: 'entry', description: 'Current Loader entry, also used to detect replacement during the write.' }, { name: 'change', description: 'Derive a raw config from the current entry and its inherited layer.' }],
-        returns: 'Fulfillment after Loader reconciliation completes.',
+        description: 'Validate, persist, and reconcile a plugin\'s next config; ordinary fields keep normal lifecycle rules. References to model groups the LLM runtime cannot route are dropped from the candidate with a warning. A derived candidate equal to the live entry config returns before the profile reload, so a no-op edit raises no reload, document write, or update notification.',
+        parameters: [{ name: 'entry', description: 'Current Loader entry, also used to detect replacement during the write.' }, { name: 'change', description: 'Derive a raw config from the current entry and its inherited layer; it must be side-effect free because a committed edit invokes it for the no-op probe and again after the reload.' }],
+        returns: 'Fulfillment after Loader reconciliation completes, or immediately for a no-op candidate.',
       },
     ],
   },
@@ -2618,6 +2618,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Forms keyed by unique profile entry ids.',
       },
       {
+        signature: 'describeNamespace(ns: string, options?: SettingsDescribeOptions): SettingsDescriptor | undefined',
+        description: 'Project one namespace from the same cached generation `describe()` serves. Readers that consume one namespace use this instead of projecting the whole set, so a narrow read stays correct while costing one row.',
+        parameters: [{ name: 'ns', description: 'profile entry id.' }, { name: 'options', description: 'redaction required for remote callers.' }],
+        returns: 'the namespace\'s descriptor, or undefined when no active entry carries it.',
+      },
+      {
+        signature: 'publishArtifact(key: string, value: unknown): number',
+        description: 'Publish one derived artifact beside the configuration document. Artifacts never enter `describe()`, so a publish costs no document revision, profile write, Loader reload, or forwarded settings event; clients read them through the Remote `describeArtifact` method. The revision is derived from the serialized value, so a republish of the same value keeps it — the basis for revision-aware reads — and a client\'s held revision stays meaningful across a host restart.',
+        parameters: [{ name: 'key', description: 'artifact name, e.g. `catalogRules.resolved`.' }, { name: 'value', description: 'JSON-serializable value; stored detached from the caller\'s copy.' }],
+        returns: 'the artifact revision after the publish.',
+      },
+      {
+        signature: 'readArtifact(key: string): SettingsArtifact | undefined',
+        description: 'Read one published artifact.',
+        parameters: [{ name: 'key', description: 'artifact name.' }],
+        returns: 'the current value and revision, or undefined when never published.',
+      },
+      {
         signature: 'async update(ns: string, patch: object, expectedRevision?: number): Promise<void>',
         description: 'Merge editable fields into an entry\'s config.',
         parameters: [{ name: 'ns', description: 'Profile entry id.' }, { name: 'patch', description: 'Fields to merge.' }, { name: 'expectedRevision', description: 'Revision returned by describe.' }],
@@ -2645,6 +2663,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
         returns: 'provider writability, local-document presence, and one view per namespace.',
         throws: ['RemoteError when no settings provider is mounted.'],
+      },
+      {
+        signature: '@Remote describeNamespace(ns: string): SettingsNamespaceView | undefined',
+        description: 'Answer one namespace\'s redacted view from the service\'s cached generation, so a reader that consumes a single namespace does not transfer the rest.',
+        parameters: [{ name: 'ns', description: 'namespace key to read.' }],
+        returns: 'the namespace\'s redacted view, or `undefined` when no active entry carries it.',
+        throws: ['RemoteError when the request is invalid or no provider is mounted.'],
+      },
+      {
+        signature: '@Remote describeArtifact(key: string, knownRevision: number | undefined): SettingsArtifactView | undefined',
+        description: 'Read one published settings artifact. Derived values are published beside the document through `settings.publishArtifact`, so a change to them never forces a document revision, reload, or whole-document read.',
+        parameters: [{ name: 'key', description: 'artifact name.' }, { name: 'knownRevision', description: 'revision the caller holds; a match answers `changed: false` without the value.' }],
+        returns: 'the artifact read, or `undefined` when the key was never published.',
+        throws: ['RemoteError when the request is invalid or no provider is mounted.'],
       },
       {
         signature: '@Remote update( ns: string, patch: Record<string, JsonValue>, expectedRevision: number | undefined, ): Promise<SettingsNamespaceView>',
@@ -7354,6 +7386,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionWorkspacePathApplication',
     declaration: 'export type SessionWorkspacePathApplication = NativeFileApplication;',
+  },
+  {
+    name: 'SettingsArtifact',
+    declaration: 'export interface SettingsArtifact {\n    revision: number;\n    value: unknown;\n}',
+  },
+  {
+    name: 'SettingsArtifactView',
+    declaration: 'export interface SettingsArtifactView {\n    readonly key: string;\n    readonly revision: number;\n    readonly changed: boolean;\n    readonly value?: JsonValue;\n}',
   },
   {
     name: 'SettingsDescribeOptions',

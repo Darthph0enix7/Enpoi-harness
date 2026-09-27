@@ -61,7 +61,7 @@ describe('role registry helpers', () => {
   })
 
   it('hides seat:false roles, groups registry council roles, and ungroups unknown persona ids', async () => {
-    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const { buildFleetCategories, fleetSeatState, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const registry = mergeRoleRegistry({
       ghost: { label: 'Ghost', seat: false },
       muse: { label: 'The Muse', group: 'council' },
@@ -75,7 +75,14 @@ describe('role registry helpers', () => {
     expect(seats).toContain('unknown-role')
     const keeper = categories.find(category => category.key === 'supervision')?.seats.find(seat => seat.id === 'keeper')
     expect(keeper?.name).toBe('Context Keeper')
-    expect(keeper?.defaultLabel).toBe('Default')
+    // The keeper cannot inherit a conversation model: its label names the route.
+    expect(keeper?.defaultLabel).toBe('built-in default: freellmapi/auto')
+    expect(keeper?.defaultKind).toBe('builtin-default')
+    expect(fleetSeatState(null, keeper!)).toBe('builtin-default')
+    expect(fleetSeatState(undefined, keeper!)).toBe('builtin-default')
+    // An explicit model is the only thing that counts as assigned.
+    expect(fleetSeatState({ provider: 'freellmapi', model: 'auto' }, keeper!)).toBe('assigned')
+    expect(fleetSeatState({ provider: 'freellmapi', model: '' }, keeper!)).toBe('builtin-default')
     // A registry role declared with group `council` keeps the shared group;
     // a persona-only id no registry claims lands in Ungrouped.
     expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['muse'])
@@ -83,15 +90,16 @@ describe('role registry helpers', () => {
   })
 
   it('renders the designated compaction seat before any assignment', async () => {
-    const { buildFleetCategories, mergeRoleRegistry, isKnownFleetSeat } = await import('../src/client/role-registry.ts')
+    const { buildFleetCategories, fleetSeatState, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [])
     const compaction = categories.find(category => category.key === 'supervision')
       ?.seats.find(seat => seat.id === 'compaction')
 
     expect(compaction?.name).toBe('Compaction Summariser')
     expect(compaction?.defaultLabel).toBe('Inherit')
+    expect(compaction?.defaultKind).toBe('inherit')
     expect(compaction?.defaultHint).toContain('prefix cache')
-    expect(isKnownFleetSeat('Compaction')).toBe(true)
+    expect(fleetSeatState(null, compaction!)).toBe('inherit')
     // A cleared assignment keeps its fleet row.
     expect(buildFleetCategories(mergeRoleRegistry(undefined), ['compaction'], [])
       .flatMap(category => category.seats.map(seat => seat.id))).toContain('compaction')
@@ -173,9 +181,32 @@ describe('fleet council grouping', () => {
       .toEqual(['skeptic', 'architect', 'pragmatist'])
     expect(categories.find(category => category.key === 'council:chorus')?.seats.map(seat => seat.id))
       .toEqual(['visionary', 'experiencer', 'integrator'])
-    // Both councils share the same arbiters; each renders once, in the shared group.
+    // Both councils share the same arbiters; each renders once, in the shared
+    // group, in the declaration's order.
     expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id))
-      .toEqual(['chair', 'referee'])
+      .toEqual(['referee', 'chair'])
+  })
+
+  it('keeps a legacy council persona row in the shared group with no council registry', async () => {
+    const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['chair'], [])
+
+    // A leftover arbiter row survives on its persona key alone.
+    expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['chair'])
+  })
+
+  it('renders declared arbiters from the council registry with no persona row at all', async () => {
+    const { buildFleetCategories, fleetSeatState, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], LIVE_COUNCILS)
+    const shared = categories.find(category => category.key === 'council')
+
+    // The declaration itself owns the rows: a clear/refresh can never drop them.
+    expect(shared?.seats.map(seat => seat.id)).toEqual(['referee', 'chair'])
+    expect(shared?.seats.find(seat => seat.id === 'referee')?.name).toBe('Referee')
+    expect(fleetSeatState(null, shared!.seats[0]!)).toBe('inherit')
+    // A hidden arbiter stays hidden.
+    const hidden = buildFleetCategories(mergeRoleRegistry({ referee: { seat: false } }), [], LIVE_COUNCILS)
+    expect(hidden.flatMap(category => category.seats.map(seat => seat.id))).not.toContain('referee')
   })
 
   it('gives a newly registered council its own group with no code change', async () => {

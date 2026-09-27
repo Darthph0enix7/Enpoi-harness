@@ -97,6 +97,9 @@ describe('ui-settings-subagent apply', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
     remote.emit('settings/document-updated', ['llm-deepseek', 1])
     expect(refresh).toHaveBeenCalledTimes(2)
+    // A commit outside the model-input namespaces leaves the catalogue alone.
+    remote.emit('settings/document-updated', ['ui-settings-general', 3])
+    expect(refresh).toHaveBeenCalledTimes(2)
     ctx.emit('connection/reset')
     expect(reset).toHaveBeenCalledTimes(1)
     refresh.mockRestore()

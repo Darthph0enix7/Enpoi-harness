@@ -396,6 +396,24 @@ describe('ui-model-selection dual entry', () => {
     })
   })
 
+  it('ignores settings commits that cannot move the model catalog', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(b.calls.models).toBeGreaterThan(0) })
+    const before = b.calls.models
+
+    // A theme/whiteboard-style commit is not a model input: no catalog reload.
+    b.remote.emit('settings/document-updated', ['ui-settings-general', 3])
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(b.calls.models).toBe(before)
+
+    b.remote.emit('settings/document-updated', ['llm-pi-ai', 1])
+    await vi.waitFor(() => { expect(b.calls.models).toBeGreaterThan(before) })
+  })
+
   it('retains the last catalog on refresh failure and recovers on retry', async () => {
     const b = await bench()
     try {

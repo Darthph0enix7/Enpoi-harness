@@ -63,7 +63,11 @@ const QUOTA_RE = /\b429\b|quota|rate limit|usage limit|resource_exhausted|too ma
 const CAPACITY_RE = /\b503\b|\b529\b|overloaded|capacity|server is busy|model_capacity/i
 
 /** Auth vocabulary. Checked late: status-code words are weaker than bodies. */
-const AUTH_RE = /\b401\b|\b402\b|\b403\b|unauthorized|invalid api key|incorrect api key|permission denied|insufficient (?:credits|balance)/i
+// The provider-code clauses (`auth_required`, `authentication`, `invalid_token`,
+// `invalid…api…key`) match the `CODE: message` detail the stream mapper carries
+// for an AUTH failure, where the original 401/403 status text is no longer part
+// of the message.
+const AUTH_RE = /\b401\b|\b402\b|\b403\b|unauthorized|invalid.{0,4}api.{0,4}key|incorrect[_ ]api[_ ]key|permission denied|insufficient (?:credits|balance)|\bauth\b|auth_required|authentication|invalid[_ ]token/i
 
 /** Client-payload vocabulary: the request itself is unserviceable. Deliberately
  *  narrow — several gateways stamp EVERY error envelope (including 401s) with

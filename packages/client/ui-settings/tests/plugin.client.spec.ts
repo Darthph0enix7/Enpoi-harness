@@ -33,6 +33,44 @@ describe('settings domain base plugin', () => {
     await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(3) })
   })
 
+  it('skips the document read for the revision its own write folded', async () => {
+    const namespace = (revision: number) => ({
+      ns: 'ui-test',
+      schema: JSON.parse(JSON.stringify({ type: 'object', properties: {} })),
+      value: {},
+      autoGenerate: true,
+      applies: 'live',
+      secrets: [],
+      revision,
+    })
+    const describeCall = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { writable: true, hasDocument: true, namespaces: [namespace(3)] },
+    })
+    const mutate = vi.fn().mockResolvedValue({
+      ok: true,
+      value: namespace(4),
+    })
+    const ctx = new Context()
+    const remote = new TestRemote(ctx, { settings: { describe: describeCall, mutate } })
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(1) })
+
+    // The client's own write folds revision 4; its echo needs no read — one
+    // 926 KB body per client is pure fan-out cost.
+    const form = ctx.get('configForms')!.get('ui-test')
+    await form.set('field', 'value')
+    remote.emit('settings/document-updated', ['ui-test', 4])
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledTimes(1)
+
+    // Another client's commit: the fold does not cover it, so the mirror reads.
+    remote.emit('settings/document-updated', ['ui-test', 5])
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+    await fiber.dispose()
+  })
+
   it('fiber disposal retires the service and its invalidation subscriptions', async () => {
     const { ctx, describeCall, remote, fiber } = bench()
     await fiber.await()

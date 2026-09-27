@@ -79,7 +79,11 @@ function trackValues(scope: ConfigForm<UiTestSettings>): Array<UiTestSettings | 
   const seen: Array<UiTestSettings | undefined> = [scope.getSnapshot().value]
   scope.subscribe(() => {
     const value = scope.getSnapshot().value
-    if (value !== seen[seen.length - 1]) seen.push(value)
+    const last = seen[seen.length - 1]
+    // Reference or content: a pending-state publication republishes the same
+    // section as a fresh object, which is not a value change.
+    if (value === last || JSON.stringify(value) === JSON.stringify(last)) return
+    seen.push(value)
   })
   return seen
 }
@@ -168,7 +172,9 @@ describe('ConfigFormController', () => {
     await vi.waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
     first.resolve(ok(view({ preference: 'dark' }, 5)))
     await Promise.all([dark, light])
-    expect(published.map(section => section?.preference)).toEqual([undefined, 'system', 'light'])
+    // The second write publishes optimistically before the wire settles; the
+    // latest settlement folds revision 6 in without another value change.
+    expect(published.map(section => section?.preference)).toEqual([undefined, 'system', 'dark', 'light'])
     expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'light' }, revision: 6 })
     expect(mutate).toHaveBeenNthCalledWith(1,
       'ui-test',
@@ -234,6 +240,215 @@ describe('ConfigFormController', () => {
     expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'dark' }, revision: 8 })
   })
 
+  it('does not publish for a wire re-read that leaves its revision still', async () => {
+    // Another namespace moved on the wire, so the mirror hands this form a
+    // fresh row object for its namespace; the revision is the same, and a form
+    // that republished here would wake its consumers for nothing.
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(ok({
+        writable: true, hasDocument: true,
+        namespaces: [view({ preference: 'system' }, 4), { ...view({ preference: 'dark' }, 1), ns: 'other' }],
+      }))
+      .mockResolvedValueOnce(ok({
+        writable: true, hasDocument: true,
+        namespaces: [view({ preference: 'system' }, 4), { ...view({ preference: 'light' }, 2), ns: 'other' }],
+      }))
+    const { mirror, scope } = derivedScope({ describe: describeCall })
+    await mirror.load()
+    let wakes = 0
+    scope.subscribe(() => { wakes += 1 })
+    await mirror.load()
+    expect(wakes).toBe(0)
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'system' }, revision: 4 })
+  })
+
+  it('does not publish for a same-revision fold whose value did not move', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 4))
+    const { mirror, scope } = derivedScope({ describe: describeCall })
+    await mirror.load()
+    let wakes = 0
+    scope.subscribe(() => { wakes += 1 })
+    // A fresh row object (a write answer) at the held revision with the same
+    // value: the revision and the projected value both still stand.
+    mirror.acceptView(view({ preference: 'system' }, 4))
+    expect(wakes).toBe(0)
+    // The same revision with a moved value is a real change (a projection can
+    // move under a static revision) and publishes.
+    mirror.acceptView(view({ preference: 'dark' }, 4))
+    expect(wakes).toBe(1)
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'dark' }, revision: 4 })
+  })
+
+  it('wakes only the form whose namespace slice moved', async () => {
+    const otherView: SettingsNamespaceView = { ...view({ preference: 'dark' }, 1), ns: 'other' }
+    const describeCall = vi.fn().mockResolvedValueOnce(ok({
+      writable: true, hasDocument: true,
+      namespaces: [view({ preference: 'system' }, 1), otherView],
+    }))
+    const ctx = ctxWith({ describe: describeCall })
+    const mirror = new SettingsDescribeMirror(ctx)
+    const theme = new ConfigFormController<UiTestSettings>(ctx, { namespace: 'ui-test' }, mirror, 'host', settingsSchema)
+    const other = new ConfigFormController<UiTestSettings>(ctx, { namespace: 'other' }, mirror, 'host', settingsSchema)
+    await mirror.load()
+    let themeWakes = 0
+    let otherWakes = 0
+    theme.subscribe(() => { themeWakes += 1 })
+    other.subscribe(() => { otherWakes += 1 })
+    mirror.acceptView({ ...otherView, revision: 2 })
+    expect(themeWakes).toBe(0)
+    expect(otherWakes).toBe(1)
+    expect(other.getSnapshot()).toMatchObject({ value: { preference: 'dark' }, revision: 2 })
+  })
+
+  it('publishes the optimistic section before the wire settles and converges on the answer', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 4))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const write = scope.set('preference', 'dark')
+    expect(scope.getSnapshot()).toMatchObject({
+      value: { preference: 'dark' },
+      revision: 4,
+      pending: [{ op: 'set', path: ['preference'], value: 'dark' }],
+    })
+    gate.resolve(ok(view({ preference: 'dark' }, 5)))
+    await write
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'dark' }, revision: 5 })
+    expect(scope.getSnapshot().pending).toBeUndefined()
+  })
+
+  it('applies nested ops optimistically and rolls them back when the write is refused', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'system' }, 2))
+      .mockResolvedValueOnce(described({ preference: 'light' }, 3))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const write = scope.mutate([{ op: 'set', path: ['nested', 'flag'], value: true }])
+    expect((scope.getSnapshot().value as unknown as { nested?: { flag?: boolean } } | undefined)?.nested?.flag).toBe(true)
+    gate.resolve(rejected())
+    await write
+    expect((scope.getSnapshot().value as unknown as { nested?: unknown } | undefined)?.nested).toBeUndefined()
+    expect(scope.getSnapshot().pending).toBeUndefined()
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'light' }, revision: 3 })
+  })
+
+  it('applies set and unset ops optimistically, creating and dropping nested levels', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'system' }, 2))
+      .mockResolvedValueOnce(described({ preference: 'light' }, 3))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const write = scope.mutate([
+      { op: 'set', path: ['deep', 'level', 'value'], value: 1 },
+      { op: 'unset', path: ['preference', 'nested'] },
+      { op: 'unset', path: ['deep', 'level'] },
+      { op: 'unset', path: ['deep', 'missing', 'leaf'] },
+    ])
+    const optimistic = scope.getSnapshot().value as unknown as { deep?: unknown }
+    expect(optimistic.deep).toEqual({})
+    expect((optimistic as { preference: string }).preference).toBe('system')
+    gate.resolve(rejected())
+    await write
+    expect((scope.getSnapshot().value as unknown as { deep?: unknown }).deep).toBeUndefined()
+  })
+
+  it('applies a root set op optimistically', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'system' }, 2))
+      .mockResolvedValueOnce(described({ preference: 'dark' }, 3))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const write = scope.mutate([{ op: 'set', path: [], value: { preference: 'dark' } }])
+    expect(scope.getSnapshot().value).toEqual({ preference: 'dark' })
+    gate.resolve(ok(view({ preference: 'dark' }, 3)))
+    await write
+    expect(scope.getSnapshot().value).toEqual({ preference: 'dark' })
+  })
+
+  it('applies a root unset op optimistically', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'system' }, 2))
+      .mockResolvedValueOnce(described({ preference: 'light' }, 3))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const write = scope.mutate([{ op: 'unset', path: [] }])
+    expect(scope.getSnapshot().value).toBeUndefined()
+    gate.resolve(rejected())
+    await write
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'light' }, revision: 3 })
+  })
+
+  it('applies a nested set over a section the decoder resolved to a primitive', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 2))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const ctx = ctxWith({ describe: describeCall, mutate })
+    const mirror = new SettingsDescribeMirror(ctx)
+    const scope = new ConfigFormController<string>(
+      ctx, { namespace: 'ui-test', decode: () => 'scalar' }, mirror, 'host', settingsSchema)
+    await mirror.load()
+    const write = scope.mutate([{ op: 'set', path: ['field'], value: true }])
+    expect(scope.getSnapshot().value).toEqual({ field: true })
+    gate.resolve(rejected())
+    await write
+    expect(scope.getSnapshot().value).toBe('scalar')
+  })
+
+  it('does not settle a superseded write that rejects', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 2))
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const mutate = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const failing = scope.set('preference', 'dark')
+    const later = scope.set('preference', 'system')
+    await expect(failing).rejects.toThrow('offline')
+    // The superseded failure left the whole optimistic overlay to the latest write.
+    expect(scope.getSnapshot()).toMatchObject({
+      value: { preference: 'system' },
+      pending: [
+        { op: 'set', path: ['preference'], value: 'dark' },
+        { op: 'set', path: ['preference'], value: 'system' },
+      ],
+    })
+    gate.resolve(ok(view({ preference: 'system' }, 3)))
+    await later
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'system' }, revision: 3 })
+    expect(scope.getSnapshot().pending).toBeUndefined()
+  })
+
+  it('releases the mirror write slot for a write cancelled by disposal', async () => {
+    const gate = deferred<Answer<SettingsNamespaceView>>()
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'system' }, 1))
+      .mockResolvedValueOnce(described({ preference: 'system' }, 5))
+    const mutate = vi.fn().mockReturnValueOnce(gate.promise)
+    const { mirror, scope } = derivedScope({ describe: describeCall, mutate })
+    await mirror.load()
+    const inFlight = scope.set('preference', 'dark')
+    await vi.waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    const queued = scope.set('preference', 'light')
+    const stopped = scope.dispose()
+    gate.resolve(ok(view({ preference: 'dark' }, 2)))
+    await Promise.all([inFlight, queued, stopped])
+
+    // Both write slots settled: an announcement for the namespace reads again
+    // instead of deferring to a write that will never settle.
+    mirror.invalidate('ui-test', 5)
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+  })
+
   it('folds the latest write answer into the mirror so a sibling scope sees it', async () => {
     const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 4))
     const mutate = vi.fn().mockResolvedValueOnce(ok(view({ preference: 'dark' }, 5)))
@@ -282,7 +497,11 @@ describe('ConfigFormController', () => {
     await mirror.load()
     await scope.set('preference', 'dark')
     await scope.set('preference', 'system')
-    expect(published.map(section => section?.preference)).toEqual([undefined, 'system', 'light'])
+    // Each awaited refusal rolls its optimistic op back through the recovery
+    // read; the Host state is the only value that survives.
+    expect(published.map(section => section?.preference)).toEqual([
+      undefined, 'system', 'dark', 'light', 'system', 'light',
+    ])
   })
 
   it('does not recover superseded refused writes', async () => {
@@ -300,7 +519,11 @@ describe('ConfigFormController', () => {
       scope.set('preference', 'light'),
     ])
     expect(describeCall).toHaveBeenCalledTimes(1)
-    expect(published.map(section => section?.preference)).toEqual([undefined, 'system', 'light'])
+    // Superseded refusals leave their optimistic ops in place until the
+    // accepted write settles the whole overlay on the Host value.
+    expect(published.map(section => section?.preference)).toEqual([
+      undefined, 'system', 'dark', 'system', 'light',
+    ])
   })
 
   it('keeps the write queue usable when a subscriber throws', async () => {
@@ -418,7 +641,7 @@ describe('ConfigFormController', () => {
     }
     const mirror = {
       getSnapshot: () => snapshot,
-      subscribe: (listener: () => void) => {
+      subscribeNamespace: (_ns: string, listener: () => void) => {
         notify = listener
         return () => {}
       },

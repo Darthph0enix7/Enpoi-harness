@@ -27,7 +27,62 @@ import type {} from '@deepseek-ai/dsh-api-remotes/types'
 import type {} from '@deepseek-ai/dsh-settings/types'
 import type { SettingsSchemaService } from './schema.ts'
 import type { ConfigForm, ConfigFormSnapshot } from './config-form-types.ts'
-import { SettingsDescribeMirror, type SettingsDescribeFace } from './settings-mirror.ts'
+import { sameJson, SettingsDescribeMirror, type SettingsDescribeFace } from './settings-mirror.ts'
+
+/**
+ * Apply one namespace's ordered path operations to a clone of a decoded
+ * section: the optimistic value a pending write publishes until its Host
+ * answer (or recovery read) replaces it.
+ */
+function applyPathOps<T>(section: T, ops: readonly SettingsPathOpView[]): T {
+  let draft: unknown = structuredClone(section)
+  for (const op of ops) {
+    if (op.op === 'unset') draft = removeAtPath(draft, op.path)
+    else draft = insertAtPath(draft, op.path, op.value)
+  }
+  return draft as T
+}
+
+/** Set a value at a string path, creating intermediate object levels. */
+function insertAtPath(root: unknown, path: readonly string[], value: unknown): unknown {
+  if (path.length === 0) return value
+  const last = path[path.length - 1]
+  /* v8 ignore next -- non-empty paths always carry their last key; the guard only satisfies noUncheckedIndexedAccess. */
+  if (last === undefined) return root
+  const record = root !== null && typeof root === 'object' && !Array.isArray(root)
+    ? root as Record<string, unknown>
+    : {}
+  let cursor = record
+  for (const key of path.slice(0, -1)) {
+    const next = cursor[key]
+    const child = next !== null && typeof next === 'object' && !Array.isArray(next)
+      ? next as Record<string, unknown>
+      : {}
+    cursor[key] = child
+    cursor = child
+  }
+  cursor[last] = value
+  return record
+}
+
+/** Remove the value at a string path, tolerating missing intermediate levels. */
+function removeAtPath(root: unknown, path: readonly string[]): unknown {
+  if (path.length === 0) return undefined
+  if (root === null || typeof root !== 'object' || Array.isArray(root)) return root
+  const [head, ...rest] = path
+  /* v8 ignore next -- non-empty paths always carry their first key; the guard only satisfies noUncheckedIndexedAccess. */
+  if (head === undefined) return root
+  const record = root as Record<string, unknown>
+  if (rest.length === 0) {
+    const kept: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(record)) if (key !== head) kept[key] = entry
+    return kept
+  }
+  const child = record[head]
+  const next = removeAtPath(child, rest)
+  if (next === child) return root
+  return { ...record, [head]: next }
+}
 
 /** Domain-owned description of one settings namespace consumed by a browser plugin. */
 interface ConfigFormSpec<T> {
@@ -59,6 +114,16 @@ export class ConfigFormController<T> implements ConfigForm<T> {
    * its fence from here first.
    */
   private pendingRevision: number | undefined
+  /**
+   * Last server state this form derived, and the ordered writes still in
+   * flight over it. `null` view means the namespace was last seen absent, so
+   * `undefined` as "never derived" needs the object itself.
+   */
+  private lastDerived: { view: SettingsNamespaceView | undefined; writable: boolean } | undefined
+  /** Decoded server section matching {@link lastDerived}'s view. */
+  private lastDecoded: T | undefined
+  /** In-flight writes, oldest first; their ops publish optimistically. */
+  private pendingWrites: Array<{ generation: number; ops: readonly SettingsPathOpView[] }> = []
 
   /**
    * @param ctx - the providing plugin's context, whose `remote.settings`
@@ -85,7 +150,9 @@ export class ConfigFormController<T> implements ConfigForm<T> {
       mode: persistence,
     })
     if (persistence === 'host') {
-      this.unsubscribe = mirror.subscribe(() => { this.derive() })
+      // Slice subscription: this form derives only when its own namespace row
+      // is replaced, so a commit to any other namespace costs it no wake.
+      this.unsubscribe = mirror.subscribeNamespace(this.spec.namespace, () => { this.derive() })
       this.derive()
     }
   }
@@ -132,23 +199,49 @@ export class ConfigFormController<T> implements ConfigForm<T> {
    * @returns whether the Host accepted the mutation, after any recovery read.
    */
   mutate(ops: readonly SettingsPathOpView[], expectedRevision?: number): Promise<boolean> {
+    if (this.persistence === 'memory' || this.disposed) return Promise.resolve(false)
     const ownedOps = structuredClone(ops) as SettingsPathOpView[]
     const generation = ++this.writeGeneration
+    // Publish the optimistic section before the write leaves: the ops apply
+    // over the last accepted server section, and every later settlement either
+    // folds the host answer or rolls the pending ops back through recovery.
+    this.pendingWrites.push({ generation, ops: ownedOps })
+    this.publish()
+    this.mirror.expectWrite(this.spec.namespace)
     return this.enqueue(async () => {
-      const revision = expectedRevision ?? this.pendingRevision ?? this.getSnapshot().revision
-      const response = await this.ctx.remote.settings.mutate(this.spec.namespace, ownedOps, revision)
-      if (!response.ok) {
-        await this.recover(generation)
-        return false
+      try {
+        const revision = expectedRevision ?? this.pendingRevision ?? this.getSnapshot().revision
+        const response = await this.ctx.remote.settings.mutate(this.spec.namespace, ownedOps, revision)
+        if (!response.ok) {
+          // The latest refusal recovers from Host state, then settles its
+          // overlay; a superseded one leaves recovery (and the pending
+          // rollback) to the latest write.
+          await this.recover(generation)
+          if (generation === this.writeGeneration) this.settlePending()
+          return false
+        }
+        if (this.disposed) return true
+        if (generation === this.writeGeneration) {
+          this.pendingRevision = undefined
+          try {
+            this.mirror.acceptView(response.value)
+          } finally {
+            this.settlePending()
+          }
+        } else {
+          this.pendingRevision = response.value.revision
+        }
+        return true
+      } catch (error) {
+        // A transport failure or a failed fold still settles this form's
+        // optimistic overlay; the write itself surfaces to the caller.
+        if (generation === this.writeGeneration) this.settlePending()
+        throw error
+      } finally {
+        // After the answer folded: a commit announced while this write was in
+        // flight is dropped here unless the fold did not carry its revision.
+        this.mirror.settleWrite(this.spec.namespace)
       }
-      if (this.disposed) return true
-      if (generation === this.writeGeneration) {
-        this.pendingRevision = undefined
-        this.mirror.acceptView(response.value)
-      } else {
-        this.pendingRevision = response.value.revision
-      }
-      return true
     })
   }
 
@@ -172,9 +265,14 @@ export class ConfigFormController<T> implements ConfigForm<T> {
   }
 
   private enqueue(operation: () => Promise<boolean>): Promise<boolean> {
-    if (this.persistence === 'memory' || this.disposed) return Promise.resolve(false)
     const task = this.tail.then(async () => {
-      if (this.disposed) return false
+      if (this.disposed) {
+        // A write cancelled before it crossed the wire still releases its
+        // mirror write slot; otherwise the namespace would defer every later
+        // echo forever.
+        this.mirror.settleWrite(this.spec.namespace)
+        return false
+      }
       return await operation()
     })
     // The returned task carries its own settlement to the caller; the queue
@@ -183,29 +281,62 @@ export class ConfigFormController<T> implements ConfigForm<T> {
     return task
   }
 
+  /**
+   * Derive the server section from the mirror. A row that is the held
+   * reference — or a same-revision row whose projected value did not move —
+   * changes nothing this form consumes and skips the store publication
+   * entirely: no subscriber wake, no re-render.
+   */
   private derive(): void {
     if (this.disposed) return
     const mirrored = this.mirror.getSnapshot()
     if (mirrored.view === undefined) return
     const { writable } = mirrored.view
     const view = mirrored.view.namespaces.find(candidate => candidate.ns === this.spec.namespace)
-    if (view === undefined) {
-      this.store.update((draft) => {
-        draft.status = 'unavailable'
-        draft.writable = writable
-      })
-      return
-    }
-    const decoded = this.decode(view)
+    const previous = this.lastDerived
+    if (previous !== undefined && previous.writable === writable
+      && view !== undefined && previous.view !== undefined
+      && view.revision === previous.view.revision && sameJson(view.value, previous.view.value)) return
+    this.lastDerived = { view, writable }
+    this.lastDecoded = view === undefined ? undefined : this.decode(view)
+    this.publish()
+  }
+
+  /**
+   * Publish the section the form serves: the last accepted server value with
+   * every pending write's ops applied optimistically, or the raw server value
+   * once nothing is pending.
+   */
+  private publish(): void {
+    const derived = this.lastDerived
+    if (derived === undefined) return
+    const pending = this.pendingWrites.length === 0
+      ? undefined
+      : this.pendingWrites.flatMap(entry => entry.ops)
     this.store.update((draft) => {
-      draft.revision = view.revision
-      draft.base = view.base
-      draft.user = view.user
-      draft.writable = writable
-      if (decoded === undefined) return
+      draft.revision = derived.view?.revision
+      draft.base = derived.view?.base
+      draft.user = derived.view?.user
+      draft.writable = derived.writable
+      if (pending === undefined) delete draft.pending
+      else draft.pending = pending
+      if (derived.view === undefined) {
+        draft.status = 'unavailable'
+        return
+      }
+      if (this.lastDecoded === undefined) return
       draft.status = 'ready'
-      draft.value = decoded
+      draft.value = pending === undefined
+        ? this.lastDecoded
+        : applyPathOps(this.lastDecoded, pending)
     })
+  }
+
+  /** Drop every recorded pending write and republish the server section. */
+  private settlePending(): void {
+    if (this.pendingWrites.length === 0) return
+    this.pendingWrites = []
+    this.publish()
   }
 
   private decode(view: SettingsNamespaceView): T | undefined {

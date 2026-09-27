@@ -51,6 +51,11 @@ describe('classifyFailure', () => {
   it('maps the failure vocabulary onto pool decisions', () => {
     expect(classifyFailure('401 Unauthorized: invalid api key')).toBe('AUTH')
     expect(classifyFailure('402 payment required: insufficient credits')).toBe('AUTH')
+    // The stream mapper replaces the raw envelope with the provider's own
+    // `CODE: message` pair on AUTH failures; the pool must still classify it.
+    expect(classifyFailure('PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.')).toBe('AUTH')
+    expect(classifyFailure('INVALID_TOKEN: Your authentication token is invalid. Please sign in again.')).toBe('AUTH')
+    expect(classifyFailure('authentication_error: invalid x-api-key')).toBe('AUTH')
     expect(classifyFailure('429 rate limit exceeded, too many requests')).toBe('QUOTA')
     expect(classifyFailure('RESOURCE_EXHAUSTED quota exhausted for project')).toBe('QUOTA')
     expect(classifyFailure('529 model capacity exhausted, server is busy')).toBe('CAPACITY')

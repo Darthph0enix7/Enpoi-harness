@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
-import { SettingsDescribeMirror, type SettingsDescribeView } from '../src/client/settings-mirror.ts'
+import { sameJson, SettingsDescribeMirror, type SettingsDescribeView } from '../src/client/settings-mirror.ts'
 
 /** What a Remote call answers with: no carrier envelope, and a typed failure. */
 type Answer<T> =
@@ -34,6 +34,23 @@ function deferred<T>() {
   const promise = new Promise<T>((res) => { resolve = res })
   return { promise, resolve }
 }
+
+describe('sameJson', () => {
+  it('compares JSON values structurally', () => {
+    expect(sameJson(1, 1)).toBe(true)
+    expect(sameJson(1, '1')).toBe(false)
+    expect(sameJson(null, null)).toBe(true)
+    expect(sameJson(null, {})).toBe(false)
+    expect(sameJson([1, 2], [1, 2])).toBe(true)
+    expect(sameJson([1, 2], [1, 3])).toBe(false)
+    expect(sameJson([1], [1, 2])).toBe(false)
+    expect(sameJson([1], { 0: 1 })).toBe(false)
+    expect(sameJson({ a: 1 }, { a: 1 })).toBe(true)
+    expect(sameJson({ a: 1 }, { a: 1, b: 2 })).toBe(false)
+    expect(sameJson({ a: 1 }, { b: 1 })).toBe(false)
+    expect(sameJson({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] })).toBe(true)
+  })
+})
 
 describe('SettingsDescribeMirror', () => {
   it('folds loads before the wire read into it, and mid-flight loads into one rerun', async () => {
@@ -115,6 +132,178 @@ describe('SettingsDescribeMirror', () => {
     expect(mirror.namespace('locale')?.revision).toBe(4)
     expect(seen).toEqual([9])
     expect(describeCall).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the held snapshot when a refresh answers the held view reference', async () => {
+    // A 304 revalidation repeats the same `view` reference; replacing the
+    // snapshot with it would wake every derived store for nothing.
+    const document = described([view('theme', 1)])
+    const describeCall = vi.fn().mockResolvedValue(document)
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    const held = mirror.getSnapshot()
+    let wakes = 0
+    mirror.subscribe(() => { wakes += 1 })
+    await mirror.load()
+    expect(mirror.getSnapshot()).toBe(held)
+    expect(wakes).toBe(0)
+    expect(describeCall).toHaveBeenCalledTimes(2)
+  })
+
+  it('acceptView of the already-held row reference folds nothing and wakes nobody', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('theme', 1), view('locale', 4)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    const held = mirror.getSnapshot()
+    let wakes = 0
+    mirror.subscribe(() => { wakes += 1 })
+    mirror.acceptView(mirror.namespace('theme')!)
+    expect(mirror.getSnapshot()).toBe(held)
+    expect(wakes).toBe(0)
+  })
+
+  it('subscribeNamespace wakes only the namespace whose row moved', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('theme', 1), view('locale', 4)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    const themeWakes: number[] = []
+    const localeWakes: number[] = []
+    const offTheme = mirror.subscribeNamespace('theme', () => { themeWakes.push(1) })
+    mirror.subscribeNamespace('locale', () => { localeWakes.push(1) })
+    mirror.acceptView(view('theme', 9))
+    expect(themeWakes).toHaveLength(1)
+    expect(localeWakes).toHaveLength(0)
+    // Disposal stops the slice.
+    offTheme()
+    mirror.acceptView(view('theme', 10))
+    expect(themeWakes).toHaveLength(1)
+    expect(mirror.namespace('theme')?.revision).toBe(10)
+  })
+
+  it('notifies broadcast subscribers once when a slice-only fold publishes', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('theme', 1), view('locale', 4)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    let wakes = 0
+    mirror.subscribe(() => { wakes += 1 })
+    mirror.acceptView(view('locale', 5))
+    expect(wakes).toBe(1)
+  })
+
+  it('reuses the held row for a namespace whose revision did not move', async () => {
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described([view('theme', 1), view('locale', 4)]))
+      .mockResolvedValueOnce(described([view('theme', 1), view('locale', 5)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    const heldTheme = mirror.namespace('theme')
+    let themeWakes = 0
+    let localeWakes = 0
+    mirror.subscribeNamespace('theme', () => { themeWakes += 1 })
+    mirror.subscribeNamespace('locale', () => { localeWakes += 1 })
+
+    await mirror.load()
+
+    expect(mirror.namespace('theme')).toBe(heldTheme)
+    expect(mirror.namespace('locale')?.revision).toBe(5)
+    expect(themeWakes).toBe(0)
+    expect(localeWakes).toBe(1)
+  })
+
+  it('publishes a view whose writable/hasDocument moved with the same rows', async () => {
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(ok({ writable: true, hasDocument: false, namespaces: [view('theme', 1)] }))
+      .mockResolvedValueOnce(ok({ writable: true, hasDocument: true, namespaces: [view('theme', 1)] }))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    const heldTheme = mirror.namespace('theme')
+    let wakes = 0
+    mirror.subscribe(() => { wakes += 1 })
+    await mirror.load()
+    expect(wakes).toBe(1)
+    expect(mirror.getSnapshot().view?.hasDocument).toBe(true)
+    expect(mirror.namespace('theme')).toBe(heldTheme)
+  })
+
+  it('answers slice listeners on the first document even for an absent namespace', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('locale', 1)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    let wakes = 0
+    mirror.subscribeNamespace('theme', () => { wakes += 1 })
+    await mirror.load()
+    expect(wakes).toBe(1)
+    expect(mirror.namespace('theme')).toBeUndefined()
+  })
+
+  it('invalidate drops the revision its own fold already carries', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('theme', 2)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    mirror.acceptView(view('theme', 2))
+    mirror.invalidate('theme', 2)
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledTimes(1)
+    // A revision beyond the fold is another client's commit: read it.
+    mirror.invalidate('theme', 3)
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+  })
+
+  it('reads an announcement whose revision was only read, not folded', async () => {
+    // A page-policy (autoGenerate) change emits with an unchanged revision, so
+    // a held revision cannot prove the announcement is old news.
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described([view('theme', 2)]))
+      .mockResolvedValueOnce(described([view('theme', 2)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    mirror.invalidate('theme', 2)
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+  })
+
+  it('defers a commit announced while a local write is in flight', async () => {
+    const describeCall = vi.fn().mockResolvedValueOnce(described([view('theme', 1)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    mirror.expectWrite('theme')
+    mirror.invalidate('theme', 2)
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledTimes(1)
+
+    // The write answer folds revision 2: the deferred echo is already covered.
+    mirror.acceptView(view('theme', 2))
+    mirror.settleWrite('theme')
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledTimes(1)
+    expect(mirror.namespace('theme')?.revision).toBe(2)
+  })
+
+  it('keeps the deferral until the last in-flight write settles', async () => {
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described([view('theme', 1)]))
+      .mockResolvedValueOnce(described([view('theme', 2)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    mirror.expectWrite('theme')
+    mirror.expectWrite('theme')
+    mirror.invalidate('theme', 2)
+    mirror.settleWrite('theme')
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledTimes(1)
+    mirror.settleWrite('theme')
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+  })
+
+  it('reads after a settle that did not fold the announced revision', async () => {
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described([view('theme', 1)]))
+      .mockResolvedValueOnce(described([view('theme', 2)]))
+    const mirror = new SettingsDescribeMirror(ctxWith(describeCall))
+    await mirror.load()
+    mirror.expectWrite('theme')
+    mirror.invalidate('theme', 2)
+    mirror.settleWrite('theme')
+    await vi.waitFor(() => { expect(describeCall).toHaveBeenCalledTimes(2) })
+    expect(mirror.namespace('theme')?.revision).toBe(2)
   })
 
   it('acceptView before any answer is a no-op instead of inventing a document', () => {

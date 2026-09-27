@@ -9,11 +9,14 @@
  * registry (`enpoi-orchestration.roles`), the live council registry
  * (`enpoiCouncil.list`, one group per council under its own label), and every
  * persona-assigned id neither claims, so the fleet grows and shrinks with the
- * operator's roles and councils. The keeper seat shows "Default" (its plugin
- * Config route) instead of "Inherit" — the keeper has no parent turn to
- * inherit from; the compaction seat is always rendered (a designated seat)
- * and inherits the session model by default, because any other summariser
- * breaks the prompt-prefix cache and pays full input price for the region.
+ * operator's roles and councils. The keeper seat shows its exact built-in
+ * default ("built-in default: freellmapi/auto") instead of "Inherit" — the
+ * keeper has no parent turn to inherit from; the compaction seat is always
+ * rendered (a designated seat) and inherits the session model by default,
+ * because any other summariser breaks the prompt-prefix cache and pays full
+ * input price for the region. Every row has an explicit state — assigned,
+ * inherit, or built-in default — and a clear changes only that seat's state,
+ * never which rows render.
  *
  * The tab's own `sessionId` addresses the model directory; the injected face
  * carries the persona assignment hook plus the assignment callbacks, and the
@@ -25,7 +28,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { HostObservable, InjectFace, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PersonaMap } from './persona-store.ts'
-import { buildFleetCategories, type FleetCouncil, type RoleRegistryMap } from './role-registry.ts'
+import { buildFleetCategories, fleetSeatState, KEEPER_DEFAULT_ROUTE, type FleetCouncil, type RoleRegistryMap } from './role-registry.ts'
 import { ensureSettingsFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { CAPABILITIES_KIND } from './kinds.ts'
 import css from './AgentModelsBody.module.css'
@@ -157,7 +160,14 @@ export function AgentModelsBody({
             <div className={css.rows}>
               {category.seats.map((seat) => {
                 const assigned = assignments[seat.id] ?? null
-                const isExplicitlyAssigned = assigned !== null && Boolean(assigned.model)
+                const state = fleetSeatState(assigned, seat)
+                const isExplicitlyAssigned = state === 'assigned' && assigned !== null
+                const stateLabel = isExplicitlyAssigned
+                  ? `${assigned.provider}/${assigned.model}`
+                  : seat.defaultLabel ?? 'Inherit'
+                const stateHint = isExplicitlyAssigned
+                  ? `assigned: ${stateLabel}`
+                  : `${stateLabel}${seat.defaultHint !== undefined ? ` — ${seat.defaultHint}` : ''}`
                 const override: ModelSelectOverride = {
                   current: isExplicitlyAssigned ? assigned : null,
                   placeholder: seat.defaultLabel ?? 'Inherit',
@@ -167,7 +177,7 @@ export function AgentModelsBody({
                   },
                 }
                 return (
-                  <div key={seat.id} className={css.row} title={seat.defaultHint !== undefined && !isExplicitlyAssigned ? `${seat.name} — Default: ${seat.defaultHint}` : seat.name}>
+                  <div key={seat.id} className={css.row} title={`${seat.name} — ${stateHint}`}>
                     <span className={css.icon}><MicroIcon d={seat.icon} size={11} /></span>
                     <span className={css.name}>{seat.name}</span>
                     <div className={css.controls}>
@@ -204,7 +214,7 @@ export function AgentModelsBody({
         ))}
       </div>
       <footer className={css.foot}>
-        <span>Unassigned seats use the dispatching agent's model · Keeper uses its config route · Compaction should stay on the session model (a different summariser loses the prefix cache and pays full input price for the region)</span>
+        <span>{`Inherit follows the dispatching agent's model · The keeper has no conversation to inherit from, so it uses its built-in default: ${KEEPER_DEFAULT_ROUTE} · Compaction should stay on the session model (a different summariser loses the prefix cache and pays full input price for the region)`}</span>
         <button
           type="button"
           className={css.footLink}

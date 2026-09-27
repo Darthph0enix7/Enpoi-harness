@@ -39,7 +39,7 @@ One **Save** writes both sections through their own namespaces, each fenced by t
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The Host half is an empty `apply`, present only so the package holds a Loader row the client module system serves the browser half for. The browser half binds each namespace through `ctx.configForms.get`: `SubagentLimitsCardController` stages the limits over the shared `SettingsFormModel` of `ui-primitives`, with a field spec that admits safe whole numbers at or above each field's floor; `SubagentModelSelectionCardController` keeps its own draft because its two fields save as one revision-fenced `mutate`, joins the stored routes with `remote.session.modelCatalog()`, and re-reads the catalogue on `llm/adapters-updated` and `settings/document-updated` while a connection reset drops its draft. `subagentCardFace` composes the two into the one face `SubagentCard` renders inside the shared `SettingsForm`, whose save validates both and writes the dirty ones. The page registers into the Plugins page's `plugins.item` slot through `ctx.configForms.whileServed` over both namespaces.
+The Host half is an empty `apply`, present only so the package holds a Loader row the client module system serves the browser half for. The browser half binds each namespace through `ctx.configForms.get`: `SubagentLimitsCardController` stages the limits over the shared `SettingsFormModel` of `ui-primitives`, with a field spec that admits safe whole numbers at or above each field's floor; `SubagentModelSelectionCardController` keeps its own draft because its two fields save as one revision-fenced `mutate`, joins the stored routes with `remote.session.modelCatalog()`, and re-reads the catalogue on `llm/adapters-updated` and on a `settings/document-updated` for a model-input namespace (`llm-*` or `enpoi-orchestration`) while a connection reset drops its draft. `subagentCardFace` composes the two into the one face `SubagentCard` renders inside the shared `SettingsForm`, whose save validates both and writes the dirty ones. The page registers into the Plugins page's `plugins.item` slot through `ctx.configForms.whileServed` over both namespaces.
 
 </details>
 
@@ -68,7 +68,7 @@ None; this package neither assembles nor sends a provider request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **The catalogue re-reads on three signals only** — adapter changes, document commits, and reconnects; a provider that starts advertising without any of them shows up on the next of those or on **Retry**.
+- **The catalogue re-reads on three signals only** — adapter changes, document commits to a model-input namespace (`llm-*` or `enpoi-orchestration`), and reconnects; a provider that starts advertising without any of them shows up on the next of those or on **Retry**.
 - **Runtime invariant:** No companion is published. The page holds no owned relationship of its own: what it shows derives from the settings mirror and the model catalogue, and what it writes the Host validates.
 
 <a id="dev-note"></a>

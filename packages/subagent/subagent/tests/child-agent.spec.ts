@@ -5,7 +5,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import { applyChildComposition, resolveChildAgentOptions } from '../src/child-agent.ts'
+import { applyChildComposition, resolveChildAgentOptions, SUBAGENT_DELEGATION_CONTEXT } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
   const id = SessionId('parent')
@@ -142,5 +142,15 @@ describe('child composition persona shadow', () => {
       for (const scope of scopes) await scope.dispose()
       await ctx.fiber.dispose()
     }
+  })
+})
+
+describe('delegation scope guidance (honest tool surface)', () => {
+  it('names the file tools and the auto-denied interpreter path', () => {
+    // 2026-09-27: a delegated child tried to read a JSON projection cache with
+    // `python3 -c`, was auto-denied, and lost the turn — the guidance must name
+    // read/grep/glob as the supported path.
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('read, grep, and glob')
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('auto-denied')
   })
 })

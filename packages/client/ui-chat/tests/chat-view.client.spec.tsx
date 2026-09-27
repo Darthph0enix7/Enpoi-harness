@@ -198,7 +198,7 @@ const retry = (seq: number): ModelRetryNode => ({
 })
 const turnError = (seq: number, code?: string): TurnErrorNode => ({
   kind: 'turn-error', seq, time: seq * 1_000, turn: 1, step: 0,
-  message: seq === 2 ? 'API key is invalid' : 'plugin exploded',
+  message: seq === 2 ? 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.' : 'plugin exploded',
   ...(code === undefined ? {} : { code }),
 })
 const turnMaxTokens = (seq: number): TurnMaxTokensNode => ({
@@ -2155,7 +2155,7 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     const statuses = view.getAllByRole('status')
     expect(statuses.map(status => status.textContent)).toEqual([
-      '本轮运行失败API 密钥无效AUTH',
+      '本轮运行失败API 密钥无效: PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.AUTH',
       '本轮运行失败plugin exploded',
       '本轮运行失败当前请求的额度已用尽QUOTA',
       '本轮运行失败当前请求的额度已用尽ACCOUNT_QUOTA',

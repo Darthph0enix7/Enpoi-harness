@@ -8,11 +8,13 @@
  * (settings-refresh.ts: one request per burst, scheduled by the pushed
  * `settings/document-updated`, a transport reconnect, the tab becoming
  * visible, or a stale mount); a read answering the revision this store last
- * applied notifies nobody, and a persona key with a local write in flight
- * keeps its optimistic value until that write settles.
+ * applied notifies nobody, a read that reconciles to the values already held
+ * republishes nothing (no row flickers through a write's echo), and a persona
+ * key with a local write in flight keeps its optimistic value until that write
+ * settles. A cleared key stays an explicit `null`, so clearing one seat never
+ * removes another seat's row.
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
-import { getRoleRegistry, isKnownFleetSeat } from './role-registry.ts'
 import { readEnpoiNamespace } from './settings-refresh.ts'
 
 /** Persona id → explicit model selection (null = inherit); the page's snapshot value. */
@@ -40,27 +42,44 @@ let writeSeq = 0
  */
 let lastAppliedRevision: number | undefined
 
+/** Whether two assignments carry the same route. */
+function sameSelection(left: ModelSelection | null | undefined, right: ModelSelection | null | undefined): boolean {
+  if (left === right) return true
+  if (left === null || left === undefined || right === null || right === undefined) return false
+  return left.provider === right.provider
+    && left.model === right.model
+    && (left.chain ?? '') === (right.chain ?? '')
+    && (left.reasoningEffort ?? '') === (right.reasoningEffort ?? '')
+}
+
+/** Whether two persona snapshots carry the same keys and routes. */
+function samePersonas(left: PersonaMap, right: PersonaMap): boolean {
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  if (leftKeys.length !== rightKeys.length) return false
+  for (const key of leftKeys) {
+    if (!Object.hasOwn(right, key) || !sameSelection(left[key], right[key])) return false
+  }
+  return true
+}
+
 /**
- * Replace the snapshot from one server read. Keys with an in-flight local write
- * keep their optimistic value; every other key follows the server (so a
- * concurrent clear in another client is applied).
+ * Reconcile one server read into the snapshot by value. Keys with an in-flight
+ * local write keep their optimistic value, including a key the server document
+ * has not caught up with yet; every other key follows the server (so a
+ * concurrent change in another client is applied). A read that carries the
+ * snapshot this store already holds republishes nothing — the map identity,
+ * and every row, stays put through the write's settings echo.
  * @param serverPersonas - the personas map the host just reported.
  */
 function applyServerPersonas(serverPersonas: PersonaMap): void {
-  const merged: PersonaMap = {}
-  for (const [key, value] of Object.entries(serverPersonas)) {
-    if (pendingPersonaKeys.has(key)) {
-      // An in-flight local clear drops the server's row; a local optimistic
-      // value wins over it.
-      if (!Object.hasOwn(currentPersonas, key)) continue
-      const local = currentPersonas[key]
-      if (local !== undefined) {
-        merged[key] = local
-        continue
-      }
-    }
-    merged[key] = value
+  const merged: PersonaMap = { ...serverPersonas }
+  for (const key of pendingPersonaKeys) {
+    // The pending key's own state wins: its optimistic selection, or the
+    // explicit null of a local clear.
+    merged[key] = currentPersonas[key] ?? null
   }
+  if (samePersonas(merged, currentPersonas)) return
   currentPersonas = merged
   notify()
 }
@@ -145,28 +164,20 @@ export function setPersonaAssignment(personaId: string, selection: ModelSelectio
 /**
  * Optimistically clear an explicit assignment, reverting the persona back to
  * its fallback route (0ms update) and persisting the leaf write in the
- * background. A registry seat keeps its fleet row after the clear, so its key
- * stays as an explicit `null`; a persona id with no registry row exists only
- * as this assignment (a stray left by an older fleet), so the clear removes
- * the key itself — a `null` would leave the seat lingering as a "Custom" row.
+ * background. The cleared key stays as an explicit `null` — the seat's
+ * `inherit`/`builtin-default` state — and every other key, explicit null
+ * included, is carried over untouched: a clear changes one seat's state and
+ * can never drop another seat's row.
  * @param personaId - display persona id.
  * @returns whether the mutation was persisted.
  */
 export function clearPersonaAssignment(personaId: string): Promise<boolean> {
   const key = personaId.toLowerCase().replace(/^the\s+/, '').trim()
-  const next: PersonaMap = {}
-  for (const [k, v] of Object.entries(currentPersonas)) {
-    if (k !== key && v !== null && v !== undefined) {
-      next[k] = v
-    }
-  }
-  currentPersonas = next
+  currentPersonas = { ...currentPersonas, [key]: null }
   notify()
   pendingPersonaKeys.add(key)
 
-  const op = Object.hasOwn(getRoleRegistry(), key) || isKnownFleetSeat(key)
-    ? { op: 'set' as const, path: ['personas', key], value: null }
-    : { op: 'unset' as const, path: ['personas', key] }
+  const op = { op: 'set' as const, path: ['personas', key], value: null }
 
   return fetch('/api/settings.mutate', {
     method: 'POST',

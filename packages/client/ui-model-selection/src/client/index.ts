@@ -143,11 +143,11 @@ export function apply(ctx: ClientContext): void {
   ctx.plugin(ModelDirectoryResolver)
 
   // The host rules engine republishes `catalogRules.resolved` after every
-  // settings update; re-read the mirror on that push so the picker's rule
-  // decisions track the backend without a reload. A read that resolves to the
-  // same map publishes nothing, so this cannot loop.
+  // settings update to either input namespace; re-read the mirror on that push
+  // so the picker's rule decisions track the backend without a reload. A read
+  // that resolves to the same map publishes nothing, so this cannot loop.
   ctx.effect(() => ctx.remote.$on('settings/document-updated', (ns) => {
-    if (ns === 'enpoi-orchestration') void refreshCatalogVisibility()
+    if (ns === 'enpoi-orchestration' || ns === 'llm-pi-ai') void refreshCatalogVisibility()
   }), 'ui-model-selection: catalog visibility refresh')
 
   // Entry 1: the /model popupSelect over the shared directory.

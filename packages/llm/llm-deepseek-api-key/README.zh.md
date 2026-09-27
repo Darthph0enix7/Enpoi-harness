@@ -39,6 +39,8 @@ kind: "package-reference"
 
 `models` 是该 provider 独立的可配置目录；默认值和协议能力来自共享传输包。目录判断不探测推理端点。设置命名空间采用 Cordis entry id，没有 entry 时采用插件名。产品保留 official 的 `llm-deepseek` entry id，账号使用 `llm-deepseek-account`。
 
+`disabled` 是 Models 页面为本 shipped 路由写入的 volatile 移除标志（其设置地址是整个分区，没有可 unset 的 profile 路径）。为 true 时，插件同时撤回其 configurable-provider 目录条目与适配器路由，路由停止服务；该标志是 profile patch 中的普通 entry 配置，因此后续 settings 重写不会丢失。全新安装应以 Kilo Gateway（keyless，`kilo-auto/free`）作为默认路由，并让该上游路由缺失或可通过该标志移除。
+
 <a id="understand-the-implementation"></a>
 ## 理解实现
 

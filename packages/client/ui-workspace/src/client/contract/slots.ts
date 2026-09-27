@@ -135,15 +135,15 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * The rows of one Session's "..." menu, in ascending `order`. ui-workspace
      * registers the shipped rows here — `pin` (100), `rename` (200), `fork`
-     * (300), `archive` (400) — so a plugin row is placed by its own `order`
-     * among them. Use a package-namespaced `id`; reusing a shipped id at
-     * another `priority` shadows that row. Each entry renders one
-     * `role="menuitem"` `<button>` (the shipped rows use ui-primitives'
-     * `MenuItemButton`, which adds the host styling and `separatorBefore`),
-     * decides its own visibility from its own state, and dismisses the menu
-     * through the injected `useMenuOpenState` hook after acting; the list's
-     * keyboard walk and focus return read the DOM, so any such button joins
-     * them. Labels come from the contributing package's locale namespace.
+     * (300) — so a plugin row is placed by its own `order` among them. Use a
+     * package-namespaced `id`; reusing a shipped id at another `priority`
+     * shadows that row. Each entry renders one `role="menuitem"` `<button>`
+     * (the shipped rows use ui-primitives' `MenuItemButton`, which adds the
+     * host styling and `separatorBefore`), decides its own visibility from its
+     * own state, and dismisses the menu through the injected
+     * `useMenuOpenState` hook after acting; the list's keyboard walk and focus
+     * return read the DOM, so any such button joins them. Labels come from the
+     * contributing package's locale namespace.
      * @example
      * return {
      *   inject: ['slots'],
@@ -176,10 +176,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * The hover buttons at the end of one Session row, in ascending `order`,
      * after the "..." menu trigger. ui-workspace registers `archive` (100) and
-     * `pin` (200) here. An entry renders one icon button (or nothing, when its
-     * action does not apply to the row) and owns the action it performs. Clicks
-     * inside the strip stay in the strip, so the button needs no propagation
-     * handling to keep the row from opening.
+     * `pin` (200) here; archive has no menu row, so this button is its only
+     * sidebar affordance. An entry renders one icon button (or nothing, when
+     * its action does not apply to the row) and owns the action it performs.
+     * Clicks inside the strip stay in the strip, so the button needs no
+     * propagation handling to keep the row from opening.
      */
     'sidebar.workspaces.session.row.action': { kind: 'list'; scope: 'root'; owner: SessionRowOwnerProps }
   }

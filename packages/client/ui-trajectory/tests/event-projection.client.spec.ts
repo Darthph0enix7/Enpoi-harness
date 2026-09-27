@@ -53,8 +53,9 @@ describe('Trajectory event projection', () => {
       ])
   })
 
-  it('redacts auth failures and presents other durable values', () => {
-    expect(displayFailure({ code: 'AUTH', message: 'secret' })).toEqual({ code: 'AUTH', message: '' })
+  it('keeps the provider detail on auth failures and presents other durable values', () => {
+    expect(displayFailure({ code: 'AUTH', message: 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.' }))
+      .toEqual({ code: 'AUTH', message: 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.' })
     expect(displayFailure({ message: 'offline' })).toEqual({ message: 'offline' })
     expect(displayFailure({ code: 'UNKNOWN' })).toEqual({ code: 'UNKNOWN', message: '{"code":"UNKNOWN"}' })
     expect(displayFailure(undefined)).toEqual({ message: 'undefined' })

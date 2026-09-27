@@ -74,7 +74,13 @@ export function apply(ctx: ClientContext): void {
     'ui-settings-subagent: adapter invalidations',
   )
   ctx.effect(
-    () => ctx.remote.$on('settings/document-updated', () => { models.refreshCatalog() }),
+    // Only namespaces that can move the advertised model inputs reload the
+    // candidate list: the `llm-*` provider configurations and
+    // `enpoi-orchestration` preferences. Any other settings commit leaves the
+    // catalog as it is.
+    () => ctx.remote.$on('settings/document-updated', (ns) => {
+      if (ns.startsWith('llm-') || ns === 'enpoi-orchestration') models.refreshCatalog()
+    }),
     'ui-settings-subagent: settings invalidations',
   )
   ctx.effect(

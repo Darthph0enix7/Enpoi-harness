@@ -869,6 +869,26 @@ describe('mapStopReason / mapUsage', () => {
       .toEqual({ kind: 'error', failure: { message: 'pi-ai stream error', code: 'PI_AI_ERROR' } })
   })
 
+  it("carries the provider's own code and message on AUTH failures", () => {
+    // Kilo's paid-model wall, as the live probe returned it (2026-09-27):
+    // 401 {"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"You need to sign in to use this model."}}
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '401: {"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"You need to sign in to use this model."}}',
+    }))).toEqual({
+      kind: 'error',
+      failure: { code: 'AUTH', message: 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.' },
+    })
+    // Anthropic Messages spells the code `type`.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '401: {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    }))).toEqual({ kind: 'error', failure: { code: 'AUTH', message: 'authentication_error: invalid x-api-key' } })
+    // No readable envelope: the raw diagnostic is kept rather than dropped.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 401: bad key' })))
+      .toEqual({ kind: 'error', failure: { code: 'AUTH', message: 'HTTP 401: bad key' } })
+  })
+
   it('maps routable HTTP-ish error messages to stable codes', () => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 401: bad key' })))
       .toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })

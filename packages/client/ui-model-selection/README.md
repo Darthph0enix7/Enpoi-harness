@@ -33,6 +33,8 @@ Mount this plugin alongside `ui-conversation` and the commands package; the comp
 
 Mouse selection uses native browser clicks, including their cancellation behavior; a press alone never selects. Opening the menu focuses its trigger, and clicking the trigger again closes the menu and returns focus there. While a selection from either entry is pending, focus stays on the trigger, the trigger shows a spinner in place of its chevron, and each row whose value the selection carries shows one in place of its check; a rejected selection leaves the menu open, and Tab returns to the current row.
 
+The picker applies the Host rules engine's resolved visibility map, read revision-aware through the settings artifact channel (`settings.describeArtifact`) and re-read when a settings document update lands on either input namespace; a Host without the channel is read through the legacy `enpoi-orchestration.catalogRules.resolved` document, and a read resolving to the already-published map repaints nothing.
+
 ### Model and effort
 
 Models stay grouped by provider. The composer menu shows model and effort names only, with DeepSeek Account first and DeepSeek second; third-party providers retain their catalog order. Navigation chevrons use `--dsw-alias-menu-icon`. The `/model` popup shows provider names and catalog descriptions; it localizes the two built-in DeepSeek descriptions and leaves external provider descriptions verbatim. The popup applies the selected model's default effort; the composer can then choose any advertised effort. An adapter without reasoning metadata leaves the Effort row absent; there is no arbitrary effort input.

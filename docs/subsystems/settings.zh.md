@@ -48,6 +48,37 @@ prepareDocument(): Promise<string>
  */
 describe(options?: SettingsDescribeOptions): SettingsDescriptor[]
 
+/**
+ * Project one namespace from the same cached generation `describe()` serves.
+ * Readers that consume one namespace use this instead of projecting the whole
+ * set, so a narrow read stays correct while costing one row.
+ * @param ns - profile entry id.
+ * @param options - redaction required for remote callers.
+ * @returns the namespace's descriptor, or undefined when no active entry carries it.
+ */
+describeNamespace(ns: string, options?: SettingsDescribeOptions): SettingsDescriptor | undefined
+
+/**
+ * Publish one derived artifact beside the configuration document. Artifacts
+ * never enter `describe()`, so a publish costs no document revision, profile
+ * write, Loader reload, or forwarded settings event; clients read them
+ * through the Remote `describeArtifact` method. The revision is derived from
+ * the serialized value, so a republish of the same value keeps it — the basis
+ * for revision-aware reads — and a client's held revision stays meaningful
+ * across a host restart.
+ * @param key - artifact name, e.g. `catalogRules.resolved`.
+ * @param value - JSON-serializable value; stored detached from the caller's copy.
+ * @returns the artifact revision after the publish.
+ */
+publishArtifact(key: string, value: unknown): number
+
+/**
+ * Read one published artifact.
+ * @param key - artifact name.
+ * @returns the current value and revision, or undefined when never published.
+ */
+readArtifact(key: string): SettingsArtifact | undefined
+
 /** Merge editable fields into an entry's config.
  * @param ns Profile entry id.
  * @param patch Fields to merge.
@@ -86,6 +117,26 @@ Host service backing the generated `ctx.remote.settings` namespace. Every remote
  * @throws RemoteError when no settings provider is mounted.
  */
 @Remote describe(): SettingsDescribeValue
+
+/**
+ * Answer one namespace's redacted view from the service's cached generation,
+ * so a reader that consumes a single namespace does not transfer the rest.
+ * @param ns - namespace key to read.
+ * @returns the namespace's redacted view, or `undefined` when no active entry carries it.
+ * @throws RemoteError when the request is invalid or no provider is mounted.
+ */
+@Remote describeNamespace(ns: string): SettingsNamespaceView | undefined
+
+/**
+ * Read one published settings artifact. Derived values are published beside
+ * the document through `settings.publishArtifact`, so a change to them never
+ * forces a document revision, reload, or whole-document read.
+ * @param key - artifact name.
+ * @param knownRevision - revision the caller holds; a match answers `changed: false` without the value.
+ * @returns the artifact read, or `undefined` when the key was never published.
+ * @throws RemoteError when the request is invalid or no provider is mounted.
+ */
+@Remote describeArtifact(key: string, knownRevision: number | undefined): SettingsArtifactView | undefined
 
 /**
  * Merge a patch into one namespace's stored user section.

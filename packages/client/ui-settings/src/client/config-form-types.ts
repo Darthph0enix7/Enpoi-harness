@@ -27,6 +27,13 @@ export interface ConfigFormSnapshot<T> {
   user: unknown
   /** Namespace revision fencing the next write; undefined before the first Host view. */
   revision: number | undefined
+  /**
+   * Ordered operations of the writes that have not settled yet, oldest first;
+   * undefined when none are pending. {@link value} carries these applied
+   * optimistically over the last accepted section, so a control can render an
+   * applied/pending state instead of reverting until the echo arrives.
+   */
+  pending?: readonly SettingsPathOpView[]
   /** Whether the Host document accepts writes; memory mode never does. */
   writable: boolean
   /** `host` syncs with the Host document; `memory` keeps a remote browser process-local. */

@@ -59,15 +59,59 @@ describe('keyless provider routes', () => {
     expect(server.headers[0]?.authorization).toBeUndefined()
   })
 
-  it('uses a supplied key when present (paid/BYOK path)', async () => {
-    vi.stubEnv('KILO_API_KEY', 'paid-key')
+  // Live probe (2026-09-27, https://api.kilo.ai/api/gateway/chat/completions):
+  //   anonymous kilo-auto/free            -> 200
+  //   anonymous + `authorization: Bearer bogus-probe-key`
+  //                                       -> 401 {"error":{"code":"INVALID_TOKEN", ...}}
+  // A stored/ambient/env key therefore BREAKS a keyless route, so none may be
+  // sent unless the route is explicitly configured for BYOK (keyless dropped).
+  it('never sends a stored or env-provided key on a keyless route', async () => {
+    vi.stubEnv('KILO_API_KEY', 'bogus-probe-key')
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(server.url)
 
     const result = await assemble(ctx, { provider: 'kilo', model: 'kilo-auto/free', messages: [] })
 
     expect(result.finish).toEqual({ kind: 'stop' })
+    expect(server.headers[0]?.authorization).toBeUndefined()
+  })
+
+  it('sends a provided key only on an explicit BYOK route (keyless dropped)', async () => {
+    vi.stubEnv('KILO_API_KEY', 'paid-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        kilo: {
+          api: 'openai-completions',
+          baseURL: server.url,
+          apiKeyEnv: 'KILO_API_KEY',
+          models: [{ id: 'kilo-auto/free' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { provider: 'kilo', model: 'kilo-auto/free', messages: [] })
+
+    expect(result.finish).toEqual({ kind: 'stop' })
     expect(server.headers[0]?.authorization).toBe('Bearer paid-key')
+  })
+
+  it("carries the provider's own code and message through an AUTH failure", async () => {
+    const server = await mockServer([{
+      status: 401,
+      body: JSON.stringify({ error: { code: 'PAID_MODEL_AUTH_REQUIRED', message: 'You need to sign in to use this model.' } }),
+    }])
+    const ctx = await harness(server.url)
+
+    const result = await assemble(ctx, { provider: 'kilo', model: 'kilo-auto/free', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'AUTH', message: 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.' },
+    })
+    expect(server.headers[0]?.authorization).toBeUndefined()
   })
 
   it('still fails a required env ref clearly when it is unset', async () => {
@@ -118,7 +162,9 @@ describe('keyless provider routes', () => {
       } as never),
       resolveApiKey: () => Promise.resolve(undefined),
       pool: engine,
-      resolveCredential: async () => undefined,
+      // Both identities resolve: a keyless route must still attempt them
+      // anonymously rather than send the resolved credentials.
+      resolveCredential: async (ref: string) => ref === 'ANON_KEY' ? 'stored-anon-key' : 'stored-second-key',
       log: () => {},
       auth: memoryAuth(),
     })

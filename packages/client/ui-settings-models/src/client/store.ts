@@ -101,6 +101,22 @@ export function joinProviderDirectory(
       - (right.provider === 'deepseek-account' ? 0 : right.provider === 'deepseek-official' ? 1 : 2))
 }
 
+/**
+ * Whether a whole-section route declares the removal flag the Models page
+ * writes. A shipped route whose settings address is the whole section cannot be
+ * removed by unsetting a profile, so its plugin declares a volatile boolean
+ * `disabled` field and the page sets it; a namespace without that field must
+ * not offer an action whose write the settings service would reject as
+ * non-volatile.
+ * @param schema - schema callbacks the page renders forms through.
+ * @param view - the route's settings namespace view.
+ * @returns whether the namespace schema declares a boolean `disabled` field.
+ */
+export function declaresRemovalFlag(schema: SettingsSchemaOperations, view: SettingsNamespaceView): boolean {
+  const root = schema.rehydrate(view.schema)
+  return schema.nodeAtPath(root, ['disabled'])?.type === 'boolean'
+}
+
 /** One provider row the page renders. */
 export interface ProviderRow {
   /** Account route has usable credentials for the configured inference origin. */
@@ -109,7 +125,11 @@ export interface ProviderRow {
   entry: ProviderDirectoryEntry
   /** Whether any layer configures this provider (its profile resolves). */
   configured: boolean
-  /** Whether the user layer alone carries the profile (removal restores the base). */
+  /**
+   * Whether the page can remove the route: a routable profile the user layer
+   * alone carries (removal restores the base), or a whole-section shipped
+   * route whose namespace declares the `disabled` removal flag.
+   */
   removable: boolean
   /** The credential reference the resolved profile names, when one does. */
   apiKeyEnv: string | undefined
@@ -237,9 +257,10 @@ export class ModelsSettingsStore {
       const configured = namespace !== undefined
         && (entry.settingsPath.length === 0 || this.schema.getPath(namespace.value, entry.settingsPath) !== undefined)
       const removable = namespace !== undefined
-        && entry.settingsPath.length > 0
-        && this.schema.hasPath(namespace.user, entry.settingsPath)
-        && !this.schema.hasPath(namespace.base, entry.settingsPath)
+        && (entry.settingsPath.length > 0
+          ? this.schema.hasPath(namespace.user, entry.settingsPath)
+            && !this.schema.hasPath(namespace.base, entry.settingsPath)
+          : declaresRemovalFlag(this.schema, namespace))
       return {
         entry,
         configured,

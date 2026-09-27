@@ -77,6 +77,42 @@ function classifyPiAiError(message: string): string {
 }
 
 /**
+ * Recover the provider's own `code: message` from the JSON error envelope pi-ai
+ * flattens into its error text. pi-ai composes a non-2xx body as
+ * `<status>: <json body>` (upstream `utils/error-body.ts`) and discards the
+ * structured error, so a gateway's machine code (Kilo's
+ * `PAID_MODEL_AUTH_REQUIRED`, `INVALID_TOKEN`) would otherwise be unreadable.
+ * Only the semantic pair is returned; the raw envelope (and any credential
+ * fragment it might echo) is not carried into the failure.
+ * @param text - the flattened pi-ai error message.
+ * @returns `CODE: message`, a lone `message`, or undefined when no JSON envelope is present.
+ */
+export function providerErrorDetail(text: string): string | undefined {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return undefined
+  let body: unknown
+  try {
+    body = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return undefined
+  }
+  if (typeof body !== 'object' || body === null) return undefined
+  const outer = body as { error?: unknown }
+  const record = typeof outer.error === 'object' && outer.error !== null
+    ? outer.error as Record<string, unknown>
+    : outer as Record<string, unknown>
+  // OpenAI-shaped envelopes carry `code`; Anthropic Messages carries the same
+  // idea as `type` (`authentication_error`).
+  const code = typeof record.code === 'string' && record.code.length > 0
+    ? record.code
+    : typeof record.type === 'string' && record.type.length > 0 ? record.type : undefined
+  const detail = typeof record.message === 'string' && record.message.length > 0 ? record.message : undefined
+  if (code !== undefined && detail !== undefined) return `${code}: ${detail}`
+  return detail ?? code
+}
+
+/**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
@@ -132,10 +168,18 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
       const code = classifyPiAiError(text)
+      // An auth failure carries the provider's own code and message (e.g.
+      // `PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.`)
+      // so the UI can headline its localized copy and append the actionable
+      // detail, instead of collapsing to the generic key message. The raw
+      // envelope stays in the log's message when it has no readable pair.
+      const detail = code === 'AUTH' ? providerErrorDetail(text) : undefined
       // A gated free-tier route fails identically on every attempt, so the
       // user-facing failure carries the policy explanation, not just the
       // provider's raw 403 envelope.
-      const explained = code === FREE_TIER_GATED_CODE ? `${text} — ${FREE_TIER_GATED_EXPLANATION}` : text
+      const explained = code === FREE_TIER_GATED_CODE
+        ? `${text} — ${FREE_TIER_GATED_EXPLANATION}`
+        : detail ?? text
       return { kind: 'error', failure: { message: explained, code } }
     }
   }

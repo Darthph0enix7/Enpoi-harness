@@ -95,11 +95,11 @@ describe('persona-store live sync', () => {
     await expect(write).resolves.toBe(true)
   })
 
-  it('clears a registry seat with an explicit null so its fleet row stays', async () => {
+  it('clears a registry seat to an explicit null and keeps every other row state', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = (JSON.parse(String(init.body)) as { method: string }).method
       if (method === 'settings.describe') {
-        return describeResponse({ personas: { fixer: { provider: 'deepseek-official', model: 'old' } } }, 1)
+        return describeResponse({ personas: { oracle: null, fixer: { provider: 'deepseek-official', model: 'old' } } }, 1)
       }
       return mutateOk()
     })
@@ -111,7 +111,11 @@ describe('persona-store live sync', () => {
 
     await expect(store.clearPersonaAssignment('Fixer')).resolves.toBe(true)
 
-    expect(store.getPersonaAssignments().fixer).toBeUndefined()
+    // The cleared key stays as the explicit inherit state; the other seat's
+    // explicit null is untouched — clearing one seat drops no rows.
+    expect(store.getPersonaAssignments().fixer).toBeNull()
+    expect(store.getPersonaAssignments().oracle).toBeNull()
+    expect(Object.keys(store.getPersonaAssignments()).sort()).toEqual(['fixer', 'oracle'])
     expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
       { op: 'set', path: ['personas', 'fixer'], value: null },
     ])
@@ -133,13 +137,13 @@ describe('persona-store live sync', () => {
 
     await expect(store.clearPersonaAssignment('Keeper')).resolves.toBe(true)
 
-    expect(store.getPersonaAssignments().keeper).toBeUndefined()
+    expect(store.getPersonaAssignments().keeper).toBeNull()
     expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
       { op: 'set', path: ['personas', 'keeper'], value: null },
     ])
   })
 
-  it('unsets a stray persona key with no registry row instead of nulling it', async () => {
+  it('keeps a cleared stray persona key as an explicit null too — no row is ever dropped', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = (JSON.parse(String(init.body)) as { method: string }).method
       if (method === 'settings.describe') {
@@ -155,10 +159,108 @@ describe('persona-store live sync', () => {
 
     await expect(store.clearPersonaAssignment('critic')).resolves.toBe(true)
 
-    expect(store.getPersonaAssignments().critic).toBeUndefined()
+    expect(store.getPersonaAssignments().critic).toBeNull()
     expect(mutateBodies(fetchMock).at(-1)?.payload.args.ops).toEqual([
-      { op: 'unset', path: ['personas', 'critic'] },
+      { op: 'set', path: ['personas', 'critic'], value: null },
     ])
+  })
+
+  it('keeps a pending clear over a refresh that still reads the old value', async () => {
+    let releaseMutate: ((res: Response) => void) | undefined
+    const mutateGate = new Promise<Response>((resolve) => { releaseMutate = resolve })
+    let revision = 1
+    const personas: Record<string, unknown> = { fixer: { provider: 'deepseek-official', model: 'old' } }
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') return describeResponse({ personas }, revision)
+      return mutateGate
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().fixer).toEqual({ provider: 'deepseek-official', model: 'old' })
+    })
+
+    const write = store.clearPersonaAssignment('fixer')
+    // The echo still carries the pre-clear row: the local explicit null holds.
+    revision = 2
+    await store.refreshFromServer()
+    expect(store.getPersonaAssignments().fixer).toBeNull()
+
+    releaseMutate?.(mutateOk())
+    await expect(write).resolves.toBe(true)
+  })
+
+  it('releases a pending key when its write fails, so the server value can win again', async () => {
+    let revision = 1
+    const personas: Record<string, unknown> = { fixer: { provider: 'deepseek-official', model: 'old' } }
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') return describeResponse({ personas }, revision)
+      throw new Error('offline')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().fixer).toEqual({ provider: 'deepseek-official', model: 'old' })
+    })
+
+    await expect(store.setPersonaAssignment('fixer', { provider: 'deepseek-official', model: 'new' })).resolves.toBe(false)
+    await expect(store.clearPersonaAssignment('fixer')).resolves.toBe(false)
+
+    // Failed writes hold no pending key: the next read's server value applies.
+    revision = 2
+    personas.fixer = { provider: 'deepseek-official', model: 'remote' }
+    await store.refreshFromServer()
+    expect(store.getPersonaAssignments().fixer).toEqual({ provider: 'deepseek-official', model: 'remote' })
+  })
+
+  it('does not republish when a new revision carries the snapshot already held', async () => {
+    let personas = { fixer: { provider: 'deepseek-official', model: 'old' } }
+    let revision = 1
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') return describeResponse({ personas }, revision)
+      return mutateOk()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+    await vi.waitFor(() => {
+      expect(store.getPersonaAssignments().fixer).toBeDefined()
+    })
+
+    const listener = vi.fn()
+    const unsubscribe = store.subscribePersonaAssignments(listener)
+    // A push after another namespace write echoes the same personas under a new
+    // revision: no snapshot replacement, no subscriber wake, no row re-render.
+    revision = 2
+    await store.refreshFromServer()
+    expect(listener).not.toHaveBeenCalled()
+    unsubscribe()
+  })
+
+  it('keeps a pending optimistic key the echoed document does not carry yet', async () => {
+    let releaseMutate: ((res: Response) => void) | undefined
+    const mutateGate = new Promise<Response>((resolve) => { releaseMutate = resolve })
+    let revision = 1
+    const personas: Record<string, unknown> = {}
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      if (method === 'settings.describe') return describeResponse({ personas }, revision)
+      return mutateGate
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/persona-store.ts')
+
+    const write = store.setPersonaAssignment('keeper', { provider: 'freellmapi', model: 'auto' })
+    // The echo arrives before the server document carries the new row: the
+    // optimistic value (and its row) must survive the refresh.
+    revision = 2
+    await store.refreshFromServer()
+    expect(store.getPersonaAssignments().keeper).toEqual({ provider: 'freellmapi', model: 'auto' })
+
+    releaseMutate?.(mutateOk())
+    await expect(write).resolves.toBe(true)
   })
 })
 

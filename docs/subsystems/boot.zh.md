@@ -47,9 +47,12 @@ configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; overr
 
 /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
  * References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.
+ * A derived candidate equal to the live entry config returns before the profile reload, so a no-op
+ * edit raises no reload, document write, or update notification.
  * @param entry Current Loader entry, also used to detect replacement during the write.
- * @param change Derive a raw config from the current entry and its inherited layer.
- * @returns Fulfillment after Loader reconciliation completes.
+ * @param change Derive a raw config from the current entry and its inherited layer; it must be
+ * side-effect free because a committed edit invokes it for the no-op probe and again after the reload.
+ * @returns Fulfillment after Loader reconciliation completes, or immediately for a no-op candidate.
  */
 async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, ): Promise<void>
 ```

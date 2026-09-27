@@ -163,7 +163,12 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     setDeleteError(null)
 
     try {
-      if (deleteTarget.apiKeyEnv) {
+      // A shipped route addresses the whole section: its removal is the
+      // namespace's own `disabled` flag, and its credential may be shared with
+      // another route (the fork's llm-pi-ai deepseek profile names the same
+      // DEEPSEEK_API_KEY), so a route removal never unsets the credential.
+      const shipped = deleteTarget.entry.settingsPath.length === 0
+      if (!shipped && deleteTarget.apiKeyEnv) {
         const credRes = await api.credentials.unset(deleteTarget.apiKeyEnv)
         if (!credRes.ok) {
           setDeleteError(credRes.error.message)
@@ -173,7 +178,9 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       }
       const res = await api.settings.mutate(
         deleteTarget.entry.settingsNs,
-        [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }],
+        shipped
+          ? [{ op: 'set', path: ['disabled'], value: true }]
+          : [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }],
         undefined,
       )
       if (!res.ok) {
@@ -340,7 +347,9 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           description={
             deleteTarget
               ? providerCopy(
-                deleteTarget.apiKeyEnv ? t('deleteDescriptionWithCredential') : t('deleteDescription'),
+                deleteTarget.apiKeyEnv && deleteTarget.entry.settingsPath.length > 0
+                  ? t('deleteDescriptionWithCredential')
+                  : t('deleteDescription'),
                 deleteTarget.entry,
               )
               : ''
@@ -401,13 +410,18 @@ export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boo
   return !readOnly && !row?.configured
 }
 
-/** Helper to remove a provider profile from settings. */
+/** Helper to remove a provider route from settings. */
 export async function removeProviderProfile(
   face: { api: Pick<ModelsWire, 'settings' | 'credentials'>; t?: (key: keyof typeof en) => string },
   _controller: ModelsSettingsStore,
   target: { settingsNs: string; settingsPath: string[]; credentialRef?: string },
 ): Promise<string | null> {
-  if (target.credentialRef) {
+  // An empty settings path means the shipped route's address is its whole
+  // namespace: removal is the namespace's own `disabled` flag, and a
+  // credential the route names may be shared with another profile that has to
+  // keep working, so it stays.
+  const shipped = target.settingsPath.length === 0
+  if (!shipped && target.credentialRef) {
     const credRes = await face.api.credentials.unset(target.credentialRef)
     if (!credRes.ok && credRes.error) {
       return credRes.error.message
@@ -416,7 +430,9 @@ export async function removeProviderProfile(
 
   const settingsRes = await face.api.settings.mutate(
     target.settingsNs,
-    [{ op: 'unset', path: target.settingsPath }],
+    shipped
+      ? [{ op: 'set', path: ['disabled'], value: true }]
+      : [{ op: 'unset', path: target.settingsPath }],
     undefined,
   )
   if (!settingsRes.ok) {

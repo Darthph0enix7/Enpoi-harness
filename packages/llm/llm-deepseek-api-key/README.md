@@ -39,6 +39,8 @@ The endpoint and credential reference come from one configuration resolution. In
 
 `models` is an independently configurable catalog for this provider; defaults and protocol capabilities come from the shared transport. Discovery does not probe inference endpoints. The settings namespace is the Cordis entry id, or the plugin name without an entry. Product profiles retain the official entry id `llm-deepseek` and use `llm-deepseek-account` for the account route.
 
+`disabled` is the volatile removal flag the Models page writes for this shipped route (its settings address is the whole section, so there is no profile path to unset). While true, the plugin withdraws both its configurable-provider directory entry and its adapter route, and the route stops serving; the flag is ordinary entry config in the profile patch, so it survives later settings rewrites. A fresh installation should ship Kilo Gateway (keyless, `kilo-auto/free`) as the default route with this upstream route either absent or removable through that flag.
+
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 

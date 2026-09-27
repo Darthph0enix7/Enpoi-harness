@@ -169,6 +169,13 @@ export function apply(ctx: ClientContext): void {
   // follows its settings scope, so it needs no subscription here.
   ctx.effect(() => {
     const refreshModels = (): void => { refreshIfLoaded(controller) }
+    // The page's join: the settings namespaces its provider rows render from
+    // plus `enpoi-orchestration` (hidden models / group registry). A commit to
+    // any other namespace cannot change a row, so the page does not reload.
+    const pageNamespaces = (): ReadonlySet<string> => new Set(
+      controller.store.getSnapshot().rows
+        .map(row => row.entry.settingsNs)
+        .filter(ns => ns !== ''))
     // Cross-client live sync for the hidden-model map: an
     // enpoi-orchestration commit in any other client is debounced, then merged
     // into the local store (the settings page and the model picker both
@@ -183,8 +190,12 @@ export function apply(ctx: ClientContext): void {
     }
     const disposers = [
       ctx.remote.$on('settings/document-updated', (ns) => {
-        if (ns === 'enpoi-orchestration') scheduleHiddenModelsRefresh()
-        refreshModels()
+        if (ns === 'enpoi-orchestration') {
+          scheduleHiddenModelsRefresh()
+          refreshModels()
+          return
+        }
+        if (pageNamespaces().has(ns)) refreshModels()
       }),
       ctx.remote.$on('credentials/record-updated', refreshModels),
       ctx.remote.$on('credentials/reference-updated', refreshModels),

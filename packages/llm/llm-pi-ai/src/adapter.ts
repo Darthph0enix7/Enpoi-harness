@@ -445,11 +445,13 @@ export class PiAiAdapter extends LlmAdapter {
         headers: commonHeaders,
       }
       /**
-       * One attempt's stream options. A keyless attempt with no resolved key
-       * passes the placeholder key pi-ai requires and clears the Authorization
-       * header the SDK derives from it, unless deployment headers already
-       * carry their own authorization. Any supplied key — on a keyless route
-       * or any other — keeps the normal bearer header.
+       * One attempt's stream options. A keyless attempt passes the placeholder
+       * key pi-ai requires and clears the Authorization header the SDK derives
+       * from it, unless deployment headers already carry their own
+       * authorization. A keyless route never receives a resolved key — stored,
+       * ambient, and env values are all suppressed before this point — so its
+       * only possible Authorization header is deployment-owned. Any supplied
+       * key on an authenticated route keeps the normal bearer header.
        */
       const attemptOptions = (apiKeyOverride: string | undefined): SimpleStreamOptions => {
         const keyless = profile.keyless && apiKeyOverride === undefined
@@ -503,9 +505,10 @@ export class PiAiAdapter extends LlmAdapter {
             )
           }
         }
-        // A keyless route serves an identity whose reference resolves to
-        // nothing with no credential at all; only an authenticated route
-        // requires every attempted identity to resolve.
+        // A keyless route serves every identity with no credential at all
+        // (its key material is resolved only for the logs and is never sent);
+        // only an authenticated route requires every attempted identity to
+        // resolve.
         const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id) || profile.keyless)
         if (resolvableOrder.length === 0) {
           throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no resolvable identities`, 'MISSING_CREDENTIAL')
@@ -524,12 +527,16 @@ export class PiAiAdapter extends LlmAdapter {
           if (identity === undefined) continue
           const key = resolvedKeys.get(candidate.id)
           attempts += 1
-          const keylessAttempt = profile.keyless && key === undefined
+          // A keyless route never sends a stored, ambient, or env-provided
+          // key: even an identity whose credential reference resolves is
+          // attempted anonymously, because any Authorization header turns the
+          // gateway's anonymous path into 401 INVALID_TOKEN.
+          const keylessAttempt = profile.keyless
           // Per-attempt teardown: a rotated-away request must not keep its
           // upstream connection open alongside the next attempt's.
           const attemptController = new AbortController()
           const attemptSignal = AbortSignal.any([watchdog.signal, attemptController.signal])
-          const iterator = makeAttempt(key, attemptSignal)
+          const iterator = makeAttempt(keylessAttempt ? undefined : key, attemptSignal)
           const buffered: StreamChunk[] = []
           let committed = false
           let failure: LlmFailure | undefined

@@ -26,6 +26,18 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * Namespaces whose commits can move the advertised model inputs: the `llm-*`
+ * provider configurations, and `enpoi-orchestration` (pool and rule
+ * preferences). Any other settings commit leaves the catalog as it is, so a
+ * theme or whiteboard write no longer reloads 1,393 models.
+ * @param ns - the namespace named by a `settings/document-updated` event.
+ * @returns whether the event can change the model catalog.
+ */
+function affectsModelCatalog(ns: string): boolean {
+  return ns.startsWith('llm-') || ns === 'enpoi-orchestration'
+}
+
 /** Live mutable state in one holder (service methods run behind the caller-ctx tracker). */
 interface LiveState {
   /** Directories keyed by Client binding, removed by their scope disposer. */
@@ -53,7 +65,9 @@ export class ModelDirectoryResolver extends Service {
       for (const directory of this.live.directories.values) directory.resetConnected()
     })
     ctx.remote.$on('llm/adapters-updated', () => { this.catalog.refresh() })
-    ctx.remote.$on('settings/document-updated', () => { this.catalog.refresh() })
+    ctx.remote.$on('settings/document-updated', (ns) => {
+      if (affectsModelCatalog(ns)) this.catalog.refresh()
+    })
     ctx.remote.$on('credentials/record-updated', () => { this.catalog.refresh() })
     ctx.remote.$on('credentials/reference-updated', () => { this.catalog.refresh() })
   }

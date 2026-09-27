@@ -33,6 +33,9 @@
  *           "input": ["text", "image"],
  *           "tools": true,
  *           "reasoning": true,
+ *           "isFree": false,
+ *           "gated": true,
+ *           "gateReason": "sign-in required",
  *           "source": "discovered",
  *           "discoveredAt": 1790000000000
  *         }
@@ -77,6 +80,15 @@ export interface DiscoveredModelRecord {
   readonly pricing?: Readonly<Record<string, string>> | undefined
   /** Whether the endpoint's directory marked the model free. */
   readonly isFree?: boolean | undefined
+  /**
+   * Whether the endpoint's directory marked the model sign-in/paid-only
+   * (`isFree: false`). Mirrors the catalogue rules engine's `gated` entry
+   * flag, so a picker dims it with {@link gateReason} and a `gated` rule
+   * clause can exclude it.
+   */
+  readonly gated?: boolean | undefined
+  /** The picker-facing reason a gated model is unavailable; absent when not gated. */
+  readonly gateReason?: string | undefined
   /** True when neither models.dev, the installed catalog, nor the listing disclosed any capability. */
   readonly unverified?: boolean | undefined
   /** Provenance marker: this record came from an endpoint listing, not configuration. */
@@ -136,6 +148,9 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
         .filter((pair): pair is [string, string] => typeof pair[1] === 'string'),
     )
     : undefined
+  // A gate reason without the gate is noise from a hand-edited cache; it is
+  // kept only beside `gated: true`.
+  const gateReason = entry.gated === true ? nonEmptyString(entry.gateReason) : undefined
   return {
     id,
     ...nonEmptyString(entry.name) === undefined ? {} : { name: nonEmptyString(entry.name) },
@@ -146,6 +161,8 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
     ...typeof entry.reasoning === 'boolean' ? { reasoning: entry.reasoning } : {},
     ...pricing === undefined || Object.keys(pricing).length === 0 ? {} : { pricing },
     ...typeof entry.isFree === 'boolean' ? { isFree: entry.isFree } : {},
+    ...entry.gated === true ? { gated: true } : {},
+    ...gateReason === undefined ? {} : { gateReason },
     ...entry.unverified === true ? { unverified: true } : {},
     source: 'discovered',
     discoveredAt: positiveInteger(entry.discoveredAt) ?? fallbackStamp,

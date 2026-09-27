@@ -765,7 +765,14 @@ function requestErrorMessage(
   request: Pick<TrajectoryRequestNumber, 'error' | 'errorCode'>,
   t: TrajectoryTranslate,
 ): string | undefined {
-  if (request.errorCode === 'AUTH') return t('details.failure.auth')
+  if (request.errorCode === 'AUTH') {
+    // The localized headline first; the provider's own detail (its machine
+    // code and message) follows when the adapter carried one.
+    const headline = t('details.failure.auth')
+    return request.error === undefined || request.error.length === 0 || request.error === headline
+      ? headline
+      : `${headline}: ${request.error}`
+  }
   if (request.error === COMPACTION_INTERRUPTED_ERROR) return t('layout.compactionInterrupted')
   return request.error
 }
