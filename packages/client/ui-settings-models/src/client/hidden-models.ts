@@ -73,9 +73,14 @@ async function describeHiddenModels(): Promise<HiddenModelsNamespaceView | undef
 
 /** Publish one map to localStorage and notify subscribers (no server write). */
 function publishLocal(map: HiddenMap): void {
+  const serialized = JSON.stringify(map)
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
-  } catch {}
+    // A merge that resolves to the stored map is a no-op: no repaint.
+    if (localStorage.getItem(STORAGE_KEY) === serialized) return
+    localStorage.setItem(STORAGE_KEY, serialized)
+  } catch {
+    // Storage disabled: fall through and notify from the in-memory merge.
+  }
   try {
     window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: {} }))
   } catch {}

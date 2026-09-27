@@ -20,9 +20,23 @@ export interface ProviderTemplate {
   baseURL: string
   /** Docs URL for the provider. */
   doc?: string
+  /**
+   * The provider serves requests without any credential (anonymous free
+   * tier); its env ref stays optional and a supplied key switches to BYOK.
+   */
+  keyless?: boolean
 }
 
-export const PROVIDER_TEMPLATES: ProviderTemplate[] = presets as unknown as ProviderTemplate[]
+/**
+ * Presets whose free tier serves requests with no credential at all. Kept
+ * outside the generated data module so regenerating the preset list cannot
+ * drop the capability.
+ */
+const KEYLESS_PRESET_IDS = new Set(['kilo'])
+
+export const PROVIDER_TEMPLATES: ProviderTemplate[] =
+  (presets as unknown as ProviderTemplate[]).map(preset =>
+    KEYLESS_PRESET_IDS.has(preset.id) ? { ...preset, keyless: true } : preset)
 
 /** OpenCode's popular-provider ordering (use-providers.ts popularProviders). */
 export const POPULAR_PROVIDERS = [

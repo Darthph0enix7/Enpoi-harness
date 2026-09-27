@@ -25,6 +25,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconDataOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ModelDirectoryState } from './directory.ts'
 import { ModelDirectoryResolver } from './service.ts'
+import { refreshCatalogVisibility } from './catalog-visibility.ts'
 import type { ModelSelectInjected } from './slots.ts'
 import { ModelSelect } from './ModelSelect.tsx'
 import { en, zh, type ModelKey } from './locales.ts'
@@ -140,6 +141,14 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
 
   ctx.plugin(ModelDirectoryResolver)
+
+  // The host rules engine republishes `catalogRules.resolved` after every
+  // settings update; re-read the mirror on that push so the picker's rule
+  // decisions track the backend without a reload. A read that resolves to the
+  // same map publishes nothing, so this cannot loop.
+  ctx.effect(() => ctx.remote.$on('settings/document-updated', (ns) => {
+    if (ns === 'enpoi-orchestration') void refreshCatalogVisibility()
+  }), 'ui-model-selection: catalog visibility refresh')
 
   // Entry 1: the /model popupSelect over the shared directory.
   ctx.inject(['commandUi', 'modelDirectories'], (scope: ClientContext) => {

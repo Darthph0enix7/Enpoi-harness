@@ -165,6 +165,111 @@ describe('SessionController revert RPC', () => {
     )).resolves.not.toBe('revert-invalid')
   })
 
+  it('makes a revert with an empty (failed) tail a no-op and writes no boundary', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    // A turn whose provider failed leaves the user message as the last
+    // surface node: there is nothing after it to shadow.
+    const failed = createUserMessage({
+      content: [{ type: 'text', text: 'failed query' }],
+      source: { kind: 'user' },
+    })
+    session.append('user/message', failed, { surfaceOp: 'append' })
+    session.append('turn/start', { turn: 3 })
+    session.append('turn/end', {
+      turn: 3,
+      reason: { kind: 'error', error: { message: 'No API key for provider: fixture', code: 'PI_AI_ERROR' } },
+    })
+    const failedSeq = session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === failed.id)!.seq
+
+    const result = await controller.revert({ sessionId, atSeq: failedSeq })
+
+    expect(result).toMatchObject({
+      accepted: true,
+      revertedText: 'failed query',
+      revertedCount: 0,
+      noop: true,
+    })
+    expect(result.notice).toContain('no revert boundary was created')
+    // The wedge root cause: no revert/state boundary may be committed when
+    // there is no following surface node to shadow.
+    expect(session.snapshotEvents().some(e => e.type === 'revert/state')).toBe(false)
+  })
+
+  it('clears a stored boundary that has nothing to shadow and admits the prompt', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const failed = createUserMessage({
+      content: [{ type: 'text', text: 'failed query' }],
+      source: { kind: 'user' },
+    })
+    session.append('user/message', failed, { surfaceOp: 'append' })
+    session.append('turn/start', { turn: 3 })
+    session.append('turn/end', {
+      turn: 3,
+      reason: { kind: 'error', error: { message: 'No API key for provider: fixture', code: 'PI_AI_ERROR' } },
+    })
+    const failedSeq = session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === failed.id)!.seq
+    // Simulate a boundary persisted by an older binary before the no-op fix.
+    session.append('revert/state', { fromSeq: failedSeq, cause: 'revert' })
+    const followup = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, { followup })
+
+    const signal = new AbortController().signal
+    await expect(controller.prompt({
+      requestId: 'stale-boundary' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text' as const, text: 'retry' }],
+      revertFromSeq: failedSeq,
+    }, signal)).resolves.toMatchObject({ accepted: true })
+
+    // The stale boundary is cleared atomically with admission, and the message
+    // is appended plainly (no replace span to shadow).
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
+    expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'commit' })
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(followup.mock.calls[0]).toHaveLength(1)
+  })
+
+  it('clears a stored boundary whose anchor is gone and admits the prompt', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    session.append('revert/state', { fromSeq: 999, cause: 'revert' })
+    const followup = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, { followup })
+
+    const signal = new AbortController().signal
+    await expect(controller.prompt({
+      requestId: 'missing-anchor' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text' as const, text: 'retry' }],
+      revertFromSeq: 999,
+    }, signal)).resolves.toMatchObject({ accepted: true })
+
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
+    expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'commit' })
+    expect(followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores an unusable stored boundary to promptable state', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const failed = createUserMessage({
+      content: [{ type: 'text', text: 'failed query' }],
+      source: { kind: 'user' },
+    })
+    session.append('user/message', failed, { surfaceOp: 'append' })
+    const failedSeq = session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === failed.id)!.seq
+    session.append('revert/state', { fromSeq: failedSeq, cause: 'revert' })
+
+    await expect(controller.revertRestore({ sessionId })).resolves.toMatchObject({ accepted: true })
+
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
+    expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'restore' })
+  })
+
   it('rejects a non-user anchor', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!

@@ -94,6 +94,15 @@ export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
   /**
+   * Keyless (anonymous) route: no credential is required to serve requests,
+   * and an `apiKeyEnv` beside it turns optional — a resolvable value authenticates
+   * the paid/BYOK path, an unset one sends the request without an Authorization
+   * header instead of failing. Keys supplied through pi-ai's own stored
+   * credentials are superseded by the keyless request path; name an `apiKeyEnv`
+   * for BYOK.
+   */
+  keyless?: boolean
+  /**
    * Multi-credential pool for this route. When present, requests rotate
    * across the listed identities (priority-sticky) with per-identity ×
    * per-model cooldowns; a single `apiKeyEnv` remains valid as an implicit
@@ -223,13 +232,15 @@ export interface PiAiPoolConfig {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'keyless'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
+  /** Whether this route serves requests without a credential when none resolves. */
+  keyless: boolean
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
@@ -376,6 +387,7 @@ const poolConfig = z.object({
 
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
+  keyless: z.boolean(),
   pool: poolConfig,
   displayName: z.string(),
   api: z.union(supportedProtocols()),
@@ -512,7 +524,18 @@ export function resolveProfiles(
     // always shown route keys, and a catalog route must not silently rename
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, pool, ...rest } = source
+    const { apiKeyEnv, keyless, retryPolicy, models: _models, displayName: _displayName, pool, ...rest } = source
+    // A keyless route reaches the wire with no Authorization header, which only
+    // the OpenAI-compatible protocols can express (their SDK clears the header
+    // for a null value); Anthropic Messages authenticates with `x-api-key`,
+    // which has no such omission, so a keyless profile there would send a
+    // placeholder key instead of none.
+    if (keyless === true && source.api === 'anthropic-messages') {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" sets keyless, which this build cannot serve over anthropic-messages;`
+        + ' use openai-completions or openai-responses for an anonymous route',
+      )
+    }
     // Schemastery materializes an absent object key's array fields as empty
     // lists, so an unset `pool` arrives as `{ identities: [] }`. A pool with
     // no identities IS no pool: treat it exactly like absence instead of
@@ -560,7 +583,7 @@ export function resolveProfiles(
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
-        namesCredential: apiKeyEnv !== undefined || hasPool,
+        namesCredential: apiKeyEnv !== undefined || hasPool || keyless === true,
       })
     } catch (error) {
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
@@ -570,6 +593,7 @@ export function resolveProfiles(
       ...rest,
       provider,
       displayName,
+      keyless: keyless === true,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       ...hasPool && pool !== undefined ? { pool: { ...pool, identities: pool.identities.map(identity => ({ ...identity })) } } : {},
       streamIdleTimeoutMs,

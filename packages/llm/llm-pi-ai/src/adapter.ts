@@ -81,6 +81,20 @@ interface PiAiSnapshot {
   models: Models
 }
 
+/**
+ * The non-empty placeholder key pi-ai's OpenAI-compatible APIs require before
+ * they construct a client. A keyless attempt passes it and clears the
+ * Authorization header the OpenAI SDK would derive from it (`null` is the
+ * SDK's documented form for omitting a default header), so the request reaches
+ * the wire with no Authorization header at all.
+ */
+const KEYLESS_REQUEST_KEY = 'unused'
+
+/** Whether deployment headers already carry a non-empty Authorization. */
+function hasAuthorizationHeader(headers: Readonly<Record<string, string>>): boolean {
+  return Object.entries(headers).some(([name, value]) => name.toLowerCase() === 'authorization' && value.length > 0)
+}
+
 /** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
@@ -91,7 +105,9 @@ export interface PiAiAdapterOptions {
    * pi-ai auth, which for an installed catalog route is its provider-native
    * ambient discovery; the plugin allows that only for a profile naming no
    * credential at all, because a named reference that misses throws `LlmError`
-   * `MISSING_CREDENTIAL` rather than falling back.
+   * `MISSING_CREDENTIAL` rather than falling back. A keyless profile also
+   * answers `undefined` for a missing reference, and the attempt then sends no
+   * Authorization header instead of failing.
    */
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
   /**
@@ -421,16 +437,33 @@ export class PiAiAdapter extends LlmAdapter {
       const sessionHeader = profile.sessionHeader === undefined || options.sessionId === undefined
         ? {}
         : { [profile.sessionHeader]: String(options.sessionId) }
+      const commonHeaders = requestHeaders({ ...sessionHeader, ...profile.headers })
       const commonOptions = {
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
-        headers: requestHeaders({ ...sessionHeader, ...profile.headers }),
+        headers: commonHeaders,
+      }
+      /**
+       * One attempt's stream options. A keyless attempt with no resolved key
+       * passes the placeholder key pi-ai requires and clears the Authorization
+       * header the SDK derives from it, unless deployment headers already
+       * carry their own authorization. Any supplied key — on a keyless route
+       * or any other — keeps the normal bearer header.
+       */
+      const attemptOptions = (apiKeyOverride: string | undefined): SimpleStreamOptions => {
+        const keyless = profile.keyless && apiKeyOverride === undefined
+        const headers: Record<string, string | null> = { ...commonHeaders }
+        if (keyless && !hasAuthorizationHeader(commonHeaders)) headers.authorization = null
+        return {
+          ...profileOptions(profile, reasoning, keyless ? KEYLESS_REQUEST_KEY : apiKeyOverride),
+          ...commonOptions,
+          ...keyless ? { headers: headers as Record<string, string> } : {},
+        }
       }
       const makeAttempt = (apiKeyOverride: string | undefined, signal: AbortSignal): AsyncGenerator<StreamChunk> =>
         toStreamChunks(snapshot.models.streamSimple(model, context, {
-          ...profileOptions(profile, reasoning, apiKeyOverride),
-          ...commonOptions,
+          ...attemptOptions(apiKeyOverride),
           signal,
         }), model.contextWindow, signal)[Symbol.asyncIterator]()
 
@@ -470,7 +503,10 @@ export class PiAiAdapter extends LlmAdapter {
             )
           }
         }
-        const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id))
+        // A keyless route serves an identity whose reference resolves to
+        // nothing with no credential at all; only an authenticated route
+        // requires every attempted identity to resolve.
+        const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id) || profile.keyless)
         if (resolvableOrder.length === 0) {
           throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no resolvable identities`, 'MISSING_CREDENTIAL')
         }
@@ -487,8 +523,8 @@ export class PiAiAdapter extends LlmAdapter {
           const identity = identityById.get(candidate.id)
           if (identity === undefined) continue
           const key = resolvedKeys.get(candidate.id)
-          if (key === undefined) continue
           attempts += 1
+          const keylessAttempt = profile.keyless && key === undefined
           // Per-attempt teardown: a rotated-away request must not keep its
           // upstream connection open alongside the next attempt's.
           const attemptController = new AbortController()
@@ -520,15 +556,21 @@ export class PiAiAdapter extends LlmAdapter {
               }
               if (chunk.type === 'finish') {
                 if (chunk.reason.kind === 'error') {
-                  // Mid-stream failure: too late to rotate transparently,
-                  // but the state update steers the NEXT request away.
-                  engine.recordFailure(
-                    options.provider,
-                    identity.id,
-                    options.model,
-                    classifyFailure(chunk.reason.failure.message),
-                    chunk.reason.failure.message,
-                  )
+                  const midFailureClass = classifyFailure(chunk.reason.failure.message)
+                  // A keyless attempt's 401/403 is the route's own answer
+                  // (e.g. a free tier that now demands a key), not a
+                  // credential failure: there is no key to cool down.
+                  if (!(keylessAttempt && midFailureClass === 'AUTH')) {
+                    // Mid-stream failure: too late to rotate transparently,
+                    // but the state update steers the NEXT request away.
+                    engine.recordFailure(
+                      options.provider,
+                      identity.id,
+                      options.model,
+                      midFailureClass,
+                      chunk.reason.failure.message,
+                    )
+                  }
                 }
               }
               yield chunk
@@ -544,6 +586,17 @@ export class PiAiAdapter extends LlmAdapter {
           }
           if (committed) return
           const failureClass = classifyFailure(failure?.message ?? '')
+          // A keyless attempt has no credential to rotate or cool: a 401/403
+          // is the route's own answer (e.g. a free tier that now demands a
+          // key), so it ends the request terminally instead of burning pool
+          // identities.
+          if (keylessAttempt && failureClass === 'AUTH') {
+            throw new LlmError(
+              `llm-pi-ai: keyless provider "${options.provider}" answered an auth failure (AUTH):`
+              + ` ${failure?.message ?? 'unknown failure'}`,
+              'AUTH',
+            )
+          }
           engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure?.message ?? 'unknown failure')
           lastFailure = failure?.message ?? lastFailure
           if (!ROTATING_CLASSES.has(failureClass)) {
@@ -645,8 +698,7 @@ export class PiAiAdapter extends LlmAdapter {
       }
 
       const events = snapshot.models.streamSimple(model, context, {
-        ...profileOptions(profile, reasoning, apiKey),
-        ...commonOptions,
+        ...attemptOptions(apiKey),
         signal: watchdog.signal,
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()

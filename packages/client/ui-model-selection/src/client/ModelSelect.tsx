@@ -47,7 +47,6 @@ import {
 } from './model-groups.ts'
 import {
   CATALOG_VISIBILITY_CHANGED_EVENT, catalogVisibilitySnapshot, ensureCatalogVisibility,
-  refreshCatalogVisibility,
 } from './catalog-visibility.ts'
 import css from './ModelSelect.module.css'
 
@@ -144,7 +143,8 @@ export function ModelSelect(
       setPrefsVersion(v => v + 1)
     }
     const onRulesChange = () => {
-      void refreshCatalogVisibility()
+      // The event announces a map that already moved; repaint from the cache
+      // instead of re-reading (a re-read here would loop through publish).
       setPrefsVersion(v => v + 1)
     }
     window.addEventListener('dsh:model-picker-prefs-changed', onPrefsChange)

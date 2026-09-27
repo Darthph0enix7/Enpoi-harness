@@ -40,6 +40,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [baseURL, setBaseURL] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
@@ -56,6 +57,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   }, [])
 
   if (!open) return null
+
+  const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
 
   const handleSelect = (tpl: ProviderTemplate | 'empty') => {
     setSelected(tpl)
@@ -107,7 +110,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         displayName: displayName.trim() || id,
         api: protocol,
         baseURL: baseURL.trim(),
-        ...cleanKey.length > 0 ? { apiKeyEnv: keyRef } : {},
+        // A keyless preset stores its reference too, so a key supplied later
+        // authenticates the paid/BYOK path; without one the route serves
+        // anonymously.
+        ...keylessSelected
+          ? { keyless: true, apiKeyEnv: keyRef }
+          : cleanKey.length > 0 ? { apiKeyEnv: keyRef } : {},
         ...needsPlaceholderModel ? { models: [{ id: 'auto' }] } : {},
       }
 
@@ -132,6 +140,34 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         setError(settingsRes.error.message)
         setBusy(false)
         return
+      }
+
+      // Discovery is part of the add: the new route's models land without a
+      // manual refresh. The profile is already stored, so a refused or empty
+      // discovery still closes with the provider in place.
+      setDiscovering(true)
+      try {
+        const discovery = await api.llm.discoverModels('llm-pi-ai', {
+          provider: id,
+          baseURL: baseURL.trim(),
+          api: protocol,
+          ...(cleanKey.length > 0 ? { apiKey: cleanKey } : {}),
+        })
+        if (discovery.ok && discovery.value.length > 0) {
+          const models = discovery.value.map(model => ({
+            id: model.id,
+            ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
+            ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+            ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
+          }))
+          await api.settings.mutate(
+            'llm-pi-ai',
+            [{ op: 'set', path: ['providers', id, 'models'], value: models as unknown as JsonValue }],
+            undefined,
+          )
+        }
+      } catch {
+        // The route stays created; the detail panel's refresh remains.
       }
 
       onClose(true)
@@ -160,7 +196,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               Back
             </Button>
             <Button variant="primary" disabled={busy || readOnly} onClick={handleCreate}>
-              {busy ? t('creating') : t('create')}
+              {discovering ? t('discovering') : busy ? t('creating') : t('create')}
             </Button>
           </>
         )
@@ -267,7 +303,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               className={styles['input']}
               type="password"
               value={apiKey}
-              placeholder={selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
+              placeholder={keylessSelected
+                ? t('keylessApiKeyPlaceholder')
+                : selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
               onChange={e => setApiKey(e.target.value)}
               disabled={busy || readOnly}
             />
@@ -278,6 +316,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               <span className={styles['presetMetaItem']}>
                 Env: {selected.env.length > 0 ? selected.env.join(', ') : 'none'}
               </span>
+              {keylessSelected && (
+                <span className={styles['presetMetaItem']}>{t('keylessProviderHint')}</span>
+              )}
               {selected.doc && (
                 <a className={styles['presetMetaItem']} href={selected.doc} target="_blank" rel="noreferrer">
                   Docs ↗

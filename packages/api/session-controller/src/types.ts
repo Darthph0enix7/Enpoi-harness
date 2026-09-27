@@ -748,6 +748,10 @@ export interface SessionRevertValue {
   readonly accepted: true
   readonly revertedText: string
   readonly revertedCount: number
+  /** Set when the anchor had no following surface node to shadow; no boundary was written. */
+  readonly noop?: boolean
+  /** Operator-facing reason for a no-op revert. */
+  readonly notice?: string
 }
 
 /** Revert restore request (restoreSeq omitted restores everything). */

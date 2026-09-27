@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -345,16 +345,36 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       : deriveKeyRef(providerId)
   }, [providerId, rawProfile.apiKeyEnv])
 
-  // Sync profile when row changes (synchronous reset for 0ms switch via effect, but kept lightweight)
+  // Per-provider transient state resets only when the route itself changes: a
+  // settings echo (a fresh namespace identity from the store) must not clear
+  // the model search, a typed key, or a test result.
   useEffect(() => {
-    setDisplayName(typeof rawProfile.displayName === 'string' ? rawProfile.displayName : row.entry.displayName)
-    setBaseURL(typeof rawProfile.baseURL === 'string' ? rawProfile.baseURL : '')
-    setProtocol(typeof rawProfile.api === 'string' ? rawProfile.api : 'openai-completions')
     setKeyInput('')
     setTestStatus({ state: 'idle' })
     setSaveSuccess(false)
     setModelSearch('')
-  }, [providerId, rawProfile, row.entry.displayName])
+  }, [providerId])
+
+  // Server reconciliation for the stored profile fields: apply the server
+  // value only when it actually moved, so a no-op echo cannot clobber an
+  // in-progress edit (the pool editor's optimistic-local pattern).
+  const lastServerProfile = useRef<{ displayName: string; baseURL: string; protocol: string } | null>(null)
+  useEffect(() => {
+    const next = {
+      displayName: typeof rawProfile.displayName === 'string' ? rawProfile.displayName : row.entry.displayName,
+      baseURL: typeof rawProfile.baseURL === 'string' ? rawProfile.baseURL : '',
+      protocol: typeof rawProfile.api === 'string' ? rawProfile.api : 'openai-completions',
+    }
+    const previous = lastServerProfile.current
+    if (previous !== null
+      && previous.displayName === next.displayName
+      && previous.baseURL === next.baseURL
+      && previous.protocol === next.protocol) return
+    lastServerProfile.current = next
+    setDisplayName(next.displayName)
+    setBaseURL(next.baseURL)
+    setProtocol(next.protocol)
+  }, [rawProfile, row.entry.displayName])
 
   // Models list
   const modelsList = useMemo<ModelItem[]>(() => {

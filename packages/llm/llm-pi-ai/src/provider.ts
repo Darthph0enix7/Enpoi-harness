@@ -97,11 +97,13 @@ export interface ProviderSpec {
   /** The route's materialized models, in configuration order. */
   models: readonly Model<Api>[]
   /**
-   * Whether the profile names a credential, which it does through `apiKeyEnv`
-   * alone: configuration carries the reference, never the secret. Only that
-   * decides whether {@link routeAuth} adds the harness's own api-key method to
-   * a catalog provider that offers none; the key itself still arrives per
-   * request, never at construction.
+   * Whether the profile carries a credential reference (`apiKeyEnv`) or a
+   * credential pool, or is keyless: configuration carries references, never
+   * secrets. Only that decides whether {@link routeAuth} adds the harness's own
+   * api-key method to a catalog provider that offers none; the key itself still
+   * arrives per request, never at construction. A keyless route needs the
+   * method too, so the placeholder key its attempt passes has something to
+   * resolve through.
    */
   namesCredential: boolean
 }
@@ -121,9 +123,9 @@ export interface ProviderSpec {
  * honouring the override), so an OAuth-only provider — `openai-codex` is the
  * one the installed catalog ships — would refuse a profile's explicit key with
  * `Provider is not configured` before any request went out. Adding the harness
- * method beside the provider's own restores that route. A keyless profile adds
- * nothing and still reports the honest refusal, because this adapter resolves
- * credentials through its own seam and holds no OAuth store to fall back on.
+ * method beside the provider's own restores that route, and it is what a
+ * keyless route resolves its placeholder key through on a provider whose
+ * catalog entry offers no api-key auth at all.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.

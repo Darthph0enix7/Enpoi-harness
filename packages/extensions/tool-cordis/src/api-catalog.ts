@@ -2038,7 +2038,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: '@Remote(\'revert\') revert(request: SessionRevertRequest): Promise<SessionRevertValue>',
         description: 'Revert the conversation from a user message (revert-from-here).',
         parameters: [{ name: 'request', description: 'session and the user-message seq anchoring the revert.' }],
-        returns: 'the reverted query text and count for the input card.',
+        returns: 'the reverted query text and count for the input card; a no-op receipt (`noop`, `notice`) when the anchor has nothing to shadow.',
       },
       {
         signature: '@Remote(\'revertRestore\') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>',
@@ -7205,7 +7205,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionRevertValue',
-    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedCount: number;\n}',
+    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedCount: number;\n    readonly noop?: boolean;\n    readonly notice?: string;\n}',
   },
   {
     name: 'SessionSearchCursor',

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ComponentProps } from 'react'
 import { ModelSelect } from '../src/client/ModelSelect.tsx'
 import type { ModelDirectoryState } from '../src/client/directory.ts'
 import {
+  CATALOG_VISIBILITY_CHANGED_EVENT,
   catalogDecision, catalogVisibilitySnapshot, parseCatalogVisibility, parseCatalogVisibilityDecision,
   refreshCatalogVisibility,
 } from '../src/client/catalog-visibility.ts'
@@ -108,6 +109,19 @@ describe('catalog visibility parsing', () => {
     await refreshCatalogVisibility()
     expect(catalogVisibilitySnapshot().size).toBe(0)
   })
+
+  it('publishes no change event when a re-read resolves to the same map', async () => {
+    stubDescribe(RESOLVED)
+    await refreshCatalogVisibility()
+    const listener = vi.fn()
+    window.addEventListener(CATALOG_VISIBILITY_CHANGED_EVENT, listener)
+    try {
+      await refreshCatalogVisibility()
+      expect(listener).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener(CATALOG_VISIBILITY_CHANGED_EVENT, listener)
+    }
+  })
 })
 
 describe('ModelSelect rules visibility', () => {
@@ -167,5 +181,34 @@ describe('ModelSelect rules visibility', () => {
     fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'local' } })
     expect(screen.queryByText('Locally Hidden')).toBeNull()
     expect(screen.getByText(/No models matching/)).toBeTruthy()
+  })
+
+  it('keeps the search text and the revealed rows across a decision-map republish', async () => {
+    stubDescribe(RESOLVED)
+    await refreshCatalogVisibility()
+    const select = vi.fn(async () => ({ ok: true as const, value: undefined }))
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore<ModelDirectoryState>(state())}
+      load={vi.fn()}
+      select={select}
+      t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: 'Plain Model' }))
+    const search = screen.getByPlaceholderText<HTMLInputElement>('Search models...')
+    fireEvent.change(search, { target: { value: 'free' } })
+    expect(screen.getByText('Free Model')).toBeTruthy()
+
+    // The host republishes a changed map while the search is open: the local
+    // search text and the revealed rule-hidden row survive the repaint.
+    stubDescribe({
+      ...RESOLVED,
+      'kilo/plain-model': { state: 'hidden', reason: 'hidden by rule: zero-price', source: 'rule', rule: 'zero-price' },
+    })
+    await act(async () => { await refreshCatalogVisibility() })
+
+    expect(search.value).toBe('free')
+    expect(screen.getByText('Free Model')).toBeTruthy()
   })
 })

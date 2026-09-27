@@ -6,10 +6,13 @@
  * `catalogRules` document after each settings update and publishes only the
  * decisions that differ from default-visible: hidden entries (with the reason
  * the picker renders) and manual pins (with the rule or gate they override).
- * One `settings.describe` primes a module-level cache at load; the
- * `dsh:catalog-visibility-changed` event queues a re-read, and the payload is
- * mirrored into {@link CATALOG_VISIBILITY_STORAGE_KEY} so a surface that must
- * not fetch settings itself can resolve a decision synchronously. An empty or
+ * One `settings.describe` primes a module-level cache at load; the host's
+ * `settings/document-updated` push re-reads it, and the payload is mirrored
+ * into {@link CATALOG_VISIBILITY_STORAGE_KEY} so a surface that must not fetch
+ * settings itself can resolve a decision synchronously. The
+ * `dsh:catalog-visibility-changed` event announces a map that actually moved:
+ * a read resolving to the already-published map keeps the same reference and
+ * dispatches nothing, so consumers never repaint on a no-op echo. An empty or
  * absent map means "no rules applied": the caller falls back to its own
  * manual hidden list.
  */
@@ -67,6 +70,8 @@ export function parseCatalogVisibility(value: unknown): Map<string, CatalogVisib
 let decisions = new Map<string, CatalogVisibilityDecision>()
 let loaded = false
 let inflight: Promise<void> | undefined
+/** Serialized form of the last published map; a matching read is a no-op. */
+let lastSerialized: string | undefined
 
 /**
  * The shared coalesced `settings.describe` reader the connection wire root
@@ -89,10 +94,19 @@ function notify(): void {
 }
 
 function publish(next: Map<string, CatalogVisibilityDecision>): void {
+  const serialized = JSON.stringify(Object.fromEntries(next))
+  // A read that resolves to the map already published is a no-op: keep the
+  // same reference and dispatch nothing, so consumers do not repaint and a
+  // listener that re-reads cannot loop. The cache is still usable.
+  if (serialized === lastSerialized) {
+    loaded = true
+    return
+  }
   decisions = next
   loaded = true
+  lastSerialized = serialized
   try {
-    localStorage.setItem(CATALOG_VISIBILITY_STORAGE_KEY, JSON.stringify(Object.fromEntries(next)))
+    localStorage.setItem(CATALOG_VISIBILITY_STORAGE_KEY, serialized)
   } catch {
     // Storage disabled (private mode, quota): the in-memory cache still serves.
   }
@@ -103,7 +117,10 @@ function publish(next: Map<string, CatalogVisibilityDecision>): void {
 function readMirror(): Map<string, CatalogVisibilityDecision> {
   try {
     const raw = localStorage.getItem(CATALOG_VISIBILITY_STORAGE_KEY)
-    return raw === null ? new Map() : parseCatalogVisibility(JSON.parse(raw))
+    if (raw === null) return new Map()
+    const parsed = parseCatalogVisibility(JSON.parse(raw))
+    lastSerialized = JSON.stringify(Object.fromEntries(parsed))
+    return parsed
   } catch {
     return new Map()
   }

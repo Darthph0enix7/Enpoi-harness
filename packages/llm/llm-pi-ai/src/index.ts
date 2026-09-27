@@ -213,6 +213,10 @@ export function apply(ctx: Context, config: Config): void {
       // Without the seam the environment is the whole credential plane.
       : launchEnvironmentOf(ctx).get(ref)?.value
     if (hit !== undefined && hit.length > 0) return assertUsableApiKey(hit, 'llm-pi-ai', ref)
+    // A keyless route keeps the reference optional: a set value buys the
+    // paid/BYOK path, an unset one serves anonymously. The adapter clears the
+    // Authorization header for such an attempt.
+    if (profile.keyless) return undefined
     throw new LlmError(
       `llm-pi-ai: no credential for provider route "${provider}"; its profile resolves ${ref}, which is not`
       + ` set — store ${ref} through the credentials service (the web Models page writes it) or export it,`
