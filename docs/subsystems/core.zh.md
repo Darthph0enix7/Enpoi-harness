@@ -443,7 +443,8 @@ currentSelection(): ModelSelection
 /**
  * Save the complete default model selection. A deployment without a configuration
  * editor keeps its composition entry. Saves commit in submission order; a failed
- * save rejects its caller without blocking later saves.
+ * save rejects its caller without blocking later saves. A `chain` the optional
+ * `modelChains` registry cannot route is dropped before the profile write.
  * @param next - resolved selection accepted by an entry point.
  * @returns fulfillment after the optional profile write settles.
  */

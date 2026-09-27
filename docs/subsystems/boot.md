@@ -46,6 +46,7 @@ entries(): Entry[]
 configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }>
 
 /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
+ * References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.
  * @param entry Current Loader entry, also used to detect replacement during the write.
  * @param change Derive a raw config from the current entry and its inherited layer.
  * @returns Fulfillment after Loader reconciliation completes.
