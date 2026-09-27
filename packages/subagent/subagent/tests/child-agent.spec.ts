@@ -133,7 +133,7 @@ describe('child composition persona shadow', () => {
           scopes.push(child)
           applyChildComposition(child.ctx, {} as Agent, { persona: 'You are Fixer.' })
         },
-      } as never)
+      } as never, {})
       const childRendered = renderPrompt(await ctx.systemPrompt.assemble({ scope: childKey }))
       expect(childRendered).toContain('You are Fixer.')
       expect(childRendered).not.toContain('PARENT PRESET DOCTRINE')
