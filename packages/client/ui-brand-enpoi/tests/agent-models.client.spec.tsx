@@ -68,7 +68,8 @@ describe('AgentModelsBody — dynamic fleet', () => {
     expect(screen.getByText('The Oracle')).toBeTruthy()
     expect(screen.getByText('Designer')).toBeTruthy()
     expect(screen.queryByText('COUNCIL')).toBeNull()
-    expect(screen.getByText('5 seats')).toBeTruthy()
+    // 5 registry seats + the always-rendered designated compaction seat.
+    expect(screen.getByText('6 seats')).toBeTruthy()
   })
 
   it('grows with a user-defined registry role, hides seat:false, and keeps persona-only rows', () => {
@@ -86,7 +87,8 @@ describe('AgentModelsBody — dynamic fleet', () => {
     expect(screen.getByText('Context Keeper')).toBeTruthy()
     // An unknown persona-assigned id is title-cased into a seat.
     expect(screen.getByText('My Role')).toBeTruthy()
-    expect(screen.getByText('8 seats')).toBeTruthy()
+    // 5 registry seats + muse + keeper + my-role + the designated compaction seat.
+    expect(screen.getByText('9 seats')).toBeTruthy()
   })
 
   it('renders one group per live council under its own label, arbiters shared', () => {
@@ -122,8 +124,8 @@ describe('AgentModelsBody — dynamic fleet', () => {
     // Arbiters serve both councils but render once each, in the shared group.
     expect(screen.getAllByText('Referee')).toHaveLength(1)
     expect(screen.getAllByText('Chair')).toHaveLength(1)
-    // 5 registry seats + 6 council seats + 2 arbiters.
-    expect(screen.getByText('13 seats')).toBeTruthy()
+    // 5 registry seats + 6 council seats + 2 arbiters + the designated compaction seat.
+    expect(screen.getByText('14 seats')).toBeTruthy()
   })
 
   it('renders a seat two councils list once and skips a council with zero seats', () => {

@@ -11,7 +11,9 @@
  * persona-assigned id neither claims, so the fleet grows and shrinks with the
  * operator's roles and councils. The keeper seat shows "Default" (its plugin
  * Config route) instead of "Inherit" — the keeper has no parent turn to
- * inherit from.
+ * inherit from; the compaction seat is always rendered (a designated seat)
+ * and inherits the session model by default, because any other summariser
+ * breaks the prompt-prefix cache and pays full input price for the region.
  *
  * The tab's own `sessionId` addresses the model directory; the injected face
  * carries the persona assignment hook plus the assignment callbacks, and the
@@ -202,7 +204,7 @@ export function AgentModelsBody({
         ))}
       </div>
       <footer className={css.foot}>
-        <span>Unassigned seats use the dispatching agent's model · Keeper uses its config route</span>
+        <span>Unassigned seats use the dispatching agent's model · Keeper uses its config route · Compaction should stay on the session model (a different summariser loses the prefix cache and pays full input price for the region)</span>
         <button
           type="button"
           className={css.footLink}

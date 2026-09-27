@@ -201,3 +201,54 @@
     align-self: flex-end;
   }
 }
+/* Group note + effective-policy readout */
+.groupNote {
+  padding: 7px 12px 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  opacity: 0.85;
+}
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px 11px;
+  border-top: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.06));
+  background: rgba(94, 234, 212, 0.04);
+}
+
+.readoutRoute {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.readoutLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+}
+
+.readoutValue {
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  font-variant-numeric: tabular-nums;
+}
+
+.readoutLine {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+
+.readoutDim {
+  opacity: 0.75;
+}
+
+.readoutProblem {
+  font-size: 10px;
+  color: var(--dsw-alias-label-warning, #fbbf24);
+}

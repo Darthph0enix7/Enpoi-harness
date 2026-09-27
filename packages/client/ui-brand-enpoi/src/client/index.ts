@@ -28,7 +28,12 @@ import {
 } from './SubagentSessionsBody.tsx'
 import { GitBody, GitIcon } from './GitBody.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
-import { OrchestrationSettings } from './OrchestrationSettings.tsx'
+import { OrchestrationSettings, type OrchestrationSettingsInjected } from './OrchestrationSettings.tsx'
+import {
+  getCompactionPolicy,
+  refreshCompactionPolicy,
+  subscribeCompactionPolicy,
+} from './compaction-policy.ts'
 import { PermissionsSettings } from './PermissionsSettings.tsx'
 import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { TerminalRegistry } from './terminal/registry.ts'
@@ -58,7 +63,7 @@ import {
   refreshFromServer as refreshPersonaAssignments,
   type PersonaMap,
 } from './persona-store.ts'
-import { refreshFromServer as refreshOrchestrationParams } from './params-store.ts'
+import { refreshFromServer as refreshOrchestrationParams, getOrchestrationParams, subscribeOrchestrationParams } from './params-store.ts'
 import { refreshFromServer as refreshPermissionsView } from './permissions-model.ts'
 import { refreshEffectiveRoles } from './role-effective.ts'
 import {
@@ -224,12 +229,47 @@ export function apply(ctx: Context): void {
     }, WatchtowerView)
   })
 
-  // 2b. Orchestration parameters settings section (doc 38)
+  // 2b. Orchestration parameters settings section (doc 38). The effective
+  // compaction-policy readout mirrors the backend derivation for the selected
+  // summariser route, refreshed from the params/persona stores and the model
+  // catalog (its context window is the derivation's input).
+  ctx.effect(() => {
+    const catalogStore = ctx.get('modelDirectories')?.catalog.store
+    const recompute = (): void => {
+      const catalog = catalogStore?.getSnapshot().value ?? undefined
+      refreshCompactionPolicy(
+        getOrchestrationParams().compaction,
+        getPersonaAssignments()['compaction'] ?? null,
+        catalog?.default ?? null,
+        catalog,
+      )
+    }
+    recompute()
+    const disposers = [
+      subscribeOrchestrationParams(recompute),
+      subscribePersonaAssignments(recompute),
+      catalogStore?.subscribe(recompute) ?? (() => {}),
+    ]
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }, 'enpoi: compaction policy readout')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'orchestration',
     order: 20,
     label: () => 'Orchestration',
+    inject: (): OrchestrationSettingsInjected => ({
+      hooks: {
+        compactionPolicy: {
+          getSnapshot: getCompactionPolicy,
+          subscribe: subscribeCompactionPolicy,
+        },
+      },
+      loadPolicyModels: () => {
+        ctx.get('modelDirectories')?.catalog.load().catch(() => { /* surfaced on the catalog store */ })
+      },
+    }),
   }, OrchestrationSettings))
 
   // 2d. Dynamic entities settings section (doc 59): roles, councils, MCPs,

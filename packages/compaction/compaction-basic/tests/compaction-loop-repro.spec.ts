@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import { createUserMessage, createSystemMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, resolveRetryPolicy , createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -15,7 +16,7 @@ import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
-import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, type SessionEvent, type SessionSeq, type SurfaceEvent } from '@deepseek-ai/dsh-session'
 
 /**
  * CBR-001 regression through the real loop. A replacement checkpoint has a high
@@ -23,6 +24,29 @@ import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deeps
  * must be safe and re-compacting that checkpoint alone must succeed. This pins
  * surface-position semantics rather than raw-log scanning.
  */
+
+/** Records every region the pressure loop actually summarised. */
+class GuardProbeEngine extends BasicCompactionEngine {
+  readonly regions: Array<{ start: SessionSeq; end: SessionSeq }> = []
+
+  override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
+    return {
+      summary: [{ type: 'text', text: 'GUARD SUMMARY' }],
+      provider: 'mock',
+      model: 'stub',
+    }
+  }
+
+  override async compactRegion(
+    start: SessionSeq,
+    end: SessionSeq,
+    agent: Agent,
+    signal?: AbortSignal,
+  ): Promise<CompactionResult> {
+    this.regions.push({ start, end })
+    return super.compactRegion(start, end, agent, signal)
+  }
+}
 
 class ReproCompactionEngine extends BasicCompactionEngine {
   override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
@@ -146,7 +170,18 @@ async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(AgentLoopInvariant)
 }
 
-async function harness(toolSteps: number): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
+// Small window so several tool steps cross the threshold and compaction fires
+// within the runaway turn after enough history can shrink.
+const REPRO_COMPACT_CONFIG = {
+  auto: true,
+  headroomTokens: 0,
+  thresholdRatio: 0.5,
+  retainTokens: 50,
+  maxTokens: 8192,
+  compactionRetries: 1,
+} as const
+
+async function mountHarness(toolSteps: number): Promise<Context> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await mountInvariants(ctx)
@@ -161,16 +196,12 @@ async function harness(toolSteps: number): Promise<{ ctx: Context; compact: Repr
       return [{ type: 'text', text: 'work result' }]
     },
   }))
-  // Small window so several tool steps cross the threshold and compaction
-  // fires within the runaway turn after enough history can shrink.
-  const compact = new ReproCompactionEngine(ctx, {
-    auto: true,
-    headroomTokens: 0,
-    thresholdRatio: 0.5,
-    retainTokens: 50,
-    maxTokens: 8192,
-    compactionRetries: 1,
-  })
+  return ctx
+}
+
+async function harness(toolSteps: number): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
+  const ctx = await mountHarness(toolSteps)
+  const compact = new ReproCompactionEngine(ctx, { ...REPRO_COMPACT_CONFIG })
   return { ctx, compact }
 }
 
@@ -269,6 +300,43 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       expect(precedingStepEnd!.seq).toBeLessThan(compactStart!.seq)
       expect(compactStart!.seq).toBeLessThan(nextStepStart!.seq)
     } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses a checkpoint-only or non-relieving retry and warns once with the priced numbers', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const ctx = await mountHarness(8)
+    try {
+      const engine = new GuardProbeEngine(ctx, { ...REPRO_COMPACT_CONFIG })
+      const agent = await ctx.agentLoop.create(SessionId('no-relief'), { provider: 'mock', model: 'mock' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a long multi-step task' }], source: { kind: 'user' } }))
+      await waitForIdle(ctx, agent)
+
+      const events = agent.session.snapshotEvents()
+      expect(events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      const warned = stderr.mock.calls
+        .map(call => String(call[0]))
+        .filter(line => line.includes('cannot relieve pressure'))
+      expect(warned.length).toBeGreaterThan(0)
+      expect(warned[0]).toContain('surface')
+      expect(warned[0]).toContain('threshold')
+      expect(engine.regions.length).toBeGreaterThan(0)
+      // No summary ever targeted a checkpoint-only range: re-summarising a
+      // replacement is the compounding-loss case the guard exists for.
+      for (const region of engine.regions) {
+        const nodes = agent.session.surface.nodes.filter(seq => seq >= region.start && seq <= region.end)
+        const checkpointOnly = nodes.length > 0 && nodes.every(seq => {
+          // oxlint-disable-next-line typescript/no-deprecated -- test mirrors the guard's own read.
+          const event = agent.session.eventAt(seq)
+          if (event?.type !== 'user/message') return false
+          const op = event.surfaceOp
+          return typeof op === 'object' && op !== null && op.op === 'replace'
+        })
+        expect(checkpointOnly, `region ${region.start}-${region.end} must not be checkpoint-only`).toBe(false)
+      }
+    } finally {
+      stderr.mockRestore()
       await ctx.fiber.dispose()
     }
   })

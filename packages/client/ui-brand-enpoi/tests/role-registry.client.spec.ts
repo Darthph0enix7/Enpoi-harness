@@ -82,6 +82,21 @@ describe('role registry helpers', () => {
     expect(categories.find(category => category.key === 'ungrouped')?.seats.map(seat => seat.id)).toEqual(['unknown-role'])
   })
 
+  it('renders the designated compaction seat before any assignment', async () => {
+    const { buildFleetCategories, mergeRoleRegistry, isKnownFleetSeat } = await import('../src/client/role-registry.ts')
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [])
+    const compaction = categories.find(category => category.key === 'supervision')
+      ?.seats.find(seat => seat.id === 'compaction')
+
+    expect(compaction?.name).toBe('Compaction Summariser')
+    expect(compaction?.defaultLabel).toBe('Inherit')
+    expect(compaction?.defaultHint).toContain('prefix cache')
+    expect(isKnownFleetSeat('Compaction')).toBe(true)
+    // A cleared assignment keeps its fleet row.
+    expect(buildFleetCategories(mergeRoleRegistry(undefined), ['compaction'], [])
+      .flatMap(category => category.seats.map(seat => seat.id))).toContain('compaction')
+  })
+
   it('retires a role with disabled:true — built-in and user-defined alike', async () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const registry = mergeRoleRegistry({

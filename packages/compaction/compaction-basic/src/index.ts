@@ -17,6 +17,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
+  applySettingsOverrides,
   resolveCompactSpec,
   resolveConfig,
   resolveTargetPolicy,
@@ -27,8 +28,9 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
-import { summarizeWithLlm } from './summarizer.ts'
-import type { SummarizationInput, SummaryResult } from './summarizer.ts'
+import { readCompactionSettings, resolveCompactionSeat } from './settings.ts'
+import { resolveSummarizationTarget, summarizeWithLlm } from './summarizer.ts'
+import type { SummarizationInput, SummarizationFraming, SummaryConfig, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
   ModelCompactPolicyConfig,
@@ -65,6 +67,58 @@ function routedTarget(
 function reservedCompletionTokens(agent: Agent, defaultMaxTokens: number | undefined): number {
   const configured = agent.session.requestHeader()?.config.maxTokens
   return configured ?? defaultMaxTokens ?? 0
+}
+
+/** One priced surface node from the conversation meter. */
+interface PricedSurfaceNode {
+  readonly seq: SessionSeq
+  readonly tokens: number
+}
+
+/** Sum the priced cost of the inclusive positional range the selection returned. */
+function pricedRangeTokens(
+  nodes: readonly PricedSurfaceNode[],
+  start: SessionSeq,
+  end: SessionSeq,
+): number {
+  let total = 0
+  for (const node of nodes) {
+    if (node.seq >= start && node.seq <= end) total += node.tokens
+  }
+  return total
+}
+
+/**
+ * Whether every node in the range is a compaction-produced replacement (a
+ * framed checkpoint). Re-summarising these compounds loss, so such a range is
+ * never worth a summary pass on its own.
+ */
+function isCheckpointOnlyRange(
+  session: Session,
+  nodes: readonly PricedSurfaceNode[],
+  start: SessionSeq,
+  end: SessionSeq,
+): boolean {
+  let sawNode = false
+  for (const node of nodes) {
+    if (node.seq < start || node.seq > end) continue
+    sawNode = true
+    if (!isCompactionCheckpointNode(session, node.seq)) return false
+  }
+  return sawNode
+}
+
+/** Whether one surface node is a `user/message` replacement authored by a compaction summary. */
+function isCompactionCheckpointNode(session: Session, seq: SessionSeq): boolean {
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+  const event = session.eventAt(seq)
+  if (event?.type !== 'user/message') return false
+  const op = event.surfaceOp
+  if (typeof op !== 'object' || op === null || op.op !== 'replace') return false
+  return (event.sourceEventSeqs ?? []).some(source => {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    return session.eventAt(source)?.type === 'compaction/summary'
+  })
 }
 
 /** Resolve the conversation target used to select an optional policy override. */
@@ -131,6 +185,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   readonly config: ResolvedConfig
 
   private readonly warnedPressureConfigTargets = new Set<string>()
+  private readonly warnedPressureReliefTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
 
@@ -195,7 +250,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       this.overflowAgents.set(agent.session, agent)
       const target = routedTarget(agent.session)
       if (target === undefined) return next()
-      const policy = resolveTargetPolicy(this.config, target)
+      const policy = resolveTargetPolicy(this.effectiveConfig(), target)
       const retries = this.overflowRetries.get(agent) ?? 0
       if (retries >= policy.maxOverflowRetries) return next()
 
@@ -238,7 +293,12 @@ export class BasicCompactionEngine extends CompactionEngine {
    * Summarize the replayed conversation region through a direct one-shot
    * `ctx.llm.stream()` call whose prefix reuses the conversation's own system
    * prompt, tools, and messages so the provider's KV cache is not invalidated.
-   * Override this sole hook for a template or remote summarizer.
+   * The `personas.compaction` seat, when assigned, overrides the summariser
+   * route (a different model loses the prefix cache and pays the region's full
+   * input price); when the summariser's own context window is smaller than the
+   * region, the replay is capped to fit and the durable checkpoint records the
+   * un-summarized seqs for recall. Override this sole hook for a template or
+   * remote summarizer.
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
    * @param agent - supplies routed-model history, fallback model, and session id.
    * @param signal - optional cancellation forwarded to the adapter.
@@ -250,10 +310,50 @@ export class BasicCompactionEngine extends CompactionEngine {
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
     const target = conversationTarget(agent)
-    const config = target === undefined
-      ? this.config
-      : resolveTargetPolicy(this.config, target)
-    return summarizeWithLlm(this.ctx, config, input, agent, signal)
+    const settings = this.effectiveConfig()
+    const config: SummaryConfig = target === undefined
+      ? settings
+      : resolveTargetPolicy(settings, target)
+    const seat = resolveCompactionSeat(this.ctx)
+    const summaryConfig: SummaryConfig = seat === undefined
+      ? config
+      : {
+        ...config,
+        summarizationProvider: seat.provider,
+        summarizationModel: seat.model,
+        ...seat.chain === undefined ? {} : { summarizationChain: seat.chain },
+      }
+    const framing = await this.summarizerFraming(summaryConfig, agent, signal)
+    return summarizeWithLlm(this.ctx, summaryConfig, input, agent, signal, framing)
+  }
+
+  /** Resolve the summariser's usable input budget from its own context window. */
+  private async summarizerFraming(
+    config: SummaryConfig,
+    agent: Agent,
+    signal?: AbortSignal,
+  ): Promise<SummarizationFraming | undefined> {
+    const target = resolveSummarizationTarget(config, agent)
+    if (target === undefined) return undefined
+    try {
+      const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+      const contextWindow = info.context?.contextWindow
+      if (contextWindow === undefined) return undefined
+      // The summariser's own completion is capped by the resolved generation
+      // cap; never reserve more than half the window so the replay keeps room.
+      const outputReserve = Math.min(config.maxTokens, Math.floor(contextWindow / 2))
+      const inputBudgetTokens = contextWindow - outputReserve
+      return inputBudgetTokens > 0 ? { inputBudgetTokens } : undefined
+    } catch {
+      // No window metadata or a metadata fault: replay the raw region exactly
+      // as before; the output-cap guard and the mechanical fallback still apply.
+      return undefined
+    }
+  }
+
+  /** Plugin config overlaid with the live `parameters.compaction` settings values. */
+  private effectiveConfig(): ResolvedConfig {
+    return applySettingsOverrides(this.config, readCompactionSettings(this.ctx))
   }
 
   /**
@@ -273,7 +373,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   ): Promise<CompactionResult | null> {
     const target = routedTarget(agent.session)
     if (target === undefined) return null
-    const policy = resolveTargetPolicy(this.config, target)
+    const policy = resolveTargetPolicy(this.effectiveConfig(), target)
     const meter = this.ctx.tokenMeter
     let measurement = meter.measure(agent.session)
     switch (trigger) {
@@ -335,6 +435,22 @@ export class BasicCompactionEngine extends CompactionEngine {
         /* v8 ignore next -- paired with the defensive post-success branch above. */
         break
       }
+      // A checkpoint-only range re-summarises derived content (loss compounds)
+      // and a range whose removal still leaves the surface above threshold
+      // cannot relieve pressure: the retained tail alone dominates. Warn once
+      // per target and fall through instead of retrying every step.
+      const rangeTokens = pricedRangeTokens(measurement.nodes, range.start, range.end)
+      const checkpointOnly = isCheckpointOnlyRange(agent.session, measurement.nodes, range.start, range.end)
+      if (checkpointOnly || (attempt > 0 && measurement.totalTokens - rangeTokens >= spec.thresholdTokens)) {
+        this.warnCannotRelieve(targetKey, {
+          totalTokens: measurement.totalTokens,
+          thresholdTokens: spec.thresholdTokens,
+          rangeTokens,
+          retainTokens: spec.retainTokens,
+          checkpointOnly,
+        })
+        return result
+      }
       result = await this.compactRegion(range.start, range.end, agent, signal)
       measurement = meter.measure(agent.session)
       if (measurement.totalTokens < spec.thresholdTokens) return result
@@ -344,6 +460,27 @@ export class BasicCompactionEngine extends CompactionEngine {
       `compaction still above threshold after ${spec.compactionRetries + 1} compaction attempts `
       + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens})`,
     )
+  }
+
+  /**
+   * Emit one diagnostic when a cut cannot relieve pressure, keyed by target so
+   * a per-step trigger never repeats it. stderr is the observable channel: the
+   * harness logger buffers info/warn.
+   * @param targetKey - `provider/model` whose pressure could not be relieved.
+   * @param numbers - the priced numbers behind the refusal.
+   */
+  private warnCannotRelieve(
+    targetKey: string,
+    numbers: { totalTokens: number; thresholdTokens: number; rangeTokens: number; retainTokens: number; checkpointOnly: boolean },
+  ): void {
+    if (this.warnedPressureReliefTargets.has(targetKey)) return
+    this.warnedPressureReliefTargets.add(targetKey)
+    const line = `compaction-basic: ${targetKey} cannot relieve pressure`
+      + ` (surface ${numbers.totalTokens} >= threshold ${numbers.thresholdTokens};`
+      + ` removable ${numbers.checkpointOnly ? 'checkpoint-only' : 'span'} ${numbers.rangeTokens} tokens,`
+      + ` retained tail budget ${numbers.retainTokens}); skipping summary`
+    this.ctx.logger.warn(line)
+    process.stderr.write(`[compaction-basic] ${line}\n`)
   }
 
   /**
@@ -367,7 +504,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       start,
       end,
       agent,
-      { owner: 'current-turn', stability: 'whole-surface' },
+      { owner: 'current-turn', stability: 'whole-surface', allowMechanicalFallback: true },
       signal,
     )
   }
@@ -406,6 +543,7 @@ export class BasicCompactionEngine extends CompactionEngine {
             {
               owner: null,
               stability: 'selected-span',
+              allowMechanicalFallback: false,
               ...sourceCommandId === undefined ? {} : { sourceCommandId },
               flush: async () => {
                 await this.ctx.sessions.flush(agent.session)

@@ -914,7 +914,7 @@ describe('SQLite reconciliation and source lifecycle', () => {
       .resolves.toMatchObject({ items: [{ header: { id: SessionId('second') } }] })
   })
 
-  it('uses the reconciled persistence binding through the query boundary', async () => {
+  it('answers a targeted event search from the current persistence binding and rejects once it unmounts', async () => {
     const durable = header('post-reconcile-unmount')
     TestPersistence.reset([{ meta: durable, events: [
       ...messageEvents('durable needle', 1),
@@ -922,19 +922,9 @@ describe('SQLite reconciliation and source lifecycle', () => {
     ] }])
     const ctx = await liveContext({ path: ':memory:', defaultLimit: 1, maxLimit: 2 })
     const persistence = await ctx.plugin(TestPersistence)
-    const internals = ctx.sessionQuery as unknown as {
-      _reconcile(signal: AbortSignal | undefined): Promise<{
-        identity: symbol
-        service?: SessionPersistence
-      }>
-    }
-    const reconcile = internals._reconcile.bind(internals)
-    const boundary = vi.spyOn(internals, '_reconcile').mockImplementation(async (signal) => {
-      const binding = await reconcile(signal)
-      await persistence.dispose()
-      return binding
-    })
 
+    // Targeted indexing reads the current binding directly: no full-corpus
+    // reconcile runs before the page is answered.
     const page = await ctx.sessionQuery.searchEvents({
       sessionId: durable.id,
       query: 'needle',
@@ -942,7 +932,7 @@ describe('SQLite reconciliation and source lifecycle', () => {
     })
     expect(page.items).toMatchObject([{ sessionId: durable.id }])
     expect(page.nextCursor).toEqual(expect.any(String))
-    boundary.mockRestore()
+    await persistence.dispose()
     await expect(ctx.sessionQuery.searchEvents({ sessionId: durable.id, query: 'needle' }))
       .rejects.toThrow(expectCode('SESSION_QUERY_SESSION_NOT_FOUND'))
   })
@@ -1489,7 +1479,13 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
         )
 
       expect(result.items).toHaveLength(1)
-      expect(TestPersistence.listSignals).toEqual([controller.signal, controller.signal])
+      // Sessions search reconciles the whole corpus (list before + after);
+      // events search indexes only its target (one list, one cold read). The
+      // background pass lists without the caller signal and is filtered out.
+      const signaledLists = TestPersistence.listSignals.filter(signal => signal !== undefined)
+      expect(signaledLists).toEqual(
+        scope === 'sessions' ? [controller.signal, controller.signal] : [controller.signal],
+      )
       expect(TestPersistence.readSignals).toEqual([controller.signal])
     },
   )
@@ -1881,5 +1877,92 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
     expect(openB).toHaveBeenCalledTimes(1)
     await searchB.dispose()
     await persistenceB.dispose()
+  })
+})
+
+describe('background indexing off the search hot path', () => {
+  it('answers an event search from a targeted index while the corpus pass is still running', async () => {
+    const durable = header('targeted-while-indexing')
+    TestPersistence.reset([{ meta: durable, events: messageEvents('targeted needle') }])
+    // `first-search` defers the pass to the first search, so the index is
+    // provably still running when the targeted search answers.
+    const ctx = await liveContext({ path: ':memory:', openAt: 'first-search', firstSearchWaitMs: 0 })
+    await ctx.plugin(TestPersistence)
+
+    // No wait at all: the cross-session search reports the coded indexing
+    // state instead of blocking, while the targeted event search answers.
+    await expect(ctx.sessionQuery.searchSessions({ query: 'targeted needle' }))
+      .rejects.toThrow(expectCode('SESSION_QUERY_INDEXING'))
+    const page = await ctx.sessionQuery.searchEvents({ sessionId: durable.id, query: 'targeted needle' })
+    expect(page.items).toMatchObject([{ sessionId: durable.id }])
+  })
+
+  it('reaches ready, reports progress, and never restarts the pass on repeated searches', async () => {
+    const durable = header('ready-progress')
+    TestPersistence.reset([{ meta: durable, events: messageEvents('progress needle') }])
+    const ctx = await liveContext({ path: ':memory:', openAt: 'first-search', firstSearchWaitMs: 20_000 })
+    await ctx.plugin(TestPersistence)
+    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
+
+    await expect(ctx.sessionQuery.searchSessions({ query: 'progress needle' }))
+      .resolves.toMatchObject({ items: [{ header: durable }] })
+    expect(engine.indexState.status).toBe('ready')
+    expect(engine.indexState.totalSessions).toBeGreaterThan(0)
+    expect(engine.indexState.skippedSessions).toBe(0)
+    const pass = (engine as unknown as { _indexPass?: Promise<void> })._indexPass
+
+    await ctx.sessionQuery.searchSessions({ query: 'progress needle' })
+    await ctx.sessionQuery.searchEvents({ sessionId: durable.id, query: 'progress needle' })
+    expect((engine as unknown as { _indexPass?: Promise<void> })._indexPass).toBe(pass)
+  })
+
+  it('retries a failed pass only on the next search and reports its coded failure', async () => {
+    const durable = header('retry-failed-pass')
+    TestPersistence.reset([{ meta: durable, events: messageEvents('retry needle') }])
+    const ctx = await liveContext({ path: ':memory:', firstSearchWaitMs: 20_000 })
+    await ctx.plugin(TestPersistence)
+    TestPersistence.failure = new Error('listing offline')
+    await expect(ctx.sessionQuery.searchSessions({ query: 'retry needle' }))
+      .rejects.toThrow(expectCode('SESSION_QUERY_PERSISTENCE_FAILED'))
+    TestPersistence.failure = undefined
+    await expect(ctx.sessionQuery.searchSessions({ query: 'retry needle' }))
+      .resolves.toMatchObject({ items: [{ header: durable }] })
+  })
+
+  it('validates firstSearchWaitMs through the config schema', () => {
+    expect(() => new SqliteSessionQueryEngine.Config({ path: ':memory:', firstSearchWaitMs: 30_000 }))
+      .toThrow()
+    expect(() => new SqliteSessionQueryEngine.Config({ path: ':memory:', firstSearchWaitMs: -1 }))
+      .toThrow()
+  })
+})
+
+describe('bounded first-search wait semantics', () => {
+  it('waits for the pass once, then reports the running state immediately', async () => {
+    const durable = header('wait-once')
+    TestPersistence.reset([{ meta: durable, events: messageEvents('wait needle') }])
+    const ctx = await liveContext({ path: ':memory:', openAt: 'first-search', firstSearchWaitMs: 400 })
+    await ctx.plugin(TestPersistence)
+    const release = Promise.withResolvers<void>()
+    TestPersistence.listGate = release.promise
+    TestPersistence.listStarted = () => { TestPersistence.listStarted = undefined }
+
+    const first = Date.now()
+    await expect(ctx.sessionQuery.searchSessions({ query: 'wait needle' }))
+      .rejects.toThrow(expectCode('SESSION_QUERY_INDEXING'))
+    expect(Date.now() - first).toBeGreaterThanOrEqual(350)
+
+    const second = Date.now()
+    await expect(ctx.sessionQuery.searchSessions({ query: 'wait needle' }))
+      .rejects.toThrow(expectCode('SESSION_QUERY_INDEXING'))
+    // The second search never re-waits the bounded interval.
+    expect(Date.now() - second).toBeLessThan(200)
+
+    TestPersistence.listGate = undefined
+    release.resolve(undefined)
+    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
+    while (engine.indexState.status !== 'ready') await new Promise(resolve => setTimeout(resolve, 20))
+    await expect(ctx.sessionQuery.searchSessions({ query: 'wait needle' }))
+      .resolves.toMatchObject({ items: [{ header: durable }] })
   })
 })

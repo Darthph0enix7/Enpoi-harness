@@ -297,6 +297,13 @@ function service(
   return new TestCompactionEngine(ctx, { headroomTokens: 0, maxTokens: 8192, ...config })
 }
 
+/** Automatic engine whose region transaction always fails (fallback also unavailable). */
+class FailingRegionEngine extends TestCompactionEngine {
+  override compactRegion(): Promise<never> {
+    return Promise.reject(new Error('summary unavailable after prune'))
+  }
+}
+
 async function compactIfNeeded(
   compact: BasicCompactionEngine,
   session: Session,
@@ -1205,23 +1212,37 @@ describe('compaction region transaction', () => {
     )).rejects.toThrow(/selected surface changed/)
   })
 
-  it('records summarizer failures without mutating the surface', async () => {
+  it('lands a deterministic omission stub when the summarizer fails', async () => {
     const compact = service()
     compact.error = new Error('summary unavailable')
     const session = conversation(2)
-    const before = session.surface.nodes
+    const before = [...session.surface.nodes]
 
-    await expect(compact.compactRegion(
+    const result = await compact.compactRegion(
       before[0]!,
       before[2]!,
       agent(session, MODEL),
-    )).rejects.toThrow('summary unavailable')
-    expect(session.surface.nodes).toEqual(before)
-    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
-      .toMatchObject({ error: 'summary unavailable' })
+    )
+    // The turn survives: the automatic path lands the model-free fallback
+    // instead of rejecting, and the surface really shrank.
+    expect(result.shadowedSeqs.length).toBeGreaterThan(0)
+    expect(session.surface.nodes).not.toEqual(before)
+    const events = session.snapshotEvents()
+    // The transcript is intact: every shadowed event is still in the log.
+    for (const seq of before) expect(events.some(event => event.seq === seq)).toBe(true)
+    const replacement = events.findLast(event => event.type === 'user/message'
+      && event.data.source !== undefined && event.data.source.kind === 'compact-checkpoint')
+    expect(replacement).toBeDefined()
+    const text = replacement?.type === 'user/message'
+      ? replacement.data.content.map(block => block.type === 'text' ? block.text : '').join('')
+      : ''
+    expect(text).toContain('session_event_search')
+    expect(events.findLast(event => event.type === 'compaction/end')?.data).not.toHaveProperty('error')
+    expect(events.findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ provider: '', model: '' })
   })
 
-  it('stringifies non-Error failures in the durable end bracket', async () => {
+  it('lands the mechanical stub for non-Error summarizer failures', async () => {
     const compact = service()
     compact.error = 'plain failure'
     const session = conversation(2)
@@ -1230,9 +1251,9 @@ describe('compaction region transaction', () => {
       nodes[0]!,
       nodes[2]!,
       agent(session, MODEL),
-    )).rejects.toBe('plain failure')
+    )).resolves.toMatchObject({ summary: [expect.objectContaining({ type: 'text' })] })
     expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
-      .toMatchObject({ error: 'plain failure' })
+      .not.toHaveProperty('error')
   })
 
   it('tolerates concurrent log-only appends while the selected surface is stable', async () => {
@@ -1273,7 +1294,7 @@ describe('compaction region transaction', () => {
     expect(session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(false)
   })
 
-  it('rejects a non-shrinking framed summary under the conversation meter', async () => {
+  it('replaces a non-shrinking framed summary with the mechanical omission', async () => {
     const compact = service()
     compact.summary = Array.from({ length: 100 }, (_, index) => ({
       type: 'text',
@@ -1282,12 +1303,16 @@ describe('compaction region transaction', () => {
     const session = conversation(2)
     const nodes = session.surface.nodes
 
-    await expect(compact.compactRegion(
+    const result = await compact.compactRegion(
       nodes[0]!,
       nodes[2]!,
       agent(session, MODEL),
-    )).rejects.toThrow(/summary is not smaller/)
-    expect(session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(false)
+    )
+    expect(result.shadowedSeqs.length).toBeGreaterThan(0)
+    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ provider: '', model: '' })
+    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
+      .not.toHaveProperty('error')
   })
 
   it('lets a model-independent custom summarizer compact without a conversation model', async () => {
@@ -1736,7 +1761,7 @@ describe('automatic listener and loader composition', () => {
     expect(pressured.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
   })
 
-  it('warns and continues after operational failures, including non-Errors', async () => {
+  it('warns and continues when the automatic compaction transaction fails', async () => {
     const ctx = createContext()
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -1746,7 +1771,7 @@ describe('automatic listener and loader composition', () => {
       thresholdRatio: 0.5,
       retainTokens: 180,
     })
-    compact.error = 'temporary failure'
+    vi.spyOn(compact, 'compactRegion').mockRejectedValue('temporary failure')
     const session = conversation(4)
 
     await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
@@ -1888,7 +1913,7 @@ describe('automatic listener and loader composition', () => {
     expect(summarizedText(compact.calls[0]!.input)).toContain('tool result middle pruned')
   })
 
-  it('retries from a durable prune when later overflow summarization throws', async () => {
+  it('retries from a durable prune when the later region transaction throws', async () => {
     const ctx = createContext(10_000)
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -1897,20 +1922,18 @@ describe('automatic listener and loader composition', () => {
       headChars: 20,
       tailChars: 10,
     })
-    const compact = new TestCompactionEngine(ctx, {
+    void new FailingRegionEngine(ctx, {
       headroomTokens: 0,
       maxTokens: 8192,
       thresholdRatio: 1,
       retainTokens: 900,
     })
-    compact.error = new Error('summary unavailable after prune')
     const session = oversizedToolResult(3_000, true)
 
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(true)
     expect(session.surface.replaceGeneration).toBe(1)
     expect(session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(2)
-    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
-      .toMatchObject({ error: 'summary unavailable after prune' })
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/end')).toBe(false)
     expect(warnings).toContainEqual(expect.stringContaining('retrying from the replacement surface'))
   })
 
@@ -2002,7 +2025,7 @@ describe('automatic listener and loader composition', () => {
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
     const compact = new TestCompactionEngine(ctx)
-    compact.error = new Error('summary unavailable')
+    vi.spyOn(compact, 'compactIfNeeded').mockRejectedValue(new Error('summary unavailable'))
     const original = overflow('original provider overflow')
 
     expect(await recover(ctx, agent(conversation(3), MODEL), original)).toBe(false)
@@ -2018,7 +2041,7 @@ describe('automatic listener and loader composition', () => {
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
     const compact = new TestCompactionEngine(ctx)
-    compact.error = 'non-error recovery failure'
+    vi.spyOn(compact, 'compactIfNeeded').mockRejectedValue('non-error recovery failure')
     const session = conversation(3)
     const generation = session.surface.replaceGeneration
     const original = overflow('original provider failure')

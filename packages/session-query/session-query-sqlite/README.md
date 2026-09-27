@@ -51,12 +51,13 @@ Choose it when you want full-text recall over prior sessions with ranking and pa
 | `readWindowMax` | `50` | Maximum `before`/`after` raw events for the inherited `readEvent()` |
 | `persistedReadConcurrency` | `4` | Concurrent persisted-log reads for inherited batch reads |
 | `preparedSessionCacheSize` | `5` | Cold prepared-Session observations the inherited `observeSession` reader retains for reuse |
+| `firstSearchWaitMs` | `20000` | Bounded wait for the background index pass on a cross-session search before it reports the coded indexing state; capped at 25000 so it stays under the tool deadline |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-session-query-sqlite) is the exhaustive source for every accepted field and its JSDoc.
 
 ### Search behavior
 
-`searchSessions` searches the whole corpus and groups results by each session's strongest matching event; `searchEvents` searches one logical session. Queries are literal phrases: they are trimmed and whitespace-normalized, and FTS5 syntax such as quotes, `OR`, `NEAR`, and `*` is treated as data, never as executable query syntax. Metadata filters (session id, cwd, created-at, parent, availability, event seq/time/type/surface) narrow results before ranking. All `current`, `shadowed`, and `log-only` events are searchable by default; pass a surface filter to narrow.
+`searchSessions` searches the whole corpus and groups results by each session's strongest matching event; `searchEvents` searches one logical session. Index maintenance never blocks the tool path: an event search indexes only its target session and answers immediately, while the whole-corpus pass runs in the background and commits one session at a time. A cross-session search waits at most `firstSearchWaitMs` (once per pass) for that background pass and then rejects with `SESSION_QUERY_INDEXING` (with `indexed/total` progress in the reason) instead of blocking to the caller's deadline; `indexState` reports the pass's status and counts. Repeated searches never restart the pass. Queries are literal phrases: they are trimmed and whitespace-normalized, and FTS5 syntax such as quotes, `OR`, `NEAR`, and `*` is treated as data, never as executable query syntax. Metadata filters (session id, cwd, created-at, parent, availability, event seq/time/type/surface) narrow results before ranking. All `current`, `shadowed`, and `log-only` events are searchable by default; pass a surface filter to narrow.
 
 Ranking is deterministic: more actual FTS5 highlighted-match spans first, then shorter documents, with event time, session id, and seq breaking ties. Results carry plain-text snippets bounded by `snippetChars` Unicode code points, with no provider-specific numeric score. Pages continue through an opaque `SessionSearchCursor` bound to the exact normalized request; a cursor becomes stale when its relevant corpus changes (`SESSION_QUERY_STALE_CURSOR`), and a within-session cursor survives changes to unrelated sessions while a cross-session cursor does not.
 
@@ -145,6 +146,7 @@ These limits define when this package is a poor fit or needs special operational
 - **Synchronous query execution** — `DatabaseSync` blocks the JavaScript thread during MATCH execution and cannot interrupt a statement already running.
 - **Token recall, not arbitrary substrings** — the `unicode61` tokenizer does not match substrings inside a larger token; use `filterEvents()` for literal scans.
 - **Single-owner derived index** — one service in one process must own each index path; external writers and multi-process sharing are unsupported.
+- **The first whole-corpus pass is background work** — on a large store the pass can take minutes; cross-session search reports `SESSION_QUERY_INDEXING` until it reaches `ready`, while per-session event search and exact reads answer throughout. The pass is not persisted as a resumable job; a restart begins a fresh pass over the store (already-current sessions are skipped).
 
 <a id="dev-note"></a>
 ### Dev Note

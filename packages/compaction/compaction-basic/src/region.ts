@@ -21,7 +21,7 @@ import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameSummary } from './summarizer.ts'
+import { frameMechanicalOmission, frameSummary, MECHANICAL_SUMMARY_TEXT } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
@@ -57,6 +57,12 @@ interface CompactionTransactionOptions {
   readonly owner: 'current-turn' | null
   /** Surface relationship that must survive asynchronous summarization. */
   readonly stability: 'whole-surface' | 'selected-span'
+  /**
+   * Automatic transactions land the deterministic model-free omission when the
+   * summary path fails (doc 66 invariant: a deterministic fallback always
+   * exists). Manual transactions stay fail-loud so the operator sees the cause.
+   */
+  readonly allowMechanicalFallback: boolean
   /** Optional durability checkpoint after a successfully closed bracket. */
   readonly flush?: () => Promise<void>
   /** Manual command that initiated this transaction, when present. */
@@ -87,6 +93,13 @@ type StabilityCheck = (
 interface TransactionFailure {
   readonly error: unknown
   readonly stage: 'summary' | 'commit'
+}
+
+/** A framed model summary is not smaller than the span it would replace. */
+class SummaryNotSmallerError extends Error {
+  constructor(message: string) {
+    super(message)
+  }
 }
 
 /**
@@ -227,6 +240,7 @@ export async function compactSurfaceRegion(
       compactionId,
       options.sourceCommandId,
       assertStable,
+      options.allowMechanicalFallback,
       signal,
     )
     if (options.owner === null) signal?.throwIfAborted()
@@ -383,7 +397,12 @@ function prepareCompaction(
   }
 }
 
-/** Run the summarizer and frame its replacement checkpoint. */
+/**
+ * Run the summarizer and frame its replacement checkpoint. When the summary
+ * path fails (or produces a non-shrinking frame) and the transaction is
+ * automatic, the deterministic model-free omission is attempted before the
+ * error is allowed to escape — the session remains promptable either way.
+ */
 async function summarizeCompaction(
   dependencies: RegionDependencies,
   prepared: PreparedCompaction,
@@ -391,24 +410,55 @@ async function summarizeCompaction(
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
   assertStable: StabilityCheck,
+  allowMechanicalFallback: boolean,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
-  let summaryResult: SummaryResult
   for (;;) {
     signal?.throwIfAborted()
     try {
-      summaryResult = await dependencies.summarize(prepared.input, agent, signal)
-      break
+      const summaryResult = await dependencies.summarize(prepared.input, agent, signal)
+      return frameSummarizedCompaction(
+        dependencies,
+        prepared,
+        summaryResult,
+        compactionId,
+        sourceCommandId,
+      )
     } catch (error: unknown) {
       if (signal?.aborted === true) throw error
       assertStable(dependencies, agent.session, prepared)
-      if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) throw error
+      if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) {
+        if (allowMechanicalFallback) {
+          const mechanical = mechanicalCompaction(
+            dependencies,
+            agent.session,
+            prepared,
+            compactionId,
+            sourceCommandId,
+          )
+          if (mechanical !== null) return mechanical
+        }
+        throw error
+      }
       prepared = prepareCompaction(dependencies, agent.session,
         validateSurfaceRegion(agent.session, prepared.start, prepared.end))
     }
   }
+}
+
+/** Frame one successful model summary and enforce the shrink guarantee. */
+function frameSummarizedCompaction(
+  dependencies: RegionDependencies,
+  prepared: PreparedCompaction,
+  summaryResult: SummaryResult,
+  compactionId: CompactionResult['compactionId'],
+  sourceCommandId: CommandId | undefined,
+): SummarizedCompaction {
+  const coverageNote = summaryResult.windowClipped === true
+    ? `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end} remain retrievable with session_event_search / session_event_read`
+    : undefined
   const checkpointMessage = createUserMessage({
-    content: frameSummary(summaryResult.summary),
+    content: frameSummary(summaryResult.summary, coverageNote),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   // The checkpoint is text-only, so its fixed-heuristic price IS its route
@@ -416,13 +466,67 @@ async function summarizeCompaction(
   // question — does the replacement lower the next request's pressure.
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
   if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
-    throw new Error(
+    throw new SummaryNotSmallerError(
       `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedRouteTokenCount})`,
     )
   }
   return {
     ...prepared,
     ...summaryResult,
+    checkpointMessage,
+  }
+}
+
+/**
+ * The deterministic model-free fallback: drop the oldest balanced prefix of
+ * the selected span and replace exactly that prefix with one pointer/omission
+ * stub citing the session log and the recall tools. The rest of the selected
+ * span stays verbatim; the removed events stay in the log (surface `replace`
+ * only), so the transcript is intact and the session is promptable.
+ * @returns the committed replacement, or `null` when even the whole span is
+ *   no larger than the stub (nothing can be freed; the caller rethrows).
+ */
+function mechanicalCompaction(
+  dependencies: RegionDependencies,
+  session: Session,
+  prepared: PreparedCompaction,
+  compactionId: CompactionResult['compactionId'],
+  sourceCommandId: CommandId | undefined,
+): SummarizedCompaction | null {
+  const probe = createUserMessage({
+    content: frameMechanicalOmission(prepared.start, prepared.end, prepared.shadowedSeqs.length),
+    source: compactCheckpointSource(compactionId, sourceCommandId),
+  })
+  const stubTokenCount = dependencies.meter.estimateMessage(probe)
+
+  let droppedTokens = 0
+  let cut: SessionSeq | undefined
+  for (const [index, node] of prepared.selectedNodes.entries()) {
+    droppedTokens += node.tokens
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- selectedNodes and shadowedSeqs are parallel.
+    const seq = prepared.shadowedSeqs[index]!
+    if (droppedTokens > stubTokenCount && toolPairingBalancedAfter(session, seq)) {
+      cut = seq
+      break
+    }
+  }
+  if (cut === undefined) return null
+
+  const selection = validateSurfaceRegion(session, prepared.start, cut)
+  const dropped = prepareCompaction(dependencies, session, selection)
+  const checkpointMessage = createUserMessage({
+    content: frameMechanicalOmission(dropped.start, dropped.end, dropped.shadowedSeqs.length),
+    source: compactCheckpointSource(compactionId, sourceCommandId),
+  })
+  if (dependencies.meter.estimateMessage(checkpointMessage) >= dropped.shadowedRouteTokenCount) {
+    return null
+  }
+  return {
+    ...dropped,
+    summary: [{ type: 'text', text: MECHANICAL_SUMMARY_TEXT }],
+    // No model wrote this checkpoint; the empty route is the durable answer.
+    provider: '',
+    model: '',
     checkpointMessage,
   }
 }

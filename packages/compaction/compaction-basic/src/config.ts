@@ -6,6 +6,7 @@
 
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import type { CompactionSettingsValues } from './settings.ts'
 import type {
   BasicCompactionConfig,
   CompactionPolicyConfig,
@@ -107,6 +108,48 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     modelPolicies,
     auto: config.auto ?? true,
   })
+}
+
+/**
+ * Overlay live operator settings (`enpoi-orchestration.parameters.compaction`)
+ * over the validated plugin config. Values are already field-validated by the
+ * settings reader; a retention pair that conflicts with the resulting
+ * threshold falls back to the resolved config so an edit can never fail a
+ * turn. An absolute `retainTokens` wins over `retainRatio` when both are set.
+ * @param config - resolved plugin configuration.
+ * @param values - validated settings-document values; empty leaves `config` unchanged in effect.
+ * @returns detached immutable configuration for this compaction decision.
+ */
+export function applySettingsOverrides(
+  config: ResolvedConfig,
+  values: CompactionSettingsValues,
+): ResolvedConfig {
+  const thresholdRatio = values.thresholdRatio ?? config.thresholdRatio
+  const headroomTokens = values.headroomTokens ?? config.headroomTokens
+  const configuredRetention: ResolvedRetention = config.retainTokens === undefined
+    ? { retainRatio: config.retainRatio }
+    : { retainTokens: config.retainTokens }
+  let retention: ResolvedRetention = configuredRetention
+  if (values.retainTokens !== undefined) retention = { retainTokens: values.retainTokens }
+  else if (values.retainRatio !== undefined) retention = { retainRatio: values.retainRatio }
+  if (retention.retainRatio !== undefined && retention.retainRatio >= thresholdRatio) {
+    retention = configuredRetention
+  }
+  const base = {
+    thresholdRatio,
+    headroomTokens,
+    summarizationProvider: config.summarizationProvider,
+    summarizationModel: config.summarizationModel,
+    maxTokens: config.maxTokens,
+    compactionRetries: config.compactionRetries,
+    maxOverflowRetries: config.maxOverflowRetries,
+    modelPolicies: config.modelPolicies,
+    auto: config.auto,
+  }
+  if (retention.retainTokens !== undefined) {
+    return deepFreeze({ ...base, retainTokens: retention.retainTokens })
+  }
+  return deepFreeze({ ...base, retainRatio: retention.retainRatio ?? config.retainRatio })
 }
 
 /**

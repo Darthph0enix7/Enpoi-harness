@@ -1524,6 +1524,25 @@ describe('search paging, prior-history bounds, titles, and cancellation', () => 
     )
   })
 
+  it('surfaces the coded indexing state with progress instead of timing out', async () => {
+    const mounted = await mount()
+    FakeQuery.sessionSearch = () => Promise.reject(
+      new SessionQueryError(
+        'session search index is building; retry shortly',
+        'SESSION_QUERY_INDEXING',
+        { cause: new Error('236/1231 sessions indexed') },
+      ),
+    )
+    vi.spyOn(mounted.ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    const result = await mounted.call('session_search', { query: 'needle' })
+
+    expect(errorCode(result)).toBe('SESSION_QUERY_INDEXING')
+    expect(text(result)).toBe(
+      'Error: session search index is building; retry shortly: 236/1231 sessions indexed',
+    )
+  })
+
   it('logs an inspectable cyclic cause chain without exposing it', async () => {
     const mounted = await mount()
     const outer = new Error('cyclic outer secret')

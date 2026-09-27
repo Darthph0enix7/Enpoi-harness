@@ -162,15 +162,20 @@ describe('summary image offload', () => {
     const selected = await seedImages(agent, ['first', 'second'])
     await seedImages(agent, ['outside-after'])
     agent.session.append('turn/start', { turn: 4 })
-    await expect(compact.compactRegion(selected.start, selected.end, agent)).rejects.toMatchObject({ code: IMAGE_OFFLOAD_REQUIRED_CODE })
+    // The offload retries stop once the selected span has no more images to
+    // offload; the automatic transaction then lands the deterministic
+    // mechanical omission instead of failing the turn.
+    const result = await compact.compactRegion(selected.start, selected.end, agent)
+    expect(result.shadowedSeqs).toContain(selected.start)
     expect(adapter.requests.slice(3).map(offloadedNames)).toEqual([[], ['first'], ['first', 'second']])
     expect(decisions(agent.session).map(event => event.data.targets)).toEqual([
       [{ seq: selected.start, imageIndexes: [0] }], [{ seq: selected.start, imageIndexes: [1] }],
     ])
-    expect(agent.session.surface.replaceGeneration).toBe(0)
-    const end = agent.session.snapshotEvents().at(-1)
-    expect(end?.type).toBe('compaction/end')
-    expect(end?.type === 'compaction/end' && typeof end.data.error).toBe('string')
+    expect(agent.session.surface.replaceGeneration).toBe(1)
+    const end = agent.session.snapshotEvents().findLast(event => event.type === 'compaction/end')
+    expect(end?.type === 'compaction/end' && end.data.error).toBeUndefined()
+    expect(agent.session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ provider: '', model: '' })
   })
 
   it('preserves omission when a subsequent summary failure is terminal', async () => {

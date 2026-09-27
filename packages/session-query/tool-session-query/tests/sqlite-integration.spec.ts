@@ -276,6 +276,9 @@ describe('tool-session-query with the real SQLite provider', () => {
 
     const ctx = new Context()
     contexts.push(ctx)
+    // Capture repair lines from the moment the engine mounts: the background
+    // index pass starts at activation and must not race the assertion.
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => undefined)
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     registerTurnBoundary(ctx)
@@ -308,7 +311,6 @@ describe('tool-session-query with the real SQLite provider', () => {
     const caller = ctx.sessions.create(SessionId('historical-caller'), {
       meta: { createdAt: 20, cwd: '/work' },
     })
-    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => undefined)
     const search = (query: string) => ctx.tools.execute({
       name: 'session_search',
       arguments: { query },

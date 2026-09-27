@@ -13,7 +13,8 @@ import type { Session, SessionEvent, SessionSeq, ToolResultMessage } from '@deep
 import type {} from '@deepseek-ai/dsh-compaction'
 // Type-only: the `ctx.tokenMeter` Context merge for the declared injection.
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { codePointLength, DEFAULTS, PRUNE_MARKER, resolveConfig } from './config.ts'
+import { codePointLength, applySettingsOverrides, DEFAULTS, PRUNE_MARKER, resolveConfig } from './config.ts'
+import { readPruneSettings } from './settings.ts'
 import type {
   PrunedEntry,
   PruneResult,
@@ -21,7 +22,7 @@ import type {
   ToolResultPruneConfig,
 } from './types.ts'
 
-export { codePointLength, DEFAULTS, PRUNE_MARKER, resolveConfig } from './config.ts'
+export { codePointLength, applySettingsOverrides, DEFAULTS, PRUNE_MARKER, resolveConfig } from './config.ts'
 export type {
   PrunedEntry,
   PruneResult,
@@ -81,11 +82,21 @@ export class ToolResultPruner extends Service {
    * @returns pruned content, or `null` when the text is within budget.
    */
   pruneContent(blocks: readonly ContentBlock[]): ContentBlock[] | null {
-    const totalChars = this.measureContent(blocks)
-    if (totalChars <= this.config.thresholdChars) return null
+    return this.pruneContentWith(this.activeConfig(), blocks)
+  }
 
-    const removedStart = this.config.headChars
-    const removedEnd = totalChars - this.config.tailChars
+  /** Budgets for one prune decision: the plugin config overlaid with live settings. */
+  private activeConfig(): ResolvedConfig {
+    return applySettingsOverrides(this.config, readPruneSettings(this.ctx))
+  }
+
+  /** Prune content under one resolved budget snapshot. */
+  private pruneContentWith(config: ResolvedConfig, blocks: readonly ContentBlock[]): ContentBlock[] | null {
+    const totalChars = this.measureContent(blocks)
+    if (totalChars <= config.thresholdChars) return null
+
+    const removedStart = config.headChars
+    const removedEnd = totalChars - config.tailChars
     const pruned: ContentBlock[] = []
     let consumed = 0
     let markerInserted = false
@@ -115,7 +126,7 @@ export class ToolResultPruner extends Service {
     if (!markerInserted) throw new Error('tool-result prune: failed to locate the removed text span')
     const charsAfter = this.measureContent(pruned)
     /* v8 ignore next -- config validation fixes the emitted head + marker + tail budget. */
-    if (charsAfter > this.config.thresholdChars || charsAfter >= totalChars) {
+    if (charsAfter > config.thresholdChars || charsAfter >= totalChars) {
       throw new Error('tool-result prune: replacement must be smaller and within threshold')
     }
     return pruned
@@ -144,9 +155,12 @@ export class ToolResultPruner extends Service {
 
     const pruned: PrunedEntry[] = []
     let charsRemoved = 0
+    // One budget snapshot per pass so a live settings edit cannot split the
+    // decision across candidates.
+    const config = this.activeConfig()
     for (const { seq, event } of candidates) {
       const original = session.deriveEventMessage(event) as ToolResultMessage
-      const content = this.pruneContent(original.content)
+      const content = this.pruneContentWith(config, original.content)
       if (content === null) continue
       const charsBefore = this.measureContent(original.content)
       const charsAfter = this.measureContent(content)

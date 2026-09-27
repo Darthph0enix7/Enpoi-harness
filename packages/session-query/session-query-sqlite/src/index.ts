@@ -81,6 +81,12 @@ export const SESSION_QUERY_SQLITE_DEFAULT_LIMIT = 20
 export const SESSION_QUERY_SQLITE_MAX_LIMIT = 100
 /** Default maximum snippet length in Unicode code points. */
 export const SESSION_QUERY_SQLITE_SNIPPET_CHARS = 240
+/**
+ * Default bounded wait for the background index pass on a cross-session
+ * search. Kept below the tool's 30 s deadline so an unready index reports the
+ * coded indexing state instead of the tool aborting the call.
+ */
+export const SESSION_QUERY_SQLITE_FIRST_SEARCH_WAIT_MS = 20_000
 
 // One transient source change gets a retry; repeated churn fails rather than monopolizing the queue.
 const STABLE_OBSERVATION_ATTEMPTS = 2
@@ -90,6 +96,22 @@ const REPAIR_LOG_LIMIT = 32
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
 export type OpenAt = 'startup' | 'first-search' | 'never'
+
+/** Progress of the background index pass that populates cross-session search. */
+export interface SessionQueryIndexState {
+  /** `idle` before the first search, `running` while the pass walks sessions, then a terminal state. */
+  readonly status: 'idle' | 'running' | 'ready' | 'failed'
+  /** Sessions indexed (or already current) by the pass. */
+  readonly indexedSessions: number
+  /** Sessions the pass could not read; they are skipped, never fatal. */
+  readonly skippedSessions: number
+  /** Sessions the pass intends to index. */
+  readonly totalSessions: number
+  readonly startedAt?: number
+  readonly finishedAt?: number
+  /** One-line failure reason when the pass itself failed. */
+  readonly error?: string
+}
 
 /** Combined session-query configuration backed by SQLite full-text search. */
 export interface Config extends SessionQueryConfig {
@@ -119,6 +141,13 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /**
+   * Bounded wait (ms) for the background index pass on a cross-session search.
+   * When the pass is still running after the wait, the search rejects with
+   * `SESSION_QUERY_INDEXING` instead of blocking; per-session event search
+   * never waits. Defaults to 20000 and is capped below the 30 s tool deadline.
+   */
+  firstSearchWaitMs?: number
 }
 
 interface ResolvedConfig {
@@ -131,6 +160,7 @@ interface ResolvedConfig {
   readWindowMax: number
   persistedReadConcurrency: number
   preparedSessionCacheSize: number
+  firstSearchWaitMs: number
 }
 
 interface ObservedSession {
@@ -224,6 +254,11 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       .min(1)
       .max(Number.MAX_SAFE_INTEGER)
       .default(SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE),
+    firstSearchWaitMs: z.number()
+      .step(1)
+      .min(0)
+      .max(25_000)
+      .default(SESSION_QUERY_SQLITE_FIRST_SEARCH_WAIT_MS),
   })
 
   /** Validated and defaulted backend configuration. */
@@ -241,6 +276,11 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _closed = false
   private _closePromise: Promise<void> | undefined
   private readonly _optionalPersistenceFiber: Fiber
+  private _indexPass: Promise<void> | undefined
+  private _indexState: SessionQueryIndexState = { status: 'idle', indexedSessions: 0, skippedSessions: 0, totalSessions: 0 }
+  private _indexFailure: SessionQueryError | undefined
+  private _indexWaited = false
+  private _indexWait: Promise<void> | undefined
 
   constructor(ctx: Context, config: Config) {
     // The assignment expression resolves before the base constructor can
@@ -263,9 +303,17 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     ctx.effect(() => async () => this.close(), 'sessionQuerySqlite.close')
   }
 
+  /** Current background index progress; read-only diagnostic surface. */
+  get indexState(): SessionQueryIndexState {
+    return this._indexState
+  }
+
   /** Open eagerly only when activation owns the configured readiness boundary. */
   protected async [Service.init](): Promise<void> {
-    if (this.config.openAt === 'startup') await this._ensureReady(undefined)
+    if (this.config.openAt === 'startup') {
+      await this._ensureReady(undefined)
+      this._ensureBackgroundIndex()
+    }
   }
 
   override async searchSessions(
@@ -275,8 +323,16 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     this._assertSearchEnabled()
     const normalized = normalizeSessionRequest(request, this.config)
     const signal = exec?.signal
+    await this._ensureReady(signal)
+    // Cross-session search spans the whole workspace corpus, so it waits a
+    // bounded time for the background pass instead of blocking on an unbounded
+    // reconcile. The coded state lets the tool report "indexing, retry"
+    // honestly when the pass is still running.
+    const state = await this._awaitIndexReady(signal)
+    if (state.status !== 'ready') {
+      throw this._indexingError(state)
+    }
     return this._serialized(signal, async () => {
-      await this._ensureReady(signal)
       const persistenceBinding = await this._reconcile(signal)
       assertNotAborted(signal)
       const generation = String(this._globalGeneration)
@@ -303,10 +359,14 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     this._assertSearchEnabled()
     const normalized = normalizeEventRequest(request, this.config)
     const signal = exec?.signal
+    await this._ensureReady(signal)
+    // One session's events never require the whole corpus: index just the
+    // target, answer immediately, and let the background pass fill the rest.
+    await this._ensureTargetIndexed(normalized.sessionId, signal)
+    this._ensureBackgroundIndex()
     return this._serialized(signal, async () => {
-      await this._ensureReady(signal)
-      const persistenceBinding = await this._reconcile(signal)
       assertNotAborted(signal)
+      const persistenceBinding = this._persistenceBinding
       const target = this._targetObservation(normalized.sessionId, persistenceBinding)
       const fingerprint = requestFingerprint(normalized)
       const offset = normalized.cursor === undefined
@@ -325,6 +385,310 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         }), offset),
       }
     })
+  }
+
+  /**
+   * Give the background pass a bounded head start on a cross-session search,
+   * then report its state. The wait stays below the tool's 30 s deadline so an
+   * unready index surfaces the coded indexing state instead of a tool abort.
+   * @param signal - caller cancellation observed before and after the wait.
+   * @returns the index state after the wait.
+   */
+  private async _awaitIndexReady(signal: AbortSignal | undefined): Promise<SessionQueryIndexState> {
+    const state = this._ensureBackgroundIndex()
+    const pass = this._indexPass
+    if (pass === undefined || state.status !== 'running' || this.config.firstSearchWaitMs === 0) return state
+    // Concurrent searches share one wait; a search arriving after a completed
+    // wait reports the same state immediately instead of re-waiting per call.
+    if (this._indexWait !== undefined) {
+      await this._indexWait
+      assertNotAborted(signal)
+      return this._indexState
+    }
+    if (this._indexWaited) return state
+    this._indexWaited = true
+    const timeout = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, this.config.firstSearchWaitMs)
+      ;(timer as { unref?: () => void }).unref?.()
+    })
+    const wait = Promise.race([pass, timeout])
+    this._indexWait = wait
+    try {
+      await wait
+    } finally {
+      if (this._indexWait === wait) this._indexWait = undefined
+    }
+    assertNotAborted(signal)
+    return this._indexState
+  }
+
+  /** Build the coded indexing rejection with bounded progress in its cause. */
+  private _indexingError(state: SessionQueryIndexState): SessionQueryError {
+    if (state.status === 'failed') {
+      return this._indexFailure ?? new SessionQueryError(
+        'session search index is unavailable',
+        'SESSION_QUERY_INDEX_FAILED',
+        state.error === undefined ? undefined : { cause: new Error(state.error) },
+      )
+    }
+    return new SessionQueryError(
+      'session search index is building; retry shortly',
+      'SESSION_QUERY_INDEXING',
+      { cause: new Error(`${state.indexedSessions}/${state.totalSessions} sessions indexed`) },
+    )
+  }
+
+  /**
+   * Start the background index pass once (idempotent). The pass never blocks a
+   * search: `searchEvents` indexes its own target synchronously and answers,
+   * while `searchSessions` reports the coded indexing state until the pass
+   * reaches `ready`. A failed pass stays failed — targeted event search and
+   * exact reads keep working — until the process restarts.
+   * @returns the current index state after the start attempt.
+   */
+  private _ensureBackgroundIndex(): SessionQueryIndexState {
+    if (this.config.openAt === 'never') return this._indexState
+    if (this._indexPass !== undefined) {
+      // A failed pass is retried only on explicit demand (a new search), never
+      // in a loop; a running pass is never restarted.
+      if (this._indexState.status !== 'failed') return this._indexState
+      this._indexPass = undefined
+      this._indexFailure = undefined
+      this._indexWaited = false
+      this._indexWait = undefined
+    }
+    const state: {
+      status: SessionQueryIndexState['status']
+      indexedSessions: number
+      skippedSessions: number
+      totalSessions: number
+      startedAt?: number
+      finishedAt?: number
+      error?: string
+    } = { status: 'running', indexedSessions: 0, skippedSessions: 0, totalSessions: 0, startedAt: Date.now() }
+    this._indexState = state
+    this._indexPass = this._runBackgroundIndex(state).catch((error: unknown) => {
+      const failure = error instanceof SessionQueryError
+        ? error
+        : new SessionQueryError(
+          `session-search indexing failed: ${errorMessage(error)}`,
+          'SESSION_QUERY_INDEX_FAILED',
+          { cause: error },
+        )
+      this._indexFailure = failure
+      state.status = 'failed'
+      state.error = failure.message.split('\n', 1)[0]?.slice(0, 300) ?? 'indexing failed'
+      state.finishedAt = Date.now()
+    })
+    return this._indexState
+  }
+
+  /**
+   * Walk every known session once, committing one session at a time and
+   * yielding between them so searches interleave. Individual unreadable
+   * sessions are skipped with a count; only a pass-level failure is terminal.
+   */
+  private async _runBackgroundIndex(state: {
+    status: SessionQueryIndexState['status']
+    indexedSessions: number
+    skippedSessions: number
+    totalSessions: number
+    startedAt?: number
+    finishedAt?: number
+    error?: string
+  }): Promise<void> {
+    await this._ensureReady(undefined)
+    const live = this.ctx.sessions.list()
+    const persistence = this._persistenceBinding.service
+    let snapshots = new Map<SessionId, ObservedPersistedSession>()
+    if (persistence !== undefined) {
+      try {
+        snapshots = materializePersistenceSnapshots(await persistence.list())
+      } catch (error: unknown) {
+        throw new SessionQueryError(
+          `session-search persistence listing failed: ${errorMessage(error)}`,
+          'SESSION_QUERY_PERSISTENCE_FAILED',
+          { cause: error },
+        )
+      }
+    }
+    const liveIds = new Set(live.map(session => session.id))
+    const targets: Array<{ kind: 'live'; session: Session } | { kind: 'persisted'; id: SessionId }> = [
+      ...live.map(session => ({ kind: 'live' as const, session })),
+      ...[...snapshots.keys()].filter(id => !liveIds.has(id)).map(id => ({ kind: 'persisted' as const, id })),
+    ]
+    state.totalSessions = targets.length
+    for (const target of targets) {
+      if (this._closed) return
+      try {
+        if (target.kind === 'live') await this._indexLiveSession(target.session, undefined)
+        else await this._indexPersistedSession(target.id, snapshots.get(target.id), undefined)
+        state.indexedSessions += 1
+      } catch {
+        // One unreadable or rejected session is skipped; the pass continues.
+        if (this._closed) return
+        state.skippedSessions += 1
+      }
+      // Hand the serialized gate back to any queued search between sessions.
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    state.status = 'ready'
+    state.finishedAt = Date.now()
+  }
+
+  /**
+   * Index exactly one session so an event search can answer without the full
+   * corpus pass. Live sessions are snapshotted in memory; persisted sessions
+   * are read from the store once and upserted in one transaction.
+   * @param sessionId - target session identity.
+   * @param signal - caller cancellation for the read and the write.
+   */
+  private async _ensureTargetIndexed(sessionId: SessionId, signal: AbortSignal | undefined): Promise<void> {
+    const live = this.ctx.sessions.get(sessionId)
+    if (live !== undefined) {
+      await this._indexLiveSession(live, signal)
+      return
+    }
+    if (this._persistenceBinding.service === undefined) throw sessionNotFound(sessionId)
+    await this._indexPersistedSession(sessionId, undefined, signal)
+  }
+
+  /** Upsert one live session's documents when its fingerprint changed. */
+  private async _indexLiveSession(session: Session, signal: AbortSignal | undefined): Promise<void> {
+    const observed = observeLive(session)
+    await this._serialized(signal, async () => {
+      const db = this._requireDb()
+      const row = db.prepare('SELECT fingerprint FROM temp.live_sessions WHERE id = ?').get(session.id) as { fingerprint?: string } | undefined
+      if (row?.fingerprint === observed.fingerprint) return
+      const persisted = db.prepare('SELECT 1 AS present FROM persisted_sessions WHERE id = ?').get(session.id) !== undefined
+      this._localGeneration += 1
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        this._replaceLiveSession(observed, this._localGeneration, persisted)
+        db.exec('COMMIT')
+      } catch (error: unknown) {
+        /* v8 ignore next 5 -- ROLLBACK failure requires a SQLite double fault; the original failure remains actionable. */
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          // The original SQLite failure remains the actionable cause.
+        }
+        throw error
+      }
+    }).catch((error: unknown) => {
+      if (error instanceof SessionQueryError) throw error
+      throw new SessionQueryError(
+        `session-search index update failed: ${errorMessage(error)}`,
+        'SESSION_QUERY_INDEX_FAILED',
+        { cause: error },
+      )
+    })
+  }
+
+  /**
+   * Upsert one persisted session's documents when its revision changed. The
+   * cold read happens outside the serialized gate; only the upsert holds it.
+   * @param sessionId - persisted session identity.
+   * @param snapshot - pre-listed snapshot when the caller already has one.
+   * @param signal - caller cancellation for the read and the write.
+   */
+  private async _indexPersistedSession(
+    sessionId: SessionId,
+    snapshot: ObservedPersistedSession | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (this.ctx.sessions.get(sessionId) !== undefined) return
+    const persistence = this._persistenceBinding.service
+    if (persistence === undefined) throw sessionNotFound(sessionId)
+    let entry = snapshot
+    if (entry === undefined) {
+      try {
+        entry = materializePersistenceSnapshots(
+          await persistence.list(signal === undefined ? undefined : { signal }),
+        ).get(sessionId)
+      } catch (error: unknown) {
+        if (isAbort(error)) throw error
+        throw new SessionQueryError(
+          `session-search persistence listing failed: ${errorMessage(error)}`,
+          'SESSION_QUERY_PERSISTENCE_FAILED',
+          { cause: error },
+        )
+      }
+    }
+    if (entry === undefined) throw sessionNotFound(sessionId)
+    const revision = entry.revision
+    const status = await this._serialized(signal, async () => {
+      const row = this._requireDb().prepare('SELECT revision FROM persisted_sessions WHERE id = ?').get(sessionId) as { revision?: string } | undefined
+      if (row === undefined) return 'missing' as const
+      return row.revision === revision ? 'current' as const : 'stale' as const
+    })
+    if (status === 'current') return
+    let loaded
+    try {
+      loaded = await readColdSessionLog(persistence, sessionId, signal)
+    } catch (error: unknown) {
+      if (isAbort(error)) throw error
+      throw new SessionQueryError(
+        `session-search persisted read failed: ${errorMessage(error)}`,
+        'SESSION_QUERY_PERSISTENCE_FAILED',
+        { cause: error },
+      )
+    }
+    assertSessionHeadersCompatible(entry.header, loaded.header)
+    const observed = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
+    const wrote = await this._writeIndexedSession(signal, sessionId, revision, () => {
+      const db = this._requireDb()
+      const generation = this._mainGeneration() + 1
+      this._replacePersistedSession(observed, revision, generation)
+      db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(generation)
+      this._globalGeneration = generation
+    })
+    if (wrote && status === 'missing') {
+      this.ctx.logger.info(
+        `session-search index repaired session "${sessionId}" (${observed.documents.length} documents)`,
+      )
+    }
+  }
+
+  /**
+   * Run one indexed-session upsert under the serialized gate with a durable
+   * transaction. A write failure is an index failure, never a persistence one.
+   * @returns whether the upsert actually wrote (false when the revision landed meanwhile).
+   */
+  private async _writeIndexedSession(
+    signal: AbortSignal | undefined,
+    sessionId: SessionId,
+    revision: SessionPersistenceRevision,
+    write: () => void,
+  ): Promise<boolean> {
+    let wrote = false
+    await this._serialized(signal, async () => {
+      const db = this._requireDb()
+      const row = db.prepare('SELECT revision FROM persisted_sessions WHERE id = ?').get(sessionId) as { revision?: string } | undefined
+      if (row?.revision === revision) return
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        write()
+        wrote = true
+        db.exec('COMMIT')
+      } catch (error: unknown) {
+        /* v8 ignore next 5 -- ROLLBACK failure requires a SQLite double fault; the original failure remains actionable. */
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          // The original SQLite failure remains the actionable cause.
+        }
+        throw error
+      }
+    }).catch((error: unknown) => {
+      if (error instanceof SessionQueryError) throw error
+      throw new SessionQueryError(
+        `session-search index update failed: ${errorMessage(error)}`,
+        'SESSION_QUERY_INDEX_FAILED',
+        { cause: error },
+      )
+    })
+    return wrote
   }
 
   /** Close the database after every accepted operation reaches quiescence. */
@@ -1060,6 +1424,7 @@ function resolveConfig(config: Config): ResolvedConfig {
       ?? SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
     preparedSessionCacheSize: config.preparedSessionCacheSize
       ?? SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+    firstSearchWaitMs: config.firstSearchWaitMs ?? SESSION_QUERY_SQLITE_FIRST_SEARCH_WAIT_MS,
   }
   if (typeof resolved.path !== 'string' || resolved.path.trim().length === 0) {
     throw invalidConfig('path must not be blank')
@@ -1083,6 +1448,13 @@ function resolveConfig(config: Config): ResolvedConfig {
     || resolved.preparedSessionCacheSize < 1
   ) {
     throw invalidConfig('preparedSessionCacheSize must be a positive safe integer')
+  }
+  if (
+    !Number.isInteger(resolved.firstSearchWaitMs)
+    || resolved.firstSearchWaitMs < 0
+    || resolved.firstSearchWaitMs > 25_000
+  ) {
+    throw invalidConfig('firstSearchWaitMs must be an integer between 0 and 25000')
   }
   if (resolved.defaultLimit > resolved.maxLimit) {
     throw invalidConfig('defaultLimit must be less than or equal to maxLimit')
@@ -1111,6 +1483,10 @@ function invalidConfig(detail: string): SessionQueryError {
 
 function indexClosed(): SessionQueryError {
   return new SessionQueryError('session-search SQLite index is closed', 'SESSION_QUERY_INDEX_FAILED')
+}
+
+function sessionNotFound(sessionId: SessionId): SessionQueryError {
+  return new SessionQueryError(`session "${sessionId}" not found`, 'SESSION_QUERY_SESSION_NOT_FOUND')
 }
 
 function assertNotAborted(signal: AbortSignal | undefined): void {

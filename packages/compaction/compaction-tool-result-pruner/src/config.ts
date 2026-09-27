@@ -64,6 +64,30 @@ export function resolveConfig(config: ToolResultPruneConfig = {}): ResolvedConfi
   return deepFreeze(structuredClone(resolved))
 }
 
+/**
+ * Layer live settings overrides over the resolved plugin config. Every
+ * override was already field-validated by the settings reader; a combination
+ * that would emit more than the threshold (head + marker + tail) is ignored
+ * whole so the prune can never grow the text or fail the session.
+ * @param config - resolved plugin configuration.
+ * @param overrides - validated settings-document overrides.
+ * @returns the effective immutable budgets for one prune decision.
+ */
+export function applySettingsOverrides(
+  config: ResolvedConfig,
+  overrides: ToolResultPruneConfig,
+): ResolvedConfig {
+  if (Object.keys(overrides).length === 0) return config
+  const merged: ResolvedConfig = {
+    thresholdChars: overrides.thresholdChars ?? config.thresholdChars,
+    headChars: overrides.headChars ?? config.headChars,
+    tailChars: overrides.tailChars ?? config.tailChars,
+  }
+  const emittedChars = merged.headChars + codePointLength(PRUNE_MARKER) + merged.tailChars
+  if (emittedChars > merged.thresholdChars) return config
+  return deepFreeze(merged)
+}
+
 function assertPositiveInteger(name: string, value: number): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`ToolResultPruneConfig: ${name} (${value}) must be a positive integer`)

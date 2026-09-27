@@ -131,6 +131,13 @@ interface LegacySeatMeta {
 
 const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
   keeper: { name: 'Context Keeper', icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z', group: 'supervision', defaultLabel: 'Default', defaultHint: KEEPER_DEFAULT_ROUTE },
+  compaction: {
+    name: 'Compaction Summariser',
+    icon: 'M3 3h10v10H3zM3 6h10M3 10h4m2 2v3m0 0l-1.5-1.5M9 15l1.5-1.5',
+    group: 'supervision',
+    defaultLabel: 'Inherit',
+    defaultHint: 'the session model — keeps the prefix cache',
+  },
   oracle: { name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2', group: 'supervision' },
   fixer: { name: 'Fixer', icon: 'M10.5 2.5l3 3L6 13H3v-3z', group: 'specialists' },
   explorer: { name: 'Explorer', icon: 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4', group: 'specialists' },
@@ -240,14 +247,22 @@ export function coerceRoleRegistry(raw: unknown): RoleRegistryMap {
 }
 
 /**
+ * Legacy seats the harness designates itself rather than the profile document:
+ * they must render before any persona assignment exists so the operator can
+ * assign them. Unassigned, each keeps its default route (today's behaviour).
+ */
+export const DESIGNATED_SEATS: ReadonlySet<string> = new Set(['compaction'])
+
+/**
  * Build the Fleet Routing groups: registry roles with `seat !== false` in
  * registry order, one group per registered council titled by the council's own
  * label, the shared arbiter group, then persona-only seats no registry or
- * council claims. Council seats are claimed by normalized id — the first
- * council that lists an id owns its row, so a duplicate appears once; a council
- * with zero seats renders no group; a role hidden with `seat: false` stays
- * hidden even when a council lists it. The shipped pre-registry seat metadata
- * (keeper, arbiters, legacy debaters) counts as a registry claim.
+ * council claims, plus the harness-designated seats that must always render.
+ * Council seats are claimed by normalized id — the first council that lists an
+ * id owns its row, so a duplicate appears once; a council with zero seats
+ * renders no group; a role hidden with `seat: false` stays hidden even when a
+ * council lists it. The shipped pre-registry seat metadata (keeper, compaction,
+ * arbiters, legacy debaters) counts as a registry claim.
  * @param registry - the effective role registry.
  * @param personaKeys - keys of the persona assignment map.
  * @param councils - the live council registry (`enpoiCouncil.list`).
@@ -350,6 +365,14 @@ export function buildFleetCategories(
       continue
     }
     ungrouped.push(resolveSeat(id, undefined))
+  }
+
+  // Harness-designated seats render without a persona assignment so the
+  // operator can assign them; a registry row of the same id already rendered.
+  for (const id of DESIGNATED_SEATS) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    push(LEGACY_SEAT_META[id]?.group ?? 'custom', resolveSeat(id, undefined))
   }
 
   const categories: FleetCategory[] = []

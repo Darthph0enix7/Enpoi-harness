@@ -35,6 +35,15 @@ export interface OrchestrationParams {
     claimsBatchSize: number
     claimsBatchMinutes: number
   }
+  compaction: {
+    thresholdRatio: number
+    retainRatio: number
+    headroomTokens: number
+    retainTokens: number
+    pruneThresholdChars: number
+    pruneHeadChars: number
+    pruneTailChars: number
+  }
   memory: {
     retrieverTopK: number
     retrieverCharBudget: number
@@ -64,6 +73,17 @@ export const PARAM_DEFAULTS: OrchestrationParams = {
     negativeCacheMs: 120_000,
     claimsBatchSize: 8,
     claimsBatchMinutes: 5,
+  },
+  // Mirrors the compaction-basic/pruner code defaults; the backend reads these
+  // only when set, so untouched values keep today's behaviour exactly.
+  compaction: {
+    thresholdRatio: 0.8,
+    retainRatio: 0.16,
+    headroomTokens: 65_536,
+    retainTokens: 0,
+    pruneThresholdChars: 8192,
+    pruneHeadChars: 4096,
+    pruneTailChars: 1024,
   },
   memory: {
     retrieverTopK: 10,
@@ -143,6 +163,7 @@ function mergeParams(base: OrchestrationParams, partial: Partial<OrchestrationPa
   return {
     council: { ...base.council, ...(partial.council ?? {}) },
     keeper: { ...base.keeper, ...(partial.keeper ?? {}) },
+    compaction: { ...base.compaction, ...(partial.compaction ?? {}) },
     memory: { ...base.memory, ...(partial.memory ?? {}) },
     oracle: { ...base.oracle, ...(partial.oracle ?? {}) },
   }

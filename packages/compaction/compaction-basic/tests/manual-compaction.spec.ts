@@ -414,6 +414,20 @@ describe('compactNow through the real loop', () => {
     await agent.whenIdle()
     expect(adapter.requests).toHaveLength(2)
   })
+
+  it('stringifies a non-Error manual summarizer failure in the durable end bracket', async () => {
+    const harness = await loopHarness()
+    const { agent, compact } = harness
+    await seedHistory(harness)
+    compact.error = 'plain manual failure'
+    const before = [...agent.session.surface.nodes]
+
+    // Manual compaction stays fail-loud: no mechanical fallback substitutes.
+    expect((await rejection(compact.compactNow(agent, SIGNAL))).code).toBe('summary')
+    expect(agent.session.surface.nodes).toEqual(before)
+    const end = compactEvents(agent.session).findLast(event => event.type === 'compaction/end')
+    expect(end?.type === 'compaction/end' ? end.data.error : undefined).toContain('plain manual failure')
+  })
 })
 
 describe('compactNow transaction and failure classification', () => {

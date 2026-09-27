@@ -35,6 +35,10 @@ const SAFE_SESSION_QUERY_FAILURES = {
     code: 'SESSION_QUERY_INDEX_FAILED',
     message: 'session search index is unavailable',
   },
+  SESSION_QUERY_INDEXING: {
+    code: 'SESSION_QUERY_INDEXING',
+    message: 'session search index is building; retry shortly',
+  },
   SESSION_QUERY_INVALID_CONFIG: {
     code: 'SESSION_QUERY_TOOL_FAILED',
     message: 'session query operation failed',
@@ -159,7 +163,8 @@ function genericFailure(): HarnessError {
  * @returns the summary, with a bounded reason suffix for infrastructure failures.
  */
 function withReason(message: string, code: SessionQueryErrorCode, error: SessionQueryError): string {
-  if (code !== 'SESSION_QUERY_INDEX_FAILED' && code !== 'SESSION_QUERY_PERSISTENCE_FAILED') return message
+  if (code !== 'SESSION_QUERY_INDEX_FAILED' && code !== 'SESSION_QUERY_INDEXING'
+    && code !== 'SESSION_QUERY_PERSISTENCE_FAILED') return message
   let reason = ''
   try {
     reason = error.cause instanceof Error ? error.cause.message : ''

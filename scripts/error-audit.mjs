@@ -434,6 +434,7 @@ function scanJournals(dir, hours, outSignals) {
         verdict = fixture ? 'expected' : 'unexplained'
       }
       else if (FALLBACK_LINE.test(line)) { cls = 'degraded-fallback'; verdict = 'expected' }
+      else if (/quarantined until/i.test(line)) { cls = 'route-quarantined'; verdict = 'expected' }
       else if (/(error|fail)/i.test(line)) { cls = 'journal-error'; verdict = 'unexplained' }
       if (!cls) continue
       const sess = line.match(UUID)?.[0] ?? line.match(/session[= ]([\w-]{3,64})/)?.[1] ?? null
