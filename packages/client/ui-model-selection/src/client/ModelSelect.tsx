@@ -8,6 +8,9 @@
  *   - Collapsible Recent group with last used models.
  *   - Collapsible Provider groups with 6-dot drag handles to rearrange provider ordering.
  *   - Clean model rows: only human-readable Model Name + compact gray context size (e.g. 1M, 128K) + Star toggle.
+ *   - Rule-aware visibility: entries the host rules engine hides carry their
+ *     reason when the search asks for them; a manual shown pin that overrode a
+ *     hide rule shows the rule it beat.
  *   - Pure monochrome vector icons throughout.
  *   - Input-matching glass material & border tokens.
  *
@@ -42,6 +45,10 @@ import {
 import {
   MODEL_GROUPS_CHANGED_EVENT, assignableModelGroups, ensureModelGroups, modelGroupById, refreshModelGroups,
 } from './model-groups.ts'
+import {
+  CATALOG_VISIBILITY_CHANGED_EVENT, catalogVisibilitySnapshot, ensureCatalogVisibility,
+  refreshCatalogVisibility,
+} from './catalog-visibility.ts'
 import css from './ModelSelect.module.css'
 
 /** Cached hidden-map reader for hot render paths: parse once per prefsVersion. */
@@ -136,15 +143,21 @@ export function ModelSelect(
       void refreshModelGroups()
       setPrefsVersion(v => v + 1)
     }
+    const onRulesChange = () => {
+      void refreshCatalogVisibility()
+      setPrefsVersion(v => v + 1)
+    }
     window.addEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
     window.addEventListener('dsh:hidden-models-changed', onPrefsChange)
     window.addEventListener('storage', onPrefsChange)
     window.addEventListener(MODEL_GROUPS_CHANGED_EVENT, onGroupsChange)
+    window.addEventListener(CATALOG_VISIBILITY_CHANGED_EVENT, onRulesChange)
     return () => {
       window.removeEventListener('dsh:model-picker-prefs-changed', onPrefsChange)
       window.removeEventListener('dsh:hidden-models-changed', onPrefsChange)
       window.removeEventListener('storage', onPrefsChange)
       window.removeEventListener(MODEL_GROUPS_CHANGED_EVENT, onGroupsChange)
+      window.removeEventListener(CATALOG_VISIBILITY_CHANGED_EVENT, onRulesChange)
     }
   }, [])
 
@@ -166,6 +179,15 @@ export function ModelSelect(
     return () => { cancelled = true }
   }, [])
 
+  // The host rules engine's resolved decision map primes the same way.
+  useEffect(() => {
+    let cancelled = false
+    void ensureCatalogVisibility().then(() => {
+      if (!cancelled) setPrefsVersion(v => v + 1)
+    })
+    return () => { cancelled = true }
+  }, [])
+
   // 0ms hot-path caches: parse hidden/collapsed maps once per prefsVersion, not per model
   const hiddenMap = useMemo(() => readHiddenMap(), [prefsVersion])
   const hiddenSets = useMemo(() => {
@@ -176,6 +198,16 @@ export function ModelSelect(
   const isHiddenCached = useMemo(() => {
     return (provider: string, modelId: string) => hiddenSets.get(provider)?.has(modelId) ?? false
   }, [hiddenSets])
+  // Rule decisions ride the same prefsVersion: the localStorage list is the 0ms
+  // manual truth, the published map adds hide-rule/gating state (and pins).
+  const catalogVisibility = useMemo(() => catalogVisibilitySnapshot(), [prefsVersion])
+  const decisionFor = useMemo(() => {
+    return (provider: string, modelId: string) => catalogVisibility.get(`${provider}/${modelId}`)
+  }, [catalogVisibility])
+  const isModelHidden = useMemo(() => {
+    return (provider: string, modelId: string) =>
+      isHiddenCached(provider, modelId) || decisionFor(provider, modelId)?.state === 'hidden'
+  }, [isHiddenCached, decisionFor])
   const collapsedSet = useMemo(() => {
     try {
       const raw = localStorage.getItem('dsh_collapsed_groups_v2')
@@ -250,7 +282,7 @@ export function ModelSelect(
   // All enabled model choices (uses 0ms cached hidden check)
   const choices = useMemo(() => state.groups.flatMap(group =>
     group.models
-      .filter(model => !isHiddenCached(group.id, model.id) || (activeSel?.provider === group.id && activeSel.model === model.id))
+      .filter(model => !isModelHidden(group.id, model.id) || (activeSel?.provider === group.id && activeSel.model === model.id))
       .map(model => ({
         group,
         model,
@@ -261,7 +293,7 @@ export function ModelSelect(
             ? {}
             : { reasoningEffort: model.reasoning.defaultEffort },
         } satisfies ModelSelection,
-      }))), [state.groups, prefsVersion, activeSel])
+      }))), [state.groups, prefsVersion, activeSel, isModelHidden])
 
   const selectedIndex = activeSel === null
     ? -1
@@ -390,12 +422,12 @@ export function ModelSelect(
     for (const ref of favRefs) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
       const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
-      if (hit && (!isHiddenCached(ref.provider, ref.modelId) || isCur)) {
+      if (hit && (!isModelHidden(ref.provider, ref.modelId) || isCur)) {
         result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isHiddenCached])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isModelHidden])
 
   // Recents list (computed on-demand when popover opens) - uses cached hidden check
   const recentItems = useMemo(() => {
@@ -405,17 +437,34 @@ export function ModelSelect(
     for (const ref of recents) {
       const hit = modelLookup.get(`${ref.provider}::${ref.modelId}`)
       const isCur = activeSel?.provider === ref.provider && activeSel.model === ref.modelId
-      if (hit && (!isHiddenCached(ref.provider, ref.modelId) || isCur)) {
+      if (hit && (!isModelHidden(ref.provider, ref.modelId) || isCur)) {
         if (!isModelFavorite(ref.provider, ref.modelId)) {
           result.push({ provider: ref.provider, model: hit.model, groupName: hit.groupName })
         }
       }
     }
     return result
-  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isHiddenCached])
+  }, [modelLookup, prefsVersion, activeSel, pickerOpen, isModelHidden])
 
   // Filtered queries
   const q = searchQuery.toLowerCase().trim()
+
+  // Rule-hidden catalogue entries an active search reveals with their reason
+  // (manual hidden pins never resurface); the group render reads this set.
+  const revealedHidden = useMemo(() => {
+    const keys = new Set<string>()
+    if (q === '') return keys
+    for (const group of state.groups) {
+      for (const model of group.models) {
+        if (!(model.name.toLowerCase().includes(q) || model.id.toLowerCase().includes(q))) continue
+        if (activeSel?.provider === group.id && activeSel.model === model.id) continue
+        if (isHiddenCached(group.id, model.id)) continue
+        const decision = decisionFor(group.id, model.id)
+        if (decision?.state === 'hidden' && decision.source !== 'manual') keys.add(`${group.id}/${model.id}`)
+      }
+    }
+    return keys
+  }, [state.groups, q, activeSel, isHiddenCached, decisionFor])
 
   // Assignable model groups: enabled groups with at least one link, read from
   // the cached registry and refreshed on the groups-changed event.
@@ -728,10 +777,13 @@ export function ModelSelect(
             const matchesSearch = !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
             if (!matchesSearch) return false
             const isCurrent = activeSel?.provider === group.id && activeSel.model === m.id
-            return isCurrent || !isHiddenCached(group.id, m.id)
+            return isCurrent || !isModelHidden(group.id, m.id)
           })
+          const hiddenMatches = q === ''
+            ? []
+            : group.models.filter(model => revealedHidden.has(`${group.id}/${model.id}`))
 
-          if (visibleModels.length === 0) return null
+          if (visibleModels.length === 0 && hiddenMatches.length === 0) return null
 
           const isCollapsed = !q && collapsedSet.has(group.id)
 
@@ -777,6 +829,12 @@ export function ModelSelect(
                     const isSelected = activeSel?.provider === group.id && activeSel.model === model.id
                     const isFav = isModelFavorite(group.id, model.id)
                     const contextStr = resolveModelContext(model)
+                    // A manual shown pin that had to override something carries
+                    // the engine's reason; a plain pin stays unbadged.
+                    const decision = decisionFor(group.id, model.id)
+                    const pinnedReason = decision?.state === 'visible' && decision.source === 'manual' && decision.reason !== 'pinned visible'
+                      ? decision.reason
+                      : undefined
 
                     return (
                       <div
@@ -790,6 +848,9 @@ export function ModelSelect(
                         </div>
                         <div className={css.modelRowRight}>
                           {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                          {pinnedReason !== undefined && pinnedReason !== null && (
+                            <span className={css.ruleTag}>{pinnedReason}</span>
+                          )}
                           <button
                             type="button"
                             className={clsx(css.starBtn, isFav && css.starBtnActive)}
@@ -807,6 +868,30 @@ export function ModelSelect(
                       </div>
                     )
                   })}
+                  {/* Hidden-by-rule matches surface on an explicit search, dimmed
+                      and selectable only through a manual shown pin — the reason
+                      stays visible instead of a silent disappearance. */}
+                  {hiddenMatches.map((model) => {
+                    const reason = decisionFor(group.id, model.id)?.reason
+                    const contextStr = resolveModelContext(model)
+                    return (
+                      <div
+                        key={`rule-hidden-${model.id}`}
+                        className={clsx(css.modelRow, css.modelRowHidden)}
+                        data-model-hidden=""
+                        title={reason ?? undefined}
+                        aria-disabled
+                      >
+                        <div className={css.modelRowLeft}>
+                          <span className={css.modelNameText}>{model.name}</span>
+                        </div>
+                        <div className={css.modelRowRight}>
+                          {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                          {reason !== null && reason !== undefined && <span className={css.ruleTag}>{reason}</span>}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -814,7 +899,7 @@ export function ModelSelect(
         })}
 
         {/* Empty search results */}
-        {q && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
+        {q && revealedHidden.size === 0 && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
           <div className={css.emptyState}>No models matching "{searchQuery}"</div>
         )}
       </div>

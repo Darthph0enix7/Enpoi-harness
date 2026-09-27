@@ -535,6 +535,35 @@
   line-height: 1;
 }
 
+/* Rule-state tag: the engine's reason for a hidden or pinned row (muted, compact) */
+.ruleTag {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 1.5px 5px;
+  border-radius: 4px;
+  letter-spacing: -0.01em;
+  flex-shrink: 0;
+  line-height: 1;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hidden-by-rule row revealed by an explicit search: dimmed and not clickable */
+.modelRowHidden {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.modelRowHidden:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+}
+
 /* Star Favorite Button (Monochrome Vector Star) */
 .starBtn {
   border: none;
