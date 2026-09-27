@@ -112,28 +112,26 @@ describe('child composition persona shadow', () => {
     const scopes: Array<ReturnType<typeof createScope>> = []
     try {
       await ctx.plugin(SystemPrompt)
-      await ctx.plugin({
-        name: 'parent-preset-fixture',
-        inject: ['systemPrompt'],
-        apply(pluginCtx: Context): void {
-          // Stand-in for a parent preset that splits a shared base (prefix) from a doctrine tail (suffix).
-          const parent = createScope(pluginCtx, parentKey)
-          scopes.push(parent)
-          parent.ctx.systemPrompt.section({
-            name: 'deployment:persona-prefix',
-            order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
-            text: 'PARENT PERSONA',
-          })
-          parent.ctx.systemPrompt.section({
-            name: 'deployment:persona-suffix',
-            order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX'),
-            text: 'PARENT PRESET DOCTRINE',
-          })
-          const child = createScope(pluginCtx, childKey, { parent: parentKey })
-          scopes.push(child)
-          applyChildComposition(child.ctx, {} as Agent, { persona: 'You are Fixer.' })
-        },
-      } as never, {})
+      // Same accepted shape as `agent-preset-registry/tests/mount.spec.ts`: an object plugin with
+      // `inject` and an `apply` taking the injected context, no cast.
+      await ctx.plugin({ inject: ['systemPrompt'], async apply(pluginCtx: Context): Promise<void> {
+        // Stand-in for a parent preset that splits a shared base (prefix) from a doctrine tail (suffix).
+        const parent = createScope(pluginCtx, parentKey)
+        scopes.push(parent)
+        parent.ctx.systemPrompt.section({
+          name: 'deployment:persona-prefix',
+          order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+          text: 'PARENT PERSONA',
+        })
+        parent.ctx.systemPrompt.section({
+          name: 'deployment:persona-suffix',
+          order: parent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX'),
+          text: 'PARENT PRESET DOCTRINE',
+        })
+        const child = createScope(pluginCtx, childKey, { parent: parentKey })
+        scopes.push(child)
+        applyChildComposition(child.ctx, {} as Agent, { persona: 'You are Fixer.' })
+      } })
       const childRendered = renderPrompt(await ctx.systemPrompt.assemble({ scope: childKey }))
       expect(childRendered).toContain('You are Fixer.')
       expect(childRendered).not.toContain('PARENT PRESET DOCTRINE')
