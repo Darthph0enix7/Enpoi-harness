@@ -86,7 +86,6 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
       <div className={styles['heavyCompare']}>
         <div className={styles['heavyCompareCol']}>
           <strong>{manifest.reuse.label}</strong>
-          <em className={styles['heavyModeNote']}> · {t('heavyRecommended')}</em>
           <span className={styles['heavyModeNote']}>{manifest.reuse.note}</span>
           <code className={styles['heavyCode']}>{manifest.reuse.baseURL}</code>
           <span className={styles['heavyModeNote']}>{t('heavyHealthUrl')}: {manifest.reuse.health.url}</span>

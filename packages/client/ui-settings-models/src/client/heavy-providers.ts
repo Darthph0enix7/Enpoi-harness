@@ -2,11 +2,13 @@
  * HEAVY provider manifests for the Add Provider workflow.
  *
  * A heavy provider is LISTED (a preset exists) but nothing is installed by
- * default: the row carries this manifest and only an explicit add runs the
- * install (or reuses the server's running endpoint over Tailscale). The
- * hand-maintained table survives preset regeneration, like
+ * default: the row carries this manifest and only an explicit add either uses
+ * an instance detection found running on this device or runs the local
+ * install. The hand-maintained table survives preset regeneration, like
  * `KEYLESS_PRESET_IDS`; keep ids and facts in step with the host-side copy in
  * the profile plugin `dsh-enpoi-heavy-providers` (the side that executes).
+ * Every shipped URL is loopback: an operator's own server lives in the host's
+ * private `$DSH_HOME/heavy-server-overlay.json`, never in this table.
  *
  * @module ui-settings-models/heavy-providers
  */
@@ -35,6 +37,9 @@ export interface HeavyProviderHealth {
   timeoutMs?: number
 }
 
+/** What a local install path needs on the machine. */
+export type HeavyLocalRuntime = 'vendor-app' | 'docker' | 'podman' | 'node'
+
 /** One platform's local install path. */
 export interface HeavyPlatformInstall {
   /** Human label override; defaults to the local install label. */
@@ -43,6 +48,8 @@ export interface HeavyPlatformInstall {
   deps?: readonly string[]
   /** Footprint hint override; defaults to `local.diskHint`. */
   diskHint?: string
+  /** Prerequisite this variant needs; defaults to `local.runtime`. */
+  runtime?: HeavyLocalRuntime
   /** Steps executed in order for this platform. */
   steps: readonly HeavyProviderStep[]
 }
@@ -61,6 +68,8 @@ export interface HeavyLocalInstall {
   baseURL: string
   deps: readonly string[]
   diskHint: string
+  /** Prerequisite the default variant needs, unless a variant overrides it. */
+  runtime?: HeavyLocalRuntime
   /** Dashboard served by the local install (defaults to {@link HeavyProviderManifest.dashboardUrl}). */
   dashboardUrl?: string
   /** Platform-keyed steps; a platform without an entry uses `default`. */
@@ -101,11 +110,12 @@ export function resolveHeavyInstall(local: HeavyLocalInstall, platform: string):
 }
 
 /**
- * Dashboard URLs the operator should be able to open: the server-side
- * dashboard for reuse mode and the loopback dashboard of a local install.
+ * Dashboard URLs the operator should be able to open: the detected
+ * instance's dashboard and the loopback dashboard of a local install (both
+ * loopback by default, so they usually deduplicate to one URL).
  * @param manifest - the heavy manifest.
  * @param mode - restrict to one mode; omitted returns both (deduplicated).
- * @returns URLs in display order (server first).
+ * @returns URLs in display order (detected endpoint first).
  */
 export function heavyDashboardUrls(manifest: HeavyProviderManifest, mode?: 'reuse' | 'local'): string[] {
   const localUrl = manifest.local.dashboardUrl ?? manifest.dashboardUrl
@@ -136,11 +146,17 @@ export interface HeavyProviderManifest {
   }
   dashboardUrl?: string
   docsUrl?: string
+  /** Loopback port the service listens on by default (detection's first candidate). */
+  defaultPort: number
   /** Account flows that need a browser; rendered as badges. */
   requiresBrowser: readonly string[]
   /** Operator-facing quirks shown in Add Provider and the detail panel. */
   quirks: readonly string[]
-  /** Least-compute option: the server already runs this; zero local install. */
+  /**
+   * Least-compute option: an instance already running on THIS device; zero
+   * install. `baseURL`/`health` default to `defaultPort` and are only ever
+   * retargeted by the host's private server overlay.
+   */
   reuse: {
     label: string
     baseURL: string
@@ -172,23 +188,24 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
     summary: 'Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.',
     protocol: 'openai-completions',
     auth: { kind: 'unified', apiKeyEnv: 'FREELLMAPI_API_KEY', keyless: false },
-    dashboardUrl: 'http://100.122.163.25:3002',
+    dashboardUrl: 'http://127.0.0.1:3002',
     docsUrl: 'https://freellmapi.co',
+    defaultPort: 3002,
     requiresBrowser: [
       'First-run setup code and password-reset code appear only in `docker compose logs` — a browser flow, not automatable',
       'Upstream provider keys are added on the web dashboard',
     ],
     quirks: [
-      'Unified key is the only client auth — never expose this port through Cloudflare Tunnel',
+      'Unified key is the only client auth — never expose this port beyond the local machine',
       'Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable',
       'The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves',
       'A missing bind-mounted JSON file is created as a directory by Docker → boot loop',
     ],
     reuse: {
-      label: 'Reuse on server (recommended)',
-      baseURL: 'http://100.122.163.25:3002/v1',
-      note: 'Zero install: points at the server gateway over Tailscale; one shared key store.',
-      health: { url: 'http://100.122.163.25:3002/api/ping', timeoutMs: 5000 },
+      label: 'Use a detected instance',
+      baseURL: 'http://127.0.0.1:3002/v1',
+      note: 'Zero install: uses a FreeLLMAPI instance already running on this device.',
+      health: { url: 'http://127.0.0.1:3002/api/ping', timeoutMs: 5000 },
     },
     local: {
       label: 'Install locally (Docker)',
@@ -196,6 +213,7 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
       deps: ['Docker Engine + Compose'],
       diskHint: '~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU',
       dashboardUrl: 'http://127.0.0.1:3002',
+      runtime: 'docker',
       install: {
         // Unknown platforms fall back to the manual Docker Compose path.
         default: {
@@ -235,6 +253,7 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
           label: 'Install locally (vendor desktop app, no Docker)',
           deps: ['macOS 11+'],
           diskHint: '~250 MB app; data in ~/Library/Application Support/FreeLLMAPI',
+          runtime: 'vendor-app',
           steps: [
             {
               label: 'Download the latest .dmg',
@@ -261,6 +280,7 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
           label: 'Install locally (vendor desktop app, no Docker)',
           deps: ['Windows 10+'],
           diskHint: '~250 MB app; data in %APPDATA%\\FreeLLMAPI',
+          runtime: 'vendor-app',
           steps: [
             {
               label: 'Download the latest installer',
@@ -304,22 +324,23 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
     // keyless anthropic routes: a placeholder reference is stored, and the
     // route MUST NOT declare a DSH pool — the proxy runs its own sticky one.
     auth: { kind: 'placeholder', apiKeyEnv: 'ANTIGRAVITY_API_KEY', keyless: false },
-    dashboardUrl: 'http://100.122.163.25:8082',
+    dashboardUrl: 'http://127.0.0.1:8082',
     docsUrl: 'https://www.npmjs.com/package/antigravity-claude-proxy',
+    defaultPort: 8082,
     requiresBrowser: [
-      'Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback — on a headless host the printed URL must be opened from a machine that can reach the callback (Tailscale/port-forward); it cannot be automated',
+      'Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback — on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated',
     ],
     quirks: [
       'The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route',
       'The console at :8082 has no auth (webuiPassword empty) — trusted networks only',
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED … resets after 46h" is normal',
-      'Shared with OpenCode — deleting the service breaks OpenCode too; the systemd unit is dotfiles-managed, so dotfiles must drop it or `op pull` resurrects it',
+      'Other tools on this device may consume the same proxy — removing the service breaks them too',
     ],
     reuse: {
-      label: 'Reuse on server (recommended)',
-      baseURL: 'http://100.122.163.25:8082',
-      note: 'Zero install: uses the server proxy and its already-configured account pool over Tailscale.',
-      health: { url: 'http://100.122.163.25:8082/health', timeoutMs: 5000 },
+      label: 'Use a detected instance',
+      baseURL: 'http://127.0.0.1:8082',
+      note: 'Zero install: uses the proxy instance already running on this device and its configured account pool.',
+      health: { url: 'http://127.0.0.1:8082/health', timeoutMs: 5000 },
     },
     local: {
       label: 'Install locally (npm + systemd user unit)',
@@ -327,6 +348,7 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
       deps: ['Node.js >= 18'],
       diskHint: '~23 MB install, ~78–150 MB RAM, no GPU',
       dashboardUrl: 'http://127.0.0.1:8082',
+      runtime: 'node',
       install: {
         default: {
           steps: [
@@ -353,8 +375,8 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
         { label: 'Remove the config directory (OAuth tokens, presets, usage history)', command: 'rm -rf {config}/antigravity-proxy' },
       ],
       warnings: [
-        'OpenCode consumes the same proxy — its provider entry stops working when the service is removed',
-        'The systemd unit is dotfiles-managed: remove it from dotfiles too or `op pull` resurrects it on the next pull',
+        'Any other tool configured against the same proxy stops working when the service is removed',
+        'If a dotfiles/config repository manages the systemd unit, remove it there too or the next sync resurrects it',
         'Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history',
         'DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown',
       ],
@@ -367,22 +389,23 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
     summary: 'Command Code\'s CLI-shaped API behind the shared multi-key keypool proxy.',
     protocol: 'commandcode/alpha-generate',
     auth: { kind: 'none', apiKeyEnv: 'COMMANDCODE_API_KEY', keyless: false },
-    dashboardUrl: 'http://100.122.163.25:8899/status',
+    dashboardUrl: 'http://127.0.0.1:8899/status',
     docsUrl: 'https://commandcode.ai',
+    defaultPort: 8899,
     requiresBrowser: [
       'Vendor account and quota dashboard live at commandcode.ai (browser)',
     ],
     quirks: [
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
       'llm-pi-ai cannot speak this API: v1 ships the manifest as "requires the custom provider package (planned)"',
-      'The keypool is shared with the opencode `go` pool — never stop or remove keypool.service when removing this provider',
+      'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',
       'The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI',
     ],
     reuse: {
-      label: 'Reuse the server keypool (documented only)',
-      baseURL: 'http://100.122.163.25:8899/commandcode',
-      note: 'All keys/catalog/sanitizer live once on the server; a DSH route needs the planned custom provider package first.',
-      health: { url: 'http://100.122.163.25:8899/healthz', timeoutMs: 5000 },
+      label: 'Use a detected instance',
+      baseURL: 'http://127.0.0.1:8899/commandcode',
+      note: 'Uses the keypool instance already running on this device; a DSH route needs the planned custom provider package first.',
+      health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
     },
     local: {
       label: 'Not supported in v1',
@@ -395,14 +418,14 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
     removal: {
       steps: [],
       warnings: [
-        'Removal drops only DSH state and the commandcode pool keys — it never stops or removes the shared keypool service (the `go` pool needs it)',
+        'Removal drops only DSH state and the commandcode pool keys — it never stops or removes the shared keypool service (other tools may need it)',
         'usage.jsonl is keypool-wide and is not touched',
       ],
     },
     unsupported: {
       reason: 'llm-pi-ai cannot speak the CLI-shaped /alpha/generate protocol — a custom provider package is required.',
       plannedWith: 'dsh-provider-commandcode (planned)',
-      reuseUrl: 'http://100.122.163.25:8899/commandcode',
+      reuseUrl: 'http://127.0.0.1:8899/commandcode',
     },
   },
 ]
@@ -431,6 +454,9 @@ export function heavyProviderProblems(manifests: readonly HeavyProviderManifest[
     seen.add(manifest.id)
     for (const [field, value] of [['label', manifest.label], ['summary', manifest.summary], ['protocol', manifest.protocol]] as const) {
       if (typeof value !== 'string' || value.trim() === '') problems.push(`${where}: ${field} is empty`)
+    }
+    if (!Number.isInteger(manifest.defaultPort) || manifest.defaultPort < 1 || manifest.defaultPort > 65_535) {
+      problems.push(`${where}: defaultPort must be a TCP port`)
     }
     if (manifest.reuse.baseURL === '' && manifest.unsupported === undefined) problems.push(`${where}: reuse.baseURL is empty`)
     if (manifest.reuse.health.url === '') problems.push(`${where}: reuse.health.url is empty`)

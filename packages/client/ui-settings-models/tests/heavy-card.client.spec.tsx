@@ -33,6 +33,10 @@ const running = {
   mode: 'reuse',
   platform: 'linux',
   health: { ok: true, status: 200, checkedAt: 1 },
+  detectedPort: 3002,
+  detectedEndpoint: 'http://127.0.0.1:3002/v1',
+  runtime: { docker: true, podman: false },
+  preflight: { path: 'detected', label: 'Use the detected instance', missing: [], requires: [] },
   job: {
     id: 'freellmapi', kind: 'install', state: 'running', stage: 'Clone FreeLLMAPI',
     stageIndex: 0, stageCount: 4, pct: 25, logTail: 'cloning…', startedAt: 1,
@@ -62,7 +66,9 @@ it('renders the dashboard URL and the polled job, then surfaces a failed run wit
 
   await waitFor(() => { expect(screen.getByText(running.job.stage)).toBeTruthy() })
   expect(screen.getByText(en.heavyJobBackground)).toBeTruthy()
-  expect(screen.getByRole('link', { name: `${en.heavyDashboardServer}: http://100.122.163.25:3002 ↗` })).toBeTruthy()
+  // The detection offer is the card's first-class surface.
+  expect(screen.getByText(en.heavyDetectedOffer.replace('{endpoint}', 'http://127.0.0.1:3002/v1'))).toBeTruthy()
+  expect(screen.getByRole('link', { name: `${en.heavyDashboardLocal}: http://127.0.0.1:3002 ↗` })).toBeTruthy()
 
   await waitFor(
     () => { expect(screen.getByText(`${en.heavyFailed}: Start the stack: exit 1`)).toBeTruthy() },
@@ -82,6 +88,45 @@ it('opens the full documentation view from the card', async () => {
   expect(screen.getByText(en.heavyPlatformHost.replace('{platform}', 'linux'))).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: en.heavyHideDocumentation }))
   expect(screen.queryByText(en.heavyReuseVsLocal)).toBeNull()
+})
+
+it('surfaces the local path and its Docker requirement when Docker exists but nothing answers', async () => {
+  stubFetch({ status: {
+    id: 'freellmapi',
+    configured: false,
+    platform: 'linux',
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
+    runtime: { docker: true, podman: false },
+    preflight: { path: 'docker', label: 'Install locally (vendor one-liner, Docker)', missing: [], requires: ['docker'] },
+  } })
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+  await waitFor(() => {
+    expect(screen.getByText(
+      `${en.heavyPreflightBest.replace('{label}', 'Install locally (vendor one-liner, Docker)')} · ${en.heavyRequiresDocker}`,
+    )).toBeTruthy()
+  })
+})
+
+it('names exactly what is missing when no local runtime is available', async () => {
+  stubFetch({ status: {
+    id: 'freellmapi',
+    configured: false,
+    platform: 'linux',
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
+    runtime: { docker: false, podman: false },
+    preflight: {
+      path: 'unsupported',
+      label: 'Install locally (vendor one-liner, Docker)',
+      missing: ['Docker Engine + Compose (or Podman)'],
+      requires: ['docker'],
+    },
+  } })
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+  await waitFor(() => {
+    expect(screen.getByText(
+      en.heavyPreflightMissing.replace('{missing}', 'Docker Engine + Compose (or Podman)'),
+    )).toBeTruthy()
+  })
 })
 
 it('fails soft when the probe is refused: unknown state, no page error', async () => {

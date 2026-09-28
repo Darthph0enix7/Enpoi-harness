@@ -938,7 +938,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   const isConfigured = keyState?.configured === true || !row.apiKeyEnv
   // Dashboard links for a non-heavy provider that declares one; the heavy card
-  // (below) renders the heavy manifest's own server/local dashboards.
+  // (below) renders the heavy manifest's own detected/local dashboards.
   const nonHeavyDashboards = heavyProviderManifest(providerId) === undefined ? providerDashboardUrls(providerId) : []
 
   return (

@@ -26,8 +26,8 @@ it('renders every manifest section for the host platform (linux)', () => {
   expect(screen.getByText(manifest.reuse.label)).toBeTruthy()
   expect(screen.getByText(`${en.heavyDeps}: Docker Engine + Compose`)).toBeTruthy()
   expect(screen.getByText(en.heavyNoLocalFootprint)).toBeTruthy()
-  expect(screen.getByRole('link', { name: `${en.heavyDashboardServer}: ${manifest.dashboardUrl} ↗` })).toBeTruthy()
-  expect(screen.getByRole('link', { name: `${en.heavyDashboardLocal}: http://127.0.0.1:3002 ↗` })).toBeTruthy()
+  // Loopback dashboards deduplicate to the one local link.
+  expect(screen.getByRole('link', { name: `${en.heavyDashboardLocal}: ${manifest.dashboardUrl} ↗` })).toBeTruthy()
   expect(screen.getByRole('link', { name: `${en.heavyDocs}: ${manifest.docsUrl} ↗` })).toBeTruthy()
   expect(screen.getByText(en.heavyPlatformHost.replace('{platform}', 'linux'))).toBeTruthy()
   expect(screen.getByRole('button', { name: en.heavyPlatformLinux }).getAttribute('aria-pressed')).toBe('true')
@@ -40,7 +40,7 @@ it('renders every manifest section for the host platform (linux)', () => {
 
   // Quirks, browser badges, install/remove surface, removal warnings.
   expect(screen.getByText(en.heavyQuirks)).toBeTruthy()
-  expect(screen.getByText(/never expose this port through Cloudflare Tunnel/)).toBeTruthy()
+  expect(screen.getByText(/never expose this port beyond the local machine/)).toBeTruthy()
   expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0)
   expect(screen.getByText(en.heavyInstalls)).toBeTruthy()
   expect(screen.getByText(en.heavyRemoves)).toBeTruthy()

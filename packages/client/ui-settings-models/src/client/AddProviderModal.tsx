@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
-import { heavyApi, pollHeavyJob, type HeavyHealthView, type HeavyJobView } from './heavy-rpc.ts'
+import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
+import { HeavyPreflightNote } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
@@ -45,13 +46,15 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [discovering, setDiscovering] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Heavy-provider flow: mode choice, optional unified key, health, progress.
+  // Heavy-provider flow: mode choice, optional unified key, detection, progress.
   const [heavyMode, setHeavyMode] = useState<'reuse' | 'local'>('reuse')
+  // A ref, not state: the status fetch resolves after the selection handler,
+  // and a stale closure would keep suppressing (or applying) the default.
+  const heavyModeTouched = useRef(false)
   const [heavyKey, setHeavyKey] = useState('')
-  const [heavyHealth, setHeavyHealth] = useState<HeavyHealthView | null>(null)
+  const [heavyStatus, setHeavyStatus] = useState<HeavyStatusView | null>(null)
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
-  const [heavyPlatform, setHeavyPlatform] = useState<string | undefined>(undefined)
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
@@ -77,12 +80,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const heavy: HeavyProviderManifest | undefined = selected !== 'empty' && selected !== null ? selected.heavy : undefined
   const heavyUnsupported = heavy?.unsupported
 
-  const refreshHeavyHealth = (manifest: HeavyProviderManifest) => {
+  const refreshHeavyStatus = (manifest: HeavyProviderManifest) => {
     setHeavyChecking(true)
     void heavyApi.status(manifest.id).then((result) => {
       if (result.ok) {
-        setHeavyHealth(result.value.health)
-        setHeavyPlatform(result.value.platform)
+        setHeavyStatus(result.value)
+        // Nothing answers → offer the install paths first; a manual mode
+        // choice always wins over this default.
+        if (result.value.detectedEndpoint === undefined && !heavyModeTouched.current) setHeavyMode('local')
       }
       setHeavyChecking(false)
     })
@@ -91,11 +96,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const handleSelect = (tpl: ProviderTemplate | 'empty') => {
     setSelected(tpl)
     setError(null)
-    setHeavyHealth(null)
+    setHeavyStatus(null)
     setHeavyJob(null)
     setHeavyKey('')
     setHeavyMode('reuse')
-    setHeavyPlatform(undefined)
+    heavyModeTouched.current = false
     if (tpl === 'empty') {
       setProviderId(uniqueId('provider', taken))
       setDisplayName('New Provider')
@@ -109,7 +114,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setProtocol(protocols.includes(tpl.protocol) ? tpl.protocol : protocols[0] || tpl.protocol)
     setBaseURL(tpl.baseURL)
     setApiKey('')
-    if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyHealth(tpl.heavy)
+    if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyStatus(tpl.heavy)
   }
 
   const handleBack = () => {
@@ -134,7 +139,6 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         setError(`${result.value.blocked.reason} (${result.value.blocked.plannedWith})`)
         return
       }
-      if (result.value.health !== undefined) setHeavyHealth(result.value.health)
       onClose(true)
       return
     }
@@ -309,16 +313,19 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
           <div className={styles['templateGrid']}>
             {search.trim() === '' ? (
               <>
-                <div className={styles['templateGroupLabel']}>{t('heavyGroup')}</div>
-                {heavyTemplates.map(tpl => (
-                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
-                ))}
                 <div className={styles['templateGroupLabel']}>Popular</div>
                 {popular.map(tpl => (
                   <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
                 ))}
                 <div className={styles['templateGroupLabel']}>All Providers</div>
                 {filtered.filter(tpl => tpl.heavy === undefined).map(tpl => (
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                ))}
+                {/* Self-hosted/heavy providers render in their own labelled
+                    group AFTER the mainstream catalog; search still finds
+                    them through the flat filtered list above. */}
+                <div className={styles['templateGroupLabel']}>{t('heavyGroup')}</div>
+                {heavyTemplates.map(tpl => (
                   <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
                 ))}
               </>
@@ -410,17 +417,16 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
             <HeavyProviderForm
               manifest={heavy}
               mode={heavyMode}
-              onMode={setHeavyMode}
+              onMode={(mode) => { heavyModeTouched.current = true; setHeavyMode(mode) }}
               keyValue={heavyKey}
               onKey={setHeavyKey}
-              health={heavyHealth}
+              status={heavyStatus}
               checking={heavyChecking}
               job={heavyJob}
-              platform={heavyPlatform}
               readOnly={readOnly}
               busy={busy}
               t={t}
-              onCheck={() => refreshHeavyHealth(heavy)}
+              onCheck={() => refreshHeavyStatus(heavy)}
             />
           )}
 
@@ -452,17 +458,18 @@ function HeavyProviderForm(props: {
   onMode: (mode: 'reuse' | 'local') => void
   keyValue: string
   onKey: (value: string) => void
-  health: HeavyHealthView | null
+  status: HeavyStatusView | null
   checking: boolean
   job: HeavyJobView | null
-  platform?: string | undefined
   readOnly: boolean
   busy: boolean
   t: (key: keyof typeof en) => string
   onCheck: () => void
 }): ReactNode {
-  const { manifest, mode, onMode, keyValue, onKey, health, checking, job, platform, readOnly, busy, t, onCheck } = props
+  const { manifest, mode, onMode, keyValue, onKey, status, checking, job, readOnly, busy, t, onCheck } = props
   const disabled = busy || readOnly
+  const platform = status?.platform
+  const health = status?.health ?? null
   const dashboardUrl = mode === 'local' ? manifest.local.dashboardUrl ?? manifest.dashboardUrl : manifest.dashboardUrl
   const [docsOpen, setDocsOpen] = useState(false)
   const install = resolveHeavyInstall(manifest.local, platform ?? '')
@@ -518,6 +525,8 @@ function HeavyProviderForm(props: {
       ) : (
         <>
           <div className={styles['heavySectionLabel']}>{t('heavySummary')}</div>
+          {/* Detection first, then the runtime preflight for the local path. */}
+          <HeavyPreflightNote status={status} t={t} />
           <div className={styles['heavyModes']}>
             <label className={styles['heavyMode']}>
               <input
@@ -529,7 +538,7 @@ function HeavyProviderForm(props: {
               />
               <span>
                 <strong>{t('heavyReuse')}</strong>
-                <em> · {t('heavyRecommended')}</em>
+                {status?.detectedEndpoint !== undefined && <em> · {t('heavyRecommended')}</em>}
                 <span className={styles['heavyModeNote']}>{manifest.reuse.note}</span>
                 <span className={styles['heavyModeNote']}>{manifest.reuse.baseURL}</span>
               </span>

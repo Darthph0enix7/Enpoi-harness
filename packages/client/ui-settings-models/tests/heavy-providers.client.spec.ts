@@ -48,10 +48,12 @@ it('antigravity never declares a DSH key pool and is not keyless', () => {
   expect(manifest?.protocol).toBe('anthropic-messages')
 })
 
-it('freellmapi reuse points at the server gateway, local at loopback', () => {
+it('freellmapi defaults to the loopback endpoint in both modes', () => {
   const manifest = heavyProviderManifest('freellmapi')
-  expect(manifest?.reuse.baseURL).toBe('http://100.122.163.25:3002/v1')
+  expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:3002/v1')
   expect(manifest?.local.baseURL).toBe('http://127.0.0.1:3002/v1')
+  expect(manifest?.defaultPort).toBe(3002)
+  expect(manifest?.reuse.label).toBe('Use a detected instance')
   expect(manifest?.removal.steps.map(step => step.command).join('\n')).toContain('docker compose down -v')
 })
 
@@ -73,10 +75,10 @@ it('selects platform-keyed installs and falls back to the Docker path', () => {
   expect(unknown.steps[0]!.command).toContain('git clone')
 })
 
-it('dashboard URLs cover both modes and deduplicate', () => {
+it('dashboard URLs cover both modes and deduplicate to the loopback dashboard', () => {
   const manifest = heavyProviderManifest('freellmapi')!
-  expect(heavyDashboardUrls(manifest)).toEqual(['http://100.122.163.25:3002', 'http://127.0.0.1:3002'])
-  expect(heavyDashboardUrls(manifest, 'reuse')).toEqual(['http://100.122.163.25:3002'])
+  expect(heavyDashboardUrls(manifest)).toEqual(['http://127.0.0.1:3002'])
+  expect(heavyDashboardUrls(manifest, 'reuse')).toEqual(['http://127.0.0.1:3002'])
   expect(heavyDashboardUrls(manifest, 'local')).toEqual(['http://127.0.0.1:3002'])
   expect(providerDashboardUrls('freellmapi')).toEqual(heavyDashboardUrls(manifest))
   // An ordinary API provider with no declared console yields no fake URL.

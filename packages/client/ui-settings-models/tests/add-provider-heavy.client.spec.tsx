@@ -48,7 +48,15 @@ function stubHeavyFetch(answers: Record<string, unknown>): { methods: string[] }
     methods.push(body.method)
     if (body.method === 'enpoiHeavy.manifests') return envelope({ items: [], problems: [] })
     if (body.method === 'enpoiHeavy.status') {
-      return envelope(answers.status ?? { id: 'x', configured: false, health: { ok: true, status: 200, checkedAt: 1 } })
+      return envelope(answers.status ?? {
+        id: 'x',
+        configured: false,
+        health: { ok: true, status: 200, checkedAt: 1 },
+        detectedPort: 3002,
+        detectedEndpoint: 'http://127.0.0.1:3002/v1',
+        runtime: { docker: true, podman: false },
+        preflight: { path: 'detected', label: 'Use the detected instance', missing: [], requires: [] },
+      })
     }
     if (body.method === 'enpoiHeavy.reuse') return envelope(answers.reuse ?? { ok: true, health: { ok: true, status: 200, checkedAt: 1 } })
     if (body.method === 'enpoiHeavy.install') return envelope(answers.install ?? { ok: true, job: { id: 'x', kind: 'install', state: 'running', stage: 'Clone', stageIndex: 0, stageCount: 4, pct: 10, logTail: '', startedAt: 1 } })
@@ -72,6 +80,59 @@ it('lists the heavy presets with a Heavy badge and surfaces quirks and mode choi
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toHaveProperty('checked', true)
+  // An answering local instance is offered first, and the mode is recommended.
+  await waitFor(() => {
+    expect(screen.getByText(en.heavyDetectedOffer.replace('{endpoint}', 'http://127.0.0.1:3002/v1'))).toBeTruthy()
+  })
+})
+
+it('preselects the install path and names missing requirements when nothing answers', async () => {
+  stubHeavyFetch({ status: {
+    id: 'x',
+    configured: false,
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
+    runtime: { docker: false, podman: false },
+    preflight: {
+      path: 'unsupported',
+      label: 'Install locally (vendor one-liner, Docker)',
+      missing: ['Docker Engine + Compose (or Podman)'],
+      requires: ['docker'],
+    },
+  } })
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  await waitFor(() => {
+    expect(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) })).toHaveProperty('checked', true)
+  })
+  expect(screen.getByText(
+    en.heavyPreflightMissing.replace('{missing}', 'Docker Engine + Compose (or Podman)'),
+  )).toBeTruthy()
+  // The local mode lists the platform's install steps.
+  expect(screen.getByText(en.heavyInstallSteps)).toBeTruthy()
+})
+
+it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and search still finds it', () => {
+  stubHeavyFetch({})
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  const popular = screen.getByText('Popular')
+  const all = screen.getByText('All Providers')
+  const heavy = screen.getByText(en.heavyGroup)
+  expect(en.heavyGroup).toBe('Self-hosted / heavy')
+  const follows = (first: HTMLElement, second: HTMLElement): boolean =>
+    (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+  expect(follows(popular, all)).toBe(true)
+  expect(follows(all, heavy)).toBe(true)
+
+  // The heavy row sits inside its group, after the All Providers label.
+  expect(follows(all, screen.getByText('FreeLLMAPI'))).toBe(true)
+
+  // Search still finds heavy providers through the flat filtered list.
+  fireEvent.change(screen.getByPlaceholderText(/Search 212 providers/), { target: { value: 'freellmapi' } })
+  expect(screen.getByText('FreeLLMAPI')).toBeTruthy()
+  expect(screen.queryByText(en.heavyGroup)).toBeNull()
 })
 
 it('reuse mode writes the route through the host and closes', async () => {

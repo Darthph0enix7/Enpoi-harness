@@ -22,23 +22,18 @@ type Translate = (key: keyof typeof en) => string
 /** One dashboard link with its role label. */
 interface DashboardEntry {
   url: string
-  label: 'heavyDashboardServer' | 'heavyDashboardLocal'
+  label: 'heavyDashboardLocal'
 }
 
-/** Dashboard entries for a heavy provider, in display order. */
+/** Dashboard entries for a heavy provider, in display order (loopback-first). */
 function dashboardEntries(manifest: HeavyProviderManifest, mode?: 'reuse' | 'local'): DashboardEntry[] {
-  const localUrl = manifest.local.dashboardUrl
-  if (mode === 'reuse') {
-    return manifest.dashboardUrl === undefined ? [] : [{ url: manifest.dashboardUrl, label: 'heavyDashboardServer' }]
-  }
-  if (mode === 'local') {
-    const url = localUrl ?? manifest.dashboardUrl
-    if (url === undefined) return []
-    return [{ url, label: localUrl === undefined ? 'heavyDashboardServer' : 'heavyDashboardLocal' }]
-  }
+  const detectedUrl = manifest.dashboardUrl
+  const localUrl = manifest.local.dashboardUrl ?? detectedUrl
   const entries: DashboardEntry[] = []
-  if (manifest.dashboardUrl !== undefined) entries.push({ url: manifest.dashboardUrl, label: 'heavyDashboardServer' })
-  if (localUrl !== undefined && localUrl !== manifest.dashboardUrl) entries.push({ url: localUrl, label: 'heavyDashboardLocal' })
+  if (mode !== 'local' && detectedUrl !== undefined) entries.push({ url: detectedUrl, label: 'heavyDashboardLocal' })
+  if (mode !== 'reuse' && localUrl !== undefined && localUrl !== detectedUrl) {
+    entries.push({ url: localUrl, label: 'heavyDashboardLocal' })
+  }
   return entries
 }
 
@@ -79,6 +74,38 @@ export function useHeavyStatus(
     })
   }, [providerId])
   return { status, checking, refresh }
+}
+
+/**
+ * The runtime preflight / detection offer line: an answering local instance
+ * first ("Running at … — use it"), else the platform's best install path with
+ * its Docker/Podman requirement, else the exact missing dependency.
+ */
+export function HeavyPreflightNote({ status, t }: { status: HeavyStatusView | null; t: Translate }): ReactNode {
+  if (status === null) return null
+  if (status.detectedEndpoint !== undefined) {
+    return (
+      <p className={styles['heavyPreflight']} data-state="detected">
+        {t('heavyDetectedOffer').replace('{endpoint}', status.detectedEndpoint)}
+      </p>
+    )
+  }
+  const preflight = status.preflight
+  if (preflight === undefined) return null
+  if (preflight.path === 'unsupported') {
+    return (
+      <p className={styles['heavyPreflight']} data-state="missing">
+        {t('heavyPreflightMissing').replace('{missing}', preflight.missing.join(', '))}
+      </p>
+    )
+  }
+  return (
+    <p className={styles['heavyPreflight']} data-state="ready">
+      {t('heavyPreflightBest').replace('{label}', preflight.label)}
+      {preflight.requires.includes('docker') ? ` · ${t('heavyRequiresDocker')}` : ''}
+      {preflight.requires.includes('podman') ? ` · ${t('heavyRequiresPodman')}` : ''}
+    </p>
+  )
 }
 
 /** Compact ONLINE indicator for one provider (list row and card head). */

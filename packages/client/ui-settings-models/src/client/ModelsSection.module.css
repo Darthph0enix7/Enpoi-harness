@@ -2389,6 +2389,26 @@ select.input {
   margin-top: 2px;
 }
 
+.sidebarGroupLabel {
+  padding: 10px 10px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.heavyPreflight {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyPreflight[data-state='detected'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
 .heavyOnlineDot {
   width: 7px;
   height: 7px;

@@ -40,6 +40,17 @@ export interface HeavyRouteView {
   models: Array<{ id: string; name?: string }>
 }
 
+/** The host's runtime preflight verdict for one heavy provider. */
+export interface HeavyPreflightView {
+  path: 'detected' | 'vendor-app' | 'docker' | 'podman' | 'node' | 'unsupported'
+  /** Human label of the chosen (or unavailable) path. */
+  label: string
+  /** What is missing when no path is available. */
+  missing: readonly string[]
+  /** Machine prerequisites the chosen path needs. */
+  requires: readonly ('docker' | 'podman')[]
+}
+
 /** `enpoiHeavy.status` result. */
 export interface HeavyStatusView {
   id: string
@@ -48,6 +59,14 @@ export interface HeavyStatusView {
   health: HeavyHealthView
   /** The host platform installs execute on (`process.platform`). */
   platform?: string
+  /** Loopback port an already-running instance answered on, when one did. */
+  detectedPort?: number
+  /** Address detection found; drives the "running at — use it" offer. */
+  detectedEndpoint?: string
+  /** Container runtimes the machine has (fail-soft detection). */
+  runtime?: { docker: boolean; podman: boolean }
+  /** The platform's best local path, detection first. */
+  preflight?: HeavyPreflightView
   unsupported?: { reason: string; plannedWith: string; reuseUrl: string }
   job?: HeavyJobView
 }
@@ -128,7 +147,7 @@ export const heavyApi = {
   manifests: () => heavyRpc<{ items: unknown[]; problems: string[]; platform?: string }>('enpoiHeavy.manifests', {}),
   /** Configured/health/job state for one provider. */
   status: (id: string) => heavyRpc<HeavyStatusView>('enpoiHeavy.status', { request: { id } }),
-  /** Add by reuse: probe the server endpoint, write the route. */
+  /** Add by detected instance: probe localhost, write the route at what answered. */
   reuse: (id: string, key?: string) => heavyRpc<HeavyReuseView>('enpoiHeavy.reuse', { request: { id, ...key === undefined || key === '' ? {} : { key } } }),
   /** Add by local install: start the polled job. */
   install: (id: string, key?: string) => heavyRpc<HeavyInstallView>('enpoiHeavy.install', { request: { id, ...key === undefined || key === '' ? {} : { key } } }),

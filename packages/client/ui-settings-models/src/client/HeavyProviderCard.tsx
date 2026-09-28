@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { heavyProviderManifest } from './heavy-providers.ts'
 import { heavyApi, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
-import { HeavyDashboardLinks, useHeavyStatus } from './HeavyProviderStatus.tsx'
+import { HeavyDashboardLinks, HeavyPreflightNote, useHeavyStatus } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -100,6 +100,8 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
 
       <div className={styles['cardBody']}>
         <p className={styles['heavySummary']}>{manifest.summary}</p>
+        {/* Detection + runtime preflight: offered on mount, fail-soft. */}
+        <HeavyPreflightNote status={status} t={t} />
         {manifest.requiresBrowser.length > 0 && (
           <div className={styles['heavyBadges']}>
             {manifest.requiresBrowser.map(line => (

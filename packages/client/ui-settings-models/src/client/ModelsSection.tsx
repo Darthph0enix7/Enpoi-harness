@@ -130,6 +130,17 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     )
   }, [configuredRows, providerSearch])
 
+  // Heavy/self-hosted rows render in their own clearly-labelled group AFTER
+  // the mainstream providers; the filter above searches both.
+  const mainstreamRows = useMemo(
+    () => filteredRows.filter(row => heavyProviderManifest(row.entry.provider) === undefined),
+    [filteredRows],
+  )
+  const heavyRows = useMemo(
+    () => filteredRows.filter(row => heavyProviderManifest(row.entry.provider) !== undefined),
+    [filteredRows],
+  )
+
   // Selected row
   const selectedRow = useMemo(() => {
     return configuredRows.find(r => r.entry.provider === selectedProviderId) || null
@@ -228,6 +239,54 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
 
   const heavyDeleteManifest = deleteTarget ? heavyProviderManifest(deleteTarget.entry.provider) : undefined
 
+  /** One sidebar row; shared by the mainstream list and the heavy group. */
+  const renderProviderRow = (row: ProviderRow): ReactNode => {
+    const isSelected = row.entry.provider === selectedProviderId
+    const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
+    const modelCount = modelCountByProvider.get(row.entry.provider)
+
+    return (
+      <div
+        key={row.entry.provider}
+        className={`${styles['providerListItem']} ${isSelected ? styles['providerListItemActive'] : ''}`}
+        role="button"
+        tabIndex={0}
+        // 0ms optimistic: synchronous state switch, no await before DOM update
+        onClick={() => setSelectedProviderId(row.entry.provider)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
+        }}
+      >
+        <span
+          className={`${styles['providerStatusDot']} ${
+            isConfigured ? styles['statusDotGreen'] : styles['statusDotYellow']
+          }`}
+          title={isConfigured ? t('providerConnected') : t('providerMissingKey')}
+        />
+
+        <div className={styles['providerListInfo']}>
+          <div className={styles['providerListNameRow']}>
+            <span className={styles['providerListName']}>{row.entry.displayName}</span>
+            {row.entry.declared && <span className={styles['customTagSmall']}>{t('customTag')}</span>}
+          </div>
+          <span className={styles['providerListSlug']}>{row.entry.provider}</span>
+          {/* Heavy routes always show their dashboard URL(s) and the cached
+                endpoint state, in either mode. */}
+          {heavyProviderManifest(row.entry.provider) !== undefined && (
+            <span className={styles['heavyRowMeta']}>
+              <HeavyStatusDot providerId={row.entry.provider} t={t} />
+              <HeavyDashboardLinks providerId={row.entry.provider} compact t={t} />
+            </span>
+          )}
+        </div>
+
+        {modelCount !== undefined && (
+          <span className={styles['providerModelCountPill']}>{modelCount}</span>
+        )}
+      </div>
+    )
+  }
+
   if (state.status === 'loading' && state.rows.length === 0) {
     return (
       <div className={styles['loadingState']}>
@@ -275,52 +334,15 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
             {filteredRows.length === 0 ? (
               <div className={styles['emptySidebar']}>{t('providersEmpty')}</div>
             ) : (
-              filteredRows.map((row) => {
-                const isSelected = row.entry.provider === selectedProviderId
-                const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
-                const modelCount = modelCountByProvider.get(row.entry.provider)
-
-                return (
-                  <div
-                    key={row.entry.provider}
-                    className={`${styles['providerListItem']} ${isSelected ? styles['providerListItemActive'] : ''}`}
-                    role="button"
-                    tabIndex={0}
-                    // 0ms optimistic: synchronous state switch, no await before DOM update
-                    onClick={() => setSelectedProviderId(row.entry.provider)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
-                    }}
-                  >
-                    <span
-                      className={`${styles['providerStatusDot']} ${
-                        isConfigured ? styles['statusDotGreen'] : styles['statusDotYellow']
-                      }`}
-                      title={isConfigured ? t('providerConnected') : t('providerMissingKey')}
-                    />
-
-                    <div className={styles['providerListInfo']}>
-                      <div className={styles['providerListNameRow']}>
-                        <span className={styles['providerListName']}>{row.entry.displayName}</span>
-                        {row.entry.declared && <span className={styles['customTagSmall']}>{t('customTag')}</span>}
-                      </div>
-                      <span className={styles['providerListSlug']}>{row.entry.provider}</span>
-                      {/* Heavy routes always show their dashboard URL(s) and
-                            the cached endpoint state, in either mode. */}
-                      {heavyProviderManifest(row.entry.provider) !== undefined && (
-                        <span className={styles['heavyRowMeta']}>
-                          <HeavyStatusDot providerId={row.entry.provider} t={t} />
-                          <HeavyDashboardLinks providerId={row.entry.provider} compact t={t} />
-                        </span>
-                      )}
-                    </div>
-
-                    {modelCount !== undefined && (
-                      <span className={styles['providerModelCountPill']}>{modelCount}</span>
-                    )}
-                  </div>
-                )
-              })
+              <>
+                {mainstreamRows.map(renderProviderRow)}
+                {/* Self-hosted/heavy providers get their own labelled group
+                    AFTER the mainstream list — not first, not buried last. */}
+                {heavyRows.length > 0 && (
+                  <div className={styles['sidebarGroupLabel']}>{t('heavyGroup')}</div>
+                )}
+                {heavyRows.map(renderProviderRow)}
+              </>
             )}
           </div>
 
