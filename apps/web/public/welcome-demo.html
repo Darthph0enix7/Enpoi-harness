@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <style data-dsh-brand="dark-boot">:root{color-scheme:dark}body{background-color:#071321;--dsh-boot-bg:#071321}</style>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#071321" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Enpoi Harness" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="./favicon-dark.svg" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" media="(prefers-color-scheme: light)" />
+    <title>Welcome demo — Enpoi Harness</title>
+    <!-- Real frozen-skin tokens (summer-liquid-glass 1.0.0-frozen), then the demo's own styling. -->
+    <link rel="stylesheet" href="./welcome-demo/skin-tokens.css" />
+    <link rel="stylesheet" href="./welcome-demo/demo.css" />
+  </head>
+  <body data-ds-dark-theme>
+    <script data-dsh-brand="dark-boot-script">
+      document.documentElement.dataset.dsThemeSource = 'dark'
+    </script>
+
+    <!-- Placeholder app chrome. Decorative: the tour spotlights these regions and nothing here is real. -->
+    <div class="app" aria-hidden="true">
+      <div class="app-rail">
+        <span class="rail-dot brand"></span>
+        <span class="rail-ico" title="Chat">◫</span>
+        <span class="rail-ico" title="Files">▤</span>
+        <span class="rail-ico" title="Terminal">▸_</span>
+        <span class="rail-ico" title="Plan">◈</span>
+      </div>
+
+      <div class="app-sidebar">
+        <div class="app-brand"><span class="brand-mark"></span><span>Enpoi Harness</span></div>
+        <button class="app-new" type="button" tabindex="-1">＋ New session</button>
+        <div class="app-group">Panels</div>
+        <div class="app-row" data-spot="plugins"><span class="row-ico">▣</span>Plugins</div>
+        <div class="app-row"><span class="row-ico">☰</span>Tasks</div>
+        <div class="app-group">Sessions</div>
+        <div class="app-row dim">Provider research</div>
+        <div class="app-row dim">Refactor the build</div>
+        <div class="app-row dim">Movie night</div>
+        <div class="app-foot">
+          <div class="app-row" data-spot="context"><span class="row-ico">◎</span>Context Dashboard</div>
+          <div class="app-row" data-spot="settings"><span class="row-ico">⚙</span>Settings</div>
+        </div>
+      </div>
+
+      <div class="app-convo">
+        <div class="app-top"><span class="app-tab on">Chat</span><span class="app-tab">Trajectory</span><span class="app-tab">Watchtower</span></div>
+        <div class="app-thread">
+          <div class="app-msg user">Hello — what can you do?</div>
+          <div class="app-msg ai">I can read files, run tools, and delegate work to subagents. Ask me to fix something.</div>
+        </div>
+        <div class="app-composer" data-spot="composer">
+          <div class="chip accent">orchestrator</div>
+          <div class="chip">workspace-write</div>
+          <div class="chip">kilo-auto/free</div>
+          <div class="chip plan">/plan</div>
+          <div class="app-send">➤</div>
+        </div>
+      </div>
+
+      <div class="app-rpanel">
+        <div class="rail-ico">◧</div>
+        <div class="rail-ico">⌸</div>
+        <div class="rail-ico">⎋</div>
+        <div class="rp-title">Right panel</div>
+        <div class="rp-line"></div>
+        <div class="rp-line short"></div>
+        <div class="rp-line"></div>
+        <div class="rp-line short"></div>
+      </div>
+    </div>
+
+    <div class="stage-dim" id="stageDim"></div>
+
+    <!-- ── Top bar ─────────────────────────────────────────────────────────── -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand-mark"></span>
+        <span class="topbar-title">Enpoi Harness</span>
+        <span class="pill">Welcome demo</span>
+        <span class="pill warn-pill" title="This page is standalone: it reads and writes nothing.">DEMO · nothing is saved</span>
+      </div>
+      <div class="topbar-right">
+        <span class="step-count" id="stepCount" aria-hidden="true">Step 1 of 7</span>
+        <button class="btn ghost small" id="btnHelp" type="button">Keys <span class="kbd-inline">?</span></button>
+        <button class="btn ghost small" id="btnResetTop" type="button">Reset</button>
+      </div>
+    </header>
+
+    <noscript><div class="noscript">This demo needs JavaScript — the harness itself does not.</div></noscript>
+
+    <!-- ── Wizard ──────────────────────────────────────────────────────────── -->
+    <main class="wizard" id="wizard" aria-label="First-run welcome demo">
+      <nav class="wizard-rail glass" aria-label="Setup steps">
+        <ol id="stepList">
+          <li data-jump="1"><button type="button"><span class="idx">1</span><span class="lbl">Welcome</span></button></li>
+          <li data-jump="2"><button type="button"><span class="idx">2</span><span class="lbl">Security &amp; access</span></button></li>
+          <li data-jump="3"><button type="button"><span class="idx">3</span><span class="lbl">First provider</span></button></li>
+          <li data-jump="4"><button type="button"><span class="idx">4</span><span class="lbl">Intelligence</span></button></li>
+          <li data-jump="5"><button type="button"><span class="idx">5</span><span class="lbl">The tour</span></button></li>
+          <li data-jump="6"><button type="button"><span class="idx">6</span><span class="lbl">Agents</span></button></li>
+          <li data-jump="7"><button type="button"><span class="idx">7</span><span class="lbl">Done</span></button></li>
+        </ol>
+      </nav>
+
+      <div class="panel glass">
+        <div class="panel-scroll" id="panelScroll">
+          <!-- 1 ─ Welcome ───────────────────────────────────────────────────── -->
+          <section class="step" data-step="1">
+            <p class="eyebrow">Step 1 · Welcome</p>
+            <h1 tabindex="-1">Welcome to Enpoi Harness</h1>
+            <p class="lead">A local AI workspace. It runs on this machine, talks only to the providers you choose, and keeps every session as a file you own.</p>
+            <ul class="cards">
+              <li class="card"><strong>Chat, tools, background jobs — one window.</strong><span>Ask in plain language; it reads files, runs commands and delegates to helpers.</span></li>
+              <li class="card"><strong>Local first.</strong><span>Nothing is sent anywhere until you pick a provider.</span></li>
+              <li class="card"><strong>Changeable and skippable.</strong><span>Every choice here can be revisited later — nothing is locked in.</span></li>
+            </ul>
+            <p class="fineprint">This page is a self-contained demo: it reads and writes no settings and touches nothing on disk.</p>
+            <div class="actions">
+              <button class="btn primary" data-next>Set up in 7 short steps <span class="arrow">→</span></button>
+              <button class="btn ghost" data-skip-all>Skip the tour</button>
+            </div>
+          </section>
+
+          <!-- 2 ─ Security & access ─────────────────────────────────────────── -->
+          <section class="step" data-step="2" hidden>
+            <p class="eyebrow">Step 2 · Security &amp; access</p>
+            <h1 tabindex="-1">Where it listens, and who can reach it</h1>
+            <div class="cards two">
+              <div class="card">
+                <strong>Loopback by default</strong>
+                <span>The web interface binds to <code>127.0.0.1</code>. Only this machine can open it. Binding <code>0.0.0.0</code> is a deliberate choice and brings no TLS, password or origin policy of its own.</span>
+              </div>
+              <div class="card">
+                <strong>Trusted-network model</strong>
+                <span>There is no password by default. Anyone who can reach the port has your access. To use it from another device, expose it only inside a trusted private network (VPN, Tailscale, LAN you control) — never a bare public port.</span>
+              </div>
+            </div>
+            <p class="subhead">Sandbox mode <span class="subnote">— how much agents may do without asking</span></p>
+            <div class="radio-list" id="sandboxList" role="radiogroup" aria-label="Sandbox mode">
+              <button class="radio" type="button" role="radio" aria-checked="false" data-mode="read-only">
+                <span class="radio-dot"></span>
+                <span><strong>Read-only</strong><em>Inspect files; edits and shell commands are denied.</em></span>
+              </button>
+              <button class="radio" type="button" role="radio" aria-checked="true" data-mode="workspace-write">
+                <span class="radio-dot"></span>
+                <span><strong>Workspace write <span class="pill tiny">default</span></strong><em>Write inside the workspace; wider actions ask first.</em></span>
+              </button>
+              <button class="radio" type="button" role="radio" aria-checked="false" data-mode="danger-full-access">
+                <span class="radio-dot"></span>
+                <span><strong>Full access</strong><em>Everything allowed, no prompts. Choose deliberately.</em></span>
+              </button>
+            </div>
+            <p class="fineprint">Changeable per session later — the composer's access-mode switch.</p>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip step</button>
+              <button class="btn primary" data-next>Continue <span class="arrow">→</span></button>
+            </div>
+          </section>
+
+          <!-- 3 ─ First provider — the real Add Provider screen ─────────────── -->
+          <section class="step" data-step="3" hidden>
+            <p class="eyebrow">Step 3 · First provider</p>
+            <h1 tabindex="-1">Add a provider — the real screen</h1>
+            <p class="lead">The real Add Provider screen: catalogue first, then the route form.</p>
+
+            <div class="pmodal" id="pModal" aria-label="Add model provider — demo mirror">
+              <div class="pmodal-head">
+                <span class="pmodal-title" id="pModalTitle">Add model provider</span>
+                <span class="pmodal-close" aria-hidden="true">✕</span>
+              </div>
+
+              <div class="pmodal-body" id="pModalBody">
+                <!-- View 1 — the template picker (the modal's first view) -->
+                <div class="pview" data-pview="picker">
+                  <div class="ptoolbar">
+                    <span class="psearch"><span class="psearch-ico" aria-hidden="true">⌕</span><span class="psearch-ph">Search 212 providers (OpenAI, Anthropic, Gemini, Ollama...)</span></span>
+                    <span class="pempty">Empty Provider</span>
+                  </div>
+                  <div class="pgrid">
+                    <div class="pgroup">Popular</div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="opencode"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">OpenCode Zen</span><span class="pid">opencode</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="opencode-go"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">OpenCode Go</span><span class="pid">opencode-go</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="anthropic"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Anthropic</span><span class="pid">anthropic</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="github-copilot"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">GitHub Copilot</span><span class="pid">github-copilot</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="openai"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">OpenAI</span><span class="pid">openai</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="google"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Google</span><span class="pid">google</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="openrouter"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">OpenRouter</span><span class="pid">openrouter</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="vercel"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Vercel AI Gateway</span><span class="pid">vercel</span></span></div>
+                    <div class="pgroup">All Providers</div>
+                    <div class="pcard preselected" role="button" tabindex="-1" data-provider="kilo"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Kilo Gateway</span><span class="pid">kilo</span></span><span class="pcheck" aria-hidden="true">✓</span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-provider="deepseek"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">DeepSeek</span><span class="pid">deepseek</span></span></div>
+                    <div class="pgroup">Self-hosted / heavy</div>
+                    <div class="pcard" role="button" tabindex="-1" data-heavy="freellmapi"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">FreeLLMAPI</span><span class="pid">freellmapi</span><span class="pbadge">Listed — add to configure</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-heavy="antigravity"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Antigravity Proxy</span><span class="pid">antigravity</span><span class="pbadge">Listed — add to configure</span></span></div>
+                    <div class="pcard" role="button" tabindex="-1" data-heavy="commandcode"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Command Code (keypool)</span><span class="pid">commandcode</span><span class="pbadge">Listed — add to configure</span></span></div>
+                  </div>
+                </div>
+
+                <!-- View 2 — the Kilo route form (pre-selected template) -->
+                <div class="pview" data-pview="form" hidden>
+                  <div class="pfields">
+                    <label class="pfield"><span class="plabel">Display Name</span><input class="pinput" id="pDisplayName" type="text" value="Kilo Gateway" tabindex="-1" /></label>
+                    <div class="prow">
+                      <label class="pfield"><span class="plabel">Provider ID (slug)</span><input class="pinput" id="pProviderId" type="text" value="kilo" tabindex="-1" /></label>
+                      <label class="pfield"><span class="plabel">API Protocol</span><select class="pinput" id="pProtocol" tabindex="-1"><option>openai-completions</option><option>openai-responses</option><option>anthropic-messages</option></select></label>
+                    </div>
+                    <label class="pfield"><span class="plabel">Base URL / Endpoint</span><input class="pinput" id="pBaseUrl" type="text" value="https://api.kilo.ai/api/gateway" tabindex="-1" /></label>
+                    <label class="pfield"><span class="plabel">API Key</span><input class="pinput" id="pApiKey" type="password" value="" placeholder="No key required — leave empty for the anonymous free tier" tabindex="-1" /></label>
+                    <div class="ppreset">
+                      <span class="ppreset-item">Env: <span id="pEnv">KILO_API_KEY</span></span>
+                      <span class="ppreset-item" id="pKeylessHint">No key required — anonymous free tier</span>
+                      <a class="ppreset-item pdoc" id="pDoc" href="https://kilo.ai" target="_blank" rel="noreferrer" tabindex="-1">Docs ↗</a>
+                    </div>
+                  </div>
+                  <div class="presult" id="pResult" hidden>
+                    <div class="pline" id="pDiscovering" hidden><span class="spinner"></span> Discovering models…</div>
+                    <div class="pline ok" id="pDiscovered" hidden>✓ Models discovered: <strong>5</strong> — written to the route.</div>
+                    <div class="pline ok" id="pTestOk" hidden>✓ Test call succeeded <span class="dim">· 0.8s · kilo-auto/free</span></div>
+                    <div class="bubble" id="pTestBubble" hidden>Ready — running free on the Kilo Gateway.</div>
+                  </div>
+                </div>
+
+                <!-- View 3 — heavy-provider form (FreeLLMAPI worked example) -->
+                <div class="pview" data-pview="heavy" hidden>
+                  <p class="ph-summary">Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.</p>
+                  <div class="ph-meta">
+                    <a class="plink" href="http://127.0.0.1:3002" target="_blank" rel="noreferrer" tabindex="-1">Dashboard ↗</a>
+                    <a class="plink" href="https://freellmapi.co" target="_blank" rel="noreferrer" tabindex="-1">Docs ↗</a>
+                    <span class="ph-health" data-ok="true" id="phHealth">Healthy · 200</span>
+                    <button class="plink" type="button" id="phCheck">Check now</button>
+                  </div>
+                  <div class="ph-label">Quirks</div>
+                  <ul class="ph-list">
+                    <li>Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path</li>
+                    <li>First-run setup code and password-reset code appear only in <code>docker compose logs</code>; upstream provider keys are added on the web dashboard</li>
+                    <li>Unified key is the only client auth — never expose this port beyond the local machine</li>
+                    <li>Losing <code>ENCRYPTION_KEY</code> (in <code>~/freellmapi/.env</code>) makes every stored upstream key unrecoverable</li>
+                    <li>The free-tier catalog is a monthly snapshot; <code>/v1/models</code> can list models no key serves</li>
+                    <li>A missing bind-mounted JSON file is created as a directory by Docker → boot loop</li>
+                  </ul>
+                  <div class="ph-label">How to add</div>
+                  <p class="ph-preflight" data-state="detected">Running at http://127.0.0.1:3002 — use it</p>
+                  <div class="ph-modes">
+                    <div class="ph-mode on">
+                      <span class="ph-radio" aria-hidden="true"></span>
+                      <span><strong>Use a detected instance</strong><em> · Recommended</em>
+                        <span class="ph-note">Zero install: uses a FreeLLMAPI instance already running on this device.</span>
+                        <span class="ph-note code">http://127.0.0.1:3002/v1</span>
+                      </span>
+                    </div>
+                    <div class="ph-mode">
+                      <span class="ph-radio" aria-hidden="true"></span>
+                      <span><strong>Install locally</strong>
+                        <span class="ph-note">Dependencies: Docker Engine + Compose · Footprint: ~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU</span>
+                        <span class="ph-note code">http://127.0.0.1:3002/v1</span>
+                      </span>
+                    </div>
+                  </div>
+                  <div class="ph-meta"><button class="plink" type="button" id="btnPhDocs">Documentation</button></div>
+                  <label class="pfield"><span class="plabel">Unified key (optional)</span><input class="pinput" type="password" value="" placeholder="Paste the gateway key when you have it — optional" tabindex="-1" /></label>
+                </div>
+
+                <!-- View 4 — HeavyProviderDocs (platform switch + dependency lines) -->
+                <div class="pview" data-pview="heavydocs" hidden>
+                  <div class="ph-docs-head"><strong>FreeLLMAPI · Documentation</strong><span class="ph-tag">openai-completions</span><span class="ph-slug">freellmapi</span></div>
+                  <p class="ph-summary">Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.</p>
+                  <div class="ph-meta">
+                    <a class="plink" href="http://127.0.0.1:3002" target="_blank" rel="noreferrer" tabindex="-1">Local dashboard: http://127.0.0.1:3002 ↗</a>
+                    <a class="plink" href="https://freellmapi.co" target="_blank" rel="noreferrer" tabindex="-1">Docs: https://freellmapi.co ↗</a>
+                  </div>
+                  <div class="ph-label">Authentication</div>
+                  <p class="ph-note">Unified key — one gateway key authenticates every upstream.</p>
+                  <div class="ph-label">Detected instance vs local install</div>
+                  <div class="ph-compare">
+                    <div class="ph-compare-col">
+                      <strong>Use a detected instance</strong>
+                      <span class="ph-note">Zero install: uses a FreeLLMAPI instance already running on this device.</span>
+                      <code>http://127.0.0.1:3002/v1</code>
+                      <span class="ph-note">Health URL: http://127.0.0.1:3002/api/ping</span>
+                      <span class="ph-note">Nothing new is installed on this device — zero added disk, RAM, and GPU.</span>
+                    </div>
+                    <div class="ph-compare-col">
+                      <strong id="phLocalLabel">Install locally (vendor one-liner, Docker)</strong>
+                      <span class="ph-note" id="phLocalDeps">Dependencies: Docker Engine + Compose</span>
+                      <span class="ph-note" id="phLocalDisk">Footprint: ~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU</span>
+                      <code>http://127.0.0.1:3002/v1</code>
+                      <span class="ph-note">Health URL: http://127.0.0.1:3002/api/ping</span>
+                    </div>
+                  </div>
+                  <div class="ph-label">Install platform</div>
+                  <div class="ph-platform">
+                    <button class="ph-plat on" type="button" data-plat="linux">Linux</button>
+                    <button class="ph-plat" type="button" data-plat="darwin">macOS</button>
+                    <button class="ph-plat" type="button" data-plat="win32">Windows</button>
+                    <span class="ph-note">Runs on: linux</span>
+                  </div>
+                  <ol class="ph-steps" id="phSteps">
+                    <li><strong>Run the FreeLLMAPI one-liner</strong><pre>curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash</pre></li>
+                    <li><strong>Wait for the gateway</strong><pre>for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping &gt;/dev/null &amp;&amp; exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1</pre></li>
+                  </ol>
+                  <div class="ph-label">Quirks</div>
+                  <ul class="ph-list">
+                    <li>Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path</li>
+                    <li>First-run setup code and password-reset code appear only in <code>docker compose logs</code>; upstream provider keys are added on the web dashboard</li>
+                    <li>Unified key is the only client auth — never expose this port beyond the local machine</li>
+                    <li>Losing <code>ENCRYPTION_KEY</code> (in <code>~/freellmapi/.env</code>) makes every stored upstream key unrecoverable</li>
+                    <li>The free-tier catalog is a monthly snapshot; <code>/v1/models</code> can list models no key serves</li>
+                    <li>A missing bind-mounted JSON file is created as a directory by Docker → boot loop</li>
+                  </ul>
+                  <div class="ph-label">What gets installed</div>
+                  <ul class="ph-list" id="phInstallList">
+                    <li>Run the FreeLLMAPI one-liner</li>
+                    <li>Wait for the gateway</li>
+                  </ul>
+                  <div class="ph-label">What gets removed</div>
+                  <ul class="ph-list">
+                    <li>Stop the stack and drop its volume</li>
+                    <li>Remove the container image</li>
+                    <li>Remove the clone directory</li>
+                  </ul>
+                  <div class="ph-label">Removal will do all of this:</div>
+                  <ul class="ph-list">
+                    <li><code>docker compose down -v</code> deletes volume freellmapi_freellmapi-data — every upstream key and the unified key die with it</li>
+                    <li><code>~/freellmapi/.env</code> holds ENCRYPTION_KEY; back it up if the volume data is kept anywhere</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="pmodal-foot">
+                <span class="pfoot-note" id="pFootNote">Kilo Gateway is pre-selected for this first run.</span>
+                <span class="pfoot-actions" id="pFootPicker"><span class="btn ghost small" aria-hidden="true">Cancel</span></span>
+                <span class="pfoot-actions" id="pFootForm" hidden>
+                  <button class="btn ghost small" type="button" id="btnPBack">Back</button>
+                  <button class="btn primary small" type="button" id="btnPCreate">Create provider</button>
+                </span>
+                <span class="pfoot-actions" id="pFootHeavy" hidden>
+                  <button class="btn ghost small" type="button" id="btnPHeavyBack">Back</button>
+                  <button class="btn primary small" type="button" id="btnPHeavyCreate">Create provider</button>
+                </span>
+                <span class="pfoot-actions" id="pFootDocs" hidden>
+                  <button class="btn ghost small" type="button" id="btnPDocsBack">Back</button>
+                </span>
+              </div>
+            </div>
+
+            <p class="fineprint">Same flow as Settings → Models — nothing is stored in this demo.</p>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip step</button>
+              <button class="btn primary" data-next>Continue <span class="arrow">→</span></button>
+            </div>
+          </section>
+
+          <!-- 4 ─ Intelligence — on by default ─────────────────────────────── -->
+          <section class="step" data-step="4" hidden>
+            <p class="eyebrow">Step 4 · Intelligence</p>
+            <h1 tabindex="-1">Background helpers — on by default</h1>
+            <p class="lead">Compaction, the Context Keeper and the Whiteboard all land enabled. With free models there is no cost — each one is a single click from off.</p>
+            <div class="warn-banner" role="note">
+              <span class="warn-ico">⚠</span>
+              <span><strong>Compaction is LLM-based</strong> — a model writes the replacement summary. A <strong>mechanical fallback is always on</strong> and makes no model call: it runs when the LLM one is unavailable. The Context Keeper and the summariser seat also use an LLM. When enabled they use the <strong>Kilo free gateway</strong> (free), not your main session model.</span>
+            </div>
+
+            <div class="toggle-card" data-feature="compaction" data-on="true">
+              <div class="toggle-head">
+                <div><strong>Compaction</strong><span class="toggle-sub">On by default. Shortens a session before it outgrows the model's window.</span></div>
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable compaction"><span class="knob"></span><span class="sw-label">On</span></button>
+              </div>
+              <div class="toggle-detail">
+                <p><strong>LLM summary</strong> — a model writes the replacement summary. <strong>Mechanical fallback — always on, no model call:</strong> drops tool-result middles and leaves a stub naming how to recover them; it takes over when the LLM summary is unavailable.</p>
+                <div class="seg" role="radiogroup" aria-label="Compaction mode">
+                  <button class="seg-btn on" type="button" role="radio" aria-checked="true" data-comp="llm">LLM summary</button>
+                  <button class="seg-btn" type="button" role="radio" aria-checked="false" data-comp="mechanical">Mechanical only</button>
+                </div>
+                <div class="llm-chip" data-llm-chip>Uses an LLM · route: Kilo free gateway (free) · not your main session model</div>
+                <div class="llm-chip off" data-mech-chip hidden>No model call · the always-on mechanical fallback runs</div>
+              </div>
+            </div>
+
+            <div class="toggle-card" data-feature="keeper" data-on="true">
+              <div class="toggle-head">
+                <div><strong>Context Keeper</strong><span class="toggle-sub">On by default. Keeps a short State checkpoint of decisions and open threads, refreshed in the background.</span></div>
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable context keeper"><span class="knob"></span><span class="sw-label">On</span></button>
+              </div>
+              <div class="toggle-detail">
+                <p>A restarted session still knows where it was. Without it, sessions simply start from their stored history.</p>
+                <div class="llm-chip">Uses an LLM · route: Kilo free gateway (free) · not your main session model</div>
+              </div>
+            </div>
+
+            <div class="toggle-card" data-feature="whiteboard" data-on="true">
+              <div class="toggle-head">
+                <div><strong>Whiteboard</strong><span class="toggle-sub">On by default. A small pinned scratchpad (paths, rules, facts, tasks) re-injected each turn.</span></div>
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable whiteboard"><span class="knob"></span><span class="sw-label">On</span></button>
+              </div>
+              <div class="toggle-detail">
+                <p>Writes happen inside a normal turn — it stores what you or the agent pin. No separate background model call.</p>
+                <div class="llm-chip off">No extra model call</div>
+              </div>
+            </div>
+
+            <p class="fineprint">Everything here is one click off. Nothing in this step is required for the harness to work.</p>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip step</button>
+              <button class="btn primary" data-next id="btnIntelNext">Continue <span class="arrow">→</span></button>
+            </div>
+          </section>
+
+          <!-- 5 ─ The tour (overlay takes over) ─────────────────────────────── -->
+          <section class="step" data-step="5" hidden>
+            <p class="eyebrow">Step 5 · The tour</p>
+            <h1 tabindex="-1">A quick look around</h1>
+            <p class="lead">Five stops over the interface behind this panel — sidebar, settings, skills &amp; MCP, the composer switches, and the Context Dashboard.</p>
+            <p class="fineprint">Placeholder chrome only: no real app is loaded behind this demo.</p>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip the tour</button>
+              <button class="btn primary" data-start-tour>Start the tour <span class="arrow">→</span></button>
+            </div>
+          </section>
+
+          <!-- 6 ─ Agents ────────────────────────────────────────────────────── -->
+          <section class="step" data-step="6" hidden>
+            <p class="eyebrow">Step 6 · Agents</p>
+            <h1 tabindex="-1">Three helpers, one picker</h1>
+            <p class="lead">Agent presets are chosen in the composer. Each has a different job:</p>
+            <ul class="cards">
+              <li class="card"><strong>Orchestrator</strong><span>Plans, implements and delegates. The default.</span></li>
+              <li class="card"><strong>Sysadmin</strong><span>Runs the machine: services, packages, disks, logs.</span></li>
+              <li class="card"><strong>Creator</strong><span>Repairs and extends the harness itself. Ask it when the app misbehaves.</span></li>
+            </ul>
+            <div class="offer-card">
+              <div class="offer-head"><strong>Analyse this system now?</strong></div>
+              <p>A read-only scan — hardware, OS, services — that runs <strong>in the background</strong> while you finish this tour. The result becomes context your agents can see. Skip it and agents start from a default system context.</p>
+              <div class="actions compact" id="offerActions">
+                <button class="btn primary small" type="button" id="btnAnalyse">Analyse in the background</button>
+                <button class="btn ghost small" type="button" id="btnSkipAnalyse">Skip — use the default context</button>
+              </div>
+              <p class="offer-status" id="offerStatus" hidden></p>
+            </div>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip step</button>
+              <button class="btn primary" data-next>Continue <span class="arrow">→</span></button>
+            </div>
+          </section>
+
+          <!-- 7 ─ Done ──────────────────────────────────────────────────────── -->
+          <section class="step" data-step="7" hidden>
+            <p class="eyebrow">Step 7 · Done</p>
+            <h1 tabindex="-1">That's the setup</h1>
+            <p class="lead" id="doneLead">Nothing here was required. Anything you skipped keeps its default — the harness works either way.</p>
+            <div class="skipped-card" id="skippedCard" hidden>
+              <strong id="skippedTitle">You skipped some steps</strong>
+              <ul id="skippedList"></ul>
+            </div>
+            <div class="card creator-card">
+              <strong>Where the Creator lives</strong>
+              <span>Composer → the agent-preset picker → <strong>Creator</strong>. It is the agent that repairs and extends this harness — ask it anything about the setup.</span>
+            </div>
+            <p class="subhead">Next</p>
+            <ul class="next-list">
+              <li>Start a session — type in the composer.</li>
+              <li>Add providers — Settings → Models.</li>
+              <li>Ask the Creator about anything you skipped.</li>
+            </ul>
+            <div class="actions">
+              <button class="btn ghost" data-back>← Back</button>
+              <button class="btn ghost" data-skip-step>Skip step</button>
+              <button class="btn primary" data-next id="btnFinish">Finish</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="panel-foot">
+          <span class="kbd-hint"><span class="kbd">←</span><span class="kbd">→</span> steps · <span class="kbd">1-7</span> jump · <span class="kbd">Esc</span> skip · <span class="kbd">R</span> reset</span>
+          <span class="foot-progress"><span id="footDots" class="dots"></span></span>
+        </div>
+      </div>
+    </main>
+
+    <!-- ── Spotlight overlay (step 5) ──────────────────────────────────────── -->
+    <div class="spot" id="spot" hidden aria-hidden="false">
+      <div class="spot-hole" id="spotHole"><span class="spot-ring"></span></div>
+      <div class="spot-tip glass" id="spotTip" role="dialog" aria-label="Interface tour">
+        <p class="tip-count" id="tipCount">Stop 1 of 5</p>
+        <h2 id="tipTitle" tabindex="-1">Sessions</h2>
+        <p id="tipBody"></p>
+        <div class="tip-actions">
+          <button class="btn ghost small" type="button" id="tipBack">← Back</button>
+          <button class="btn ghost small" type="button" id="tipSkip">Skip the tour</button>
+          <button class="btn primary small" type="button" id="tipNext">Next stop →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Background analysis dock (step 6) ───────────────────────────────── -->
+    <aside class="dock glass" id="dock" hidden aria-live="polite">
+      <div class="dock-head">
+        <span class="dock-title" id="dockTitle">System analysis · running</span>
+        <span class="pill tiny" id="dockTag">sample data in this demo</span>
+      </div>
+      <ul class="dock-lines" id="dockLines"></ul>
+      <div class="dock-foot" id="dockFoot" hidden>✓ System context ready · 28 threads · 62 GiB RAM · 4 services</div>
+    </aside>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <!-- ── Keyboard help ───────────────────────────────────────────────────── -->
+    <div class="help-mask" id="helpMask" hidden>
+      <div class="help-card glass" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+        <h2>Keyboard</h2>
+        <dl>
+          <dt><span class="kbd">←</span> <span class="kbd">→</span></dt><dd>Previous / next step (within the tour: stop)</dd>
+          <dt><span class="kbd">1</span>–<span class="kbd">7</span></dt><dd>Jump to a step</dd>
+          <dt><span class="kbd">Esc</span></dt><dd>Skip the current step (in the tour: leave it)</dd>
+          <dt><span class="kbd">R</span></dt><dd>Reset the demo</dd>
+          <dt><span class="kbd">?</span></dt><dd>This panel</dd>
+        </dl>
+        <button class="btn primary small" type="button" id="btnHelpClose">Close</button>
+      </div>
+    </div>
+
+    <div class="done-toast" id="doneToast" hidden>
+      <strong>Demo complete.</strong> In the real app this is where the harness opens — sidebar on the left, composer at the bottom.
+      <button class="btn ghost small" type="button" id="btnDoneReset">Replay</button>
+    </div>
+
+    <script src="./welcome-demo/demo.js"></script>
+  </body>
+</html>

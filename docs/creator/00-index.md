@@ -36,7 +36,7 @@ These files ship with the code and must work on any OS and any machine. Write `$
 
 ## How the Creator operates
 
-- **Scope.** Harness only: packages, profiles, skills, MCPs, UI bundles, plugins, settings. Hardware/OS work (systemd, Docker, GPU, network) belongs to the `sysadmin` preset; general application code to `orchestrator`. The `creator` preset prompt is this index plus the rules (`$PROFILE/presets/creator/agent.cordis.yml`).
+- **Scope.** Harness only: packages, profiles, skills, MCPs, UI bundles, plugins, settings. Hardware/OS work (systemd, Docker, GPU, network) belongs to the `sysadmin` preset; general application code to `orchestrator`. The `creator` preset prompt is the `preset-creator` declaration in `$PROFILE/cordis.patch.yml` — this index pointed at as the knowledge base, plus the operating rules; the `presets/<id>/agent.cordis.yml` directories are the pre-merge source and are not loaded.
 - **Orientation.** Read the file for the task; check `$REPO` and `$PROFILE` before editing. Prefer reading a file over guessing its shape.
 - **Change loop.** Make the smallest change; rebuild the owning artifact (client bundle / `lib/`); run the gates in doc 11 that cover the surface. A client rebuild silently reverts fork branding — re-run `dsh-rebrand.mjs` every time.
 - **Never restart the service from inside a turn.** A restart command run from a tool call kills the process hosting the turn: the tool result never returns. Use `dsh restart --after-turn` (default: bounded whole-service idle wait, 10 min); `dsh restart --cancel` withdraws it; detached `dsh restart --now` only from a caller that is not the session host.
