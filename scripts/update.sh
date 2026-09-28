@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# dsh mechanical updater — delegates to the installer engine (single implementation).
-# Invoked by the `dsh` shim as `dsh update [flags]`; runnable directly too.
+# dsh mechanical updater / self-heal / uninstaller — delegates to the installer
+# engine (single implementation).
+# Invoked by the `dsh` shim as `dsh update|repair|uninstall [flags]`; runnable
+# directly too (a bare invocation means update).
 #
 # $DSH_HOME is a user-scoped setting, not a prefix property, and the shim only
 # knows the install prefix. Derive the configured home here — an explicit
@@ -14,14 +16,23 @@ prefix=""
 dsh_home="${DSH_HOME:-}"
 explicit_home=0
 expect_prefix=0
+mode="update"
+argv=()
 for arg in "$@"; do
-  if [ "$expect_prefix" = 1 ]; then prefix="$arg"; expect_prefix=0; continue; fi
+  if [ "$expect_prefix" = 1 ]; then prefix="$arg"; expect_prefix=0; argv+=("$arg"); continue; fi
   case "$arg" in
-    --prefix) expect_prefix=1;;
-    --prefix=*) prefix="${arg#--prefix=}";;
-    --dsh-home|--dsh-home=*) explicit_home=1;;
+    --prefix) expect_prefix=1; argv+=("$arg");;
+    --prefix=*) prefix="${arg#--prefix=}"; argv+=("$arg");;
+    --dsh-home|--dsh-home=*) explicit_home=1; argv+=("$arg");;
+    update|repair|uninstall) mode="$arg";;
+    *) argv+=("$arg");;
   esac
 done
+case "$mode" in
+  repair) mode_flag="--repair";;
+  uninstall) mode_flag="--uninstall";;
+  *) mode_flag="--update";;
+esac
 if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ]; then
   [ -n "$prefix" ] || prefix="$HOME/.dsh"
   state="$prefix/harness/install-state.json"
@@ -30,6 +41,6 @@ if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ]; then
   fi
 fi
 if [ "$explicit_home" = 0 ] && [ -n "$dsh_home" ]; then
-  exec "$HERE/install.sh" --update --dsh-home "$dsh_home" "$@"
+  exec "$HERE/install.sh" "$mode_flag" --dsh-home "$dsh_home" ${argv[@]+"${argv[@]}"}
 fi
-exec "$HERE/install.sh" --update "$@"
+exec "$HERE/install.sh" "$mode_flag" ${argv[@]+"${argv[@]}"}
