@@ -81,8 +81,26 @@ export interface ApprovalRequestEvent {
    * `'allowed-always-broad'`. Absent means the card offers only once/default.
    */
   readonly broadAllow?: { readonly label: string }
+  /**
+   * Presentation-only advisory recommendation for a forwarded ask (Enpoi
+   * forwarded child approvals). The card renders it as its own highlighted
+   * line with the suggestion as a hint; it is NEVER applied automatically and
+   * never persisted in the approval audit events — only a human (or the
+   * session's own standing approval mode) decides. Absent on ordinary asks.
+   */
+  readonly recommendation?: ApprovalRecommendation
   /** Cancellation lifetime of the pending request. */
   readonly signal?: AbortSignal
+}
+
+/** Advisory recommendation line one forwarded approval card renders (never applied automatically). */
+export interface ApprovalRecommendation {
+  /** One short sentence the card shows. */
+  readonly text: string
+  /** Advisory suggestion shown as a hint; the human still answers the card. */
+  readonly suggestion?: 'allow' | 'reject' | 'allow-once'
+  /** Who produced the line: the root-side model, or the forwarder's derived heuristic. */
+  readonly source?: 'model' | 'derived'
 }
 
 declare module '@deepseek-ai/cordis' {

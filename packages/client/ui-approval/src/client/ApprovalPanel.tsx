@@ -15,13 +15,14 @@ export function ApprovalPanel(props: ApprovalComposerProps) {
     ? null
     : props.renderSlot('conversation.approval.detail', { callId: approval.callId })
   const reason = approval.displayReason === undefined ? approval.reason : props.resolveReason(approval.displayReason)
-  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail} t={props.t} />
-}
+  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail}
+    recommendation={approval.recommendation ?? null} t={props.t} />}
 
-function ApprovalFlow({ pending, reason, detail, t }: {
+function ApprovalFlow({ pending, reason, detail, recommendation, t }: {
   pending: PendingApproval
   reason: string | undefined
   detail: ReactNode
+  recommendation: NonNullable<PendingApproval['recommendation']> | null
   t: ApprovalComposerProps['t']
 }) {
   const [answered, setAnswered] = useState(false)
@@ -72,6 +73,15 @@ function ApprovalFlow({ pending, reason, detail, t }: {
           aria-label={t('detail.aria')}
         >
           <div className={css.headline}>{reason ?? t('escalation', { toolName: pending.toolName })}</div>
+          {recommendation !== null && (
+            <div className={css.recommendation} data-approval-recommendation="">
+              <span className={css.recommendationLabel}>{t('recommendation')}</span>
+              <span className={css.recommendationText}>{recommendation.text}</span>
+              {recommendation.suggestion !== undefined && (
+                <span className={css.recommendationHint}>{t('recommendationHint', { suggestion: recommendation.suggestion })}</span>
+              )}
+            </div>
+          )}
           {detail !== null && <div className={css.command}>{detail}</div>}
         </div>
         <div className={css.actionRow}>

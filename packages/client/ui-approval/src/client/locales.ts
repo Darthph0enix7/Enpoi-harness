@@ -9,6 +9,8 @@ export const zh = {
   allowOnce: '允许一次',
   allowAlways: '始终允许',
   allowAll: '全部允许 {label}',
+  recommendation: '建议',
+  recommendationHint: '仅供参考：模型建议 {suggestion}，不会自动执行。',
 } satisfies Record<string, string>
 
 /** Approval dictionary key union. */
@@ -23,4 +25,6 @@ export const en = {
   allowOnce: 'Allow once',
   allowAlways: 'Always allow',
   allowAll: 'Allow all {label}',
+  recommendation: 'Recommendation',
+  recommendationHint: 'Advisory only: the model suggests {suggestion} — it is never applied automatically.',
 } satisfies Record<ApprovalKey, string>

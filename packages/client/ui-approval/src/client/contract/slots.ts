@@ -60,8 +60,24 @@ export interface ApprovalPresentationRequest {
   readonly displayReason?: { readonly en: string; readonly [locale: string]: string }
   /** Broad standing-grant offer projected from the Host waterfall; the card labels its extra action with `label`. */
   readonly broadAllow?: { readonly label: string }
+  /**
+   * Advisory recommendation projected from a forwarded child ask (Enpoi).
+   * Presentation only: the card renders it as its own highlighted line and the
+   * suggestion as a hint; it is NEVER applied automatically.
+   */
+  readonly recommendation?: ApprovalRecommendation
   /** Cancellation projected from the Host waterfall. */
   readonly signal?: AbortSignal
+}
+
+/** Advisory recommendation line a forwarded approval card renders (never applied automatically). */
+export interface ApprovalRecommendation {
+  /** One short sentence the card shows. */
+  readonly text: string
+  /** Advisory suggestion shown as a hint; the human still answers the card. */
+  readonly suggestion?: 'allow' | 'reject' | 'allow-once'
+  /** Who produced the line: the root-side model, or the forwarder's derived heuristic. */
+  readonly source?: 'model' | 'derived'
 }
 
 /** Decisions this interactive Client presentation can return. */
@@ -88,6 +104,8 @@ export class PendingApproval {
   readonly displayReason: ApprovalPresentationRequest['displayReason']
   /** Broad standing-grant offer, when the asker supplied one. */
   readonly broadAllow: ApprovalPresentationRequest['broadAllow']
+  /** Advisory recommendation line, when the asker supplied one (forwarded child asks). */
+  readonly recommendation: ApprovalPresentationRequest['recommendation']
   /** Result returned by the Remote Event listener to the Host waterfall. */
   readonly result: Promise<ApprovalDecision>
 
@@ -111,6 +129,7 @@ export class PendingApproval {
     this.reason = request.reason
     this.displayReason = request.displayReason
     this.broadAllow = request.broadAllow
+    this.recommendation = request.recommendation
     const completion = Promise.withResolvers<ApprovalDecision>()
     this.result = completion.promise
     this.#resolve = completion.resolve

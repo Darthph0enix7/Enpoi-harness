@@ -17,6 +17,7 @@ export type {
   ApprovalDecision,
   ApprovalDetailOwnerProps,
   ApprovalPresentationRequest,
+  ApprovalRecommendation,
   PendingApproval,
 } from './contract/slots.ts'
 export type { ApprovalKey } from './locales.ts'
@@ -50,6 +51,7 @@ async function answerApproval(
     ...(request.reason === undefined ? {} : { reason: request.reason }),
     ...(request.displayReason === undefined ? {} : { displayReason: request.displayReason }),
     ...(request.broadAllow === undefined ? {} : { broadAllow: request.broadAllow }),
+    ...(request.recommendation === undefined ? {} : { recommendation: request.recommendation }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   })
   const completed = Promise.withResolvers<void>()

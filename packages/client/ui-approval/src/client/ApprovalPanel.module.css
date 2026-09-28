@@ -53,6 +53,37 @@
   word-break: break-all;
 }
 
+/* Offer-1 root-side / derived recommendation for a forwarded child ask: its
+   own highlighted line, clearly separate from the provenance headline, with
+   the advisory suggestion as a hint (never an action). */
+.recommendation {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--dsw-alias-state-business-primary);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-state-business-tertiary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.recommendationLabel {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 600;
+}
+
+.recommendationText {
+  color: var(--dsw-alias-label-primary);
+}
+
+.recommendationHint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
 .actionRow {
   display: flex;
   justify-content: flex-end;

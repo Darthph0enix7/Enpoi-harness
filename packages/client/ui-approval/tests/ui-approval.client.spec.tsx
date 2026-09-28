@@ -18,6 +18,7 @@ type ApprovalListener = (
     callId?: string
     reason?: string
     displayReason?: PendingApproval['displayReason']
+    recommendation?: PendingApproval['recommendation']
     signal?: AbortSignal
   },
   next: () => Promise<'unavailable'>,
@@ -328,6 +329,22 @@ describe('approval Remote Event consumer', () => {
     await scope.fiber.dispose()
   })
 
+  it('projects an advisory recommendation onto the pending card', async () => {
+    const bench = await setupPlugin()
+    const scope = createScope(bench.ctx, id('s1'))
+    await scope.fiber.await()
+    const result = bench.listener.call(scope.ctx, {
+      toolName: 'bash',
+      recommendation: { text: 'Safe once.', suggestion: 'allow-once', source: 'model' },
+    }, () => Promise.resolve('unavailable'))
+    const pending = bench.pending.getSnapshot()[0]!
+
+    expect(pending.recommendation).toEqual({ text: 'Safe once.', suggestion: 'allow-once', source: 'model' })
+    await pending.answer('allowed-once')
+    await expect(result).resolves.toBe('allowed-once')
+    await scope.fiber.dispose()
+  })
+
   it('removes stable registrations with the plugin lifetime', async () => {
     const bench = await setupPlugin()
     await bench.ctx.fiber.dispose()
@@ -348,6 +365,8 @@ function panelProps(
     allowOnce: 'Allow once',
     allowAlways: 'Always allow',
     allowAll: 'Allow all {label}',
+    recommendation: 'Recommendation',
+    recommendationHint: 'Advisory only: the model suggests {suggestion}; it is never applied automatically.',
   }
   return {
     matched: pending,
@@ -412,6 +431,33 @@ describe('ApprovalPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Allow all rm' }))
 
     await expect(pending.result).resolves.toBe('allowed-always-broad')
+  })
+
+  it('renders an advisory recommendation as its own highlighted line, never an action', async () => {
+    const pending = new PendingApproval(id('s1'), {
+      toolName: 'bash',
+      reason: 'audit reason',
+      recommendation: { text: 'Runs a plain workspace command.', suggestion: 'allow-once', source: 'model' },
+    })
+    render(<ApprovalPanel {...panelProps(pending)} />)
+
+    const line = document.querySelector('[data-approval-recommendation]')
+    expect(line).not.toBeNull()
+    expect(line?.textContent).toContain('Recommendation')
+    expect(line?.textContent).toContain('Runs a plain workspace command.')
+    expect(line?.textContent).toContain('Advisory only: the model suggests allow-once')
+    // The suggestion is a hint, not an action: no button offers it.
+    const labels = [...document.querySelectorAll('button')].map(button => button.textContent ?? '')
+    expect(labels.some(label => label.includes('allow-once'))).toBe(false)
+
+    await pending.answer('rejected')
+    await expect(pending.result).resolves.toBe('rejected')
+  })
+
+  it('carries no recommendation element on an ordinary ask', () => {
+    const pending = new PendingApproval(id('s1'), { toolName: 'bash' })
+    render(<ApprovalPanel {...panelProps(pending)} />)
+    expect(document.querySelector('[data-approval-recommendation]')).toBeNull()
   })
 
   it('keeps the audit reason intact and follows the UI language for presentation copy', () => {
