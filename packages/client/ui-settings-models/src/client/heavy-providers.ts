@@ -200,11 +200,13 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     dashboardUrl: 'http://127.0.0.1:3002',
     docsUrl: 'https://freellmapi.co',
     defaultPort: 3002,
-    requiresBrowser: [
-      'First-run setup code and password-reset code appear only in `docker compose logs` — a browser flow, not automatable',
-      'Upstream provider keys are added on the web dashboard',
-    ],
+    // Browser badges belong only to account flows that cannot complete without
+    // a browser (antigravity's Google OAuth); FreeLLMAPI's dashboard steps are
+    // ordinary quirks, not an operator-blocking browser requirement.
+    requiresBrowser: [],
     quirks: [
+      'Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path',
+      'First-run setup code and password-reset code appear only in `docker compose logs`; upstream provider keys are added on the web dashboard',
       'Unified key is the only client auth — never expose this port beyond the local machine',
       'Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable',
       'The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves',
@@ -340,6 +342,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
       'Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback — on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated',
     ],
     quirks: [
+      'Local install dependencies: native npm package for Linux/macOS/Windows (Node.js >= 18); Docker is never required',
       'The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route',
       'The console at :8082 has no auth (webuiPassword empty) — trusted networks only',
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED … resets after 46h" is normal',
@@ -408,10 +411,13 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
     // profile must never be written into the llm-pi-ai schema.
     settingsNs: 'commandcode-provider',
-    requiresBrowser: [
-      'Vendor account and quota dashboard live at commandcode.ai (browser)',
-    ],
+    // Browser badges belong only to account flows that cannot complete without
+    // a browser (antigravity's Google OAuth); the vendor dashboard is an
+    // ordinary quirk here, not an operator-blocking browser requirement.
+    requiresBrowser: [],
     quirks: [
+      'Local install dependencies: native provider package + keypool for Linux/macOS/Windows (Node.js 22); Docker is never required',
+      'The vendor account and quota dashboard live at commandcode.ai (browser)',
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
       'DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it',
       'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',
@@ -477,8 +483,70 @@ export function fallbackHeavyManifest(id: string): HeavyProviderManifest | undef
 /** The heavy preset ids, excluded from the provider-sync endpoint set. */
 export const HEAVY_PRESET_IDS: ReadonlySet<string> = new Set(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(manifest => manifest.id))
 
+/** Whether a wire value is a plain JSON object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 /**
- * Structural validation of the manifest table (unit-tested; mirrors the host
+ * Structural validation of ONE manifest entry (unit-tested; mirrors the host
+ * plugin's own check so a drifted table fails fast). Runtime-safe for wire
+ * input: every nested read is guarded, so an unknown payload yields problems
+ * instead of throwing.
+ * @param value - the candidate manifest (typed table entry or wire value).
+ * @returns one message per problem; empty means the entry is complete.
+ */
+export function heavyManifestProblems(value: unknown): string[] {
+  if (!isRecord(value)) return ['entry is not a manifest object']
+  const id = typeof value.id === 'string' && value.id !== '' ? value.id : undefined
+  const where = `manifest "${id ?? '?'}"`
+  const problems: string[] = []
+  if (id === undefined) problems.push(`${where}: id is empty`)
+  for (const field of ['label', 'summary', 'protocol'] as const) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '') problems.push(`${where}: ${field} is empty`)
+  }
+  if (!Number.isInteger(value.defaultPort) || (value.defaultPort as number) < 1 || (value.defaultPort as number) > 65_535) {
+    problems.push(`${where}: defaultPort must be a TCP port`)
+  }
+  const reuse = isRecord(value.reuse) ? value.reuse : undefined
+  const reuseHealth = reuse !== undefined && isRecord(reuse.health) ? reuse.health : undefined
+  if (value.unsupported === undefined && (typeof reuse?.baseURL !== 'string' || reuse.baseURL === '')) {
+    problems.push(`${where}: reuse.baseURL is empty`)
+  }
+  if (typeof reuseHealth?.url !== 'string' || reuseHealth.url === '') problems.push(`${where}: reuse.health.url is empty`)
+  const local = isRecord(value.local) ? value.local : undefined
+  const install = local !== undefined && isRecord(local.install) ? local.install : undefined
+  const variantAt = (key: string): Record<string, unknown> | undefined => {
+    const variant = install?.[key]
+    return isRecord(variant) ? variant : undefined
+  }
+  const variants = [variantAt('default'), variantAt('linux'), variantAt('darwin'), variantAt('win32')]
+  if (value.unsupported === undefined) {
+    if (!Array.isArray(variants[0]?.steps) || variants[0].steps.length === 0) {
+      problems.push(`${where}: local.install.default is empty`)
+    }
+    if (typeof local?.baseURL !== 'string' || local.baseURL === '') problems.push(`${where}: local.baseURL is empty`)
+  }
+  for (const [index, variant] of variants.entries()) {
+    if (variant === undefined) continue
+    if ((!Array.isArray(variant.steps) || variant.steps.length === 0) && value.unsupported === undefined) {
+      problems.push(`${where}: platform install variant ${String(index)} has no steps`)
+    }
+  }
+  const removal = isRecord(value.removal) ? value.removal : undefined
+  if (!Array.isArray(removal?.warnings) || removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
+  const auth = isRecord(value.auth) ? value.auth : undefined
+  if (auth?.kind === 'none' && value.protocol === 'anthropic-messages') {
+    problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`)
+  }
+  if (auth?.kind !== 'none' && (typeof auth?.apiKeyEnv !== 'string' || !/^[A-Z_][A-Z0-9_]*$/.test(auth.apiKeyEnv))) {
+    problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`)
+  }
+  return problems
+}
+
+/**
+ * Structural validation of a manifest table (unit-tested; mirrors the host
  * plugin's own check so a drifted table fails fast).
  * @param manifests - table to check, defaulting to the shipped one.
  * @returns one message per problem; empty means every manifest is complete.
@@ -487,37 +555,9 @@ export function heavyProviderProblems(manifests: readonly HeavyProviderManifest[
   const problems: string[] = []
   const seen = new Set<string>()
   for (const manifest of manifests) {
-    const where = `manifest "${manifest.id}"`
-    if (manifest.id === '') problems.push(`${where}: id is empty`)
-    if (seen.has(manifest.id)) problems.push(`${where}: duplicate id`)
+    problems.push(...heavyManifestProblems(manifest))
+    if (manifest.id !== '' && seen.has(manifest.id)) problems.push(`manifest "${manifest.id}": duplicate id`)
     seen.add(manifest.id)
-    for (const [field, value] of [['label', manifest.label], ['summary', manifest.summary], ['protocol', manifest.protocol]] as const) {
-      if (typeof value !== 'string' || value.trim() === '') problems.push(`${where}: ${field} is empty`)
-    }
-    if (!Number.isInteger(manifest.defaultPort) || manifest.defaultPort < 1 || manifest.defaultPort > 65_535) {
-      problems.push(`${where}: defaultPort must be a TCP port`)
-    }
-    if (manifest.reuse.baseURL === '' && manifest.unsupported === undefined) problems.push(`${where}: reuse.baseURL is empty`)
-    if (manifest.reuse.health.url === '') problems.push(`${where}: reuse.health.url is empty`)
-    const variants = [manifest.local.install.default, manifest.local.install.linux, manifest.local.install.darwin,
-      manifest.local.install.win32]
-    if (manifest.unsupported === undefined) {
-      if (manifest.local.install.default.steps.length === 0) problems.push(`${where}: local.install.default is empty`)
-      if (manifest.local.baseURL === '') problems.push(`${where}: local.baseURL is empty`)
-    }
-    for (const [index, variant] of variants.entries()) {
-      if (variant === undefined) continue
-      if (variant.steps.length === 0 && manifest.unsupported === undefined) {
-        problems.push(`${where}: platform install variant ${String(index)} has no steps`)
-      }
-    }
-    if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
-    if (manifest.auth.kind === 'none' && manifest.protocol === 'anthropic-messages') {
-      problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`)
-    }
-    if (manifest.auth.kind !== 'none' && (manifest.auth.apiKeyEnv === undefined || !/^[A-Z_][A-Z0-9_]*$/.test(manifest.auth.apiKeyEnv))) {
-      problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`)
-    }
   }
   return problems
 }

@@ -69,6 +69,25 @@ it('pre-connection proof: the commandcode row is listed and addable, never block
   console.info(`[heavy-render-proof] pre-connection commandcode: ${quote()}`)
 })
 
+it('browser-badge proof: FreeLLMAPI renders none and its dependency line, Antigravity renders the badge', async () => {
+  stubStatusFailure()
+  render(
+    <AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={t} readOnly={false} onClose={vi.fn()} />,
+  )
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
+  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
+  console.info(`[heavy-render-proof] freellmapi (no badge): ${quote()}`)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+  fireEvent.click(screen.getByText('Antigravity Proxy'))
+  await waitFor(() => { expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0) })
+  expect(screen.getByText(/native npm package for Linux\/macOS\/Windows/)).toBeTruthy()
+  console.info(`[heavy-render-proof] antigravity (badge): ${quote()}`)
+})
+
 it('host-connected proof: the same row renders the host manifest summary', async () => {
   stubStatusFailure()
   bindHostHeavyManifests({

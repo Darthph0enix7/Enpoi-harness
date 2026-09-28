@@ -86,7 +86,10 @@ it('lists the heavy presets with a Heavy badge and surfaces quirks and mode choi
 
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
   expect(screen.getByRole('link', { name: `${en.heavyDashboard} ↗` })).toBeTruthy()
-  expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0)
+  // FreeLLMAPI has no browser-bound account flow: no badge, but the local
+  // dependency line is explicit.
+  expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
+  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toHaveProperty('checked', true)

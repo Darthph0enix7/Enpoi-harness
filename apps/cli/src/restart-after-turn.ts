@@ -7,10 +7,13 @@
  *
  * - `--after-turn` writes a marker at `$DSH_HOME/state/restart-after-turn.json`
  *   naming the session, profile, and unit. The web service watches the marker:
- *   it fires only when the named session is idle (its turn ended), consumes the
- *   marker first, and then restarts the unit detached — the restart happens
- *   between turns, never inside one. A stale marker (past its deadline) is
- *   dropped; a marker left by a crash fires once on the next boot.
+ *   by default it fires only when every live session is idle, up to `--max-wait`
+ *   (10 minutes); past that bound it waits for the named session alone and warns
+ *   which running sessions it stopped waiting for. An explicit `--session`
+ *   selects the per-session scope immediately, and a per-session marker past its
+ *   deadline is dropped. The marker is consumed first, then the unit restarts
+ *   detached — between turns, never inside one; a marker left by a crash fires
+ *   once on the next boot.
  * - `--now` restarts immediately but detached from the caller (a `systemd-run
  *   --user --collect` transient unit on Linux, `launchctl kickstart` on macOS,
  *   `Restart-Service` on Windows), so the caller returns promptly and survives.
@@ -36,8 +39,8 @@ export const DEFAULT_RESTART_UNIT = 'dsh-web.service'
 /** The profile whose watcher acts on a marker unless `--profile` overrides it. */
 export const DEFAULT_RESTART_PROFILE = 'web'
 
-/** A scheduled restart older than this is stale and never fires (default 15 minutes). */
-export const DEFAULT_MAX_WAIT_MS = 15 * 60_000
+/** Bound on the whole-service idle wait (default 10 minutes); past it the marked session alone is awaited. */
+export const DEFAULT_MAX_WAIT_MS = 10 * 60_000
 
 /** The idle-sweep cadence; `turn/end` is the primary trigger, this is the safety net. */
 export const WATCH_INTERVAL_MS = 2_000
@@ -61,7 +64,11 @@ export interface RestartMarker {
   deadline: number
   /** Free-form requester identity for diagnostics (pid, cwd). */
   requestedBy: string
-  /** Fire only when every live session is idle, not just {@link sessionId}. */
+  /**
+   * Fire only when every live session is idle, not just {@link sessionId}.
+   * Past {@link deadline} the bound lapses: the watcher falls back to
+   * {@link sessionId} alone and warns which running sessions it stops waiting for.
+   */
   waitAll: boolean
 }
 
@@ -265,16 +272,19 @@ export const RESTART_USAGE = `Usage: dsh restart [--after-turn | --now | --cance
 
 Safe service restart: it never kills the turn that requested it.
 
-  --after-turn      schedule the restart for when the session's current turn ends;
-                    the web service performs it between turns (never mid-call)
+  --after-turn      schedule the restart for between turns (never mid-call); by
+                    default it waits for whole-service idle, bounded by --max-wait
   --now             restart immediately, detached from this process (systemd-run,
                     launchctl kickstart, or Restart-Service); returns promptly
   --cancel          cancel a scheduled after-turn restart
-  --session <id>    session to wait for (default: $DSH_SESSION_ID)
+  --session <id>    session to wait for (default: $DSH_SESSION_ID); selects the
+                    per-session scope immediately, skipping the wait-all default
   --unit <name>     unit to restart (default: $DSH_RESTART_UNIT or ${DEFAULT_RESTART_UNIT})
   --profile <name>  profile whose web service owns the marker (default: $DSH_PROFILE or ${DEFAULT_RESTART_PROFILE})
-  --max-wait <sec>  drop a scheduled restart never fired within this window (default 900)
-  --wait-all        fire only when every live session is idle, not just --session
+  --max-wait <sec>  bound on the whole-service wait; past it the restart waits
+                    only for --session and warns which sessions it stops waiting
+                    for (default 600)
+  --wait-all        force whole-service idle scope (the --after-turn default)
   --json            machine-readable output
   -h, --help        print this help
 `
@@ -295,10 +305,11 @@ export function parseRestartArgs(
   let nowFlag = false
   let cancel = false
   let sessionId: string | undefined
+  let sessionExplicit = false
   let unit = env.DSH_RESTART_UNIT ?? DEFAULT_RESTART_UNIT
   let profile = env.DSH_PROFILE ?? DEFAULT_RESTART_PROFILE
   let maxWaitMs = DEFAULT_MAX_WAIT_MS
-  let waitAll = false
+  let waitAll: boolean | undefined
   let json = false
   const iterator = args.values()
   for (let argument = iterator.next(); !argument.done; argument = iterator.next()) {
@@ -310,15 +321,17 @@ export function parseRestartArgs(
       case '--wait-all': waitAll = true; break
       case '--json': json = true; break
       case '-h':
-      case '--help': return { action: 'help', unit, profile, maxWaitMs, waitAll, json }
+      case '--help': return { action: 'help', unit, profile, maxWaitMs, waitAll: waitAll ?? false, json }
       case '--session':
       case '--unit':
       case '--profile':
       case '--max-wait': {
         const next = iterator.next()
         if (next.done || next.value === '') throw new RestartUsageError(`${value} needs a value`)
-        if (value === '--session') sessionId = next.value
-        else if (value === '--unit') unit = next.value
+        if (value === '--session') {
+          sessionId = next.value
+          sessionExplicit = true
+        } else if (value === '--unit') unit = next.value
         else if (value === '--profile') profile = next.value
         else {
           const seconds = Number(next.value)
@@ -341,9 +354,12 @@ export function parseRestartArgs(
     }
     sessionId = ambient
   }
-  if (cancel) return { action: 'cancel', unit, profile, maxWaitMs, waitAll, json }
-  if (afterTurn) return { action: 'after-turn', sessionId: sessionId as string, unit, profile, maxWaitMs, waitAll, json }
-  return { action: 'now', unit, profile, maxWaitMs, waitAll, json }
+  // Whole-service idle is the --after-turn default; an explicit --session
+  // selects the per-session scope, and --wait-all forces the default back.
+  const resolvedWaitAll = afterTurn ? waitAll ?? !sessionExplicit : waitAll ?? false
+  if (cancel) return { action: 'cancel', unit, profile, maxWaitMs, waitAll: resolvedWaitAll, json }
+  if (afterTurn) return { action: 'after-turn', sessionId: sessionId as string, unit, profile, maxWaitMs, waitAll: resolvedWaitAll, json }
+  return { action: 'now', unit, profile, maxWaitMs, waitAll: resolvedWaitAll, json }
 }
 
 /** Output sink for the CLI, injectable for tests. */
@@ -425,29 +441,40 @@ export function runRestart(
       scheduled: true,
       unit: marker.unit,
       sessionId: marker.sessionId,
+      waitAll: marker.waitAll,
       deadline: new Date(marker.deadline).toISOString(),
     }))
   } else {
     const deadline = new Date(marker.deadline).toISOString()
+    const scope = marker.waitAll
+      ? `after every session goes idle, or ${marker.sessionId} alone past ${deadline}`
+      : `after session ${marker.sessionId} goes idle (deadline ${deadline})`
     io.stdout(
-      `restart-after-turn: ${marker.unit} will restart after session ${marker.sessionId} goes idle `
-      + `(deadline ${deadline}); cancel with: dsh restart --cancel`,
+      `restart-after-turn: ${marker.unit} will restart ${scope}; cancel with: dsh restart --cancel`,
     )
   }
   return 0
 }
 
 /** Why one watcher sweep decided what it decided. */
-export type RestartWatchCheck = 'none' | 'waiting' | 'fired' | 'stale' | 'other-profile'
+export type RestartWatchCheck = 'none' | 'waiting' | 'fired' | 'stale' | 'other-profile' | 'timed-out'
 
-/** Injection seam for the watcher (tests substitute time, idleness, and firing). */
+/** One live session's turn state as the watcher reads it. */
+export interface LiveSessionState {
+  /** Agent/session identity. */
+  id: string
+  /** `running` while a turn (or its settlement) is active. */
+  status: 'idle' | 'running'
+}
+
+/** Injection seam for the watcher (tests substitute time, live sessions, and firing). */
 export interface RestartWatcherOptions {
   /** Harness home. */
   home?: string
   /** Profile whose markers this watcher owns. */
   profile: string
-  /** Whether the named session (and, with `waitAll`, every live session) is idle. */
-  isIdle: (marker: RestartMarker) => boolean
+  /** The live sessions and their turn state at sweep time. */
+  liveSessions: () => readonly LiveSessionState[]
   /** Fire the detached restart for a consumed marker. */
   fire: (marker: RestartMarker) => void
   /** Called with one prose line per decision (default: silent). */
@@ -471,6 +498,8 @@ export class RestartAfterTurnWatcher {
   private readonly read: (home: string) => RestartMarker | undefined
   private readonly consume: (home: string) => RestartMarker | undefined
   private readonly log: (message: string) => void
+  /** Markers whose fallback warning was already emitted (one per marker). */
+  private readonly warned = new Set<string>()
 
   constructor(private readonly options: RestartWatcherOptions) {
     this.home = options.home ?? resolveDshHome()
@@ -480,20 +509,57 @@ export class RestartAfterTurnWatcher {
     this.log = options.log ?? (() => {})
   }
 
-  /** Run one sweep. */
+  /**
+   * Run one sweep. A `waitAll` marker past its deadline stops waiting for the
+   * whole service: it falls back to the marked session alone and warns once,
+   * naming the sessions with running turns it will no longer wait for.
+   */
   check(): RestartWatchCheck {
     const marker = this.read(this.home)
     if (marker === undefined) return 'none'
     if (marker.profile !== this.options.profile) return 'other-profile'
-    if (this.now() > marker.deadline) {
-      this.consume(this.home)
-      this.log(`restart-after-turn: dropped stale restart of ${marker.unit} (deadline passed)`)
-      return 'stale'
+    const running = this.options.liveSessions().filter(session => session.status === 'running')
+    const markedRunning = running.some(session => session.id === marker.sessionId)
+    const timedOut = this.now() > marker.deadline
+    const aborting = running.filter(session => session.id !== marker.sessionId).map(session => session.id)
+    if (!marker.waitAll) {
+      if (timedOut) {
+        this.consume(this.home)
+        this.log(`restart-after-turn: dropped stale restart of ${marker.unit} (deadline passed)`)
+        return 'stale'
+      }
+      if (markedRunning) return 'waiting'
+      return this.fire(`after session ${marker.sessionId} went idle`)
     }
-    if (!this.options.isIdle(marker)) return 'waiting'
+    if (!timedOut) {
+      if (running.length > 0) return 'waiting'
+      return this.fire('after every session went idle')
+    }
+    // The bound elapsed: per-session scope from here on. Warn exactly once,
+    // naming the sessions with running turns that the restart stops waiting for.
+    const key = `${marker.sessionId}@${String(marker.requestedAt)}`
+    if (!this.warned.has(key)) {
+      this.warned.add(key)
+      this.log(
+        `restart-after-turn: wait-all bound elapsed — waiting only for session ${marker.sessionId}`
+        + (aborting.length === 0 ? '' : `; sessions with running turns that will be aborted: ${aborting.join(', ')}`)
+        + (markedRunning ? ` (session ${marker.sessionId} still runs; the restart waits for it)` : ''),
+      )
+    }
+    if (markedRunning) return 'timed-out'
+    return this.fire(`after session ${marker.sessionId} went idle`)
+  }
+
+  /** Consume and fire one marker; the consume happens before the fire. */
+  private fire(reason: string): RestartWatchCheck {
+    const running = this.options.liveSessions().filter(session => session.status === 'running')
     const consumed = this.consume(this.home)
     if (consumed === undefined) return 'none'
-    this.log(`restart-after-turn: ${consumed.unit} restarting after session ${consumed.sessionId} went idle`)
+    const aborting = running.filter(session => session.id !== consumed.sessionId).map(session => session.id)
+    this.log(
+      `restart-after-turn: ${consumed.unit} restarting ${reason}`
+      + (aborting.length === 0 ? '' : `; aborting sessions with running turns: ${aborting.join(', ')}`),
+    )
     try {
       this.options.fire(consumed)
     } catch (error) {
@@ -505,8 +571,7 @@ export class RestartAfterTurnWatcher {
 
 /** The subset of the live-agent registry the watcher reads. */
 interface LiveAgentLookup {
-  get: (id: SessionId) => { readonly status: 'idle' | 'running' } | undefined
-  list: () => readonly { readonly status: 'idle' | 'running' }[]
+  list: () => readonly { readonly id: SessionId; readonly status: 'idle' | 'running' }[]
 }
 
 /** Injection seam for the service-side installation. */
@@ -533,12 +598,10 @@ export function installRestartAfterTurn(ctx: Context, options: InstallRestartWat
   const watcher = new RestartAfterTurnWatcher({
     ...(options.home === undefined ? {} : { home: options.home }),
     profile: options.profile,
-    isIdle: (marker): boolean => {
+    liveSessions: () => {
       const agents = ctx.get('agents') as unknown as LiveAgentLookup | undefined
-      if (agents === undefined) return true
-      if (agents.get(marker.sessionId as SessionId)?.status === 'running') return false
-      if (!marker.waitAll) return true
-      return !agents.list().some(agent => agent.status === 'running')
+      if (agents === undefined) return []
+      return agents.list().map(agent => ({ id: String(agent.id), status: agent.status }))
     },
     fire: options.fire ?? ((marker): void => {
       fireDetachedRestart(marker.unit, { onError: (error) => { log(`restart-after-turn: ${error.message}`) } })

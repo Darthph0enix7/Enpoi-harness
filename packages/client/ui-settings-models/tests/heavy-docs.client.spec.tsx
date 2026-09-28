@@ -41,7 +41,9 @@ it('renders every manifest section for the host platform (linux)', () => {
   // Quirks, browser badges, install/remove surface, removal warnings.
   expect(screen.getByText(en.heavyQuirks)).toBeTruthy()
   expect(screen.getByText(/never expose this port beyond the local machine/)).toBeTruthy()
-  expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0)
+  // No browser badge for FreeLLMAPI; its local dependency line is stated instead.
+  expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
+  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
   expect(screen.getByText(en.heavyInstalls)).toBeTruthy()
   expect(screen.getByText(en.heavyRemoves)).toBeTruthy()
   expect(screen.getAllByText('Remove the clone directory').length).toBeGreaterThan(0)
@@ -79,6 +81,8 @@ it('renders the placeholder auth reference and the shared keypool removal note',
   const antigravity = fallbackHeavyManifest('antigravity')!
   render(<HeavyProviderDocs manifest={antigravity} platform="linux" t={t} />)
   expect(screen.getByText(en.heavyAuthPlaceholder.replace('{ref}', 'ANTIGRAVITY_API_KEY'))).toBeTruthy()
+  // The one provider with a browser-bound account flow carries the badge.
+  expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0)
   cleanup()
 
   const commandcode = fallbackHeavyManifest('commandcode')!

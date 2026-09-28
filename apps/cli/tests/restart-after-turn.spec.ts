@@ -71,11 +71,22 @@ describe('parseRestartArgs', () => {
   })
 
   it('resolves the after-turn session from the shell environment or --session', () => {
+    // Whole-service idle is the --after-turn default.
     expect(parseRestartArgs(['--after-turn'], { DSH_SESSION_ID: 'abc' }))
-      .toEqual(request({ action: 'after-turn', sessionId: 'abc' }))
+      .toEqual(request({ action: 'after-turn', sessionId: 'abc', waitAll: true }))
+    // An explicit --session is the per-session scope and bypasses wait-all.
     expect(parseRestartArgs(['--after-turn', '--session', 'explicit'], { DSH_SESSION_ID: 'abc' }))
-      .toEqual(request({ action: 'after-turn', sessionId: 'explicit' }))
+      .toEqual(request({ action: 'after-turn', sessionId: 'explicit', waitAll: false }))
+    // --wait-all forces the default back even alongside --session.
+    expect(parseRestartArgs(['--after-turn', '--session', 'explicit', '--wait-all'], {}))
+      .toEqual(request({ action: 'after-turn', sessionId: 'explicit', waitAll: true }))
     expect(() => parseRestartArgs(['--after-turn'], {})).toThrow(RestartUsageError)
+  })
+
+  it('bounds the wait-all default at 10 minutes unless --max-wait overrides it', () => {
+    expect(DEFAULT_MAX_WAIT_MS).toBe(10 * 60_000)
+    expect(parseRestartArgs(['--after-turn'], { DSH_SESSION_ID: 'abc' }).maxWaitMs).toBe(10 * 60_000)
+    expect(parseRestartArgs(['--after-turn', '--max-wait', '45'], { DSH_SESSION_ID: 'abc' }).maxWaitMs).toBe(45_000)
   })
 
   it('reads unit, profile, max-wait, wait-all, and json overrides', () => {
@@ -145,7 +156,7 @@ describe('RestartAfterTurnWatcher', () => {
     const watcher = new RestartAfterTurnWatcher({
       home: dir,
       profile: 'web',
-      isIdle: () => idle,
+      liveSessions: () => idle ? [] : [{ id: 'session-1', status: 'running' }],
       fire: (firedMarker) => {
         // Consume-before-fire: the marker must already be gone when the restart runs.
         expect(existsSync(restartMarkerPath(dir))).toBe(false)
@@ -164,14 +175,112 @@ describe('RestartAfterTurnWatcher', () => {
     expect(watcher.check()).toBe('none')
   })
 
-  it('drops a stale marker on boot without firing', () => {
+  it('the wait-all default fires immediately when every session is idle', () => {
+    const dir = home()
+    writeRestartMarker(marker({ waitAll: true }), dir)
+    const fired: RestartMarker[] = []
+    const log: string[] = []
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [],
+      fire: firedMarker => fired.push(firedMarker),
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('fired')
+    expect(fired).toHaveLength(1)
+    expect(log.join('\n')).toContain('after every session went idle')
+    expect(existsSync(restartMarkerPath(dir))).toBe(false)
+    console.info(`[restart-wait-all] idle at schedule: ${log.join(' | ')}`)
+  })
+
+  it('the wait-all default waits for other sessions and fires when the last one finishes', () => {
+    const dir = home()
+    writeRestartMarker(marker({ waitAll: true }), dir)
+    const fired: RestartMarker[] = []
+    const log: string[] = []
+    let others: Array<{ id: string; status: 'idle' | 'running' }> = [
+      { id: 'session-1', status: 'idle' },
+      { id: 'other-1', status: 'running' },
+    ]
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => others,
+      fire: firedMarker => fired.push(firedMarker),
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('waiting')
+    expect(fired).toEqual([])
+    others = []
+    expect(watcher.check()).toBe('fired')
+    expect(fired).toHaveLength(1)
+    expect(existsSync(restartMarkerPath(dir))).toBe(false)
+    console.info(`[restart-wait-all] waited for other-1, then fired: ${log.join(' | ')}`)
+  })
+
+  it('on timeout falls back to the marked session and warns which sessions it stops waiting for', () => {
+    const dir = home()
+    writeRestartMarker(marker({ waitAll: true, deadline: 1_500 }), dir)
+    const fired: RestartMarker[] = []
+    const log: string[] = []
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [
+        { id: 'session-1', status: 'idle' },
+        { id: 'other-1', status: 'running' },
+        { id: 'other-2', status: 'running' },
+      ],
+      fire: firedMarker => fired.push(firedMarker),
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('fired')
+    expect(fired).toHaveLength(1)
+    const text = log.join('\n')
+    expect(text).toContain('wait-all bound elapsed')
+    expect(text).toContain('other-1, other-2')
+    expect(text).toContain('will be aborted')
+    expect(text).toContain('after session session-1 went idle')
+    expect(existsSync(restartMarkerPath(dir))).toBe(false)
+    console.info(`[restart-wait-all] timeout fallback: ${text.replace(/\n/g, ' | ')}`)
+  })
+
+  it('on timeout with the marked session still running it waits for that session alone and warns once', () => {
+    const dir = home()
+    writeRestartMarker(marker({ waitAll: true, deadline: 1_500 }), dir)
+    const fired: RestartMarker[] = []
+    const log: string[] = []
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [
+        { id: 'session-1', status: 'running' },
+        { id: 'other-1', status: 'running' },
+      ],
+      fire: firedMarker => fired.push(firedMarker),
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('timed-out')
+    expect(watcher.check()).toBe('timed-out')
+    expect(fired).toEqual([])
+    expect(log.filter(line => line.includes('wait-all bound elapsed'))).toHaveLength(1)
+    expect(log.join('\n')).toContain('other-1')
+    expect(existsSync(restartMarkerPath(dir))).toBe(true)
+  })
+
+  it('drops a stale per-session marker on boot without firing', () => {
     const dir = home()
     writeRestartMarker(marker({ deadline: 1_500 }), dir)
     const fired: RestartMarker[] = []
     const watcher = new RestartAfterTurnWatcher({
       home: dir,
       profile: 'web',
-      isIdle: () => true,
+      liveSessions: () => [],
       fire: firedMarker => fired.push(firedMarker),
       now: () => 2_000,
     })
@@ -186,7 +295,7 @@ describe('RestartAfterTurnWatcher', () => {
     const watcher = new RestartAfterTurnWatcher({
       home: dir,
       profile: 'web',
-      isIdle: () => true,
+      liveSessions: () => [],
       fire: vi.fn(),
     })
     expect(watcher.check()).toBe('other-profile')
@@ -200,7 +309,7 @@ describe('RestartAfterTurnWatcher', () => {
     const make = (): RestartAfterTurnWatcher => new RestartAfterTurnWatcher({
       home: dir,
       profile: 'web',
-      isIdle: () => true,
+      liveSessions: () => [],
       fire: () => fired.push('fired'),
       now: () => 2_000,
     })
@@ -227,7 +336,7 @@ describe('runRestart', () => {
       requestedBy: `pid ${String(process.pid)}`,
       waitAll: true,
     }))
-    expect(out.join('\n')).toContain('will restart after session ambient')
+    expect(out.join('\n')).toContain('after every session goes idle, or ambient alone past')
   })
 
   it('--now fires the detached plan without writing a marker and returns promptly', () => {
@@ -282,8 +391,7 @@ describe('installRestartAfterTurn', () => {
     const fake = {
       get: (name: string) => name === 'agents'
         ? {
-          get: () => ({ status: running ? 'running' as const : 'idle' as const }),
-          list: () => [{ status: running ? 'running' as const : 'idle' as const }],
+          list: () => [{ id: 'session-1', status: running ? 'running' as const : 'idle' as const }],
         }
         : undefined,
       on: (event: string, listener: (session: unknown, event: unknown) => void) => {

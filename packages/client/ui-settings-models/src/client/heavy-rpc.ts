@@ -7,7 +7,7 @@
  * @module ui-settings-models/heavy-rpc
  */
 
-import type { HeavyProviderManifest } from './heavy-providers.ts'
+import { FALLBACK_HEAVY_PROVIDER_MANIFESTS, heavyManifestProblems, type HeavyProviderManifest } from './heavy-providers.ts'
 
 /** One HTTP probe result as the host reports it. */
 export interface HeavyHealthView {
@@ -94,8 +94,10 @@ export interface HeavyReuseView {
 /** `enpoiHeavy.install` result. */
 export interface HeavyInstallView {
   ok: boolean
-  blocked?: { reason: string; plannedWith: string }
   job?: HeavyJobView
+  blocked?: { reason: string; plannedWith: string }
+  /** The route namespace is not mounted yet: the same ordering result reuse returns. */
+  pendingRestart?: { ns: string; message: string }
 }
 
 /** `enpoiHeavy.remove` result. */
@@ -151,10 +153,62 @@ export async function heavyRpc<T>(method: string, args: Record<string, unknown>)
   }
 }
 
+/** The validated manifest table the client renders from. */
+export interface HeavyManifestTableView {
+  items: HeavyProviderManifest[]
+  problems: string[]
+  platform?: string
+}
+
+/**
+ * Structurally validate the host's `enpoiHeavy.manifests` payload. The wire
+ * is never trusted: a malformed entry whose id matches the labelled local
+ * fallback is replaced by that copy, any other malformed entry is dropped, and
+ * a payload that is not an object with an `items` array falls back to the
+ * whole labelled local copy. Every rejection is named in `problems`.
+ * @param value - the raw wire value.
+ * @returns the table the page may render.
+ */
+export function sanitizeHeavyManifests(value: unknown): HeavyManifestTableView {
+  const record = value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as { items?: unknown; problems?: unknown; platform?: unknown }
+    : undefined
+  if (record === undefined || !Array.isArray(record.items)) {
+    return { items: [...FALLBACK_HEAVY_PROVIDER_MANIFESTS], problems: ['manifest payload is malformed — rendering the labelled local copy'] }
+  }
+  const problems = Array.isArray(record.problems) ? record.problems.filter((entry): entry is string => typeof entry === 'string') : []
+  const items: HeavyProviderManifest[] = []
+  for (const entry of record.items) {
+    const found = heavyManifestProblems(entry)
+    if (found.length === 0) {
+      items.push(entry as HeavyProviderManifest)
+      continue
+    }
+    const id = entry !== null && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as { id?: unknown }).id === 'string'
+      ? (entry as { id: string }).id
+      : undefined
+    const fallback = id === undefined ? undefined : FALLBACK_HEAVY_PROVIDER_MANIFESTS.find(manifest => manifest.id === id)
+    if (fallback === undefined) {
+      problems.push(`manifest "${id ?? 'unknown'}": host copy rejected (${found[0]}) — dropped`)
+    } else {
+      items.push(fallback)
+      problems.push(`manifest "${fallback.id}": host copy rejected (${found[0]}) — using the labelled local copy`)
+    }
+  }
+  return {
+    items,
+    problems,
+    ...record.platform === undefined || typeof record.platform !== 'string' ? {} : { platform: record.platform },
+  }
+}
+
 /** The `enpoiHeavy.*` calls the Models page makes. */
 export const heavyApi = {
-  /** Fetch the host's manifest table (the single source for the listing). */
-  manifests: () => heavyRpc<{ items: HeavyProviderManifest[]; problems: string[]; platform?: string }>('enpoiHeavy.manifests', {}),
+  /** Fetch the host's manifest table, validated at this wire boundary. */
+  manifests: async (): Promise<HeavyRpcResult<HeavyManifestTableView>> => {
+    const result = await heavyRpc<unknown>('enpoiHeavy.manifests', {})
+    return result.ok ? { ok: true, value: sanitizeHeavyManifests(result.value) } : result
+  },
   /** Configured/health/job state for one provider. */
   status: (id: string) => heavyRpc<HeavyStatusView>('enpoiHeavy.status', { request: { id } }),
   /** Add by detected instance: probe localhost, write the route at what answered. */

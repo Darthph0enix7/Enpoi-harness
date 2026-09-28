@@ -28,17 +28,33 @@ it('an uninstalled heavy provider is listed in Add Provider with its manifest', 
   }
 })
 
-it('the heavy descriptors surface dashboard, browser badges, modes, and health', () => {
+it('the heavy descriptors surface dashboard, modes, and health', () => {
   for (const id of HEAVY_PRESET_IDS) {
     const manifest = fallbackHeavyManifest(id)
     expect(manifest?.dashboardUrl, id).toBeDefined()
     expect(manifest?.reuse.health.url, id).not.toBe('')
-    expect(manifest?.requiresBrowser.length, id).toBeGreaterThan(0)
     if (manifest?.unsupported === undefined) {
       expect(manifest?.local.install.default.steps.length, id).toBeGreaterThan(0)
       expect(manifest?.reuse.baseURL, id).not.toBe('')
     }
   }
+})
+
+it('browser badges belong only to the browser-bound account flow (antigravity OAuth)', () => {
+  expect(fallbackHeavyManifest('freellmapi')?.requiresBrowser).toEqual([])
+  expect(fallbackHeavyManifest('commandcode')?.requiresBrowser).toEqual([])
+  expect(fallbackHeavyManifest('antigravity')?.requiresBrowser.length).toBeGreaterThan(0)
+  expect(fallbackHeavyManifest('antigravity')?.requiresBrowser.join('\n')).toContain('OAuth')
+})
+
+it('every heavy provider states its local dependency line, Docker never the general requirement', () => {
+  for (const id of HEAVY_PRESET_IDS) {
+    expect(fallbackHeavyManifest(id)?.quirks.join('\n'), id).toContain('Local install dependencies:')
+  }
+  expect(fallbackHeavyManifest('freellmapi')?.quirks.join('\n'))
+    .toContain('native installers for Linux/macOS/Windows; Docker required only for the fallback path')
+  expect(fallbackHeavyManifest('antigravity')?.quirks.join('\n')).toContain('Docker is never required')
+  expect(fallbackHeavyManifest('commandcode')?.quirks.join('\n')).toContain('Docker is never required')
 })
 
 it('antigravity never declares a DSH key pool and is not keyless', () => {

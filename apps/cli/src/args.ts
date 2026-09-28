@@ -104,7 +104,7 @@ Examples:
   dsh tui --resume <session>                arguments after the launcher flags reach the app
   dsh web --help                            the web app's own flags and help
   dsh plugin --profile tui add <package>    install a plugin into the tui profile
-  dsh restart --after-turn                  restart the web service once this turn ends
+  dsh restart --after-turn                  restart the web service once all sessions go idle (bounded)
   dsh restart --now                         restart the web service detached, right now
 `
 

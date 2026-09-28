@@ -160,6 +160,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setError(started.message)
       return
     }
+    // Same ordering fact reuse reports: the local install cannot write its
+    // route until the profile build + restart mounts the namespace.
+    if (started.value.pendingRestart !== undefined) {
+      setError(started.value.pendingRestart.message)
+      return
+    }
     if (started.value.blocked !== undefined) {
       setError(`${started.value.blocked.reason} (${started.value.blocked.plannedWith})`)
       return
