@@ -6,7 +6,7 @@
  * gated by `onboardingCompleted`, and the Setup settings section reopens it.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -49,14 +49,31 @@ export interface WelcomeWizardInjected {
 /** Overlay owner props plus this feature's injected dependencies. */
 export type WelcomeWizardProps = PropsRuntime<'settings.onboarding'> & InjectFace<WelcomeWizardInjected>
 
-/** The five tour stops: label key, body key, and the real surface selector. */
+/**
+ * The five tour stops: label key, body key, the real surface selector, and
+ * where the tip reads relative to the spotlighted surface.
+ */
 const TOUR_STOPS = [
-  { title: 'wizTourStopSidebar', body: 'wizTourStopSidebarBody', target: '[data-dsh-tour="rightbar"]' },
-  { title: 'wizTourStopSettings', body: 'wizTourStopSettingsBody', target: '[data-dsh-tour="settings"]' },
-  { title: 'wizTourStopPlugins', body: 'wizTourStopPluginsBody', target: '[data-dsh-tour="plugins"]' },
-  { title: 'wizTourStopComposer', body: 'wizTourStopComposerBody', target: '[data-dsh-tour="composer"]' },
-  { title: 'wizTourStopContext', body: 'wizTourStopContextBody', target: '[data-dsh-tour="context"]' },
+  { title: 'wizTourStopSidebar', body: 'wizTourStopSidebarBody', target: '[data-dsh-tour="rightbar"]', place: 'left' },
+  { title: 'wizTourStopSettings', body: 'wizTourStopSettingsBody', target: '[data-dsh-tour="settings"]', place: 'right' },
+  { title: 'wizTourStopPlugins', body: 'wizTourStopPluginsBody', target: '[data-dsh-tour="plugins"]', place: 'right' },
+  { title: 'wizTourStopComposer', body: 'wizTourStopComposerBody', target: '[data-dsh-tour="composer"]', place: 'top' },
+  { title: 'wizTourStopContext', body: 'wizTourStopContextBody', target: '[data-dsh-tour="context"]', place: 'right' },
 ] as const
+
+/** One viewport rectangle the spotlight and tip position from. */
+interface TourRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** Padding the spotlight leaves around the real target. */
+const TOUR_PAD = 8
+
+/** Distance between the spotlight edge and the tip card. */
+const TIP_MARGIN = 14
 
 const SANDBOX_OPTIONS: ReadonlyArray<{ mode: SandboxMode; title: keyof typeof en; body: keyof typeof en }> = [
   { mode: 'read-only', title: 'wizSandboxReadOnly', body: 'wizSandboxReadOnlyBody' },
@@ -83,6 +100,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   const [compactionLlm, setCompactionLlm] = useState(true)
   const [addOpen, setAddOpen] = useState(false)
   const [stop, setStop] = useState(0)
+  // The tour is its own overlay layer: while it runs the wizard dialog is not
+  // rendered at all, so exactly one layer owns the screen.
+  const [tourStarted, setTourStarted] = useState(false)
 
   useEffect(() => {
     if (state.status === 'idle') void store.load()
@@ -134,6 +154,29 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     store.dispatch({ type: 'configured' })
     void store.startAnalysis()
     continueStep()
+  }
+
+  // The tour layer replaces the wizard dialog for as long as it runs.
+  if (step === 'tour' && tourStarted) {
+    return (
+      <TourOverlay
+        t={t}
+        stop={stop}
+        stepNumber={WIZARD_STEPS.indexOf('tour') + 1}
+        stepCount={WIZARD_STEPS.length}
+        onStop={setStop}
+        onBack={() => { setTourStarted(false) }}
+        onFinish={() => {
+          setTourStarted(false)
+          store.dispatch({ type: 'configured' })
+          store.dispatch({ type: 'continue' })
+        }}
+        onSkip={() => {
+          setTourStarted(false)
+          store.dispatch({ type: 'skip-tour' })
+        }}
+      />
+    )
   }
 
   return (
@@ -206,10 +249,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {step === 'tour' && (
             <TourStep
               t={t}
-              stop={stop}
-              onStop={setStop}
-              onStart={() => { setStop(0) }}
-              onFinish={() => { store.dispatch({ type: 'configured' }); store.dispatch({ type: 'continue' }) }}
+              onStart={() => { setStop(0); setTourStarted(true) }}
               onSkip={() => { store.dispatch({ type: 'skip-tour' }) }}
             />
           )}
@@ -228,7 +268,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             />
           )}
 
-          {state.analysis !== null && state.analysis !== undefined && step !== 'done' && (
+          {state.analysis !== null && state.analysis !== undefined && (
             <AnalysisDock t={t} analysis={state.analysis} />
           )}
         </div>
@@ -428,57 +468,194 @@ function Toggle({ title, sub, on, onToggle, chip, children }: {
   )
 }
 
-function TourStep({ t, stop, onStop, onStart, onFinish, onSkip }: {
+/** The tour intro panel inside the wizard; starting hands over to {@link TourOverlay}. */
+function TourStep({ t, onStart, onSkip }: {
+  t: T
+  onStart: () => void
+  onSkip: () => void
+}): ReactNode {
+  return (
+    <div className={styles.step}>
+      <h2 className={styles.heading}>{t('wizTourHeading')}</h2>
+      <p className={styles.lead}>{t('wizTourLead')}</p>
+      <p className={styles.fineprint}>{t('wizTourFineprint')}</p>
+      <div className={styles.actions}>
+        <Button variant="primary" onClick={onStart}>{t('wizTourStart')}</Button>
+        <Button onClick={onSkip}>{t('wizSkipTour')}</Button>
+      </div>
+    </div>
+  )
+}
+
+/** Measure one element's viewport rectangle. */
+function rectOf(element: Element): TourRect {
+  const box = element.getBoundingClientRect()
+  return { left: box.left, top: box.top, width: box.width, height: box.height }
+}
+
+/** Whether two measurements name the same box (sub-pixel jitter is not a move). */
+function sameRect(left: TourRect | null, right: TourRect | null): boolean {
+  if (left === null || right === null) return left === right
+  return Math.abs(left.left - right.left) < 0.5
+    && Math.abs(left.top - right.top) < 0.5
+    && Math.abs(left.width - right.width) < 0.5
+    && Math.abs(left.height - right.height) < 0.5
+}
+
+/**
+ * Place the tip beside the spotlight for one stop, clamped to the viewport; a
+ * target that is not on screen centers the tip and leaves the scrim intact.
+ */
+function tipAt(rect: TourRect | null, place: typeof TOUR_STOPS[number]['place'], size: { width: number; height: number }): { left: number; top: number } {
+  const width = window.innerWidth || 1024
+  const height = window.innerHeight || 768
+  if (rect === null) {
+    return { left: Math.max(16, (width - size.width) / 2), top: 72 }
+  }
+  const hole = {
+    left: rect.left - TOUR_PAD,
+    top: rect.top - TOUR_PAD,
+    width: rect.width + TOUR_PAD * 2,
+    height: rect.height + TOUR_PAD * 2,
+  }
+  let left: number
+  let top: number
+  switch (place) {
+    case 'right':
+      left = hole.left + hole.width + TIP_MARGIN
+      top = hole.top + hole.height / 2 - size.height / 2
+      break
+    case 'left':
+      left = hole.left - size.width - TIP_MARGIN
+      top = hole.top + hole.height / 2 - size.height / 2
+      break
+    case 'top':
+      left = hole.left + hole.width / 2 - size.width / 2
+      top = hole.top - size.height - TIP_MARGIN
+      break
+    default:
+      left = hole.left + hole.width / 2 - size.width / 2
+      top = hole.top + hole.height + TIP_MARGIN
+      break
+  }
+  return {
+    left: Math.max(16, Math.min(left, width - size.width - 16)),
+    top: Math.max(64, Math.min(top, height - size.height - 16)),
+  }
+}
+
+/**
+ * The tour layer: a full-viewport scrim that owns every pointer event, a
+ * spotlight hole that follows the real target, and the tip card. The wizard
+ * dialog is not rendered while this layer is, so exactly one layer is on
+ * screen; Back leaves the layer at the first stop instead of dead-ending.
+ */
+function TourOverlay({ t, stop, stepNumber, stepCount, onStop, onBack, onFinish, onSkip }: {
   t: T
   stop: number
+  stepNumber: number
+  stepCount: number
   onStop: (stop: number) => void
-  onStart: () => void
+  onBack: () => void
   onFinish: () => void
   onSkip: () => void
 }): ReactNode {
-  const [started, setStarted] = useState(false)
-  const [rect, setRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const current = TOUR_STOPS[stop] ?? TOUR_STOPS[0]
-  useEffect(() => {
-    if (!started) return
+  const [rect, setRect] = useState<TourRect | null>(null)
+  const [tip, setTip] = useState<{ left: number; top: number } | null>(null)
+  const layerRef = useRef<HTMLDivElement | null>(null)
+  const tipRef = useRef<HTMLDivElement | null>(null)
+
+  const measure = useCallback(() => {
     const target = document.querySelector(current.target)
-    if (target === null) {
-      setRect(null)
-      return
-    }
-    const box = target.getBoundingClientRect()
-    setRect({ left: box.left, top: box.top, width: box.width, height: box.height })
-  }, [started, stop, current])
-  if (!started) {
-    return (
-      <div className={styles.step}>
-        <h2 className={styles.heading}>{t('wizTourHeading')}</h2>
-        <p className={styles.lead}>{t('wizTourLead')}</p>
-        <p className={styles.fineprint}>{t('wizTourFineprint')}</p>
-        <div className={styles.actions}>
-          <Button variant="primary" onClick={() => { onStart(); setStarted(true) }}>{t('wizTourStart')}</Button>
-          <Button onClick={onSkip}>{t('wizSkipTour')}</Button>
-        </div>
-      </div>
-    )
-  }
+    const next = target === null ? null : rectOf(target)
+    setRect(previous => sameRect(previous, next) ? previous : next)
+  }, [current.target])
+
+  useLayoutEffect(() => { measure() }, [measure])
+
+  // The real interface can move under the layer (a resize, a scrolling rail, a
+  // late layout settle): one animation-frame loop re-measures the target and
+  // publishes only real moves, so the spotlight follows the surface instead of
+  // freezing at the first frame.
+  useEffect(() => {
+    let frame = requestAnimationFrame(function tick() {
+      measure()
+      frame = requestAnimationFrame(tick)
+    })
+    return () => { cancelAnimationFrame(frame) }
+  }, [measure])
+
+  // The tip is measured after its content changes, then placed beside the hole.
+  useLayoutEffect(() => {
+    const element = tipRef.current
+    if (element === null) return
+    const box = element.getBoundingClientRect()
+    setTip(tipAt(rect, current.place, { width: box.width, height: box.height }))
+  }, [rect, stop, current.place])
+
+  useEffect(() => { layerRef.current?.focus({ preventScroll: true }) }, [stop])
+
+  const back = (): void => { if (stop > 0) onStop(stop - 1); else onBack() }
+  const forward = (): void => { if (stop < TOUR_STOPS.length - 1) onStop(stop + 1); else onFinish() }
+
   return (
-    <div className={styles.step}>
-      {rect === null ? null : (
+    <div
+      ref={layerRef}
+      className={styles.tourLayer}
+      data-dsh-tour-overlay
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('wizNameTour')}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') onSkip()
+        else if (event.key === 'ArrowRight') forward()
+        else if (event.key === 'ArrowLeft') back()
+      }}
+    >
+      {rect !== null && (
         <div
-          className={styles.spotlight}
-          style={{ left: rect.left - 8, top: rect.top - 8, width: rect.width + 16, height: rect.height + 16 }}
-        />
+          className={styles.tourHole}
+          data-dsh-tour-hole
+          style={{
+            left: rect.left - TOUR_PAD,
+            top: rect.top - TOUR_PAD,
+            width: rect.width + TOUR_PAD * 2,
+            height: rect.height + TOUR_PAD * 2,
+          }}
+        >
+          <span className={styles.tourRing} />
+        </div>
       )}
-      <div className={styles.tip}>
-        <p className={styles.eyebrow}>{t('wizTourStop').replace('{n}', String(stop + 1)).replace('{total}', String(TOUR_STOPS.length))}</p>
+      <div
+        ref={tipRef}
+        className={styles.tourTip}
+        data-dsh-tour-tip
+        style={{
+          visibility: tip === null ? 'hidden' : 'visible',
+          left: tip?.left ?? 0,
+          top: tip?.top ?? 0,
+        }}
+      >
+        <p className={styles.eyebrow}>
+          {t('wizEyebrow').replace('{n}', `${stepNumber} of ${stepCount}`).replace('{name}', t('wizNameTour'))}
+        </p>
+        <p className={styles.tourCount} data-dsh-tour-count>
+          {t('wizTourStop').replace('{n}', String(stop + 1)).replace('{total}', String(TOUR_STOPS.length))}
+        </p>
         <h2 className={styles.heading}>{t(current.title)}</h2>
-        <p>{t(current.body)}</p>
+        <p className={styles.tourBody}>{t(current.body)}</p>
+        <div className={styles.tourDots} aria-hidden="true">
+          {TOUR_STOPS.map((entry, index) => (
+            <i key={entry.target} data-on={index === stop || undefined} />
+          ))}
+        </div>
         <div className={styles.actions}>
-          <Button disabled={stop === 0} onClick={() => { onStop(Math.max(0, stop - 1)) }}>{t('wizBack')}</Button>
+          <Button onClick={back}>{t('wizBack')}</Button>
           {stop < TOUR_STOPS.length - 1
-            ? <Button variant="primary" onClick={() => { onStop(stop + 1) }}>{t('wizNext')}</Button>
-            : <Button variant="primary" onClick={onFinish}>{t('wizTourFinish')}</Button>}
+            ? <Button variant="primary" onClick={forward}>{t('wizNext')}</Button>
+            : <Button variant="primary" onClick={forward}>{t('wizTourFinish')}</Button>}
           <Button onClick={onSkip}>{t('wizSkipTour')}</Button>
         </div>
       </div>
@@ -517,6 +694,24 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
   )
 }
 
+/** Display order of the host analysis stages; index maps to `stageIndex`. */
+const ANALYSIS_PHASE_KEYS = [
+  'wizPhaseHardware', 'wizPhaseOs', 'wizPhaseServices', 'wizPhaseDisk', 'wizPhaseGpu', 'wizPhaseWriting',
+] as const
+
+/** One phase's render state from the live job position. */
+function phaseState(analysis: NonNullable<WelcomeWizardState['analysis']>, index: number): 'done' | 'active' | 'pending' {
+  if (analysis.state === 'succeeded') return 'done'
+  if (analysis.state === 'failed') return index < analysis.stageIndex ? 'done' : 'pending'
+  if (index < analysis.stageIndex) return 'done'
+  return index === analysis.stageIndex ? 'active' : 'pending'
+}
+
+/**
+ * Live system-analysis progress: the determinate bar and phase rail render the
+ * polled host job (`pct`, `stageIndex`), so the indicator moves with the real
+ * run instead of a decorative animation.
+ */
 function AnalysisDock({ t, analysis }: { t: T; analysis: NonNullable<WelcomeWizardState['analysis']> }): ReactNode {
   const label = analysis.state === 'running'
     ? t('wizAnalysisRunning')
@@ -528,11 +723,27 @@ function AnalysisDock({ t, analysis }: { t: T; analysis: NonNullable<WelcomeWiza
       : analysis.state === 'failed'
         ? `${t('wizAnalysisFailed')}: ${analysis.error ?? ''}`
         : ''
+  const phases = ANALYSIS_PHASE_KEYS.slice(0, Math.max(0, Math.min(analysis.stageCount, ANALYSIS_PHASE_KEYS.length)))
   return (
-    <div className={styles.dock} data-state={analysis.state} role="status">
-      <strong>{t('wizAnalysisDock')}</strong>
-      <span>{label}</span>
-      <progress max={100} value={analysis.pct} />
+    <div className={styles.dock} data-state={analysis.state} data-dsh-analysis-dock role="status">
+      <div className={styles.dockHead}>
+        <strong>{t('wizAnalysisDock')}</strong>
+        {analysis.state === 'running' && <span className={styles.spinner} data-dsh-analysis-spinner aria-hidden="true" />}
+        <span className={styles.dockPct} data-dsh-analysis-pct>{analysis.pct}%</span>
+      </div>
+      <div className={styles.dockTrack} data-dsh-analysis-track>
+        <div className={styles.dockFill} data-dsh-analysis-fill style={{ width: `${analysis.pct}%` }} />
+      </div>
+      {phases.length > 0 && (
+        <ol className={styles.dockPhases} data-dsh-analysis-phases>
+          {phases.map((key, index) => (
+            <li key={key} data-phase={key} data-state={phaseState(analysis, index)}>
+              {t(key)}
+            </li>
+          ))}
+        </ol>
+      )}
+      <span className={styles.dockLabel} data-dsh-analysis-stage>{label}</span>
     </div>
   )
 }

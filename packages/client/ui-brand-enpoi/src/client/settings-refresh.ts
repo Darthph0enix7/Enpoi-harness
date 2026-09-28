@@ -21,6 +21,13 @@ export interface EnpoiNamespaceView {
   user?: Record<string, unknown>
 }
 
+/**
+ * Why the last namespace read ended as it did: `missing` means the gateway
+ * answered and this profile mounts no enpoi-orchestration namespace at all —
+ * a different repair than an unreachable transport.
+ */
+export type EnpoiNamespacePresence = 'unknown' | 'present' | 'missing' | 'unreachable'
+
 /** One registered store re-read the triggers fan out to. */
 export type SettingsRefreshApplier = () => void | Promise<void>
 
@@ -39,34 +46,58 @@ let lastSuccessAt = 0
 let debounceTimer: ReturnType<typeof setTimeout> | undefined
 let lastVisibleAt = 0
 const appliers = new Map<string, SettingsRefreshApplier>()
+let presence: EnpoiNamespacePresence = 'unknown'
+
+/** Adopt one namespaces answer: present, missing from this profile, or unusable. */
+function adoptNamespaces(namespaces: unknown): EnpoiNamespaceView | undefined {
+  if (!Array.isArray(namespaces)) {
+    presence = 'unreachable'
+    return undefined
+  }
+  const view = (namespaces as EnpoiNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
+  presence = view === undefined ? 'missing' : 'present'
+  return view
+}
 
 /** Read the namespace through the live gateway, preferring the wire root's shared coalesced describe. */
 async function describeEnpoiNamespace(): Promise<EnpoiNamespaceView | undefined> {
   readSeq += 1
-  const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
-  if (typeof shared === 'function') {
-    const value = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
-    const namespaces = value?.namespaces
-    return Array.isArray(namespaces)
-      ? (namespaces as EnpoiNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
-      : undefined
+  try {
+    const shared = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
+    if (typeof shared === 'function') {
+      const value = await (shared as () => Promise<{ namespaces?: readonly unknown[] } | undefined>)()
+      return adoptNamespaces(value?.namespaces)
+    }
+    const res = await fetch('/api/settings.describe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        method: 'settings.describe',
+        rpcId: `enpoi-describe-${readSeq}`,
+        payload: { args: {} },
+      }),
+    })
+    if (!res.ok) {
+      presence = 'unreachable'
+      return undefined
+    }
+    const json: unknown = await res.json()
+    const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+    return adoptNamespaces(namespaces)
+  } catch {
+    // A transport failure names itself: the presence flips to unreachable.
+    presence = 'unreachable'
+    return undefined
   }
-  const res = await fetch('/api/settings.describe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      method: 'settings.describe',
-      rpcId: `enpoi-describe-${readSeq}`,
-      payload: { args: {} },
-    }),
-  })
-  if (!res.ok) return undefined
-  const json: unknown = await res.json()
-  const namespaces = (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
-  return Array.isArray(namespaces)
-    ? (namespaces as EnpoiNamespaceView[]).find(n => n.ns === 'enpoi-orchestration')
-    : undefined
+}
+
+/**
+ * Why the last read ended without a view (or with one).
+ * @returns the presence the settings surfaces render their absence copy from.
+ */
+export function getEnpoiNamespacePresence(): EnpoiNamespacePresence {
+  return presence
 }
 
 /**

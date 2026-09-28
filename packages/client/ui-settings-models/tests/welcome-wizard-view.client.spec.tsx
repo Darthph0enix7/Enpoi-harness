@@ -127,4 +127,66 @@ describe('WelcomeWizard', () => {
     expect(h.set).toHaveBeenCalledWith(WIZARD_COMPLETED_FIELD, WIZARD_VERSION)
     expect(h.complete).toHaveBeenCalledTimes(1)
   })
+
+  it('runs the tour as one layer over the real UI with a working Back', async () => {
+    const target = document.createElement('div')
+    target.setAttribute('data-dsh-tour', 'rightbar')
+    document.body.appendChild(target)
+    mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameTour }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizTourStart }))
+
+    // The wizard dialog is gone: exactly the tour layer owns the screen.
+    expect(screen.queryByRole('dialog', { name: zh.wizTitle })).toBeNull()
+    const overlay = document.querySelector('[data-dsh-tour-overlay]')
+    expect(overlay).not.toBeNull()
+    expect(document.querySelector('[data-dsh-tour-hole]')).not.toBeNull()
+    expect(document.querySelector('[data-dsh-tour-count]')?.textContent).toBe('第 1 站，共 5 站')
+
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNext }))
+    expect(document.querySelector('[data-dsh-tour-count]')?.textContent).toBe('第 2 站，共 5 站')
+
+    // Back walks stops, and at the first stop returns to the wizard steps
+    // instead of dead-ending on a disabled control.
+    fireEvent.click(screen.getByRole('button', { name: zh.wizBack }))
+    expect(document.querySelector('[data-dsh-tour-count]')?.textContent).toBe('第 1 站，共 5 站')
+    fireEvent.click(screen.getByRole('button', { name: zh.wizBack }))
+    expect(document.querySelector('[data-dsh-tour-overlay]')).toBeNull()
+    expect(screen.getByRole('dialog', { name: zh.wizTitle })).toBeTruthy()
+    expect(screen.getByText(zh.wizTourHeading)).toBeTruthy()
+    target.remove()
+  })
+
+  it('skips the tour into the agents step', async () => {
+    mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameTour }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizTourStart }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizSkipTour }))
+    expect(document.querySelector('[data-dsh-tour-overlay]')).toBeNull()
+    await screen.findByText(zh.wizAgentsHeading)
+  })
+
+  it('renders the live analysis progress on every step, including done', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = { state: 'running', stage: 'services', stageIndex: 2, stageCount: 6, pct: 33 }
+      })
+    })
+    const dock = document.querySelector('[data-dsh-analysis-dock]')
+    expect(dock).not.toBeNull()
+    expect(document.querySelector('[data-dsh-analysis-spinner]')).not.toBeNull()
+    expect(document.querySelector('[data-dsh-analysis-pct]')?.textContent).toBe('33%')
+    expect(document.querySelector('[data-dsh-analysis-fill]')?.getAttribute('style')).toContain('width: 33%')
+    const phases = Array.from(document.querySelectorAll('[data-dsh-analysis-phases] li'))
+    expect(phases.map(phase => phase.getAttribute('data-state'))).toEqual([
+      'done', 'done', 'active', 'pending', 'pending', 'pending',
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameDone }))
+    expect(document.querySelector('[data-dsh-analysis-dock]')).not.toBeNull()
+  })
 })

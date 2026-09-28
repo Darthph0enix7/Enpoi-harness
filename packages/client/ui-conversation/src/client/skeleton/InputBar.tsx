@@ -398,7 +398,7 @@ export const InputBar = memo(function InputBar({
         : planActive ? t('placeholder.plan') : t('placeholder.default'))
 
   return (
-    <div className={clsx(css.root, variant === 'hero' && css.hero)}>
+    <div className={clsx(css.root, variant === 'hero' && css.hero)} data-dsh-tour="composer">
       {toast !== null && (
         <Toast
           key={toast.seq}

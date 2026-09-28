@@ -305,6 +305,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           aria-label={t('trigger')}
           aria-haspopup="dialog"
           aria-expanded={open}
+          data-dsh-tour="settings"
           onClick={() => { actions.open() }}
         >
           {renderSlot('settings.trigger', { wide })}

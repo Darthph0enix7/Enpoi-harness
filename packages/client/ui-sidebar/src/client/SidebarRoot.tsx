@@ -65,6 +65,7 @@ function PanelRow({ id, label, wide, usePanelInfo, selectPanel, renderSlot }: Pa
         className={clsx(css.panelRow, active && css.panelActive)}
         aria-label={label}
         aria-current={active ? 'page' : undefined}
+        data-dsh-tour={id}
         onClick={() => { selectPanel(id) }}
       >
         <span className={css.panelGlyph} aria-hidden="true">

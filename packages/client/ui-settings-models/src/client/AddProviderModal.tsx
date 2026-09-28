@@ -33,6 +33,17 @@ function uniqueId(base: string, taken: readonly string[]): string {
   return candidate
 }
 
+/** Parse the manual model list: one id per line or comma, blanks dropped. */
+function parseModelIds(text: string): string[] {
+  return text.split(/[\n,]/).map(entry => entry.trim()).filter(entry => entry !== '')
+}
+
+/** One endpoint-interrogation answer at the modal's own boundary. */
+type DiscoveryAnswer = { models: readonly { id: string }[] } | { message: string }
+
+/** One model row the discovery endpoint reports for a route. */
+type DiscoveredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+
 export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const { open, taken, protocols, api, t, readOnly, onClose } = props
   const [search, setSearch] = useState('')
@@ -47,6 +58,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [discovering, setDiscovering] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Manual model ids: the fallback whenever the endpoint's /models listing
+  // cannot describe the route (a config-only route or an offline endpoint).
+  const [manualModels, setManualModels] = useState('')
+  // Set when the route is stored but resolves no models: the modal stays open
+  // with discovery and manual-list paths instead of a dead end.
+  const [recovery, setRecovery] = useState<{ message: string } | null>(null)
   // Heavy-provider flow: mode choice, optional unified key, detection, progress.
   const [heavyMode, setHeavyMode] = useState<'reuse' | 'local'>('reuse')
   // A ref, not state: the status fetch resolves after the selection handler,
@@ -102,6 +119,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const handleSelect = (tpl: ProviderTemplate | 'empty') => {
     setSelected(tpl)
     setError(null)
+    setManualModels('')
+    setRecovery(null)
     setHeavyStatus(null)
     setHeavyJob(null)
     setHeavyKey('')
@@ -179,6 +198,140 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setError(final?.error ?? t('heavyFailed'))
   }
 
+  /** Ask the endpoint what it serves, at the modal's own error boundary. */
+  const runDiscovery = async (id: string, cleanKey: string): Promise<DiscoveryAnswer> => {
+    try {
+      const discovery = await api.llm.discoverModels('llm-pi-ai', {
+        provider: id,
+        baseURL: baseURL.trim(),
+        api: protocol,
+        ...(cleanKey.length > 0 ? { apiKey: cleanKey } : {}),
+      })
+      return discovery.ok ? { models: discovery.value } : { message: discovery.error.message }
+    } catch (err) {
+      return { message: messageOf(err) }
+    }
+  }
+
+  /** Persist discovered models onto the stored route. */
+  const storeDiscovered = async (id: string, models: readonly DiscoveredModel[]): Promise<boolean> => {
+    const value = models.map(model => ({
+      id: model.id,
+      ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
+      ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+      ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
+    }))
+    const res = await api.settings.mutate(
+      'llm-pi-ai',
+      [{ op: 'set', path: ['providers', id, 'models'], value: value as unknown as JsonValue }],
+      undefined,
+    )
+    if (!res.ok) {
+      setError(res.error.message)
+      return false
+    }
+    return true
+  }
+
+  /** The route profile for the current form, carrying the given model ids. */
+  const profileFor = (id: string, modelIds: readonly string[], discovered?: readonly DiscoveredModel[]): Record<string, unknown> => {
+    const cleanKey = apiKey.trim()
+    const needsPlaceholderModel = selected === 'empty' && modelIds.length === 0 && discovered === undefined
+    return {
+      displayName: displayName.trim() || id,
+      api: protocol,
+      baseURL: baseURL.trim(),
+      // A keyless preset stores its reference too, so a key supplied later
+      // authenticates the paid/BYOK path; without one the route serves
+      // anonymously.
+      ...keylessSelected
+        ? { keyless: true, apiKeyEnv: deriveKeyRef(id) }
+        : cleanKey.length > 0 ? { apiKeyEnv: deriveKeyRef(id) } : {},
+      ...needsPlaceholderModel ? { models: [{ id: 'auto' }] } : {},
+      ...modelIds.length > 0 ? { models: modelIds.map(modelId => ({ id: modelId })) } : {},
+      ...discovered !== undefined ? { models: discovered.map(model => ({
+        id: model.id,
+        ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
+        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+        ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
+      })) } : {},
+    }
+  }
+
+  /** Store the provider profile, saving a typed credential first. */
+  const storeProfile = async (id: string, modelIds: readonly string[], discovered?: readonly DiscoveredModel[]): Promise<boolean> => {
+    const cleanKey = apiKey.trim()
+    if (cleanKey.length > 0) {
+      const credRes = await api.credentials.set(deriveKeyRef(id), cleanKey)
+      if (!credRes.ok) {
+        setError(credRes.error.message)
+        return false
+      }
+    }
+    const res = await api.settings.mutate(
+      'llm-pi-ai',
+      [{ op: 'set', path: ['providers', id], value: profileFor(id, modelIds, discovered) as JsonValue }],
+      undefined,
+    )
+    if (!res.ok) {
+      setError(res.error.message)
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Whether this route still needs models listed: an adapter that knows the
+   * route only because configuration declared it (llm-pi-ai's `declared`
+   * flag) resolves nothing without a model list. An unanswerable directory
+   * read keeps the safe assumption that models are required.
+   */
+  const routeNeedsModels = async (id: string): Promise<boolean> => {
+    try {
+      const directory = await api.llm.listConfigurableProviders()
+      if (!directory.ok) return true
+      return directory.value.find(entry => entry.provider === id)?.declared === true
+    } catch {
+      return true
+    }
+  }
+
+  /** The route was stored but no models arrived: keep the modal repairable. */
+  const enterRecovery = (message: string): void => {
+    setRecovery({ message })
+    setDiscovering(false)
+    setBusy(false)
+  }
+
+  /** Retry the endpoint's /models listing from the recovery panel. */
+  const retryDiscovery = async (): Promise<void> => {
+    const id = providerId.trim().toLowerCase()
+    setBusy(true)
+    setError(null)
+    setDiscovering(true)
+    const answer = await runDiscovery(id, apiKey.trim())
+    setDiscovering(false)
+    if ('models' in answer && answer.models.length > 0) {
+      // The full profile is rewritten: a rejected first write left no route,
+      // so a models-only write would store a partial profile.
+      if (await storeProfile(id, [], answer.models)) onClose(true)
+      setBusy(false)
+      return
+    }
+    enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
+  }
+
+  /** Save the typed model ids onto the stored route and close. */
+  const saveManualModels = async (): Promise<void> => {
+    const id = providerId.trim().toLowerCase()
+    const manual = parseModelIds(manualModels)
+    if (manual.length === 0) return
+    setBusy(true)
+    setError(null)
+    if (await storeProfile(id, manual)) onClose(true)
+    setBusy(false)
+  }
+
   const handleCreate = async () => {
     const id = providerId.trim().toLowerCase()
     if (!id || !/^[a-z][a-z0-9-_]*$/.test(id)) {
@@ -196,6 +349,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
 
     setBusy(true)
     setError(null)
+    setRecovery(null)
 
     try {
       if (heavy !== undefined) {
@@ -203,26 +357,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         await handleHeavyCreate(heavy)
         return
       }
-      const keyRef = deriveKeyRef(id)
       const cleanKey = apiKey.trim()
+      const manual = parseModelIds(manualModels)
 
-      const needsPlaceholderModel = selected === 'empty'
-      const profileData: Record<string, unknown> = {
-        displayName: displayName.trim() || id,
-        api: protocol,
-        baseURL: baseURL.trim(),
-        // A keyless preset stores its reference too, so a key supplied later
-        // authenticates the paid/BYOK path; without one the route serves
-        // anonymously.
-        ...keylessSelected
-          ? { keyless: true, apiKeyEnv: keyRef }
-          : cleanKey.length > 0 ? { apiKeyEnv: keyRef } : {},
-        ...needsPlaceholderModel ? { models: [{ id: 'auto' }] } : {},
-      }
-
-      // Save credential if entered
+      // The typed credential serves the add and the later paid path alike.
       if (cleanKey.length > 0) {
-        const credRes = await api.credentials.set(keyRef, cleanKey)
+        const credRes = await api.credentials.set(deriveKeyRef(id), cleanKey)
         if (!credRes.ok) {
           setError(credRes.error.message)
           setBusy(false)
@@ -233,45 +373,46 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       // Mutate llm-pi-ai settings namespace
       const settingsRes = await api.settings.mutate(
         'llm-pi-ai',
-        [{ op: 'set', path: ['providers', id], value: profileData as JsonValue }],
+        [{ op: 'set', path: ['providers', id], value: profileFor(id, manual) as JsonValue }],
         undefined,
       )
 
       if (!settingsRes.ok) {
+        // A stored route whose adapter cannot resolve it is repairable on the
+        // spot: the recovery panel offers discovery and the manual list.
+        if (/resolves no models/.test(settingsRes.error.message)) {
+          enterRecovery(settingsRes.error.message)
+          return
+        }
         setError(settingsRes.error.message)
         setBusy(false)
         return
       }
 
-      // Discovery is part of the add: the new route's models land without a
-      // manual refresh. The profile is already stored, so a refused or empty
-      // discovery still closes with the provider in place.
-      setDiscovering(true)
-      try {
-        const discovery = await api.llm.discoverModels('llm-pi-ai', {
-          provider: id,
-          baseURL: baseURL.trim(),
-          api: protocol,
-          ...(cleanKey.length > 0 ? { apiKey: cleanKey } : {}),
-        })
-        if (discovery.ok && discovery.value.length > 0) {
-          const models = discovery.value.map(model => ({
-            id: model.id,
-            ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
-            ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
-            ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
-          }))
-          await api.settings.mutate(
-            'llm-pi-ai',
-            [{ op: 'set', path: ['providers', id, 'models'], value: models as unknown as JsonValue }],
-            undefined,
-          )
-        }
-      } catch {
-        // The route stays created; the detail panel's refresh remains.
+      if (manual.length > 0) {
+        onClose(true)
+        return
       }
 
-      onClose(true)
+      // Discovery is part of the add: the new route's models land without a
+      // manual refresh. A refusal or an empty listing keeps the modal open
+      // with the recovery paths instead of closing on a dead route.
+      setDiscovering(true)
+      const answer = await runDiscovery(id, cleanKey)
+      if ('models' in answer && answer.models.length > 0) {
+        await storeDiscovered(id, answer.models)
+        onClose(true)
+        return
+      }
+      const needsModels = selected === 'empty' ? false : await routeNeedsModels(id)
+      setDiscovering(false)
+      if (!needsModels) {
+        // The installed catalog describes this route (or the empty provider
+        // keeps its placeholder model); the models are optional.
+        onClose(true)
+        return
+      }
+      enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
     } catch (err) {
       setError(messageOf(err))
     } finally {
@@ -362,6 +503,29 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         <div className={styles['addForm']}>
           {error && <div className={styles['formError']}>{error}</div>}
 
+          {recovery !== null && (
+            <div className={styles['recoveryPanel']} data-add-recovery role="alert">
+              <strong>{t('addRecoveryTitle')}</strong>
+              <p>{t('addRecoveryBody')}</p>
+              <p className={styles['recoveryDetail']}>{recovery.message}</p>
+              <div className={styles['recoveryActions']}>
+                <Button variant="outline" disabled={busy} onClick={() => { void retryDiscovery() }}>
+                  {t('addDiscoverRetry')}
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={busy || parseModelIds(manualModels).length === 0}
+                  onClick={() => { void saveManualModels() }}
+                >
+                  {t('addSaveModels')}
+                </Button>
+                <Button variant="ghost" disabled={busy} onClick={() => onClose(true)}>
+                  {t('addRecoveryClose')}
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div className={styles['field']}>
             <label className={styles['fieldLabel']}>Display Name</label>
             <input
@@ -428,6 +592,18 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                     ? t('keylessApiKeyPlaceholder')
                     : selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
                   onChange={e => setApiKey(e.target.value)}
+                  disabled={busy || readOnly}
+                />
+              </div>
+
+              <div className={styles['field']}>
+                <label className={styles['fieldLabel']}>{t('addModelsLabel')}</label>
+                <textarea
+                  className={`${styles['input']} ${styles['modelsInput']}`}
+                  rows={3}
+                  value={manualModels}
+                  placeholder={t('addModelsHint')}
+                  onChange={e => setManualModels(e.target.value)}
                   disabled={busy || readOnly}
                 />
               </div>

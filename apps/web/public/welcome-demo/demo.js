@@ -418,6 +418,7 @@
     stepCount.textContent = `Step ${step} of 7`
     if (state.inTour) stepCount.textContent = `Step 5 of 7 · tour stop ${state.stop + 1}/${TOUR.length}`
     renderDone()
+    syncAnalysisStep()
   }
 
   function renderDone() {
@@ -933,6 +934,31 @@
     'Writing the system context…',
   ]
 
+  // Re-entry is never terminal: a skip only defers the offer, so returning to
+  // step 6 always restores both decisions. While the run is under way or
+  // already finished the card's buttons stay hidden and the footer's
+  // `Skip step` carries the step forward.
+  function syncAnalysisStep() {
+    if (state.analysis === 'running') {
+      offerActions.hidden = true
+      offerStatus.hidden = false
+      offerStatus.textContent = 'Running in the background. Keep going, you do not need to wait.'
+      return
+    }
+    if (state.analysis === 'done') {
+      offerActions.hidden = true
+      offerStatus.hidden = false
+      offerStatus.textContent = '✓ System context ready. Agents can now see this machine (sample data in this demo).'
+      return
+    }
+    offerActions.hidden = false
+    const skipped = state.choices[6] === 'skipped'
+    offerStatus.hidden = !skipped
+    offerStatus.textContent = skipped
+      ? 'Skipped earlier. You can still run the analysis, or skip it again.'
+      : ''
+  }
+
   function startAnalysis(navigate) {
     if (state.analysis !== 'idle') return
     state.analysis = 'running'
@@ -980,12 +1006,9 @@
   }
 
   function skipAnalysis() {
-    state.analysis = 'done'
+    // Skipping defers the offer, it does not retire it: `choices[6]` keeps the
+    // skip accounting while syncAnalysisStep restores the card on re-entry.
     markCurrent('skipped')
-    offerStatus.hidden = false
-    offerStatus.textContent = 'Using the default system context. Ask Sysadmin to analyse the machine later.'
-    offerActions.hidden = true
-    render()
     gotoStep(7)
   }
 

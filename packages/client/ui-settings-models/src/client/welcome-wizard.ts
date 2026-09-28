@@ -219,8 +219,9 @@ export interface WelcomeWizardState {
   analysis: WizardAnalysisView | null
 }
 
-/** How often the wizard polls a running analysis. */
-const ANALYSIS_POLL_MS = 900
+/** How often the wizard polls a running analysis. The host scan can settle in
+ * under a second, so the poll is fast enough to render its live stages. */
+const ANALYSIS_POLL_MS = 300
 
 /* v8 ignore next 3 -- closed-union default only defends future source widening */
 function assertNever(_value: never): never {

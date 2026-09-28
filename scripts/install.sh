@@ -756,6 +756,8 @@ seed_profile_home() { # stage
   seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
   seed_dir_once "$stage/presets" "$DSH_HOME/.agent-presets"
   seed_dir_once "$stage/skills" "$DSH_HOME/skills"
+  seed_dir_once "$stage/skins" "$DSH_HOME/skins"
+  seed_file_once "$stage/skin-center-active.json" "$DSH_HOME/skin-center-active.json"
   if [ -d "$fish_dir" ]; then
     seed_file_once "$stage/fish/ds.fish" "$fish_dir/functions/ds.fish"
     seed_file_once "$stage/fish/completions/ds.fish" "$fish_dir/completions/ds.fish"
@@ -765,9 +767,13 @@ seed_profile_home() { # stage
 
 prepare_profile() {
   [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; return 0; }
-  local kind rc=0 mode=seed
+  local kind rc=0 mode=seed fresh=0
   kind="$(profile_source_kind "$PROFILE_SOURCE")"
   log "profile source: $PROFILE_SOURCE ($kind)"
+  # A home without this profile's manifest would otherwise be seeded from the
+  # shipped upstream template by initProfile; that is a silent behavior change,
+  # so a failed fetch is fatal until the profile exists once.
+  if [ ! -f "$DSH_HOME/profiles/$PROFILE/package.json" ]; then fresh=1; fi
   PROFILE_STAGE="$PREFIX/harness/.profile-staging-$$"
   rm -rf "$PROFILE_STAGE"
   mkdir -p "$PROFILE_STAGE" || return 1
@@ -780,6 +786,9 @@ prepare_profile() {
   if [ "$rc" != 0 ]; then
     rm -rf "$PROFILE_STAGE"; PROFILE_STAGE=""
     if [ "$PROFILE_SOURCE_REQUIRED" = 1 ]; then die "profile fetch failed: $PROFILE_SOURCE"; fi
+    if [ "$fresh" = 1 ]; then
+      die "profile fetch failed: $PROFILE_SOURCE and $DSH_HOME/profiles/$PROFILE does not exist yet; refusing to fall back to the shipped upstream template. Fix the source, or pass --profile-source '' to seed it deliberately."
+    fi
     warn "profile fetch failed: $PROFILE_SOURCE (continuing with the shipped template)"
     return 0
   fi

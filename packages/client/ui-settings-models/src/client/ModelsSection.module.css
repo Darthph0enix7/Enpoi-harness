@@ -1703,6 +1703,44 @@ select.input {
   gap: 10px;
 }
 
+.modelsInput {
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.recoveryPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-state-warn-label, var(--dsw-alias-border-l3));
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.recoveryPanel p {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.recoveryDetail {
+  font-family: var(--ds-font-family-code, monospace);
+  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-label-tertiary)) !important;
+}
+
+.recoveryActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .formError {
   padding: 6px 10px;
   background: rgba(239, 68, 68, 0.12);

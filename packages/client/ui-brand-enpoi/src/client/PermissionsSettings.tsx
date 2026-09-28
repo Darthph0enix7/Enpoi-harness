@@ -48,7 +48,7 @@ import {
   subscribeRoleRegistry,
   type RoleRegistryMap,
 } from './role-registry.ts'
-import { isSettingsCacheFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
+import { getEnpoiNamespacePresence, isSettingsCacheFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { openSettingsSection } from './settings-nav.ts'
 import css from './PermissionsSettings.module.css'
 
@@ -215,7 +215,7 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
         </div>
       </Group>
       <Group title="Tool policy" icon={ICONS.globe}>
-        {toolRows.map(row => {
+        {toolRows.map((row) => {
           const state = rowPolicyState(perms, undefined, row)
           return (
             <PolicyRow
@@ -332,7 +332,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
             Open Dynamic → Roles
           </button>
         </div>
-        {toolRows.map(row => {
+        {toolRows.map((row) => {
           const state = rowPolicyState(perms, agent, row)
           // An aggregate with no live members has nothing to toggle: no eye.
           const targets = rowTargets(row)
@@ -444,13 +444,23 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
    * an aggregate, the row itself for a plain tool, and the legacy aggregate
    * key dropped (the aggregate is never an independent second key).
    */
-  const applyRowPolicy = (tools: Record<string, PolicyValue>, row: PermissionToolRow, next: PolicyValue | undefined): Record<string, PolicyValue> => {
-    const updated = { ...tools }
-    for (const target of rowTargets(row)) {
-      if (next === undefined) delete updated[target]
-      else updated[target] = next
+  const applyRowPolicy = (
+    tools: Record<string, PolicyValue>,
+    row: PermissionToolRow,
+    next: PolicyValue | undefined,
+  ): Record<string, PolicyValue> => {
+    const targets = new Set(rowTargets(row))
+    const legacyAggregate = isAggregateRow(row) ? row.id : undefined
+    const updated: Record<string, PolicyValue> = {}
+    for (const [key, value] of Object.entries(tools)) {
+      if (key === legacyAggregate || (next === undefined && targets.has(key))) continue
+      updated[key] = next !== undefined && targets.has(key) ? next : value
     }
-    if (isAggregateRow(row)) delete updated[row.id]
+    if (next !== undefined) {
+      for (const target of rowTargets(row)) {
+        if (target !== legacyAggregate && !Object.hasOwn(updated, target)) updated[target] = next
+      }
+    }
     return updated
   }
 
@@ -593,7 +603,11 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
     return (
       <div className={c('container')}>
         <div className={c('statusLine')}>
-          {failed ? 'Permission policy unavailable — check the gateway connection.' : 'Loading policy…'}
+          {failed
+            ? getEnpoiNamespacePresence() === 'missing'
+              ? 'Permission settings are not available in this profile — the enpoi-orchestration service is not mounted.'
+              : 'Permission policy unavailable — check the gateway connection.'
+            : 'Loading policy…'}
         </div>
         {failed && (
           <button type="button" className={c('retryBtn')} onClick={load}>Retry</button>

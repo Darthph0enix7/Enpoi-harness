@@ -76,6 +76,23 @@ describe('coalesced namespace reads', () => {
     await expect(helper.readEnpoiNamespace()).resolves.toBeUndefined()
   })
 
+  it('distinguishes a profile without the namespace from an unreachable gateway', async () => {
+    const helper = await import('../src/client/settings-refresh.ts')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      result: { ok: true, value: { namespaces: [{ ns: 'other' }] } },
+    }), { status: 200 })))
+    await expect(helper.readEnpoiNamespace()).resolves.toBeUndefined()
+    expect(helper.getEnpoiNamespacePresence()).toBe('missing')
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('offline', { status: 500 })))
+    await expect(helper.readEnpoiNamespace()).resolves.toBeUndefined()
+    expect(helper.getEnpoiNamespacePresence()).toBe('unreachable')
+
+    vi.stubGlobal('fetch', vi.fn(async () => describeResponse({ permissions: {} }, 7)))
+    await expect(helper.readEnpoiNamespace()).resolves.toMatchObject({ revision: 7 })
+    expect(helper.getEnpoiNamespacePresence()).toBe('present')
+  })
+
   it('reads three stores re-reading in one tick through a single describe call', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       if (methodOf(init) === 'settings.describe') {

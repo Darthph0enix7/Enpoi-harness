@@ -246,7 +246,14 @@ function TabSlot({
   const content = renderSlot(seat, {}, { entryKey: definition?.id ?? tab.kind, fallback, hookContext })
   return seat === 'sidebar.right.pane.tab.title'
     ? <span className={css.tabTitle} data-sidebar-right-tab={tab.id} data-sidebar-right-occurrence={id}>{content}</span>
-    : <div className={css.tabBody} data-sidebar-right-tab={tab.id} data-sidebar-right-occurrence={id} data-sidebar-right-kind={tab.kind}>{content}</div>
+    : (
+      <div
+        className={css.tabBody}
+        data-sidebar-right-tab={tab.id}
+        data-sidebar-right-occurrence={id}
+        data-sidebar-right-kind={tab.kind}
+      >{content}</div>
+    )
 }
 
 /**
@@ -383,7 +390,7 @@ function Rail({
     return () => { document.body.removeAttribute(RAIL_MARKER) }
   }, [])
   return (
-    <nav className={css.rail} aria-label={t('rail.aria')} data-sidebar-right-rail>
+    <nav className={css.rail} aria-label={t('rail.aria')} data-sidebar-right-rail data-dsh-tour="rightbar">
       <div className={css.railItems}>
         {items.map((item) => {
           const Icon = item.icon
@@ -398,6 +405,7 @@ function Rail({
                 aria-pressed={selected}
                 data-sidebar-right-rail-item={item.kind}
                 data-sidebar-right-rail-active={selected || undefined}
+                data-dsh-tour={item.kind === CONTEXT_KIND ? 'context' : undefined}
                 onClick={() => { onSelect(item.kind) }}
               >
                 {Icon === undefined
@@ -668,6 +676,8 @@ function Floats(panel: PanelProps): ReactNode {
 // enpoi: geometry of the rail and the editor pane beside the panel.
 /** Width of the always-visible rail, in px; mirrors the stylesheet. */
 const RAIL_WIDTH = 44
+/** The Context page's kind; the tour spotlight targets its rail entry. */
+const CONTEXT_KIND = 'dsh-context'
 /** Body marker the rail sets while mounted; the stylesheet keys the collapsed strip reservation on it. */
 const RAIL_MARKER = 'data-sidebar-right-rail-mounted'
 /** Width of the editor pane's drag divider, in px; mirrors the stylesheet. */

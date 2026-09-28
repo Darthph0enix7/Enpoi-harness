@@ -55,7 +55,7 @@ import {
   subscribePermissionsView,
   type PermissionsConfig,
 } from './permissions-model.ts'
-import { ensureSettingsFresh, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
+import { ensureSettingsFresh, getEnpoiNamespacePresence, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { PROTECTED_CAPABILITIES } from './capability-catalog.ts'
 import type { FleetCouncil, FleetCouncilSeat } from './role-registry.ts'
 import css from './CapabilitiesBody.module.css'
@@ -914,7 +914,13 @@ function PermissionsSection() {
         )}
       </div>
       {counts === null ? (
-        <div className={c('empty')}>{failed ? 'Permission policy unavailable.' : 'Loading policy…'}</div>
+        <div className={c('empty')}>
+          {failed
+            ? getEnpoiNamespacePresence() === 'missing'
+              ? 'Permission settings are not available in this profile.'
+              : 'Permission policy unavailable.'
+            : 'Loading policy…'}
+        </div>
       ) : (
         <div className={c('permHint')}>
           Unconfigured tools default to <b>ask</b>; bash commands match patterns first, then the tool policy.
