@@ -66,15 +66,15 @@
         </div>
       </div>
 
-      <div class="app-rpanel">
-        <div class="rail-ico">◧</div>
-        <div class="rail-ico">⌸</div>
-        <div class="rail-ico">⎋</div>
-        <div class="rp-title">Right panel</div>
-        <div class="rp-line"></div>
-        <div class="rp-line short"></div>
-        <div class="rp-line"></div>
-        <div class="rp-line short"></div>
+      <div class="app-rpanel" data-spot="sidebar">
+        <div class="rp-title">Sidebar</div>
+        <div class="rp-tab on"><span class="rp-ico" aria-hidden="true">▤</span><span>Files</span></div>
+        <div class="rp-tab"><span class="rp-ico" aria-hidden="true">⑂</span><span>Git</span></div>
+        <div class="rp-tab"><span class="rp-ico" aria-hidden="true">◉</span><span>Watchtower</span></div>
+        <div class="rp-tab"><span class="rp-ico" aria-hidden="true">◔</span><span>Context</span></div>
+        <div class="rp-tab"><span class="rp-ico" aria-hidden="true">✳</span><span>Agent Models</span></div>
+        <div class="rp-tab"><span class="rp-ico" aria-hidden="true">⬡</span><span>Capabilities</span></div>
+        <div class="rp-hint">Unused tabs can be hidden</div>
       </div>
     </div>
 
@@ -171,12 +171,25 @@
           <section class="step" data-step="3" hidden>
             <p class="eyebrow">Step 3 · First provider</p>
             <h1 tabindex="-1">Add a provider — the real screen</h1>
-            <p class="lead">The real Add Provider screen: catalogue first, then the route form.</p>
+            <p class="lead">First run ships ready: <strong>Kilo Gateway</strong> is pre-selected — free and keyless. Open the Add Provider screen, or just continue; Kilo is the default route.</p>
 
-            <div class="pmodal" id="pModal" aria-label="Add model provider — demo mirror">
+            <div class="provider-summary" id="providerSummary">
+              <div class="ps-head">
+                <span class="ps-mark" aria-hidden="true">▤</span>
+                <div class="ps-body">
+                  <strong id="psTitle">No provider added yet</strong>
+                  <span id="psSub">You can just continue with Kilo — it is free and needs no key.</span>
+                </div>
+                <button class="btn primary" type="button" id="btnAddProvider">Add provider</button>
+              </div>
+              <div class="ps-route" id="psRoute" hidden>kilo · openai-completions · https://api.kilo.ai/api/gateway · keyless free tier</div>
+            </div>
+
+            <div class="pmodal-overlay" id="pOverlay" hidden>
+            <div class="pmodal" id="pModal" role="dialog" aria-modal="true" aria-label="Add model provider — demo mirror">
               <div class="pmodal-head">
                 <span class="pmodal-title" id="pModalTitle">Add model provider</span>
-                <span class="pmodal-close" aria-hidden="true">✕</span>
+                <button class="pmodal-close" type="button" id="btnPClose" aria-label="Close">✕</button>
               </div>
 
               <div class="pmodal-body" id="pModalBody">
@@ -184,7 +197,15 @@
                 <div class="pview" data-pview="picker">
                   <div class="ptoolbar">
                     <span class="psearch"><span class="psearch-ico" aria-hidden="true">⌕</span><span class="psearch-ph">Search 212 providers (OpenAI, Anthropic, Gemini, Ollama...)</span></span>
-                    <span class="pempty">Empty Provider</span>
+                    <button class="pempty" type="button" id="btnPEmpty">Empty Provider</button>
+                  </div>
+                  <div class="pdefault">
+                    <span class="pdefault-badge">Default · Free</span>
+                    <div class="pdefault-body">
+                      <strong>Kilo Gateway — keyless and free</strong>
+                      <span>You can just continue with Kilo — it is free and needs no key. It is pre-selected for this first run.</span>
+                    </div>
+                    <button class="btn primary small" type="button" id="btnUseKilo">Use Kilo (free)</button>
                   </div>
                   <div class="pgrid">
                     <div class="pgroup">Popular</div>
@@ -197,7 +218,7 @@
                     <div class="pcard" role="button" tabindex="-1" data-provider="openrouter"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">OpenRouter</span><span class="pid">openrouter</span></span></div>
                     <div class="pcard" role="button" tabindex="-1" data-provider="vercel"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Vercel AI Gateway</span><span class="pid">vercel</span></span></div>
                     <div class="pgroup">All Providers</div>
-                    <div class="pcard preselected" role="button" tabindex="-1" data-provider="kilo"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Kilo Gateway</span><span class="pid">kilo</span></span><span class="pcheck" aria-hidden="true">✓</span></div>
+                    <div class="pcard preselected" role="button" tabindex="-1" data-provider="kilo"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">Kilo Gateway</span><span class="pid">kilo</span></span><span class="pflag">Free · default</span><span class="pcheck" aria-hidden="true">✓</span></div>
                     <div class="pcard" role="button" tabindex="-1" data-provider="deepseek"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">DeepSeek</span><span class="pid">deepseek</span></span></div>
                     <div class="pgroup">Self-hosted / heavy</div>
                     <div class="pcard" role="button" tabindex="-1" data-heavy="freellmapi"><span class="pico" aria-hidden="true">▤</span><span class="pinfo"><span class="pname">FreeLLMAPI</span><span class="pid">freellmapi</span><span class="pbadge">Listed — add to configure</span></span></div>
@@ -337,8 +358,8 @@
               </div>
 
               <div class="pmodal-foot">
-                <span class="pfoot-note" id="pFootNote">Kilo Gateway is pre-selected for this first run.</span>
-                <span class="pfoot-actions" id="pFootPicker"><span class="btn ghost small" aria-hidden="true">Cancel</span></span>
+                <span class="pfoot-note" id="pFootNote">Kilo Gateway is pre-selected for this first run — free and keyless.</span>
+                <span class="pfoot-actions" id="pFootPicker"><button class="btn ghost small" type="button" id="btnPCancel">Cancel</button></span>
                 <span class="pfoot-actions" id="pFootForm" hidden>
                   <button class="btn ghost small" type="button" id="btnPBack">Back</button>
                   <button class="btn primary small" type="button" id="btnPCreate">Create provider</button>
@@ -351,6 +372,7 @@
                   <button class="btn ghost small" type="button" id="btnPDocsBack">Back</button>
                 </span>
               </div>
+            </div>
             </div>
 
             <p class="fineprint">Same flow as Settings → Models — nothing is stored in this demo.</p>
@@ -366,10 +388,6 @@
             <p class="eyebrow">Step 4 · Intelligence</p>
             <h1 tabindex="-1">Background helpers — on by default</h1>
             <p class="lead">Compaction, the Context Keeper and the Whiteboard all land enabled. With free models there is no cost — each one is a single click from off.</p>
-            <div class="warn-banner" role="note">
-              <span class="warn-ico">⚠</span>
-              <span><strong>Compaction is LLM-based</strong> — a model writes the replacement summary. A <strong>mechanical fallback is always on</strong> and makes no model call: it runs when the LLM one is unavailable. The Context Keeper and the summariser seat also use an LLM. When enabled they use the <strong>Kilo free gateway</strong> (free), not your main session model.</span>
-            </div>
 
             <div class="toggle-card" data-feature="compaction" data-on="true">
               <div class="toggle-head">
@@ -421,7 +439,7 @@
           <section class="step" data-step="5" hidden>
             <p class="eyebrow">Step 5 · The tour</p>
             <h1 tabindex="-1">A quick look around</h1>
-            <p class="lead">Five stops over the interface behind this panel — sidebar, settings, skills &amp; MCP, the composer switches, and the Context Dashboard.</p>
+            <p class="lead">Five stops over the interface behind this panel — the right sidebar, settings, skills &amp; MCP, the composer switches, and the Context Dashboard.</p>
             <p class="fineprint">Placeholder chrome only: no real app is loaded behind this demo.</p>
             <div class="actions">
               <button class="btn ghost" data-back>← Back</button>
@@ -438,14 +456,18 @@
             <ul class="cards">
               <li class="card"><strong>Orchestrator</strong><span>Plans, implements and delegates. The default.</span></li>
               <li class="card"><strong>Sysadmin</strong><span>Runs the machine: services, packages, disks, logs.</span></li>
-              <li class="card"><strong>Creator</strong><span>Repairs and extends the harness itself. Ask it when the app misbehaves.</span></li>
+              <li class="card creator-feature">
+                <span class="pill tiny creator-pill">Knows the whole system</span>
+                <strong>Creator</strong>
+                <span>Anything about the harness — changing, updating, fixing — ask the Creator. It knows the whole system and can act on it.</span>
+              </li>
             </ul>
-            <div class="offer-card">
-              <div class="offer-head"><strong>Analyse this system now?</strong></div>
-              <p>A read-only scan — hardware, OS, services — that runs <strong>in the background</strong> while you finish this tour. The result becomes context your agents can see. Skip it and agents start from a default system context.</p>
+            <div class="offer-card recommended">
+              <div class="offer-head"><strong>Analyse this system now?</strong><span class="pill tiny money">Recommended</span></div>
+              <p>A <strong>read-only</strong> scan — hardware, OS, services — that <strong>runs in the background while you continue</strong>. It gives your <strong>sysadmin</strong> real knowledge of this machine, so agents answer from facts instead of a default system context.</p>
               <div class="actions compact" id="offerActions">
-                <button class="btn primary small" type="button" id="btnAnalyse">Analyse in the background</button>
-                <button class="btn ghost small" type="button" id="btnSkipAnalyse">Skip — use the default context</button>
+                <button class="btn primary" type="button" id="btnAnalyse">Analyse in the background <span class="arrow">→</span></button>
+                <button class="btn link" type="button" id="btnSkipAnalyse">Skip — use the default context</button>
               </div>
               <p class="offer-status" id="offerStatus" hidden></p>
             </div>
@@ -495,7 +517,7 @@
       <div class="spot-hole" id="spotHole"><span class="spot-ring"></span></div>
       <div class="spot-tip glass" id="spotTip" role="dialog" aria-label="Interface tour">
         <p class="tip-count" id="tipCount">Stop 1 of 5</p>
-        <h2 id="tipTitle" tabindex="-1">Sessions</h2>
+        <h2 id="tipTitle" tabindex="-1">The sidebar</h2>
         <p id="tipBody"></p>
         <div class="tip-actions">
           <button class="btn ghost small" type="button" id="tipBack">← Back</button>

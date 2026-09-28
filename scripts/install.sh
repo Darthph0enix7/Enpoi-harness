@@ -72,6 +72,11 @@ FORCE=0
 FORCE_DOWNGRADE=0
 JSON_OUT=0
 UPDATE_MODE=0
+QUIET=0
+NO_OPEN=0
+STEP_NO=0
+STEP_TOTAL=0
+START_TIME="$(date +%s)"
 
 OS=""
 ARCH=""
@@ -94,11 +99,31 @@ CHECK_SMOKE=0
 CHECK_AUDIT="skipped"
 ROLLED_BACK=0
 
-log() { printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2; }
+log() { [ "$QUIET" = 1 ] && return 0; printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2; }
 warn() { printf '%s: WARNING: %s\n' "$SCRIPT_NAME" "$*" >&2; }
 die() { printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; exit 1; }
 say() {
   if [ "$JSON_OUT" = 1 ]; then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi
+}
+
+step() { # label — numbered stage line on stderr; --quiet suppresses it
+  STEP_NO=$((STEP_NO + 1))
+  [ "$QUIET" = 1 ] && return 0
+  if [ "$STEP_TOTAL" -gt 0 ]; then
+    printf '%s: [%d/%d] %s\n' "$SCRIPT_NAME" "$STEP_NO" "$STEP_TOTAL" "$*" >&2
+  else
+    printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2
+  fi
+}
+
+elapsed_human() { # whole-second duration since START_TIME, e.g. "3m42s"
+  local s h m
+  s=$(( $(date +%s) - START_TIME ))
+  [ "$s" -ge 0 ] || s=0
+  h=$((s / 3600)); m=$((s / 60 % 60)); s=$((s % 60))
+  if [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm%02ds' "$m" "$s"
+  else printf '%ds' "$s"; fi
 }
 
 usage() {
@@ -133,6 +158,9 @@ Options:
   --force             rebuild/reinstall even when the version is already present
   --force-downgrade   allow a downgrade to an older version
   --write-rc          add the bin dir to the shell rc (~/.profile / fish config)
+  --quiet, -q         suppress progress/detail lines (warnings, errors, and the
+                      final summary still print)
+  --no-open           do not try to open the Web UI URL after install
   --json              print a single JSON status object on stdout
   -h, --help          this help
 
@@ -146,6 +174,9 @@ Environment:
                                      (falls back to GH_TOKEN / GITHUB_TOKEN / gh)
   DSH_DEFAULT_PROFILE_SOURCE         built-in default profile source
   DSH_PROFILE_INSTALL_TIMEOUT        profile `pnpm install` budget in seconds
+  DSH_WEB_HOST / DSH_WEB_PORT        Web UI URL printed (and opened when a
+                                     display exists); default 127.0.0.1:3080
+  DSH_NO_OPEN                        same as --no-open
 
 Exit codes: 0 success, 1 failure (update rolls back first), 42 sudo trap fired.
 USAGE
@@ -185,6 +216,8 @@ while [ "$#" -gt 0 ]; do
     --force) FORCE=1; shift;;
     --force-downgrade) FORCE_DOWNGRADE=1; shift;;
     --write-rc) WRITE_RC=1; shift;;
+    --quiet|-q) QUIET=1; shift;;
+    --no-open) NO_OPEN=1; shift;;
     --json) JSON_OUT=1; shift;;
     -h|--help) usage; exit 0;;
     --) shift; break;;
@@ -1018,24 +1051,66 @@ emit_json() { # action ok
   return 0
 }
 
+web_url() { # the URL the web surface serves after `dsh web` starts
+  local port="${DSH_WEB_PORT:-3080}"
+  case "$port" in ''|*[!0-9]*) port=3080;; esac
+  # Port 0 asks the OS for a free port, so the bound URL is unknowable here.
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then port=3080; fi
+  printf 'http://%s:%s' "${DSH_WEB_HOST:-127.0.0.1}" "$port"
+}
+
+maybe_open_browser() { # url — best-effort handoff; detached and never fatal
+  local url="$1" opener=""
+  if [ "$NO_OPEN" = 1 ] || [ "${DSH_NO_OPEN:-0}" = 1 ]; then
+    log "browser: not opening the URL (--no-open)"
+    return 0
+  fi
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "$JSON_OUT" = 1 ]; then
+    log "browser: not opening the URL (non-interactive session)"
+    return 0
+  fi
+  case "$OS" in
+    linux)
+      if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        log "browser: no display session; open $url yourself"
+        return 0
+      fi
+      opener="$(command -v xdg-open 2>/dev/null || true)"
+      ;;
+    darwin)
+      opener="$(command -v open 2>/dev/null || true)"
+      ;;
+    *) return 0;;
+  esac
+  if [ -z "$opener" ]; then
+    say "  open:     no browser opener found; open ${url} yourself"
+    return 0
+  fi
+  # Detached so a slow/hung opener can never block the installer; failure is
+  # not fatal — the URL was already printed above.
+  ( "$opener" "$url" >/dev/null 2>&1 & ) || true
+  log "browser: asked $opener to open $url"
+  return 0
+}
+
 print_summary() { # action
-  local action="$1"
+  local action="$1" url overlay
+  url="$(web_url)"
+  overlay="$PROFILE_DIR/device-patches/$(hostname 2>/dev/null || printf 'this-host')"
   say ""
-  say "dsh ${action} complete"
-  say "  version:   ${VERSION}"
-  say "  channel:   ${CHANNEL}"
-  say "  harness:   ${HARNESS}"
-  say "  current:   $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
-  say "  node:      ${NODE} (${NODE_ORIGIN})"
-  say "  pnpm:      ${PNPM} (corepack)"
-  say "  dsh home:  ${DSH_HOME} (seeded only; your files are never overwritten)"
-  say "  profile:   ${PROFILE}"
-  if [ -n "$PROFILE_SOURCE" ]; then say "  profile source: ${PROFILE_SOURCE}"; else say "  profile source: (none; shipped template)"; fi
-  say "  shim:      ${BIN_DIR}/dsh"
+  say "dsh ${action} complete — ${VERSION} (${CHANNEL}) in $(elapsed_human)"
+  say "  start:    dsh web"
+  say "  url:      ${url}   (open it — the composer is your agent)"
+  say "  commands: ds update · ds doctor · dsh restart --after-turn · ds backfill"
+  say "  home:     ${DSH_HOME} (seeded once; your files are never overwritten)"
+  say "  profile:  ${PROFILE_DIR}"
+  say "  overlay:  ${overlay}"
+  say "  changes:  ask the Creator (docs/creator/) for any harness change"
+  case ":$PATH:" in
+    *":${BIN_DIR}:"*) :;;
+    *) say "  path:     add ${BIN_DIR} to PATH (re-run with --write-rc)";;
+  esac
   say ""
-  say "Add to PATH:  export PATH=\"${BIN_DIR}:\$PATH\""
-  say "Next:         dsh web        boot the web UI"
-  say "              dsh update     update to the newest ${CHANNEL} build"
 }
 
 # ── Dry-run plans ───────────────────────────────────────────────────────────
@@ -1069,14 +1144,17 @@ dry_run_plan() {
 
 # ── Install ─────────────────────────────────────────────────────────────────
 do_install() {
+  STEP_TOTAL=9
   detect_os_arch
   sudo_trap
-  log "install root $PREFIX on $OS/$ARCH (zero sudo)"
+  step "environment: $OS/$ARCH, root $PREFIX (zero sudo)"
+  step "node: resolve (downloads v${DSH_NODE_VERSION} when PATH has none)"
   resolve_node 1 || die "no usable Node.js >= ${DSH_MIN_NODE_MAJOR}.${DSH_MIN_NODE_MINOR} and the download failed"
   log "node: $NODE ($NODE_ORIGIN)"
   # Disk hygiene before staging: failed trees are never keep-eligible and
   # would otherwise accumulate across repeated installs.
   prune_failed_versions
+  step "source: ${SOURCE:-$CHANNEL channel archive}"
   prepare_source
   log "target version: $VERSION"
   HARNESS="$PREFIX/harness/$VERSION"
@@ -1084,26 +1162,35 @@ do_install() {
     log "already installed; refreshing seed/shim only"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
     if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
+    step "pnpm: already available"
+    step "dependencies and build: reusing the installed $VERSION tree"
   else
+    step "pnpm: corepack"
     setup_pnpm || die "could not enable pnpm through corepack"
     log "pnpm: $("$PNPM" --version 2>/dev/null || printf '?') (corepack)"
+    step "dependencies and build (this takes a few minutes)"
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
   fi
   ln -sfn "$VERSION" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $VERSION"
+  step "profile: $PROFILE"
   prepare_profile
+  step "home: seeding $DSH_HOME and profile dependencies"
   seed_home
   profile_install || die "profile dependency install failed"
   run_profile_plugin_build || die "profile plugin build failed"
+  step "shim: $BIN_DIR/dsh and install-state.json"
   write_shim || die "could not write the dsh shim into $BIN_DIR"
   [ "$WRITE_RC" = 1 ] && write_rc
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(detect_service_unit)"; fi
   write_state || warn "could not write $PREFIX/harness/install-state.json"
+  step "self-check"
   if ! selfcheck; then
     warn "self-check failed for the freshly installed tree"
     emit_json install 0
     exit 1
   fi
   print_summary install
+  maybe_open_browser "$(web_url)"
   emit_json install 1
   return 0
 }
@@ -1184,8 +1271,10 @@ prune_failed_versions() {
 
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup rc recorded_home
+  STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   detect_os_arch
+  step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
   if [ -z "$SOURCE" ]; then SOURCE="$(json_field "$state" source)"; fi
@@ -1231,6 +1320,7 @@ do_update() {
   # reclaim them before the new tree needs the space.
   prune_failed_versions
   log "update: active $current on the $CHANNEL channel"
+  step "source: ${SOURCE:-$CHANNEL channel archive}"
   prepare_source
   log "update target: $VERSION"
   HARNESS="$PREFIX/harness/$VERSION"
@@ -1239,10 +1329,16 @@ do_update() {
     if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
     log "already up to date at $VERSION; nothing to fetch/build"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
+    step "pnpm: present (nothing to rebuild)"
+    step "dependencies and build: already up to date at $VERSION"
+    step "profile: $PROFILE (refresh)"
     prepare_profile
+    step "home: seeding $DSH_HOME and profile dependencies"
     seed_home
     profile_install || warn "profile dependency refresh failed"
     run_profile_plugin_build || warn "profile plugin build failed"
+    step "switch, service and backfill: $VERSION already active"
+    step "self-check"
     if ! selfcheck; then
       warn "self-check of the active tree failed"
       emit_json noop 0
@@ -1256,19 +1352,23 @@ do_update() {
     die "refusing to downgrade from $current to $VERSION without --force-downgrade"
   fi
 
+  step "pnpm: corepack"
   setup_pnpm || die "could not enable pnpm through corepack"
   backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup" 2>/dev/null || warn "could not create backup dir $backup"
   backup_user_files "$backup"
   log "user-file backups: $backup"
 
+  step "dependencies and build (this takes a few minutes)"
   if ! install_tree; then
     warn "update failed before switching; $current remains active"
     write_diagnostics install-failed
     emit_json update 0
     exit 1
   fi
+  step "profile: $PROFILE"
   prepare_profile
+  step "home, dependencies and migrations"
   if ! run_migrations; then
     warn "migrations failed before switching; $current remains active"
     write_diagnostics migrations-failed
@@ -1276,11 +1376,13 @@ do_update() {
     exit 1
   fi
 
+  step "switch, service and backfill"
   ln -sfn "$VERSION" "$PREFIX/harness/current" || die "could not switch $PREFIX/harness/current to $VERSION"
   log "switched current -> $VERSION"
   restart_service
   run_backfill
 
+  step "self-check"
   if ! selfcheck; then
     rollback "$current" "$backup" "$VERSION"
     exit 1

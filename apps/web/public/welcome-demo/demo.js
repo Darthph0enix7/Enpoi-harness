@@ -28,11 +28,11 @@
   // relative to the spotlighted region.
   const TOUR = [
     {
-      target: '.app-sidebar',
-      place: 'right',
+      target: '.app-rpanel',
+      place: 'left',
       pad: 8,
-      title: 'Sessions',
-      body: 'Start here. New session at the top; every past session stays as a row below it.',
+      title: 'The sidebar',
+      body: 'Files, Git, Watchtower, Context, Agent Models, Capabilities — the right-hand tabs. Files browses the workspace, Git tracks changes, Watchtower follows background jobs, Context shows the window budget, Agent Models assigns the model seats, Capabilities lists what agents can do. Unused tabs can be hidden.',
     },
     {
       target: '[data-spot="settings"]',
@@ -127,10 +127,10 @@
     compactionMode: 'llm',
     provider: 'kilo',
     providerView: 'picker',
+    providerOpen: false,
     providerCreated: false,
     providerRunning: false,
-    visited4: false,
-    choices: {}, // step -> 'done' | 'skipped'
+    choices: {}, // step -> 'done' (configured) | 'default' (accepted defaults) | 'skipped' (explicit)
     finished: false,
   }
 
@@ -179,13 +179,12 @@
 
   function render() {
     const step = state.step
-    if (!state.inTour && step === 4) state.visited4 = true
     $$('.step').forEach((el) => { el.hidden = Number(el.dataset.step) !== step })
     $$('#stepList li').forEach((li) => {
       const n = Number(li.dataset.jump)
       const choice = state.choices[n]
       const isActive = !state.inTour && n === step
-      li.dataset.state = isActive ? 'active' : choice === 'skipped' ? 'skipped' : choice === 'done' ? 'done' : ''
+      li.dataset.state = isActive ? 'active' : choice || ''
       const btn = li.querySelector('button')
       btn.setAttribute('aria-current', isActive ? 'step' : 'false')
     })
@@ -227,8 +226,17 @@
   function markCurrent(choice) {
     if (state.step >= 1 && state.step <= 7) {
       const prev = state.choices[state.step]
-      // Never downgrade a completed step to skipped.
-      if (!(prev === 'done' && choice === 'skipped')) state.choices[state.step] = choice
+      // A configured step is never downgraded to accepted-defaults or skipped.
+      if (prev === 'done') return
+      state.choices[state.step] = choice
+    }
+  }
+
+  // Leaving a step with Continue: accepted-defaults, unless an action in the
+  // step already marked it configured.
+  function acceptCurrent() {
+    if (state.step >= 1 && state.step <= 7 && !state.choices[state.step]) {
+      state.choices[state.step] = 'default'
     }
   }
 
@@ -237,15 +245,10 @@
     if (state.inTour) exitTour('skipped', true)
     const forward = target > state.step
     if (forward) {
-      // Steps passed over without acting keep their defaults; steps with a real
-      // action count as done when that action happened, otherwise as skipped.
+      // Steps passed over keep their defaults — only an explicit Skip click
+      // marks a step skipped.
       for (let n = state.step; n < target; n += 1) {
-        if (state.choices[n]) continue
-        if (n === 1 || n === 7) state.choices[n] = 'done'
-        else if (n === 3 && state.providerCreated) state.choices[n] = 'done'
-        else if (n === 4 && state.visited4) state.choices[n] = 'done'
-        else if (n === 6 && state.analysis !== 'idle') state.choices[n] = 'done'
-        else state.choices[n] = 'skipped'
+        if (!state.choices[n]) state.choices[n] = 'default'
       }
     }
     state.step = target
@@ -261,6 +264,7 @@
   function next() {
     if (state.inTour) { tourNext(); return }
     if (state.step === 7) { finish(); return }
+    acceptCurrent()
     gotoStep(state.step + 1)
   }
 
@@ -271,13 +275,18 @@
 
   function skipStep() {
     if (state.inTour) { exitTour('skipped'); return }
+    if (state.step === 7) { finish(); return }
     markCurrent('skipped')
-    if (state.step === 7) finish()
-    else gotoStep(state.step + 1)
+    gotoStep(state.step + 1)
   }
 
   function skipAll() {
     if (state.inTour) exitTour('skipped', true)
+    // The explicit "Skip the tour": the remaining steps are skipped, not defaulted.
+    for (let n = 2; n <= 6; n += 1) {
+      if (!state.choices[n]) state.choices[n] = 'skipped'
+    }
+    if (!state.choices[1]) state.choices[1] = 'done'
     gotoStep(7, { keepHash: true })
     syncHash()
   }
@@ -299,7 +308,6 @@
     state.sandbox = 'workspace-write'
     state.toggles = { compaction: true, keeper: true, whiteboard: true }
     state.compactionMode = 'llm'
-    state.visited4 = false
     state.choices = {}
     state.finished = false
     body.dataset.mode = ''
@@ -349,6 +357,30 @@
     $('#pModalBody').scrollTop = 0
   }
 
+  function openProviderModal(view) {
+    state.providerOpen = true
+    showProviderView(view || (state.providerCreated ? 'form' : 'picker'))
+    $('#pOverlay').hidden = false
+  }
+
+  function closeProviderModal() {
+    state.providerOpen = false
+    $('#pOverlay').hidden = true
+  }
+
+  function updateProviderSummary(created) {
+    if (!created) {
+      $('#psTitle').textContent = 'No provider added yet'
+      $('#psSub').textContent = 'You can just continue with Kilo — it is free and needs no key.'
+      $('#psRoute').hidden = true
+      return
+    }
+    $('#psTitle').textContent = `${created.name} — configured`
+    $('#psSub').textContent = created.sub
+    $('#psRoute').textContent = created.route
+    $('#psRoute').hidden = false
+  }
+
   function resetProviderResult() {
     $('#pResult').hidden = true
     $('#pDiscovering').hidden = true
@@ -394,14 +426,22 @@
     }
     const btn = $('#btnPCreate')
     btn.disabled = false
-    btn.textContent = 'Create provider'
+    btn.textContent = 'Done'
+    updateProviderSummary({
+      name: p.name,
+      sub: p.keyless
+        ? 'Keyless free route — discovery and the test call succeeded.'
+        : 'Route created — discovery and the test call succeeded.',
+      route: `${state.provider} · ${p.protocol} · ${p.baseURL || 'default endpoint'}`,
+    })
     markCurrent('done')
     render()
   }
 
   function createProvider() {
+    if (state.providerCreated) { closeProviderModal(); return }
     const p = PROVIDERS[state.provider]
-    if (!p || state.providerRunning || state.providerCreated) return
+    if (!p || state.providerRunning) return
     state.providerRunning = true
     $('#pResult').hidden = false
     $('#pDiscovering').hidden = false
@@ -434,22 +474,27 @@
     state.provider = 'kilo'
     state.providerCreated = false
     state.providerRunning = false
+    state.providerOpen = false
+    closeProviderModal()
     resetProviderResult()
     setProviderPlatform('linux')
     showProviderView('picker')
+    updateProviderSummary(null)
   }
 
   function applyProviderHash(h) {
     if (!h || h.step !== 3) return
-    if (h.view === 'heavy') { showProviderView('heavy'); return }
-    if (h.view === 'docs') { showProviderView('heavydocs'); return }
+    if (h.view === 'heavy') { openProviderModal('heavy'); return }
+    if (h.view === 'docs') { openProviderModal('heavydocs'); return }
+    if (h.view === 'picker') { openProviderModal('picker'); return }
     if (h.run) {
       selectProvider('kilo')
       finishProviderCreate(PROVIDERS.kilo)
+      openProviderModal('form')
       return
     }
-    if (h.provider && PROVIDERS[h.provider]) { selectProvider(h.provider); return }
-    showProviderView('picker')
+    if (h.provider && PROVIDERS[h.provider]) { selectProvider(h.provider); openProviderModal('form'); return }
+    closeProviderModal()
   }
 
   // ── Step 4: toggles ───────────────────────────────────────────────────────
@@ -656,6 +701,7 @@
 
   function onKey(e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return
+    if (state.providerOpen && e.key !== 'Escape') return
     const t = e.target
     if (t && t.closest && t.closest('input, textarea, select')) return
     switch (e.key) {
@@ -671,6 +717,7 @@
         break
       case 'Escape':
         if (!helpMask.hidden) { helpMask.hidden = true; break }
+        if (state.providerOpen) { closeProviderModal(); break }
         e.preventDefault()
         skipStep()
         break
@@ -741,12 +788,29 @@
       if (card.dataset.heavy === 'freellmapi') { showProviderView('heavy'); return }
       toast('Demo mirror — FreeLLMAPI is the worked example; in the wired wizard every heavy row opens this same form.')
     }))
+    $('#btnAddProvider').addEventListener('click', () => openProviderModal())
+    $('#btnPClose').addEventListener('click', closeProviderModal)
+    $('#btnPCancel').addEventListener('click', closeProviderModal)
+    $('#btnUseKilo').addEventListener('click', () => selectProvider('kilo'))
+    $('#btnPEmpty').addEventListener('click', () => {
+      toast('Demo mirror — every row here is a template; the real screen also accepts an empty route.')
+    })
+    $('#pOverlay').addEventListener('click', (e) => {
+      if (e.target === $('#pOverlay')) closeProviderModal()
+    })
     $('#btnPBack').addEventListener('click', () => showProviderView('picker'))
     $('#btnPHeavyBack').addEventListener('click', () => showProviderView('picker'))
     $('#btnPDocsBack').addEventListener('click', () => showProviderView('heavy'))
     $('#btnPCreate').addEventListener('click', createProvider)
     $('#btnPHeavyCreate').addEventListener('click', () => {
+      state.providerCreated = true
+      updateProviderSummary({
+        name: 'FreeLLMAPI',
+        sub: 'Detected instance at http://127.0.0.1:3002 — nothing new was installed on this machine.',
+        route: 'freellmapi · use detected instance · http://127.0.0.1:3002/v1',
+      })
       markCurrent('done')
+      closeProviderModal()
       render()
       toast('Demo only — nothing was installed. In the real wizard this detects the instance or runs the install job.')
     })
@@ -796,6 +860,9 @@
   }
 
   function boot() {
+    // Authored inside step 3, but the glass panel's backdrop-filter would
+    // otherwise become the containing block for the fixed overlay and clip it.
+    document.body.appendChild($('#pOverlay'))
     bind()
     const h = applyHash()
     state.step = h && h.step >= 1 && h.step <= 7 ? h.step : 1
