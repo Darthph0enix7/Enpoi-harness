@@ -8,7 +8,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
-import { HEAVY_PROVIDER_MANIFESTS } from '../src/client/heavy-providers.ts'
+import { FALLBACK_HEAVY_PROVIDER_MANIFESTS } from '../src/client/heavy-providers.ts'
 import { PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
 
 const FORBIDDEN = [
@@ -23,8 +23,8 @@ const FORBIDDEN = [
 
 it('the shipped manifests and heavy templates name no operator address, hostname, or path', () => {
   const heavyTemplates = PROVIDER_TEMPLATES.filter(template => template.heavy !== undefined)
-  expect(heavyTemplates).toHaveLength(HEAVY_PROVIDER_MANIFESTS.length)
-  for (const value of [HEAVY_PROVIDER_MANIFESTS, heavyTemplates]) {
+  expect(heavyTemplates).toHaveLength(FALLBACK_HEAVY_PROVIDER_MANIFESTS.length)
+  for (const value of [FALLBACK_HEAVY_PROVIDER_MANIFESTS, heavyTemplates]) {
     const serialized = JSON.stringify(value)
     for (const pattern of FORBIDDEN) {
       expect(serialized, `shipped heavy data must not match ${String(pattern)}`).not.toMatch(pattern)
@@ -33,7 +33,7 @@ it('the shipped manifests and heavy templates name no operator address, hostname
 })
 
 it('every manifest URL is loopback', () => {
-  for (const manifest of HEAVY_PROVIDER_MANIFESTS) {
+  for (const manifest of FALLBACK_HEAVY_PROVIDER_MANIFESTS) {
     const urls = [
       manifest.reuse.baseURL,
       manifest.reuse.health.url,

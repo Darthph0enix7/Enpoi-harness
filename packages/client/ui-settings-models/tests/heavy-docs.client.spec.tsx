@@ -8,7 +8,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 import { HeavyProviderDocs } from '../src/client/HeavyProviderDocs.tsx'
-import { heavyProviderManifest } from '../src/client/heavy-providers.ts'
+import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { en } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -16,7 +16,7 @@ afterEach(cleanup)
 const t = (key: keyof typeof en): string => en[key]
 
 it('renders every manifest section for the host platform (linux)', () => {
-  const manifest = heavyProviderManifest('freellmapi')!
+  const manifest = fallbackHeavyManifest('freellmapi')!
   render(<HeavyProviderDocs manifest={manifest} platform="linux" t={t} />)
 
   expect(screen.getByText(`${manifest.label} · ${en.heavyDocumentation}`)).toBeTruthy()
@@ -50,7 +50,7 @@ it('renders every manifest section for the host platform (linux)', () => {
 })
 
 it('switches the install selection to darwin and win32 samples', () => {
-  const manifest = heavyProviderManifest('freellmapi')!
+  const manifest = fallbackHeavyManifest('freellmapi')!
   render(<HeavyProviderDocs manifest={manifest} platform="linux" t={t} />)
 
   fireEvent.click(screen.getByRole('button', { name: en.heavyPlatformMacos }))
@@ -67,7 +67,7 @@ it('switches the install selection to darwin and win32 samples', () => {
 })
 
 it('falls back to the default install path for an undeclared platform', () => {
-  const manifest = heavyProviderManifest('freellmapi')!
+  const manifest = fallbackHeavyManifest('freellmapi')!
   render(<HeavyProviderDocs manifest={manifest} platform="freebsd" t={t} />)
   expect(screen.getByText(en.heavyPlatformFallback)).toBeTruthy()
   expect(screen.getByText(en.heavyPlatformHost.replace('{platform}', 'freebsd'))).toBeTruthy()
@@ -76,14 +76,16 @@ it('falls back to the default install path for an undeclared platform', () => {
 })
 
 it('renders the placeholder auth reference and the shared keypool removal note', () => {
-  const antigravity = heavyProviderManifest('antigravity')!
+  const antigravity = fallbackHeavyManifest('antigravity')!
   render(<HeavyProviderDocs manifest={antigravity} platform="linux" t={t} />)
   expect(screen.getByText(en.heavyAuthPlaceholder.replace('{ref}', 'ANTIGRAVITY_API_KEY'))).toBeTruthy()
   cleanup()
 
-  const commandcode = heavyProviderManifest('commandcode')!
+  const commandcode = fallbackHeavyManifest('commandcode')!
   render(<HeavyProviderDocs manifest={commandcode} platform="linux" t={t} />)
   expect(screen.getByText(en.heavyAuthNone)).toBeTruthy()
-  expect(screen.getByText(en.heavyNoRemovalSteps)).toBeTruthy()
+  // The local path is real now: provider package + keypool steps are shown.
+  expect(screen.getAllByText('Build and link the DSH provider package').length).toBeGreaterThan(0)
+  expect(screen.getAllByText('Drop only pools.commandcode (keypool and other pools stay)').length).toBeGreaterThan(0)
   expect(screen.getByText(/never stops or removes the shared keypool service/)).toBeTruthy()
 })

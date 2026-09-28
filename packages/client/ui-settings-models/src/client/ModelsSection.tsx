@@ -29,7 +29,7 @@ import { ORCHESTRATION_NS } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
-import { heavyProviderManifest } from './heavy-providers.ts'
+import { loadHostHeavyManifests, resolveHeavyManifest, useHeavyManifestState } from './heavy-manifest-source.ts'
 import { heavyApi } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyStatusDot } from './HeavyProviderStatus.tsx'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
@@ -88,6 +88,12 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const { controller, api, schema, t, picker, modelT } = injected
   const state = injected.useSnapshot(snapshot => snapshot)
 
+  // The host's `enpoiHeavy.manifests` reply is the single manifest source:
+  // one accepted reply replaces the labelled fallback table and re-renders
+  // every heavy surface from host truth.
+  const manifestState = useHeavyManifestState()
+  useEffect(() => { void loadHostHeavyManifests() }, [])
+
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
   const [providerSearch, setProviderSearch] = useState('')
   const [addModalOpen, setAddModalOpen] = useState(false)
@@ -133,12 +139,12 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   // Heavy/self-hosted rows render in their own clearly-labelled group AFTER
   // the mainstream providers; the filter above searches both.
   const mainstreamRows = useMemo(
-    () => filteredRows.filter(row => heavyProviderManifest(row.entry.provider) === undefined),
-    [filteredRows],
+    () => filteredRows.filter(row => resolveHeavyManifest(row.entry.provider) === undefined),
+    [filteredRows, manifestState.manifests],
   )
   const heavyRows = useMemo(
-    () => filteredRows.filter(row => heavyProviderManifest(row.entry.provider) !== undefined),
-    [filteredRows],
+    () => filteredRows.filter(row => resolveHeavyManifest(row.entry.provider) !== undefined),
+    [filteredRows, manifestState.manifests],
   )
 
   // Selected row
@@ -182,7 +188,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       // runs the teardown and clears route, credential, pool state, cache,
       // and chain links in one confirmed operation. Per-provider confirmation
       // text (and the antigravity OpenCode/dotfiles caveat) is shown above.
-      if (heavyProviderManifest(deleteTarget.entry.provider) !== undefined) {
+      if (resolveHeavyManifest(deleteTarget.entry.provider) !== undefined) {
         const removal = await heavyApi.remove(deleteTarget.entry.provider, heavyUninstall)
         if (!removal.ok) {
           setDeleteError(removal.message)
@@ -237,7 +243,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     }
   }
 
-  const heavyDeleteManifest = deleteTarget ? heavyProviderManifest(deleteTarget.entry.provider) : undefined
+  const heavyDeleteManifest = deleteTarget ? resolveHeavyManifest(deleteTarget.entry.provider) : undefined
 
   /** One sidebar row; shared by the mainstream list and the heavy group. */
   const renderProviderRow = (row: ProviderRow): ReactNode => {
@@ -272,7 +278,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           <span className={styles['providerListSlug']}>{row.entry.provider}</span>
           {/* Heavy routes always show their dashboard URL(s) and the cached
                 endpoint state, in either mode. */}
-          {heavyProviderManifest(row.entry.provider) !== undefined && (
+          {resolveHeavyManifest(row.entry.provider) !== undefined && (
             <span className={styles['heavyRowMeta']}>
               <HeavyStatusDot providerId={row.entry.provider} t={t} />
               <HeavyDashboardLinks providerId={row.entry.provider} compact t={t} />

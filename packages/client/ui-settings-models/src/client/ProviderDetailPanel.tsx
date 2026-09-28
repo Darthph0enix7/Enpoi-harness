@@ -15,7 +15,7 @@ import {
 } from './hidden-models.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
-import { heavyProviderManifest } from './heavy-providers.ts'
+import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { providerDashboardUrls } from './provider-templates.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
@@ -939,7 +939,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const isConfigured = keyState?.configured === true || !row.apiKeyEnv
   // Dashboard links for a non-heavy provider that declares one; the heavy card
   // (below) renders the heavy manifest's own detected/local dashboards.
-  const nonHeavyDashboards = heavyProviderManifest(providerId) === undefined ? providerDashboardUrls(providerId) : []
+  const nonHeavyDashboards = resolveHeavyManifest(providerId) === undefined ? providerDashboardUrls(providerId) : []
 
   return (
     <div className={styles['detailPanel']}>

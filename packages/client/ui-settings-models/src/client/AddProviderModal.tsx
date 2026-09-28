@@ -2,7 +2,8 @@ import { useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
+import { liveProviderTemplates, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
+import { useHeavyManifestState } from './heavy-manifest-source.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
@@ -56,23 +57,28 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
 
+  // The listing is rebuilt from the current manifest table: the host reply
+  // replaces the labelled fallback heavy rows without a page copy.
+  const manifestState = useHeavyManifestState()
+  const templates = useMemo(() => liveProviderTemplates(), [manifestState])
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
-    if (!q) return PROVIDER_TEMPLATES
-    return PROVIDER_TEMPLATES.filter(
+    if (!q) return templates
+    return templates.filter(
       p => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
     )
-  }, [search])
+  }, [search, templates])
 
   const heavyTemplates = useMemo(
-    () => PROVIDER_TEMPLATES.filter(p => p.heavy !== undefined),
-    [],
+    () => templates.filter(p => p.heavy !== undefined),
+    [templates],
   )
 
   const popular = useMemo(() => {
-    const byId = new Map(PROVIDER_TEMPLATES.map(p => [p.id, p]))
+    const byId = new Map(templates.map(p => [p.id, p]))
     return POPULAR_PROVIDERS.map(id => byId.get(id)).filter((p): p is ProviderTemplate => p !== undefined)
-  }, [])
+  }, [templates])
 
   if (!open) return null
 
@@ -133,6 +139,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       const result = await heavyApi.reuse(manifest.id, heavyKey)
       if (!result.ok) {
         setError(result.message)
+        return
+      }
+      // The route namespace of a custom-protocol provider is mounted only
+      // after the profile build + restart; report the ordering fact instead
+      // of a route that was never written.
+      if (result.value.pendingRestart !== undefined) {
+        setError(result.value.pendingRestart.message)
         return
       }
       if (result.value.blocked !== undefined) {
@@ -315,23 +328,23 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               <>
                 <div className={styles['templateGroupLabel']}>Popular</div>
                 {popular.map(tpl => (
-                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
                 ))}
                 <div className={styles['templateGroupLabel']}>All Providers</div>
                 {filtered.filter(tpl => tpl.heavy === undefined).map(tpl => (
-                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
                 ))}
                 {/* Self-hosted/heavy providers render in their own labelled
                     group AFTER the mainstream catalog; search still finds
                     them through the flat filtered list above. */}
                 <div className={styles['templateGroupLabel']}>{t('heavyGroup')}</div>
                 {heavyTemplates.map(tpl => (
-                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
                 ))}
               </>
             ) : (
               filtered.map(tpl => (
-                <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
               ))
             )}
             {filtered.length === 0 && (
@@ -493,7 +506,7 @@ function HeavyProviderForm(props: {
           {health?.status !== undefined ? ` · ${String(health.status)}` : ''}
         </span>
         <button type="button" className={styles['heavyLinkBtn']} onClick={onCheck} disabled={checking}>
-          {checking ? t('heavyChecking') : t('heavyCheck')}
+          {checking ? t('heavyChecking') : t('heavyCheckNow')}
         </button>
       </div>
 
@@ -560,6 +573,15 @@ function HeavyProviderForm(props: {
               </span>
             </label>
           </div>
+
+          {/* Ordering: the route namespace is mounted only after the profile
+              build + restart, so say so before the click instead of letting
+              the write fail as a raw settings.mutate error. */}
+          {status?.settingsReady === false && (
+            <p className={styles['heavyModeNote']} data-state="pending-restart">
+              {t('heavyPendingRestart').replace('{ns}', status.settingsNs ?? '')}
+            </p>
+          )}
 
           {mode === 'local' && install.steps.length > 0 && (
             <>
@@ -632,10 +654,13 @@ function HeavyProviderForm(props: {
 function TemplateCard({
   tpl,
   onSelect,
+  configured,
   t,
 }: {
   tpl: ProviderTemplate
   onSelect: (tpl: ProviderTemplate) => void
+  /** The provider already owns a route: its heavy row reads as configured. */
+  configured: boolean
   t: (key: keyof typeof en) => string
 }): ReactNode {
   return (
@@ -657,7 +682,7 @@ function TemplateCard({
           <span className={styles['templateCategory']}>{tpl.id}</span>
           {tpl.heavy !== undefined && (
             <span className={styles['heavyCardBadge']}>
-              {tpl.heavy.unsupported === undefined ? t('heavyBadgeShort') : t('heavyPlannedBadge')}
+              {configured ? t('heavyBadgeShort') : t('heavyListedBadge')}
             </span>
           )}
         </div>

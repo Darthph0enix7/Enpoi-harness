@@ -8,7 +8,8 @@
  */
 
 import presets from './provider-presets.ts'
-import { heavyDashboardUrls, heavyProviderManifest, HEAVY_PROVIDER_MANIFESTS, type HeavyProviderManifest } from './heavy-providers.ts'
+import { FALLBACK_HEAVY_PROVIDER_MANIFESTS, heavyDashboardUrls, type HeavyProviderManifest } from './heavy-providers.ts'
+import { heavyManifestState, resolveHeavyManifest } from './heavy-manifest-source.ts'
 
 export interface ProviderTemplate {
   id: string
@@ -48,26 +49,45 @@ export interface ProviderTemplate {
 const KEYLESS_PRESET_IDS = new Set(['kilo'])
 
 /**
- * The heavy presets appended to the generated catalog. They carry the
- * hand-maintained manifest (surviving preset regeneration, like
- * {@link KEYLESS_PRESET_IDS}) and are deliberately absent from every
- * provider-sync `endpoints` map.
+ * One heavy manifest as an Add Provider template. Render code builds the
+ * heavy group from the current manifest table through this, so a host reply
+ * replaces every heavy row without a page copy to keep in step.
+ * @param manifest - heavy manifest (host truth or the pre-connection fallback).
+ * @returns the listing template for that provider.
  */
-const HEAVY_TEMPLATES: ProviderTemplate[] = HEAVY_PROVIDER_MANIFESTS.map(manifest => ({
-  id: manifest.id,
-  name: manifest.label,
-  env: manifest.auth.apiKeyEnv === undefined ? [] : [manifest.auth.apiKeyEnv],
-  protocol: manifest.protocol,
-  baseURL: manifest.reuse.baseURL,
-  ...manifest.docsUrl === undefined ? {} : { doc: manifest.docsUrl },
-  ...manifest.auth.keyless ? { keyless: true } : {},
-  heavy: manifest,
-}))
+export function heavyTemplate(manifest: HeavyProviderManifest): ProviderTemplate {
+  return {
+    id: manifest.id,
+    name: manifest.label,
+    env: manifest.auth.apiKeyEnv === undefined ? [] : [manifest.auth.apiKeyEnv],
+    protocol: manifest.protocol,
+    baseURL: manifest.reuse.baseURL,
+    ...manifest.docsUrl === undefined ? {} : { doc: manifest.docsUrl },
+    ...manifest.auth.keyless ? { keyless: true } : {},
+    heavy: manifest,
+  }
+}
 
-export const PROVIDER_TEMPLATES: ProviderTemplate[] =
+/** The generated mainstream presets with the keyless override applied. */
+const MAINSTREAM_TEMPLATES: ProviderTemplate[] =
   (presets as unknown as ProviderTemplate[]).map(preset =>
     KEYLESS_PRESET_IDS.has(preset.id) ? { ...preset, keyless: true } : preset)
-    .concat(HEAVY_TEMPLATES)
+
+/**
+ * The pre-connection listing: mainstream presets plus the labelled fallback
+ * heavy table. Live render code uses {@link liveProviderTemplates}.
+ */
+export const PROVIDER_TEMPLATES: ProviderTemplate[] =
+  MAINSTREAM_TEMPLATES.concat(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(heavyTemplate))
+
+/**
+ * The listing to render now: mainstream presets plus the current heavy table
+ * (the host's manifests once connected, the fallback before).
+ * @returns the templates in listing order.
+ */
+export function liveProviderTemplates(): ProviderTemplate[] {
+  return MAINSTREAM_TEMPLATES.concat(heavyManifestState().manifests.map(heavyTemplate))
+}
 
 /** OpenCode's popular-provider ordering (use-providers.ts popularProviders). */
 export const POPULAR_PROVIDERS = [
@@ -99,7 +119,7 @@ export function providerPreset(id: string): ProviderTemplate | undefined {
  * @returns dashboard URLs in display order; empty when none is known.
  */
 export function providerDashboardUrls(providerId: string, mode?: 'reuse' | 'local'): string[] {
-  const manifest = heavyProviderManifest(providerId)
+  const manifest = resolveHeavyManifest(providerId)
   if (manifest !== undefined) return heavyDashboardUrls(manifest, mode)
   const dashboard = providerPreset(providerId)?.dashboard
   return dashboard === undefined || dashboard === '' ? [] : [dashboard]

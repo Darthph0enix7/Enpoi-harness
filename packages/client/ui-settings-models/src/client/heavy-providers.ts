@@ -1,13 +1,15 @@
 /**
- * HEAVY provider manifests for the Add Provider workflow.
+ * PRE-CONNECTION FALLBACK heavy-provider manifests.
  *
- * A heavy provider is LISTED (a preset exists) but nothing is installed by
- * default: the row carries this manifest and only an explicit add either uses
- * an instance detection found running on this device or runs the local
- * install. The hand-maintained table survives preset regeneration, like
- * `KEYLESS_PRESET_IDS`; keep ids and facts in step with the host-side copy in
- * the profile plugin `dsh-enpoi-heavy-providers` (the side that executes).
- * Every shipped URL is loopback: an operator's own server lives in the host's
+ * The host's `enpoiHeavy.manifests` reply is the single source of truth for
+ * everything the Add Provider and provider-detail surfaces render (see
+ * `heavy-manifest-source.ts`): the running profile plugin executes those
+ * manifests, so only they can say whether a provider is addable. This table
+ * is the small, clearly-labelled fallback the page renders before the first
+ * host reply — it mirrors the host table's ids and facts but is never
+ * authoritative, and a host reply replaces it wholesale.
+ *
+ * Every URL here is loopback: an operator's own server lives in the host's
  * private `$DSH_HOME/heavy-server-overlay.json`, never in this table.
  *
  * @module ui-settings-models/heavy-providers
@@ -135,6 +137,13 @@ export interface HeavyProviderManifest {
   /** llm-pi-ai wire protocol the route declares. */
   protocol: string
   /**
+   * Settings namespace the route profile is written to, addressed by plugin
+   * entry id. Defaults to `llm-pi-ai`; a custom-protocol provider names its
+   * own adapter plugin's namespace so the profile never lands in a section
+   * whose schema cannot parse it.
+   */
+  settingsNs?: string
+  /**
    * Route auth. `none` writes `keyless: true` (openai only); `placeholder`
    * stores an apiKeyEnv reference with no key (anthropic requires one);
    * `unified` stores one shared gateway key. Never a DSH key pool.
@@ -180,8 +189,8 @@ export interface HeavyProviderManifest {
   }
 }
 
-/** The three heavy providers v1 ships. */
-export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
+/** The three heavy providers v1 ships (the pre-connection fallback). */
+export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
     id: 'freellmapi',
     label: 'FreeLLMAPI',
@@ -386,57 +395,87 @@ export const HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
     id: 'commandcode',
     label: 'Command Code (keypool)',
-    summary: 'Command Code\'s CLI-shaped API behind the shared multi-key keypool proxy.',
+    summary: 'Command Code\'s CLI-shaped API behind the shared multi-key keypool proxy, served by the DSH provider package.',
     protocol: 'commandcode/alpha-generate',
-    auth: { kind: 'none', apiKeyEnv: 'COMMANDCODE_API_KEY', keyless: false },
+    // The keypool owns the real keys and replaces the Authorization header per
+    // request, so the DSH route is keyless; COMMANDCODE_API_KEY remains the
+    // reference a direct (non-keypool) route would name.
+    auth: { kind: 'none', apiKeyEnv: 'COMMANDCODE_API_KEY', keyless: true },
     dashboardUrl: 'http://127.0.0.1:8899/status',
     docsUrl: 'https://commandcode.ai',
     defaultPort: 8899,
+    // Served by `dsh-enpoi-commandcode-provider` (ctx.llm.registerAdapter), not
+    // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
+    // profile must never be written into the llm-pi-ai schema.
+    settingsNs: 'commandcode-provider',
     requiresBrowser: [
       'Vendor account and quota dashboard live at commandcode.ai (browser)',
     ],
     quirks: [
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
-      'llm-pi-ai cannot speak this API: v1 ships the manifest as "requires the custom provider package (planned)"',
+      'DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it',
       'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',
       'The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI',
+      'The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer — clients must not duplicate it',
+      'Quota is per key and real: the keypool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled key is spent — a normal state, not a routing defect',
     ],
     reuse: {
       label: 'Use a detected instance',
       baseURL: 'http://127.0.0.1:8899/commandcode',
-      note: 'Uses the keypool instance already running on this device; a DSH route needs the planned custom provider package first.',
+      note: 'Uses the keypool already running on this device; the provider package speaks the CLI protocol and fetches the 83-model catalog from /commandcode/catalog.json.',
       health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
     },
     local: {
-      label: 'Not supported in v1',
-      baseURL: '',
-      deps: [],
-      diskHint: '',
-      install: { default: { steps: [] } },
+      label: 'Install locally (provider package + keypool)',
+      baseURL: 'http://127.0.0.1:8899/commandcode',
+      deps: ['Node.js 22', 'systemd user units'],
+      diskHint: '~5 MB provider package, ~150 MB RAM for the keypool, no GPU',
+      dashboardUrl: 'http://127.0.0.1:8899/status',
+      runtime: 'node',
+      install: {
+        default: {
+          steps: [
+            { label: 'Build and link the DSH provider package', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs {home}/.dsh/profiles/web', weight: 3 },
+            { label: 'Seed the commandcode pool in pools.json', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs' },
+            { label: 'Deploy the keypool proxy from dotfiles', command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found — sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; install -Dm644 {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js' },
+            {
+              label: 'Write the keypool systemd user unit',
+              command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<\'EOF\'\n[Unit]\nDescription=OpenCode KeyPool — multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc \'exec node %h/.config/opencode/keypool/proxy.js\'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF',
+            },
+            { label: 'Enable and start the keypool', command: 'systemctl --user daemon-reload && systemctl --user enable --now keypool.service', optional: true },
+            {
+              label: 'Wait for the keypool',
+              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s"; exit 1',
+            },
+          ],
+        },
+      },
       health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
     },
     removal: {
-      steps: [],
+      steps: [
+        // Drops only the commandcode pool entry; the keypool rereads pools.json
+        // per request, so the shared service (and the `go` pool) is never
+        // stopped, restarted, or otherwise touched.
+        { label: 'Drop only pools.commandcode (keypool and other pools stay)', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs', optional: true },
+      ],
       warnings: [
         'Removal drops only DSH state and the commandcode pool keys — it never stops or removes the shared keypool service (other tools may need it)',
         'usage.jsonl is keypool-wide and is not touched',
+        'The provider package and its profile entry stay installed; delete the entry only when no route declares it',
       ],
     },
-    unsupported: {
-      reason: 'llm-pi-ai cannot speak the CLI-shaped /alpha/generate protocol — a custom provider package is required.',
-      plannedWith: 'dsh-provider-commandcode (planned)',
-      reuseUrl: 'http://127.0.0.1:8899/commandcode',
-    },
+    fallbackModel: 'deepseek/deepseek-v4.1-flash',
   },
 ]
 
-/** Resolve one heavy manifest by route id. */
-export function heavyProviderManifest(id: string): HeavyProviderManifest | undefined {
-  return HEAVY_PROVIDER_MANIFESTS.find(manifest => manifest.id === id)
+/** Resolve one route id against the fallback table (pre-connection only). */
+export function fallbackHeavyManifest(id: string): HeavyProviderManifest | undefined {
+  return FALLBACK_HEAVY_PROVIDER_MANIFESTS.find(manifest => manifest.id === id)
 }
 
 /** The heavy preset ids, excluded from the provider-sync endpoint set. */
-export const HEAVY_PRESET_IDS: ReadonlySet<string> = new Set(HEAVY_PROVIDER_MANIFESTS.map(manifest => manifest.id))
+export const HEAVY_PRESET_IDS: ReadonlySet<string> = new Set(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(manifest => manifest.id))
 
 /**
  * Structural validation of the manifest table (unit-tested; mirrors the host
@@ -444,7 +483,7 @@ export const HEAVY_PRESET_IDS: ReadonlySet<string> = new Set(HEAVY_PROVIDER_MANI
  * @param manifests - table to check, defaulting to the shipped one.
  * @returns one message per problem; empty means every manifest is complete.
  */
-export function heavyProviderProblems(manifests: readonly HeavyProviderManifest[] = HEAVY_PROVIDER_MANIFESTS): string[] {
+export function heavyProviderProblems(manifests: readonly HeavyProviderManifest[] = FALLBACK_HEAVY_PROVIDER_MANIFESTS): string[] {
   const problems: string[] = []
   const seen = new Set<string>()
   for (const manifest of manifests) {

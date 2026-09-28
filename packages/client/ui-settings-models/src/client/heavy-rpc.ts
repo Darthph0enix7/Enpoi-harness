@@ -7,6 +7,8 @@
  * @module ui-settings-models/heavy-rpc
  */
 
+import type { HeavyProviderManifest } from './heavy-providers.ts'
+
 /** One HTTP probe result as the host reports it. */
 export interface HeavyHealthView {
   ok: boolean
@@ -54,11 +56,17 @@ export interface HeavyPreflightView {
 /** `enpoiHeavy.status` result. */
 export interface HeavyStatusView {
   id: string
+  /** The effective host manifest; the row renders from this, never a page copy. */
+  manifest?: HeavyProviderManifest
   configured: boolean
   mode?: 'reuse' | 'local'
   health: HeavyHealthView
   /** The host platform installs execute on (`process.platform`). */
   platform?: string
+  /** Settings namespace the route profile is written to. */
+  settingsNs?: string
+  /** Whether that namespace is mounted in the running profile. */
+  settingsReady?: boolean
   /** Loopback port an already-running instance answered on, when one did. */
   detectedPort?: number
   /** Address detection found; drives the "running at — use it" offer. */
@@ -75,6 +83,8 @@ export interface HeavyStatusView {
 export interface HeavyReuseView {
   ok: boolean
   blocked?: { reason: string; plannedWith: string }
+  /** The route namespace is not mounted yet: available after the next restart. */
+  pendingRestart?: { ns: string; message: string }
   route?: HeavyRouteView
   health?: HeavyHealthView
   models?: Array<{ id: string; name?: string }>
@@ -143,8 +153,8 @@ export async function heavyRpc<T>(method: string, args: Record<string, unknown>)
 
 /** The `enpoiHeavy.*` calls the Models page makes. */
 export const heavyApi = {
-  /** Fetch the host's manifest table (display copy; listing is static). */
-  manifests: () => heavyRpc<{ items: unknown[]; problems: string[]; platform?: string }>('enpoiHeavy.manifests', {}),
+  /** Fetch the host's manifest table (the single source for the listing). */
+  manifests: () => heavyRpc<{ items: HeavyProviderManifest[]; problems: string[]; platform?: string }>('enpoiHeavy.manifests', {}),
   /** Configured/health/job state for one provider. */
   status: (id: string) => heavyRpc<HeavyStatusView>('enpoiHeavy.status', { request: { id } }),
   /** Add by detected instance: probe localhost, write the route at what answered. */

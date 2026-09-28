@@ -2,8 +2,9 @@
 /**
  * Add Provider's heavy branch: quirks/dashboard/browser badges are surfaced,
  * the recommended reuse mode writes the route through the host, local mode
- * polls the install job, and commandcode is blocked until its provider
- * package exists.
+ * polls the install job, a preset-only provider reads as listed/addable with
+ * an unchecked health affordance, and an early click reports the restart
+ * ordering instead of a raw settings.mutate failure.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -37,6 +38,15 @@ function envelope(value: unknown): Promise<Response> {
     ok: true,
     status: 200,
     json: async () => ({ result: { ok: true, value } }),
+  } as unknown as Response)
+}
+
+/** One refused gateway envelope, as heavyRpc reports a failed host call. */
+function errorEnvelope(message: string): Promise<Response> {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ result: { ok: false, error: { message } } }),
   } as unknown as Response)
 }
 
@@ -164,12 +174,59 @@ it('local mode starts the install job and polls it to success', async () => {
   expect(methods).toContain('enpoiHeavy.job')
 })
 
-it('commandcode is blocked until its custom provider package exists', async () => {
-  stubHeavyFetch({})
+it('a preset-only heavy provider reads as listed — add to configure, health unchecked until the probe', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { method: string }
+    if (body.method === 'enpoiHeavy.status') return errorEnvelope('host unreachable')
+    return envelope({})
+  }))
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  expect(screen.getAllByText(en.heavyListedBadge).length).toBeGreaterThan(0)
+  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  // Never the blocked/planned wording, and the add stays available.
+  expect(screen.queryByText(en.heavyBlockedTitle)).toBeNull()
+  expect(screen.queryByText(en.heavyPlannedBadge)).toBeNull()
+  const create = screen.getByRole('button', { name: en.create })
+  expect(create).toHaveProperty('disabled', false)
+  // A refused probe leaves the health card in "Not checked" with a retry.
+  await waitFor(() => { expect(screen.getByRole('button', { name: en.heavyCheckNow })).toBeTruthy() })
+  expect(screen.getByText(en.heavyHealthUnknown)).toBeTruthy()
+})
+
+it('shows the ordering note when the host reports the route namespace unmounted', async () => {
+  stubHeavyFetch({ status: {
+    id: 'commandcode',
+    configured: false,
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
+    settingsNs: 'commandcode-provider',
+    settingsReady: false,
+    runtime: { docker: true, podman: false },
+    preflight: { path: 'node', label: 'Install locally (provider package + keypool)', missing: [], requires: [] },
+  } })
   render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Command Code (keypool)'))
-  expect(screen.getByText(en.heavyBlockedTitle)).toBeTruthy()
-  const create = screen.getByRole('button', { name: en.create })
-  expect(create).toHaveProperty('disabled', true)
+  await waitFor(() => {
+    expect(screen.getByText(en.heavyPendingRestart.replace('{ns}', 'commandcode-provider'))).toBeTruthy()
+  })
+})
+
+it('a reuse click before the route namespace is mounted reports the restart ordering', async () => {
+  const message = 'Available after the next restart — the "commandcode-provider" settings namespace is not registered in the running profile yet (build the profile, then restart the service).'
+  const { methods } = stubHeavyFetch({ reuse: {
+    ok: false,
+    pendingRestart: { ns: 'commandcode-provider', message },
+  } })
+  const onClose = vi.fn()
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+
+  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(screen.getByText(message)).toBeTruthy() })
+  expect(onClose).not.toHaveBeenCalled()
+  expect(methods).toContain('enpoiHeavy.reuse')
 })

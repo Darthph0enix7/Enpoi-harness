@@ -12,7 +12,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { heavyProviderManifest, type HeavyProviderManifest } from './heavy-providers.ts'
+import { resolveHeavyManifest } from './heavy-manifest-source.ts'
+import type { HeavyProviderManifest } from './heavy-providers.ts'
 import { HEAVY_HEALTH_TTL_MS, heavyStatusCache, type HeavyStatusView } from './heavy-rpc.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -138,7 +139,7 @@ export function HeavyDashboardLinks({
   compact?: boolean
   t: Translate
 }): ReactNode {
-  const manifest = heavyProviderManifest(providerId)
+  const manifest = resolveHeavyManifest(providerId)
   if (manifest === undefined) return null
   const entries = dashboardEntries(manifest, mode)
   if (entries.length === 0) return null

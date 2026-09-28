@@ -6,8 +6,8 @@
 import { expect, it } from 'vitest'
 import {
   HEAVY_PRESET_IDS,
+  fallbackHeavyManifest,
   heavyDashboardUrls,
-  heavyProviderManifest,
   heavyProviderProblems,
   resolveHeavyInstall,
 } from '../src/client/heavy-providers.ts'
@@ -20,7 +20,7 @@ it('the manifest table is structurally complete', () => {
 
 it('an uninstalled heavy provider is listed in Add Provider with its manifest', () => {
   const listing = new Map(PROVIDER_TEMPLATES.map(template => [template.id, template]))
-  for (const manifest of [heavyProviderManifest('freellmapi')!, heavyProviderManifest('antigravity')!, heavyProviderManifest('commandcode')!]) {
+  for (const manifest of [fallbackHeavyManifest('freellmapi')!, fallbackHeavyManifest('antigravity')!, fallbackHeavyManifest('commandcode')!]) {
     const template = listing.get(manifest.id)
     expect(template, `${manifest.id} must be listed`).toBeDefined()
     expect(template?.heavy?.id).toBe(manifest.id)
@@ -30,7 +30,7 @@ it('an uninstalled heavy provider is listed in Add Provider with its manifest', 
 
 it('the heavy descriptors surface dashboard, browser badges, modes, and health', () => {
   for (const id of HEAVY_PRESET_IDS) {
-    const manifest = heavyProviderManifest(id)
+    const manifest = fallbackHeavyManifest(id)
     expect(manifest?.dashboardUrl, id).toBeDefined()
     expect(manifest?.reuse.health.url, id).not.toBe('')
     expect(manifest?.requiresBrowser.length, id).toBeGreaterThan(0)
@@ -42,14 +42,30 @@ it('the heavy descriptors surface dashboard, browser badges, modes, and health',
 })
 
 it('antigravity never declares a DSH key pool and is not keyless', () => {
-  const manifest = heavyProviderManifest('antigravity')
+  const manifest = fallbackHeavyManifest('antigravity')
   expect(JSON.stringify(manifest)).not.toContain('"pool"')
   expect(manifest?.auth.keyless).toBe(false)
   expect(manifest?.protocol).toBe('anthropic-messages')
 })
 
+it('the pre-connection fallback marks commandcode addable with the real keypool facts', () => {
+  const manifest = fallbackHeavyManifest('commandcode')
+  expect(manifest?.unsupported).toBeUndefined()
+  expect(manifest?.settingsNs).toBe('commandcode-provider')
+  expect(manifest?.auth).toEqual({ kind: 'none', apiKeyEnv: 'COMMANDCODE_API_KEY', keyless: true })
+  expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.local.install.default.steps.length).toBeGreaterThan(0)
+  expect(manifest?.local.install.default.steps.map(step => step.command).join('\n'))
+    .toContain('enpoi-commandcode-provider/scripts/install.mjs')
+  expect(manifest?.removal.steps.map(step => step.command).join('\n')).toContain('keypool-remove.mjs')
+  expect(JSON.stringify(manifest?.removal)).toContain('never stops or removes the shared keypool service')
+  const quirks = manifest?.quirks.join('\n') ?? ''
+  expect(quirks).toContain('Proxy use detected')
+  expect(quirks).toContain('QUOTA failure')
+})
+
 it('freellmapi defaults to the loopback endpoint in both modes', () => {
-  const manifest = heavyProviderManifest('freellmapi')
+  const manifest = fallbackHeavyManifest('freellmapi')
   expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:3002/v1')
   expect(manifest?.local.baseURL).toBe('http://127.0.0.1:3002/v1')
   expect(manifest?.defaultPort).toBe(3002)
@@ -58,7 +74,7 @@ it('freellmapi defaults to the loopback endpoint in both modes', () => {
 })
 
 it('selects platform-keyed installs and falls back to the Docker path', () => {
-  const local = heavyProviderManifest('freellmapi')!.local
+  const local = fallbackHeavyManifest('freellmapi')!.local
   const linux = resolveHeavyInstall(local, 'linux')
   expect(linux.steps[0]!.command).toContain('freellmapi.co/install.sh')
   expect(linux.steps[0]!.command).toContain('PORT=3002')
@@ -76,7 +92,7 @@ it('selects platform-keyed installs and falls back to the Docker path', () => {
 })
 
 it('dashboard URLs cover both modes and deduplicate to the loopback dashboard', () => {
-  const manifest = heavyProviderManifest('freellmapi')!
+  const manifest = fallbackHeavyManifest('freellmapi')!
   expect(heavyDashboardUrls(manifest)).toEqual(['http://127.0.0.1:3002'])
   expect(heavyDashboardUrls(manifest, 'reuse')).toEqual(['http://127.0.0.1:3002'])
   expect(heavyDashboardUrls(manifest, 'local')).toEqual(['http://127.0.0.1:3002'])

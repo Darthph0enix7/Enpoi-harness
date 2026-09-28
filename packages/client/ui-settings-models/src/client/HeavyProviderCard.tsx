@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { heavyProviderManifest } from './heavy-providers.ts'
+import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { heavyApi, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyPreflightNote, useHeavyStatus } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
@@ -25,8 +25,11 @@ export interface HeavyProviderCardProps {
 
 /** Provider detail card for a heavy provider. */
 export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): ReactNode {
-  const manifest = heavyProviderManifest(providerId)
-  const { status, checking, refresh } = useHeavyStatus(providerId, { enabled: manifest !== undefined })
+  // Host truth first: the status reply carries the manifest the running
+  // profile executes; the shared table covers the pre-reply render.
+  const listed = resolveHeavyManifest(providerId)
+  const { status, checking, refresh } = useHeavyStatus(providerId, { enabled: listed !== undefined })
+  const manifest = status?.manifest ?? listed
   const [job, setJob] = useState<HeavyJobView | null>(null)
   const [showDocs, setShowDocs] = useState(false)
 
