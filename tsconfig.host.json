@@ -21,6 +21,7 @@
     "apps/web/tests/code-card-layout.e2e.ts",
     "apps/web/tests/code-language.snapshot.ts",
     "apps/web/tests/scaffold.ts",
+    "apps/web/tests/first-run-setup.e2e.ts",
     "apps/web/tests/voice-input.e2e.ts",
     "apps/web/tests/voice-setup.e2e.ts",
     "apps/web/tests/voice-download.e2e.ts",
@@ -210,6 +211,7 @@
     { "path": "./packages/client/ui-settings-general/tsconfig.host.json" },
 
     { "path": "./packages/host/product-telemetry-otel" },
+    { "path": "./packages/host/first-run" },
     { "path": "./packages/boot/config-editor" },
     { "path": "./packages/client/connection/tsconfig.host.json" },
     { "path": "./packages/skill/skill-office" },

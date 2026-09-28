@@ -85,6 +85,20 @@
         provider: deepseek-official
         model: deepseek-flash
 
+    # First-run defaults. On a fresh settings document with no provider
+    # routes, this writes the keyless Kilo Gateway route and points the
+    # default model at its free tier, so a new machine can talk to a model
+    # with no key. The write lands in the user layer, so Models can remove
+    # the route; a stored marker stops any later re-seed. The analysis row
+    # runs the read-only system scan the first-run wizard starts, and the
+    # context row (mounted by the sysadmin preset) turns the result into that
+    # agent's machine context.
+    - id: first-run
+      name: '@deepseek-ai/dsh-host-first-run'
+
+    - id: first-run-analysis
+      name: '@deepseek-ai/dsh-host-first-run/analysis'
+
     - id: jobs
       name: '@deepseek-ai/dsh-jobs-local'
 

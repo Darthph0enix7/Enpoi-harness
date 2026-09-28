@@ -1182,18 +1182,61 @@ body[data-mode='done'] .wizard { opacity: 0; pointer-events: none; }
 .creator-feature {
   grid-column: 1 / -1;
   gap: 6px;
-  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 58%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, var(--dsw-specific-input-major));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, transparent), 0 8px 22px rgba(0, 7, 18, 0.3);
+  border-color: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 58%, transparent);
+  background: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 10%, var(--dsw-specific-input-major));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 20%, transparent), 0 8px 22px rgba(0, 7, 18, 0.3);
 }
 
 .creator-feature strong { font-size: 15px; }
 
 .creator-pill {
   align-self: flex-start;
-  color: var(--dsw-alias-brand-primary);
-  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, var(--dsw-alias-bg-layer-1));
+  color: var(--agent, var(--dsw-alias-brand-primary));
+  border-color: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 45%, transparent);
+  background: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 12%, var(--dsw-alias-bg-layer-1));
+}
+
+/* Step 6 — one colour per agent, shared by the cards and the legend */
+
+.agent-card[data-agent='orchestrator'],
+.legend-key[data-agent='orchestrator'] { --agent: var(--dsw-alias-brand-primary); }
+
+.agent-card[data-agent='sysadmin'],
+.legend-key[data-agent='sysadmin'] { --agent: var(--dsw-static-green-400); }
+
+.agent-card[data-agent='creator'],
+.legend-key[data-agent='creator'] { --agent: var(--dsw-static-amber-400); }
+
+.agent-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.legend-key { display: inline-flex; align-items: center; gap: 6px; }
+.legend-note { color: var(--dsw-alias-label-tertiary); }
+
+.agent-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--agent, var(--dsw-alias-brand-primary));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 25%, transparent);
+}
+
+.agent-card { border-left: 3px solid var(--agent, var(--dsw-alias-brand-primary)); }
+.agent-card strong { display: flex; align-items: center; gap: 7px; }
+
+.agent-pill {
+  align-self: flex-start;
+  color: var(--agent, var(--dsw-alias-brand-primary));
+  border-color: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 45%, transparent);
+  background: color-mix(in srgb, var(--agent, var(--dsw-alias-brand-primary)) 12%, var(--dsw-alias-bg-layer-1));
 }
 
 .skipped-card {

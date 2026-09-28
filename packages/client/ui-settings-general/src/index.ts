@@ -9,11 +9,14 @@ import z from '@deepseek-ai/schemastery'
 export interface Config {
   /** Last acknowledged welcome notice version. */
   welcomeNoticeVersion: Volatile<string | undefined>
+  /** Version of the first-run setup flow this installation completed. */
+  onboardingCompleted: Volatile<string | undefined>
 }
 
 /** Live welcome preference. */
 export const Config = z.object({
   welcomeNoticeVersion: z.string().volatile(),
+  onboardingCompleted: z.string().volatile(),
 })
 
 /** The browser consumes the configuration form projection.

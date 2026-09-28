@@ -1,0 +1,334 @@
+/* First-run welcome wizard: full-viewport overlay over the real application. */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 72%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.dialog {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 720px);
+  max-width: min(960px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow: hidden;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  box-shadow: var(--dsw-shadow-l2, 0 24px 64px rgb(0 0 0 / 35%));
+}
+
+.dialog:focus {
+  outline: none;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 20px 12px;
+  border-right: 1px solid var(--dsw-alias-border-l2);
+}
+
+.railItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+}
+
+.railItem[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.railItem[data-state='configured'] .railIndex {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.railItem[data-state='skipped'] .railLabel {
+  color: var(--dsw-alias-label-dimmed);
+  text-decoration: line-through;
+}
+
+.railIndex {
+  width: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.railLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 420px;
+  padding: 28px 32px;
+  overflow: auto;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.heading {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 22px;
+}
+
+.lead {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  line-height: 1.5;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cards,
+.toggles,
+.radios {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card,
+.toggle,
+.radio,
+.offer,
+.route {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+}
+
+.card h3,
+.toggle strong,
+.offer h3 {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+}
+
+.card p,
+.toggle p,
+.offer p {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  line-height: 1.45;
+}
+
+.card[data-agent='orchestrator'] {
+  border-left: 3px solid var(--dsw-alias-brand-primary);
+}
+
+.card[data-agent='sysadmin'] {
+  border-left: 3px solid var(--dsw-alias-state-success-primary);
+}
+
+.card[data-agent='creator'] {
+  border-left: 3px solid var(--dsw-alias-state-warn-label);
+}
+
+.toggleHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  background: var(--dsw-alias-border-l3);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 200ms ease;
+}
+
+.toggle[data-on='true'] .switch {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 220ms ease;
+}
+
+.toggle[data-on='true'] .knob {
+  transform: translateX(16px);
+}
+
+.chip {
+  align-self: flex-start;
+  padding: 2px 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 999px;
+}
+
+.segments {
+  display: flex;
+  gap: 4px;
+}
+
+.segments button {
+  padding: 4px 10px;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  background: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+}
+
+.segments button[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.radio {
+  align-items: flex-start;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.radio[data-active='true'] {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.radio strong {
+  color: var(--dsw-alias-label-primary);
+}
+
+.radio span {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.route[data-state='configured'] {
+  border-color: var(--dsw-alias-state-success-primary);
+}
+
+.route span {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.offer {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.fineprint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.error {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.subhead {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+}
+
+.tip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+  margin: auto;
+  padding: 18px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  box-shadow: var(--dsw-shadow-l2, 0 16px 40px rgb(0 0 0 / 30%));
+}
+
+.spotlight {
+  position: fixed;
+  z-index: -1;
+  border: 2px solid var(--dsw-alias-brand-primary);
+  border-radius: 14px;
+  box-shadow: 0 0 0 9999px color-mix(in srgb, var(--dsw-alias-bg-base) 66%, transparent);
+  pointer-events: none;
+  transition: all 450ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.dock {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+  padding: 10px 12px;
+  font-size: 12px;
+  background: var(--dsw-alias-bg-module-platform);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.dock progress {
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spotlight,
+  .knob,
+  .switch {
+    transition: none;
+  }
+}

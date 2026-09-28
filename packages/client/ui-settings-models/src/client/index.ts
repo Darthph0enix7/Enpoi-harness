@@ -27,7 +27,13 @@ import { DeepSeekOnboardingDialog } from './DeepSeekOnboardingDialog.tsx'
 import type { DeepSeekOnboardingInjected } from './DeepSeekOnboardingDialog.tsx'
 import { WelcomeNotice } from './WelcomeNotice.tsx'
 import type { WelcomeNoticeInjected } from './WelcomeNotice.tsx'
+import { WelcomeWizard } from './WelcomeWizard.tsx'
+import type { WelcomeWizardInjected } from './WelcomeWizard.tsx'
+import { SetupSection } from './SetupSection.tsx'
+import type { SetupSectionInjected } from './SetupSection.tsx'
 import { WelcomeNoticeStore } from './welcome-store.ts'
+import { WelcomeWizardStore, WIZARD_SETTINGS_NAMESPACE } from './welcome-wizard.ts'
+import { analysisApi } from './welcome-rpc.ts'
 import { ModelsSettingsStore } from './store.ts'
 import type { ModelsWire } from './store.ts'
 import { createModelsOperations } from './operations.ts'
@@ -152,6 +158,26 @@ export function apply(ctx: ClientContext): void {
     hooks: { welcome: welcomeController.store },
     t,
   })
+  // First-run setup: one store drives the wizard step and the Setup section's
+  // reopen action, so both surfaces agree on the completion marker.
+  const wizardController = new WelcomeWizardStore(
+    ctx.configForms.get<Record<string, unknown>>(WIZARD_SETTINGS_NAMESPACE),
+    analysisApi,
+  )
+  const wizardInjected = (): WelcomeWizardInjected => ({
+    store: wizardController,
+    hooks: { wizard: wizardController.store, models: controller.store },
+    modelsController: controller,
+    operations,
+    api: wire,
+    schema,
+    t,
+  })
+  const setupInjected = (): SetupSectionInjected => ({
+    store: wizardController,
+    hooks: { wizard: wizardController.store },
+    t,
+  })
   // The Key Pool extension's Remote faces are bound once here, where the
   // namespaces are declared in this plugin's own `inject`; the components
   // receive callbacks and data and never a context.
@@ -205,6 +231,7 @@ export function apply(ctx: ClientContext): void {
     return () => {
       if (hiddenRefreshTimer !== undefined) clearTimeout(hiddenRefreshTimer)
       welcomeController.dispose()
+      wizardController.dispose()
       for (const dispose of pickerDisposers) dispose()
       for (const dispose of disposers) dispose()
     }
@@ -237,6 +264,23 @@ export function apply(ctx: ClientContext): void {
     order: -100,
     inject: welcomeInjected,
   }, WelcomeNotice))
+  // First-run setup leads the coordinator queue: the wizard hands the slot to
+  // the welcome notice when it completes or when the marker already exists.
+  ctx.slots.inject('settings.onboarding', () => ctx.slots.register({
+    name: 'settings.onboarding',
+    id: 'welcome-wizard',
+    order: -200,
+    inject: wizardInjected,
+  }, WelcomeWizard))
+  // The Setup row re-runs the flow later; the store's reopen flag overrides
+  // the completion marker for the next blank session.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'setup',
+    order: 90,
+    label: () => t('wizSetupNav'),
+    inject: setupInjected,
+  }, SetupSection))
   ctx.slots.inject('settings.onboarding', () => ctx.slots.register({
     name: 'settings.onboarding',
     id: 'deepseek-official',

@@ -56,3 +56,11 @@ vendor/*/src/**/*.js
 vendor/*/src/**/*.js.map
 vendor/*/src/**/*.d.ts
 vendor/*/src/**/*.d.ts.map
+
+# in-place build residue under src/ (emitted by package builds; never commit)
+packages/*/*/src/*.js
+packages/*/*/src/*.js.map
+packages/*/*/src/*.d.ts
+packages/*/*/*/src/*.js
+packages/*/*/*/src/*.js.map
+packages/*/*/*/src/*.d.ts
