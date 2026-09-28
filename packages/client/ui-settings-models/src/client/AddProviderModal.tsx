@@ -3,7 +3,9 @@ import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
+import type { HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
+import { heavyApi, pollHeavyJob, type HeavyHealthView, type HeavyJobView } from './heavy-rpc.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -42,6 +44,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [discovering, setDiscovering] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Heavy-provider flow: mode choice, optional unified key, health, progress.
+  const [heavyMode, setHeavyMode] = useState<'reuse' | 'local'>('reuse')
+  const [heavyKey, setHeavyKey] = useState('')
+  const [heavyHealth, setHeavyHealth] = useState<HeavyHealthView | null>(null)
+  const [heavyChecking, setHeavyChecking] = useState(false)
+  const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
@@ -51,6 +59,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     )
   }, [search])
 
+  const heavyTemplates = useMemo(
+    () => PROVIDER_TEMPLATES.filter(p => p.heavy !== undefined),
+    [],
+  )
+
   const popular = useMemo(() => {
     const byId = new Map(PROVIDER_TEMPLATES.map(p => [p.id, p]))
     return POPULAR_PROVIDERS.map(id => byId.get(id)).filter((p): p is ProviderTemplate => p !== undefined)
@@ -59,10 +72,24 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   if (!open) return null
 
   const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
+  const heavy: HeavyProviderManifest | undefined = selected !== 'empty' && selected !== null ? selected.heavy : undefined
+  const heavyUnsupported = heavy?.unsupported
+
+  const refreshHeavyHealth = (manifest: HeavyProviderManifest) => {
+    setHeavyChecking(true)
+    void heavyApi.status(manifest.id).then((result) => {
+      if (result.ok) setHeavyHealth(result.value.health)
+      setHeavyChecking(false)
+    })
+  }
 
   const handleSelect = (tpl: ProviderTemplate | 'empty') => {
     setSelected(tpl)
     setError(null)
+    setHeavyHealth(null)
+    setHeavyJob(null)
+    setHeavyKey('')
+    setHeavyMode('reuse')
     if (tpl === 'empty') {
       setProviderId(uniqueId('provider', taken))
       setDisplayName('New Provider')
@@ -71,16 +98,56 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setApiKey('')
       return
     }
-    setProviderId(uniqueId(tpl.id, taken))
+    setProviderId(tpl.heavy !== undefined ? tpl.id : uniqueId(tpl.id, taken))
     setDisplayName(tpl.name)
     setProtocol(protocols.includes(tpl.protocol) ? tpl.protocol : protocols[0] || tpl.protocol)
     setBaseURL(tpl.baseURL)
     setApiKey('')
+    if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyHealth(tpl.heavy)
   }
 
   const handleBack = () => {
     setSelected(null)
     setError(null)
+  }
+
+  /** The heavy add: reuse writes the route after a probe; local runs the polled job. */
+  const handleHeavyCreate = async (manifest: HeavyProviderManifest) => {
+    setHeavyJob(null)
+    if (manifest.unsupported !== undefined) {
+      setError(`${manifest.unsupported.reason} (${manifest.unsupported.plannedWith})`)
+      return
+    }
+    if (heavyMode === 'reuse') {
+      const result = await heavyApi.reuse(manifest.id, heavyKey)
+      if (!result.ok) {
+        setError(result.message)
+        return
+      }
+      if (result.value.blocked !== undefined) {
+        setError(`${result.value.blocked.reason} (${result.value.blocked.plannedWith})`)
+        return
+      }
+      if (result.value.health !== undefined) setHeavyHealth(result.value.health)
+      onClose(true)
+      return
+    }
+    const started = await heavyApi.install(manifest.id, heavyKey)
+    if (!started.ok) {
+      setError(started.message)
+      return
+    }
+    if (started.value.blocked !== undefined) {
+      setError(`${started.value.blocked.reason} (${started.value.blocked.plannedWith})`)
+      return
+    }
+    if (started.value.job !== undefined) setHeavyJob(started.value.job)
+    const final = await pollHeavyJob(manifest.id, setHeavyJob)
+    if (final?.state === 'succeeded') {
+      onClose(true)
+      return
+    }
+    setError(final?.error ?? t('heavyFailed'))
   }
 
   const handleCreate = async () => {
@@ -93,7 +160,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setError(t('customRouteTaken'))
       return
     }
-    if (!baseURL.trim()) {
+    if (!heavy && !baseURL.trim()) {
       setError(t('customNeedsBaseUrl'))
       return
     }
@@ -102,6 +169,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setError(null)
 
     try {
+      if (heavy !== undefined) {
+        setDiscovering(heavyMode === 'reuse')
+        await handleHeavyCreate(heavy)
+        return
+      }
       const keyRef = deriveKeyRef(id)
       const cleanKey = apiKey.trim()
 
@@ -175,6 +247,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setError(messageOf(err))
     } finally {
       setBusy(false)
+      setDiscovering(false)
     }
   }
 
@@ -195,8 +268,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
             <Button variant="ghost" disabled={busy} onClick={handleBack}>
               Back
             </Button>
-            <Button variant="primary" disabled={busy || readOnly} onClick={handleCreate}>
-              {discovering ? t('discovering') : busy ? t('creating') : t('create')}
+            <Button
+              variant="primary"
+              disabled={busy || readOnly || heavyUnsupported !== undefined}
+              onClick={handleCreate}
+            >
+              {heavy !== undefined && busy && heavyJob?.state === 'running'
+                ? t('heavyInstalling')
+                : discovering ? t('discovering') : busy ? t('creating') : t('create')}
             </Button>
           </>
         )
@@ -222,18 +301,26 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
           </div>
 
           <div className={styles['templateGrid']}>
-            {search.trim() === '' && (
+            {search.trim() === '' ? (
               <>
+                <div className={styles['templateGroupLabel']}>{t('heavyGroup')}</div>
+                {heavyTemplates.map(tpl => (
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                ))}
                 <div className={styles['templateGroupLabel']}>Popular</div>
                 {popular.map(tpl => (
-                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} />
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
                 ))}
                 <div className={styles['templateGroupLabel']}>All Providers</div>
+                {filtered.filter(tpl => tpl.heavy === undefined).map(tpl => (
+                  <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+                ))}
               </>
+            ) : (
+              filtered.map(tpl => (
+                <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} t={t} />
+              ))
             )}
-            {filtered.map(tpl => (
-              <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} />
-            ))}
             {filtered.length === 0 && (
               <div className={styles['emptySidebar']}>No providers match "{search}".</div>
             )}
@@ -251,7 +338,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               value={displayName}
               placeholder="e.g. OpenAI Official"
               onChange={e => setDisplayName(e.target.value)}
-              disabled={busy || readOnly}
+              disabled={busy || readOnly || heavy !== undefined}
             />
           </div>
 
@@ -264,7 +351,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                 value={providerId}
                 placeholder="e.g. openai"
                 onChange={e => setProviderId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
-                disabled={busy || readOnly}
+                disabled={busy || readOnly || heavy !== undefined}
               />
             </div>
 
@@ -285,33 +372,52 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
             </div>
           </div>
 
-          <div className={styles['field']}>
-            <label className={styles['fieldLabel']}>Base URL / Endpoint</label>
-            <input
-              className={styles['input']}
-              type="text"
-              value={baseURL}
-              placeholder="https://api.openai.com/v1"
-              onChange={e => setBaseURL(e.target.value)}
-              disabled={busy || readOnly}
-            />
-          </div>
+          {heavy === undefined ? (
+            <>
+              <div className={styles['field']}>
+                <label className={styles['fieldLabel']}>Base URL / Endpoint</label>
+                <input
+                  className={styles['input']}
+                  type="text"
+                  value={baseURL}
+                  placeholder="https://api.openai.com/v1"
+                  onChange={e => setBaseURL(e.target.value)}
+                  disabled={busy || readOnly}
+                />
+              </div>
 
-          <div className={styles['field']}>
-            <label className={styles['fieldLabel']}>API Key</label>
-            <input
-              className={styles['input']}
-              type="password"
-              value={apiKey}
-              placeholder={keylessSelected
-                ? t('keylessApiKeyPlaceholder')
-                : selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
-              onChange={e => setApiKey(e.target.value)}
-              disabled={busy || readOnly}
+              <div className={styles['field']}>
+                <label className={styles['fieldLabel']}>API Key</label>
+                <input
+                  className={styles['input']}
+                  type="password"
+                  value={apiKey}
+                  placeholder={keylessSelected
+                    ? t('keylessApiKeyPlaceholder')
+                    : selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
+                  onChange={e => setApiKey(e.target.value)}
+                  disabled={busy || readOnly}
+                />
+              </div>
+            </>
+          ) : (
+            <HeavyProviderForm
+              manifest={heavy}
+              mode={heavyMode}
+              onMode={setHeavyMode}
+              keyValue={heavyKey}
+              onKey={setHeavyKey}
+              health={heavyHealth}
+              checking={heavyChecking}
+              job={heavyJob}
+              readOnly={readOnly}
+              busy={busy}
+              t={t}
+              onCheck={() => refreshHeavyHealth(heavy)}
             />
-          </div>
+          )}
 
-          {selected !== 'empty' && (
+          {selected !== 'empty' && heavy === undefined && (
             <div className={styles['presetMeta']}>
               <span className={styles['presetMetaItem']}>
                 Env: {selected.env.length > 0 ? selected.env.join(', ') : 'none'}
@@ -332,7 +438,168 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   )
 }
 
-function TemplateCard({ tpl, onSelect }: { tpl: ProviderTemplate; onSelect: (t: ProviderTemplate) => void }): ReactNode {
+/** The heavy-provider form: summary, quirks, browser badges, mode choice, progress. */
+function HeavyProviderForm(props: {
+  manifest: HeavyProviderManifest
+  mode: 'reuse' | 'local'
+  onMode: (mode: 'reuse' | 'local') => void
+  keyValue: string
+  onKey: (value: string) => void
+  health: HeavyHealthView | null
+  checking: boolean
+  job: HeavyJobView | null
+  readOnly: boolean
+  busy: boolean
+  t: (key: keyof typeof en) => string
+  onCheck: () => void
+}): ReactNode {
+  const { manifest, mode, onMode, keyValue, onKey, health, checking, job, readOnly, busy, t, onCheck } = props
+  const disabled = busy || readOnly
+  const dashboardUrl = mode === 'local' ? manifest.local.dashboardUrl ?? manifest.dashboardUrl : manifest.dashboardUrl
+  return (
+    <div className={styles['heavyPanel']}>
+      <p className={styles['heavySummary']}>{manifest.summary}</p>
+
+      <div className={styles['heavyMetaRow']}>
+        {dashboardUrl !== undefined && (
+          <a className={styles['presetMetaItem']} href={dashboardUrl} target="_blank" rel="noreferrer">
+            {t('heavyDashboard')} ↗
+          </a>
+        )}
+        {manifest.docsUrl !== undefined && (
+          <a className={styles['presetMetaItem']} href={manifest.docsUrl} target="_blank" rel="noreferrer">
+            {t('heavyDocs')} ↗
+          </a>
+        )}
+        <span className={styles['heavyHealthBadge']} data-ok={health?.ok === true ? 'true' : 'false'}>
+          {health === null ? t('heavyHealthUnknown') : health.ok ? t('heavyHealthOk') : t('heavyHealthDown')}
+          {health?.status !== undefined ? ` · ${String(health.status)}` : ''}
+        </span>
+        <button type="button" className={styles['heavyLinkBtn']} onClick={onCheck} disabled={checking}>
+          {checking ? t('heavyChecking') : t('heavyCheck')}
+        </button>
+      </div>
+
+      {manifest.requiresBrowser.length > 0 && (
+        <div className={styles['heavyBadges']}>
+          {manifest.requiresBrowser.map(line => (
+            <span key={line} className={styles['heavyBrowserBadge']} title={line}>
+              {t('heavyBrowserBadge')}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className={styles['heavySectionLabel']}>{t('heavyQuirks')}</div>
+      <ul className={styles['heavyList']}>
+        {manifest.quirks.map(quirk => <li key={quirk}>{quirk}</li>)}
+      </ul>
+
+      {manifest.unsupported !== undefined ? (
+        <div className={styles['heavyBlocked']}>
+          <strong>{t('heavyBlockedTitle')}</strong>
+          <p>{manifest.unsupported.reason}</p>
+          <p className={styles['heavyBlockedHint']}>
+            {t('heavyBlockedHint').replace('{planned}', manifest.unsupported.plannedWith)}
+            {' · '}
+            <a href={manifest.unsupported.reuseUrl} target="_blank" rel="noreferrer">{t('heavyReuseUrl')} ↗</a>
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className={styles['heavySectionLabel']}>{t('heavySummary')}</div>
+          <div className={styles['heavyModes']}>
+            <label className={styles['heavyMode']}>
+              <input
+                type="radio"
+                name="heavy-mode"
+                checked={mode === 'reuse'}
+                disabled={disabled}
+                onChange={() => onMode('reuse')}
+              />
+              <span>
+                <strong>{t('heavyReuse')}</strong>
+                <em> · {t('heavyRecommended')}</em>
+                <span className={styles['heavyModeNote']}>{manifest.reuse.note}</span>
+                <span className={styles['heavyModeNote']}>{manifest.reuse.baseURL}</span>
+              </span>
+            </label>
+            <label className={styles['heavyMode']}>
+              <input
+                type="radio"
+                name="heavy-mode"
+                checked={mode === 'local'}
+                disabled={disabled}
+                onChange={() => onMode('local')}
+              />
+              <span>
+                <strong>{t('heavyLocal')}</strong>
+                <span className={styles['heavyModeNote']}>
+                  {t('heavyDeps')}: {manifest.local.deps.join(', ')} · {t('heavyDisk')}: {manifest.local.diskHint}
+                </span>
+                <span className={styles['heavyModeNote']}>{manifest.local.baseURL}</span>
+              </span>
+            </label>
+          </div>
+
+          {mode === 'local' && manifest.local.install.length > 0 && (
+            <>
+              <div className={styles['heavySectionLabel']}>{t('heavyInstallSteps')}</div>
+              <ol className={styles['heavyList']}>
+                {manifest.local.install.map(step => <li key={step.label}>{step.label}</li>)}
+              </ol>
+            </>
+          )}
+
+          {manifest.auth.kind === 'unified' ? (
+            <div className={styles['field']}>
+              <label className={styles['fieldLabel']}>{t('heavyKeyLabel')}</label>
+              <input
+                className={styles['input']}
+                type="password"
+                value={keyValue}
+                placeholder={t('heavyKeyPlaceholder')}
+                onChange={e => onKey(e.target.value)}
+                disabled={disabled}
+              />
+            </div>
+          ) : (
+            <p className={styles['heavyModeNote']}>
+              {t('heavyPlaceholderAuth').replace('{ref}', manifest.auth.apiKeyEnv ?? '')}
+            </p>
+          )}
+
+          {job !== null && (
+            <div className={styles['heavyProgress']}>
+              <div className={styles['heavyProgressHead']}>
+                <span>{t('heavyProgress').replace('{step}', String(job.stageIndex + 1)).replace('{total}', String(job.stageCount))}</span>
+                <span>{job.pct}%</span>
+              </div>
+              <div className={styles['heavyProgressTrack']}>
+                <div className={styles['heavyProgressFill']} style={{ width: `${job.pct}%` }} data-state={job.state} />
+              </div>
+              <div className={styles['heavyStage']}>{job.stage}</div>
+              {job.logTail !== '' && <pre className={styles['heavyLog']}>{job.logTail}</pre>}
+              {job.state === 'failed' && (
+                <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error}</p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function TemplateCard({
+  tpl,
+  onSelect,
+  t,
+}: {
+  tpl: ProviderTemplate
+  onSelect: (tpl: ProviderTemplate) => void
+  t: (key: keyof typeof en) => string
+}): ReactNode {
   return (
     <div
       className={styles['templateCard']}
@@ -350,6 +617,11 @@ function TemplateCard({ tpl, onSelect }: { tpl: ProviderTemplate; onSelect: (t: 
         <div className={styles['templateInfo']}>
           <span className={styles['templateName']}>{tpl.name}</span>
           <span className={styles['templateCategory']}>{tpl.id}</span>
+          {tpl.heavy !== undefined && (
+            <span className={styles['heavyCardBadge']}>
+              {tpl.heavy.unsupported === undefined ? t('heavyBadgeShort') : t('heavyPlannedBadge')}
+            </span>
+          )}
         </div>
       </div>
     </div>

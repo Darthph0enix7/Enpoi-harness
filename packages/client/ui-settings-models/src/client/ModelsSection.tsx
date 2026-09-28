@@ -29,6 +29,8 @@ import { ORCHESTRATION_NS } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
+import { heavyProviderManifest } from './heavy-providers.ts'
+import { heavyApi } from './heavy-rpc.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -91,6 +93,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const [deleteTarget, setDeleteTarget] = useState<ProviderRow | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [heavyUninstall, setHeavyUninstall] = useState(false)
 
   // Ensure store is loaded
   useEffect(() => {
@@ -163,6 +166,31 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     setDeleteError(null)
 
     try {
+      // A HEAVY provider's removal belongs to its manifest: the host plugin
+      // runs the teardown and clears route, credential, pool state, cache,
+      // and chain links in one confirmed operation. Per-provider confirmation
+      // text (and the antigravity OpenCode/dotfiles caveat) is shown above.
+      if (heavyProviderManifest(deleteTarget.entry.provider) !== undefined) {
+        const removal = await heavyApi.remove(deleteTarget.entry.provider, heavyUninstall)
+        if (!removal.ok) {
+          setDeleteError(removal.message)
+          setDeleting(false)
+          return
+        }
+        const errors = removal.value.summary?.errors ?? []
+        const teardown = removal.value.summary?.teardown
+        if (errors.length > 0 || teardown?.ok === false) {
+          // Keep the dialog up: the operator must see which named step failed
+          // instead of believing the provider was fully removed.
+          setDeleteError(`${t('heavyRemoveFailed')}: ${[...errors, teardown?.failedStep ?? ''].filter(Boolean).join('; ')}`)
+          setDeleting(false)
+          await controller.load()
+          return
+        }
+        setDeleteTarget(null)
+        await controller.load()
+        return
+      }
       // A shipped route addresses the whole section: its removal is the
       // namespace's own `disabled` flag, and its credential may be shared with
       // another route (the fork's llm-pi-ai deepseek profile names the same
@@ -196,6 +224,8 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       setDeleting(false)
     }
   }
+
+  const heavyDeleteManifest = deleteTarget ? heavyProviderManifest(deleteTarget.entry.provider) : undefined
 
   if (state.status === 'loading' && state.rows.length === 0) {
     return (
@@ -308,7 +338,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
               api={api}
               t={t}
               readOnly={!state.writable}
-              onDelete={() => setDeleteTarget(selectedRow)}
+              onDelete={() => { setHeavyUninstall(false); setDeleteTarget(selectedRow) }}
               onSaved={() => void controller.load()}
             />
           ) : (
@@ -366,12 +396,31 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                 disabled={deleting}
                 onClick={confirmDelete}
               >
-                {deleting ? t('deletingAction') : t('confirmDeleteAction')}
+                {deleting ? (heavyDeleteManifest !== undefined && heavyUninstall ? t('heavyRemoving') : t('deletingAction')) : t('confirmDeleteAction')}
               </Button>
             </>
           }
         >
           {deleteError && <p className={styles['error']}>{deleteError}</p>}
+          {heavyDeleteManifest !== undefined && (
+            <div className={styles['heavyPanel']}>
+              <div className={styles['heavySectionLabel']}>{t('heavyRemoveWarnings')}</div>
+              <ul className={styles['heavyList']}>
+                {heavyDeleteManifest.removal.warnings.map(warning => <li key={warning}>{warning}</li>)}
+              </ul>
+              {heavyDeleteManifest.removal.steps.length > 0 && (
+                <label className={styles['heavyMode']}>
+                  <input
+                    type="checkbox"
+                    checked={heavyUninstall}
+                    disabled={deleting}
+                    onChange={event => setHeavyUninstall(event.target.checked)}
+                  />
+                  <span>{t('heavyAlsoUninstall')}</span>
+                </label>
+              )}
+            </div>
+          )}
         </Modal>
       </div>
       {/* MODEL GROUPS: a full-width row below the master-detail page. It

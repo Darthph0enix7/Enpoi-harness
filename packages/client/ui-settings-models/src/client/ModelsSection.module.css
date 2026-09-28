@@ -2178,3 +2178,206 @@ select.input {
     max-width: none;
     border-radius: var(--card-radius);
   }}
+/* ========================================================================= */
+/* HEAVY PROVIDERS                                                          */
+/* ========================================================================= */
+
+.heavyPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-settings-card-fill);
+}
+
+.heavySummary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyMetaRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.heavyHealthBadge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyHealthBadge[data-ok='true'] {
+  border-color: var(--dsw-alias-state-success-primary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.heavyHealthBadge[data-ok='false'] {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.heavyLinkBtn {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+}
+
+.heavyBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.heavyBrowserBadge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--dsw-alias-state-warn-label);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.heavySectionLabel {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.heavyList {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyBlocked {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-warn-label);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyBlocked p {
+  margin: 0;
+}
+
+.heavyBlockedHint {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.heavyModes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heavyMode {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.heavyMode em {
+  font-style: normal;
+  color: var(--dsw-alias-brand-primary);
+}
+
+.heavyModeNote {
+  display: block;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.heavyProgress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.heavyProgressHead {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.heavyProgressTrack {
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.heavyProgressFill {
+  height: 100%;
+  background: var(--dsw-alias-button-primary-fill);
+  transition: width 0.3s ease;
+}
+
+.heavyProgressFill[data-state='failed'] {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.heavyStage {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyLog {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: pre-wrap;
+}
+
+.heavyProgressError {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.heavyCardBadge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-secondary);
+}

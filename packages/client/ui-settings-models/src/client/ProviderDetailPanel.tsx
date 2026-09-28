@@ -14,6 +14,7 @@ import {
   toggleModelHidden, hideAllModels, showAllModels,
 } from './hidden-models.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
+import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -969,6 +970,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           )}
         </div>
       </div>
+
+      {/* Heavy provider panel: manifest quirks, dashboard link, health probe.
+          It renders only for the three manifest-backed routes. */}
+      <HeavyProviderCard providerId={providerId} t={_t} />
 
       {/* Key Pool & Identities Card */}
       {poolConfig && poolConfig.identities && poolConfig.identities.length > 0 ? (

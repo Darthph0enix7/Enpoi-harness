@@ -8,6 +8,7 @@
  */
 
 import presets from './provider-presets.ts'
+import { HEAVY_PROVIDER_MANIFESTS, type HeavyProviderManifest } from './heavy-providers.ts'
 
 export interface ProviderTemplate {
   id: string
@@ -25,6 +26,13 @@ export interface ProviderTemplate {
    * tier); its env ref stays optional and a supplied key switches to BYOK.
    */
   keyless?: boolean
+  /**
+   * HEAVY provider: listed, but nothing is installed until the operator adds
+   * one. The manifest drives the mode choice, install job, health probe, and
+   * removal confirmation; until then the preset has no route and is excluded
+   * from the provider-sync endpoint set.
+   */
+  heavy?: HeavyProviderManifest
 }
 
 /**
@@ -34,9 +42,27 @@ export interface ProviderTemplate {
  */
 const KEYLESS_PRESET_IDS = new Set(['kilo'])
 
+/**
+ * The heavy presets appended to the generated catalog. They carry the
+ * hand-maintained manifest (surviving preset regeneration, like
+ * {@link KEYLESS_PRESET_IDS}) and are deliberately absent from every
+ * provider-sync `endpoints` map.
+ */
+const HEAVY_TEMPLATES: ProviderTemplate[] = HEAVY_PROVIDER_MANIFESTS.map(manifest => ({
+  id: manifest.id,
+  name: manifest.label,
+  env: manifest.auth.apiKeyEnv === undefined ? [] : [manifest.auth.apiKeyEnv],
+  protocol: manifest.protocol,
+  baseURL: manifest.reuse.baseURL,
+  ...manifest.docsUrl === undefined ? {} : { doc: manifest.docsUrl },
+  ...manifest.auth.keyless ? { keyless: true } : {},
+  heavy: manifest,
+}))
+
 export const PROVIDER_TEMPLATES: ProviderTemplate[] =
   (presets as unknown as ProviderTemplate[]).map(preset =>
     KEYLESS_PRESET_IDS.has(preset.id) ? { ...preset, keyless: true } : preset)
+    .concat(HEAVY_TEMPLATES)
 
 /** OpenCode's popular-provider ordering (use-providers.ts popularProviders). */
 export const POPULAR_PROVIDERS = [
