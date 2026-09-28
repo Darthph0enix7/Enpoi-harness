@@ -1,8 +1,9 @@
 /**
- * Provider detail card for a HEAVY provider: the live health probe, the
- * dashboard link, the "requires a browser" badges, the manifest quirks, and
- * the mode the configured route uses. Fail-soft: an unreachable host or
- * dashboard renders as a badge, never as an error that blocks the page.
+ * Provider detail card for a HEAVY provider: the cached health probe, the
+ * dashboard URL(s), the "requires a browser" badges, the manifest quirks, the
+ * live install job (polled while it runs, persisted on the host), and the full
+ * documentation view. Fail-soft: an unreachable host or dashboard renders as a
+ * badge, never as an error that blocks the page.
  *
  * @module ui-settings-models/HeavyProviderCard
  */
@@ -10,7 +11,9 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { heavyProviderManifest } from './heavy-providers.ts'
-import { heavyApi, type HeavyStatusView } from './heavy-rpc.ts'
+import { heavyApi, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
+import { HeavyDashboardLinks, useHeavyStatus } from './HeavyProviderStatus.tsx'
+import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -20,36 +23,52 @@ export interface HeavyProviderCardProps {
   t: (key: keyof typeof en) => string
 }
 
+/** Provider detail card for a heavy provider. */
 export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): ReactNode {
   const manifest = heavyProviderManifest(providerId)
-  const [status, setStatus] = useState<HeavyStatusView | null>(null)
-  const [checking, setChecking] = useState(false)
+  const { status, checking, refresh } = useHeavyStatus(providerId, { enabled: manifest !== undefined })
+  const [job, setJob] = useState<HeavyJobView | null>(null)
+  const [showDocs, setShowDocs] = useState(false)
 
+  // A host snapshot (page reopened, or another surface started the job) is
+  // adopted unless the locally polled copy is newer. A same-start terminal
+  // snapshot still wins, so a finished run is never masked by a cached
+  // running status reply.
   useEffect(() => {
-    let cancelled = false
-    setChecking(true)
-    void heavyApi.status(providerId).then((result) => {
-      if (cancelled) return
-      if (result.ok) setStatus(result.value)
-      setChecking(false)
+    const snapshot = status?.job
+    if (snapshot === undefined) return
+    setJob((previous) => {
+      if (previous === null) return snapshot
+      if (snapshot.startedAt > previous.startedAt) return snapshot
+      if (snapshot.startedAt === previous.startedAt && snapshot.state !== 'running') return snapshot
+      return previous
     })
-    return () => { cancelled = true }
-  }, [providerId])
+  }, [status])
+
+  // While a job runs, poll it directly: status is TTL-cached for health, but
+  // progress must move. A terminal snapshot forces a status refresh so the
+  // mode/dashboard badges pick up the route the finalizer just wrote.
+  useEffect(() => {
+    if (job?.state !== 'running') return
+    let cancelled = false
+    const timer = setInterval(() => {
+      void heavyApi.job(providerId).then((result) => {
+        if (cancelled) return
+        const next = result.ok ? result.value.job : undefined
+        if (next === undefined) return
+        setJob(next)
+        if (next.state !== 'running') refresh()
+      })
+    }, HEAVY_JOB_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [job?.state, providerId, refresh])
 
   if (manifest === undefined) return null
 
-  const check = () => {
-    setChecking(true)
-    void heavyApi.status(providerId).then((result) => {
-      if (result.ok) setStatus(result.value)
-      setChecking(false)
-    })
-  }
-
   const health = status?.health
-  const dashboardUrl = status?.mode === 'local'
-    ? manifest.local.dashboardUrl ?? manifest.dashboardUrl
-    : manifest.dashboardUrl
   return (
     <div className={styles['settingsCard']}>
       <div className={styles['cardHead']}>
@@ -64,17 +83,16 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
           </span>
         </div>
         <div className={styles['poolHeaderActions']}>
-          {dashboardUrl !== undefined && (
-            <a className={styles['presetMetaItem']} href={dashboardUrl} target="_blank" rel="noreferrer">
-              {t('heavyDashboard')} ↗
-            </a>
-          )}
+          <HeavyDashboardLinks providerId={providerId} mode={status?.mode} t={t} />
           {manifest.docsUrl !== undefined && (
             <a className={styles['presetMetaItem']} href={manifest.docsUrl} target="_blank" rel="noreferrer">
               {t('heavyDocs')} ↗
             </a>
           )}
-          <button type="button" className={styles['heavyLinkBtn']} onClick={check} disabled={checking}>
+          <button type="button" className={styles['heavyLinkBtn']} aria-pressed={showDocs} onClick={() => setShowDocs(open => !open)}>
+            {showDocs ? t('heavyHideDocumentation') : t('heavyDocumentation')}
+          </button>
+          <button type="button" className={styles['heavyLinkBtn']} onClick={refresh} disabled={checking}>
             {checking ? t('heavyChecking') : t('heavyCheck')}
           </button>
         </div>
@@ -106,17 +124,25 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
             </p>
           </div>
         )}
-        {status?.job !== undefined && status.job.state === 'running' && (
+        {job !== null && (
           <div className={styles['heavyProgress']}>
             <div className={styles['heavyProgressHead']}>
-              <span>{status.job.stage}</span>
-              <span>{status.job.pct}%</span>
+              <span>{t('heavyProgress').replace('{step}', String(job.stageIndex + 1)).replace('{total}', String(job.stageCount))}</span>
+              <span>{job.pct}%</span>
             </div>
             <div className={styles['heavyProgressTrack']}>
-              <div className={styles['heavyProgressFill']} style={{ width: `${status.job.pct}%` }} data-state={status.job.state} />
+              <div className={styles['heavyProgressFill']} style={{ width: `${job.pct}%` }} data-state={job.state} />
             </div>
+            <div className={styles['heavyStage']}>{job.stage}</div>
+            {job.state === 'running' && <p className={styles['heavyModeNote']}>{t('heavyJobBackground')}</p>}
+            {job.state === 'succeeded' && <p className={styles['heavyModeNote']}>{t('heavyJobSucceeded')}</p>}
+            {job.state === 'failed' && (
+              <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error ?? t('heavyJobFailedHint')}</p>
+            )}
+            {job.logTail !== '' && <pre className={styles['heavyLog']}>{job.logTail}</pre>}
           </div>
         )}
+        {showDocs && <HeavyProviderDocs manifest={manifest} platform={status?.platform} t={t} />}
       </div>
     </div>
   )

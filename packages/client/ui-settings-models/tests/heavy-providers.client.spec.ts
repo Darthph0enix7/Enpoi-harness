@@ -1,10 +1,17 @@
 /**
- * Heavy provider presets: listed in Add Provider, manifest-complete, and
- * usable only through the host's add flow (no route exists by listing alone).
+ * Heavy provider presets: listed in Add Provider, manifest-complete, usable
+ * only through the host's add flow (no route exists by listing alone), and
+ * carrying platform-keyed install paths with a default fallback.
  */
 import { expect, it } from 'vitest'
-import { HEAVY_PRESET_IDS, heavyProviderManifest, heavyProviderProblems } from '../src/client/heavy-providers.ts'
-import { PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
+import {
+  HEAVY_PRESET_IDS,
+  heavyDashboardUrls,
+  heavyProviderManifest,
+  heavyProviderProblems,
+  resolveHeavyInstall,
+} from '../src/client/heavy-providers.ts'
+import { PROVIDER_TEMPLATES, providerDashboardUrls } from '../src/client/provider-templates.ts'
 
 it('the manifest table is structurally complete', () => {
   expect(heavyProviderProblems()).toEqual([])
@@ -28,7 +35,7 @@ it('the heavy descriptors surface dashboard, browser badges, modes, and health',
     expect(manifest?.reuse.health.url, id).not.toBe('')
     expect(manifest?.requiresBrowser.length, id).toBeGreaterThan(0)
     if (manifest?.unsupported === undefined) {
-      expect(manifest?.local.install.length, id).toBeGreaterThan(0)
+      expect(manifest?.local.install.default.steps.length, id).toBeGreaterThan(0)
       expect(manifest?.reuse.baseURL, id).not.toBe('')
     }
   }
@@ -46,4 +53,32 @@ it('freellmapi reuse points at the server gateway, local at loopback', () => {
   expect(manifest?.reuse.baseURL).toBe('http://100.122.163.25:3002/v1')
   expect(manifest?.local.baseURL).toBe('http://127.0.0.1:3002/v1')
   expect(manifest?.removal.steps.map(step => step.command).join('\n')).toContain('docker compose down -v')
+})
+
+it('selects platform-keyed installs and falls back to the Docker path', () => {
+  const local = heavyProviderManifest('freellmapi')!.local
+  const linux = resolveHeavyInstall(local, 'linux')
+  expect(linux.steps[0]!.command).toContain('freellmapi.co/install.sh')
+  expect(linux.steps[0]!.command).toContain('PORT=3002')
+  const darwin = resolveHeavyInstall(local, 'darwin')
+  expect(darwin.label).toContain('desktop app')
+  expect(darwin.deps).toEqual(['macOS 11+'])
+  expect(darwin.steps[0]!.command).toContain('.dmg')
+  expect(darwin.steps.map(step => step.command).join('\n')).toContain('"port":3002')
+  const win32 = resolveHeavyInstall(local, 'win32')
+  expect(win32.deps).toEqual(['Windows 10+'])
+  expect(win32.steps[0]!.command).toContain('.exe')
+  const unknown = resolveHeavyInstall(local, 'freebsd')
+  expect(unknown.label).toBe(local.label)
+  expect(unknown.steps[0]!.command).toContain('git clone')
+})
+
+it('dashboard URLs cover both modes and deduplicate', () => {
+  const manifest = heavyProviderManifest('freellmapi')!
+  expect(heavyDashboardUrls(manifest)).toEqual(['http://100.122.163.25:3002', 'http://127.0.0.1:3002'])
+  expect(heavyDashboardUrls(manifest, 'reuse')).toEqual(['http://100.122.163.25:3002'])
+  expect(heavyDashboardUrls(manifest, 'local')).toEqual(['http://127.0.0.1:3002'])
+  expect(providerDashboardUrls('freellmapi')).toEqual(heavyDashboardUrls(manifest))
+  // An ordinary API provider with no declared console yields no fake URL.
+  expect(providerDashboardUrls('openai')).toEqual([])
 })

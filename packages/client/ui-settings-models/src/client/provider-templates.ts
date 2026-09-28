@@ -8,7 +8,7 @@
  */
 
 import presets from './provider-presets.ts'
-import { HEAVY_PROVIDER_MANIFESTS, type HeavyProviderManifest } from './heavy-providers.ts'
+import { heavyDashboardUrls, heavyProviderManifest, HEAVY_PROVIDER_MANIFESTS, type HeavyProviderManifest } from './heavy-providers.ts'
 
 export interface ProviderTemplate {
   id: string
@@ -21,6 +21,11 @@ export interface ProviderTemplate {
   baseURL: string
   /** Docs URL for the provider. */
   doc?: string
+  /**
+   * Console/dashboard URL when the provider serves one; omitted when no
+   * dashboard is known (the heavy manifests carry their own).
+   */
+  dashboard?: string
   /**
    * The provider serves requests without any credential (anonymous free
    * tier); its env ref stays optional and a supplied key switches to BYOK.
@@ -82,6 +87,22 @@ export const KEYLESS_PROVIDERS = new Set(['ollama', 'lmstudio', 'llama-cpp', 'vl
 /** Resolve a preset by id. */
 export function providerPreset(id: string): ProviderTemplate | undefined {
   return PROVIDER_TEMPLATES.find(p => p.id === id)
+}
+
+/**
+ * Dashboard URLs known for one provider: the heavy manifest's server/local
+ * dashboards when the id is heavy, otherwise the template's own `dashboard`
+ * link. An ordinary API provider with no console yields an empty list, so
+ * callers render nothing rather than guessing a URL.
+ * @param providerId - route id.
+ * @param mode - restrict heavy providers to one mode; omitted returns both.
+ * @returns dashboard URLs in display order; empty when none is known.
+ */
+export function providerDashboardUrls(providerId: string, mode?: 'reuse' | 'local'): string[] {
+  const manifest = heavyProviderManifest(providerId)
+  if (manifest !== undefined) return heavyDashboardUrls(manifest, mode)
+  const dashboard = providerPreset(providerId)?.dashboard
+  return dashboard === undefined || dashboard === '' ? [] : [dashboard]
 }
 
 /** Default API-key env ref for a provider id (deriveKeyRef convention). */

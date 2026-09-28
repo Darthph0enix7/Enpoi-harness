@@ -3,9 +3,10 @@ import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { PROVIDER_TEMPLATES, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
-import type { HeavyProviderManifest } from './heavy-providers.ts'
+import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { heavyApi, pollHeavyJob, type HeavyHealthView, type HeavyJobView } from './heavy-rpc.ts'
+import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -50,6 +51,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [heavyHealth, setHeavyHealth] = useState<HeavyHealthView | null>(null)
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
+  const [heavyPlatform, setHeavyPlatform] = useState<string | undefined>(undefined)
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
@@ -78,7 +80,10 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const refreshHeavyHealth = (manifest: HeavyProviderManifest) => {
     setHeavyChecking(true)
     void heavyApi.status(manifest.id).then((result) => {
-      if (result.ok) setHeavyHealth(result.value.health)
+      if (result.ok) {
+        setHeavyHealth(result.value.health)
+        setHeavyPlatform(result.value.platform)
+      }
       setHeavyChecking(false)
     })
   }
@@ -90,6 +95,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setHeavyJob(null)
     setHeavyKey('')
     setHeavyMode('reuse')
+    setHeavyPlatform(undefined)
     if (tpl === 'empty') {
       setProviderId(uniqueId('provider', taken))
       setDisplayName('New Provider')
@@ -410,6 +416,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               health={heavyHealth}
               checking={heavyChecking}
               job={heavyJob}
+              platform={heavyPlatform}
               readOnly={readOnly}
               busy={busy}
               t={t}
@@ -448,14 +455,17 @@ function HeavyProviderForm(props: {
   health: HeavyHealthView | null
   checking: boolean
   job: HeavyJobView | null
+  platform?: string | undefined
   readOnly: boolean
   busy: boolean
   t: (key: keyof typeof en) => string
   onCheck: () => void
 }): ReactNode {
-  const { manifest, mode, onMode, keyValue, onKey, health, checking, job, readOnly, busy, t, onCheck } = props
+  const { manifest, mode, onMode, keyValue, onKey, health, checking, job, platform, readOnly, busy, t, onCheck } = props
   const disabled = busy || readOnly
   const dashboardUrl = mode === 'local' ? manifest.local.dashboardUrl ?? manifest.dashboardUrl : manifest.dashboardUrl
+  const [docsOpen, setDocsOpen] = useState(false)
+  const install = resolveHeavyInstall(manifest.local, platform ?? '')
   return (
     <div className={styles['heavyPanel']}>
       <p className={styles['heavySummary']}>{manifest.summary}</p>
@@ -542,14 +552,32 @@ function HeavyProviderForm(props: {
             </label>
           </div>
 
-          {mode === 'local' && manifest.local.install.length > 0 && (
+          {mode === 'local' && install.steps.length > 0 && (
             <>
               <div className={styles['heavySectionLabel']}>{t('heavyInstallSteps')}</div>
+              <p className={styles['heavyModeNote']}>
+                {install.label}
+                {platform !== undefined && platform !== ''
+                  ? ` · ${t('heavyPlatformHost').replace('{platform}', platform)}`
+                  : ''}
+              </p>
               <ol className={styles['heavyList']}>
-                {manifest.local.install.map(step => <li key={step.label}>{step.label}</li>)}
+                {install.steps.map(step => <li key={step.label}>{step.label}</li>)}
               </ol>
             </>
           )}
+
+          <div className={styles['heavyMetaRow']}>
+            <button
+              type="button"
+              className={styles['heavyLinkBtn']}
+              aria-pressed={docsOpen}
+              onClick={() => setDocsOpen(open => !open)}
+            >
+              {docsOpen ? t('heavyHideDocumentation') : t('heavyDocumentation')}
+            </button>
+          </div>
+          {docsOpen && <HeavyProviderDocs manifest={manifest} platform={platform} t={t} />}
 
           {manifest.auth.kind === 'unified' ? (
             <div className={styles['field']}>
@@ -579,6 +607,7 @@ function HeavyProviderForm(props: {
                 <div className={styles['heavyProgressFill']} style={{ width: `${job.pct}%` }} data-state={job.state} />
               </div>
               <div className={styles['heavyStage']}>{job.stage}</div>
+              {job.state === 'running' && <p className={styles['heavyModeNote']}>{t('heavyJobBackground')}</p>}
               {job.logTail !== '' && <pre className={styles['heavyLog']}>{job.logTail}</pre>}
               {job.state === 'failed' && (
                 <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error}</p>

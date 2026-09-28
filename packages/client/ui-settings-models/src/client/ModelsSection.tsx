@@ -31,6 +31,7 @@ import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
 import { heavyProviderManifest } from './heavy-providers.ts'
 import { heavyApi } from './heavy-rpc.ts'
+import { HeavyDashboardLinks, HeavyStatusDot } from './HeavyProviderStatus.tsx'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -304,6 +305,14 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                         {row.entry.declared && <span className={styles['customTagSmall']}>{t('customTag')}</span>}
                       </div>
                       <span className={styles['providerListSlug']}>{row.entry.provider}</span>
+                      {/* Heavy routes always show their dashboard URL(s) and
+                            the cached endpoint state, in either mode. */}
+                      {heavyProviderManifest(row.entry.provider) !== undefined && (
+                        <span className={styles['heavyRowMeta']}>
+                          <HeavyStatusDot providerId={row.entry.provider} t={t} />
+                          <HeavyDashboardLinks providerId={row.entry.provider} compact t={t} />
+                        </span>
+                      )}
                     </div>
 
                     {modelCount !== undefined && (

@@ -46,6 +46,8 @@ export interface HeavyStatusView {
   configured: boolean
   mode?: 'reuse' | 'local'
   health: HeavyHealthView
+  /** The host platform installs execute on (`process.platform`). */
+  platform?: string
   unsupported?: { reason: string; plannedWith: string; reuseUrl: string }
   job?: HeavyJobView
 }
@@ -123,7 +125,7 @@ export async function heavyRpc<T>(method: string, args: Record<string, unknown>)
 /** The `enpoiHeavy.*` calls the Models page makes. */
 export const heavyApi = {
   /** Fetch the host's manifest table (display copy; listing is static). */
-  manifests: () => heavyRpc<{ items: unknown[]; problems: string[] }>('enpoiHeavy.manifests', {}),
+  manifests: () => heavyRpc<{ items: unknown[]; problems: string[]; platform?: string }>('enpoiHeavy.manifests', {}),
   /** Configured/health/job state for one provider. */
   status: (id: string) => heavyRpc<HeavyStatusView>('enpoiHeavy.status', { request: { id } }),
   /** Add by reuse: probe the server endpoint, write the route. */
@@ -163,3 +165,79 @@ export async function pollHeavyJob(
     await new Promise(resolve => setTimeout(resolve, interval))
   }
 }
+
+/** Status/health cache lifetime: a mounted page probes each provider at most once per minute. */
+export const HEAVY_HEALTH_TTL_MS = 60_000
+
+/** Install-job poll cadence: fast enough to animate progress, far from a tight loop. */
+export const HEAVY_JOB_POLL_MS = 2000
+
+/** One cached status snapshot and the clock reading it was stored at. */
+interface HeavyStatusEntry {
+  at: number
+  value: HeavyStatusView
+}
+
+/** The TTL cache behind the ONLINE indicators. */
+export interface HeavyStatusCache {
+  /** The fresh cached snapshot, or undefined when absent or expired. */
+  peek(id: string): HeavyStatusView | undefined
+  /** Read through the cache; concurrent callers share one in-flight load. */
+  read(id: string, options?: { force?: boolean }): Promise<HeavyRpcResult<HeavyStatusView>>
+  /** Drop one provider's entry, or every entry. */
+  invalidate(id?: string): void
+}
+
+/**
+ * Create a status cache. Fail-soft: a failed load is reported to its caller
+ * and stores nothing, so the previous snapshot (if any) stays displayable and
+ * a refused probe never becomes a page error.
+ * @param options - TTL, clock, and loader seams.
+ * @returns the cache handle.
+ */
+export function createHeavyStatusCache(options: {
+  ttlMs?: number
+  now?: () => number
+  load?: (id: string) => Promise<HeavyRpcResult<HeavyStatusView>>
+} = {}): HeavyStatusCache {
+  const ttlMs = options.ttlMs ?? HEAVY_HEALTH_TTL_MS
+  const now = options.now ?? Date.now
+  const load = options.load ?? ((id: string) => heavyApi.status(id))
+  const entries = new Map<string, HeavyStatusEntry>()
+  const inflight = new Map<string, Promise<HeavyRpcResult<HeavyStatusView>>>()
+  return {
+    peek: (id) => {
+      const entry = entries.get(id)
+      return entry === undefined || now() - entry.at >= ttlMs ? undefined : entry.value
+    },
+    read: (id, readOptions) => {
+      const entry = entries.get(id)
+      if (readOptions?.force !== true && entry !== undefined && now() - entry.at < ttlMs) {
+        return Promise.resolve({ ok: true, value: entry.value })
+      }
+      const pending = inflight.get(id)
+      if (pending !== undefined) return pending
+      const request = load(id)
+        .then(
+          (result) => {
+            if (result.ok) entries.set(id, { at: now(), value: result.value })
+            return result
+          },
+          (error: unknown): HeavyRpcResult<HeavyStatusView> => ({
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+        .finally(() => { inflight.delete(id) })
+      inflight.set(id, request)
+      return request
+    },
+    invalidate: (id) => {
+      if (id === undefined) entries.clear()
+      else entries.delete(id)
+    },
+  }
+}
+
+/** The page-wide status cache shared by the provider list and the detail card. */
+export const heavyStatusCache = createHeavyStatusCache()
