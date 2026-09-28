@@ -146,11 +146,22 @@ describe('child composition persona shadow', () => {
 })
 
 describe('delegation scope guidance (honest tool surface)', () => {
-  it('names the file tools and the auto-denied interpreter path', () => {
+  it('names the file tools and the approval-gated interpreter path', () => {
     // 2026-09-27: a delegated child tried to read a JSON projection cache with
-    // `python3 -c`, was auto-denied, and lost the turn — the guidance must name
-    // read/grep/glob as the supported path.
+    // `python3 -c`, hit the approval gate, and lost the turn — the guidance must
+    // name read/grep/glob as the supported path.
     expect(SUBAGENT_DELEGATION_CONTEXT).toContain('read, grep, and glob')
-    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('auto-denied')
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('those commands require')
+  })
+
+  it('tells a child its asks are forwarded and suspends, never automatically rejected', () => {
+    // 2026-09-28: forwarded child approvals (doc 55) replaced the child's
+    // deterministic auto-rejection, so guidance claiming an automatic refusal
+    // is false and teaches workarounds.
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('forwarded to the session that delegated you')
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('suspends until it resolves')
+    expect(SUBAGENT_DELEGATION_CONTEXT).toContain('never infer around it')
+    expect(SUBAGENT_DELEGATION_CONTEXT).not.toContain('rejected automatically')
+    expect(SUBAGENT_DELEGATION_CONTEXT).not.toContain('auto-denied')
   })
 })

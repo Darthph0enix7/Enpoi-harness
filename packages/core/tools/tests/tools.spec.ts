@@ -847,6 +847,53 @@ describe('ToolRuntime', () => {
       expect(seen[0]?.signal?.aborted).toBe(true)
     })
 
+    it('treats a call a forwarded child ask already allowed as final: no second ask, the body dispatches', async () => {
+      const ctx = await approvalSetup()
+      const agent = fakeAgent()
+      let asked = 0
+      ctx.on('approval/request', () => {
+        asked += 1
+        return Promise.resolve<ApprovalOutcome>('rejected')
+      })
+      ctx.on('tools/pre-execute', async (_exec, _next): Promise<PreToolDecision> =>
+        ({ kind: 'ask', reason: 'a downstream layer re-asks after a forwarded approval' }))
+      ctx.provide('forwardedApprovals', {
+        resolves: (session: unknown, callId: unknown, toolName: unknown) =>
+          session === agent.session && callId === 'c1' && toolName === 'echo',
+      })
+
+      const result = await ctx.tools.execute({
+        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
+      })
+
+      expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
+      expect(asked).toBe(0)
+    })
+
+    it('keeps the normal ask path for calls the forwarded-approval seam does not know', async () => {
+      const ctx = await approvalSetup()
+      const agent = fakeAgent()
+      let asked = 0
+      ctx.on('approval/request', () => {
+        asked += 1
+        return Promise.resolve<ApprovalOutcome>('rejected')
+      })
+      ctx.on('tools/pre-execute', async (_exec, _next): Promise<PreToolDecision> => ({ kind: 'ask' }))
+      ctx.provide('forwardedApprovals', {
+        // Same call and tool name, another session: the record is session-scoped.
+        resolves: (session: unknown, callId: unknown, toolName: unknown) =>
+          session !== agent.session && callId === 'c1' && toolName === 'echo',
+      })
+
+      const result = await ctx.tools.execute({
+        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
+      })
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0]).toMatchObject({ text: 'Error: the user rejected tool "echo"' })
+      expect(asked).toBe(1)
+    })
+
     it('dispatches on the explicit broad standing grant and forwards the broad offer', async () => {
       const ctx = await approvalSetup()
       const agent = fakeAgent()

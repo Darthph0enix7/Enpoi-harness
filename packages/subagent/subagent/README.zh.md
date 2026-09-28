@@ -166,7 +166,7 @@ kind: "package-reference"
 ##### 委派范围声明
 
 ```markdown
-You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session — operations that require approval are rejected automatically. When the job needs access beyond that scope, do not retry the denied operation; state the limitation in your reply so the delegating agent can handle it.
+You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session. A call that needs approval is forwarded to the session that delegated you, and this turn suspends until it resolves; do not work around a denial by other means. If a call is refused, adapt the task or state the limitation in your reply — never infer around it. Use the dedicated read, grep, and glob tools to inspect files. Do not shell out to an interpreter (bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands require approval, while the dedicated file tools are the supported, approval-free path.
 ```
 
 #### Token 影响

@@ -171,12 +171,13 @@ export interface ChildComposition {
  */
 export const SUBAGENT_DELEGATION_CONTEXT
   = 'You are a delegated subagent: your permission scope was fixed when you were started and cannot be '
-    + 'widened from inside this session — operations that require approval are rejected automatically. '
-    + 'When the task needs access beyond that scope, do not retry the denied operation; state the '
-    + 'limitation in your reply so the delegating agent can handle it. '
+    + 'widened from inside this session. A call that needs approval is forwarded to the session that '
+    + 'delegated you, and this turn suspends until it resolves; do not work around a denial by other '
+    + 'means. If a call is refused, adapt the task or state the limitation in your reply — never infer '
+    + 'around it. '
     + 'Use the dedicated read, grep, and glob tools to inspect files. Do not shell out to an interpreter '
-    + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands are '
-    + 'auto-denied, and the dedicated file tools are the supported, approval-free path.'
+    + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands require '
+    + 'approval, while the dedicated file tools are the supported, approval-free path.'
 
 /**
  * Compose one child inside its creation window: join its parent's preset,
@@ -242,8 +243,9 @@ export interface DelegatedPolicyOverrides {
   readonly sandboxMode: SandboxMode | undefined
   /**
    * `'never'` whenever the approval capability is composed, `undefined`
-   * otherwise: a delegated child acts only within the sandbox scope fixed at
-   * delegation, so its asks are rejected deterministically.
+   * otherwise: the child's own session cannot answer an ask, so an
+   * approval-required call is forwarded to the nearest live root by the
+   * deployment's forwarding listener and the child suspends until it resolves.
    */
   readonly approvalPolicy: 'never' | undefined
 }

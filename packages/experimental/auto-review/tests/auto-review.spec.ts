@@ -846,6 +846,63 @@ describe('native review request', () => {
     ])
   })
 
+  it('keeps a forwarded child approval final against a reviewer denial in a never session', async () => {
+    const { ctx } = await harness([decisionChunks('{"risk":"high","decision":"deny"}')])
+    const probe = registerProbe(ctx)
+    let asked = 0
+    ctx.on('approval/request', () => {
+      asked += 1
+      return Promise.resolve<ApprovalOutcome>('allowed-once')
+    })
+    const { session, agent } = autoSession(ctx, 'never-forwarded')
+    setApprovalPolicy(session, 'never')
+    appendHeader(session, [{ name: 'probe', description: 'probe', parameters: { type: 'object' } }])
+    session.append('turn/start', { turn: 1 })
+    const callId = ToolCallId('never-forwarded-call')
+    appendAssistant(session, [{ type: 'tool-call', id: callId, name: 'probe', arguments: '{}' }])
+    appendNativeCall(session, callId, 'probe', '{}')
+    ctx.provide('forwardedApprovals', {
+      resolves: (candidate: unknown, candidateCallId: unknown, toolName: unknown) =>
+        candidate === session && candidateCallId === callId && toolName === 'probe',
+    })
+
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal, callId, name: 'probe', arguments: {}, agent,
+    })
+
+    expect(result).toMatchObject({ isError: false })
+    expect(probe.runs()).toBe(1)
+    expect(asked).toBe(0)
+  })
+
+  it('keeps a never-session reviewer denial final without a forwarded approval record', async () => {
+    const { ctx } = await harness([decisionChunks('{"risk":"medium","decision":"deny","reason":"not authorized"}')])
+    const probe = registerProbe(ctx)
+    let asked = 0
+    ctx.on('approval/request', () => {
+      asked += 1
+      return Promise.resolve<ApprovalOutcome>('allowed-once')
+    })
+    const { session, agent } = autoSession(ctx, 'never-not-forwarded')
+    setApprovalPolicy(session, 'never')
+    appendHeader(session, [{ name: 'probe', description: 'probe', parameters: { type: 'object' } }])
+    session.append('turn/start', { turn: 1 })
+    const callId = ToolCallId('never-not-forwarded-call')
+    appendAssistant(session, [{ type: 'tool-call', id: callId, name: 'probe', arguments: '{}' }])
+    appendNativeCall(session, callId, 'probe', '{}')
+
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal, callId, name: 'probe', arguments: {}, agent,
+    })
+
+    expect(result).toMatchObject({
+      isError: true,
+      error: { info: { code: 'AUTO_REVIEW_DENIED' }, message: 'Auto review rejected tool "probe"; its body was not executed' },
+    })
+    expect(probe.runs()).toBe(0)
+    expect(asked).toBe(0)
+  })
+
   it('keeps a downstream denial ahead of asking the user', async () => {
     const { ctx } = await harness([decisionChunks('{"risk":"medium","decision":"deny"}')])
     const probe = registerProbe(ctx)

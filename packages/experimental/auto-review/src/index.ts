@@ -26,6 +26,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import {
+  forwardedApprovalIsFinal,
   RUN_CODE_NAME,
   type PreToolDecision,
   type ToolExecution,
@@ -707,7 +708,12 @@ export function apply(ctx: Context): void {
         if (!review.ok) return failed(exec, review.error)
         const { decision } = review
         // The permission owner pins an approval policy into every published Session.
-        if (decision.decision === 'deny' && ctx.approval.overrideOf(agent.session) === 'never') {
+        // A call a forwarded child ask already allowed is final: the reviewer's
+        // denial cannot re-open what the human (or the root's Full-access mode)
+        // already approved, so it falls through to the downstream decision.
+        if (decision.decision === 'deny'
+          && ctx.approval.overrideOf(agent.session) === 'never'
+          && !forwardedApprovalIsFinal(ctx, agent.session, exec.callId, exec.name)) {
           return denied(exec, decision.reason)
         }
         const downstream = await next()

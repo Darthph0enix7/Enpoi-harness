@@ -630,6 +630,47 @@ export type PostToolDecision =
   | { kind: 'block'; feedback: ContentBlock[]; additionalContexts?: UserMessage[] }
 
 /**
+ * Optional forwarded-child-approval finality seam, provided by the deployment's
+ * child-ask forwarder (a profile plugin) under the `forwardedApprovals`
+ * service name and consumed opportunistically with `ctx.get`. A forwarded
+ * child ask that already allowed one exact call — the human answered its card,
+ * or the root's Full-access mode stood in — is FINAL: no later ask may dispatch
+ * a second approval request for it and no session policy may re-reject it.
+ * Absent, every ask keeps its historical behavior.
+ */
+export interface ForwardedApprovalFinality {
+  /**
+   * Whether one exact tool call in one session was already allowed by a
+   * forwarded child ask.
+   * @param session - the asking agent's session, read structurally.
+   * @param callId - the tool call's identity.
+   * @param toolName - the call's tool, pinned so another tool cannot reuse the identity.
+   * @returns `true` when the call was already allowed by a forwarded ask.
+   */
+  resolves(session: unknown, callId: unknown, toolName: unknown): boolean
+}
+
+/**
+ * Read the optional forwarded-child-approval finality seam. A deployment that
+ * composes no forwarder (or mounts it after this read) reports no final call,
+ * which is the historical behavior.
+ * @param ctx - context to resolve the optional service from.
+ * @param session - the asking agent's session.
+ * @param callId - the tool call's identity.
+ * @param toolName - the call's tool name.
+ * @returns whether the exact call was already allowed by a forwarded child ask.
+ */
+export function forwardedApprovalIsFinal(
+  ctx: Context,
+  session: unknown,
+  callId: unknown,
+  toolName: unknown,
+): boolean {
+  const seam = ctx.get('forwardedApprovals') as ForwardedApprovalFinality | undefined
+  return seam?.resolves(session, callId, toolName) === true
+}
+
+/**
  * Best-effort human-readable message from an arbitrary thrown value: Error
  * instances use `.message`; non-Error objects with a string `message`
  * property (e.g. `throw { message: 'denied' }`) use it too; everything else
@@ -1738,12 +1779,21 @@ export class ToolRuntime extends Service {
    * session to audit to and no UI to route to. Otherwise the outcome maps
    * one-to-one — `allowed-once` proceeds; the three non-grants deny with
    * distinct reasons so the model can tell a human "no" from an absent
-   * approval channel.
+   * approval channel. A call the optional `forwardedApprovals` seam reports as
+   * already allowed by a forwarded child ask is final and skips the ask
+   * entirely.
    */
   private async serviceAsk(
     exec: ToolExecution,
     ask: Extract<PreToolDecision, { kind: 'ask' }>,
   ): Promise<ToolAskResolution> {
+    // A forwarded child ask that already resolved this exact call is final:
+    // the human answered its card (or the root's Full-access mode stood in), so
+    // an outer ask must not dispatch a second request and the session's own
+    // `never` policy must not re-reject the call.
+    if (forwardedApprovalIsFinal(this.ctx, exec.agent?.session, exec.callId, exec.name)) {
+      return { decision: { kind: 'allow' }, approvalCancelled: false }
+    }
     const approval = this.ctx.get('approval')
     if (approval === undefined) {
       return {
