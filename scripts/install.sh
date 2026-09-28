@@ -686,6 +686,19 @@ stage_profile_source() { # src kind stage
   return 0
 }
 
+# Drop the `onboardingCompleted` row from a freshly copied profile patch in
+# place: a fresh home must boot into the first-run wizard, while the live
+# profile keeps its marker (its setup is complete). A single-line removal keeps
+# every other byte of the large YAML document intact.
+strip_onboarding_completed() { # patch-file
+  local file="$1" tmp="$1.strip-$$"
+  [ -f "$file" ] || return 0
+  cp -p "$file" "$tmp"
+  grep -v -E '^[[:space:]]*onboardingCompleted:' "$file" > "$tmp" || true
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
 copy_profile_tree() { # src dst mode(seed|refresh)
   # seed: first install, all shipped files land (the dir is fresh).
   # refresh: user state survives — settings.yaml, cordis.patch.yml (the
@@ -727,6 +740,9 @@ copy_profile_tree() { # src dst mode(seed|refresh)
     else
       mkdir -p "$(dirname "$d")" || return 1
       cp -p "$src/$rel" "$d" || return 1
+      # Seed mode only (refresh keeps the live patch above): a fresh home must
+      # not inherit the live device's wizard marker or first-run is skipped.
+      case "$rel" in cordis.patch.yml) strip_onboarding_completed "$d";; esac
     fi
   done < <( cd "$src" && find . -mindepth 1 -print0 )
   return 0

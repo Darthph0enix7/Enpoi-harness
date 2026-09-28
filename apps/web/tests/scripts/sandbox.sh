@@ -120,6 +120,19 @@ seed_dir_once() { # src-dir dst-dir
   return 0
 }
 
+# Drop the `onboardingCompleted` row from a profile patch in place: a fresh
+# home must boot into the first-run wizard, while the live profile keeps its
+# marker (its setup is complete). A single-line removal keeps every other byte
+# of the large YAML document intact.
+strip_onboarding_completed() { # patch-file
+  local file="$1" tmp="$1.strip-$$"
+  [ -f "$file" ] || return 0
+  cp -p "$file" "$tmp"
+  grep -v -E '^[[:space:]]*onboardingCompleted:' "$file" > "$tmp" || true
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
 # Seed the sandbox home from the fetched profile, mirroring install.sh's
 # seed_profile_home so a fresh home boots our composition. Existing files are
 # never touched. The fish function/completions are intentionally not seeded:
@@ -152,6 +165,11 @@ provision_profile() {
     # One home's state never ships: the seed writes fresh-settings.yaml, and the
     # profile's own settings.yaml/device-patches belong to the live device.
     rm -rf "$stage/.git" "$stage/settings.yaml" "$stage/device-patches" "$stage/node_modules"
+    # The live profile's patch also carries its `onboardingCompleted` marker;
+    # a fresh home must not inherit it or the first-run wizard never shows.
+    # Only the freshly copied patch is stripped — the live profile keeps its
+    # marker because that setup is complete.
+    strip_onboarding_completed "$stage/cordis.patch.yml"
     mkdir -p "$(dirname "$dir")"
     mv "$stage" "$dir" || { rm -rf "$stage"; fail "could not move the fetched profile into $dir"; }
     need_install=1
