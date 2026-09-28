@@ -56,13 +56,7 @@ The onboarding ledger projects in ascending order and mounts exactly one step at
 <a id="understand-the-implementation"></a>
 ### Opening a section from another feature
 
-The shell publishes `ctx.settingsUi` (`SettingsUiService`), a client-side door for
-other features: `openSection(id)` opens the settings panel directly on one
-registered `settings.section` id (an unknown id still opens the panel). The shell
-component republishes its live handler on mount and clears it on unmount, so the
-service always follows the rendered occurrence. The Enpoi capabilities drawer
-uses it for its "Manage in Settings" link and the permissions summary card's
-"Edit rules" action.
+The shell publishes `ctx.settingsUi` (`SettingsUiService`), a client-side door for other features: `openSection(id)` opens the settings panel directly on one registered `settings.section` id (an unknown id still opens the panel). The shell component republishes its live handler on mount and clears it on unmount, so the service always follows the rendered occurrence. The Enpoi capabilities drawer uses it for its "Manage in Settings" link and the permissions summary card's "Edit rules" action.
 
 ## Understand the implementation
 

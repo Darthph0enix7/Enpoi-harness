@@ -13,12 +13,14 @@ import {
   DEFAULT_RESTART_UNIT,
   detachedRestartPlan,
   installRestartAfterTurn,
+  MAX_RESTART_CONFIRM_ATTEMPTS,
   parseRestartArgs,
   parseRestartMarker,
   RESTART_MARKER_VERSION,
   RestartAfterTurnWatcher,
   RestartUsageError,
   readRestartMarker,
+  restartFailurePath,
   restartMarkerPath,
   runRestart,
   type RestartMarker,
@@ -316,6 +318,75 @@ describe('RestartAfterTurnWatcher', () => {
     const results = [make().check(), make().check()].sort()
     expect(results).toEqual(['fired', 'none'])
     expect(fired).toEqual(['fired'])
+  })
+
+  it('keeps a successful confirmed fire consumed', () => {
+    const dir = home()
+    writeRestartMarker(marker(), dir)
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [],
+      fire: () => {},
+      confirm: () => true,
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('fired')
+    expect(existsSync(restartMarkerPath(dir))).toBe(false)
+  })
+
+  it('re-arms the marker with a bounded attempt count when the restart is not confirmed', () => {
+    const dir = home()
+    writeRestartMarker(marker({ deadline: 2_500 }), dir)
+    const fired: RestartMarker[] = []
+    const log: string[] = []
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [],
+      fire: firedMarker => fired.push(firedMarker),
+      confirm: () => false,
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    // Attempt 1: consumed, fired, unconfirmed -> written back with attempt 1
+    // and a retry deadline so the next sweep cannot drop it as stale.
+    expect(watcher.check()).toBe('retry')
+    const rearmed = readRestartMarker(dir)
+    expect(rearmed?.attempts).toBe(1)
+    expect(rearmed?.deadline).toBe(2_000 + 60_000)
+    // Attempts 2 and 3 also re-arm; attempt 4 is over the bound and is dropped
+    // with a durable failure record instead of looping forever.
+    expect(watcher.check()).toBe('retry')
+    expect(readRestartMarker(dir)?.attempts).toBe(2)
+    expect(watcher.check()).toBe('retry')
+    expect(readRestartMarker(dir)?.attempts).toBe(3)
+    expect(watcher.check()).toBe('retry')
+    expect(existsSync(restartMarkerPath(dir))).toBe(false)
+    expect(existsSync(restartFailurePath(dir))).toBe(true)
+    expect(JSON.parse(readFileSync(restartFailurePath(dir), 'utf8'))).toMatchObject({ attempts: MAX_RESTART_CONFIRM_ATTEMPTS + 1 })
+    expect(fired).toHaveLength(MAX_RESTART_CONFIRM_ATTEMPTS + 1)
+    expect(log.join('\n')).toContain('giving up')
+    expect(log.join('\n')).toContain('marker re-armed for the next sweep')
+    console.info(`[restart-confirm] retry state: ${log.join(' | ')}`)
+  })
+
+  it('re-arms immediately when the detached fire throws', () => {
+    const dir = home()
+    writeRestartMarker(marker(), dir)
+    const log: string[] = []
+    const watcher = new RestartAfterTurnWatcher({
+      home: dir,
+      profile: 'web',
+      liveSessions: () => [],
+      fire: () => { throw new Error('no systemd session') },
+      log: line => log.push(line),
+      now: () => 2_000,
+    })
+    expect(watcher.check()).toBe('retry')
+    expect(readRestartMarker(dir)?.attempts).toBe(1)
+    expect(log.join('\n')).toContain('no systemd session')
+    expect(log.join('\n')).toContain('marker re-armed for the next sweep')
   })
 })
 

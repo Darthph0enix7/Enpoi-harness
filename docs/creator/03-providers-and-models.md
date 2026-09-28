@@ -1,0 +1,93 @@
+# 03 — Providers and models
+
+Read this for: where routes/models come from, how to add or remove a provider (API, heavy, custom), how discovery and the key pool behave, how model groups fail over, and what each error class means for routing. Sources: `packages/llm/llm-pi-ai/src/*`, `packages/llm/llm/src/*`, `profiles/web/packages/enpoi-{provider-sync,model-chains,catalog-rules,heavy-providers}/src/*`, `packages/client/ui-settings-models/src/client/*`. Recon: `dsh-migration/evidence/heavy-providers/`.
+
+## 1. Catalogue and the hourly sync
+
+`enpoi-provider-sync` refreshes each route from the endpoint and enriches from **models.dev** (the catalogue OpenCode/OpenChamber use).
+
+| Knob | Default | Where |
+|---|---|---|
+| `intervalMs` | `3_600_000` (1 h) | `profiles/web/.../enpoi-provider-sync/src/index.ts:71` |
+| `syncOnStart` / `syncDelayMs` | `true` / `2000` | same, `:72-73` |
+| `endpoints` | `{}` — baseURL for routes not yet saved | `:74`, consumed `:1052` |
+| `capacityDefaults` | `{}` — per-route `prefixes`/`default` context+max fallbacks | `:75`, `fallbackFor` `:656` |
+
+- models.dev database: fetched from its `api.json`, cached in OpenCode's shared models cache (`~/.cache/opencode/models.json`) for restarts (`:178-214`). Fields used: `name`, `limit.context/output`, `cost.input/output`, `modalities.input`, `tool_call`, `reasoning`/`reasoning_options` (`:142-168`).
+- Per pass, for every configured route **and** every `endpoints` id: fetch `GET {baseURL}/models` (Bearer if a key resolves; pool routes use the highest-priority enabled identity; keyless sends none) (`:1056-1090`).
+- Merge, don't replace: configured models the endpoint omitted are kept stamped `source: "configured"`; advertised ids are refreshed; new ids appended (`mergeConfiguredModels` `:951-987`). Writes `llm-pi-ai.providers.<route>.models` with revision fencing, three conflict retries (`:1099-1109`).
+- A route the installed pi-ai catalog ships is **never** fetched or written — the catalog is the better answer (`isCatalogRoute` `:314`, skip `:1064-1067`).
+- Non-catalog routes (Kilo, self-hosted gateways) also get `$DSH_HOME/cache/discovered-models.json` (`:533-541`, writer `:624`). Version `1`; a different version is ignored, not guessed (`packages/llm/llm-pi-ai/src/discovered.ts:61,201-220`).
+
+**Failure modes.** Fetch failure logs one line and leaves the route untouched (`describeSyncFailure` `:642`). A never-configured heavy route must not be put in settings "just in case": the sync probes every configured route hourly. A catalog-less route with no baseURL and no cached discovery cannot resolve, so the provider editor cannot save it (`discovered.ts:1-13`); run discovery or list `models` by hand.
+
+## 2. Adding, customizing, removing providers
+
+- A route is a key in the `llm-pi-ai.providers` dict; the key is the route id (`packages/llm/llm-pi-ai/src/config.ts:92-93`). Profile fields: `api`, `baseURL`, `apiKeyEnv`, `keyless`, `pool`, `displayName`, `models`, `modelOverrides`, `compat`, `headers`, `reasoning`, `transport`, `timeoutMs`, `retryPolicy` (`config.ts:93-206`). `modelOverrides` only works on a catalog route without a `models` list (`:128-136`). Legacy `provider`/`maxRetries` fields are rejected with their replacement (`:436-451`).
+- UI listing: `provider-templates.ts` — generated mainstream presets from the models.dev mirror plus the heavy table; `liveProviderTemplates()` renders host manifests when connected, a labelled fallback before (`:80-102`). `KEYLESS_PRESET_IDS = {kilo}` is hand-kept outside the generated file (`:49`). A key ref derives as `<ID>_API_KEY` (`deriveKeyRef` `:129-131`).
+- Add Provider flow (`AddProviderModal.tsx:206-272`): derive ref → store entered key via `credentials.set` → `settings.mutate('llm-pi-ai', set providers.<id>, profile)` → discovery runs and adopts returned models (best-effort; refusal keeps the route). A keyless preset still stores `apiKeyEnv` so a later key switches it to BYOK (`:214-219`). The empty/"custom" preset writes a placeholder `models: [{id:'auto'}]` (`:220`).
+- Custom namespaces: a provider served by another adapter names its own settings namespace (`settingsNs`, e.g. `commandcode-provider`, `llm-deepseek`); never force its profile into the `llm-pi-ai` schema.
+- **Removability** (`store.ts:259-263`, `ModelsSection.tsx:212-231`): a user-layer route (`settingsPath` non-empty, absent from the base) deletes by `unset` and unsets its credential; a **shipped** route (empty settings path) is removed by setting that namespace's `disabled: true`, and its credential is never unset (it may be shared, e.g. `DEEPSEEK_API_KEY`). Heavy providers delete through the host RPC (below).
+
+## 3. Per-provider model discovery
+
+- "Fetch models" answers from the installed catalog when the route is a catalog route — no network (`packages/llm/llm-pi-ai/src/discovery.ts:275-285`). Otherwise `GET {baseURL}/models`; Anthropic lists at `{root}/v1/models?limit=1000`, OpenAI protocols at `{baseURL}/models` (`:117-122`).
+- Only `openai-completions`, `openai-responses`, `anthropic-messages` are interrogable (`:39-43`); any other protocol → `DISCOVERY_UNSUPPORTED` and hand entry. A draft without `api` is probed as `openai-completions` (`:300`). Reply cap 4 MiB (`:58`); body may be a `data` array or a `models` map (`:181-200`).
+- Auth: a key typed in the form wins; otherwise the stored route's credential is resolved lazily and deployment headers applied (`:307-326`). 401/403 append "check the API key" (`:338-342`). Result is returned as draft candidates — nothing is stored until the caller writes settings (`:10-14`).
+- Sync-side normalization (`provider-sync/src/index.ts:422-460`): id, name, context, max output, modalities (`input_modalities`/`modalities`/`architecture`), `supported_parameters` → tools/reasoning, `pricing`, `isFree`. Absent means **undisclosed**, never "no". A listing `isFree:false` sets `gated:true`, `gateReason:'sign-in required'` (`:447-458`). Nothing disclosed anywhere → `unverified: true` with text-only/no-reasoning floor, never a guess (`:800-831`).
+- Capability precedence: name = models.dev → live → catalog → beautified id (`:803-814`); context/max = live listing → models.dev → catalog → prefix/default fallback (`:816-826`); modalities and reasoning = models.dev/catalog → live → id heuristics only when nothing was disclosed (`:678-760`).
+
+## 4. Keyless routes
+
+- `keyless: true` means every request is anonymous. The adapter passes a placeholder key pi-ai requires (`KEYLESS_REQUEST_KEY = 'unused'`) and sets `authorization: null`, so no stored, ambient, or env key reaches the wire; a deployment-owned Authorization header still wins (`packages/llm/llm-pi-ai/src/adapter.ts:91,456-464`).
+- Refused over `anthropic-messages` (no way to omit `x-api-key`); use an OpenAI protocol (`config.ts:527-538`). A keyless route's 401/403 is the route's own answer: it ends the request with `AUTH` and never cools/rotates pool identities (`adapter.ts:566-606`). The sync also fetches a keyless listing anonymously (`provider-sync/src/index.ts:1069-1074`).
+
+## 5. HEAVY providers (`enpoi-heavy-providers`)
+
+Listed in Add Provider, nothing installed until added. Manifests are declarative: `id, label, protocol, auth{kind: none|placeholder|unified, apiKeyEnv, keyless}, defaultPort, settingsNs?, reuse, local{label,baseURL,deps,diskHint,runtime,install{default,linux,darwin,win32},health}, removal{steps,warnings}, fallbackModel, unsupported?` (`profiles/web/.../enpoi-heavy-providers/src/manifests.ts:118-175`). Shipped v1: FreeLLMAPI (openai-completions, unified key, Docker/vendor app), Antigravity proxy (anthropic-messages, placeholder ref, npm+systemd user unit; its own account pool means DSH pooling MUST stay off), Command Code (custom `commandcode/alpha-generate`, keyless, own `settingsNs`, keypool).
+
+- Detection: probe order = configured/settings address → manifest `reuse.baseURL` → loopback default port; first 2xx wins; fail-soft (`planner.ts:141-201`).
+- Preflight: detected instance first, then the platform variant whose runtime exists (Docker; Podman substitutes for Docker); otherwise `unsupported` with the exact missing dependency (`chooseLocalPath` `:265-290`). Per-OS steps resolve `default` when no `linux`/`darwin`/`win32` variant exists (`manifests.ts:105-115`).
+- Install: starts a polled job, not a settings write. Steps run sequentially through the subprocess seam (`bash -lc`, `{home}`/`{config}` substituted); each update persists to `$DSH_HOME/cache/heavy-jobs/<id>.json`; the UI polls `{stage, pct, logTail}` (8 KiB tail; `pct` caps at 99 until success) (`jobs.ts:20-35,149-199`). Only after all required steps succeed does the finalizer discover models, write the route (at `local.baseURL`) and store the key; failure leaves no route/credential (`remote.ts:263-286`).
+- Reuse: probe → discover → write route at the detected address → store key if supplied; probe failure never blocks the add, it is reported for the health badge (`planner.ts:564-584`).
+- Docs view renders manifest data offline: auth mode, reuse-vs-local comparison, deps/disk hints, platform-switchable install steps, dashboard/docs links, quirks and browser-required badges (`HeavyProviderDocs.tsx:1-20`).
+- Dashboard/health: status RPC folds configured/mode, health, detected endpoint/port, runtime, preflight and current job (`remote.ts:192-225`); the client probes health through a TTL cache so rows share one probe (`HeavyProviderStatus.tsx:1-15`).
+- Removal: optional manifest teardown (`uninstall: true`) then route `unset`, credential `unset`, `$DSH_HOME/pools/<id>.json`, discovered-cache entry, and chain links naming the route (a chain left link-less and selector-less is dropped). Every sub-step is fail-soft and reported (`planner.ts:684-748`). Command Code removes only its pools entry — never the shared keypool.
+- Server overlay: operator-owned `$DSH_HOME/heavy-server-overlay.json` `{ providers: { <id>: { reuseBaseURL?, reuseHealthURL?, dashboardUrl? } } }`. Shipped manifests stay loopback; an overlay retargets reuse/health/dashboard only (`planner.ts:292-332`).
+- Pending restart: if a manifest's `settingsNs` is not mounted in the running profile, add returns a clear "build the profile, then restart" message instead of a failed write (`planner.ts:452-493`).
+
+## 6. Embedded key pools (multiple keys per route)
+
+- Declared as `pool: { strategy, identities: [{id, credentialRef, priority?, enabled?}] }` on the route; secrets live in the credentials service, settings hold references only (`config.ts:105-111,208-231`). `strategy` defaults `priority-sticky` (highest-priority healthy identity serves all; others failover) vs `balanced` (round-robin per model) (`:220-231`). Lower `priority` serves first; absent ranks last.
+- Routing state per identity × model persists at `$DSH_HOME/pools/<route>.json` (version 1, debounced atomic writes; cooldowns/failures survive restarts, counters do not) (`pool.ts:216-247,544-582`). Failure classes and cooldowns: `AUTH` 15 min, `QUOTA` 30 s or the parsed "resets in…" hint clamped to [30 s, 24 h], `CAPACITY` 60 s, `UPSTREAM` 30 s; `GATEWAY_OUTAGE`/`INVALID_REQUEST`/`POLICY` never cool a key (`:37-54,93-127`). Only AUTH/QUOTA/CAPACITY/UPSTREAM rotate (`:37`).
+- Attempt order: healthy identities first; all-cooling means optimistic probing in priority order, never leaving the request unserved (`orderFor` `:291-333`). Per attempt: pre-resolve credentials (unresolvable identities are skipped), max 5 attempts, 30 s pool deadline; a committed generation is never rotated away (`adapter.ts:486-538`). Mapping failures to classes: `classifyFailure` checks transient model-name errors, then 503/529 → CAPACITY, then quota vocabulary, then auth, then request-shape (`pool.ts:138-158`). CAPACITY with no other healthy identity sleeps the 5/10/20/30/60 s tiers on the same identity (`adapter.ts:644-656`). Exhaustion throws `PROVIDER_POOL_EXHAUSTED` with per-identity cooldown/reset and last error (`:658-703`).
+- UI: the provider detail panel edits the pool — strategy select labelled "How the pool picks among healthy keys" (`ProviderDetailPanel.tsx:1005-1011`), per-identity rows with cooldown countdown, Test Key, Reset cooldown, priority reordering (reindexed 1..n), enable/disable and delete (`:729-838`, `pool-extras.tsx`). Test/reset call host RPCs `poolStatus` / `poolTestIdentity` / `poolResetCooldown` (`llm-pi-ai/src/index.ts:322-356`); test identity probes the route's model listing (latency + count), never a chat request.
+
+## 7. Model groups (chains)
+
+- Data: `enpoi-orchestration.chains.<id>` = `{ label?, links:[{provider, model, effort?}], selectors?, attempts?, onCut?: failover|continue, disabled? }` (`profiles/web/.../enpoi-model-chains/src/index.ts:93-106`). Resolved through `ctx.get('modelChains')` as a frozen snapshot, rebuilt on settings events; unknown/disabled/malformed ids answer `undefined` (fail-open, one stderr line) (`:42-47,438-454`).
+- Runtime: a request carrying `chain` resolves the group; dispatch starts at the link the request already names (earlier links are never re-run) and escalates on retryable failures. Link budget 15 s pre-commit, total chain budget 60 s; after the first non-usage chunk the generation owns its clock (`packages/llm/llm/src/index.ts:191-199,1554-1602`). Escalation codes include `AUTH`, `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `STREAM_CLOSED`, `EMPTY_RESPONSE`, `MISSING_CREDENTIAL`, `UNKNOWN_MODEL`, `NO_ADAPTER`, `PROVIDER_POOL_EXHAUSTED`, `PROVIDER_MODEL_OUTAGE` (`:215-231`). Request-level codes (bad request, context overflow, image offload) and `FREE_TIER_GATED` are deliberately absent; all links failed → `MODEL_CHAIN_EXHAUSTED` naming each link's failure (`:232,389-423`).
+- Per-link `effort` swaps the reasoning effort for that link; a link that is not the caller's own route never inherits the caller's effort (`linkRequest` `:1720-1740`). Because routes/models are not pruned from a group, a link whose route was removed stays and fails fast (`UNKNOWN_MODEL`/`NO_ADAPTER`) → escalates to the next link. `attempts` and `onCut` are read by the fork consumers (council/keeper/oracle), not by the core chain loop.
+- Selectors: evaluated against the live catalogue on every resolve, appended after explicit links, best-first (cheapest known price → larger context → provider/id) (`catalog-rules/src/selectors.ts:92-108`). `adopt` defaults **false**: matches present at first evaluation join; later matches are preview-only candidates until an operator edit re-baselines (`model-chains/src/index.ts:390-402`). `preview(id)` reports `previous`, `added`, `removed`, `candidates`, `warnings` (`:461-492`).
+
+## 8. Rules/filters engine (`enpoi-catalog-rules`)
+
+- Rules are data: `enpoi-orchestration.catalogRules` (`rules.ts`). Visibility precedence, manual always first: manual hidden > manual shown > gated marker > first matching hide rule > visible (`rules.ts:10-13,572-607`). Hide rules never delete entries, and a malformed document degrades to seeded defaults with warnings (`:425-490`).
+- Predicate clauses (ANDed): `zeroPrice` (at least one known price, all zero; unknown fails), `maxPrice`, `tools`, `vision`, `reasoning`, `minContextWindow` (unknown fails), `provider`, `providerGlob`, `idGlob`, `nameGlob`, `noTraining`, `gated` (`:151-177`). An empty/unrecognized predicate never matches (`:289`).
+- Privacy: curated seed plus document overrides; lookup `provider/model` → bare model id → provider → `unknown`; **unknown satisfies neither** `noTraining: true` nor `false` (`:74-90,146-149,279-283`).
+- Manual pins from `uiPreferences.hiddenModels` are unioned in, so the Models page and the rules document are one manual concept (`:519-540`). The engine publishes a compact derived map (hidden entries + manual pins) as the `catalogRules.resolved` settings artifact (document fallback on older hosts) and exposes `visibility()`, `decide(provider, model)`, `expandSelector`, `previewRulesChange` (`index.ts:190-211,64-78`). Stale rules/pins that match nothing warn; show previews with `previewRulesChange` before applying.
+
+## 9. Error classes → routing reaction
+
+| Class/code | Meaning | Reaction |
+|---|---|---|
+| `AUTH` (401/403, invalid/missing key) | Key or gateway auth failed | Pool: rotate identity, cooldown 15 min. Keyless: terminal. Chain: escalate. |
+| `QUOTA` / `ACCOUNT_QUOTA` | Account/credit/quota exhausted | Pool: rotate + cooldown (parsed reset hint if present). Chain: escalate. |
+| `FREE_TIER_GATED` | Server-side client-policy gate (OpenCode free tier) | Terminal: no retry, no rotation, no cooldown, no chain escalation; switch route or provider. |
+| `CAPACITY` (503/529/overloaded) | Transient provider overload | Pool: rotate to a healthy key, else same-key backoff tiers; pool exhaustion raises `PROVIDER_POOL_EXHAUSTED` (chain-escalatable). |
+| `RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`STREAM_CLOSED`/`EMPTY_RESPONSE` | Transient wire/provider failure | Retryable by policy (default normal, 5 retries, 500 ms→10 s backoff, 0.1 jitter); `UPSTREAM` rotates at 30 s cooldown; chain escalates. |
+| `INVALID_REQUEST`, `CONTEXT_WINDOW_EXCEEDED`, `IMAGE_OFFLOAD_REQUIRED` | Request itself unserviceable | Never rotates/cools/escalates. Compact, offload images, or shrink input, then resend. |
+| `POLICY`, `GATEWAY_OUTAGE` (model-name rejection), `ABORTED` | Route/transport-policy property | No cooldown, no rotation; `MODEL_OUTAGE`/`POLICY` end the attempt (a chain may still move providers). |
+| `MISSING_CREDENTIAL`/`INVALID_CREDENTIAL` | Unset or malformed stored key | Configure the reference; missing credential escalates in chains. |
+
+Pointers: pool unit tests `packages/llm/llm-pi-ai/tests/`; heavy install/removal evidence `dsh-migration/evidence/heavy-providers/recon-2026-09-28.md`; approvals for operator-only actions live in `04-permissions-and-approvals.md`.

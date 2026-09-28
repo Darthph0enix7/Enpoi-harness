@@ -210,6 +210,26 @@ describe('PoolEngine persistence', () => {
     expect(snapshot.k?.m?.consecutiveFailures).toBe(0)
     expect(snapshot.k?.m?.lastError).toBeUndefined()
   })
+
+  it('merges disk routing state when a failure lands before hydration finishes', async () => {
+    await writeFile(join(stateDir, 'early.json'), JSON.stringify({
+      version: 1,
+      identities: { k: { m: { cooldownUntil: 9_999_999, consecutiveFailures: 3 } } },
+    }), 'utf8')
+    const e = engine({ now: () => 1_000_000 })
+    // First touch records a failure while the async read is still in flight.
+    e.recordFailure('early', 'b', 'm2', 'QUOTA', 'Resets in 10min.')
+    await e.hydrate('early')
+    // Disk state for the untouched identity/model survives the merge...
+    expect(e.cooldownRemaining('early', 'k', 'm')).toBeGreaterThan(0)
+    expect(e.snapshot('early').k?.m?.consecutiveFailures).toBe(3)
+    // ...and the early in-memory failure stays authoritative for its own key.
+    expect(e.snapshot('early').b?.m2?.consecutiveFailures).toBe(1)
+    await e.flush()
+    const persisted = JSON.parse(await readFile(join(stateDir, 'early.json'), 'utf8'))
+    expect(persisted.identities.k.m.cooldownUntil).toBeGreaterThan(0)
+    expect(persisted.identities.b.m2.consecutiveFailures).toBe(1)
+  })
 })
 
 describe('parseQuotaHeaders', () => {

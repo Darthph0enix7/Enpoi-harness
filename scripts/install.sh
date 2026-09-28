@@ -123,6 +123,8 @@ Options:
   --profile-ref REF   git ref fetched from a git profile source (default: HEAD)
   --service-unit U    systemd user unit / launchd label to restart on update
                       (default: auto-detected only when it references --prefix)
+  --dsh-home DIR      harness home override (default: $DSH_HOME or $HOME/.dsh);
+                      update fails loudly when it disagrees with install-state.json
   --merge-baseline F  run the profile's three-way merge engine against F
                       (timestamped backups; never fail closed)
   --update            mechanical update: install, migrate, switch, self-check,
@@ -174,6 +176,8 @@ while [ "$#" -gt 0 ]; do
     --profile-ref=*) PROFILE_REF="${arg#*=}"; shift;;
     --service-unit) need_value "$@"; SERVICE_UNIT="$2"; shift 2;;
     --service-unit=*) SERVICE_UNIT="${arg#*=}"; shift;;
+    --dsh-home) need_value "$@"; DSH_HOME="$2"; shift 2;;
+    --dsh-home=*) DSH_HOME="${arg#*=}"; shift;;
     --merge-baseline) need_value "$@"; MERGE_BASELINE="$2"; shift 2;;
     --merge-baseline=*) MERGE_BASELINE="${arg#*=}"; shift;;
     --update) UPDATE_MODE=1; shift;;
@@ -617,6 +621,8 @@ copy_profile_tree() { # src dst mode(seed|refresh)
   # seed: first install, all shipped files land (the dir is fresh).
   # refresh: user state survives — settings.yaml, cordis.patch.yml (the
   # config-editor document), device-patches/, node_modules/, backups.
+  # Profile-shipped fish/ and systemd/ files are re-seeded when their content
+  # changed: a stale function or unit must not survive an update silently.
   local src="$1" dst="$2" mode="${3:-seed}" rel d
   while IFS= read -r -d '' rel; do
     rel="${rel#./}"
@@ -624,10 +630,27 @@ copy_profile_tree() { # src dst mode(seed|refresh)
       .git|.git/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*) continue;;
       .backup-*|.backup-*/*) continue;;
       settings.yaml|device-patches|device-patches/*) continue;;
-      fresh-settings.yaml|fish|fish/*|presets|presets/*|skills|skills/*|systemd|systemd/*) continue;;
+      fresh-settings.yaml|presets|presets/*|skills|skills/*) continue;;
     esac
     if [ "$mode" = refresh ]; then
       case "$rel" in cordis.patch.yml) continue;; esac
+      case "$rel" in
+        fish|fish/*|systemd|systemd/*)
+          d="$dst/$rel"
+          if [ -d "$src/$rel" ]; then
+            mkdir -p "$d" || return 1
+          elif [ ! -f "$d" ]; then
+            mkdir -p "$(dirname "$d")" || return 1
+            cp -p "$src/$rel" "$d" || return 1
+            log "profile refresh: seeded $rel"
+          elif ! cmp -s "$src/$rel" "$d"; then
+            mkdir -p "$(dirname "$d")" || return 1
+            cp -p "$src/$rel" "$d" || return 1
+            log "profile refresh: re-seeded $rel (shipped content changed)"
+          fi
+          continue
+          ;;
+      esac
     fi
     d="$dst/$rel"
     if [ -d "$src/$rel" ]; then
@@ -868,15 +891,31 @@ backup_user_files() { # dir
 }
 
 restore_user_files() { # dir
-  local b="$1" f rel
+  local b="$1" f rel failed=0 total=0
   [ -d "$b/root" ] || return 0
   while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    total=$((total + 1))
     rel="${f#"$b"/root/}"
-    mkdir -p "$(dirname "/$rel")" 2>/dev/null || true
-    cp -p "$f" "/$rel" 2>/dev/null && log "restored /$rel"
+    if ! mkdir -p "$(dirname "/$rel")"; then
+      printf '%s: ERROR: cannot create %s while restoring /%s\n' "$SCRIPT_NAME" "$(dirname "/$rel")" "$rel" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if cp -p "$f" "/$rel"; then
+      log "restored /$rel"
+    else
+      printf '%s: ERROR: could not restore /%s from %s\n' "$SCRIPT_NAME" "$rel" "$f" >&2
+      failed=$((failed + 1))
+    fi
   done <<EOF
 $(find "$b/root" -type f 2>/dev/null)
 EOF
+  if [ "$failed" -gt 0 ]; then
+    printf '%s: ERROR: rollback restore is INCOMPLETE: %s of %s backed-up file(s) were not restored; the active config may mix old and new files. Restore them manually from %s/root/ (paths there mirror /).\n' \
+      "$SCRIPT_NAME" "$failed" "$total" "$b" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -1035,6 +1074,9 @@ do_install() {
   log "install root $PREFIX on $OS/$ARCH (zero sudo)"
   resolve_node 1 || die "no usable Node.js >= ${DSH_MIN_NODE_MAJOR}.${DSH_MIN_NODE_MINOR} and the download failed"
   log "node: $NODE ($NODE_ORIGIN)"
+  # Disk hygiene before staging: failed trees are never keep-eligible and
+  # would otherwise accumulate across repeated installs.
+  prune_failed_versions
   prepare_source
   log "target version: $VERSION"
   HARNESS="$PREFIX/harness/$VERSION"
@@ -1068,10 +1110,10 @@ do_install() {
 
 # ── Update ──────────────────────────────────────────────────────────────────
 rollback() { # prev backup failed_version
-  local prev="$1" backup="$2" failed="$3"
+  local prev="$1" backup="$2" failed="$3" restore_rc=0
   warn "rolling back to $prev"
   ln -sfn "$prev" "$PREFIX/harness/current" 2>/dev/null || warn "could not repoint $PREFIX/harness/current"
-  restore_user_files "$backup"
+  restore_user_files "$backup" || restore_rc=1
   if [ -d "$PREFIX/harness/$failed" ]; then
     mv "$PREFIX/harness/$failed" "$PREFIX/harness/$failed.failed-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
       || warn "could not archive the failed tree $PREFIX/harness/$failed"
@@ -1081,6 +1123,16 @@ rollback() { # prev backup failed_version
   unset DSH_UPDATE_SELFTEST_FAIL
   if selfcheck >/dev/null 2>&1; then prev_ok=0; else warn "the previous tree also fails self-check; inspect $HARNESS"; fi
   ROLLED_BACK=1
+  if [ "$restore_rc" != 0 ]; then
+    write_diagnostics rolled-back-partial
+    emit_json update 0
+    say ""
+    say "dsh update FAILED; rolled back to ${prev} (previous tree self-check: $([ "$prev_ok" = 0 ] && printf 'ok' || printf 'failed')), but the user-file restore did NOT complete."
+    say "  active:  $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
+    say "  failed:  $PREFIX/harness/$failed.failed-*"
+    say "  backups: $backup — restore the remaining files manually from $backup/root/ (paths there mirror /)"
+    return 1
+  fi
   write_diagnostics rolled-back
   emit_json update 0
   say ""
@@ -1092,21 +1144,46 @@ rollback() { # prev backup failed_version
 }
 
 prune_versions() { # keep1 keep2 (newest first)
-  local keep1="$1" keep2="$2" d name
+  local keep1="$1" keep2="${2:-}" d name size removed=0
   for d in "$PREFIX/harness"/*; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
     case "$name" in .*|current|*.failed-*) continue;; esac
-    if [ "$name" = "$keep1" ] || [ "$name" = "$keep2" ]; then continue; fi
+    if [ -n "$keep1" ] && [ "$name" = "$keep1" ]; then continue; fi
+    if [ -n "$keep2" ] && [ "$name" = "$keep2" ]; then continue; fi
     [ -f "$d/.dsh-install-complete" ] || continue
-    log "pruning old version $name"
-    rm -rf "$d" || warn "could not prune $name"
+    size="$(du -sh "$d" 2>/dev/null | awk '{print $1}')"
+    log "pruning old version $name${size:+ (freed $size)}"
+    if rm -rf "$d"; then removed=$((removed + 1)); else warn "could not prune $name"; fi
   done
+  prune_failed_versions
+  [ "$removed" -gt 0 ] && log "pruned $removed old version tree(s)"
+  return 0
+}
+
+# Failed update trees (<version>.failed-<ts>) are skipped by the
+# keep-current-plus-previous rule and would grow without bound. Keep the newest
+# DSH_KEEP_FAILED (default 2) for diagnosis, remove the rest newest-first, and
+# report the disk space reclaimed. Safe to run before a fetch: it never touches
+# a keep-eligible or incomplete tree.
+prune_failed_versions() {
+  local keep="${DSH_KEEP_FAILED:-2}" i=0 f name size removed=0
+  case "$keep" in ''|*[!0-9]*) keep=2;; esac
+  while IFS= read -r f; do
+    [ -d "$f" ] || continue
+    i=$((i + 1))
+    [ "$i" -le "$keep" ] && continue
+    name="$(basename "$f")"
+    size="$(du -sh "$f" 2>/dev/null | awk '{print $1}')"
+    log "pruning failed tree $name${size:+ (freed $size)}"
+    if rm -rf "$f"; then removed=$((removed + 1)); else warn "could not prune failed tree $name"; fi
+  done < <(ls -1dt "$PREFIX/harness"/*.failed-* 2>/dev/null)
+  [ "$removed" -gt 0 ] && log "pruned $removed failed tree(s); kept the newest $keep for diagnosis"
   return 0
 }
 
 do_update() {
-  local state="$PREFIX/harness/install-state.json" current backup rc
+  local state="$PREFIX/harness/install-state.json" current backup rc recorded_home
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   detect_os_arch
   resolve_node 0 || die "no usable Node.js found for the update"
@@ -1119,6 +1196,13 @@ do_update() {
   if [ -z "$BIN_DIR" ]; then BIN_DIR="$(json_field "$state" binDir)"; [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"; fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(json_field "$state" serviceUnit)"; fi
   resolve_home
+  # The state file records the home this install was seeded with; updating a
+  # different home would migrate/seed the wrong tree. Any mismatch is fatal
+  # before a single write, with the exact remedy.
+  recorded_home="$(json_field "$state" dshHome)"
+  if [ -n "$recorded_home" ] && [ "$recorded_home" != "$DSH_HOME" ]; then
+    die "DSH_HOME mismatch: $state records dshHome='$recorded_home' but this invocation resolves DSH_HOME='$DSH_HOME'. Nothing was changed. Remedy: export DSH_HOME='$recorded_home' and re-run (or: DSH_HOME='$recorded_home' dsh update). To deliberately move the home, re-run the installer with --dsh-home '$DSH_HOME' --prefix '$PREFIX'."
+  fi
   current="$(readlink "$PREFIX/harness/current" 2>/dev/null || true)"
   if [ -z "$current" ]; then current="$(json_field "$state" version)"; fi
   [ -n "$current" ] && [ -d "$PREFIX/harness/$current" ] || die "cannot find the active version under $PREFIX/harness (current='$current')"
@@ -1143,6 +1227,9 @@ do_update() {
     return 0
   fi
   sudo_trap
+  # Disk hygiene before fetching: failed trees are never keep-eligible, so
+  # reclaim them before the new tree needs the space.
+  prune_failed_versions
   log "update: active $current on the $CHANNEL channel"
   prepare_source
   log "update target: $VERSION"
@@ -1150,11 +1237,6 @@ do_update() {
 
   if [ "$VERSION" = "$current" ] && [ "$FORCE" != 1 ]; then
     if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
-    local recorded_home
-    recorded_home="$(json_field "$state" dshHome)"
-    if [ -n "$recorded_home" ] && [ "$recorded_home" != "$DSH_HOME" ]; then
-      warn "state records dshHome=$recorded_home but this shell resolves DSH_HOME=$DSH_HOME"
-    fi
     log "already up to date at $VERSION; nothing to fetch/build"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
     prepare_profile

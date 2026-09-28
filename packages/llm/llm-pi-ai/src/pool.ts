@@ -67,6 +67,7 @@ const CAPACITY_RE = /\b503\b|\b529\b|overloaded|capacity|server is busy|model_ca
 // `invalid…api…key`) match the `CODE: message` detail the stream mapper carries
 // for an AUTH failure, where the original 401/403 status text is no longer part
 // of the message.
+// eslint-disable-next-line @stylistic/max-len — the AUTH_RE literal must stay one line (auditable pattern).
 const AUTH_RE = /\b401\b|\b402\b|\b403\b|unauthorized|invalid.{0,4}api.{0,4}key|incorrect[_ ]api[_ ]key|permission denied|insufficient (?:credits|balance)|\bauth\b|auth_required|authentication|invalid[_ ]token/i
 
 /** Client-payload vocabulary: the request itself is unserviceable. Deliberately
@@ -261,6 +262,8 @@ export class PoolEngine {
   readonly #saveDebounceMs: number
   readonly #providers = new Map<string, PersistedProviderState>()
   readonly #loaded = new Set<string>()
+  /** In-flight (or finished) hydration per provider; concurrent callers share it. */
+  readonly #hydrations = new Map<string, Promise<void>>()
   readonly #saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Providers whose state changed since their last successful write. */
   readonly #dirty = new Set<string>()
@@ -490,8 +493,22 @@ export class PoolEngine {
     return providerState.identities[identityId][modelId]
   }
 
-  async hydrate(provider: string): Promise<void> {
-    if (this.#loaded.has(provider)) return
+  /**
+   * Load one provider's persisted routing state. Concurrent callers share the
+   * same in-flight read, so `await hydrate(p)` after a first touch waits for
+   * the merge instead of returning early.
+   * @param provider - the provider route key.
+   */
+  hydrate(provider: string): Promise<void> {
+    const pending = this.#hydrations.get(provider)
+    if (pending !== undefined) return pending
+    if (this.#loaded.has(provider)) return Promise.resolve()
+    const run = this.#load(provider)
+    this.#hydrations.set(provider, run)
+    return run
+  }
+
+  async #load(provider: string): Promise<void> {
     this.#loaded.add(provider)
     let raw: string
     try {
@@ -529,13 +546,31 @@ export class PoolEngine {
         }
       }
       const existing = this.#providers.get(provider)
-      if (existing !== undefined) {
-        if (this.#dirty.has(provider)) return
-        existing.identities = identities
-      } else {
-        if (this.#dirty.has(provider)) return
+      if (existing === undefined) {
         this.#providers.set(provider, { version: 1, identities })
+        return
       }
+      if (!this.#dirty.has(provider)) {
+        existing.identities = identities
+        return
+      }
+      // Dirty: a failure or success was recorded before this read finished.
+      // Memory is authoritative for the keys it already touched; disk
+      // restores every other identity/model, so early traffic cannot drop
+      // persisted routing state.
+      let adopted = false
+      for (const [identityId, models] of Object.entries(identities)) {
+        const memoryModels = existing.identities[identityId] ?? {}
+        existing.identities[identityId] = memoryModels
+        for (const [modelId, entry] of Object.entries(models)) {
+          if (memoryModels[modelId] === undefined) {
+            memoryModels[modelId] = entry
+            adopted = true
+          }
+        }
+      }
+      // A debounced write may have raced this read; persist the merged state.
+      if (adopted) this.#scheduleSave(provider)
     } catch (error) {
       this.#log(`pool state for "${provider}" is unreadable (${String(error)}); starting clean`)
     }

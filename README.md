@@ -1,77 +1,56 @@
-# DeepSeek Harness
+# Enpoi Harness
 
 English | [中文](README.zh.md)
 
-DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
+The Enpoi Harness is **upstream [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plus our operator profile**: a curated bundle of providers, orchestration, diagnostics, UI surfaces, and a frozen default skin that turns the all-plugin `dsh` runtime into a working multi-model fleet.
 
-It is built on an **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512).
+- Runtime and packages up to `packages/` are upstream, with a small set of fork patches (`patches/`).
+- Everything in `$DSH_HOME/profiles/<name>` (default profile: `web`) is ours: the `dsh-enpoi-*` bundle packages, the default skin, the fleet presets, the gates, and the Creator docs.
+- Documentation for operating the harness: **[docs/creator/](docs/creator/00-index.md)** — start at the index (map + operating rules), then read the one file for the task.
 
-Documentation: [https://deepseek-harness.github.io/deepseek-harness/](https://deepseek-harness.github.io/deepseek-harness/)
+<a id="run"></a>
 
-## Developer preview
-
-DeepSeek Harness is in _developer preview_ and iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
-
-Review the [safety notice](SAFETY.md) before running the project.
-
-## Run
-
-### Run from `npm`
-
-Install `Node.js`, then run:
+## Install (Linux + macOS, no sudo)
 
 ```sh
-npx @deepseek-ai/dsh web
+curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash
 ```
 
-The command starts the Web UI at `http://127.0.0.1:3080` by default and opens it in the default browser for a local launch. An SSH launch only prints the host URL because the SSH client or editor owns the local forwarded address. Pass `--no-open` to run the server without opening a browser. See [Web UI guide](docs/user/guide/index.md).
+The installer detects OS/arch, uses Node ≥ 22.19 from `PATH` (or downloads one into the prefix), enables pnpm through corepack, fetches a versioned harness build, builds it, seeds `$DSH_HOME` (settings, presets, skills), and installs the `dsh` shim into `~/.local/bin`. It never uses sudo, never overwrites seeded settings, and is idempotent.
 
-### Run from source
+<a id="run-from-source"></a>
 
-To run from a repository checkout:
+From a checkout (also how the tests install):
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
-pnpm install
-pnpm run build
-pnpm dsh web
+bash scripts/install.sh --source . --channel stable
 ```
 
-`pnpm run build` prepares the repository artifacts. `pnpm dsh web` uses those built artifacts without rebuilding.
+## Channels
 
-## Community and support
+| Channel | Meaning |
+|---|---|
+| `stable` (default) | Released, verified builds. Used when `--channel` is omitted. |
+| `beta` | Pre-release builds for the next channel bump. |
 
-- Submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).
-- Add the [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic to your plugin repository for discoverability.
-- Join <a href="https://discord.gg/Ycq5dCaS4">DeepSeek Harness Discord community</a>.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Development
-
-Start with the [development guide](docs/development.md) and [architecture documentation](docs/architecture.md).
-
-`pnpm run dev:web` builds, serves, and rebuilds client bundles on source edits in one terminal, and `make help` lists the matching Make targets for Web and Desktop; the guide's application commands section owns the full table.
-
-For agents, follow [AGENTS.md](AGENTS.md).
-
-## Citation
-
-```bibtex
-@misc{deepseek-harness2026,
-  title={DeepSeek Harness: Everything is a Plugin},
-  author={DeepSeek-AI},
-  year={2026},
-  publisher={GitHub},
-  howpublished={\url{https://github.com/deepseek-ai/deepseek-harness}},
-}
+```sh
+dsh update                    # update on the current channel
+dsh update --channel beta     # switch to beta (then back with --channel stable)
+dsh update --dry-run          # show the plan without touching anything
 ```
 
-## License
+Updates are versioned directory switches with rollback on failure; `$DSH_HOME` is only ever seeded, never overwritten. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
 
-[MIT](LICENSE)
+## What is ours vs upstream
 
-Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+| Ours (`dsh-enpoi-*` packages + profile) | Upstream (`deepseek-harness`) |
+|---|---|
+| Provider sync, heavy-provider installs, key pools, catalog rules, model chains | Core runtime, session log, client framework, plugin loader, tools, compaction |
+| Orchestration: roles/seats, councils, Oracle, keeper, living brief, whiteboard, memory | Web UI shell, conversation, settings framework and most built-in pages |
+| Diagnostics ledger, verification gates, Creator docs | Desktop/headless bundles, SDKs, benchmarks |
+
+When working on upstream code, follow upstream `AGENTS.md`, `docs/`, and the contributing guide. When working on the harness the operator actually runs, start from `docs/creator/` and keep it in sync with every change.
+
+## Safety and license
+
+Read [SAFETY.md](SAFETY.md) before running an agent with shell access — a `creator`/`sysadmin` session is shell access to the machine. Upstream is MIT-licensed; our packages live in this repository and the companion profile. Third-party dependencies are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

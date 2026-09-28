@@ -1,0 +1,106 @@
+# 04 — Permissions & approvals
+
+How a tool call becomes `allow`, `ask`, or `deny`; where the rules live; the approval card; child asks forwarded through a parent; the never-approvable rails; Full access. Path convention: `packages/enpoi-*` is the installed profile bundle's `packages/` tree; other `packages/...` paths are the harness checkout.
+
+## 1. Where the rules live
+
+One document, one namespace: `enpoi-orchestration.permissions` in the settings document (`settings.yaml`). The namespace shape is declared at `packages/enpoi-capabilities/src/index.ts:87-150`; the resolver reads it fresh on every tool dispatch (`packages/enpoi-capabilities/src/policy.ts:5-8`), so a settings edit applies to the next call — no rebuild, no restart.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `defaults.unknownTools` | `allow \| ask \| deny` (ship `ask`) | fallback for an unconfigured tool |
+| `tools` | `{ <toolName>: allow \| ask \| deny }` | global per-tool policy; `'*'` is not special here |
+| `bashPatterns` | `[{ pattern, policy }]` | ordered; FIRST match wins, then shipped patterns, then `tools.bash` |
+| `agents.<role>.tools` | same map | per-agent override; absent key = inherit global |
+| `agents.<role>.bashPatterns` | ordered list | per-agent bash rules, evaluated before global patterns |
+| `agents.<role>.available` | `string[]` | per-role child tool allowlist (see §9) |
+| `grants` | `{ <id>: StandingGrant }` | machine-written standing allows (see §5) |
+
+Shipped defaults are code, not YAML: `SHIPPED_TOOL_DEFAULTS` and `SHIPPED_BASH_PATTERNS` (`policy.ts:104-160`). Read-only tools (read/glob/grep/memory/whiteboard/introspection) are `allow`; `bash` and `str_replace_editor` are `ask`; `edit`/`write` ship `allow`; `job_kill` ships `ask`; unknown tools fall to `ask`. A YAML row only needs to carry the rows the operator changes — everything else falls through to code. Capability toggles are a **different mechanism** and are not policy: `capabilities.tools`, `capabilities.skills`, `capabilities.mcp` (`index.ts:60-64`) strip the schema entirely (§8). Disabling a tool is stronger than denying it: the model never sees it.
+
+## 2. Resolution order (fresh per dispatch)
+
+Implemented in `resolvePolicy` (`policy.ts:560-693`); the listener that calls it runs after the capability-disabled check in `index.ts:852-934`. Deny at any tier terminates immediately; grants never upgrade a deny.
+1. **Capability disabled** → deny (`index.ts:856-860`).
+2. **Read-only session veto**: sandbox mode `read-only` denies `bash`, `edit`, `write`, `str_replace_editor` (`policy.ts:73`, `565-567`).
+3. **Bash** goes through the pattern ladder (§3). **Every other tool**: agent `tools[tool]` → global `tools[tool]` / shipped default → MCP wildcard ladder (`policy.ts:273-299`) → `defaults.unknownTools`.
+4. **Grants** short-circuit an `ask` at its own granularity (pattern-level grants never absorb tool-level asks, and vice versa — `policy.ts:307-326`).
+5. **Default**: `defaults.unknownTools`, ship `ask` (`policy.ts:684-692`).
+
+`review_run` is a fixed exception: reviewer/oracle seats (`REVIEW_ROLES`, descriptor labels) get `allow`; every other role gets a named `deny` (`policy.ts:85-101`, `649-653`).
+
+## 3. Bash: compound commands, patterns, scans
+
+- The raw command is split at quote-depth-0 `&&`, `||`, `;`, `|`, newlines (`splitCompoundCommand`, `policy.ts:167-210`); leading `KEY=VAL` prefixes are stripped (`policy.ts:213-218`). Any sub-command deny denies the whole call; the first ask wins.
+- Pattern matching (`matchBashPattern`, `policy.ts:227-238`): a bare token (`rm`) matches argv0 exactly; a trailing star binds to arguments (`rm*` ≡ `rm`, `rmdir` stays distinct); a pattern containing a space is a glob over the full sub-command.
+- **Opaque executors fail safe**: `bash`/`sh`/`zsh`/`eval`/… and inline (`python -c`, `node -e`, …) always ask regardless of visible verbs (`policy.ts:383-387`, `607-627`).
+- **Hidden-surface scan**: a command embedding a dangerous verb inside `$( )`, backticks, `<(...)`, heredocs, `xargs`, `find -exec` asks explicitly (`policy.ts:333-340`, `631-642`).
+- An Always-allow grant for either scan pins the **exact raw command string** (`policy.ts:616-640`).
+
+## 4. The approval card
+
+When a policy resolves `ask` the registry presents a card (`packages/client/ui-approval/src/client/ApprovalPanel.tsx:88-95`). Outcomes are closed (`packages/interaction/user-approval/src/types.ts:36`):
+
+| Action | Outcome | Effect |
+|---|---|---|
+| Allow once | `allowed-once` | this call only |
+| Allow always | `allowed-always` | host writes the default pin (§5) |
+| Allow all `<verb>` | `allowed-always-broad` | only offered when the ask carries `broadAllow`; pins the rule-level pattern |
+| Reject | `rejected` | corrective tool error to the asker |
+| Cancel / nobody | `cancelled` / `unavailable` | fail closed |
+
+The ask/outcome pair is durable audit (`approval/asked` + `approval/decided`, `packages/interaction/user-approval/src/index.ts:223-242`). Session policy: `'never'` rejects deterministically **before any answerer** (`index.ts:275-283`); a missing/throwing answerer yields `unavailable`; a pending ask expires after `answerTimeoutMs` (default 15 min, `0` disables) and resolves `unavailable` (`index.ts:151`, `315-365`).
+
+## 5. Grants (standing allows)
+
+- Stored in `permissions.grants` keyed by generated id (`g-<base36>-<rand>`, `index.ts:951-953`). Host-written only: the card answers, the host observes `approval/decided` and persists the grant in a revision-fenced settings write, retrying up to 3 times on `SETTINGS_CONFLICT` (`index.ts:948-981`, `1018-1060`).
+- Each grant records `tool`, optional `pattern`, the asking `agent` (audit only) and `global: true` — a card grant covers **all agents** (`policy.ts:24-42`, `819-828`).
+- **Exact-command pin vs broad allow**: for a danger-list ask (`rm`, `rmdir`, `dd`, `mkfs*`, `chmod -R`, …, `policy.ts:347-368`) the card's default "always" pins the exact raw command; the separate "allow all `<verb>`" pins the matched rule pattern and requires the caller to opt in (`policy.ts:765-812`).
+- A forwarded child's broad grant needs a **second confirmation card** before it is stored (`packages/enpoi-capabilities/src/forwarding.ts:954-986`).
+- Grants are checked after deny rules in both resolvers; a grant can never turn `deny` into `allow` (`policy.ts:12-14`, `forwarding.ts:8-18`).
+
+## 6. Forwarded child approvals
+
+A delegated child runs with approval policy pinned `never`, so an ask used to dead-end. The forwarder (`forwarding.ts`) resolves child asks through the nearest live root (≤32 hops, `index.ts:681-699`), in this order:
+1. **Rails first** — never card-approvable; each resolves only through the parent's own effective policy (an `allow` there passes, anything else denies naming the class), `forwarding.ts:672-696`; the boundary rail additionally requires the root's sandbox to be `danger-full-access` (`index.ts:718-726`).
+2. **Session-scoped grants** answered earlier on a forwarded card — in-memory, keyed to the requester's child session, process lifetime, never shared with siblings or another root (`forwarding.ts:592-596`, `1011-1030`); a forwarded answer never writes a global grant (`index.ts:1043-1045`).
+3. **Root mode** (`index.ts:707-716`): `full-access` = parent judgement (§8); `interactive` = the human card; anything else (approval `never` without full access, or unknown) **fails closed** with a quiet stderr line (`forwarding.ts:704-711`, `1002-1009`).
+4. **Card path**: provenance (child session, agent label, depth, matched rule) plus a recommendation line. The line comes from ONE bounded call to the **root session's default model** (`packages/enpoi-capabilities/src/recommendation.ts:39-51`, `186-227`; wired at `index.ts:774-811`) or, on any miss, the derived heuristic (`forwarding.ts:471-516`). On the card it is presentation only — the human's answer resolves the ask; only in Full access is the suggestion applied (`forwarding.ts:753-824`).
+5. **Batching**: identical concurrent asks (same child, tool, and call shape) share one card or one judgement (`forwarding.ts:713-726`). Denials come back as corrective tool errors; the child adapts, it is not killed. An undeliverable/unanswered ask fails closed and the child's turn settles (`forwarding.ts:46-49`).
+6. **Finality**: an allowed call is recorded against the requester's session and call identity; a later outer ask or reviewer denial cannot re-open it (`forwarding.ts:655-657`, `index.ts:846-850`, `904-913`).
+
+## 7. Hard rails (never approvable via a forwarded card)
+
+`RailClass` and detection: `forwarding.ts:108-117`, `408-459`. A child asking nicely can never lift them; a grant never absorbs them.
+
+- **depth** — past the delegation cap (`ctx.subagents.resolveMaxDepth`, shipped `1`) (`forwarding.ts:672-680`; default at `index.ts:840-844`).
+- **privilege-escalation** — `sudo`, `su`, `doas`, `pkexec` (`forwarding.ts:288`).
+- **recursive-delete** — `rm -r/-f`, `rmdir`, `find -delete`/`-exec rm`, `rsync --delete` (`forwarding.ts:372-381`, `418-421`).
+- **history-rewrite** — `git push --force*`, `git reset --hard`, `filter-branch`, `filter-repo` (`forwarding.ts:383-393`).
+- **exfiltration** — `scp`, `sftp`, `ftp`, `nc`, `socat`, `sshpass`, remote rsync, `curl -T`, `wget --post-file`, `docker push` (`forwarding.ts:291`, `423-431`).
+- **pipe-to-shell** — `… | sh`, `… | python`, `sh <(…)` (`forwarding.ts:401-406`).
+- **credentials** — `.env`, `.ssh`, `id_rsa|ed25519|ecdsa`, `.pem`, `.netrc`, `.aws`, `.git-credentials`, `known_hosts`, gcloud/kube/docker config, `.npmrc` (`forwarding.ts:284-285`), checked in bash text and in declared path arguments (`forwarding.ts:279-282`, `350-370`).
+- **boundary** — a path argument resolving outside the child's workspace (`forwarding.ts:364-370`, `453-458`); the parent-side ceiling is the root's sandbox mode (`index.ts:726`).
+
+## 8. Full access semantics
+
+Full access = the root session's permission preset `danger-full-access` (sandbox `danger-full-access` + approval `never`; `packages/interaction/permission-presets/src/index.ts:194-198`). It is a user-selected mode with an explicit GUI risk gate (`packages/client/ui-permission-presets/src/client/presentation.ts:4`). What it does: for a **forwarded child ask**, the operator's mode is the standing answer — the parent's bounded reasoner judges and its suggestion is applied (`allow`/`allow-once` → allow with the reason; `reject` → corrective denial with the reason; `forwarding.ts:753-802`). No card appears; the operator pre-answered the session's risk envelope. What it does **not** mean:
+- It is **not** a policy bypass for the root's own calls. A root ask under `never` is denied with a named reason; only delegated children enter the forwarding path (`index.ts:878-920`). The root's own commands still need allow rows/patterns.
+- It is **not** a rail bypass: rails resolve first, through the parent's own effective policy, and a non-allow there denies (`forwarding.ts:682-696`, `index.ts:718-737`).
+- It is **not** "no limits": at most `PARENT_JUDGEMENT_BUDGET_PER_TURN = 8` judgements per root turn; beyond it the forwarder denies with a named reason and never queues forever (`forwarding.ts:277`, `866-876`).
+- It is **not** a silent allow: a missed judgement (no reasoner, error, timeout, unparseable, no suggestion) falls back to `derivedRiskOf` — clean asks allow with a named reason, any risk signal denies with the signal named (`forwarding.ts:492-516`, `803-823`). A child still cannot self-escalate; only an ask the child's own policy produced is forwarded (`forwarding.ts:55-56`).
+
+## 9. Per-agent rules and changing any of it
+
+- `permissions.agents.<role>.tools` / `.bashPatterns` override the global matrix for that role; an absent key inherits (`policy.ts:44-50`, `395-411`). The role id is resolved from the live agent, the session's preset projection, then the header (`agentRoleOf`, `policy.ts:489-521`); a delegated child carries the parent's preset, so reviewer seats are identified from the child's `subagent/descriptor` label (`reviewerSeatOf`, `policy.ts:537-553`).
+- `permissions.agents.<role>.available` is the **child tool allowlist** consumed by delegation: it replaces the role registry's `tools.available` and the built-in deny map wholesale, and is read fresh per spawn (`packages/subagent/tool-subagent/src/index.ts:729-767`).
+- Edit the document directly (settings YAML / `settings.mutate`) or via the operator's Capabilities & Tools drawer (`profiles/web/sidebar-patch/src/client/CapabilitiesView.tsx`); the UI is a view over the same document. Changing `capabilities.*` toggles is a separate edit from changing policy rows.
+- Grants are never hand-edited in normal flow; to revoke, remove the row from `permissions.grants` and the next dispatch re-resolves without it.
+
+## 10. Failure modes
+
+- Settings unreadable → `readPermissionConfig()` returns `{}` and shipped defaults apply; denies do not silently become allows (`index.ts:572-578`).
+- An empty ask for `bash` is a deny (`policy:empty`, `policy.ts:569-574`) — never a crash.
+- A forwarded ask with no live root, with mode unknown, or unattended fails **closed** with a stderr line; the child sees a corrective tool error (`forwarding.ts:666-669`, `1002-1009`).
+- A grant write that loses a revision race retries, then logs a persistence failure to stderr; the in-memory decision already happened (`index.ts:966-980`).
+- Deleting/renaming an MCP server prunes its `mcp__<server>__*` policy rows in the same fenced write, so no inert rows survive (`packages/enpoi-capabilities/src/mcp-tools.ts:116-141`).

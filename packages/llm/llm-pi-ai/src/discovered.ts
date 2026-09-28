@@ -53,7 +53,7 @@
  * @module dsh-llm-pi-ai/discovered
  */
 
-import { readFileSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -221,17 +221,37 @@ export function parseDiscoveredCache(raw: unknown): DiscoveredCache {
 
 let loaded: { path: string; stamp: string; routes: ReadonlyMap<string, DiscoveredRouteRecord> } | undefined
 
+/** Bytes sampled from each end of the cache file for the memo key. */
+const STAMP_SAMPLE_BYTES = 256
+
 /**
  * The file's current identity, or `''` when it does not exist. Resolution
  * memoizes on this, so a sync pass that rewrites the cache is visible to the
- * very next resolution without a restart.
+ * very next resolution without a restart. `mtimeMs:size` alone can miss a
+ * same-size rewrite inside one mtime tick, so the first and last bytes are
+ * sampled too — cheap (no parse) and enough to notice any rewrite that moves
+ * the document's edges.
  * @param path - the cache file.
- * @returns `mtimeMs:size`, stable across reads of unchanged content.
+ * @returns `mtimeMs:size:head:tail`, stable across reads of unchanged content.
  */
 export function discoveredModelsStamp(path: string = discoveredModelsPath()): string {
   try {
     const stats = statSync(path)
-    return `${String(stats.mtimeMs)}:${String(stats.size)}`
+    let head = ''
+    let tail = ''
+    const fd = openSync(path, 'r')
+    try {
+      const sample = Buffer.alloc(Math.min(STAMP_SAMPLE_BYTES, stats.size))
+      const headRead = readSync(fd, sample, 0, sample.length, 0)
+      head = sample.subarray(0, headRead).toString('latin1')
+      if (stats.size > sample.length) {
+        const tailRead = readSync(fd, sample, 0, sample.length, stats.size - sample.length)
+        tail = sample.subarray(0, tailRead).toString('latin1')
+      }
+    } finally {
+      closeSync(fd)
+    }
+    return `${String(stats.mtimeMs)}:${String(stats.size)}:${head}:${tail}`
   } catch {
     return ''
   }

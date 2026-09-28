@@ -1,3 +1,4 @@
+import { statSync, utimesSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -183,5 +184,24 @@ describe('resolution over discovered models', () => {
     resetDiscoveredModelsCache()
     expect(resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels().map(model => model.id))
       .toEqual(['second'])
+  })
+
+  it('sees a same-size rewrite inside one mtime tick (content sample beats mtime:size)', async () => {
+    const path = await cacheFile(cacheWith([{ id: 'aaaaa', source: 'discovered', discoveredAt: 1 }]))
+    const fixed = 1_700_000_000
+    utimesSync(path, fixed, fixed)
+    resetDiscoveredModelsCache()
+    expect(discoveredModelsFor('acme-gateway')?.map(model => model.id)).toEqual(['aaaaa'])
+    const stampBefore = discoveredModelsStamp()
+    const before = statSync(path)
+    // Same byte length, different content, restored to the exact same mtime:
+    // only a content check (not mtime:size) can tell the rewrite happened.
+    await writeFile(path, JSON.stringify(cacheWith([{ id: 'bbbbb', source: 'discovered', discoveredAt: 1 }])), 'utf8')
+    utimesSync(path, fixed, fixed)
+    const after = statSync(path)
+    expect(after.size).toBe(before.size)
+    expect(after.mtimeMs).toBe(before.mtimeMs)
+    expect(discoveredModelsStamp()).not.toBe(stampBefore)
+    expect(discoveredModelsFor('acme-gateway')?.map(model => model.id)).toEqual(['bbbbb'])
   })
 })
