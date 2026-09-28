@@ -37,6 +37,7 @@ import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { provideCmdline, type AppReady } from '@deepseek-ai/dsh-cmdline'
 import { createProcessShutdown, type ProcessShutdown } from './process-shutdown.ts'
+import { installRestartAfterTurn } from './restart-after-turn.ts'
 
 const NAME = 'dsh'
 
@@ -315,6 +316,14 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
       && ctx.fiber.state === FiberState.ACTIVE
       && ctx.get('loader') !== undefined) {
       appReady.commit()
+    }
+    // Fork: a web surface hosts live sessions and therefore owns the
+    // restart-after-turn marker. A marker names its profile, so a tree only
+    // ever fires its own; other surfaces (headless, tui) never act on one.
+    // Installing here rather than in a bundle plugin keeps the watcher on the
+    // launcher source the service already runs, with no package build.
+    if (ctx.get('webServer') !== undefined) {
+      installRestartAfterTurn(ctx, { profile: options.profile })
     }
     return { ctx, shutdown }
   } catch (error) {

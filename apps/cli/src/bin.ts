@@ -42,6 +42,11 @@ export async function runCli(): Promise<void> {
       process.exit(await runPlugin(invocation.profile, invocation.args))
       break
     }
+    case 'restart': {
+      const { runRestart } = await import('./restart-after-turn.ts')
+      process.exit(runRestart(invocation.args))
+      break
+    }
     case 'dump-config': {
       const { runDumpConfig } = await import('./dump-config.ts')
       runDumpConfig(

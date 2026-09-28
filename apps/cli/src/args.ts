@@ -57,8 +57,15 @@ interface PluginInvocation {
   args: string[]
 }
 
+/** Safe service restart (fork): schedule after the current turn, detached now, or cancel. */
+interface RestartInvocation {
+  mode: 'restart'
+  /** Raw `dsh restart` arguments, verbatim; parsed by the restart command itself. */
+  args: string[]
+}
+
 /** The resolved `dsh` invocation. Help, version, and errors exit inside {@link parseDshArgs}. */
-export type DshInvocation = ProfileInvocation | DumpConfigInvocation | DumpConfigSchemaInvocation | PluginInvocation
+export type DshInvocation = ProfileInvocation | DumpConfigInvocation | DumpConfigSchemaInvocation | PluginInvocation | RestartInvocation
 
 /** Launcher flags for profile boot and configuration dumps. */
 interface BootOptions {
@@ -97,6 +104,8 @@ Examples:
   dsh tui --resume <session>                arguments after the launcher flags reach the app
   dsh web --help                            the web app's own flags and help
   dsh plugin --profile tui add <package>    install a plugin into the tui profile
+  dsh restart --after-turn                  restart the web service once this turn ends
+  dsh restart --now                         restart the web service detached, right now
 `
 
 /**
@@ -151,7 +160,7 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
   program
     .name('dsh')
     .version(version, '-V, --version', 'output the version number')
-    .usage('[--profile] <name> [options] [app-args...]\n       dsh plugin --profile <name> <pnpm-args...>')
+    .usage('[--profile] <name> [options] [app-args...]\n       dsh plugin --profile <name> <pnpm-args...>\n       dsh restart [--after-turn | --now | --cancel]')
     .description('dsh: boot a DeepSeek Harness profile — an ordered stack of plugin-bundle patch layers under your own overrides.')
     .addHelpText('after', HELP_EXAMPLES)
     .exitOverride()
@@ -196,6 +205,10 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
         resolved = { mode: 'plugin', profile: options.profile, args }
       })
   }
+
+  // Fork: the safe restart command never boots a profile and owns its own
+  // parser (help, flag errors, and the marker lifecycle).
+  if (first === 'restart') return { mode: 'restart', args: argv.slice(1) }
 
   try {
     const expanded = first !== undefined && !first.startsWith('-') && first !== 'plugin'
