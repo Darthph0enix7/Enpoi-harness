@@ -246,22 +246,54 @@ describe('request-level dynamic profiles', () => {
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
   })
 
-  it('refuses a settings write this adapter could not serve, leaving its routes alone', async () => {
+  it('stores an unserviceable route with its diagnostic instead of refusing the write', async () => {
     const dir = await home()
     const ctx = await boot(dir, { providers: { openai: {} } })
 
     // Shape-valid but unserviceable: a route the catalog does not ship and
-    // that lists no models of its own. The section schema resolves the whole
-    // profile set, so this is refused where it is written rather than stored
-    // and then quietly disabling every route in the namespace.
-    await expect(configurations.get(ctx)!.update({ providers: { 'not-a-real-provider': {} } }))
-      .rejects.toThrow(/resolves no models/)
-    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
+    // that lists no models of its own. The write stores the route with its
+    // catalog diagnostic so a configuration surface can repair it (fetch,
+    // hand-enter, or delete its models); a direct request fails loud with the
+    // same diagnostic before any network I/O.
+    await configurations.get(ctx)!.update({ providers: { 'not-a-real-provider': {} } })
+    const stored = ctx.llm.listConfigurableProviders().find(candidate => candidate.provider === 'not-a-real-provider')
+    expect(stored?.declared).toBe(true)
+    expect(stored?.error).toContain('resolves no models')
+    await expect(ctx.llm.resolveModelInfo('not-a-real-provider', 'anything')).rejects.toThrow(/resolves no models/)
 
+    // Repairing the route with a serviceable model clears its diagnostic.
+    await configurations.get(ctx)!.update({
+      providers: { 'not-a-real-provider': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        models: [{ id: 'm-1' }],
+      } },
+    })
+    expect(ctx.llm.listConfigurableProviders().find(candidate => candidate.provider === 'not-a-real-provider')?.error)
+      .toBeUndefined()
+
+    // A self-contained profile error still refuses the write and leaves the
+    // stored route set alone.
     await expect(configurations.get(ctx)!.update({
       providers: { openai: { headers: { 'bad header name': 'value' } } },
     })).rejects.toThrow(/provider "openai" header "bad header name" is not valid for Fetch/)
-    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
+    expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['not-a-real-provider', 'openai'])
+
+    // The empty-route allowance never opens the door to another catalog
+    // failure: a changed set carrying one refuses whole, so its empty route
+    // does not slip into the stored document beside it. Both catalog failure
+    // kinds (a route-level override with no catalog, a model-level duplicate
+    // id) keep the refusal.
+    for (const broken of [
+      { modelOverrides: { x: { maxTokens: 4096 } } },
+      { api: 'openai-completions', baseURL: 'https://acme.test/v1', models: [{ id: 'a' }, { id: 'a' }] },
+    ]) {
+      await expect(configurations.get(ctx)!.update({ providers: {
+        'empty-route': {},
+        'broken-route': broken,
+      } })).rejects.toThrow(/resolves no models/)
+      expect(ctx.llm.listConfigurableProviders().find(candidate => candidate.provider === 'empty-route')).toBeUndefined()
+    }
   })
 
   it('keeps serving its routes when a settings-born route collides with another adapter', async () => {

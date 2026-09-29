@@ -156,7 +156,7 @@ it('offers /models discovery and the manual list when a config-only route resolv
   const save = screen.getByRole('button', { name: en.addSaveModels })
   expect((save as HTMLButtonElement).disabled).toBe(true)
   fireEvent.change(screen.getByPlaceholderText(en.addModelsHint), { target: { value: 'zen-1\nzen-2' } })
-  expect((screen.getByRole('button', { name: en.addSaveModels }) as HTMLButtonElement).disabled).toBe(false)
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addSaveModels }).disabled).toBe(false)
   fireEvent.click(screen.getByRole('button', { name: en.addSaveModels }))
   await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
   const last = mutate.mock.calls.at(-1) as unknown as [
@@ -274,4 +274,109 @@ it('closes without recovery when the installed catalog describes the route', asy
   fireEvent.click(screen.getByRole('button', { name: en.create }))
   await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
   expect(document.querySelector('[data-add-recovery]')).toBeNull()
+})
+
+it('names a required key plainly, and does not ask a keyless preset for one', () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={vi.fn()}
+  />)
+
+  fireEvent.click(screen.getAllByText('OpenCode Zen')[0]!)
+  expect(screen.getByText(en.addNeedsKeyHint)).toBeTruthy()
+  fireEvent.change(screen.getByPlaceholderText('Env ref: OPENCODE_API_KEY'), { target: { value: 'sk-test' } })
+  expect(screen.queryByText(en.addNeedsKeyHint)).toBeNull()
+
+  // A keyless preset serves anonymously: no key note is shown.
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+  fireEvent.click(screen.getAllByText('Kilo Gateway')[0]!)
+  expect(screen.queryByText(en.addNeedsKeyHint)).toBeNull()
+})
+
+it('keeps the recovery panel usable when the retrying write rejects', async () => {
+  const mutate = vi.fn()
+    .mockResolvedValueOnce({
+      ok: false as const,
+      error: { code: 'settings/rejected', message: 'llm-pi-ai: provider "opencode" resolves no models; the installed catalog does not describe this route' },
+    })
+    .mockRejectedValue(new Error('transport down'))
+  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'zen-1', name: 'Zen One' }] }))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getAllByText('OpenCode Zen')[0]!)
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+  await waitFor(() => { expect(document.querySelector('[data-add-recovery]')).not.toBeNull() })
+
+  // The retry's profile write rejects: the panel reports it and re-enables.
+  fireEvent.click(screen.getByRole('button', { name: en.addDiscoverRetry }))
+  await waitFor(() => { expect(screen.getByText('transport down')).toBeTruthy() })
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addDiscoverRetry }).disabled).toBe(false)
+
+  // A retry that reports no models keeps the panel open with that message.
+  discoverModels.mockResolvedValueOnce({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } })
+  fireEvent.click(screen.getByRole('button', { name: en.addDiscoverRetry }))
+  await waitFor(() => { expect(screen.getByText('no endpoint')).toBeTruthy() })
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addDiscoverRetry }).disabled).toBe(false)
+
+  // The manual save rejects the same way, without freezing the modal.
+  fireEvent.change(screen.getByPlaceholderText(en.addModelsHint), { target: { value: 'zen-2' } })
+  fireEvent.click(screen.getByRole('button', { name: en.addSaveModels }))
+  await waitFor(() => { expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addSaveModels }).disabled).toBe(false) })
+  expect(onClose).not.toHaveBeenCalled()
+})
+
+it('keeps the recovery panel when the route still carries a catalog diagnostic', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn(async () => ({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } }))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={{
+      ...wire(discoverModels, mutate),
+      llm: {
+        discoverModels,
+        listConfigurableProviders: vi.fn(async () => ({
+          ok: true as const,
+          value: [{
+            provider: 'opencode',
+            displayName: 'OpenCode Zen',
+            settingsNs: 'llm-pi-ai',
+            settingsPath: ['providers', 'opencode'],
+            declared: false,
+            error: 'llm-pi-ai: provider "opencode" resolves no models; the installed catalog does not describe this route',
+          }],
+        })),
+        listProviders: vi.fn(),
+        poolStatus: vi.fn(),
+        poolResetCooldown: vi.fn(),
+        poolTestIdentity: vi.fn(),
+      },
+    } as unknown as ModelsWire}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getAllByText('OpenCode Zen')[0]!)
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+  await waitFor(() => { expect(document.querySelector('[data-add-recovery]')).not.toBeNull() })
+  expect(onClose).not.toHaveBeenCalled()
 })

@@ -360,6 +360,24 @@ describe('ModelsSection', () => {
     expect(within(providerRow('DeepSeek')).getByTitle(en.providerMissingKey)).toBeTruthy()
   })
 
+  it('adds an unconfigured catalog provider under its own id, and suffixes a configured one', async () => {
+    await mountSection()
+    fireEvent.click(screen.getByRole('button', { name: en.addProviderAction }))
+    const modal = document.querySelector('[class*="addProviderDialog"]') as HTMLElement
+    const search = within(modal).getByPlaceholderText(/Search 212 providers/)
+    // 'anthropic' is listed by the directory but owns no profile yet: the add
+    // reuses the catalog id, which is what makes its models resolve.
+    fireEvent.change(search, { target: { value: 'anthropic' } })
+    fireEvent.click(within(modal).getAllByText('Anthropic')[0]!)
+    expect(within(modal).getByPlaceholderText<HTMLInputElement>('e.g. openai').value).toBe('anthropic')
+
+    // 'openai' already owns a profile: the add creates a suffixed duplicate.
+    fireEvent.click(within(modal).getByRole('button', { name: 'Back' }))
+    fireEvent.change(within(modal).getByPlaceholderText(/Search 212 providers/), { target: { value: 'openai' } })
+    fireEvent.click(within(modal).getAllByText('OpenAI')[0]!)
+    expect(within(modal).getByPlaceholderText<HTMLInputElement>('e.g. openai').value).toBe('openai-1')
+  })
+
   it('selects a provider on click and shows its detail panel', async () => {
     await mountSection()
     // The page opens on the first configured row; clicking another switches it.

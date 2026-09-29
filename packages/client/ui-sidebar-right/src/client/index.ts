@@ -33,7 +33,7 @@ import type {} from './contract/slots.ts'
 import { GuideBody, type GuideInjected } from './tabs/guide/GuideBody.tsx'
 import { GuideTitle } from './tabs/guide/GuideTitle.tsx'
 import { RightbarSeat, type SidebarRightInjected } from './shell/SidebarRight.tsx'
-import { RightbarRoot } from './shell/RightbarRoot.tsx'
+import { RightbarRoot, type RightbarRootInjected } from './shell/RightbarRoot.tsx'
 import { MobileSurfaces, type MobileSurfacesInjected } from './shell/MobileSurfaces.tsx'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
 import { SidebarRightRail } from './rail.ts'
@@ -238,10 +238,24 @@ export function apply(ctx: ClientContext): void {
       },
     }
 
+    // enpoi: the root seat's rail faces. The rail is global, so the session-less
+    // incarnation can draw it and stage the operator's kind before any session
+    // surface exists; the first session's seat applies that kind through its
+    // own open path.
+    const rootInjected = (): RightbarRootInjected => ({
+      hooks: {
+        railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
+        rail: rail.state,
+      },
+      stageKind: (kind) => { rail.setKind(kind) },
+    })
+
     const disposeTypes = [tabs.register(guideDefinition(t))]
     const disposeSeat = ctx.slots.inject('rightbar', function* () {
       yield ctx.slots.register({
         name: 'rightbar',
+        locale: NS,
+        inject: rootInjected,
         children: { 'rightbar.session': { kind: 'single', scope: 'session' } },
       }, RightbarRoot)
       yield ctx.slots.register({

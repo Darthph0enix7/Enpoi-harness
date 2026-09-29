@@ -652,6 +652,13 @@ export interface RouteCatalogRequest {
 /** An expected configuration failure that stored-catalog reads may retain for repair. */
 export class PiAiCatalogError extends Error {}
 
+/**
+ * Stable phrase identifying the empty-route diagnostic. A settings write may
+ * store a route carrying exactly this diagnostic so the Models page can add
+ * its models later; every other catalog failure still refuses the write.
+ */
+export const NO_MODELS_MARKER = 'resolves no models'
+
 /** Report a route the deployment cannot serve, naming the settings key at fault. */
 function invalid(provider: string, detail: string): never {
   throw new PiAiCatalogError(`llm-pi-ai: provider "${provider}" ${detail}`)
@@ -892,7 +899,7 @@ export function resolveRouteModels(
         ...record.input === undefined ? {} : { input: [...record.input] },
       }))
   if (entries.length === 0) {
-    invalid(provider, 'resolves no models; the installed catalog does not describe this route, so its models'
+    invalid(provider, `${NO_MODELS_MARKER}; the installed catalog does not describe this route, so its models`
       + ' must be listed in configuration, fetched from its endpoint\'s /models listing, or added manually on the'
       + ' Models page')
   }

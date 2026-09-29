@@ -57,6 +57,15 @@ const ANTHROPIC_MODEL_LIMIT = 1000
  */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
+/**
+ * Wall-clock budget for one listing interrogation. A configuration-time probe
+ * must not outlive the form that started it: a black-holed endpoint would
+ * otherwise leave the add-provider surface waiting forever. The timeout is
+ * reported through the same failure path as an unreachable endpoint, so the
+ * surface falls back to hand-entry exactly as it does for a refused listing.
+ */
+const DISCOVERY_TIMEOUT_MS = 15_000
+
 /** Capacity fields nested by enriched model-directory replies. */
 interface ListingLimit {
   context?: unknown
@@ -313,45 +322,54 @@ export async function discoverModels(
   const stored = storedProfile?.()
   const supplied = request.apiKey ?? await stored?.resolveApiKey()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
-  let response: Response
-  try {
-    const headers = new Headers(stored?.headers === undefined ? undefined : Object.entries(stored.headers))
-    headers.set('accept', 'application/json')
-    if (api === 'anthropic-messages') {
-      headers.set('anthropic-version', ANTHROPIC_VERSION)
-      if (apiKey !== undefined) headers.set('x-api-key', apiKey)
-    } else if (apiKey !== undefined) {
-      headers.set('authorization', `Bearer ${apiKey}`)
-    }
-    for (const [name, value] of Object.entries(attributionHeaders())) headers.set(name, value)
-    response = await fetch(url, {
-      method: 'GET',
-      headers,
-      ...request.signal === undefined ? {} : { signal: request.signal },
-    })
-  } catch (error: unknown) {
-    if (request.signal?.aborted) {
-      throw new LlmError('model discovery aborted by caller', 'ABORTED', { cause: error })
-    }
-    throw new LlmError(`could not reach ${url}`, 'DISCOVERY_FAILED', { cause: error })
+  const headers = new Headers(stored?.headers === undefined ? undefined : Object.entries(stored.headers))
+  headers.set('accept', 'application/json')
+  if (api === 'anthropic-messages') {
+    headers.set('anthropic-version', ANTHROPIC_VERSION)
+    if (apiKey !== undefined) headers.set('x-api-key', apiKey)
+  } else if (apiKey !== undefined) {
+    headers.set('authorization', `Bearer ${apiKey}`)
   }
-  if (!response.ok) {
-    throw new LlmError(
-      `${url} answered ${response.status}${response.status === 401 || response.status === 403 ? '; check the API key' : ''}`,
-      'DISCOVERY_FAILED',
-    )
-  }
+  for (const [name, value] of Object.entries(attributionHeaders())) headers.set(name, value)
+  // The endpoint probe races the caller's cancellation against a deadline of
+  // its own; both abort the same network phase, and each gets its own report.
+  const deadline = new AbortController()
+  const timer = setTimeout(() => { deadline.abort() }, DISCOVERY_TIMEOUT_MS)
+  timer.unref()
+  const signal = request.signal === undefined
+    ? deadline.signal
+    : AbortSignal.any([request.signal, deadline.signal])
   let text: string
   try {
+    const response = await fetch(url, { method: 'GET', headers, signal })
+    if (!response.ok) {
+      throw new LlmError(
+        `${url} answered ${response.status}${response.status === 401 || response.status === 403 ? '; check the API key' : ''}`,
+        'DISCOVERY_FAILED',
+      )
+    }
     text = await readBounded(response, url)
   } catch (error: unknown) {
-    // Cancellation during the body read rejects with the abort reason, which
-    // may be any value; the caller gets the same coded failure it would have
-    // for a cancellation before the request went out.
+    // Cancellation during the transfer rejects with the abort reason, which may
+    // be any value; the caller and the deadline get the same coded failure they
+    // would have for a cancellation before the request went out.
     if (request.signal?.aborted) {
       throw new LlmError('model discovery aborted by caller', 'ABORTED', { cause: error })
     }
-    throw error
+    if (deadline.signal.aborted) {
+      throw new LlmError(
+        `${url} did not answer within ${String(DISCOVERY_TIMEOUT_MS / 1000)} seconds;`
+        + " check the endpoint URL, or enter this provider's models by hand",
+        'DISCOVERY_FAILED',
+        { cause: error },
+      )
+    }
+    // A refusal the probe itself decided (a non-ok status, an oversized reply)
+    // keeps its own message; anything else is a network reach failure.
+    if (error instanceof LlmError) throw error
+    throw new LlmError(`could not reach ${url}`, 'DISCOVERY_FAILED', { cause: error })
+  } finally {
+    clearTimeout(timer)
   }
   let body: unknown
   try {

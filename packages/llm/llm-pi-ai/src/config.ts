@@ -27,6 +27,7 @@ import {
   CHAT_TEMPLATE_VARS,
   MAX_TOKENS_FIELDS,
   MODALITIES,
+  NO_MODELS_MARKER,
   PiAiCatalogError,
   resolveRouteModels,
   SUPPORTED_THINKING_FORMATS,
@@ -419,9 +420,15 @@ export const Config = z.object({
 })
 
 /**
- * Reject new or changed provider profiles that cannot be served. Unchanged
- * stored profiles may need repair after a catalog upgrade and do not block
- * edits to another provider. Removed profiles require no catalog validation.
+ * Reject new or changed provider profiles whose own fields are unusable.
+ * Unchanged stored profiles may need repair after a catalog upgrade and do
+ * not block edits to another provider. Removed profiles require no catalog
+ * validation. A changed route that resolves no models is stored with that
+ * diagnostic instead of refusing the write: it must stay visible and
+ * repairable on the Models page (fetch, hand-enter, or delete its models), and
+ * a request to it already fails loud with the diagnostic before any network
+ * I/O. Every other catalog failure, and every schema or self-contained profile
+ * error, still rejects the write.
  * @param config - the resolved section to check.
  * @param previous - current resolved section; omission checks every provider.
  * @throws Error naming the route and configuration entry that cannot be served.
@@ -429,7 +436,21 @@ export const Config = z.object({
 export function assertServiceable(config: Options, previous?: Options): void {
   const changed = Object.fromEntries(Object.entries(config.providers ?? {}).filter(([provider, profile]) =>
     !deepEqualJson(profile, previous?.providers?.[provider])))
-  resolveProfiles(changed)
+  try {
+    resolveProfiles(changed)
+  } catch (error) {
+    if (!(error instanceof PiAiCatalogError) || !error.message.includes(NO_MODELS_MARKER)) throw error
+    // The strict pass stopped at the empty-route diagnostic. Store that route
+    // with its diagnostic, but keep the refusal when the same changed set also
+    // carries any other catalog failure — the empty route is the one the add
+    // surface creates before its discovery answers. Resolution surfaces a
+    // route's first retained model diagnostic as its `catalogError`, so this
+    // single read covers every retained failure kind.
+    const deferred = resolveProfiles(changed, 'deferred')
+    for (const profile of deferred.values()) {
+      if (profile.catalogError !== undefined && !profile.catalogError.includes(NO_MODELS_MARKER)) throw error
+    }
+  }
 }
 
 /** Reject removed pre-release profile fields and name their replacements. */

@@ -461,7 +461,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       'conversation.input.plan': { kind: 'single', scope: 'session' },
       'conversation.input.agent': { kind: 'single', scope: 'session', inject: {} as AgentPresetSeatInjected },
       'conversation.input.right': { kind: 'list', scope: 'session' },
-      'conversation.input.model': { kind: 'single', scope: 'session' },
+      'conversation.input.model': { kind: 'single', scope: 'session-maybe' },
       'conversation.input.activity': { kind: 'single', scope: 'session' },
       'conversation.composer.dock': { kind: 'list', scope: 'session' },
     },

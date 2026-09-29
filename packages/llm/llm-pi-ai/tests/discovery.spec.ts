@@ -427,6 +427,32 @@ describe('draft-provider model discovery', () => {
     }, aborted)).rejects.toMatchObject({ code: 'ABORTED' })
   })
 
+  it('reports an endpoint that never answers instead of hanging the probe', async () => {
+    const ctx = await harness()
+    // A black-holed endpoint accepts nothing: the probe must end at its own
+    // deadline with the hand-entry fallback, not wait forever on the fetch.
+    vi.stubGlobal('fetch', (_url: string | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      if (signal === undefined || signal === null) {
+        reject(new Error('expected a discovery signal'))
+        return
+      }
+      signal.addEventListener('abort', () => { reject(signal.reason as Error) }, { once: true })
+    }))
+    vi.useFakeTimers()
+    try {
+      const probe = ctx.llm.discoverModels('llm-pi-ai', { baseURL: 'https://blackhole.example/v1' })
+      const rejection = expect(probe).rejects.toMatchObject({
+        code: 'DISCOVERY_FAILED',
+        message: expect.stringContaining('did not answer within 15 seconds'),
+      })
+      await vi.advanceTimersByTimeAsync(15_000)
+      await rejection
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('is offered for the namespace, and refuses one it does not serve', async () => {
     const ctx = await harness()
 

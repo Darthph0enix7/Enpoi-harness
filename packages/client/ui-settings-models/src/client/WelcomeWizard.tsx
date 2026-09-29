@@ -415,6 +415,7 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
           on={choice.compaction}
           onToggle={() => { onChoice({ ...choice, compaction: !choice.compaction }) }}
           chip={compactionLlm ? t('wizCompactionChipLlm') : t('wizCompactionChipMechanical')}
+          tone={compactionLlm ? 'llm' : 'off'}
         >
           <div className={styles.segments} role="radiogroup" aria-label={t('wizCompactionTitle')}>
             <button type="button" role="radio" aria-checked={compactionLlm} data-active={compactionLlm} onClick={() => { onCompactionLlm(true) }}>{t('wizCompactionLlm')}</button>
@@ -427,6 +428,7 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
           on={choice.keeper}
           onToggle={() => { onChoice({ ...choice, keeper: !choice.keeper }) }}
           chip={t('wizKeeperChip')}
+          tone="llm"
         />
         <Toggle
           title={t('wizWhiteboardTitle')}
@@ -434,6 +436,7 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
           on={choice.whiteboard}
           onToggle={() => { onChoice({ ...choice, whiteboard: !choice.whiteboard }) }}
           chip={t('wizWhiteboardChip')}
+          tone="off"
         />
       </div>
       <p className={styles.fineprint}>{t('wizIntelligenceFineprint')}</p>
@@ -445,12 +448,14 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
   )
 }
 
-function Toggle({ title, sub, on, onToggle, chip, children }: {
+function Toggle({ title, sub, on, onToggle, chip, tone, children }: {
   title: string
   sub: string
   on: boolean
   onToggle: () => void
   chip: string
+  /** Chip emphasis: 'llm' is the amber model-call note, 'off' the green no-call note. */
+  tone: 'llm' | 'off'
   children?: ReactNode
 }): ReactNode {
   return (
@@ -462,7 +467,7 @@ function Toggle({ title, sub, on, onToggle, chip, children }: {
         </button>
       </div>
       <p>{sub}</p>
-      <span className={styles.chip}>{chip}</span>
+      <span className={styles.chip} data-tone={tone}>{chip}</span>
       {on && children !== undefined ? children : null}
     </div>
   )

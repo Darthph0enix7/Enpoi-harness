@@ -196,6 +196,17 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.input.model',
       locale: NS,
       inject: (sessionId): ModelSelectInjected => {
+        // Session-less (first-run shell): the seat shows the shared catalog's
+        // deployment default (`kilo-auto/free`); the surrounding inert composer
+        // keeps it locked, so there is no session to submit a selection to.
+        if (sessionId === undefined) {
+          return {
+            available: true,
+            directory: models.hero,
+            load: () => { void models.catalog.load().catch(() => { /* surfaced on the store */ }) },
+            select: () => Promise.resolve(undefined),
+          }
+        }
         const directory = models.directoryFor(sessionId)
         const available = sessions.subagentAddress(sessionId) === undefined
         return {

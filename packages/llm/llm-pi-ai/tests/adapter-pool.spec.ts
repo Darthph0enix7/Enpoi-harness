@@ -174,6 +174,26 @@ describe('PiAiAdapter credential pools', () => {
     await expect(collect(adapter, server.url)).rejects.toMatchObject({
       code: 'MISSING_CREDENTIAL',
     })
+    // Plain credential language naming the references to fill, never pool
+    // vocabulary the configuration surface cannot act on.
+    await expect(collect(adapter, server.url)).rejects.toThrow(
+      /provider "deepseek" needs a credential, but none of its key-pool references \(POOL_KEY_A, POOL_KEY_B\) resolve/,
+    )
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('names the disabled pool when no identity is enabled', async () => {
+    const server = await mockServer([])
+    const engine = await engineOf()
+    const adapter = pooledAdapter({
+      deepseek: {
+        baseURL: server.url,
+        pool: { identities: [{ id: 'off', credentialRef: 'POOL_KEY_A', enabled: false }] },
+      },
+    }, engine, { POOL_KEY_A: 'key-a' })
+
+    await expect(collect(adapter, server.url)).rejects.toMatchObject({ code: 'MISSING_CREDENTIAL' })
+    await expect(collect(adapter, server.url)).rejects.toThrow(/has no enabled key-pool identity/)
     expect(server.requests).toHaveLength(0)
   })
 

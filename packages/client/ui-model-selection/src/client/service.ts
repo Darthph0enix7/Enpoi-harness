@@ -16,9 +16,10 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { WeakMapWithValues } from '@deepseek-ai/dsh-util-values'
 import { ModelCatalogDirectory } from './catalog.ts'
-import { ModelDirectory } from './directory.ts'
+import { ModelDirectory, type ModelDirectoryState } from './directory.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -52,6 +53,15 @@ export class ModelDirectoryResolver extends Service {
   /** The shared Host-generation catalog; global surfaces (e.g. Fleet Routing)
    * read it directly when no session directory exists. */
   readonly catalog: ModelCatalogDirectory
+  /**
+   * The session-less composer seat's state: the shared catalog plus the Host's
+   * deployment default selection. The first-run shell renders the model picker
+   * before a session exists, so this is the one directory-shaped value that
+   * needs no session scope.
+   */
+  readonly hero: SnapshotStore<ModelDirectoryState> = createSnapshotStore<ModelDirectoryState>({
+    current: null, routable: null, groups: [], failures: [], status: 'idle', pending: null, error: null,
+  })
 
   /**
    * @param ctx - owning root context (the service registers itself as `models`).
@@ -59,6 +69,8 @@ export class ModelDirectoryResolver extends Service {
   constructor(ctx: Context) {
     super(ctx, 'modelDirectories')
     this.catalog = new ModelCatalogDirectory(ctx)
+    this.catalog.store.subscribe(() => { this.syncHero() })
+    this.syncHero()
     void this.catalog.load().catch(() => { /* selectors expose the shared error */ })
     ctx.on('connection/reset', () => {
       this.catalog.resetGeneration()
@@ -100,5 +112,34 @@ export class ModelDirectoryResolver extends Service {
       live.directories.delete(binding)
     }, 'ui-model-selection: session directory')
     return directory
+  }
+
+  /**
+   * Republish the session-less seat state from the shared catalog: the Host's
+   * deployment default (`kilo-auto/free` in the shipped profile) is the
+   * selection the picker shows, with its effort caption, while no session
+   * exists.
+   */
+  private syncHero(): void {
+    const catalog = this.catalog.store.getSnapshot()
+    const selection = catalog.value?.default ?? null
+    const reasoning = selection === null ? undefined : this.catalog.reasoningFor(selection)
+    const effort = selection?.reasoningEffort ?? reasoning?.defaultEffort
+    const retainedEffort = effort === undefined ? undefined
+      : reasoning?.efforts.find(level => level.id === effort)?.name ?? effort
+    const routable = selection === null
+      ? null
+      : catalog.value?.groups.some(group => group.id === selection.provider
+        && group.models.some(model => model.id === selection.model)) ?? false
+    this.hero.set({
+      current: selection,
+      ...retainedEffort === undefined ? {} : { retainedEffort },
+      routable,
+      groups: catalog.value?.groups ?? [],
+      failures: catalog.value?.failures ?? [],
+      status: catalog.status === 'error' ? 'error' : catalog.status === 'ready' ? 'ready' : 'loading',
+      pending: null,
+      error: catalog.error,
+    })
   }
 }

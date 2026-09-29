@@ -370,15 +370,17 @@ function PanelChrome({
  * focuses the panel on it); clicking the lit icon collapses the panel. The rail
  * never hides, with or without the panel.
  */
-function Rail({
+export function Rail({
   items, active, fullscreen, autoFullscreen, actions, sessionId, onSelect, t,
 }: {
   readonly items: readonly SidebarRightRailItem[]
   readonly active: string | undefined
   readonly fullscreen: boolean
   readonly autoFullscreen: boolean
-  readonly actions: Store['actions']
-  readonly sessionId: SessionId
+  /** The mounted session's actions; absent while no session surface exists. */
+  readonly actions?: Store['actions'] | undefined
+  /** The mounted session; absent while no session surface exists. */
+  readonly sessionId?: SessionId | undefined
   readonly onSelect: (kind: string) => void
   readonly t: RightbarSeatProps['t']
 }): ReactNode {
@@ -431,13 +433,15 @@ function Rail({
             <BottomTerminalGlyph />
           </button>
         </Tooltip>
-        <PanelChrome
-          fullscreen={fullscreen}
-          autoFullscreen={autoFullscreen}
-          actions={actions}
-          sessionId={sessionId}
-          t={t}
-        />
+        {actions !== undefined && sessionId !== undefined && (
+          <PanelChrome
+            fullscreen={fullscreen}
+            autoFullscreen={autoFullscreen}
+            actions={actions}
+            sessionId={sessionId}
+            t={t}
+          />
+        )}
       </div>
     </nav>
   )

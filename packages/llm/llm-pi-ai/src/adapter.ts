@@ -486,7 +486,11 @@ export class PiAiAdapter extends LlmAdapter {
         await engine.hydrate(options.provider)
         const order = engine.orderFor(options.provider, profile.pool.identities, options.model, profile.pool.strategy)
         if (order.length === 0) {
-          throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no enabled identities`, 'MISSING_CREDENTIAL')
+          throw new LlmError(
+            `llm-pi-ai: provider "${options.provider}" has no enabled key-pool identity; enable one on the Models`
+            + ' page (Keys card) and retry',
+            'MISSING_CREDENTIAL',
+          )
         }
         const identityById = new Map(profile.pool.identities.map(identity => [identity.id, identity]))
         // Fix maxAttempts counting: pre-resolve credentials to count only resolvable identities.
@@ -511,7 +515,16 @@ export class PiAiAdapter extends LlmAdapter {
         // resolve.
         const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id) || profile.keyless)
         if (resolvableOrder.length === 0) {
-          throw new LlmError(`llm-pi-ai: provider "${options.provider}" pool has no resolvable identities`, 'MISSING_CREDENTIAL')
+          // Plain credential language, not pool vocabulary: the outcome is a
+          // route that needs a key before it can answer, and the user can store
+          // one from the Models page. The missing references stay named so the
+          // exact entry to fill is not a guess.
+          const refs = profile.pool.identities.map(identity => identity.credentialRef).join(', ')
+          throw new LlmError(
+            `llm-pi-ai: provider "${options.provider}" needs a credential, but none of its key-pool references`
+            + ` (${refs}) resolve; store one of them on the Models page (Keys card) or export it, then retry`,
+            'MISSING_CREDENTIAL',
+          )
         }
         const maxAttempts = Math.min(resolvableOrder.length, 5)
         const deadlineMs = this.config.poolDeadlineMs ?? 30_000

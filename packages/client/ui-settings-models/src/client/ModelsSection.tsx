@@ -174,7 +174,13 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   }, [schema, state.namespaces])
 
   const takenProviderIds = useMemo(() => {
-    return state.rows.map(r => r.entry.provider)
+    // Only a route that already owns a profile (or serves live) is taken. The
+    // joined directory lists every installed catalog provider, so treating that
+    // listing as taken forced every catalog add onto a suffixed duplicate the
+    // installed catalog cannot describe.
+    return state.rows
+      .filter(row => row.configured || row.entry.active)
+      .map(row => row.entry.provider)
   }, [state.rows])
 
   // Delete Provider

@@ -128,9 +128,10 @@ describe('ui-sidebar-right apply', () => {
     // Six registrations: the root and panel seats, the guide body and chip
     // title under the guide implementation's id, and the mobile shell's two
     // surface entry lists. The guide draws no product copy of its own, so
-    // neither guide seat binds the dictionary.
+    // neither guide seat binds the dictionary; the root seat does, because the
+    // session-less rail draws the same localized labels as the panel seat.
     expect(registered.map(entry => [entry.name, entry.key, entry.locale, entry.component])).toEqual([
-      ['rightbar', undefined, undefined, RightbarRoot],
+      ['rightbar', undefined, 'sidebarRight', RightbarRoot],
       ['rightbar.session', undefined, 'sidebarRight', RightbarSeat],
       ['sidebar.right.pane.tab', GUIDE_ID, undefined, GuideBody],
       ['sidebar.right.pane.tab.title', GUIDE_ID, undefined, GuideTitle],

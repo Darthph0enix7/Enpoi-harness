@@ -511,7 +511,10 @@ export const InputBar = memo(function InputBar({
               {input === undefined || sessionId === undefined
                 ? null
                 : renderSlot('conversation.input.right', {})}
-              {sessionId === undefined || compactComposer
+              {/* Session-maybe: the model seat paints the deployment default in
+                  the inert no-session bar too, so the first-run shell shows the
+                  picker (and its effort pill) before any session exists. */}
+              {compactComposer
                 ? null
                 : renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             </div>

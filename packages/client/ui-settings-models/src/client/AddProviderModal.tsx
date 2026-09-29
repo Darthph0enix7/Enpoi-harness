@@ -100,6 +100,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   if (!open) return null
 
   const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
+  // A preset that names an environment reference genuinely needs a key: say so
+  // plainly while still allowing a save without one (the route stays
+  // repairable from the Models page).
+  const needsKeyHint = selected !== 'empty' && selected !== null && !keylessSelected
+    && selected.env.length > 0 && apiKey.trim().length === 0
   const heavy: HeavyProviderManifest | undefined = selected !== 'empty' && selected !== null ? selected.heavy : undefined
   const heavyUnsupported = heavy?.unsupported
 
@@ -283,14 +288,16 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   /**
    * Whether this route still needs models listed: an adapter that knows the
    * route only because configuration declared it (llm-pi-ai's `declared`
-   * flag) resolves nothing without a model list. An unanswerable directory
+   * flag) resolves nothing without a model list, and a stored route carrying a
+   * catalog diagnostic resolves nothing either. An unanswerable directory
    * read keeps the safe assumption that models are required.
    */
   const routeNeedsModels = async (id: string): Promise<boolean> => {
     try {
       const directory = await api.llm.listConfigurableProviders()
       if (!directory.ok) return true
-      return directory.value.find(entry => entry.provider === id)?.declared === true
+      const entry = directory.value.find(candidate => candidate.provider === id)
+      return entry?.declared === true || entry?.error !== undefined
     } catch {
       return true
     }
@@ -309,16 +316,23 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setBusy(true)
     setError(null)
     setDiscovering(true)
-    const answer = await runDiscovery(id, apiKey.trim())
-    setDiscovering(false)
-    if ('models' in answer && answer.models.length > 0) {
-      // The full profile is rewritten: a rejected first write left no route,
-      // so a models-only write would store a partial profile.
-      if (await storeProfile(id, [], answer.models)) onClose(true)
+    try {
+      const answer = await runDiscovery(id, apiKey.trim())
+      if ('models' in answer && answer.models.length > 0) {
+        // The full profile is rewritten: a rejected first write left no route,
+        // so a models-only write would store a partial profile.
+        if (await storeProfile(id, [], answer.models)) onClose(true)
+        return
+      }
+      enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
+    } catch (err) {
+      // A rejected write must not leave the panel spinning: report it and keep
+      // the manual list usable.
+      enterRecovery(messageOf(err))
+    } finally {
+      setDiscovering(false)
       setBusy(false)
-      return
     }
-    enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
   }
 
   /** Save the typed model ids onto the stored route and close. */
@@ -328,8 +342,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     if (manual.length === 0) return
     setBusy(true)
     setError(null)
-    if (await storeProfile(id, manual)) onClose(true)
-    setBusy(false)
+    try {
+      if (await storeProfile(id, manual)) onClose(true)
+    } catch (err) {
+      setError(messageOf(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleCreate = async () => {
@@ -594,6 +613,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                   onChange={e => setApiKey(e.target.value)}
                   disabled={busy || readOnly}
                 />
+                {needsKeyHint && (
+                  <p className={styles['presetMetaItem']} data-add-needs-key>{t('addNeedsKeyHint')}</p>
+                )}
               </div>
 
               <div className={styles['field']}>
