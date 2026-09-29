@@ -97,22 +97,22 @@ describe('permissions projection unit', () => {
     ctx.on('permission-presets/catalog-changed', () => { notifications.push(notifications.length + 1) })
 
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis'])
     const fiber = await mountAuto(ctx)
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis', AUTO_PRESET])
     expect(session.seq).toBe(beforeSeq)
     expect(ctx.sessionProjections.snapshot(session)).toEqual(beforeProjection)
 
     await fiber.dispose()
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis'])
     expect(session.seq).toBe(beforeSeq)
     expect(ctx.sessionProjections.snapshot(session)).toEqual(beforeProjection)
 
     const reinstalled = await mountAuto(ctx)
     expect(ctx.permissionPresets.catalog().options.map(option => option.value))
-      .toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
+      .toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis', AUTO_PRESET])
     expect(notifications).toEqual([1, 2, 3])
     await reinstalled.dispose()
     expect(notifications).toEqual([1, 2, 3, 4])
@@ -155,7 +155,7 @@ describe('/permission command', () => {
     const listed = await ctx.commands.execute(agent, '/permission', [], new AbortController().signal)
     expect(listed?.result).toEqual({
       kind: 'success',
-      text: 'current preset workspace-write (available: read-only, workspace-write, danger-full-access, auto)',
+      text: 'current preset workspace-write (available: read-only, workspace-write, danger-full-access, system-analysis, auto)',
     })
     const switched = await ctx.commands.execute(agent, '/permission auto', [], new AbortController().signal)
     expect(switched?.result).toEqual({ kind: 'success', text: 'preset auto' })
@@ -183,7 +183,7 @@ describe('/permission command', () => {
     const execution = await ctx.commands.execute(agent, '/permission', [], new AbortController().signal)
     expect(execution?.result).toEqual({
       kind: 'success',
-      text: 'current preset workspace-write (available: read-only, workspace-write, danger-full-access)',
+      text: 'current preset workspace-write (available: read-only, workspace-write, danger-full-access, system-analysis)',
     })
     expect(session.snapshotEvents().filter(event => event.type === 'permission/preset')).toHaveLength(1)
   })
@@ -199,7 +199,7 @@ describe('/permission command', () => {
     // preset`, which the row's own title already says.
     expect(execution?.result).toEqual({
       kind: 'error',
-      text: 'unknown preset "yolo" (available: read-only, workspace-write, danger-full-access)',
+      text: 'unknown preset "yolo" (available: read-only, workspace-write, danger-full-access, system-analysis)',
     })
     expect(session.snapshotEvents().filter(event =>
       event.type !== 'command/run' && event.type !== 'command/done')).toEqual(before)

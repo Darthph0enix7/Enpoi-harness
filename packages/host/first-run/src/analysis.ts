@@ -247,9 +247,9 @@ export const Config: z<AnalysisConfig> = z.object({
   preset: z.string().default('sysadmin'),
   provider: z.string().default('kilo'),
   model: z.string().default('kilo-auto/free'),
-  // The investigation is read-only toward the host; this preset gives its own
-  // scratch workspace just enough room to write the two profile artifacts.
-  permissionPreset: z.string().default('workspace-write'),
+  // The investigation is read-only toward the host; the system-analysis preset
+  // confines writes to its own scratch workspace and raises no approval prompt, so the unattended run cannot stall.
+  permissionPreset: z.string().default('system-analysis'),
   timeoutMinutes: z.number().default(15),
 })
 

@@ -39,7 +39,7 @@ export interface AcpConfig {
 ## `@deepseek-ai/dsh-agent-default-model`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/core/agent-default-model/src/index.ts:24`](../packages/core/agent-default-model/src/index.ts)
+- `source`: [`packages/core/agent-default-model/src/index.ts:26`](../packages/core/agent-default-model/src/index.ts)
 
 ```ts config-catalog
 /** Default model selection supplied by plugin configuration. */
@@ -48,6 +48,8 @@ export interface Config {
   provider: Volatile<string>
   /** Provider-owned model id. */
   model: Volatile<string>
+  /** Optional model-group id whose links route the default selection's requests. */
+  chain?: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
 }
@@ -184,7 +186,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert`
-- `source`: [`packages/api/gateway/src/index.ts:145`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:155`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
@@ -193,6 +195,13 @@ export interface Config {
   readonly websocketHeartbeatIntervalMs?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /**
+   * Milliseconds a pending forwarded invocation may wait before a Client
+   * connecting later receives a replay of it; older entries are cancelled and
+   * removed instead (self-healing crash-tail asks). `0` replays without a
+   * bound. @default 900000
+   */
+  readonly remoteEventReplayMaxAgeMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
@@ -222,13 +231,15 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:79`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:96`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
 export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Default rows in one `session.list` page (the client loads further pages on demand). */
+  readonly listPageSize?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->
@@ -238,7 +249,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-api-settings-controller`
 
-- `source`: [`packages/api/settings-controller/src/index.ts:35`](../packages/api/settings-controller/src/index.ts)
+- `source`: [`packages/api/settings-controller/src/index.ts:47`](../packages/api/settings-controller/src/index.ts)
 
 ```ts config-catalog
 /** Host integrations replaceable by direct unit tests. */
@@ -301,7 +312,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-workspace-controller`
 
 - `inject`: `typert` · `workspaceRegistry`
-- `source`: [`packages/api/workspace-controller/src/index.ts:33`](../packages/api/workspace-controller/src/index.ts)
+- `source`: [`packages/api/workspace-controller/src/index.ts:34`](../packages/api/workspace-controller/src/index.ts)
 
 ```ts config-catalog
 /** First-use directory policy for the Host account. */
@@ -1381,13 +1392,37 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-host-directory-picker-browse -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-host-first-run -->
+<a id="deepseek-aidsh-host-first-run"></a>
+
+## `@deepseek-ai/dsh-host-first-run`
+
+- `inject`: `settings`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/host/first-run/src/index.ts:30`](../packages/host/first-run/src/index.ts)
+
+```ts config-catalog
+/** Plugin config: the seeded route, and the marker read back on later boots. */
+export interface Config {
+  /** Run the seed when no marker is stored. */
+  enabled: boolean
+  /** Route id to seed. */
+  provider: string
+  /** Model the route serves and the session default points at. */
+  model: string
+  /** Marker; any stored value means the seed already ran. */
+  seedVersion: Volatile<string | undefined>
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-host-first-run -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-host-frontend-static -->
 <a id="deepseek-aidsh-host-frontend-static"></a>
 
 ## `@deepseek-ai/dsh-host-frontend-static`
 
 - `inject`: `webServer` · `connection`
-- `source`: [`packages/host/frontend-static/src/index.ts:30`](../packages/host/frontend-static/src/index.ts)
+- `source`: [`packages/host/frontend-static/src/index.ts:33`](../packages/host/frontend-static/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the dist anchor. */
@@ -1568,6 +1603,15 @@ export type Config = ProtocolConfig
 export interface Config extends ProtocolConfig {
   /** Credential reference resolved per request; defaults to DEEPSEEK_API_KEY. */
   apiKeyEnv: Volatile<string>
+  /**
+   * Removed-route override written by the Models page. A shipped route cannot
+   * be removed by unsetting a profile (its settings address is the whole
+   * section), so the operator's delete writes this flag; the plugin withdraws
+   * the directory entry and the adapter route while it is true. The flag is a
+   * volatile config field, so the write lands in the entry's config in the
+   * profile patch and survives later settings rewrites of the same entry.
+   */
+  disabled: Volatile<boolean>
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-deepseek-api-key -->
@@ -1579,7 +1623,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:222`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:273`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1596,6 +1640,22 @@ export interface Config {
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * Keyless (anonymous) route: no credential is required to serve requests.
+   * Every request it sends is anonymous — a stored, ambient, or env-provided
+   * key never reaches its wire, because a gateway's anonymous path may reject
+   * any Authorization header it sees. Byok (bring your own key) on such a
+   * gateway is an explicit configuration: drop `keyless` and keep the
+   * `apiKeyEnv` reference, which then resolves and sends as usual.
+   */
+  keyless?: boolean
+  /**
+   * Multi-credential pool for this route. When present, requests rotate
+   * across the listed identities (priority-sticky) with per-identity ×
+   * per-model cooldowns; a single `apiKeyEnv` remains valid as an implicit
+   * one-identity pool. Configuration carries references, never secrets.
+   */
+  pool?: PiAiPoolConfig
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -1654,6 +1714,12 @@ export interface PiAiProviderProfile {
   defaultInput?: PiAiModality[]
   /** Provider request headers, validated against Fetch when the profile resolves; Harness attribution wins reserved names. */
   headers?: Record<string, string>
+  /**
+   * Route that requires a routing-affinity session header (opencode Zen Go).
+   * When set, the adapter sends `{[sessionHeader]: String(sessionId)}` on every
+   * request so the provider can pin the conversation to a routing bucket.
+   */
+  sessionHeader?: string
   /** Provider-neutral pi-ai reasoning level. */
   reasoning?: ModelThinkingLevel
   /** Token budgets used by reasoning providers that support them. */
@@ -1684,6 +1750,14 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+}
+
+/** Multi-credential routing for one provider route. */
+export interface PiAiPoolConfig {
+  /** Selection strategy; defaults to `priority-sticky`. Failure handling, cooldowns, and recovery are strategy-independent. */
+  strategy?: PoolStrategy
+  /** The route's credential identities (≥ 1, unique ids). */
+  identities: PiAiPoolIdentity[]
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1828,6 +1902,23 @@ export interface PiAiCompatProfile {
 
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
+
+/** How the pool picks among healthy identities. */
+export type PoolStrategy =
+  | /** Highest-priority healthy identity serves everything; lower identities are failover standbys. Maximizes upstream prompt-cache hits and keeps quota plans at full remaining capacity. */ 'priority-sticky'
+  | /** Round-robin across healthy identities per model. Spreads load for rate-limited (RPM/TPM) plans; fragments upstream caches and depletes quota pools together. */ 'balanced'
+
+/** One credential identity inside a route's pool. */
+export interface PiAiPoolIdentity {
+  /** Stable identity key (state, logs, UI). */
+  id: string
+  /** Credential reference resolved per request through `ctx.credentials`. */
+  credentialRef: string
+  /** Lower serves first under priority-sticky; omission ranks last. */
+  priority?: number
+  /** Disabled identities are skipped without losing their state. */
+  enabled?: boolean
+}
 
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
@@ -2145,8 +2236,9 @@ export interface Config {
 /** The {@link PermissionPresetService} config: preset table and composition default. */
 export interface Config {
   /**
-   * The preset table: name → knob bundle. Defaults to `workspace-write`
-   * (workspace-write + ask) and `danger-full-access` (danger-full-access +
+   * The preset table: name → knob bundle. Defaults to `read-only` (read-only +
+   * ask), `workspace-write` (workspace-write + ask), `system-analysis`
+   * (workspace-write + never), and `danger-full-access` (danger-full-access +
    * never). The names `custom` and `auto` are reserved for derived state and
    * the Auto review integration respectively.
    */
@@ -2632,7 +2724,7 @@ export interface Config {
 
 - `inject`: `sessions`
 - `refs`: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
-- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:92`](../packages/session-query/session-query-sqlite/src/index.ts)
+- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:117`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 ```ts config-catalog
 /** Combined session-query configuration backed by SQLite full-text search. */
@@ -2663,6 +2755,13 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /**
+   * Bounded wait (ms) for the background index pass on a cross-session search.
+   * When the pass is still running after the wait, the search rejects with
+   * `SESSION_QUERY_INDEXING` instead of blocking; per-session event search
+   * never waits. Defaults to 20000 and is capped below the 30 s tool deadline.
+   */
+  firstSearchWaitMs?: number
 }
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
@@ -3061,7 +3160,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 ## `@deepseek-ai/dsh-subagent`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:192`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:193`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */
@@ -3766,7 +3865,7 @@ export interface Config {
 
 - `inject`: `tools` · `subagents` · `systemPrompt` · `sessionProjections`
 - `refs`: [`AgentOptions`](subsystems/core.md)
-- `source`: [`packages/subagent/tool-subagent/src/index.ts:48`](../packages/subagent/tool-subagent/src/index.ts)
+- `source`: [`packages/subagent/tool-subagent/src/index.ts:49`](../packages/subagent/tool-subagent/src/index.ts)
 
 ```ts config-catalog
 /** Config: which registered provider this tool delegates to, plus child defaults. */
@@ -3957,7 +4056,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-tools`
 
 - `inject`: `systemPrompt`
-- `source`: [`packages/core/tools/src/index.ts:674`](../packages/core/tools/src/index.ts)
+- `source`: [`packages/core/tools/src/index.ts:725`](../packages/core/tools/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: how the registered tools are presented to the model. */
@@ -4010,7 +4109,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-user-approval`
 
-- `source`: [`packages/interaction/user-approval/src/index.ts:135`](../packages/interaction/user-approval/src/index.ts)
+- `source`: [`packages/interaction/user-approval/src/index.ts:128`](../packages/interaction/user-approval/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config. All optional — `static Config` supplies the defaults. */
@@ -4022,6 +4121,15 @@ export interface Config {
    * prompting (the deterministic CI/unattended stance).
    */
   readonly policy?: ApprovalPolicy
+  /**
+   * How long a dispatched ask may stay pending before it resolves the
+   * fail-closed `'unavailable'` outcome (default {@link DEFAULT_ANSWER_TIMEOUT_MS}).
+   * A registered answerer that never settles — an attached client that walked
+   * away — would otherwise park the turn indefinitely. Expiry also aborts the
+   * ask's dispatch signal, so forwarded presentations (the browser's approval
+   * card) are cancelled with it. `0` disables the bound.
+   */
+  readonly answerTimeoutMs?: number
 }
 
 /**
@@ -4290,6 +4398,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 | `@deepseek-ai/dsh-client-ui-agent-preset` | — | [`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-approval` | — | [`packages/client/ui-approval/src/index.ts`](../packages/client/ui-approval/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-attachment` | — | [`packages/client/ui-attachment/src/index.ts`](../packages/client/ui-attachment/src/index.ts) |
+| `@deepseek-ai/dsh-client-ui-brand-enpoi` | — | [`packages/client/ui-brand-enpoi/src/index.ts`](../packages/client/ui-brand-enpoi/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-brand-official` | — | [`packages/client/ui-brand-official/src/index.ts`](../packages/client/ui-brand-official/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-chat` | — | [`packages/client/ui-chat/src/index.ts`](../packages/client/ui-chat/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-commands` | — | [`packages/client/ui-commands/src/index.ts`](../packages/client/ui-commands/src/index.ts) |
@@ -4298,6 +4407,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 | `@deepseek-ai/dsh-client-ui-deliverables` | `systemPrompt` · `connection` · `sessionQuery` · `sessionController` · `workspaceFiles` · `fs` · `sandboxPolicy` · `workspaceChanges` | [`packages/client/ui-deliverables/src/index.ts`](../packages/client/ui-deliverables/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-directory-picker-browse` | — | [`packages/client/ui-directory-picker-browse/src/index.ts`](../packages/client/ui-directory-picker-browse/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-directory-picker-native` | — | [`packages/client/ui-directory-picker-native/src/index.ts`](../packages/client/ui-directory-picker-native/src/index.ts) |
+| `@deepseek-ai/dsh-client-ui-enpoi-editor` | — | [`packages/client/ui-enpoi-editor/src/index.ts`](../packages/client/ui-enpoi-editor/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-goal` | — | [`packages/client/ui-goal/src/index.ts`](../packages/client/ui-goal/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-input-trigger` | — | [`packages/client/ui-input-trigger/src/index.ts`](../packages/client/ui-input-trigger/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-jobs` | — | [`packages/client/ui-jobs/src/index.ts`](../packages/client/ui-jobs/src/index.ts) |
@@ -4350,6 +4460,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 | `@deepseek-ai/dsh-goal-round-driver` | `agents` · `goals` · `sessions` | [`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts) |
 | `@deepseek-ai/dsh-host-directory-picker-auto` | `webServer` · `loader` | [`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts) |
 | `@deepseek-ai/dsh-host-directory-picker-native` | — | [`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts) |
+| `@deepseek-ai/dsh-host-enpoi-terminal` | `webServer` · `connection` | [`packages/host/enpoi-terminal/src/index.ts`](../packages/host/enpoi-terminal/src/index.ts) |
 | `@deepseek-ai/dsh-host-plugin-inventory` | `loader` | [`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts) |
 | `@deepseek-ai/dsh-llm` | — | [`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts) |
 | `@deepseek-ai/dsh-lsp` | — | [`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts) |
@@ -4409,6 +4520,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 | --- | --- | --- |
 | `@deepseek-ai/dsh-agent-loop-testkit` | — | [`packages/test-support/agent-loop-testkit/src/index.ts`](../packages/test-support/agent-loop-testkit/src/index.ts) |
 | `@deepseek-ai/dsh-anonymous-user-id` | — | [`packages/identity/anonymous-user-id/src/index.ts`](../packages/identity/anonymous-user-id/src/index.ts) |
+| `@deepseek-ai/dsh-api-peer` | — | [`packages/api/peer/src/index.ts`](../packages/api/peer/src/index.ts) |
 | `@deepseek-ai/dsh-app-boot` | — | [`packages/boot/app-boot/src/index.ts`](../packages/boot/app-boot/src/index.ts) |
 | `@deepseek-ai/dsh-atomic-write` | — | [`packages/util/atomic-write/src/index.ts`](../packages/util/atomic-write/src/index.ts) |
 | `@deepseek-ai/dsh-base` | — | [`packages/bundle/base/src/index.ts`](../packages/bundle/base/src/index.ts) |
@@ -4427,6 +4539,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 | `@deepseek-ai/dsh-experimental-voice-input-bundle` | — | [`packages/experimental/voice-input-bundle/src/index.ts`](../packages/experimental/voice-input-bundle/src/index.ts) |
 | `@deepseek-ai/dsh-experimental-webworker-packer` | — | [`packages/experimental/webworker-packer/src/index.ts`](../packages/experimental/webworker-packer/src/index.ts) |
 | `@deepseek-ai/dsh-experimental-webworker-runtime` | — | [`packages/experimental/webworker-runtime/src/index.ts`](../packages/experimental/webworker-runtime/src/index.ts) |
+| `@deepseek-ai/dsh-fake-openai` | — | [`packages/support/fake-openai/src/index.ts`](../packages/support/fake-openai/src/index.ts) |
 | `@deepseek-ai/dsh-home-paths` | — | [`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts) |
 | `@deepseek-ai/dsh-hook-protocol` | — | [`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts) |
 | `@deepseek-ai/dsh-http-proxy` | — | [`packages/util/http-proxy/src/index.ts`](../packages/util/http-proxy/src/index.ts) |

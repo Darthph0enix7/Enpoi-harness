@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  ANALYSIS_STAGES, createAnalysisRunner, handleRequest, stagePct,
+  ANALYSIS_STAGES, Config, createAnalysisRunner, handleRequest, stagePct,
   type AnalysisDependencies, type AnalysisRunner,
 } from '../src/analysis.ts'
 import type { InvestigationOutcome } from '../src/investigation.ts'
+
+describe('analysis plugin config', () => {
+  it('defaults the investigation session to the shipped system-analysis permission preset', () => {
+    expect(Config({})).toMatchObject({ permissionPreset: 'system-analysis' })
+  })
+})
 
 const OUTCOME: InvestigationOutcome = {
   profile: {

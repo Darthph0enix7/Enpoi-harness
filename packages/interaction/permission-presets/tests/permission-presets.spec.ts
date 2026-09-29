@@ -92,17 +92,23 @@ describe('PermissionPresetService', () => {
       .toThrow('permission: permissions session projection is not registered')
   })
 
-  it('advertises the preset table in declaration order and resolves bundles', async () => {
+  it('advertises the preset table in declaration order and resolves bundles without touching the shipped entries', async () => {
     const ctx = await mounted()
-    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis'])
+    expect(ctx.permissionPresets.resolve('read-only')).toMatchObject({ sandbox: 'read-only', approval: 'ask' })
+    expect(ctx.permissionPresets.resolve('workspace-write')).toMatchObject({ sandbox: 'workspace-write', approval: 'ask' })
     expect(ctx.permissionPresets.resolve('danger-full-access')).toMatchObject({ sandbox: 'danger-full-access', approval: 'never' })
+    expect(ctx.permissionPresets.resolve('system-analysis')).toEqual({
+      sandbox: 'workspace-write', approval: 'never', name: 'system-analysis',
+      description: 'Workspace-confined writes without approval prompts, for commissioned read-only investigations.',
+    })
     expect(() => ctx.permissionPresets.resolve('plan')).toThrow(/unknown preset "plan"/)
   })
 
   it('publishes an effect-scoped current-session preset and removes it on unload', async () => {
     const ctx = await mounted()
     const fiber = await mountAuto(ctx)
-    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access', AUTO_PRESET])
+    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis', AUTO_PRESET])
     expect(ctx.permissionPresets.resolve(AUTO_PRESET)).toEqual({
       sandbox: 'danger-full-access', approval: 'ask',
     })
@@ -112,7 +118,7 @@ describe('PermissionPresetService', () => {
     })
 
     await fiber.dispose()
-    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+    expect(ctx.permissionPresets.names).toEqual(['read-only', 'workspace-write', 'danger-full-access', 'system-analysis'])
     expect(() => ctx.permissionPresets.resolve(AUTO_PRESET)).toThrow(/unknown preset "auto"/)
   })
 
@@ -207,6 +213,7 @@ describe('PermissionPresetService', () => {
 
   it('composition defaults outside the table still derive custom when an explicit new-session default is configured', async () => {
     const ctx = await mounted({
+      bashDefault: 'read-only',
       approvalDefault: 'never',
       config: { defaultPreset: 'workspace-write' },
     })
@@ -269,6 +276,7 @@ describe('PermissionPresetService', () => {
   it('optionOf() presents shipped labels/descriptions, falls back to the raw key, and fixes custom', async () => {
     const ctx = await mounted()
     expect(ctx.permissionPresets.optionOf('danger-full-access')).toEqual({ value: 'danger-full-access', name: 'danger-full-access', description: 'Full file access without approval prompts.' })
+    expect(ctx.permissionPresets.optionOf('system-analysis')).toEqual({ value: 'system-analysis', name: 'system-analysis', description: 'Workspace-confined writes without approval prompts, for commissioned read-only investigations.' })
     expect(ctx.permissionPresets.optionOf('custom')).toEqual({ value: 'custom', name: 'Custom', description: 'Current sandbox and approval settings do not match a preset.' })
     const bare = await mounted({ config: { presets: { plain: { sandbox: 'workspace-write', approval: 'ask' } } } })
     expect(bare.permissionPresets.optionOf('plain')).toEqual({ value: 'plain', name: 'plain' })
@@ -286,7 +294,7 @@ describe('PermissionPresetService', () => {
   })
 
   it('requires an explicit default when composition defaults match no preset', async () => {
-    await expect(mounted({ approvalDefault: 'never' }))
+    await expect(mounted({ bashDefault: 'read-only', approvalDefault: 'never' }))
       .rejects.toThrow(/configure defaultPreset explicitly/)
   })
 

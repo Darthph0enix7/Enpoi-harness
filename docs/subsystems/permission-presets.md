@@ -8,7 +8,7 @@ Source: [`packages/interaction/permission-presets/src/index.ts`](../../packages/
 
 ## The preset table
 
-A preset maps one stable key to a sandbox/approval bundle plus optional client presentation. The default configured table ships `workspace-write` (`workspace-write` + `ask`) and `danger-full-access` (`danger-full-access` + `never`); `custom` and `auto` are reserved and cannot be configured.
+A preset maps one stable key to a sandbox/approval bundle plus optional client presentation. The default configured table ships `read-only` (`read-only` + `ask`), `workspace-write` (`workspace-write` + `ask`), `system-analysis` (`workspace-write` + `never`, for unattended workspace-confined runs), and `danger-full-access` (`danger-full-access` + `never`); `custom` and `auto` are reserved and cannot be configured.
 
 ```ts type-equiv
 /** One preset's sandbox/approval bundle and optional client presentation. */
@@ -28,8 +28,9 @@ interface PresetSpec {
 /** The {@link PermissionPresetService} config: preset table and composition default. */
 interface Config {
   /**
-   * The preset table: name → knob bundle. Defaults to `workspace-write`
-   * (workspace-write + ask) and `danger-full-access` (danger-full-access +
+   * The preset table: name → knob bundle. Defaults to `read-only` (read-only +
+   * ask), `workspace-write` (workspace-write + ask), `system-analysis`
+   * (workspace-write + never), and `danger-full-access` (danger-full-access +
    * never). The names `custom` and `auto` are reserved for derived state and
    * the Auto review integration respectively.
    */

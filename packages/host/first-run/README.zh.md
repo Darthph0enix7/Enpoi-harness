@@ -39,7 +39,7 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-host-first-run/analysis'
   config:
     preset: sysadmin
-    permissionPreset: workspace-write
+    permissionPreset: system-analysis
     timeoutMinutes: 15
 
 - name: '@deepseek-ai/dsh-host-first-run/context'
@@ -52,7 +52,7 @@ kind: "package-reference"
 | `seedVersion` | 空 | 标记；任何已存值都表示种子已经决定过 |
 | `routes` | `true` | 注册 `/system-analysis/start`、`/status`、`/context`、`/accept` 与 `/reject` |
 | `preset` | `sysadmin` | 负责调查的智能体预设；仅为该会话挂载 |
-| `permissionPreset` | `workspace-write` | 强制用于调查会话的权限预设；它只开放该运行自己的临时工作区 |
+| `permissionPreset` | `system-analysis` | 强制用于调查会话的权限预设；它把写入限制在该运行自己的临时工作区，且不发起审批提示，因为无人值守该运行 |
 | `timeoutMinutes` | `15` | 单次调查的硬性上限 |
 
 运行是单例的，且只在客户端显式操作时启动。运行中或已结束时 `start` 返回当前视图，`status` 不会改变它，`context` 返回已存文档或 null，`accept`/`reject` 记录操作员的决定。调查智能体维护一个待办清单，条目即清单各节，宿主把该清单映射到小窗的阶段轨道；智能体用普通的 `write` 工具把 `profile.json` 与 `system-profile.md` 写入该运行的临时工作区，宿主再把两份文件复制到 harness 主目录。缺少智能体运行时、未知预设或超出时限都会让运行以原因失败于任务视图，且不影响 harness。
@@ -116,6 +116,6 @@ Confirm anything the document does not state with read-only commands.
 
 - sysadmin 预设必须挂载 `@deepseek-ai/dsh-host-first-run/context`；该行由 fork 配置文件拥有，harness 仓库只发布导出。
 - 分析只在显式操作（智能体步骤或小窗）时启动；档案被接受或决定被记录后，不再主动提供运行。
-- 调查会话以 `workspace-write` 运行，且仅限它自己的临时工作区，以便智能体写入两份产物；该目录之外的主机对它仍是只读的，提示禁止其他一切改动。
+- 调查会话以随附的 `system-analysis` 预设运行（workspace-write 沙箱、审批 `never`），且仅限它自己的临时工作区，以便智能体写入两份产物；该目录之外的主机对它仍是只读的，提示禁止其他一切改动。
 - 强制程度取决于部署如何命名权限预设；`permissionPreset` 不可用时只记一条警告，并仅依靠提示中的只读规则继续。
 - 调查会话不挂载到 Workspace，因此会出现在历史中，但不在某个工作区的会话列表里。

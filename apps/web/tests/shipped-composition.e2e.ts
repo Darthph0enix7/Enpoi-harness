@@ -627,6 +627,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
     'read-only',
     'workspace-write',
     'danger-full-access',
+    'system-analysis',
   ])
   const headlessRows = composeEntries([
     loadOverlayPatches('shipped headless composition', BASE_PATCH_PATH),

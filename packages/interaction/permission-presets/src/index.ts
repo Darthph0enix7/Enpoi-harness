@@ -158,8 +158,9 @@ export interface PermissionSettings {
 /** The {@link PermissionPresetService} config: preset table and composition default. */
 export interface Config {
   /**
-   * The preset table: name → knob bundle. Defaults to `workspace-write`
-   * (workspace-write + ask) and `danger-full-access` (danger-full-access +
+   * The preset table: name → knob bundle. Defaults to `read-only` (read-only +
+   * ask), `workspace-write` (workspace-write + ask), `system-analysis`
+   * (workspace-write + never), and `danger-full-access` (danger-full-access +
    * never). The names `custom` and `auto` are reserved for derived state and
    * the Auto review integration respectively.
    */
@@ -197,6 +198,10 @@ export class PermissionPresetService extends TypertRemoteService {
       'danger-full-access': {
         sandbox: 'danger-full-access', approval: 'never',
         name: 'danger-full-access', description: 'Full file access without approval prompts.',
+      },
+      'system-analysis': {
+        sandbox: 'workspace-write', approval: 'never',
+        name: 'system-analysis', description: 'Workspace-confined writes without approval prompts, for commissioned read-only investigations.',
       },
     }),
     defaultPreset: z.string().volatile(),
