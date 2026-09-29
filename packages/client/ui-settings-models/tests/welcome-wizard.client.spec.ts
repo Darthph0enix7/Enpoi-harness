@@ -34,9 +34,9 @@ describe('welcome wizard state machine', () => {
     expect(wizardReducer(dirty, { type: 'restart' })).toEqual(initialWizardState())
   })
 
-  it('writes the sandbox preset through the real namespace', () => {
+  it('writes the sandbox preset through the profile entry namespace', () => {
     expect(sandboxWrite('read-only')).toEqual({
-      ns: 'permission-presets',
+      ns: 'permission',
       ops: [{ op: 'set', path: ['defaultPreset'], value: 'read-only' }],
     })
   })
@@ -116,6 +116,18 @@ describe('welcome wizard gating', () => {
     expect(store.store.getSnapshot().wizard.step).toBe('welcome')
     store.close()
     expect(store.store.getSnapshot().visible).toBe(false)
+    store.dispose()
+  })
+
+  it('keeps a refused step write on its own step and clears it on navigation', async () => {
+    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis)
+    await store.load()
+    store.dispatch({ type: 'continue' })
+    store.noteWriteFailure('security', 'refused')
+    expect(store.store.getSnapshot().writeFailure).toEqual({ step: 'security', message: 'refused' })
+
+    store.dispatch({ type: 'goto', step: 'provider' })
+    expect(store.store.getSnapshot().writeFailure).toBeNull()
     store.dispose()
   })
 

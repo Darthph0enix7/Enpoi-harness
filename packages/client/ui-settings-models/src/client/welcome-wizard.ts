@@ -82,9 +82,11 @@ export type WizardAction =
   | { type: 'configured' }
   | { type: 'restart' }
 
-/** The settings write the security step performs for one sandbox preset. */
+/** The settings write the security step performs for one sandbox preset.
+ * The namespace is the profile entry id (`permission` in the base bundle),
+ * never the package name `@deepseek-ai/dsh-permission-presets`. */
 export function sandboxWrite(mode: SandboxMode): WizardWrite {
-  return { ns: 'permission-presets', ops: [{ op: 'set', path: ['defaultPreset'], value: mode }] }
+  return { ns: 'permission', ops: [{ op: 'set', path: ['defaultPreset'], value: mode }] }
 }
 
 /**
@@ -203,10 +205,22 @@ export interface WizardAnalysisApi {
   status: () => Promise<WizardRpcResult<WizardAnalysisView>>
 }
 
+/** One step's refused settings write: the step that caused it and the Host's diagnostic. */
+export interface WizardWriteFailure {
+  /** The step whose write was refused; the note renders only while that step is current. */
+  step: WizardStepId
+  message: string
+}
+
 /** Snapshot rendered by the wizard overlay. */
 export interface WelcomeWizardState {
   status: 'idle' | 'loading' | 'ready' | 'saving' | 'error'
   error: string | null
+  /**
+   * The last step write the Host refused, shown on its own step and cleared by
+   * the next navigation; a failure on one step never surfaces on another.
+   */
+  writeFailure: WizardWriteFailure | null
   /** Durable or process-local completion of the setup flow. */
   completed: boolean
   /** Process-local reopen from the Setup entry; overrides completion. */
@@ -234,6 +248,7 @@ export class WelcomeWizardStore {
   readonly store: SnapshotStore<WelcomeWizardState> = createSnapshotStore<WelcomeWizardState>({
     status: 'idle',
     error: null,
+    writeFailure: null,
     completed: false,
     reopened: false,
     visible: false,
@@ -270,22 +285,30 @@ export class WelcomeWizardStore {
    * @param action - the action to dispatch.
    */
   dispatch(action: WizardAction): void {
-    this.store.update((state) => { state.wizard = wizardReducer(state.wizard, action) })
+    this.store.update((state) => {
+      state.wizard = wizardReducer(state.wizard, action)
+      // A step-local write note never survives leaving its step.
+      if (action.type !== 'configured') state.writeFailure = null
+    })
   }
 
   /** Skip the whole tour from the welcome step: steps 2 to 6 are marked skipped. */
   skipWholeTour(): void {
-    this.store.update((state) => { state.wizard = skipWholeTour() })
+    this.store.update((state) => {
+      state.wizard = skipWholeTour()
+      state.writeFailure = null
+    })
   }
 
   /**
-   * Record a step write the Host refused. The step transition already
-   * happened, so this only raises the non-blocking alert; the next derive
-   * clears it with the scope's own answer.
+   * Record a step write the Host refused as a note on the step that caused it.
+   * The step transition already happened, so the note renders only while that
+   * step is current and is cleared by the next navigation.
+   * @param step - the step whose write was refused.
    * @param message - the Host's refusal diagnostic.
    */
-  noteWriteFailure(message: string): void {
-    this.store.update((state) => { state.error = message })
+  noteWriteFailure(step: WizardStepId, message: string): void {
+    this.store.update((state) => { state.writeFailure = { step, message } })
   }
 
   /** Reopen the wizard from the Setup entry, whatever the marker says. */
@@ -293,6 +316,7 @@ export class WelcomeWizardStore {
     this.store.update((state) => {
       state.reopened = true
       state.wizard = initialWizardState()
+      state.writeFailure = null
       state.visible = true
     })
   }

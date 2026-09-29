@@ -17,7 +17,7 @@ import type { ModelsOperations } from './operations.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import { AddProviderModal } from './AddProviderModal.tsx'
 import {
-  WIZARD_STEPS, intelligenceWrites, sandboxWrite, skippedSteps,
+  WIZARD_FREE_PROVIDER, WIZARD_STEPS, intelligenceWrites, sandboxWrite, skippedSteps,
   type IntelligenceChoice, type SandboxMode, type WizardStepId, type WizardWrite,
 } from './welcome-wizard.ts'
 import type { WelcomeWizardState, WelcomeWizardStore } from './welcome-wizard.ts'
@@ -119,18 +119,22 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   }, [complete, state.status, state.visible])
 
   const kilo = useMemo(
-    () => models.rows.find(row => row.entry.provider === 'kilo'),
+    () => models.rows.find(row => row.entry.provider === WIZARD_FREE_PROVIDER),
     [models.rows],
   )
   const taken = useMemo(() => models.rows.map(row => row.entry.provider), [models.rows])
-  // Rows the provider step renders: a route the add just wrote appears here as
-  // soon as the awaited refresh lands, without a page reload.
-  const configuredProviders = useMemo(
-    () => models.rows
-      .filter(row => row.configured || row.entry.active)
-      .map(row => ({ id: row.entry.provider, name: row.entry.displayName, configured: row.configured })),
-    [models.rows],
-  )
+  // Rows the provider step renders under the featured route card: one row per
+  // route id, and never a plain row for the provider the rich card above
+  // already explains (Kilo, the seeded free default).
+  const configuredProviders = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string; configured: boolean }>()
+    for (const row of models.rows) {
+      if (!row.configured && !row.entry.active) continue
+      if (row.entry.provider === WIZARD_FREE_PROVIDER) continue
+      byId.set(row.entry.provider, { id: row.entry.provider, name: row.entry.displayName, configured: row.configured })
+    }
+    return [...byId.values()]
+  }, [models.rows])
   const protocols = useMemo(() => protocolChoices(models.namespaces.get('llm-pi-ai'), schema), [models.namespaces, schema])
 
   if (!state.visible) return null
@@ -145,23 +149,24 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   }
   const continueStep = (): void => { store.dispatch({ type: 'continue' }) }
 
-  /** Persist one step's writes without holding the step transition; a refusal
-   * surfaces as a non-blocking alert while the wizard keeps its new step. */
-  const persistWrites = (writes: readonly WizardWrite[]): void => {
+  /** Persist one step's writes without holding the step transition. A refusal
+   * becomes a note on the step that caused it, so it never shows on later
+   * steps and clears as soon as the user navigates. */
+  const persistWrites = (writes: readonly WizardWrite[], origin: WizardStepId): void => {
     void applyWrites(operations, writes).then((failure) => {
-      if (failure !== null) store.noteWriteFailure(failure)
+      if (failure !== null) store.noteWriteFailure(origin, failure)
     })
   }
   const securityContinue = (): void => {
     store.dispatch({ type: 'configured' })
     continueStep()
-    persistWrites([sandboxWrite(sandbox)])
+    persistWrites([sandboxWrite(sandbox)], 'security')
   }
   const intelligenceContinue = (): void => {
     const effective: IntelligenceChoice = { ...choice, compaction: choice.compaction && compactionLlm }
     store.dispatch({ type: 'configured' })
     continueStep()
-    persistWrites(intelligenceWrites(effective))
+    persistWrites(intelligenceWrites(effective), 'intelligence')
   }
   const agentsAnalyse = (): void => {
     store.dispatch({ type: 'configured' })
@@ -282,8 +287,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             />
           )}
 
-          {state.error !== null && step !== 'done' && (
-            <p className={styles.error} role="alert" data-wiz-write-error>{state.error}</p>
+          {state.writeFailure !== null && state.writeFailure.step === step && (
+            <p className={styles.error} role="alert" data-wiz-write-error>{state.writeFailure.message}</p>
           )}
 
           {state.analysis !== null && state.analysis !== undefined && (

@@ -24,7 +24,7 @@ const schemaService = new SettingsSchemaService(new Context())
 
 const VIEW: SettingsNamespaceView = {
   autoGenerate: false,
-  ns: 'permission-presets',
+  ns: 'permission',
   schema: {},
   value: {},
   applies: 'live',
@@ -96,10 +96,23 @@ describe('WelcomeWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: zh.wizContinue }))
     await screen.findByText(zh.wizProviderHeading)
     expect(h.operations).toHaveBeenCalledWith(
-      'permission-presets',
+      'permission',
       [{ op: 'set', path: ['defaultPreset'], value: 'read-only' }],
       undefined,
     )
+  })
+
+  it('shows a refused write only on the step that caused it', async () => {
+    const h = mount()
+    fireEvent.click(await screen.findByRole('button', { name: zh.wizStart }))
+    expect(screen.getByText(zh.wizSecurityHeading)).toBeTruthy()
+
+    act(() => { h.store.noteWriteFailure('security', 'the host refused the write') })
+    expect(document.querySelector('[data-wiz-write-error]')?.textContent).toBe('the host refused the write')
+
+    fireEvent.click(screen.getByRole('button', { name: zh.wizContinue }))
+    await screen.findByText(zh.wizProviderHeading)
+    expect(document.querySelector('[data-wiz-write-error]')).toBeNull()
   })
 
   it('writes the background-helper toggles with the Kilo free seats', async () => {
