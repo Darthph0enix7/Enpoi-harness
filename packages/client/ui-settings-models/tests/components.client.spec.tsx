@@ -421,9 +421,10 @@ describe('ModelsSection', () => {
     // A confirmed-missing reference paints the warning dot.
     const missing = within(providerRow('openai')).getByTitle(en.providerMissingKey)
     expect(missing.className).toContain('statusDotYellow')
-    // `zombie` names no reference, so it authenticates natively and reads as
-    // connected rather than missing a key.
-    expect(within(providerRow('zombie')).getByTitle(en.providerConnected)).toBeTruthy()
+    // `zombie` names no reference, so its conventional derived reference is
+    // the only fact to go on; the describe answered nothing resolves it, so
+    // the row reads as missing a key instead of claiming one.
+    expect(within(providerRow('zombie')).getByTitle(en.providerMissingKey)).toBeTruthy()
   })
 
   it('decides setup need from the row state and the read-only posture', () => {

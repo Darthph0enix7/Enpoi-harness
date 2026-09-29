@@ -81,13 +81,13 @@ const SANDBOX_OPTIONS: ReadonlyArray<{ mode: SandboxMode; title: keyof typeof en
   { mode: 'danger-full-access', title: 'wizSandboxFull', body: 'wizSandboxFullBody' },
 ]
 
-/** Run one step's writes and report whether every write was accepted. */
-async function applyWrites(operations: ModelsOperations, writes: readonly WizardWrite[]): Promise<boolean> {
+/** Run one step's writes and return the first refusal message, or null. */
+async function applyWrites(operations: ModelsOperations, writes: readonly WizardWrite[]): Promise<string | null> {
   for (const write of writes) {
     const outcome = await operations.writeSettings(write.ns, write.ops, undefined)
-    if (outcome.kind !== 'written') return false
+    if (outcome.kind !== 'written') return outcome.message
   }
-  return true
+  return null
 }
 
 /** The seven-step overlay. */
@@ -123,6 +123,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     [models.rows],
   )
   const taken = useMemo(() => models.rows.map(row => row.entry.provider), [models.rows])
+  // Rows the provider step renders: a route the add just wrote appears here as
+  // soon as the awaited refresh lands, without a page reload.
+  const configuredProviders = useMemo(
+    () => models.rows
+      .filter(row => row.configured || row.entry.active)
+      .map(row => ({ id: row.entry.provider, name: row.entry.displayName, configured: row.configured })),
+    [models.rows],
+  )
   const protocols = useMemo(() => protocolChoices(models.namespaces.get('llm-pi-ai'), schema), [models.namespaces, schema])
 
   if (!state.visible) return null
@@ -137,18 +145,23 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   }
   const continueStep = (): void => { store.dispatch({ type: 'continue' }) }
 
-  const securityContinue = (): void => {
-    void applyWrites(operations, [sandboxWrite(sandbox)]).then((written) => {
-      if (written) store.dispatch({ type: 'configured' })
-      continueStep()
+  /** Persist one step's writes without holding the step transition; a refusal
+   * surfaces as a non-blocking alert while the wizard keeps its new step. */
+  const persistWrites = (writes: readonly WizardWrite[]): void => {
+    void applyWrites(operations, writes).then((failure) => {
+      if (failure !== null) store.noteWriteFailure(failure)
     })
+  }
+  const securityContinue = (): void => {
+    store.dispatch({ type: 'configured' })
+    continueStep()
+    persistWrites([sandboxWrite(sandbox)])
   }
   const intelligenceContinue = (): void => {
     const effective: IntelligenceChoice = { ...choice, compaction: choice.compaction && compactionLlm }
-    void applyWrites(operations, intelligenceWrites(effective)).then((written) => {
-      if (written) store.dispatch({ type: 'configured' })
-      continueStep()
-    })
+    store.dispatch({ type: 'configured' })
+    continueStep()
+    persistWrites(intelligenceWrites(effective))
   }
   const agentsAnalyse = (): void => {
     store.dispatch({ type: 'configured' })
@@ -228,6 +241,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {step === 'provider' && (
             <ProviderStep
               t={t}
+              providers={configuredProviders}
               installed={kilo !== undefined}
               configured={kilo?.configured === true}
               onAdd={() => { setAddOpen(true) }}
@@ -268,6 +282,10 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             />
           )}
 
+          {state.error !== null && step !== 'done' && (
+            <p className={styles.error} role="alert" data-wiz-write-error>{state.error}</p>
+          )}
+
           {state.analysis !== null && state.analysis !== undefined && (
             <AnalysisDock t={t} analysis={state.analysis} />
           )}
@@ -280,9 +298,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           api={api}
           t={t}
           readOnly={false}
-          onClose={(created) => {
-            setAddOpen(false)
-            void modelsController.load()
+          onClose={async (created) => {
+            // The modal stays up until the provider panel behind it carries
+            // the new route, so the result is visible when the form closes.
+            try {
+              if (created) await modelsController.load()
+            } finally {
+              setAddOpen(false)
+            }
             if (created === true) store.dispatch({ type: 'configured' })
           }}
         />
@@ -367,8 +390,10 @@ function SecurityStep({ t, mode, onMode, onContinue, onBack }: {
   )
 }
 
-function ProviderStep({ t, installed, configured, onAdd, onContinue, onBack }: {
+function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, onBack }: {
   t: T
+  /** Live routes the panel lists; the step's own add refreshes this list. */
+  providers: readonly { id: string; name: string; configured: boolean }[]
   installed: boolean
   configured: boolean
   onAdd: () => void
@@ -383,6 +408,18 @@ function ProviderStep({ t, installed, configured, onAdd, onContinue, onBack }: {
         <strong>{configured ? t('wizProviderConfigured') : installed ? t('wizProviderInstalled') : t('wizProviderMissing')}</strong>
         <span>{t('wizProviderRoute')}</span>
         <span>{t('wizProviderFree')}</span>
+      </div>
+      <div className={styles.providerPanel} data-wiz-providers>
+        {providers.map(provider => (
+          <div
+            key={provider.id}
+            className={styles.providerRow}
+            data-state={provider.configured ? 'configured' : 'installed'}
+          >
+            <strong>{provider.name}</strong>
+            <span>{provider.id}</span>
+          </div>
+        ))}
       </div>
       <p className={styles.fineprint}>{t('wizProviderFineprint')}</p>
       <div className={styles.actions}>

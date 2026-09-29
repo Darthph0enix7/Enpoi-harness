@@ -20,7 +20,7 @@ afterEach(() => {
 function wire(): ModelsWire {
   return {
     settings: { describe: vi.fn(), update: vi.fn(), replace: vi.fn(), mutate: vi.fn() },
-    credentials: { describe: vi.fn(), set: vi.fn(), unset: vi.fn() },
+    credentials: { describe: vi.fn(async () => ({ ok: true as const, value: {} })), set: vi.fn(), unset: vi.fn() },
     llm: {
       discoverModels: vi.fn(),
       listConfigurableProviders: vi.fn(),

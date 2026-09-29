@@ -18,6 +18,19 @@ it('reads complete selections from volatile config and clears omitted reasoning 
   expect(consumer.currentSelection()).toEqual({ provider: 'p', model: 'm' })
 })
 
+it('resolves the keyless Kilo baseline when no provider or model is selected', async () => {
+  const blank = new Context()
+  onTestFinished(() => blank.fiber.dispose())
+  await blank.plugin(DefaultModel, { provider: '', model: '' })
+  expect(blank.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+
+  // A blank field resolves alone: a configured provider keeps its model baseline.
+  const half = new Context()
+  onTestFinished(() => half.fiber.dispose())
+  await half.plugin(DefaultModel, { provider: 'acme', model: '' })
+  expect(half.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: 'kilo-auto/free' })
+})
+
 it('persists complete selections through its owning profile entry', async () => {
   const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
   const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')

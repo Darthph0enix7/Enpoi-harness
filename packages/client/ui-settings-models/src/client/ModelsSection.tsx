@@ -28,7 +28,7 @@ import { ModelGroupsRow } from './ModelGroupsRow.tsx'
 import { ORCHESTRATION_NS } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
-import { protocolChoices, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
+import { protocolChoices, providerKeyConfigured, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
 import { loadHostHeavyManifests, resolveHeavyManifest, useHeavyManifestState } from './heavy-manifest-source.ts'
 import { heavyApi } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyStatusDot } from './HeavyProviderStatus.tsx'
@@ -254,7 +254,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   /** One sidebar row; shared by the mainstream list and the heavy group. */
   const renderProviderRow = (row: ProviderRow): ReactNode => {
     const isSelected = row.entry.provider === selectedProviderId
-    const isConfigured = row.credential?.configured === true || !row.apiKeyEnv
+    const isConfigured = providerKeyConfigured(row)
     const modelCount = modelCountByProvider.get(row.entry.provider)
 
     return (
@@ -403,9 +403,14 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           api={api}
           t={t}
           readOnly={!state.writable}
-          onClose={(created) => {
-            setAddModalOpen(false)
-            if (created) void controller.load()
+          onClose={async (created) => {
+            // The modal stays up until the join that renders the new row has
+            // answered, so the provider is on screen when the form goes away.
+            try {
+              if (created) await controller.load()
+            } finally {
+              setAddModalOpen(false)
+            }
           }}
         />
 

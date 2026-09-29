@@ -79,11 +79,13 @@
 
     # The transport-independent default for Agents created by entry points.
     # Settings may supply a saved selection; consumers read it at creation time.
+    # The shipped baseline is the keyless Kilo Gateway free tier, so a Session
+    # with nothing selected still starts on a provider that answers without a key.
     - id: agent-default-model
       name: '@deepseek-ai/dsh-agent-default-model'
       config:
-        provider: deepseek-official
-        model: deepseek-flash
+        provider: kilo
+        model: kilo-auto/free
 
     # First-run defaults. On a fresh settings document with no provider
     # routes, this writes the keyless Kilo Gateway route and points the

@@ -2,16 +2,23 @@
 /** Adding a provider discovers and stores its models before the modal closes. */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
-import type { ModelsWire } from '../src/client/store.ts'
+import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 
 afterEach(cleanup)
 
+/** A discovery refusal as the Remote face delivers it: a real RemoteError. */
+function discoveryRefused(message: string): RemoteError<'llm/model-discovery-rejected'> {
+  return new RemoteError('llm/model-discovery-rejected', message, { settingsNs: 'llm-pi-ai' })
+}
+
 function wire(discoverModels: ReturnType<typeof vi.fn>, mutate: ReturnType<typeof vi.fn>): ModelsWire {
   return {
     settings: { describe: vi.fn(), update: vi.fn(), replace: vi.fn(), mutate },
-    credentials: { describe: vi.fn(), set: vi.fn(async () => ({ ok: true as const, value: undefined })), unset: vi.fn() },
+    // eslint-disable-next-line @stylistic/max-len -- single-line credentials fixture
+    credentials: { describe: vi.fn(async () => ({ ok: true as const, value: {} })), set: vi.fn(async () => ({ ok: true as const, value: undefined })), unset: vi.fn() },
     llm: {
       discoverModels,
       listConfigurableProviders: vi.fn(async () => ({ ok: true as const, value: [] })),
@@ -29,7 +36,7 @@ it('discovers and stores the new provider models before closing', async () => {
     value: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>
   }>()
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(() => discovery.promise)
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(() => discovery.promise)
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -77,7 +84,7 @@ it('discovers and stores the new provider models before closing', async () => {
 
 it('closes with the provider created when discovery is refused', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(async () => ({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: false as const, error: discoveryRefused('no endpoint') }))
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -100,7 +107,7 @@ it('closes with the provider created when discovery is refused', async () => {
 
 it('closes with the provider created when discovery rejects', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(async () => { throw new Error('transport down') })
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => { throw new Error('transport down') })
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -122,7 +129,7 @@ it('closes with the provider created when discovery rejects', async () => {
 
 it('offers /models discovery and the manual list when a config-only route resolves no models', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(async () => ({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: false as const, error: discoveryRefused('no endpoint') }))
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -174,8 +181,8 @@ it('offers /models discovery and the manual list when a config-only route resolv
 
 it('retries /models from the recovery panel and rewrites the full profile', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn()
-    .mockResolvedValueOnce({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } })
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>()
+    .mockResolvedValueOnce({ ok: false as const, error: discoveryRefused('no endpoint') })
     .mockResolvedValueOnce({ ok: true as const, value: [{ id: 'zen-1', name: 'Zen One' }] })
   const onClose = vi.fn()
   render(<AddProviderModal
@@ -223,7 +230,7 @@ it('keeps a repairable recovery panel when the profile write itself names missin
     ok: false as const,
     error: { code: 'settings/invalid', message: 'llm-pi-ai: provider "opencode" resolves no models; the installed catalog does not describe this route' },
   }))
-  const discoverModels = vi.fn()
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>()
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -245,7 +252,7 @@ it('keeps a repairable recovery panel when the profile write itself names missin
 
 it('closes without recovery when the installed catalog describes the route', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [] }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: true as const, value: [] }))
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -278,7 +285,7 @@ it('closes without recovery when the installed catalog describes the route', asy
 
 it('names a required key plainly, and does not ask a keyless preset for one', () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn()
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>()
   render(<AddProviderModal
     open
     taken={[]}
@@ -307,7 +314,7 @@ it('keeps the recovery panel usable when the retrying write rejects', async () =
       error: { code: 'settings/rejected', message: 'llm-pi-ai: provider "opencode" resolves no models; the installed catalog does not describe this route' },
     })
     .mockRejectedValue(new Error('transport down'))
-  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'zen-1', name: 'Zen One' }] }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: true as const, value: [{ id: 'zen-1', name: 'Zen One' }] }))
   const onClose = vi.fn()
   render(<AddProviderModal
     open
@@ -329,7 +336,7 @@ it('keeps the recovery panel usable when the retrying write rejects', async () =
   expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addDiscoverRetry }).disabled).toBe(false)
 
   // A retry that reports no models keeps the panel open with that message.
-  discoverModels.mockResolvedValueOnce({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } })
+  discoverModels.mockResolvedValueOnce({ ok: false as const, error: discoveryRefused('no endpoint') })
   fireEvent.click(screen.getByRole('button', { name: en.addDiscoverRetry }))
   await waitFor(() => { expect(screen.getByText('no endpoint')).toBeTruthy() })
   expect(screen.getByRole<HTMLButtonElement>('button', { name: en.addDiscoverRetry }).disabled).toBe(false)
@@ -343,7 +350,7 @@ it('keeps the recovery panel usable when the retrying write rejects', async () =
 
 it('keeps the recovery panel when the route still carries a catalog diagnostic', async () => {
   const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
-  const discoverModels = vi.fn(async () => ({ ok: false as const, error: { code: 'llm/discovery-failed', message: 'no endpoint' } }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: false as const, error: discoveryRefused('no endpoint') }))
   const onClose = vi.fn()
   render(<AddProviderModal
     open

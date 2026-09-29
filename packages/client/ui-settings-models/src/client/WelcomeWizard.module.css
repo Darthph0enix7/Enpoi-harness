@@ -333,6 +333,42 @@
   font-size: 12px;
 }
 
+/* The live provider rows on the first-provider step: the add's own refresh
+   replaces this list in place, so a stored route shows without a reload. */
+.providerPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.providerRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.providerRow[data-state='configured'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
+}
+
+.providerRow strong {
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+}
+
+.providerRow span {
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .offer {
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent);
   background: color-mix(in srgb, var(--dsw-alias-brand-primary) 7%, var(--dsw-alias-bg-layer-1));

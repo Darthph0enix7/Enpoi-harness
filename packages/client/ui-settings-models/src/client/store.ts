@@ -334,6 +334,19 @@ export function providerUsable(row: ProviderRow): boolean {
   return row.credential?.configured === true
 }
 
+/**
+ * Whether a row's key is actually present: the reference its resolved profile
+ * names, or the conventional derived reference the keyless and dormant rows
+ * are described under, as the credentials describe answered. A missing or
+ * refused describe is not a configured key — a route naming no reference is
+ * not one either.
+ * @param row - one joined provider row.
+ * @returns whether the credentials describe reports a resolving value.
+ */
+export function providerKeyConfigured(row: ProviderRow): boolean {
+  return (row.credential ?? row.derivedCredential)?.configured === true
+}
+
 /** First-run onboarding readiness derived only from the shared Models join. */
 export type OnboardingReadiness =
   | { kind: 'loading' }

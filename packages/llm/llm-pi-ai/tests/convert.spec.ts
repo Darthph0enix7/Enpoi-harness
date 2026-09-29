@@ -859,6 +859,13 @@ describe('mapStopReason / mapUsage', () => {
     })
   })
 
+  it('classifies a gateway-reported empty completion as retryable EMPTY_RESPONSE', () => {
+    // Kilo's gateway relays a degenerate upstream completion with this exact
+    // wording; the turn must retry it, not die as a catch-all PI_AI_ERROR.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'Provider returned an empty response' })))
+      .toEqual({ kind: 'error', failure: { message: 'Provider returned an empty response', code: EMPTY_RESPONSE_CODE } })
+  })
+
   it('keeps a thinking-only stop successful (any block counts as content)', () => {
     expect(mapStopReason(assistant({ stopReason: 'stop', content: [{ type: 'thinking', thinking: 'mull' }] })))
       .toEqual({ kind: 'stop' })

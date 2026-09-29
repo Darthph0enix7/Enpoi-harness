@@ -1,5 +1,7 @@
 /**
  * Default model selection for an Agent without a session-specific selection.
+ * A configured pair that names no provider or model resolves to the keyless
+ * Kilo Gateway free tier, so an Agent is never created without a provider.
  *
  * @module @deepseek-ai/dsh-agent-default-model
  */
@@ -30,6 +32,28 @@ export interface Config {
   chain?: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+}
+
+/**
+ * Route the baseline selection resolves to when no provider is configured:
+ * the keyless Kilo Gateway, which the first-run seed also writes.
+ */
+export const BASELINE_PROVIDER = 'kilo'
+/** Model the baseline selection resolves to: the gateway's free auto tier. */
+export const BASELINE_MODEL = 'kilo-auto/free'
+
+/**
+ * Resolve a possibly unset provider/model pair against the keyless baseline.
+ * A blank field is an unset selection, never a route or model id, so a
+ * deployment that selects nothing still starts every Session on a provider.
+ * @param configured - provider and model as configured; blank means unset.
+ * @returns the configured pair, or the Kilo free-auto baseline per blank field.
+ */
+export function resolveBaseline(configured: { provider: string; model: string }): { provider: string; model: string } {
+  return {
+    provider: configured.provider === '' ? BASELINE_PROVIDER : configured.provider,
+    model: configured.model === '' ? BASELINE_MODEL : configured.model,
+  }
 }
 
 /** Project stored settings onto the Agent-facing selection type. */
@@ -77,7 +101,10 @@ export class AgentDefaultModelConfig extends Service {
     const reasoningEffort = this.config.reasoningEffort.get()
     const chain = this.config.chain?.get()
     return selection({
-      provider: this.config.provider.get(), model: this.config.model.get(),
+      ...resolveBaseline({
+        provider: this.config.provider.get(),
+        model: this.config.model.get(),
+      }),
       ...chain === undefined ? {} : { chain },
       ...reasoningEffort === undefined ? {} : { reasoningEffort },
     })

@@ -278,6 +278,16 @@ export class WelcomeWizardStore {
     this.store.update((state) => { state.wizard = skipWholeTour() })
   }
 
+  /**
+   * Record a step write the Host refused. The step transition already
+   * happened, so this only raises the non-blocking alert; the next derive
+   * clears it with the scope's own answer.
+   * @param message - the Host's refusal diagnostic.
+   */
+  noteWriteFailure(message: string): void {
+    this.store.update((state) => { state.error = message })
+  }
+
   /** Reopen the wizard from the Setup entry, whatever the marker says. */
   reopen(): void {
     this.store.update((state) => {

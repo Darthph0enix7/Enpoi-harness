@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -20,7 +20,12 @@ export interface AddProviderModalProps {
   api: ModelsWire
   t: (key: keyof typeof en) => string
   readOnly: boolean
-  onClose: (created?: boolean) => void
+  /**
+   * Close the modal; `created` marks a route that was stored. The returned
+   * promise settles after the owner refreshed its provider list, so the modal
+   * stays up until the new route is visible behind it.
+   */
+  onClose: (created?: boolean) => void | Promise<void>
 }
 
 /** Unique route id: base, then base-1, base-2... until free. */
@@ -97,9 +102,58 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     return POPULAR_PROVIDERS.map(id => byId.get(id)).filter((p): p is ProviderTemplate => p !== undefined)
   }, [templates])
 
+  const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
+  // The convention reference the selected preset names, when it names one:
+  // the key field probes it so its label cannot read as a key already in
+  // place while nothing resolves it.
+  const presetEnvRef = selected !== null && selected !== 'empty' && !keylessSelected
+    && selected.env.length > 0
+    ? selected.env[0]
+    : undefined
+  const [envRefAnswer, setEnvRefAnswer] = useState<{ ref: string; configured: boolean } | undefined>(undefined)
+  // An answer belongs to the reference it described: a selected preset reads
+  // only its own answer, so a late reply for a previously selected route
+  // cannot lend this field a claim.
+  const envRefConfigured = presetEnvRef !== undefined && envRefAnswer?.ref === presetEnvRef
+    ? envRefAnswer.configured
+    : undefined
+  useEffect(() => {
+    if (!open || presetEnvRef === undefined) return
+    void api.credentials.describe([presetEnvRef]).then((response) => {
+      if (!response.ok) return
+      const described = response.value[presetEnvRef]
+      if (described !== undefined) setEnvRefAnswer({ ref: presetEnvRef, configured: described.configured === true })
+    }).catch(() => {
+      // A refused describe leaves the field with no configured claim.
+    })
+  }, [open, api.credentials, presetEnvRef])
+
+  // Reopening starts from the template list: a form left over from the last
+  // add would otherwise hide the created route behind its old slug and make
+  // the same id read as taken instead of showing the fresh list.
+  useEffect(() => {
+    if (open) return
+    setSearch('')
+    setSelected(null)
+    setProviderId('')
+    setDisplayName('')
+    setBaseURL('')
+    setApiKey('')
+    setBusy(false)
+    setDiscovering(false)
+    setError(null)
+    setManualModels('')
+    setRecovery(null)
+    setHeavyMode('reuse')
+    setHeavyKey('')
+    setHeavyStatus(null)
+    setHeavyChecking(false)
+    setHeavyJob(null)
+    heavyModeTouched.current = false
+  }, [open])
+
   if (!open) return null
 
-  const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
   // A preset that names an environment reference genuinely needs a key: say so
   // plainly while still allowing a save without one (the route stays
   // repairable from the Models page).
@@ -176,7 +230,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         setError(`${result.value.blocked.reason} (${result.value.blocked.plannedWith})`)
         return
       }
-      onClose(true)
+      await onClose(true)
       return
     }
     const started = await heavyApi.install(manifest.id, heavyKey)
@@ -197,7 +251,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     if (started.value.job !== undefined) setHeavyJob(started.value.job)
     const final = await pollHeavyJob(manifest.id, setHeavyJob)
     if (final?.state === 'succeeded') {
-      onClose(true)
+      await onClose(true)
       return
     }
     setError(final?.error ?? t('heavyFailed'))
@@ -321,7 +375,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       if ('models' in answer && answer.models.length > 0) {
         // The full profile is rewritten: a rejected first write left no route,
         // so a models-only write would store a partial profile.
-        if (await storeProfile(id, [], answer.models)) onClose(true)
+        if (await storeProfile(id, [], answer.models)) await onClose(true)
         return
       }
       enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
@@ -343,7 +397,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setBusy(true)
     setError(null)
     try {
-      if (await storeProfile(id, manual)) onClose(true)
+      if (await storeProfile(id, manual)) await onClose(true)
     } catch (err) {
       setError(messageOf(err))
     } finally {
@@ -409,7 +463,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       }
 
       if (manual.length > 0) {
-        onClose(true)
+        await onClose(true)
         return
       }
 
@@ -419,8 +473,11 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setDiscovering(true)
       const answer = await runDiscovery(id, cleanKey)
       if ('models' in answer && answer.models.length > 0) {
-        await storeDiscovered(id, answer.models)
-        onClose(true)
+        // A refused model-list write keeps the panel open with its message:
+        // closing here would hide the route's missing models behind a
+        // refresh that cannot resolve them.
+        if (!await storeDiscovered(id, answer.models)) return
+        await onClose(true)
         return
       }
       const needsModels = selected === 'empty' ? false : await routeNeedsModels(id)
@@ -428,7 +485,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       if (!needsModels) {
         // The installed catalog describes this route (or the empty provider
         // keeps its placeholder model); the models are optional.
-        onClose(true)
+        await onClose(true)
         return
       }
       enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
@@ -443,13 +500,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   return (
     <Modal
       open={open}
-      onClose={() => onClose(false)}
+      onClose={() => { void onClose(false) }}
       title={selected === null ? t('add') : `Add ${displayName || 'Provider'}`}
       closeLabel={t('close')}
       className={styles['addProviderDialog'] ?? ''}
       footer={
         selected === null ? (
-          <Button variant="outline" onClick={() => onClose(false)}>
+          <Button variant="outline" onClick={() => { void onClose(false) }}>
             {t('cancel')}
           </Button>
         ) : (
@@ -538,7 +595,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                 >
                   {t('addSaveModels')}
                 </Button>
-                <Button variant="ghost" disabled={busy} onClick={() => onClose(true)}>
+                <Button variant="ghost" disabled={busy} onClick={() => { void onClose(true) }}>
                   {t('addRecoveryClose')}
                 </Button>
               </div>
@@ -609,7 +666,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                   value={apiKey}
                   placeholder={keylessSelected
                     ? t('keylessApiKeyPlaceholder')
-                    : selected !== 'empty' && selected.env.length > 0 ? `Env ref: ${selected.env[0]}` : 'Enter API Key (optional for local/proxy endpoints)'}
+                    : presetEnvRef === undefined
+                      ? 'Enter API Key (optional for local/proxy endpoints)'
+                      : envRefConfigured === undefined
+                        ? `Env ref: ${presetEnvRef}`
+                        : envRefConfigured
+                          ? t('addEnvRefConfigured').replace('{ref}', presetEnvRef)
+                          : t('addEnvRefMissing').replace('{ref}', presetEnvRef)}
                   onChange={e => setApiKey(e.target.value)}
                   disabled={busy || readOnly}
                 />

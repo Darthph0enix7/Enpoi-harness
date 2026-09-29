@@ -271,7 +271,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   )
   const [keyInput, setKeyInput] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [keyState, setKeyState] = useState<CredentialInfo | undefined>(row.credential)
+  const [keyState, setKeyState] = useState<CredentialInfo | undefined>(
+    row.credential ?? row.derivedCredential,
+  )
   const [modelSearch, setModelSearch] = useState('')
   // 0ms hidden cache: like ModelSelect, parse once per prefsVersion, not per click
   const [prefsVersion, setPrefsVersion] = useState(0)
@@ -380,6 +382,12 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setSaveSuccess(false)
     setModelSearch('')
   }, [providerId])
+
+  // The page re-joins credentials on every load; the badge must follow the
+  // latest describe answer instead of keeping the first render's claim.
+  useEffect(() => {
+    setKeyState(row.credential ?? row.derivedCredential)
+  }, [providerId, row.credential, row.derivedCredential])
 
   // Server reconciliation for the stored profile fields: apply the server
   // value only when it actually moved, so a no-op echo cannot clobber an
@@ -936,7 +944,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }
   }
 
-  const isConfigured = keyState?.configured === true || !row.apiKeyEnv
+  const isConfigured = keyState?.configured === true
   // Dashboard links for a non-heavy provider that declares one; the heavy card
   // (below) renders the heavy manifest's own detected/local dashboards.
   const nonHeavyDashboards = resolveHeavyManifest(providerId) === undefined ? providerDashboardUrls(providerId) : []
