@@ -95,7 +95,7 @@ describe('role registry helpers', () => {
     const compaction = categories.find(category => category.key === 'supervision')
       ?.seats.find(seat => seat.id === 'compaction')
 
-    expect(compaction?.name).toBe('Compaction Summariser')
+    expect(compaction?.name).toBe('CTX Summarizer')
     expect(compaction?.defaultLabel).toBe('Inherit')
     expect(compaction?.defaultKind).toBe('inherit')
     expect(compaction?.defaultHint).toContain('prefix cache')

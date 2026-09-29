@@ -214,7 +214,7 @@ export function AgentModelsBody({
         ))}
       </div>
       <footer className={css.foot}>
-        <span>{`Inherit follows the dispatching agent's model · The keeper has no conversation to inherit from, so it uses its built-in default: ${KEEPER_DEFAULT_ROUTE} · Compaction should stay on the session model (a different summariser loses the prefix cache and pays full input price for the region)`}</span>
+        <span>{`Inherit follows the dispatching agent's model · The keeper has no conversation to inherit from, so it uses its built-in default: ${KEEPER_DEFAULT_ROUTE} · The context summarizer should stay on the session model (a different route loses the prefix cache and pays full input price for the region)`}</span>
         <button
           type="button"
           className={css.footLink}

@@ -159,7 +159,7 @@ const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
     defaultKind: 'builtin-default',
   },
   compaction: {
-    name: 'Compaction Summariser',
+    name: 'CTX Summarizer',
     icon: 'M3 3h10v10H3zM3 6h10M3 10h4m2 2v3m0 0l-1.5-1.5M9 15l1.5-1.5',
     group: 'supervision',
     defaultLabel: 'Inherit',

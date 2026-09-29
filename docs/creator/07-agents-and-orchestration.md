@@ -44,10 +44,10 @@ How agent presets, seats, councils, the Oracle, and delegation work, and how to 
 
 - A **seat** is a named model assignment key. Seat routing lives in `enpoi-orchestration.personas[<seatId>]` = `{ provider, model, reasoningEffort?, chain? }` (read freshest per spawn, `profiles/web/packages/enpoi-orchestration` consumers; e.g. council `core/fiber.ts:274-290`).
 - Fleet groups render in fixed order (`packages/client/ui-brand-enpoi/src/client/role-registry.ts:50-58`): `supervision`, `specialists`, `council`, `custom` — plus one group per registered council and `UNGROUPED` for persona-only ids.
-- Shipped seats per group: supervision — The Oracle, Context Keeper, Compaction Summariser; specialists — Fixer, Explorer, Librarian, Designer; council — Referee, Chair, and each council's debaters (role-registry.ts:152-183).
+- Shipped seats per group: supervision — The Oracle, Context Keeper, CTX Summarizer; specialists — Fixer, Explorer, Librarian, Designer; council — Referee, Chair, and each council's debaters (role-registry.ts:152-183).
 - Unassigned seats fall back two ways (`fleetSeatState`, role-registry.ts:89-92): `inherit` = the dispatching/session model; `builtin-default` = the seat's own plugin route.
   - **Keeper:** always `builtin-default: freellmapi/auto` (role-registry.ts:61,157) — it runs outside a conversation and has no parent model to inherit from. Do not expect it to follow the session model.
-  - **Compaction Summariser:** designated seat, always rendered, `inherit` (session model). The footer states the economics: a different summariser model loses the prompt-prefix cache and pays full input price for the region (`AgentModelsBody.tsx:217`); the panel explains all three states — assigned / inherit / built-in default (AgentModelsBody.tsx:8-18).
+  - **CTX Summarizer:** designated seat, always rendered, `inherit` (session model). The footer states the economics: a different summarizer model loses the prompt-prefix cache and pays full input price for the region (`AgentModelsBody.tsx:217`); the panel explains all three states — assigned / inherit / built-in default (AgentModelsBody.tsx:8-18).
 - To retarget a seat: Settings → Agent Models → Fleet Routing, pick a provider/model for the row (writes `personas[<id>]`); Reset clears it back to the default. A chain assignment resolves to the first enabled link at run time (compaction: `compaction-basic/src/settings.ts:138-161`; councils: `fiber.ts:238-272`).
 
 ## 4. Councils

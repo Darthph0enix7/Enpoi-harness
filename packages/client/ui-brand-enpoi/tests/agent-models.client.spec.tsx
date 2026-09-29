@@ -153,7 +153,7 @@ describe('AgentModelsBody — dynamic fleet', () => {
     expect(screen.getByText('Fixer')).toBeTruthy()
     expect(screen.getByText('Context Keeper')).toBeTruthy()
     // The compaction seat is always rendered, assigned or not.
-    expect(screen.getByText('Compaction Summariser')).toBeTruthy()
+    expect(screen.getByText('CTX Summarizer')).toBeTruthy()
     // Cleared registry rows + the always-rendered compaction row show the
     // explicit inherit placeholder (5 registry seats + compaction).
     expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBe(6)

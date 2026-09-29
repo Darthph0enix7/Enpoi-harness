@@ -79,7 +79,7 @@ const KEEPER_ROWS: ParamRow[] = [
 ]
 
 const COMPACTION_ROWS: ParamRow[] = [
-  { key: 'thresholdRatio', label: 'Fire at', hint: 'Window fraction that starts a compaction', min: 0.05, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+  { key: 'thresholdRatio', label: 'Fire at', hint: 'Window fraction that triggers summarization', min: 0.05, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
   { key: 'retainRatio', label: 'Keep tail', hint: 'Window fraction kept verbatim', min: 0.01, max: 0.99, step: 0.01, format: v => `${Math.round(v * 100)}%` },
   { key: 'headroomTokens', label: 'Headroom', hint: 'Safety margin beyond the output reserve', min: 1024, max: 500_000, step: 1024, format: v => `${v.toLocaleString()} tok` },
   { key: 'retainTokens', label: 'Tail floor', hint: 'Absolute retained tail; 0 = use the fraction', min: 0, max: 500_000, step: 512, format: v => v === 0 ? 'off' : `${v.toLocaleString()} tok` },
@@ -130,7 +130,7 @@ function Group({
       </div>
       {note !== undefined && <div className={css.groupNote}>{note}</div>}
       <div className={css.rows}>
-        {rows.map(row => {
+        {rows.map((row) => {
           const value = group[row.key]
           const isBool = row.bool === true || typeof value === 'boolean'
           return (
@@ -212,7 +212,7 @@ function NumberRow({ id, row, value }: { id: keyof OrchestrationParams; row: Par
         step={row.step ?? 1}
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
-        onKeyDown={e => {
+        onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.currentTarget.blur()
           }
@@ -245,12 +245,12 @@ export function OrchestrationSettings({
         onReset={() => resetOrchestrationGroup('keeper')} />
       <Group
         id="compaction"
-        title="Compaction"
+        title="Context Summarizer"
         icon={ICONS.compaction}
         rows={COMPACTION_ROWS}
         params={params}
         onReset={() => resetOrchestrationGroup('compaction')}
-        note="The defaults are the shipped behaviour; values apply on the next decision. A summariser model other than the session's breaks the prompt-prefix cache and pays full input price for the whole region — only free/local routes are reliably cheaper."
+        note="The defaults are the shipped behaviour; values apply on the next decision. A summarizer model other than the session's breaks the prompt-prefix cache and pays full input price for the whole region — only free/local routes are reliably cheaper."
         footer={<CompactionReadout readout={policy} />}
       />
       <Group id="memory" title="Memory" icon={ICONS.memory} rows={MEMORY_ROWS} params={params}
