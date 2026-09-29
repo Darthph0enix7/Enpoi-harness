@@ -24,10 +24,10 @@ Not profile bundles: `dsh-enpoi-oracle`, `dsh-enpoi-debug`, and `dsh-enpoi-tool-
 
 - Preset data: id `kilo`, protocol `openai-completions`, base URL `https://api.kilo.ai/api/gateway`, env `KILO_API_KEY` (`$REPO/packages/client/ui-settings-models/src/client/provider-presets.ts:887-895`).
 - **Keyless by policy**: `kilo` is in `KEYLESS_PRESET_IDS` (`provider-templates.ts:49`), so the Add-Provider wizard does not require a key; a supplied key switches the same route to BYOK.
-- What works without sign-in: the free tier — `kilo-auto/free` (256k context, tools, reasoning), `stealth/space-bunny-alpha`, `poolside/laguna-s-2.1:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `dots-studio/dots-3-note-preview:free` (prices 0/0 in the profile patch, e.g. `$PROFILE/cordis.patch.yml:17535-17615`).
+- What works without sign-in: the free tier — `kilo-auto/free` (256k context, tools, reasoning), `stealth/space-bunny-alpha`, `poolside/laguna-s-2.1:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `dots-studio/dots-3-note-preview:free`; discovery syncs the full catalogue into the route after first boot.
 - What needs sign-in: paid/gated models carry `gated: true` + `gateReason: sign-in required` — `kilo-auto/efficient`, `anthropic/claude-opus-5.5`, `openai/gpt-6-sol`, and the `deepseek/*` set in the same block. The picker dims them with that reason; a `gated` rule can exclude them (doc 03).
 - `enpoi-provider-sync` stamps `gated` from the listing (`isFree === false` ⇒ gated) and merges the gate reason (`enpoi-provider-sync/src/index.ts:106,458,895-899`).
-- Default session route lives in the profile patch row `agent-default-model` (provider/model) — check the row, do not assume.
+- Default session route is seeded by the first-run plugin (`packages/host/first-run`): provider `kilo`, model `kilo-auto/free`. The stored `agent-default-model` row appears in the profile patch after the first boot — check the row, do not assume.
 - Add/remove in Settings → Models or the Add-Provider wizard; discovery runs automatically after add (doc 03).
 
 ## Default tool set
@@ -70,4 +70,4 @@ Settings-document toggles apply hot on the next spawn/render; bundle list change
 ## Where "install defaults" come from
 
 - Installer seeds `$DSH_HOME` once: `fresh-settings.yaml` → `settings.yaml`, plus presets, skills, systemd/fish helpers (`$REPO/scripts/install.sh:1-25,627,664`).
-- The profile's own patch layer (`$PROFILE/cordis.patch.yml`) is the operator document: it may already define providers/personas. Read it before claiming a value is a "fresh default".
+- The profile's own patch layer (`$PROFILE/cordis.patch.yml`) ships as a fresh-install template: composition rows plus the orchestration parameters that `fresh-settings.yaml` also carries. Operator state (providers, default model, UI settings, seats, permissions, grants, MCP catalog, chains, favorites, whiteboard) is written into a machine's own patch by the settings service; `scripts/install.sh` and the sandbox strip those rows from a freshly copied patch, and they are never committed to the profile repo. Read the template before claiming a value is a "fresh default".

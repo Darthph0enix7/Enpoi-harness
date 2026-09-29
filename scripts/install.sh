@@ -686,16 +686,65 @@ stage_profile_source() { # src kind stage
   return 0
 }
 
-# Drop the `onboardingCompleted` row from a freshly copied profile patch in
-# place: a fresh home must boot into the first-run wizard, while the live
-# profile keeps its marker (its setup is complete). A single-line removal keeps
-# every other byte of the large YAML document intact.
+# The three strippers below remove configured-machine state from a freshly
+# copied profile patch in place. They exist as a second line of defence behind
+# the sanitized repo template: a source tree that is itself a live profile (a
+# local profile dir, a stale clone) must still install a fresh home. Editing
+# the text line-by-line keeps the large YAML document's formatting, multi-line
+# strings, and `!!js` tags intact.
+
+# Drop the `onboardingCompleted` marker: a fresh home must boot into the
+# first-run wizard, while the live profile keeps its marker (that setup is
+# complete).
 strip_onboarding_completed() { # patch-file
   local file="$1" tmp="$1.strip-$$"
   [ -f "$file" ] || return 0
   cp -p "$file" "$tmp"
   grep -v -E '^[[:space:]]*onboardingCompleted:' "$file" > "$tmp" || true
   if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
+# Drop whole top-level `- id: <id>` rows (and their blocks): the settings rows
+# a configured machine accumulates — its provider routes, its default-model
+# seat, its UI settings.
+strip_patch_rows() { # patch-file id...
+  local file="$1" tmp="$1.rows-$$"
+  shift
+  [ -f "$file" ] || return 0
+  awk -v ids="$*" '
+    BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1 }
+    /^- / { id = $0; sub(/^- id:[[:space:]]*/, "", id); sub(/[[:space:]]+$/, "", id); skip = (id in drop) }
+    !skip { print }
+  ' "$file" > "$tmp"
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
+# Drop operator-owned sections (4-space keys such as `    permissions:`) from
+# the `enpoi-orchestration` row: seats, grants, MCP catalog/status, chains,
+# favorites, whiteboard, tool-group overrides. Only that row is touched.
+strip_patch_sections() { # patch-file key...
+  local file="$1" tmp="$1.sect-$$"
+  shift
+  [ -f "$file" ] || return 0
+  awk -v keys="$*" '
+    BEGIN { n = split(keys, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1 }
+    /^- / { inorch = ($0 == "- id: enpoi-orchestration") }
+    inorch && /^    [A-Za-z0-9_@.\/-]+:/ { key = $0; sub(/^    /, "", key); sub(/:.*/, "", key); skip = (key in drop) }
+    !skip { print }
+  ' "$file" > "$tmp"
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
+# Fresh-home patch: strip everything that belongs to the configured machine.
+strip_fresh_patch() { # patch-file
+  local file="$1"
+  strip_patch_rows "$file" agent-default-model ui-settings-general ui-settings-models ui-theme llm-pi-ai
+  strip_patch_sections "$file" capabilities mcpServers mcpStatus personas roles councils chains \
+    catalogRules uiPreferences permissions whiteboard toolGroups
+  strip_onboarding_completed "$file"
   return 0
 }
 
@@ -741,8 +790,9 @@ copy_profile_tree() { # src dst mode(seed|refresh)
       mkdir -p "$(dirname "$d")" || return 1
       cp -p "$src/$rel" "$d" || return 1
       # Seed mode only (refresh keeps the live patch above): a fresh home must
-      # not inherit the live device's wizard marker or first-run is skipped.
-      case "$rel" in cordis.patch.yml) strip_onboarding_completed "$d";; esac
+      # not inherit the live device's wizard marker, settings rows, or
+      # orchestration state.
+      case "$rel" in cordis.patch.yml) strip_fresh_patch "$d";; esac
     fi
   done < <( cd "$src" && find . -mindepth 1 -print0 )
   return 0
