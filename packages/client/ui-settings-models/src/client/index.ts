@@ -12,6 +12,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: pulls the shell's SlotMap merge (the 'shell.overlay' entry).
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: pulls the ctx.remote merge and the forwarded-event key face
 // (settings/credentials invalidations ride the allowlist) into this program.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -29,6 +31,9 @@ import { WelcomeNotice } from './WelcomeNotice.tsx'
 import type { WelcomeNoticeInjected } from './WelcomeNotice.tsx'
 import { WelcomeWizard } from './WelcomeWizard.tsx'
 import type { WelcomeWizardInjected } from './WelcomeWizard.tsx'
+import { SystemAnalysisChip } from './SystemAnalysisChip.tsx'
+import type { SystemAnalysisChipInjected } from './SystemAnalysisChip.tsx'
+import { SystemAnalysisStore, systemAnalysisApi } from './system-analysis.ts'
 import { SetupSection } from './SetupSection.tsx'
 import type { SetupSectionInjected } from './SetupSection.tsx'
 import { WelcomeNoticeStore } from './welcome-store.ts'
@@ -178,6 +183,20 @@ export function apply(ctx: ClientContext): void {
     hooks: { wizard: wizardController.store },
     t,
   })
+  // The frame-wide system-analysis chip owns its own store: it auto-starts the
+  // analysis on a machine with no profile, follows the run, and carries the
+  // accept/reject decision independently of the wizard.
+  const analysisController = new SystemAnalysisStore(systemAnalysisApi)
+  const analysisInjected = (): SystemAnalysisChipInjected => ({
+    actions: {
+      open: () => { void analysisController.open() },
+      accept: () => { void analysisController.accept() },
+      reject: () => { void analysisController.reject() },
+      dismiss: () => { void analysisController.dismiss() },
+      retry: () => { void analysisController.retry() },
+    },
+    hooks: { analysis: analysisController.store },
+  })
   // The Key Pool extension's Remote faces are bound once here, where the
   // namespaces are declared in this plugin's own `inject`; the components
   // receive callbacks and data and never a context.
@@ -232,10 +251,17 @@ export function apply(ctx: ClientContext): void {
       if (hiddenRefreshTimer !== undefined) clearTimeout(hiddenRefreshTimer)
       welcomeController.dispose()
       wizardController.dispose()
+      analysisController.dispose()
       for (const dispose of pickerDisposers) dispose()
       for (const dispose of disposers) dispose()
     }
   }, 'ui-settings-models: pushed invalidations')
+  // The chip reads the host state once on activation: a fresh machine starts
+  // the analysis in the background, a stored profile offers the decision.
+  ctx.effect(() => {
+    void analysisController.load()
+    return () => { analysisController.dispose() }
+  }, 'ui-settings-models: system-analysis auto-start')
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -288,4 +314,12 @@ export function apply(ctx: ClientContext): void {
     order: 0,
     inject: deepSeekOnboardingInjected,
   }, DeepSeekOnboardingDialog))
+  // Frame-wide bottom-right chip: progress phases, the ready decision, and the
+  // failure retry. It lives in the shell overlay so it outlives every panel.
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'system-analysis',
+    locale: NS,
+    inject: analysisInjected,
+  }, SystemAnalysisChip))
 }

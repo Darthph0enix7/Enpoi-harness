@@ -1,19 +1,32 @@
 /**
- * The first-run system analysis: one read-only scan run on the host while the
- * user keeps working, published as JSON over `/system-analysis/*` and stored
- * as the sysadmin system-context document. The run is a singleton, bounded,
- * and never fatal: a failed probe degrades one section, a failed run reports
- * its reason in the job view, and neither state blocks the harness.
+ * The system analysis: one read-only scan run on the host while the user keeps
+ * working, summarised by the configured free route into a capability-level
+ * living document, published as JSON over `/system-analysis/*`. The run is a
+ * singleton, bounded, and never fatal: a failed probe degrades one section, a
+ * failed run reports its reason in the job view, and neither state blocks the
+ * harness. Accept keeps the document; reject removes it and records the
+ * decision so no later boot re-runs the analysis.
  * @module @deepseek-ai/dsh-host-first-run/analysis
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-// Empty type import carries the `webServer` Context merge for the reads below.
+// Empty type imports carry the `webServer` and `llm` Context merges for the reads below.
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
-import { readSystemContext, systemContextPath, writeSystemContext } from './context-file.ts'
-import { ANALYSIS_STAGES, runSystemScan, type SystemScanResult, type SystemScanSummary } from './scan.ts'
+import {
+  readSystemProfile,
+  readSystemProfileDecision,
+  removeSystemProfile,
+  systemProfilePath,
+  writeSystemProfile,
+  writeSystemProfileDecision,
+  writeSystemProfileScan,
+  type SystemProfileDecision,
+} from './context-file.ts'
+import { ANALYSIS_STAGES, runSystemScan, type AnalysisStage, type SystemScanFacts, type SystemScanResult, type SystemScanSummary } from './scan.ts'
+import { summariseSystemFacts } from './summarise.ts'
 /** Route prefix this plugin owns. */
 export const ANALYSIS_ROUTE = '/system-analysis'
 
@@ -36,24 +49,39 @@ export interface AnalysisJobView {
   summary?: SystemScanSummary
   /** Document path the result was written to. */
   contextPath?: string
+  /** Whether a profile document is stored right now. */
+  hasProfile: boolean
+  /** The operator's recorded decision, or null when none was recorded. */
+  decision: SystemProfileDecision | null
 }
 
-/** Replaceable run dependencies; production binds the real scan and writer. */
+/** Replaceable run dependencies; production binds the real scan, summariser, and storage. */
 export interface AnalysisDependencies {
-  scan: (onStage: (stage: string) => void) => Promise<SystemScanResult>
-  write: (markdown: string) => string
-  read: () => string | null
+  scan: (onStage: (stage: AnalysisStage) => void) => Promise<SystemScanResult>
+  summarise: (facts: SystemScanFacts) => Promise<string>
+  writeProfile: (markdown: string) => string
+  writeScan: (json: string) => string
+  readProfile: () => string | null
+  removeProfile: () => void
+  readDecision: () => SystemProfileDecision | null
+  writeDecision: (decision: SystemProfileDecision) => void
+  /** `provider/model` label the document header records. */
+  route: string
   now: () => number
 }
 
-/** The singleton analysis runner behind the route and the wizard. */
+/** The singleton analysis runner behind the route and the client chip. */
 export interface AnalysisRunner {
   /** Start the run, or return the current view while one is live or settled. */
   start: () => AnalysisJobView
   /** Current run view without changing it. */
   status: () => AnalysisJobView
-  /** Stored context text, or null before a successful run. */
+  /** Stored profile text, or null before a successful run. */
   context: () => string | null
+  /** Keep the stored document and record the acceptance. */
+  accept: () => AnalysisJobView
+  /** Remove the stored document and record the rejection. */
+  reject: () => AnalysisJobView
 }
 
 /** Stage list length drives the progress percentage. */
@@ -61,7 +89,7 @@ const STAGE_COUNT = ANALYSIS_STAGES.length
 
 /**
  * Build one runner over the injected dependencies.
- * @param dependencies - scan, storage, and clock.
+ * @param dependencies - scan, summariser, storage, and clock.
  * @returns the runner the route plugin and tests drive.
  */
 export function createAnalysisRunner(dependencies: AnalysisDependencies): AnalysisRunner {
@@ -71,9 +99,17 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
     stageIndex: 0,
     stageCount: STAGE_COUNT,
     pct: 0,
+    hasProfile: false,
+    decision: null,
   }
 
   let stageIndex = 0
+
+  const view = (): AnalysisJobView => ({
+    ...job,
+    hasProfile: dependencies.readProfile() !== null,
+    decision: dependencies.readDecision(),
+  })
 
   const advance = (stage: string): void => {
     const bounded = Math.min(stageIndex, STAGE_COUNT - 1)
@@ -89,7 +125,18 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
   const run = async (): Promise<void> => {
     try {
       const result = await dependencies.scan(advance)
-      const contextPath = dependencies.write(result.markdown)
+      advance('summarising')
+      const body = await dependencies.summarise(result.facts)
+      advance('writing profile')
+      dependencies.writeScan(JSON.stringify(result.facts, null, 2))
+      const contextPath = dependencies.writeProfile([
+        '# System profile',
+        '',
+        `_Read-only scan summarised ${new Date(dependencies.now()).toISOString()} by ${dependencies.route}. Capability-level; the raw scan facts are stored beside this document._`,
+        '',
+        body,
+        '',
+      ].join('\n'))
       job = {
         ...job,
         state: 'succeeded',
@@ -113,8 +160,10 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
 
   return {
     start: () => {
-      if (job.state === 'running') return { ...job }
-      if (job.state === 'succeeded') return { ...job }
+      if (job.state === 'running') return view()
+      // A settled success whose document is gone (rejected, or removed by hand)
+      // is no longer settled: the next start runs the analysis again.
+      if (job.state === 'succeeded' && dependencies.readProfile() !== null) return view()
       stageIndex = 0
       job = {
         state: 'running',
@@ -123,12 +172,23 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
         stageCount: STAGE_COUNT,
         pct: 0,
         startedAt: dependencies.now(),
+        hasProfile: false,
+        decision: null,
       }
       void run()
-      return { ...job }
+      return view()
     },
-    status: () => ({ ...job }),
-    context: () => dependencies.read(),
+    status: () => view(),
+    context: () => dependencies.readProfile(),
+    accept: () => {
+      dependencies.writeDecision('accepted')
+      return view()
+    },
+    reject: () => {
+      dependencies.removeProfile()
+      dependencies.writeDecision('rejected')
+      return view()
+    },
   }
 }
 
@@ -136,18 +196,27 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
 export interface AnalysisConfig {
   /** Register the `/system-analysis` routes. */
   routes: boolean
+  /** Provider route the summariser call uses. */
+  provider: string
+  /** Model the summariser call uses. */
+  model: string
+  /** Output cap for the profile body. */
+  maxTokens: number
 }
 
 /** Validated analysis-plugin configuration; the Loader resolves the row config with it. */
 export const Config: z<AnalysisConfig> = z.object({
   routes: z.boolean().default(true),
+  provider: z.string().default('kilo'),
+  model: z.string().default('kilo-auto/free'),
+  maxTokens: z.number().default(800),
 })
 
 /** Stable Cordis plugin name. */
 export const name = 'first-run-analysis'
 
-/** The analysis serves browser calls through the host web server. */
-export const inject = ['webServer']
+/** The analysis serves browser calls through the host web server and summarises through the LLM service. */
+export const inject = ['webServer', 'llm']
 
 /** Write one JSON response with no caching. */
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -178,6 +247,14 @@ export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res:
       sendJson(res, 200, { ok: true, text: runner.context() })
       return
     }
+    if (path === '/accept') {
+      sendJson(res, 200, { ok: true, job: runner.accept() })
+      return
+    }
+    if (path === '/reject') {
+      sendJson(res, 200, { ok: true, job: runner.reject() })
+      return
+    }
     sendJson(res, 404, { ok: false, message: `unknown system-analysis path "${path}"` })
   } catch (error) {
     // Answering is the only failure mode left here; the harness must never
@@ -188,15 +265,25 @@ export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res:
 
 /**
  * Register the system-analysis routes over the host web server.
- * @param ctx - host context carrying the web server.
- * @param config - route registration policy.
+ * @param ctx - host context carrying the web server and the LLM service.
+ * @param config - route registration policy and summariser route.
  */
 export function apply(ctx: Context, config: AnalysisConfig): void {
   if (!config.routes) return
   const runner = createAnalysisRunner({
-    scan: onStage => runSystemScan(stage => onStage(stage)),
-    write: markdown => writeSystemContext(markdown),
-    read: () => readSystemContext(systemContextPath()),
+    scan: onStage => runSystemScan(onStage),
+    summarise: facts => summariseSystemFacts(ctx.llm, facts, {
+      provider: config.provider,
+      model: config.model,
+      maxTokens: config.maxTokens,
+    }),
+    writeProfile: markdown => writeSystemProfile(markdown),
+    writeScan: json => writeSystemProfileScan(json),
+    readProfile: () => readSystemProfile(),
+    removeProfile: () => { removeSystemProfile() },
+    readDecision: () => readSystemProfileDecision(),
+    writeDecision: (decision) => { writeSystemProfileDecision(decision) },
+    route: `${config.provider}/${config.model}`,
     now: () => Date.now(),
   })
   ctx.effect(() => ctx.webServer.register({
@@ -204,4 +291,6 @@ export function apply(ctx: Context, config: AnalysisConfig): void {
     path: ANALYSIS_ROUTE,
     handler: (req, res) => { handleRequest(runner, req, res) },
   }), 'first-run: system-analysis routes')
+  // The document path is a stable fact of this plugin; expose it for diagnostics.
+  ctx.logger.debug('first-run: system profile document at %s', systemProfilePath())
 }

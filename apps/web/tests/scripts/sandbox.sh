@@ -164,7 +164,7 @@ strip_patch_sections() { # patch-file key...
   [ -f "$file" ] || return 0
   awk -v keys="$*" '
     BEGIN { n = split(keys, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1 }
-    /^- / { inorch = ($0 == "- id: enpoi-orchestration") }
+    /^- / { inorch = ($0 == "- id: enpoi-orchestration"); skip = 0 }
     inorch && /^    [A-Za-z0-9_@.\/-]+:/ { key = $0; sub(/^    /, "", key); sub(/:.*/, "", key); skip = (key in drop) }
     !skip { print }
   ' "$file" > "$tmp"

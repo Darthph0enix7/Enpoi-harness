@@ -743,7 +743,8 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
 
 /** Display order of the host analysis stages; index maps to `stageIndex`. */
 const ANALYSIS_PHASE_KEYS = [
-  'wizPhaseHardware', 'wizPhaseOs', 'wizPhaseServices', 'wizPhaseDisk', 'wizPhaseGpu', 'wizPhaseWriting',
+  'wizPhaseHardware', 'wizPhaseOs', 'wizPhaseServices', 'wizPhaseTooling', 'wizPhaseHosting',
+  'wizPhaseDisk', 'wizPhaseGpu', 'wizPhaseSummarising', 'wizPhaseWriting',
 ] as const
 
 /** One phase's render state from the live job position. */
