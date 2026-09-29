@@ -127,14 +127,14 @@ seed_dir_once() { # src-dir dst-dir
 # the text line-by-line keeps the large YAML document's formatting, multi-line
 # strings, and `!!js` tags intact.
 
-# Drop the `onboardingCompleted` marker: a fresh home must boot into the
-# first-run wizard, while the live profile keeps its marker (that setup is
-# complete).
-strip_onboarding_completed() { # patch-file
+# Drop the `onboardingCompleted` and first-run `seedVersion` markers: a fresh
+# home must boot into the first-run wizard with the keyless seed pending,
+# while the live profile keeps its markers (that setup is complete).
+strip_fresh_markers() { # patch-file
   local file="$1" tmp="$1.strip-$$"
   [ -f "$file" ] || return 0
   cp -p "$file" "$tmp"
-  grep -v -E '^[[:space:]]*onboardingCompleted:' "$file" > "$tmp" || true
+  grep -v -E '^[[:space:]]*(onboardingCompleted|seedVersion):' "$file" > "$tmp" || true
   if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
   return 0
 }
@@ -178,7 +178,7 @@ strip_fresh_patch() { # patch-file
   strip_patch_rows "$file" agent-default-model ui-settings-general ui-settings-models ui-theme llm-pi-ai
   strip_patch_sections "$file" capabilities mcpServers mcpStatus personas roles councils chains \
     catalogRules uiPreferences permissions whiteboard toolGroups
-  strip_onboarding_completed "$file"
+  strip_fresh_markers "$file"
   return 0
 }
 
