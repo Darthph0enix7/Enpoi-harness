@@ -98,31 +98,26 @@ describe('analysis percentage', () => {
 })
 
 describe('system-analysis store', () => {
-  it('offers the opt-in investigation on a machine with no profile and never starts by itself', async () => {
+  it('stays hidden on a machine with no profile and never starts by itself', async () => {
     const { api, start, status } = fakeApi()
     status.mockResolvedValueOnce({ ok: true, value: view() })
     const store = new SystemAnalysisStore(api)
     await store.load()
     expect(start).not.toHaveBeenCalled()
-    expect(store.store.getSnapshot()).toMatchObject({ phase: 'idle' })
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'hidden' })
     store.dispose()
   })
 
-  it('dismisses the offer for this process and offers again on a fresh store', async () => {
-    const { api } = fakeApi()
+  it('keeps a no-profile machine hidden across further status reads', async () => {
+    const { api, start } = fakeApi()
     const store = new SystemAnalysisStore(api)
     await store.load()
-    expect(store.store.getSnapshot().phase).toBe('idle')
-    store.dismissOffer()
     expect(store.store.getSnapshot().phase).toBe('hidden')
-    // A later status read does not resurrect the dismissed offer.
+    // A later status read does not surface any offer.
     await store.load()
     expect(store.store.getSnapshot().phase).toBe('hidden')
-    const fresh = new SystemAnalysisStore(api)
-    await fresh.load()
-    expect(fresh.store.getSnapshot().phase).toBe('idle')
+    expect(start).not.toHaveBeenCalled()
     store.dispose()
-    fresh.dispose()
   })
 
   it('starts on the explicit action and follows the run to ready', async () => {
@@ -156,13 +151,10 @@ describe('system-analysis store', () => {
     expect(rejected.start).not.toHaveBeenCalled()
   })
 
-  it('offers the run again when a settled job lost its document', async () => {
+  it('stays hidden when a settled job lost its document', async () => {
     const { api, status } = fakeApi()
     status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', stage: 'done', stageIndex: 8, pct: 100 }) })
     const store = new SystemAnalysisStore(api)
-    await store.load()
-    expect(store.store.getSnapshot().phase).toBe('idle')
-    store.dismissOffer()
     await store.load()
     expect(store.store.getSnapshot().phase).toBe('hidden')
     store.dispose()

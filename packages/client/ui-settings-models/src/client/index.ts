@@ -167,10 +167,10 @@ export function apply(ctx: ClientContext): void {
     hooks: { welcome: welcomeController.store },
     t,
   })
-  // The frame-wide system-analysis chip owns its own store: it offers the
-  // opt-in investigation while nothing is stored, follows a run started from
-  // either surface, and carries the accept/reject decision independently of
-  // the wizard. Nothing starts without an explicit action.
+  // The frame-wide system-analysis chip owns its own store: it follows the run
+  // the wizard's agents step starts, shows the stored profile for the
+  // accept/reject decision independently of the wizard, and stays hidden when
+  // nothing needs the operator. Nothing starts without an explicit action.
   const analysisController = new SystemAnalysisStore(systemAnalysisApi)
   // The wizard's agents step starts the same host run; its adapter wakes the
   // chip store so the progress bar adopts the run the step just began.
@@ -203,14 +203,8 @@ export function apply(ctx: ClientContext): void {
     hooks: { wizard: wizardController.store },
     t,
   })
-  // The frame-wide system-analysis chip owns its own store: it offers the
-  // opt-in investigation while nothing is stored, follows a run started from
-  // either surface, and carries the accept/reject decision independently of
-  // the wizard. Nothing starts without an explicit action.
   const analysisInjected = (): SystemAnalysisChipInjected => ({
     actions: {
-      start: () => { void analysisController.start() },
-      dismissOffer: () => { analysisController.dismissOffer() },
       open: () => { void analysisController.open() },
       accept: () => { void analysisController.accept() },
       reject: () => { void analysisController.reject() },
@@ -279,8 +273,8 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'ui-settings-models: pushed invalidations')
   // The chip reads the host state once on activation: a stored profile offers
-  // the decision, a run already in flight is adopted, and a machine with no
-  // profile shows the opt-in offer. Nothing is started here.
+  // the decision and a run already in flight is adopted. Nothing is started
+  // here; only the wizard's agents step starts a run.
   ctx.effect(() => {
     void wizardController.load().then(() => analysisController.load())
     return () => { analysisController.dispose() }

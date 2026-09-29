@@ -59,10 +59,11 @@ function mount() {
   const modelsStore = createSnapshotStore<ModelsSettingsState>({
     status: 'ready', error: null, credentialError: null, writable: true, rows: [], namespaces: new Map(),
   })
-  const store = new WelcomeWizardStore(scope, {
-    start: async () => ({ ok: true, value: { state: 'idle', stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
-    status: async () => ({ ok: true, value: { state: 'idle', stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
-  }, vi.fn())
+  const analysis = {
+    start: vi.fn(async () => ({ ok: true as const, value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 6, pct: 0 } })),
+    status: vi.fn(async () => ({ ok: true as const, value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 6, pct: 0 } })),
+  }
+  const store = new WelcomeWizardStore(scope, analysis, vi.fn())
   const complete = vi.fn()
   const props: WelcomeWizardProps = {
     stepId: 'welcome-wizard',
@@ -83,7 +84,12 @@ function mount() {
     useModels: bindSnapshotSelector(modelsStore),
     t: key => zh[key],
   }
-  return { ...render(<WelcomeWizard {...props} />), store, operations: writeSettings, set, complete }
+  return { ...render(<WelcomeWizard {...props} />), store, analysis, operations: writeSettings, set, complete }
+}
+
+/** Move the mounted wizard to the agents step from the rail. */
+function gotoAgents(): void {
+  fireEvent.click(screen.getByRole('button', { name: zh.wizNameAgents }))
 }
 
 describe('WelcomeWizard', () => {
@@ -213,6 +219,65 @@ describe('WelcomeWizard', () => {
     })
     const ready = document.querySelector('[data-wiz-analysis-status]')?.textContent ?? ''
     expect(ready).toBe(zh.wizAnalysisReady)
+  })
+
+  it('returns from the agents step to the tour step with Back', async () => {
+    mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    gotoAgents()
+    await screen.findByText(zh.wizAgentsHeading)
+    fireEvent.click(screen.getByRole('button', { name: zh.wizBack }))
+    expect(screen.getByText(zh.wizTourHeading)).toBeTruthy()
+  })
+
+  it('skips the agents step without starting a run', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    gotoAgents()
+    fireEvent.click(screen.getByRole('button', { name: zh.wizAnalyseSkip }))
+    expect(h.analysis.start).not.toHaveBeenCalled()
+    expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
+    expect(h.store.store.getSnapshot().wizard.states.agents).toBe('skipped')
+  })
+
+  it('starts the investigation in the background and advances on Investigate', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    gotoAgents()
+    fireEvent.click(screen.getByRole('button', { name: zh.wizAnalyseStart }))
+    expect(h.analysis.start).toHaveBeenCalledTimes(1)
+    expect(h.store.store.getSnapshot().wizard.states.agents).toBe('configured')
+    expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
+  })
+
+  it('offers Continue beside the status while a run is in flight', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = { state: 'running', stage: 'machine', stageIndex: 0, stageCount: 8, pct: 10 }
+      })
+    })
+    gotoAgents()
+    expect(document.querySelector('[data-wiz-analysis-status]')?.textContent).toBe(zh.wizAnalyseRunning)
+    fireEvent.click(screen.getByRole('button', { name: zh.wizContinue }))
+    expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
+  })
+
+  it('keeps Continue and Back on a failed run, without starting a retry', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = { state: 'failed', stage: '', stageIndex: 0, stageCount: 8, pct: 0, error: 'route refused' }
+      })
+    })
+    gotoAgents()
+    expect(document.querySelector('[data-wiz-analysis-status]')?.textContent).toBe(`${zh.wizAnalysisFailed}: route refused`)
+    expect(screen.getByRole('button', { name: zh.wizBack })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: zh.wizContinue }))
+    expect(h.analysis.start).not.toHaveBeenCalled()
+    expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
   })
 
   it('shows the demo key glyphs beside Back and Continue', async () => {

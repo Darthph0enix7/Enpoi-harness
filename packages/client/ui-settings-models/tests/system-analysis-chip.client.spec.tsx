@@ -25,8 +25,6 @@ function mount(initial: Partial<SystemAnalysisState> = {}) {
     ...initial,
   })
   const actions = {
-    start: vi.fn(),
-    dismissOffer: vi.fn(),
     open: vi.fn(),
     accept: vi.fn(),
     reject: vi.fn(),
@@ -48,16 +46,14 @@ describe('SystemAnalysisChip', () => {
     expect(document.querySelector('[data-dsh-system-analysis]')).toBeNull()
   })
 
-  it('offers the investigation only through its explicit start and dismiss actions', () => {
-    const { actions } = mount({ phase: 'idle' })
-    expect(document.querySelector('[data-dsh-system-analysis-chip="idle"]')).toBeTruthy()
-    expect(screen.getByText(en.sysAnalysisOffer)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisStart }))
-    expect(actions.start).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisDismiss }))
-    expect(actions.dismissOffer).toHaveBeenCalledTimes(1)
-    // The offer never starts anything on mount.
-    expect(actions.start).toHaveBeenCalledTimes(1)
+  it('renders no offer chip for a retired idle phase', () => {
+    const { store } = mount()
+    // The chip phase union no longer carries `idle`; a state from an older
+    // reader must not resurrect the removed offer surface.
+    store.update((state) => {
+      ;(state as { phase: string }).phase = 'idle'
+    })
+    expect(document.querySelector('[data-dsh-system-analysis-chip]')).toBeNull()
   })
 
   it('portals the running bar onto the document body and expands its phases upward', () => {

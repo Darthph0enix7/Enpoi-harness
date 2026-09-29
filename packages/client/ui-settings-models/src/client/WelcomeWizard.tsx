@@ -197,6 +197,12 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     void store.startAnalysis()
     continueStep()
   }
+  // The forward control once a run is already in flight: the step advances
+  // exactly like the Investigate path does, without starting another run.
+  const agentsContinue = (): void => {
+    store.dispatch({ type: 'configured' })
+    continueStep()
+  }
 
   // The tour layer replaces the wizard dialog for as long as it runs.
   if (step === 'tour' && tourStarted) {
@@ -295,7 +301,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             />
           )}
           {step === 'agents' && (
-            <AgentsStep t={t} analysis={state.analysis} onAnalyse={agentsAnalyse} onSkip={() => { store.dispatch({ type: 'skip' }) }} />
+            <AgentsStep
+              t={t}
+              analysis={state.analysis}
+              onAnalyse={agentsAnalyse}
+              onSkip={() => { store.dispatch({ type: 'skip' }) }}
+              onContinue={agentsContinue}
+              onBack={() => { store.dispatch({ type: 'goto', step: 'tour' }) }}
+            />
           )}
           {step === 'done' && (
             <DoneStep
@@ -736,14 +749,19 @@ function TourOverlay({ t, stop, stepNumber, stepCount, onStop, onBack, onFinish,
   )
 }
 
-function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
+function AgentsStep({ t, analysis, onAnalyse, onSkip, onContinue, onBack }: {
   t: T
   analysis: WelcomeWizardState['analysis']
   onAnalyse: () => void
   onSkip: () => void
+  /** Forward control while a run is already in flight. */
+  onContinue: () => void
+  onBack: () => void
 }): ReactNode {
   // One line of step copy states the run's outcome; progress and the review
-  // surface itself live in the frame-wide chip, never in this card.
+  // surface itself live in the frame-wide chip, never in this card. A run in
+  // flight swaps the offer buttons for the status line plus Continue, so the
+  // step always keeps a forward control and a Back to the tour step.
   const status = analysis === null || analysis === undefined
     ? null
     : analysis.state === 'running'
@@ -771,6 +789,12 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
               <Button onClick={onSkip}>{t('wizAnalyseSkip')}</Button>
             </div>
           )}
+      </div>
+      <div className={styles.actions}>
+        <Button onClick={onBack}><KeyHint glyph="←" side="before" />{t('wizBack')}</Button>
+        {status !== null && (
+          <Button variant="primary" onClick={onContinue}>{t('wizContinue')}<KeyHint glyph="→" side="after" /></Button>
+        )}
       </div>
     </div>
   )

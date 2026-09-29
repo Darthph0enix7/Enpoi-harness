@@ -3,10 +3,9 @@
  * store. The wire is validated at this boundary: a response that is not the
  * expected envelope becomes a displayable failure message, never an exception
  * in the chip, and a percentage is clamped to the 0..100 the bar can render.
- * Nothing here starts a run on its own: the store offers the investigation
- * while the machine has no profile and no recorded decision, and only an
- * explicit action (the chip's start button or the setup wizard's agents step)
- * sends `start`. A run already in flight is adopted and followed.
+ * Nothing here starts a run on its own: only the setup wizard's agents step
+ * sends `start`, and the chip store follows a run already in flight, shows the
+ * stored profile for the decision, or stays hidden.
  * @module ui-settings-models/system-analysis
  */
 
@@ -52,11 +51,11 @@ export interface SystemAnalysisApi {
 /** Snapshot rendered by the chip. */
 export interface SystemAnalysisState {
   /**
-   * Hidden until the machine needs something from the operator: `idle` offers
-   * the opt-in investigation, `running` shows the stage rail, `ready` awaits a
-   * decision, and `failed` carries the reason with a retry.
+   * Hidden until the machine needs something from the operator: `running`
+   * shows the stage rail, `ready` awaits a decision, and `failed` carries the
+   * reason with a retry.
    */
-  phase: 'hidden' | 'idle' | 'running' | 'ready' | 'failed'
+  phase: 'hidden' | 'running' | 'ready' | 'failed'
   stage: string
   stageIndex: number
   stageCount: number
@@ -159,7 +158,7 @@ export const systemAnalysisApi: SystemAnalysisApi = {
   reject: () => call('reject'),
 }
 
-/** Coordinates the chip's opt-in offer, poll, and decision. */
+/** Coordinates the chip's status read, poll, and decision. */
 export class SystemAnalysisStore {
   /** uSES-safe state source the chip renders from. */
   readonly store: SnapshotStore<SystemAnalysisState> = createSnapshotStore<SystemAnalysisState>({
@@ -176,15 +175,14 @@ export class SystemAnalysisStore {
   })
 
   private poll: ReturnType<typeof setInterval> | undefined
-  private offerDismissed = false
 
   /** @param api - the host analysis calls. */
   constructor(private readonly api: SystemAnalysisApi) {}
 
   /**
-   * Read the current state and follow a run already in flight. A machine with
-   * no profile and no recorded decision shows the opt-in offer; nothing here
-   * starts a run.
+   * Read the current state and follow a run already in flight. A stored
+   * profile shows the review surface; a machine without one stays hidden.
+   * Nothing here starts a run.
    * @returns settlement after the first status answer is applied.
    */
   async load(): Promise<void> {
@@ -206,12 +204,6 @@ export class SystemAnalysisStore {
     }
     this.apply(result.value)
     if (result.value.state === 'running') this.follow()
-  }
-
-  /** Hide the opt-in offer for this process; the next boot offers again. */
-  dismissOffer(): void {
-    this.offerDismissed = true
-    this.store.update((state) => { state.phase = 'hidden' })
   }
 
   /** Fetch the stored document and open the results panel. */
@@ -292,18 +284,13 @@ export class SystemAnalysisStore {
       if (view.state === 'succeeded') {
         // A stored profile pending a decision is the review surface; one that
         // already carries a decision is settled and keeps no chrome. A settled
-        // run whose document is gone (rejected, or removed by hand) offers the
-        // run again, exactly like the host's own start decision.
-        if (view.hasProfile) {
-          state.phase = view.decision === null ? 'ready' : 'hidden'
-          return
-        }
-        state.phase = view.decision !== null || this.offerDismissed ? 'hidden' : 'idle'
+        // run whose document is gone (rejected, or removed by hand) stays
+        // hidden until the setup wizard starts another run.
+        state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
         return
       }
-      // Idle: offer the investigation only while nothing is stored and no
-      // decision was ever recorded; a dismissed offer stays down.
-      state.phase = view.hasProfile || view.decision !== null || this.offerDismissed ? 'hidden' : 'idle'
+      // Idle: nothing to follow; the setup wizard's agents step owns the start.
+      state.phase = 'hidden'
     })
   }
 

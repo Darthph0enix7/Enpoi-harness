@@ -1,12 +1,13 @@
 /**
- * Frame-wide bottom-right chip for the system analysis: an opt-in offer while
- * no profile is stored, a compact collapsible bar with live progress once the
- * user starts the run, "System analysis ready" once the profile is stored, and
- * the failure reason with a retry when the run failed. The bar is portaled out
- * of the shell frame so it sits above the application and above the first-run
- * modal; expanding it grows the phase rail upward. Clicking the ready bar opens
- * the stored document with Accept and Reject; clicking elsewhere dismisses the
- * panel and accepts. Nothing here blocks the app and nothing starts by itself.
+ * Frame-wide bottom-right chip for the system analysis: a compact collapsible
+ * bar with live progress once a run is in flight, "System analysis ready" once
+ * the profile is stored, and the failure reason with a retry when the run
+ * failed. A machine that needs nothing from the operator renders nothing: the
+ * investigation is offered only by the setup wizard's agents step. The bar is
+ * portaled out of the shell frame so it sits above the application and above
+ * the first-run modal; expanding it grows the phase rail upward. Clicking the
+ * ready bar opens the stored document with Accept and Reject; clicking
+ * elsewhere dismisses the panel and accepts. Nothing here blocks the app.
  * @module ui-settings-models/SystemAnalysisChip
  */
 
@@ -22,8 +23,6 @@ import css from './SystemAnalysisChip.module.css'
 /** Actions and live state delivered through the renderer-bound hooks. */
 export interface SystemAnalysisChipInjected {
   actions: {
-    start: () => void
-    dismissOffer: () => void
     open: () => void
     accept: () => void
     reject: () => void
@@ -110,24 +109,6 @@ export function SystemAnalysisChip({
             <Button disabled={state.busy} onClick={actions.reject}>{t('sysAnalysisReject')}</Button>
           </div>
         </section>
-      )}
-      {state.phase === 'idle' && (
-        <div className={css.chip} data-dsh-system-analysis-chip="idle">
-          <span className={css.body}>
-            <strong>{t('sysAnalysisTitle')}</strong>
-            <span className={css.stage}>{t('sysAnalysisOffer')}</span>
-          </span>
-          <Button variant="primary" onClick={actions.start}>{t('sysAnalysisStart')}</Button>
-          <button
-            type="button"
-            className={css.offerDismiss}
-            data-dsh-system-analysis-dismiss
-            aria-label={t('sysAnalysisDismiss')}
-            onClick={actions.dismissOffer}
-          >
-            ×
-          </button>
-        </div>
       )}
       {state.phase === 'running' && (
         <div className={css.dock} role="status" data-dsh-system-analysis-chip="running">
