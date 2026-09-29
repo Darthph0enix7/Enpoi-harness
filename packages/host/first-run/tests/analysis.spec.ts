@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   ANALYSIS_STAGES, createAnalysisRunner, handleRequest, stagePct,
-  type AnalysisDependencies,
+  type AnalysisDependencies, type AnalysisRunner,
 } from '../src/analysis.ts'
 import type { InvestigationOutcome } from '../src/investigation.ts'
 
@@ -44,6 +44,20 @@ async function settled(): Promise<void> {
   await Promise.resolve()
   await Promise.resolve()
   await Promise.resolve()
+}
+
+/** Answer one route request and parse the JSON body back out. */
+function reply(runner: AnalysisRunner, url: string, method: 'GET' | 'POST' = 'GET'): { status: number; body: unknown } {
+  let status = 0
+  let body = ''
+  const res = {
+    setHeader: () => {},
+    end: (chunk: string) => { body = chunk },
+    set statusCode(value: number) { status = value },
+    get statusCode() { return status },
+  }
+  handleRequest(runner, { url, method } as never, res as never)
+  return { status, body: JSON.parse(body) }
 }
 
 describe('system analysis runner', () => {
@@ -228,23 +242,43 @@ describe('system analysis runner', () => {
       readDecision: () => decision,
       writeDecision: (next) => { decision = next },
     }))
-    const reply = (url: string): { status: number; body: unknown } => {
-      let status = 0
-      let body = ''
-      const res = {
-        setHeader: () => {},
-        end: (chunk: string) => { body = chunk },
-        set statusCode(value: number) { status = value },
-        get statusCode() { return status },
-      }
-      handleRequest(runner, { url } as never, res as never)
-      return { status, body: JSON.parse(body) }
-    }
-    expect(reply('/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'idle' } } })
-    expect(reply('/system-analysis/start')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'running' } } })
-    expect(reply('/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
-    expect(reply('/system-analysis/accept')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
-    expect(reply('/system-analysis/reject')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
-    expect(reply('/system-analysis/unknown')).toMatchObject({ status: 404, body: { ok: false } })
+    expect(reply(runner, '/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'idle' } } })
+    expect(reply(runner, '/system-analysis/start', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'running' } } })
+    expect(reply(runner, '/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
+    expect(reply(runner, '/system-analysis/accept', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
+    expect(reply(runner, '/system-analysis/reject', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
+    expect(reply(runner, '/system-analysis/unknown')).toMatchObject({ status: 404, body: { ok: false } })
+  })
+
+  it('refuses a GET on start with 405 without launching the investigation', async () => {
+    const investigate = vi.fn(dependencies().investigate)
+    const runner = createAnalysisRunner(dependencies({ investigate }))
+    expect(reply(runner, '/system-analysis/start')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    await settled()
+    expect(investigate).not.toHaveBeenCalled()
+    expect(runner.status().state).toBe('idle')
+    // The correct method still starts the run.
+    expect(reply(runner, '/system-analysis/start', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'running' } } })
+    await settled()
+    expect(investigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts GET only for the reads and POST only for the actions', () => {
+    let decision: 'accepted' | 'rejected' | null = null
+    const runner = createAnalysisRunner(dependencies({
+      readProfile: () => 'profile text',
+      readDecision: () => decision,
+      writeDecision: (next) => { decision = next },
+    }))
+    expect(reply(runner, '/system-analysis/status', 'POST')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    expect(reply(runner, '/system-analysis/context', 'POST')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    // A refused decision never reaches the runner.
+    expect(reply(runner, '/system-analysis/accept')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    expect(reply(runner, '/system-analysis/reject')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    expect(decision).toBeNull()
+    // The correct methods still pass.
+    expect(reply(runner, '/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
+    expect(reply(runner, '/system-analysis/accept', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
+    expect(reply(runner, '/system-analysis/reject', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
   })
 })

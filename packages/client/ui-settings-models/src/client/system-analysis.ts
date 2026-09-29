@@ -289,8 +289,12 @@ export class SystemAnalysisStore {
         state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
         return
       }
-      // Idle: nothing to follow; the setup wizard's agents step owns the start.
-      state.phase = 'hidden'
+      // Idle: nothing to follow here, but the host runner is process-local, so
+      // after a restart an idle answer with a stored profile and no recorded
+      // decision still awaits the same review. Every other idle (no profile,
+      // or already decided) stays hidden; the setup wizard's agents step owns
+      // starting a run.
+      state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
     })
   }
 

@@ -267,8 +267,17 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value))
 }
 
+/** Method each path accepts; undefined for a path this plugin does not own. */
+function routeMethod(path: string): 'GET' | 'POST' | undefined {
+  if (path === '/start' || path === '/accept' || path === '/reject') return 'POST'
+  if (path === '/status' || path === '/context') return 'GET'
+  return undefined
+}
+
 /**
- * Handle one `/system-analysis/*` request.
+ * Handle one `/system-analysis/*` request. The two reads (`status`, `context`)
+ * accept GET only and the three actions (`start`, `accept`, `reject`) POST
+ * only; a wrong method answers 405 without touching the runner.
  * @param runner - the singleton runner.
  * @param req - incoming request.
  * @param res - response owner.
@@ -276,6 +285,11 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res: ServerResponse): void {
   try {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname.slice(ANALYSIS_ROUTE.length)
+    const method = routeMethod(path)
+    if (method !== undefined && req.method !== method) {
+      sendJson(res, 405, { ok: false, message: `the system-analysis path "${path}" accepts ${method} only` })
+      return
+    }
     if (path === '/start') {
       sendJson(res, 200, { ok: true, job: runner.start() })
       return

@@ -329,9 +329,14 @@ export class WelcomeWizardStore {
   /**
    * Reopen the wizard from the Setup entry, whatever the marker says. The
    * shell's onboarding request is raised too, so the coordinator mounts the
-   * wizard immediately even with a retained conversation.
+   * wizard immediately even with a retained conversation. The host runner is
+   * process-local, so the wizard then refreshes its analysis from the host: a
+   * run left over from before a restart (or rejected while this store kept a
+   * settled view) must not leave the agents step at a Continue with no way to
+   * start.
+   * @returns settlement after the host analysis status was applied.
    */
-  reopen(): void {
+  async reopen(): Promise<void> {
     this.store.update((state) => {
       state.reopened = true
       state.wizard = initialWizardState()
@@ -339,6 +344,7 @@ export class WelcomeWizardStore {
       state.visible = true
     })
     this.requestOnboarding()
+    await this.refreshAnalysis()
   }
 
   /** Close the overlay without completing; the next first run shows it again. */
@@ -397,12 +403,33 @@ export class WelcomeWizardStore {
     this.poll = undefined
   }
 
+  /**
+   * Read the host's analysis view after a reopen. An idle host means no run
+   * exists in this process, so the step returns to its offer; a failed read
+   * makes no claim either, rather than keeping a stale settled view that
+   * cannot be started again.
+   */
+  private async refreshAnalysis(): Promise<void> {
+    const result = await this.analysis.status()
+    if (!result.ok) {
+      this.store.update((state) => { state.analysis = null })
+      return
+    }
+    this.store.update((state) => {
+      state.analysis = result.value.state === 'idle' ? null : result.value
+    })
+  }
+
   private followAnalysis(): void {
     if (this.poll !== undefined) return
     this.poll = setInterval(() => {
       void this.analysis.status().then((result) => {
         if (!result.ok) return
-        this.store.update((state) => { state.analysis = result.value })
+        // A host restart mid-run settles at idle: the step falls back to the
+        // offer instead of painting the idle view as a failure.
+        this.store.update((state) => {
+          state.analysis = result.value.state === 'idle' ? null : result.value
+        })
         if (result.value.state !== 'running' && this.poll !== undefined) {
           clearInterval(this.poll)
           this.poll = undefined

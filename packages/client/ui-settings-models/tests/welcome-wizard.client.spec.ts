@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   WIZARD_COMPLETED_FIELD, WIZARD_VERSION, WelcomeWizardStore, initialWizardState,
   intelligenceWrites, sandboxWrite, skippedSteps, skipWholeTour, wizardReducer,
-  type WizardScope, type WizardScopeSnapshot,
+  type WizardAnalysisView, type WizardScope, type WizardScopeSnapshot,
 } from '../src/client/welcome-wizard.ts'
 
 describe('welcome wizard state machine', () => {
@@ -118,7 +118,7 @@ describe('welcome wizard gating', () => {
       requestOnboarding,
     )
     await store.load()
-    store.reopen()
+    await store.reopen()
     expect(store.store.getSnapshot().reopened).toBe(true)
     expect(store.store.getSnapshot().visible).toBe(true)
     expect(store.store.getSnapshot().wizard.step).toBe('welcome')
@@ -126,6 +126,85 @@ describe('welcome wizard gating', () => {
     store.close()
     expect(store.store.getSnapshot().visible).toBe(false)
     store.dispose()
+  })
+
+  it('refreshes the analysis on reopen, so a settled run from before the restart does not persist', async () => {
+    const succeeded: WizardAnalysisView = { state: 'succeeded', stage: 'done', stageIndex: 8, stageCount: 8, pct: 100 }
+    const status = vi.fn(async () => ({
+      ok: true as const,
+      value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 8, pct: 0 },
+    }))
+    const store = new WelcomeWizardStore(
+      scope({ mode: 'host', status: 'ready', value: {} }),
+      { start: async () => ({ ok: true as const, value: succeeded }), status },
+      noRequest,
+    )
+    await store.load()
+    await store.startAnalysis()
+    expect(store.store.getSnapshot().analysis?.state).toBe('succeeded')
+    // A reject (or a host restart) settles the runner at idle: the reopened
+    // step must offer Investigate and Skip again, not a Continue over a run
+    // that no longer exists.
+    await store.reopen()
+    expect(status).toHaveBeenCalledTimes(1)
+    expect(store.store.getSnapshot().analysis).toBeNull()
+    store.dispose()
+  })
+
+  it('adopts a live host run view on reopen', async () => {
+    const running: WizardAnalysisView = { state: 'running', stage: 'machine', stageIndex: 0, stageCount: 8, pct: 0 }
+    const status = vi.fn(async () => ({ ok: true as const, value: running }))
+    const store = new WelcomeWizardStore(
+      scope({ mode: 'host', status: 'ready', value: {} }),
+      { start: async () => ({ ok: true as const, value: running }), status },
+      noRequest,
+    )
+    await store.load()
+    await store.reopen()
+    expect(store.store.getSnapshot().analysis).toMatchObject({ state: 'running', stage: 'machine' })
+    store.dispose()
+  })
+
+  it('clears a stale analysis when the reopen status read fails', async () => {
+    const succeeded: WizardAnalysisView = { state: 'succeeded', stage: 'done', stageIndex: 8, stageCount: 8, pct: 100 }
+    const status = vi.fn(async () => ({ ok: false as const, message: 'offline' }))
+    const store = new WelcomeWizardStore(
+      scope({ mode: 'host', status: 'ready', value: {} }),
+      { start: async () => ({ ok: true as const, value: succeeded }), status },
+      noRequest,
+    )
+    await store.load()
+    await store.startAnalysis()
+    await store.reopen()
+    expect(store.store.getSnapshot().analysis).toBeNull()
+    store.dispose()
+  })
+
+  it('clears the analysis when a poll finds the host settled at idle', async () => {
+    const running: WizardAnalysisView = { state: 'running', stage: 'machine', stageIndex: 0, stageCount: 8, pct: 0 }
+    const status = vi.fn(async () => ({
+      ok: true as const,
+      value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 8, pct: 0 },
+    }))
+    const store = new WelcomeWizardStore(
+      scope({ mode: 'host', status: 'ready', value: {} }),
+      { start: async () => ({ ok: true as const, value: running }), status },
+      noRequest,
+    )
+    vi.useFakeTimers()
+    try {
+      await store.load()
+      await store.startAnalysis()
+      expect(store.store.getSnapshot().analysis?.state).toBe('running')
+      // A host restart mid-run: the next poll reads idle, so the step must
+      // fall back to the offer instead of painting the idle view as a failure.
+      await vi.advanceTimersByTimeAsync(300)
+      expect(store.store.getSnapshot().analysis).toBeNull()
+      expect(status).toHaveBeenCalledTimes(1)
+    } finally {
+      store.dispose()
+      vi.useRealTimers()
+    }
   })
 
   it('keeps a refused step write on its own step and clears it on navigation', async () => {

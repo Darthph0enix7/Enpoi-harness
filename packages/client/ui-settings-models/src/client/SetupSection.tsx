@@ -40,7 +40,7 @@ export function SetupSection(props: SetupSectionProps): ReactNode {
       <h2>{t('wizSetupTitle')}</h2>
       <p>{t('wizSetupIntro')}</p>
       <p>{state.completed ? t('wizSetupCompleted') : t('wizSetupNotCompleted')}</p>
-      <Button variant="primary" onClick={() => { store.reopen() }}>{t('wizSetupRun')}</Button>
+      <Button variant="primary" onClick={() => { void store.reopen() }}>{t('wizSetupRun')}</Button>
     </div>
   )
 }

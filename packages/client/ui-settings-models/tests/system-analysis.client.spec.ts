@@ -172,6 +172,37 @@ describe('system-analysis store', () => {
     expect(recorded.start).not.toHaveBeenCalled()
   })
 
+  it('shows the review for a stored undecided profile after a host restart', async () => {
+    // The host runner state is process-local: after a restart with a stored
+    // profile and no decision, status answers idle and only hasProfile and
+    // decision distinguish the review surface from a machine with nothing.
+    const restarted = fakeApi()
+    restarted.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle', hasProfile: true }) })
+    const store = new SystemAnalysisStore(restarted.api)
+    await store.load()
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'ready' })
+    expect(restarted.start).not.toHaveBeenCalled()
+    store.dispose()
+  })
+
+  it('hides an idle host with no profile or an already decided one', async () => {
+    const empty = fakeApi()
+    empty.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle' }) })
+    const noProfile = new SystemAnalysisStore(empty.api)
+    await noProfile.load()
+    expect(noProfile.store.getSnapshot().phase).toBe('hidden')
+
+    const decided = fakeApi()
+    decided.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle', hasProfile: true, decision: 'rejected' }) })
+    const settled = new SystemAnalysisStore(decided.api)
+    await settled.load()
+    expect(settled.store.getSnapshot().phase).toBe('hidden')
+    expect(empty.start).not.toHaveBeenCalled()
+    expect(decided.start).not.toHaveBeenCalled()
+    noProfile.dispose()
+    settled.dispose()
+  })
+
   it('adopts a run already in flight and follows it to the decision', async () => {
     vi.useFakeTimers()
     const { api, start, status } = fakeApi()

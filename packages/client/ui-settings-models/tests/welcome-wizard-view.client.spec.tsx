@@ -280,6 +280,21 @@ describe('WelcomeWizard', () => {
     expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
   })
 
+  it('offers Investigate and Skip again after reopening onto an idle host', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = { state: 'succeeded', stage: 'done', stageIndex: 8, stageCount: 8, pct: 100 }
+      })
+    })
+    await act(async () => { await h.store.reopen() })
+    gotoAgents()
+    expect(document.querySelector('[data-wiz-analysis-status]')).toBeNull()
+    expect(screen.getByRole('button', { name: zh.wizAnalyseStart })).toBeTruthy()
+    expect(screen.getByRole('button', { name: zh.wizAnalyseSkip })).toBeTruthy()
+  })
+
   it('shows the demo key glyphs beside Back and Continue', async () => {
     mount()
     await screen.findByRole('dialog', { name: zh.wizTitle })
