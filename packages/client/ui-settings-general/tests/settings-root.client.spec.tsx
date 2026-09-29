@@ -99,9 +99,10 @@ function mount({
   }
   const unusedHook = (() => { throw new Error('unused by SettingsRoot') }) as never
   const shell = createSettingsShellStore().create()
+  const close = vi.fn(() => { shell.actions.close() })
   const props: SettingsRootComponentProps = {
     useStore: bindSnapshotSelector(shell),
-    actions: shell.actions,
+    actions: { ...shell.actions, close },
     useSessions: select => select(sessions),
     useSessionStatus,
     usePanelInfo, useSessionRetainInfo: () => undefined, useResource,
@@ -157,7 +158,7 @@ function mount({
     desktopUpdate = next
     view.rerender(<SettingsRoot {...props} />)
   }
-  return { view, renderSlot, bump, listeners, reconnect, setConnectionState, setDesktopUpdate }
+  return { view, renderSlot, bump, listeners, reconnect, setConnectionState, setDesktopUpdate, close }
 }
 
 function openPanel() {
@@ -432,6 +433,14 @@ describe('SettingsPanel navigation', () => {
       (first?.[1] as { complete: () => void }).complete()
     })
     expect(clearOnboardingRequest).toHaveBeenCalledOnce()
+  })
+
+  it('yields the settings modal on an explicit onboarding request only', () => {
+    const requested = mount({ onboardingActive: false, onboardingRequest: true })
+    expect(requested.close).toHaveBeenCalledOnce()
+    cleanup()
+    const idle = mount({ onboardingActive: false })
+    expect(idle.close).not.toHaveBeenCalled()
   })
 
   it('paints no takeover chrome of its own around the mounted step', () => {

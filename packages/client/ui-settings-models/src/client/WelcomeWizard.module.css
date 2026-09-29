@@ -7,10 +7,11 @@
 .backdrop {
   position: fixed;
   inset: 0;
-  /* Above the settings modal (1000): the wizard is a takeover surface, and
-     "Run setup again" opens it from inside that modal. Below the analysis
-     chip (1050) and transient menus (1100). */
-  z-index: 1010;
+  /* Below the shared modal layer (Modal primitive, z 1000): surfaces the
+     wizard opens from its steps — Add provider, provider editors — must stay
+     above it. The settings modal yields on an explicit reopen instead
+     (SettingsRoot closes it when the onboarding request rises). */
+  z-index: 900;
   display: grid;
   place-items: center;
   background: var(--dsw-alias-bg-mask-3);
@@ -430,9 +431,9 @@
 .tourLayer {
   position: fixed;
   inset: 0;
-  /* Above the wizard backdrop (1010) so the spotlight covers it; still below
-     the analysis chip (1050). */
-  z-index: 1020;
+  /* Above the wizard backdrop (900), still below the shared modal layer
+     (1000) so a modal opened during the tour stays reachable. */
+  z-index: 950;
   outline: none;
 }
 

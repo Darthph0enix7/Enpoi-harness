@@ -249,6 +249,16 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
     setCompletedOnboarding(new Set())
   }, [onboardingActive])
 
+  // An explicit request takes over the screen; the settings modal yields so
+  // the wizard (which sits below the shared modal layer) is visible and
+  // clickable. Guarded on the rising edge: a request that never clears cannot
+  // keep the panel shut.
+  const previousOnboardingRequest = useRef(false)
+  useEffect(() => {
+    if (onboardingRequested && !previousOnboardingRequest.current) close()
+    previousOnboardingRequest.current = onboardingRequested
+  }, [onboardingRequested, close])
+
   useLayoutEffect(() => {
     const previous = previousConnectionState.current
     previousConnectionState.current = connectionState
