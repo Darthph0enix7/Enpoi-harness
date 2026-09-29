@@ -9,6 +9,9 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the settings shell's Context merge (ctx.settingsUi) into
+// this program.
+import type {} from '@deepseek-ai/dsh-client-ui-settings-general/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -38,6 +41,7 @@ import { SetupSection } from './SetupSection.tsx'
 import type { SetupSectionInjected } from './SetupSection.tsx'
 import { WelcomeNoticeStore } from './welcome-store.ts'
 import { WelcomeWizardStore, WIZARD_SETTINGS_NAMESPACE } from './welcome-wizard.ts'
+import type { WizardAnalysisApi } from './welcome-wizard.ts'
 import { analysisApi } from './welcome-rpc.ts'
 import { ModelsSettingsStore } from './store.ts'
 import type { ModelsWire } from './store.ts'
@@ -85,7 +89,7 @@ export function refreshIfLoaded(controller: ModelsSettingsStore): void {
  */
 export const inject = [
   'slots', 'locale', 'remote', 'remote.credentials', 'remote.llm', 'remote.settings', 'remote.session',
-  'configForms', 'settingsSchema',
+  'configForms', 'settingsSchema', 'settingsUi',
 ]
 
 /**
@@ -163,11 +167,27 @@ export function apply(ctx: ClientContext): void {
     hooks: { welcome: welcomeController.store },
     t,
   })
+  // The frame-wide system-analysis chip owns its own store: it offers the
+  // opt-in investigation while nothing is stored, follows a run started from
+  // either surface, and carries the accept/reject decision independently of
+  // the wizard. Nothing starts without an explicit action.
+  const analysisController = new SystemAnalysisStore(systemAnalysisApi)
+  // The wizard's agents step starts the same host run; its adapter wakes the
+  // chip store so the progress bar adopts the run the step just began.
+  const wizardAnalysisApi: WizardAnalysisApi = {
+    start: async () => {
+      const result = await analysisApi.start()
+      if (result.ok) void analysisController.load()
+      return result
+    },
+    status: analysisApi.status,
+  }
   // First-run setup: one store drives the wizard step and the Setup section's
   // reopen action, so both surfaces agree on the completion marker.
   const wizardController = new WelcomeWizardStore(
     ctx.configForms.get<Record<string, unknown>>(WIZARD_SETTINGS_NAMESPACE),
-    analysisApi,
+    wizardAnalysisApi,
+    () => { ctx.settingsUi.requestOnboarding() },
   )
   const wizardInjected = (): WelcomeWizardInjected => ({
     store: wizardController,
@@ -183,16 +203,14 @@ export function apply(ctx: ClientContext): void {
     hooks: { wizard: wizardController.store },
     t,
   })
-  // The frame-wide system-analysis chip owns its own store: it auto-starts the
-  // analysis while the first-run flow is pending, follows the run, and carries
-  // the accept/reject decision independently of the wizard. The gate reads the
-  // wizard store, whose `load()` resolves after the completion marker is known.
-  const analysisController = new SystemAnalysisStore(systemAnalysisApi, () => {
-    const snapshot = wizardController.store.getSnapshot()
-    return snapshot.status === 'ready' && !snapshot.completed
-  })
+  // The frame-wide system-analysis chip owns its own store: it offers the
+  // opt-in investigation while nothing is stored, follows a run started from
+  // either surface, and carries the accept/reject decision independently of
+  // the wizard. Nothing starts without an explicit action.
   const analysisInjected = (): SystemAnalysisChipInjected => ({
     actions: {
+      start: () => { void analysisController.start() },
+      dismissOffer: () => { analysisController.dismissOffer() },
       open: () => { void analysisController.open() },
       accept: () => { void analysisController.accept() },
       reject: () => { void analysisController.reject() },
@@ -260,14 +278,13 @@ export function apply(ctx: ClientContext): void {
       for (const dispose of disposers) dispose()
     }
   }, 'ui-settings-models: pushed invalidations')
-  // The chip reads the host state once on activation: a fresh machine in first
-  // run starts the analysis in the background, a stored profile offers the
-  // decision. The completion marker resolves first, so a later boot of a
-  // completed installation never mistakes "loading" for "first run".
+  // The chip reads the host state once on activation: a stored profile offers
+  // the decision, a run already in flight is adopted, and a machine with no
+  // profile shows the opt-in offer. Nothing is started here.
   ctx.effect(() => {
     void wizardController.load().then(() => analysisController.load())
     return () => { analysisController.dispose() }
-  }, 'ui-settings-models: system-analysis auto-start')
+  }, 'ui-settings-models: system-analysis status')
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -304,8 +321,9 @@ export function apply(ctx: ClientContext): void {
     order: -200,
     inject: wizardInjected,
   }, WelcomeWizard))
-  // The Setup row re-runs the flow later; the store's reopen flag overrides
-  // the completion marker for the next blank session.
+  // The Setup row re-runs the flow later: the store raises the shell's
+  // onboarding request, which mounts the wizard immediately through the
+  // coordinator whatever the session state is.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'setup',

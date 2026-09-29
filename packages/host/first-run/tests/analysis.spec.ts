@@ -1,37 +1,38 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAnalysisRunner, handleRequest, stagePct, type AnalysisDependencies } from '../src/analysis.ts'
-import type { SystemScanResult } from '../src/scan.ts'
+import {
+  ANALYSIS_STAGES, createAnalysisRunner, handleRequest, stagePct,
+  type AnalysisDependencies,
+} from '../src/analysis.ts'
+import type { InvestigationOutcome } from '../src/investigation.ts'
 
-const RESULT: SystemScanResult = {
-  summary: { threads: 8, memoryGiB: 16, services: 4 },
-  facts: {
-    scannedAt: '2026-09-29T00:00:00.000Z',
-    hostname: 'test-host',
-    hardware: { cpu: 'Test CPU', threads: 8, memoryGiB: 16 },
-    os: { type: 'Linux', release: '6.8', platform: 'linux', arch: 'x64', distribution: 'Test OS' },
-    services: { system: 4, user: 0, names: ['a.service'] },
-    tooling: [{ name: 'docker', version: '29.1.3' }],
-    hosting: { containers: 2, containerNames: ['one', 'two'], listeningPorts: [3000], composeProjects: ['stack'] },
-    disk: [{ path: '/', freeGiB: 30, totalGiB: 232 }],
-    gpu: null,
+const OUTCOME: InvestigationOutcome = {
+  profile: {
+    hostKind: 'server',
+    usage: { coding: 'repositories' },
+    capabilities: { cpu: 'Test CPU, 8 threads', memory: '16 GiB', gpu: 'none' },
+    hosting: { containers: [] },
+    tooling: { cuda: '12.8 through PyTorch' },
+    networking: { tailscale: 'present' },
   },
+  document: '## Machine\n\n- test machine',
 }
 
-/** Dependency set with an instantly settling scan and summariser. */
+/** Dependency set with an instantly settling investigation. */
 function dependencies(overrides: Partial<AnalysisDependencies> = {}): AnalysisDependencies {
   return {
-    scan: async (onStage) => {
-      for (const stage of ['hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU'] as const) onStage(stage)
-      return RESULT
+    investigate: async (onStage) => {
+      await Promise.resolve()
+      for (const stage of ANALYSIS_STAGES.slice(0, -1)) onStage(stage)
+      return OUTCOME
     },
-    summarise: async () => '## Capabilities\n- test machine',
     writeProfile: () => '/tmp/system-profile.md',
-    writeScan: () => '/tmp/system-profile.scan.json',
+    writeProfileJson: () => '/tmp/system-profile.json',
     readProfile: () => null,
     removeProfile: () => {},
     readDecision: () => null,
     writeDecision: () => {},
     route: 'kilo/kilo-auto/free',
+    preset: 'sysadmin',
     now: () => 1_000,
     ...overrides,
   }
@@ -46,34 +47,34 @@ async function settled(): Promise<void> {
 }
 
 describe('system analysis runner', () => {
-  it('runs in the background, advances every stage, and lands the profile', async () => {
+  it('runs in the background, advances the checklist stages, and lands both artifacts', async () => {
     const writeProfile = vi.fn((_markdown: string) => '/tmp/system-profile.md')
-    const writeScan = vi.fn(() => '/tmp/system-profile.scan.json')
-    const runner = createAnalysisRunner(dependencies({ writeProfile, writeScan }))
+    const writeProfileJson = vi.fn(() => '/tmp/system-profile.json')
+    const runner = createAnalysisRunner(dependencies({ writeProfile, writeProfileJson }))
     expect(runner.status().state).toBe('idle')
     const started = runner.start()
     expect(started.state).toBe('running')
+    expect(started.stage).toBe('machine')
     expect(started.startedAt).toBe(1_000)
-    expect(started.stageCount).toBe(9)
+    expect(started.stageCount).toBe(8)
     await settled()
     const done = runner.status()
     expect(done.state).toBe('succeeded')
-    expect(done.summary).toEqual({ threads: 8, memoryGiB: 16, services: 4 })
     expect(done.contextPath).toBe('/tmp/system-profile.md')
     expect(done.pct).toBe(100)
-    expect(writeScan).toHaveBeenCalledWith(JSON.stringify(RESULT.facts, null, 2))
+    expect(writeProfileJson).toHaveBeenCalledWith(JSON.stringify(OUTCOME.profile, null, 2))
     const document = writeProfile.mock.calls[0]?.[0] ?? ''
     expect(document).toContain('# System profile')
     expect(document).toContain('1970-01-01T00:00:01.000Z')
-    expect(document).toContain('kilo/kilo-auto/free')
-    expect(document).toContain('## Capabilities')
+    expect(document).toContain('sysadmin agent on kilo/kilo-auto/free')
+    expect(document).toContain('## Machine')
   })
 
   it('derives one stage position into a bounded percentage', () => {
-    expect(stagePct(0, 9)).toBe(0)
-    expect(stagePct(8, 9)).toBe(89)
-    expect(stagePct(100, 9)).toBe(89)
-    expect(stagePct(-3, 9)).toBe(0)
+    expect(stagePct(0, 8)).toBe(0)
+    expect(stagePct(7, 8)).toBe(88)
+    expect(stagePct(100, 8)).toBe(88)
+    expect(stagePct(-3, 8)).toBe(0)
     expect(stagePct(3, 0)).toBe(0)
   })
 
@@ -84,16 +85,12 @@ describe('system analysis runner', () => {
       samples.push({ stage: current.stage, stageIndex: current.stageIndex, pct: current.pct })
     }
     const runner = createAnalysisRunner(dependencies({
-      scan: async (onStage) => {
-        for (const stage of ['hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU'] as const) {
+      investigate: async (onStage) => {
+        for (const stage of ANALYSIS_STAGES.slice(0, -1)) {
           onStage(stage)
           record()
         }
-        return RESULT
-      },
-      summarise: async () => {
-        record()
-        return '## Capabilities\n- test machine'
+        return OUTCOME
       },
       writeProfile: () => {
         record()
@@ -102,60 +99,110 @@ describe('system analysis runner', () => {
     }))
     runner.start()
     await settled()
-    expect(samples.map(sample => sample.pct)).toEqual([0, 11, 22, 33, 44, 56, 67, 78, 89])
+    expect(samples.map(sample => sample.pct)).toEqual([0, 13, 25, 38, 50, 63, 75, 88])
     expect(samples.map(sample => sample.stage)).toEqual([
-      'hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU', 'summarising', 'writing profile',
+      'machine', 'usage', 'hosting', 'tooling', 'runtimes', 'networking', 'resources', 'writing profile',
     ])
     for (const sample of samples) {
       expect(sample.pct).toBeGreaterThanOrEqual(0)
       expect(sample.pct).toBeLessThanOrEqual(100)
       expect(sample.stageIndex).toBeGreaterThanOrEqual(0)
-      expect(sample.stageIndex).toBeLessThanOrEqual(9)
+      expect(sample.stageIndex).toBeLessThanOrEqual(8)
     }
     expect(runner.status().pct).toBe(100)
   })
 
+  it('ignores a repeated or unknown stage so the rail never moves backwards', async () => {
+    const runner = createAnalysisRunner(dependencies({
+      investigate: async (onStage) => {
+        onStage('tooling')
+        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 3 })
+        onStage('tooling')
+        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 3 })
+        onStage('resources')
+        onStage('machine')
+        expect(runner.status()).toMatchObject({ stage: 'machine', stageIndex: 0 })
+        return OUTCOME
+      },
+    }))
+    runner.start()
+    await settled()
+    expect(runner.status().state).toBe('succeeded')
+  })
+
   it('keeps a settled run when start is called again', async () => {
-    const scan = vi.fn(dependencies().scan)
-    const runner = createAnalysisRunner(dependencies({ scan, readProfile: () => '# System profile\n' }))
+    const investigate = vi.fn(dependencies().investigate)
+    const runner = createAnalysisRunner(dependencies({ investigate, readProfile: () => '# System profile\n' }))
     runner.start()
     await settled()
     runner.start()
     await settled()
-    expect(scan).toHaveBeenCalledTimes(1)
+    expect(investigate).toHaveBeenCalledTimes(1)
   })
 
   it('restarts a settled run whose document was removed', async () => {
-    const scan = vi.fn(dependencies().scan)
+    const investigate = vi.fn(dependencies().investigate)
     let stored: string | null = '# System profile\n'
-    const runner = createAnalysisRunner(dependencies({ scan, readProfile: () => stored }))
+    const runner = createAnalysisRunner(dependencies({ investigate, readProfile: () => stored }))
     runner.start()
     await settled()
-    expect(scan).toHaveBeenCalledTimes(1)
+    expect(investigate).toHaveBeenCalledTimes(1)
     stored = null
     expect(runner.start().state).toBe('running')
     await settled()
-    expect(scan).toHaveBeenCalledTimes(2)
+    expect(investigate).toHaveBeenCalledTimes(2)
   })
 
-  it('reports a failed scan without throwing', async () => {
-    const runner = createAnalysisRunner(dependencies({ scan: async () => { throw new Error('no probes') } }))
+  it('reports a failed investigation without throwing and keeps no profile', async () => {
+    const runner = createAnalysisRunner(dependencies({
+      investigate: async () => { throw new Error('unknown agent preset: sysadmin') },
+    }))
     runner.start()
     await settled()
     const failed = runner.status()
     expect(failed.state).toBe('failed')
-    expect(failed.error).toBe('no probes')
+    expect(failed.error).toBe('unknown agent preset: sysadmin')
     expect(runner.context()).toBeNull()
   })
 
-  it('reports a failed summariser with its reason', async () => {
-    const runner = createAnalysisRunner(dependencies({ summarise: async () => { throw new Error('route refused') } }))
+  it('removes a half-written publication when the document write fails after the JSON write', async () => {
+    const writeProfileJson = vi.fn(() => '/tmp/system-profile.json')
+    const removeProfile = vi.fn()
+    const runner = createAnalysisRunner(dependencies({
+      writeProfileJson,
+      writeProfile: () => { throw new Error('disk full') },
+      removeProfile,
+    }))
     runner.start()
     await settled()
-    expect(runner.status()).toMatchObject({ state: 'failed', error: 'route refused' })
+    const failed = runner.status()
+    expect(writeProfileJson).toHaveBeenCalledOnce()
+    expect(failed.state).toBe('failed')
+    expect(failed.error).toBe('disk full')
+    expect(removeProfile).toHaveBeenCalledOnce()
   })
 
-  it('accepts by recording the decision and rejecting by removing the document', async () => {
+  it('hands the investigation a signal that follows the plugin lifetime', async () => {
+    const lifetime = new AbortController()
+    const seen = vi.fn()
+    const runner = createAnalysisRunner(dependencies({
+      investigate: (onStage, signal) => {
+        seen(signal.aborted)
+        onStage('machine')
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+        })
+      },
+    }), lifetime.signal)
+    runner.start()
+    await settled()
+    expect(seen).toHaveBeenCalledWith(false)
+    lifetime.abort(new Error('unloaded'))
+    await settled()
+    expect(runner.status()).toMatchObject({ state: 'failed', error: 'aborted' })
+  })
+
+  it('accepts by recording the decision and rejecting by removing the document', () => {
     let decision: 'accepted' | 'rejected' | null = null
     const writeDecision = vi.fn((next: 'accepted' | 'rejected') => { decision = next })
     const removeProfile = vi.fn()
@@ -177,7 +224,7 @@ describe('system analysis runner', () => {
   it('answers start, status, context, accept, reject, and unknown paths over the route', () => {
     let decision: 'accepted' | 'rejected' | null = null
     const runner = createAnalysisRunner(dependencies({
-      readProfile: () => 'scan text',
+      readProfile: () => 'profile text',
       readDecision: () => decision,
       writeDecision: (next) => { decision = next },
     }))
@@ -195,7 +242,7 @@ describe('system analysis runner', () => {
     }
     expect(reply('/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'idle' } } })
     expect(reply('/system-analysis/start')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'running' } } })
-    expect(reply('/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'scan text' } })
+    expect(reply('/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
     expect(reply('/system-analysis/accept')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
     expect(reply('/system-analysis/reject')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
     expect(reply('/system-analysis/unknown')).toMatchObject({ status: 404, body: { ok: false } })

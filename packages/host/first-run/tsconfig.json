@@ -18,13 +18,43 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../../util/brand"
+    },
+    {
       "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../util/values"
     },
     {
       "path": "../../host/webserver"
     },
     {
+      "path": "../../core/agent"
+    },
+    {
+      "path": "../../core/session"
+    },
+    {
       "path": "../../core/system-prompt"
+    },
+    {
+      "path": "../../core/tools"
+    },
+    {
+      "path": "../../todo/tool-todo"
+    },
+    {
+      "path": "../../llm/llm"
+    },
+    {
+      "path": "../../preset/agent-preset-registry"
+    },
+    {
+      "path": "../../interaction/permission-presets"
+    },
+    {
+      "path": "../../session/session-title"
     },
     {
       "path": "../../settings/settings"

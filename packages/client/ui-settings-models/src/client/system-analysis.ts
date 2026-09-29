@@ -3,9 +3,10 @@
  * store. The wire is validated at this boundary: a response that is not the
  * expected envelope becomes a displayable failure message, never an exception
  * in the chip, and a percentage is clamped to the 0..100 the bar can render.
- * The store auto-starts the analysis while the first-run flow is pending and
- * the machine has no profile and no recorded decision, follows the run, and
- * carries the accept/reject decision.
+ * Nothing here starts a run on its own: the store offers the investigation
+ * while the machine has no profile and no recorded decision, and only an
+ * explicit action (the chip's start button or the setup wizard's agents step)
+ * sends `start`. A run already in flight is adopted and followed.
  * @module ui-settings-models/system-analysis
  */
 
@@ -50,8 +51,12 @@ export interface SystemAnalysisApi {
 
 /** Snapshot rendered by the chip. */
 export interface SystemAnalysisState {
-  /** Hidden until a run is live, a profile awaits a decision, or a run failed. */
-  phase: 'hidden' | 'running' | 'ready' | 'failed'
+  /**
+   * Hidden until the machine needs something from the operator: `idle` offers
+   * the opt-in investigation, `running` shows the stage rail, `ready` awaits a
+   * decision, and `failed` carries the reason with a retry.
+   */
+  phase: 'hidden' | 'idle' | 'running' | 'ready' | 'failed'
   stage: string
   stageIndex: number
   stageCount: number
@@ -154,7 +159,7 @@ export const systemAnalysisApi: SystemAnalysisApi = {
   reject: () => call('reject'),
 }
 
-/** Coordinates the chip's auto-start, poll, and decision. */
+/** Coordinates the chip's opt-in offer, poll, and decision. */
 export class SystemAnalysisStore {
   /** uSES-safe state source the chip renders from. */
   readonly store: SnapshotStore<SystemAnalysisState> = createSnapshotStore<SystemAnalysisState>({
@@ -171,20 +176,15 @@ export class SystemAnalysisStore {
   })
 
   private poll: ReturnType<typeof setInterval> | undefined
+  private offerDismissed = false
+
+  /** @param api - the host analysis calls. */
+  constructor(private readonly api: SystemAnalysisApi) {}
 
   /**
-   * @param api - the host analysis calls.
-   * @param firstRunPending - whether the first-run setup flow is still pending;
-   * the analysis starts itself only there, never on a later boot.
-   */
-  constructor(
-    private readonly api: SystemAnalysisApi,
-    private readonly firstRunPending: () => boolean = () => true,
-  ) {}
-
-  /**
-   * Read the current state and auto-start the analysis when this machine is in
-   * first run and has no profile and no recorded decision.
+   * Read the current state and follow a run already in flight. A machine with
+   * no profile and no recorded decision shows the opt-in offer; nothing here
+   * starts a run.
    * @returns settlement after the first status answer is applied.
    */
   async load(): Promise<void> {
@@ -193,19 +193,8 @@ export class SystemAnalysisStore {
       this.fail(result.failure)
       return
     }
-    const view = result.value
-    this.apply(view)
-    // A run already in flight (however it was started) is adopted and followed;
-    // a settled decision or a stored profile needs no chip.
-    if (view.state === 'running') {
-      this.follow()
-      return
-    }
-    if (view.state === 'failed' || view.hasProfile || view.decision !== null) return
-    // First-run chrome only: a completed installation with no profile never
-    // starts the analysis on its own.
-    if (!this.firstRunPending()) return
-    await this.start()
+    this.apply(result.value)
+    if (result.value.state === 'running') this.follow()
   }
 
   /** Start the run, or adopt the one already in flight. */
@@ -217,6 +206,12 @@ export class SystemAnalysisStore {
     }
     this.apply(result.value)
     if (result.value.state === 'running') this.follow()
+  }
+
+  /** Hide the opt-in offer for this process; the next boot offers again. */
+  dismissOffer(): void {
+    this.offerDismissed = true
+    this.store.update((state) => { state.phase = 'hidden' })
   }
 
   /** Fetch the stored document and open the results panel. */
@@ -296,11 +291,19 @@ export class SystemAnalysisStore {
       }
       if (view.state === 'succeeded') {
         // A stored profile pending a decision is the review surface; one that
-        // already carries a decision is settled and keeps no chrome.
-        state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
+        // already carries a decision is settled and keeps no chrome. A settled
+        // run whose document is gone (rejected, or removed by hand) offers the
+        // run again, exactly like the host's own start decision.
+        if (view.hasProfile) {
+          state.phase = view.decision === null ? 'ready' : 'hidden'
+          return
+        }
+        state.phase = view.decision !== null || this.offerDismissed ? 'hidden' : 'idle'
         return
       }
-      state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
+      // Idle: offer the investigation only while nothing is stored and no
+      // decision was ever recorded; a dismissed offer stays down.
+      state.phase = view.hasProfile || view.decision !== null || this.offerDismissed ? 'hidden' : 'idle'
     })
   }
 

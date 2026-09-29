@@ -4,16 +4,18 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_SYSTEM_CONTEXT,
+  essentialsLine,
   readSystemProfile,
   readSystemProfileDecision,
+  readSystemProfileEssentials,
   readSystemProfileOrDefault,
   removeSystemProfile,
   SYSTEM_PROFILE_REFERENCE,
+  systemProfileContextText,
   writeSystemProfile,
   writeSystemProfileDecision,
-  writeSystemProfileScan,
+  writeSystemProfileJson,
 } from '../src/context-file.ts'
-import { runSystemScan } from '../src/scan.ts'
 
 const roots: string[] = []
 
@@ -52,17 +54,17 @@ describe('system-profile document', () => {
     expect(readSystemProfileOrDefault(path)).toBe(DEFAULT_SYSTEM_CONTEXT)
   })
 
-  it('keeps the raw scan JSON beside the document and removes both on rejection', () => {
+  it('keeps the structured JSON beside the document and removes both on rejection', () => {
     const path = scratch()
-    const scanPath = join(path, '..', 'system-profile.scan.json')
+    const jsonPath = join(path, '..', 'system-profile.json')
     writeSystemProfile('# System profile\n', path)
-    writeSystemProfileScan('{"threads":8}', scanPath)
-    expect(readFileSync(scanPath, 'utf8')).toBe('{"threads":8}')
-    removeSystemProfile(path, scanPath)
+    writeSystemProfileJson('{"hostKind":"server"}', jsonPath)
+    expect(readFileSync(jsonPath, 'utf8')).toBe('{"hostKind":"server"}')
+    removeSystemProfile(path, jsonPath)
     expect(readSystemProfile(path)).toBeNull()
-    expect(() => readFileSync(scanPath, 'utf8')).toThrow()
+    expect(() => readFileSync(jsonPath, 'utf8')).toThrow()
     // Rejection is idempotent.
-    removeSystemProfile(path, scanPath)
+    removeSystemProfile(path, jsonPath)
   })
 
   it('records and reads the operator decision', () => {
@@ -77,20 +79,44 @@ describe('system-profile document', () => {
   })
 })
 
-describe('read-only system scan', () => {
-  it('assembles every section and reports stages in order', async () => {
-    const stages: string[] = []
-    const result = await runSystemScan(stage => stages.push(stage))
-    expect(stages).toEqual(['hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU'])
-    expect(result.summary.threads).toBeGreaterThan(0)
-    expect(result.summary.memoryGiB).toBeGreaterThan(0)
-    expect(result.facts.scannedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u)
-    expect(result.facts.hardware.threads).toBe(result.summary.threads)
-    expect(result.facts.os.platform).toBe(process.platform)
-    expect(result.facts.tooling.map(tool => tool.name)).toEqual([
-      'docker', 'node', 'npm', 'python', 'cuda', 'git', 'pnpm', 'tailscale',
-    ])
-    expect(result.facts.disk.length).toBe(2)
-    expect(Array.isArray(result.facts.hosting.containerNames)).toBe(true)
+describe('profile essentials', () => {
+  it('reads the present essentials from the structured profile and ignores malformed input', () => {
+    const jsonPath = join(scratch(), '..', 'system-profile.json')
+    expect(readSystemProfileEssentials(jsonPath)).toEqual({})
+    writeFileSync(jsonPath, 'not json')
+    expect(readSystemProfileEssentials(jsonPath)).toEqual({})
+    writeSystemProfileJson(JSON.stringify({
+      hostKind: 'server',
+      capabilities: { cpu: 'Xeon E5-2680 v4, 28 threads', memory: '62 GiB', gpu: 'Tesla P40, 24 GB', disk: '30 GiB free of 232 GiB' },
+      usage: { coding: true },
+    }), jsonPath)
+    expect(readSystemProfileEssentials(jsonPath)).toEqual({
+      hostKind: 'server',
+      cpu: 'Xeon E5-2680 v4, 28 threads',
+      memory: '62 GiB',
+      gpu: 'Tesla P40, 24 GB',
+      disk: '30 GiB free of 232 GiB',
+    })
+    expect(essentialsLine(readSystemProfileEssentials(jsonPath)))
+      .toBe('System profile essentials: server; CPU Xeon E5-2680 v4, 28 threads; memory 62 GiB; GPU Tesla P40, 24 GB; disk 30 GiB free of 232 GiB.')
+    expect(essentialsLine({})).toBeNull()
+  })
+
+  it('bounds one verbose essentials field instead of flooding the prompt', () => {
+    const long = 'x'.repeat(400)
+    const line = essentialsLine({ hostKind: 'server', cpu: long })
+    expect(line).toBe(`System profile essentials: server; CPU ${'x'.repeat(119)}….`)
+  })
+
+  it('contributes essentials plus the reference once stored, and the default before that', () => {
+    const path = join(scratch(), '..', 'system-profile.md')
+    const jsonPath = join(path, '..', 'system-profile.json')
+    expect(systemProfileContextText(path, jsonPath)).toBe(DEFAULT_SYSTEM_CONTEXT)
+    writeSystemProfile('# System profile\n', path)
+    expect(systemProfileContextText(path, jsonPath)).toBe(SYSTEM_PROFILE_REFERENCE)
+    writeSystemProfileJson('{"hostKind":"server","capabilities":{"gpu":"Tesla P40, 24 GB"}}', jsonPath)
+    expect(systemProfileContextText(path, jsonPath)).toBe(
+      `System profile essentials: server; GPU Tesla P40, 24 GB.\n${SYSTEM_PROFILE_REFERENCE}`,
+    )
   })
 })

@@ -11,6 +11,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the ctx.remote merge and its fixed Host facts.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { getDeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the settings slot declarations plus the ctx.configForms Context
@@ -39,6 +40,10 @@ import type { SettingsDocumentActionInjected } from './SettingsDocumentAction.ts
 import { SettingsDocumentStore } from './settings-document-store.ts'
 import { en, zh, type SettingsKey } from './locales.ts'
 
+export type {
+  SettingsOnboardingStep, SettingsRootComponentProps, SettingsRootInjected, SettingsSectionRow,
+  SettingsUiService,
+} from './shell-contract.ts'
 export type {
   CloseLabelProps, HeaderContentProps, TriggerContentProps,
 } from './chrome.tsx'
@@ -120,7 +125,9 @@ export function apply(ctx: ClientContext): void {
   let onboardingVersion = -1
   let onboardingSteps: readonly SettingsOnboardingStep[] = []
   let openSectionImpl: (id: string) => void = () => {}
+  const onboardingRequest = createSnapshotStore<{ requested: boolean }>({ requested: false })
   const shellInjected = (): SettingsRootInjected => ({
+    clearOnboardingRequest: () => { onboardingRequest.update((s) => { s.requested = false }) },
     openDesktopUpdate: () => { desktopUpdate.open() },
     publishOpenSection: (handler) => {
       openSectionImpl = handler
@@ -131,6 +138,7 @@ export function apply(ctx: ClientContext): void {
       desktopUpdate: desktopUpdate.store,
       device: getDeviceRuntime(),
       connectionState: connection.state,
+      onboardingRequest,
       sections: {
         getSnapshot: () => {
           const version = ctx.slots.getVersion('settings.section')
@@ -179,7 +187,10 @@ export function apply(ctx: ClientContext): void {
   })
   // Cross-plugin door to the panel: any feature may open Settings on a section
   // (the capabilities drawer links to Permissions and Dynamic this way).
-  ctx.effect(() => ctx.provide('settingsUi', { openSection: (id) => { openSectionImpl(id) } }), 'ui-settings-general: settingsUi service')
+  ctx.effect(() => ctx.provide('settingsUi', {
+    openSection: (id) => { openSectionImpl(id) },
+    requestOnboarding: () => { onboardingRequest.update((s) => { s.requested = true }) },
+  }), 'ui-settings-general: settingsUi service')
 
   ctx.slots.inject('sidebar.settings', () => {
     const shellHandle = createSettingsShellStore()

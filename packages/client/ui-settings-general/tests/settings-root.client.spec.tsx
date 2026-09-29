@@ -44,6 +44,8 @@ function mount({
   connectionState = 'connected',
   desktopUpdate = { failed: false, opening: false },
   onboardingActive = true,
+  onboardingRequest = false,
+  clearOnboardingRequest = vi.fn(),
   mainView = true,
   rows = [
     { id: 'general', order: 0, label: 'General' },
@@ -61,6 +63,8 @@ function mount({
   connectionState?: ConnectionSnapshot
   desktopUpdate?: DesktopUpdateView
   onboardingActive?: boolean
+  onboardingRequest?: boolean
+  clearOnboardingRequest?: () => void
   mainView?: boolean
   rows?: Row[]
   steps?: Step[]
@@ -123,6 +127,8 @@ function mount({
       return select(currentConnectionState)
     },
     useOnboardingSteps: select => select(steps),
+    useOnboardingRequest: select => select({ requested: onboardingRequest }),
+    clearOnboardingRequest,
     useSections: (select) => {
       const [, force] = useState(0)
       useEffect(() => {
@@ -408,6 +414,24 @@ describe('SettingsPanel navigation', () => {
     const { renderSlot } = mount({ mainView: false })
 
     expect(renderSlot.mock.calls.some(call => call[0] === 'settings.onboarding')).toBe(true)
+  })
+
+  it('starts at the first step on an explicit reopen request, retained session or not', () => {
+    const { renderSlot } = mount({ onboardingActive: false, onboardingRequest: true })
+    const calls = renderSlot.mock.calls.filter(call => call[0] === 'settings.onboarding')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.[1]).toMatchObject({ stepId: 'welcome' })
+    expect(calls[0]?.[2]).toEqual({ only: 'welcome' })
+  })
+
+  it('clears the onboarding request once the requested flow ran its first step', () => {
+    const clearOnboardingRequest = vi.fn()
+    const { renderSlot } = mount({ onboardingActive: false, onboardingRequest: true, clearOnboardingRequest })
+    const first = renderSlot.mock.calls.find(call => call[0] === 'settings.onboarding')
+    act(() => {
+      (first?.[1] as { complete: () => void }).complete()
+    })
+    expect(clearOnboardingRequest).toHaveBeenCalledOnce()
   })
 
   it('paints no takeover chrome of its own around the mounted step', () => {

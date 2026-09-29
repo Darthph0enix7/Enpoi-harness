@@ -125,6 +125,30 @@ button.chip:hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+/* Dismiss control of the opt-in offer: a quiet glyph that stays readable on
+   the chip surface in every skin. */
+.offerDismiss {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  background: none;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+}
+
+.offerDismiss:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .body {
   display: flex;
   flex-direction: column;

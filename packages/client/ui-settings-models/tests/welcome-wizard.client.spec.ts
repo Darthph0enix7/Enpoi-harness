@@ -69,6 +69,9 @@ function scope(snapshot: WizardScopeSnapshot, set = vi.fn(async () => true)): Wi
   }
 }
 
+/** Third constructor argument for specs that never reopen the wizard. */
+const noRequest = (): void => {}
+
 const idleAnalysis = {
   start: async () => ({ ok: true as const, value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
   status: async () => ({ ok: true as const, value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
@@ -76,13 +79,14 @@ const idleAnalysis = {
 
 describe('welcome wizard gating', () => {
   it('shows on a fresh document and hides once the marker version matches', async () => {
-    const fresh = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis)
+    const fresh = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis, noRequest)
     await fresh.load()
     expect(fresh.store.getSnapshot().visible).toBe(true)
 
     const done = new WelcomeWizardStore(
       scope({ mode: 'host', status: 'ready', value: { [WIZARD_COMPLETED_FIELD]: WIZARD_VERSION } }),
       idleAnalysis,
+      noRequest,
     )
     await done.load()
     expect(done.store.getSnapshot().completed).toBe(true)
@@ -96,6 +100,7 @@ describe('welcome wizard gating', () => {
     const store = new WelcomeWizardStore(
       scope({ mode: 'host', status: 'ready', value: {} }, set),
       idleAnalysis,
+      noRequest,
     )
     await store.load()
     await expect(store.finish()).resolves.toBe(false)
@@ -105,22 +110,26 @@ describe('welcome wizard gating', () => {
     store.dispose()
   })
 
-  it('reopens after the marker when the Setup entry asks', async () => {
+  it('reopens after the marker when the Setup entry asks, raising the shell request', async () => {
+    const requestOnboarding = vi.fn()
     const store = new WelcomeWizardStore(
       scope({ mode: 'host', status: 'ready', value: { [WIZARD_COMPLETED_FIELD]: WIZARD_VERSION } }),
       idleAnalysis,
+      requestOnboarding,
     )
     await store.load()
     store.reopen()
+    expect(store.store.getSnapshot().reopened).toBe(true)
     expect(store.store.getSnapshot().visible).toBe(true)
     expect(store.store.getSnapshot().wizard.step).toBe('welcome')
+    expect(requestOnboarding).toHaveBeenCalledOnce()
     store.close()
     expect(store.store.getSnapshot().visible).toBe(false)
     store.dispose()
   })
 
   it('keeps a refused step write on its own step and clears it on navigation', async () => {
-    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis)
+    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis, noRequest)
     await store.load()
     store.dispatch({ type: 'continue' })
     store.noteWriteFailure('security', 'refused')
@@ -132,7 +141,7 @@ describe('welcome wizard gating', () => {
   })
 
   it('treats an unmounted settings namespace as no overlay, never as a block', async () => {
-    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'unavailable' }), idleAnalysis)
+    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'unavailable' }), idleAnalysis, noRequest)
     await store.load()
     expect(store.store.getSnapshot().visible).toBe(false)
     expect(store.store.getSnapshot().status).toBe('error')
@@ -140,7 +149,7 @@ describe('welcome wizard gating', () => {
   })
 
   it('treats a memory scope as a first run and resolves load immediately', async () => {
-    const store = new WelcomeWizardStore(scope({ mode: 'memory', status: 'ready' }), idleAnalysis)
+    const store = new WelcomeWizardStore(scope({ mode: 'memory', status: 'ready' }), idleAnalysis, noRequest)
     await store.load()
     expect(store.store.getSnapshot().visible).toBe(true)
     store.dispose()
@@ -154,7 +163,7 @@ describe('welcome wizard gating', () => {
       subscribe: (next) => { listeners.add(next); return () => { listeners.delete(next) } },
       set: async () => true,
     }
-    const store = new WelcomeWizardStore(loading, idleAnalysis)
+    const store = new WelcomeWizardStore(loading, idleAnalysis, noRequest)
     let settled = false
     const pending = store.load().then(() => { settled = true })
     await Promise.resolve()

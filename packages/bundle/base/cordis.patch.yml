@@ -92,9 +92,9 @@
     # default model at its free tier, so a new machine can talk to a model
     # with no key. The write lands in the user layer, so Models can remove
     # the route; a stored marker stops any later re-seed. The analysis row
-    # runs the read-only system scan the first-run wizard starts, and the
-    # context row (mounted by the sysadmin preset) turns the result into that
-    # agent's machine context.
+    # runs the opt-in read-only sysadmin investigation the wizard or the chip
+    # starts, and the context row (mounted by the sysadmin preset) contributes
+    # the profile essentials plus a reference to that agent's machine record.
     - id: first-run
       name: '@deepseek-ai/dsh-host-first-run'
 

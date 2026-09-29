@@ -13,30 +13,13 @@ function parseJob(value: unknown): WizardAnalysisView | undefined {
   const job = value as Record<string, unknown>
   const state = job.state
   if (state !== 'idle' && state !== 'running' && state !== 'succeeded' && state !== 'failed') return undefined
-  const stage = typeof job.stage === 'string' ? job.stage : ''
-  const stageIndex = typeof job.stageIndex === 'number' ? job.stageIndex : 0
-  const stageCount = typeof job.stageCount === 'number' ? job.stageCount : 0
-  const pct = typeof job.pct === 'number' ? job.pct : 0
-  const summary = job.summary
   return {
     state,
-    stage,
-    stageIndex,
-    stageCount,
-    pct,
+    stage: typeof job.stage === 'string' ? job.stage : '',
+    stageIndex: typeof job.stageIndex === 'number' ? job.stageIndex : 0,
+    stageCount: typeof job.stageCount === 'number' ? job.stageCount : 0,
+    pct: typeof job.pct === 'number' ? job.pct : 0,
     ...typeof job.error === 'string' ? { error: job.error } : {},
-    ...typeof summary === 'object' && summary !== null ? {
-      summary: {
-        threads: Number((summary as Record<string, unknown>).threads ?? 0),
-        memoryGiB: Number((summary as Record<string, unknown>).memoryGiB ?? 0),
-        services: typeof (summary as Record<string, unknown>).services === 'number'
-          ? (summary as Record<string, unknown>).services as number
-          : null,
-        ...typeof (summary as Record<string, unknown>).gpu === 'string'
-          ? { gpu: (summary as Record<string, unknown>).gpu as string }
-          : {},
-      },
-    } : {},
   }
 }
 

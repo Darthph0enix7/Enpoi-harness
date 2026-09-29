@@ -1,12 +1,12 @@
 /**
- * Frame-wide bottom-right chip for the system analysis: a compact collapsible
- * bar with live progress while the run is in flight, "System analysis ready"
- * once the profile is stored, and the failure reason with a retry when the run
- * failed. The bar is portaled out of the shell frame so it sits above the
- * application and above the first-run modal; expanding it grows the phase rail
- * upward. Clicking the ready bar opens the stored document with Accept and
- * Reject; clicking elsewhere dismisses the panel and accepts. Nothing here
- * blocks the app.
+ * Frame-wide bottom-right chip for the system analysis: an opt-in offer while
+ * no profile is stored, a compact collapsible bar with live progress once the
+ * user starts the run, "System analysis ready" once the profile is stored, and
+ * the failure reason with a retry when the run failed. The bar is portaled out
+ * of the shell frame so it sits above the application and above the first-run
+ * modal; expanding it grows the phase rail upward. Clicking the ready bar opens
+ * the stored document with Accept and Reject; clicking elsewhere dismisses the
+ * panel and accepts. Nothing here blocks the app and nothing starts by itself.
  * @module ui-settings-models/SystemAnalysisChip
  */
 
@@ -22,6 +22,8 @@ import css from './SystemAnalysisChip.module.css'
 /** Actions and live state delivered through the renderer-bound hooks. */
 export interface SystemAnalysisChipInjected {
   actions: {
+    start: () => void
+    dismissOffer: () => void
     open: () => void
     accept: () => void
     reject: () => void
@@ -31,22 +33,21 @@ export interface SystemAnalysisChipInjected {
   hooks: { analysis: ObservableSnapshot<SystemAnalysisState> }
 }
 
-/** Display order of the host analysis stages; index maps to `stageIndex`. */
+/** Display order of the investigation stages; index maps to `stageIndex`. */
 const PHASE_KEYS = [
-  'wizPhaseHardware', 'wizPhaseOs', 'wizPhaseServices', 'wizPhaseTooling', 'wizPhaseHosting',
-  'wizPhaseDisk', 'wizPhaseGpu', 'wizPhaseSummarising', 'wizPhaseWriting',
+  'wizPhaseMachine', 'wizPhaseUsage', 'wizPhaseHosting', 'wizPhaseTooling',
+  'wizPhaseRuntimes', 'wizPhaseNetworking', 'wizPhaseResources', 'wizPhaseWriting',
 ] as const
 
 /** Host stage id to locale key; an unknown stage renders verbatim. */
 const STAGE_KEYS: Readonly<Record<string, typeof PHASE_KEYS[number]>> = {
-  'hardware': 'wizPhaseHardware',
-  'operating system': 'wizPhaseOs',
-  'services': 'wizPhaseServices',
-  'tooling': 'wizPhaseTooling',
+  'machine': 'wizPhaseMachine',
+  'usage': 'wizPhaseUsage',
   'hosting': 'wizPhaseHosting',
-  'disk': 'wizPhaseDisk',
-  'GPU': 'wizPhaseGpu',
-  'summarising': 'wizPhaseSummarising',
+  'tooling': 'wizPhaseTooling',
+  'runtimes': 'wizPhaseRuntimes',
+  'networking': 'wizPhaseNetworking',
+  'resources': 'wizPhaseResources',
   'writing profile': 'wizPhaseWriting',
 }
 
@@ -109,6 +110,24 @@ export function SystemAnalysisChip({
             <Button disabled={state.busy} onClick={actions.reject}>{t('sysAnalysisReject')}</Button>
           </div>
         </section>
+      )}
+      {state.phase === 'idle' && (
+        <div className={css.chip} data-dsh-system-analysis-chip="idle">
+          <span className={css.body}>
+            <strong>{t('sysAnalysisTitle')}</strong>
+            <span className={css.stage}>{t('sysAnalysisOffer')}</span>
+          </span>
+          <Button variant="primary" onClick={actions.start}>{t('sysAnalysisStart')}</Button>
+          <button
+            type="button"
+            className={css.offerDismiss}
+            data-dsh-system-analysis-dismiss
+            aria-label={t('sysAnalysisDismiss')}
+            onClick={actions.dismissOffer}
+          >
+            ×
+          </button>
+        </div>
       )}
       {state.phase === 'running' && (
         <div className={css.dock} role="status" data-dsh-system-analysis-chip="running">

@@ -14,7 +14,7 @@ function view(overrides: Partial<SystemAnalysisView> = {}): SystemAnalysisView {
     state: 'idle',
     stage: '',
     stageIndex: 0,
-    stageCount: 9,
+    stageCount: 8,
     pct: 0,
     hasProfile: false,
     decision: null,
@@ -56,7 +56,7 @@ describe('analysis percentage', () => {
   it('clamps a percentage the host reports past 100 at the wire boundary', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       ok: true,
-      job: { state: 'running', stage: 'tooling', stageIndex: 3, stageCount: 9, pct: 420, hasProfile: false, decision: null },
+      job: { state: 'running', stage: 'tooling', stageIndex: 3, stageCount: 8, pct: 420, hasProfile: false, decision: null },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
     const result = await systemAnalysisApi.status()
     expect(result).toEqual({ ok: true, value: expect.objectContaining({ pct: 100, stageIndex: 3 }) })
@@ -74,11 +74,11 @@ describe('analysis percentage', () => {
 
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       ok: true,
-      job: { state: 'succeeded', stageIndex: 3, stageCount: 9, pct: 33, hasProfile: true, decision: 'accepted' },
+      job: { state: 'succeeded', stageIndex: 3, stageCount: 8, pct: 33, hasProfile: true, decision: 'accepted' },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
     expect(await systemAnalysisApi.status()).toEqual({
       ok: true,
-      value: { state: 'succeeded', stage: '', stageIndex: 3, stageCount: 9, pct: 33, hasProfile: true, decision: 'accepted' },
+      value: { state: 'succeeded', stage: '', stageIndex: 3, stageCount: 8, pct: 33, hasProfile: true, decision: 'accepted' },
     })
   })
 
@@ -98,24 +98,51 @@ describe('analysis percentage', () => {
 })
 
 describe('system-analysis store', () => {
-  it('auto-starts on a machine with no profile and follows the run to ready', async () => {
-    vi.useFakeTimers()
+  it('offers the opt-in investigation on a machine with no profile and never starts by itself', async () => {
     const { api, start, status } = fakeApi()
     status.mockResolvedValueOnce({ ok: true, value: view() })
-    start.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'hardware', stageIndex: 0, pct: 0 }) })
-    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 9, pct: 100 }) })
     const store = new SystemAnalysisStore(api)
     await store.load()
+    expect(start).not.toHaveBeenCalled()
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'idle' })
+    store.dispose()
+  })
+
+  it('dismisses the offer for this process and offers again on a fresh store', async () => {
+    const { api } = fakeApi()
+    const store = new SystemAnalysisStore(api)
+    await store.load()
+    expect(store.store.getSnapshot().phase).toBe('idle')
+    store.dismissOffer()
+    expect(store.store.getSnapshot().phase).toBe('hidden')
+    // A later status read does not resurrect the dismissed offer.
+    await store.load()
+    expect(store.store.getSnapshot().phase).toBe('hidden')
+    const fresh = new SystemAnalysisStore(api)
+    await fresh.load()
+    expect(fresh.store.getSnapshot().phase).toBe('idle')
+    store.dispose()
+    fresh.dispose()
+  })
+
+  it('starts on the explicit action and follows the run to ready', async () => {
+    vi.useFakeTimers()
+    const { api, start, status } = fakeApi()
+    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'machine', stageIndex: 0, pct: 0 }) })
+    start.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'machine', stageIndex: 0, pct: 0 }) })
+    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 8, pct: 100 }) })
+    const store = new SystemAnalysisStore(api)
+    await loadAndStart(store)
     expect(start).toHaveBeenCalledTimes(1)
-    expect(store.store.getSnapshot()).toMatchObject({ phase: 'running', stage: 'hardware' })
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'running', stage: 'machine' })
     await vi.advanceTimersByTimeAsync(300)
     expect(store.store.getSnapshot().phase).toBe('ready')
     store.dispose()
   })
 
-  it('offers the decision for a stored profile and never auto-starts after a rejection', async () => {
+  it('offers the decision for a stored profile and hides one that was already decided', async () => {
     const stored = fakeApi()
-    stored.status.mockResolvedValueOnce({ ok: true, value: view({ hasProfile: true }) })
+    stored.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true }) })
     const ready = new SystemAnalysisStore(stored.api)
     await ready.load()
     expect(ready.store.getSnapshot().phase).toBe('ready')
@@ -129,14 +156,15 @@ describe('system-analysis store', () => {
     expect(rejected.start).not.toHaveBeenCalled()
   })
 
-  it('re-runs a settled job whose document is gone', async () => {
-    const { api, start, status } = fakeApi()
-    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded' }) })
-    start.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'hardware' }) })
+  it('offers the run again when a settled job lost its document', async () => {
+    const { api, status } = fakeApi()
+    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', stage: 'done', stageIndex: 8, pct: 100 }) })
     const store = new SystemAnalysisStore(api)
     await store.load()
-    expect(start).toHaveBeenCalledTimes(1)
-    expect(store.store.getSnapshot().phase).toBe('running')
+    expect(store.store.getSnapshot().phase).toBe('idle')
+    store.dismissOffer()
+    await store.load()
+    expect(store.store.getSnapshot().phase).toBe('hidden')
     store.dispose()
   })
 
@@ -144,7 +172,7 @@ describe('system-analysis store', () => {
     const recorded = fakeApi()
     recorded.status.mockResolvedValueOnce({
       ok: true,
-      value: view({ state: 'succeeded', hasProfile: true, decision: 'accepted', stage: 'done', stageIndex: 9, pct: 100 }),
+      value: view({ state: 'succeeded', hasProfile: true, decision: 'accepted', stage: 'done', stageIndex: 8, pct: 100 }),
     })
     const store = new SystemAnalysisStore(recorded.api)
     await store.load()
@@ -152,24 +180,15 @@ describe('system-analysis store', () => {
     expect(recorded.start).not.toHaveBeenCalled()
   })
 
-  it('never starts outside the first-run flow', async () => {
-    const { api, start, status } = fakeApi()
-    status.mockResolvedValueOnce({ ok: true, value: view() })
-    const store = new SystemAnalysisStore(api, () => false)
-    await store.load()
-    expect(start).not.toHaveBeenCalled()
-    expect(store.store.getSnapshot().phase).toBe('hidden')
-  })
-
   it('adopts a run already in flight and follows it to the decision', async () => {
     vi.useFakeTimers()
     const { api, start, status } = fakeApi()
-    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'services', stageIndex: 2, pct: 22 }) })
-    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 9, pct: 100 }) })
+    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'hosting', stageIndex: 2, pct: 25 }) })
+    status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 8, pct: 100 }) })
     const store = new SystemAnalysisStore(api)
     await store.load()
     expect(start).not.toHaveBeenCalled()
-    expect(store.store.getSnapshot()).toMatchObject({ phase: 'running', stage: 'services', pct: 22 })
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'running', stage: 'hosting', pct: 25 })
     await vi.advanceTimersByTimeAsync(300)
     expect(store.store.getSnapshot()).toMatchObject({ phase: 'ready', pct: 100 })
     store.dispose()
@@ -183,10 +202,9 @@ describe('system-analysis store', () => {
     expect(first.store.getSnapshot()).toMatchObject({ phase: 'failed', errorCode: 'service', error: null })
 
     const startFailure = fakeApi()
-    startFailure.status.mockResolvedValueOnce({ ok: true, value: view() })
     startFailure.start.mockResolvedValueOnce({ ok: false, failure: { kind: 'rejected' } })
     const second = new SystemAnalysisStore(startFailure.api)
-    await second.load()
+    await second.start()
     expect(second.store.getSnapshot()).toMatchObject({ phase: 'failed', errorCode: 'rejected', error: null })
 
     const transport = fakeApi()
@@ -228,7 +246,7 @@ describe('system-analysis store', () => {
     accept.mockResolvedValueOnce({ ok: false, failure: { kind: 'rejected', message: 'the analysis request was rejected' } })
     await store.accept()
     expect(store.store.getSnapshot()).toMatchObject({ phase: 'failed', errorCode: 'rejected', error: 'the analysis request was rejected' })
-    start.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'hardware' }) })
+    start.mockResolvedValueOnce({ ok: true, value: view({ state: 'running', stage: 'machine' }) })
     await store.retry()
     expect(store.store.getSnapshot().phase).toBe('running')
     store.dispose()
@@ -237,7 +255,7 @@ describe('system-analysis store', () => {
   it('stops polling once disposed', async () => {
     vi.useFakeTimers()
     const { api, status } = fakeApi()
-    status.mockResolvedValue({ ok: true, value: view({ state: 'running', stage: 'hardware' }) })
+    status.mockResolvedValue({ ok: true, value: view({ state: 'running', stage: 'machine' }) })
     const store = new SystemAnalysisStore(api)
     await store.start()
     expect(store.store.getSnapshot().phase).toBe('running')
@@ -250,7 +268,7 @@ describe('system-analysis store', () => {
   it('keeps one poll when start is called again on a live run', async () => {
     vi.useFakeTimers()
     const { api, status } = fakeApi()
-    status.mockResolvedValue({ ok: true, value: view({ state: 'running', stage: 'hardware' }) })
+    status.mockResolvedValue({ ok: true, value: view({ state: 'running', stage: 'machine' }) })
     const store = new SystemAnalysisStore(api)
     await store.start()
     await store.start()
@@ -264,7 +282,7 @@ describe('system-analysis store', () => {
     const { api, start, status } = fakeApi()
     start.mockResolvedValueOnce({
       ok: true,
-      value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 9, pct: 100 }),
+      value: view({ state: 'succeeded', hasProfile: true, stage: 'done', stageIndex: 8, pct: 100 }),
     })
     const store = new SystemAnalysisStore(api)
     await store.start()
@@ -324,3 +342,9 @@ describe('system-analysis store', () => {
     expect(await systemAnalysisApi.start()).toEqual({ ok: false, failure: { kind: 'transport', message: 'offline' } })
   })
 })
+
+/** Load the status, then start explicitly; the two steps the chip performs. */
+async function loadAndStart(store: SystemAnalysisStore): Promise<void> {
+  await store.load()
+  await store.start()
+}

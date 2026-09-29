@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-host-first-run",
-  "description": "First-run product defaults (keyless Kilo Gateway route) and the read-only system analysis that feeds the sysadmin context",
+  "description": "First-run product defaults (keyless Kilo Gateway route) and the opt-in read-only sysadmin investigation that feeds the system profile",
   "version": "0.1.7-enpoi.1",
   "publishConfig": {
     "access": "public"
@@ -36,19 +36,35 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@deepseek-ai/dsh-brand": "workspace:*",
     "@deepseek-ai/dsh-home-paths": "workspace:*",
+    "@deepseek-ai/dsh-util-values": "workspace:*",
     "@deepseek-ai/schemastery": "workspace:~"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:~",
-    "@deepseek-ai/dsh-llm": "workspace:*"
+    "@deepseek-ai/dsh-agent": "workspace:*",
+    "@deepseek-ai/dsh-agent-preset-registry": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-permission-presets": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:*",
+    "@deepseek-ai/dsh-session-title": "workspace:*",
+    "@deepseek-ai/dsh-tool-todo": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:~",
     "@deepseek-ai/cordis-plugin-loader": "workspace:~",
+    "@deepseek-ai/dsh-agent": "workspace:*",
+    "@deepseek-ai/dsh-agent-preset-registry": "workspace:*",
     "@deepseek-ai/dsh-host-webserver": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-permission-presets": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:*",
+    "@deepseek-ai/dsh-session-title": "workspace:*",
     "@deepseek-ai/dsh-settings": "workspace:*",
     "@deepseek-ai/dsh-system-prompt": "workspace:*",
-    "@deepseek-ai/dsh-llm": "workspace:*"
+    "@deepseek-ai/dsh-tool-todo": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*"
   }
 }

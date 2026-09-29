@@ -1,19 +1,19 @@
 /**
- * The system analysis: one read-only scan run on the host while the user keeps
- * working, summarised by the configured free route into a capability-level
- * living document, published as JSON over `/system-analysis/*`. The run is a
- * singleton, bounded, and never fatal: a failed probe degrades one section, a
- * failed run reports its reason in the job view, and neither state blocks the
- * harness. Accept keeps the document; reject removes it and records the
- * decision so no later boot re-runs the analysis.
+ * The system analysis: one opt-in, read-only agent investigation of this
+ * machine, started from the client and published as JSON over
+ * `/system-analysis/*`. The run is a singleton, bounded by a configured time
+ * limit, and never fatal: a refused preset or a failed investigation reports
+ * its reason in the job view and leaves the harness untouched. Accept keeps
+ * the stored document; reject removes it and records the decision so no later
+ * boot re-offers the analysis. The run only ever starts on an explicit client
+ * action; nothing at boot schedules it.
  * @module @deepseek-ai/dsh-host-first-run/analysis
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-// Empty type imports carry the `webServer` and `llm` Context merges for the reads below.
+// Empty type imports carry the `webServer` Context merge for the reads below.
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type {} from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import {
   readSystemProfile,
@@ -22,13 +22,22 @@ import {
   systemProfilePath,
   writeSystemProfile,
   writeSystemProfileDecision,
-  writeSystemProfileScan,
+  writeSystemProfileJson,
   type SystemProfileDecision,
 } from './context-file.ts'
-import { ANALYSIS_STAGES, runSystemScan, type AnalysisStage, type SystemScanFacts, type SystemScanResult, type SystemScanSummary } from './scan.ts'
-import { summariseSystemFacts } from './summarise.ts'
+import {
+  INVESTIGATION_STAGES, investigationWorkspacePath, runSystemInvestigation,
+  type InvestigationOutcome, type InvestigationStage,
+} from './investigation.ts'
+
 /** Route prefix this plugin owns. */
 export const ANALYSIS_ROUTE = '/system-analysis'
+
+/** Every stage one investigation run reports, in execution order. */
+export const ANALYSIS_STAGES = INVESTIGATION_STAGES
+
+/** One stage name from {@link ANALYSIS_STAGES}. */
+export type AnalysisStage = InvestigationStage
 
 /** One analysis run as the client renders and polls it. */
 export interface AnalysisJobView {
@@ -45,8 +54,6 @@ export interface AnalysisJobView {
   finishedAt?: number
   /** Failure reason once the run settled failed. */
   error?: string
-  /** Scan facts once the run settled succeeded. */
-  summary?: SystemScanSummary
   /** Document path the result was written to. */
   contextPath?: string
   /** Whether a profile document is stored right now. */
@@ -55,18 +62,25 @@ export interface AnalysisJobView {
   decision: SystemProfileDecision | null
 }
 
-/** Replaceable run dependencies; production binds the real scan, summariser, and storage. */
+/** Replaceable run dependencies; production binds the real investigation and storage. */
 export interface AnalysisDependencies {
-  scan: (onStage: (stage: AnalysisStage) => void) => Promise<SystemScanResult>
-  summarise: (facts: SystemScanFacts) => Promise<string>
+  /**
+   * Run the bounded investigation.
+   * @param onStage - observer called as the investigating agent enters each stage.
+   * @param signal - cancellation for the run's whole lifetime.
+   * @returns the published structured profile and Markdown document.
+   */
+  investigate: (onStage: (stage: AnalysisStage) => void, signal: AbortSignal) => Promise<InvestigationOutcome>
   writeProfile: (markdown: string) => string
-  writeScan: (json: string) => string
+  writeProfileJson: (json: string) => string
   readProfile: () => string | null
   removeProfile: () => void
   readDecision: () => SystemProfileDecision | null
   writeDecision: (decision: SystemProfileDecision) => void
   /** `provider/model` label the document header records. */
   route: string
+  /** Agent preset the document header records. */
+  preset: string
   now: () => number
 }
 
@@ -89,8 +103,7 @@ const STAGE_COUNT = ANALYSIS_STAGES.length
 
 /**
  * Percentage one stage position reports, clamped to the 0..100 the client bar
- * can render. The published index is bounded to the last stage, so a stage
- * listener firing more times than the list holds still cannot report hundreds.
+ * can render.
  * @param stageIndex - zero-based position of the stage being entered.
  * @param stageCount - stages in the run.
  * @returns the integer percentage for that position.
@@ -101,12 +114,23 @@ export function stagePct(stageIndex: number, stageCount: number): number {
   return Math.round((bounded / stageCount) * 100)
 }
 
+/** The document header written above the agent-authored profile body. */
+function profileHeader(route: string, preset: string, at: number): string[] {
+  return [
+    '# System profile',
+    '',
+    `_Read-only investigation by the ${preset} agent on ${route}, completed ${new Date(at).toISOString()}. The structured profile is stored beside this document as system-profile.json; inventories in both are a snapshot of that investigation._`,
+    '',
+  ]
+}
+
 /**
  * Build one runner over the injected dependencies.
- * @param dependencies - scan, summariser, storage, and clock.
+ * @param dependencies - investigation, storage, and clock.
+ * @param lifetime - aborts a live run when the owning plugin unloads.
  * @returns the runner the route plugin and tests drive.
  */
-export function createAnalysisRunner(dependencies: AnalysisDependencies): AnalysisRunner {
+export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetime?: AbortSignal): AnalysisRunner {
   let job: AnalysisJobView = {
     state: 'idle',
     stage: '',
@@ -117,49 +141,45 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
     decision: null,
   }
 
-  let stageIndex = 0
-
   const view = (): AnalysisJobView => ({
     ...job,
     hasProfile: dependencies.readProfile() !== null,
     decision: dependencies.readDecision(),
   })
 
-  const advance = (stage: string): void => {
-    const bounded = Math.min(stageIndex, STAGE_COUNT - 1)
-    job = {
-      ...job,
-      stage,
-      stageIndex: bounded,
-      pct: stagePct(bounded, STAGE_COUNT),
-    }
-    stageIndex += 1
+  /** Enter one stage. A repeated or unknown stage never moves the rail. */
+  const enter = (stage: AnalysisStage): void => {
+    const index = ANALYSIS_STAGES.indexOf(stage)
+    if (index < 0) return
+    job = { ...job, stage, stageIndex: index, pct: stagePct(index, STAGE_COUNT) }
   }
 
-  const run = async (): Promise<void> => {
+  const run = async (signal: AbortSignal): Promise<void> => {
     try {
-      const result = await dependencies.scan(advance)
-      advance('summarising')
-      const body = await dependencies.summarise(result.facts)
-      advance('writing profile')
-      dependencies.writeScan(JSON.stringify(result.facts, null, 2))
-      const contextPath = dependencies.writeProfile([
-        '# System profile',
-        '',
-        `_Read-only scan summarised ${new Date(dependencies.now()).toISOString()} by ${dependencies.route}. Capability-level; the raw scan facts are stored beside this document._`,
-        '',
-        body,
-        '',
-      ].join('\n'))
-      job = {
-        ...job,
-        state: 'succeeded',
-        stage: 'done',
-        stageIndex: STAGE_COUNT,
-        pct: 100,
-        finishedAt: dependencies.now(),
-        summary: result.summary,
-        contextPath,
+      const outcome = await dependencies.investigate(enter, signal)
+      enter('writing profile')
+      try {
+        dependencies.writeProfileJson(JSON.stringify(outcome.profile, null, 2))
+        const contextPath = dependencies.writeProfile([
+          ...profileHeader(dependencies.route, dependencies.preset, dependencies.now()),
+          outcome.document.trim(),
+          '',
+        ].join('\n'))
+        job = {
+          ...job,
+          state: 'succeeded',
+          stage: 'done',
+          stageIndex: STAGE_COUNT,
+          pct: 100,
+          finishedAt: dependencies.now(),
+          contextPath,
+        }
+      } catch (error) {
+        // A half-written publication is not a profile: remove both files so
+        // `hasProfile` and the next start agree, then settle failed with the
+        // real reason.
+        dependencies.removeProfile()
+        throw error
       }
     } catch (error) {
       job = {
@@ -178,10 +198,9 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
       // A settled success whose document is gone (rejected, or removed by hand)
       // is no longer settled: the next start runs the analysis again.
       if (job.state === 'succeeded' && dependencies.readProfile() !== null) return view()
-      stageIndex = 0
       job = {
         state: 'running',
-        stage: 'hardware',
+        stage: ANALYSIS_STAGES[0],
         stageIndex: 0,
         stageCount: STAGE_COUNT,
         pct: 0,
@@ -189,7 +208,7 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
         hasProfile: false,
         decision: null,
       }
-      void run()
+      void run(lifetime ?? new AbortController().signal)
       return view()
     },
     status: () => view(),
@@ -206,31 +225,39 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
   }
 }
 
-/** Plugin config: the route can be switched off without unloading the package. */
+/** Plugin config: the route, the investigation preset and route, and its bound. */
 export interface AnalysisConfig {
   /** Register the `/system-analysis` routes. */
   routes: boolean
-  /** Provider route the summariser call uses. */
+  /** Agent preset that performs the investigation. */
+  preset: string
+  /** Provider route the investigation agent runs on. */
   provider: string
-  /** Model the summariser call uses. */
+  /** Model the investigation agent runs on. */
   model: string
-  /** Output cap for the profile body. */
-  maxTokens: number
+  /** Permission preset enforced on the investigation session. */
+  permissionPreset: string
+  /** Hard bound on one investigation, in minutes. */
+  timeoutMinutes: number
 }
 
 /** Validated analysis-plugin configuration; the Loader resolves the row config with it. */
 export const Config: z<AnalysisConfig> = z.object({
   routes: z.boolean().default(true),
+  preset: z.string().default('sysadmin'),
   provider: z.string().default('kilo'),
   model: z.string().default('kilo-auto/free'),
-  maxTokens: z.number().default(800),
+  // The investigation is read-only toward the host; this preset gives its own
+  // scratch workspace just enough room to write the two profile artifacts.
+  permissionPreset: z.string().default('workspace-write'),
+  timeoutMinutes: z.number().default(15),
 })
 
 /** Stable Cordis plugin name. */
 export const name = 'first-run-analysis'
 
-/** The analysis serves browser calls through the host web server and summarises through the LLM service. */
-export const inject = ['webServer', 'llm']
+/** The analysis serves browser calls through the host web server. */
+export const inject = ['webServer']
 
 /** Write one JSON response with no caching. */
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -279,27 +306,37 @@ export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res:
 
 /**
  * Register the system-analysis routes over the host web server.
- * @param ctx - host context carrying the web server and the LLM service.
- * @param config - route registration policy and summariser route.
+ * @param ctx - host context carrying the web server and the agent runtime.
+ * @param config - route, preset, investigation route, and bound.
  */
 export function apply(ctx: Context, config: AnalysisConfig): void {
   if (!config.routes) return
+  // A run must not outlive the row that owns it; the effect aborts any live
+  // investigation when the plugin unloads.
+  const lifetime = new AbortController()
+  ctx.effect(() => () => {
+    lifetime.abort(new Error('the first-run analysis plugin unloaded'))
+  }, 'first-run: investigation lifetime')
   const runner = createAnalysisRunner({
-    scan: onStage => runSystemScan(onStage),
-    summarise: facts => summariseSystemFacts(ctx.llm, facts, {
+    investigate: (onStage, signal) => runSystemInvestigation({
+      ctx,
+      workspace: investigationWorkspacePath(),
       provider: config.provider,
       model: config.model,
-      maxTokens: config.maxTokens,
-    }),
+      preset: config.preset,
+      permissionPreset: config.permissionPreset,
+      timeoutMinutes: config.timeoutMinutes,
+    }, { onStage, signal: AbortSignal.any([signal, lifetime.signal]) }),
     writeProfile: markdown => writeSystemProfile(markdown),
-    writeScan: json => writeSystemProfileScan(json),
+    writeProfileJson: json => writeSystemProfileJson(json),
     readProfile: () => readSystemProfile(),
     removeProfile: () => { removeSystemProfile() },
     readDecision: () => readSystemProfileDecision(),
     writeDecision: (decision) => { writeSystemProfileDecision(decision) },
     route: `${config.provider}/${config.model}`,
+    preset: config.preset,
     now: () => Date.now(),
-  })
+  }, lifetime.signal)
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: ANALYSIS_ROUTE,

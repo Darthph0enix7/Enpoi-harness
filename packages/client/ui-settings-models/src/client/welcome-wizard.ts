@@ -193,7 +193,6 @@ export interface WizardAnalysisView {
   stageCount: number
   pct: number
   error?: string
-  summary?: { threads: number; memoryGiB: number; services: number | null; gpu?: string }
 }
 
 /** One RPC outcome at the wizard's own wire boundary. */
@@ -264,10 +263,13 @@ export class WelcomeWizardStore {
   /**
    * @param scope - the settings namespace carrying the completion marker.
    * @param analysis - the host analysis calls.
+   * @param requestOnboarding - raise the shell's explicit onboarding request,
+   * which mounts this wizard through the coordinator whatever the session.
    */
   constructor(
     private readonly scope: WizardScope,
     private readonly analysis: WizardAnalysisApi,
+    private readonly requestOnboarding: () => void,
   ) {}
 
   /**
@@ -324,7 +326,11 @@ export class WelcomeWizardStore {
     this.store.update((state) => { state.writeFailure = { step, message } })
   }
 
-  /** Reopen the wizard from the Setup entry, whatever the marker says. */
+  /**
+   * Reopen the wizard from the Setup entry, whatever the marker says. The
+   * shell's onboarding request is raised too, so the coordinator mounts the
+   * wizard immediately even with a retained conversation.
+   */
   reopen(): void {
     this.store.update((state) => {
       state.reopened = true
@@ -332,6 +338,7 @@ export class WelcomeWizardStore {
       state.writeFailure = null
       state.visible = true
     })
+    this.requestOnboarding()
   }
 
   /** Close the overlay without completing; the next first run shows it again. */

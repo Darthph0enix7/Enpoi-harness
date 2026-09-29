@@ -7,7 +7,8 @@
  * aria-labelledby the title node; close: visually-hidden slot text). Modal
  * open state and the active section id are component-local viewing state;
  * the onboarding coordinator mounts exactly one ordered registrant while the
- * sessions-derived empty-Hero fact is active. Visible dialog chrome belongs
+ * sessions-derived empty-Hero fact or an explicit reopen request is active.
+ * Visible dialog chrome belongs
  * to the step, so a mounted-but-deciding step paints nothing here.
  *
  * On a phone the modal becomes a full-screen page instead: a section list
@@ -190,8 +191,8 @@ function MobileSettingsPage({ rows, renderSlot, activeId, onSelect, onBack, onCl
  */
 export function SettingsRoot(props: SettingsRootComponentProps) {
   const {
-    wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useSessions, renderSlot, t,
-    useDesktopUpdate, useDevice, openDesktopUpdate, publishOpenSection, useStore, actions,
+    wide, reconnect, useConnectionState, useSections, useOnboardingSteps, useOnboardingRequest, useSessions, renderSlot, t,
+    useDesktopUpdate, useDevice, openDesktopUpdate, publishOpenSection, clearOnboardingRequest, useStore, actions,
   } = props
   const { open, activeId } = useStore(state => state)
   const { close, openSection } = actions
@@ -228,13 +229,19 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
   const connectionState = useConnectionState(state => state)
   const previousConnectionState = useRef(connectionState)
   const onboardingSteps = useOnboardingSteps(s => s)
+  const onboardingRequested = useOnboardingRequest(snapshot => snapshot.requested)
   const onboardingActive = useSessions((state) => {
     const main = Object.values(state.byId)
       .find(session => (session.retainedBy.mainView ?? 0) > 0)
     return state.phase === 'ready' && (main === undefined || main.blank)
-  })
+  }) || onboardingRequested
   const onboardingStep = onboardingActive
-    ? onboardingSteps.find(step => !completedOnboarding.has(step.id))
+    ? (onboardingRequested
+      // An explicit request always starts the chain at its first step: the
+      // process-local completed set records earlier mounts, not the flow the
+      // operator just asked for.
+      ? onboardingSteps[0]
+      : onboardingSteps.find(step => !completedOnboarding.has(step.id)))
     : undefined
 
   useEffect(() => {
@@ -284,7 +291,8 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
       if (previous.has(id)) return previous
       return new Set([...previous, id])
     })
-  }, [])
+    if (onboardingRequested) clearOnboardingRequest()
+  }, [onboardingRequested, clearOnboardingRequest])
 
   let connectionIndicator: ConnectionIndicatorState | undefined
   if (connectionState === 'connecting' || holdConnecting) {

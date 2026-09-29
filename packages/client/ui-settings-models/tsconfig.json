@@ -32,6 +32,9 @@
       "path": "../ui-settings/tsconfig.client.json"
     },
     {
+      "path": "../ui-settings-general/tsconfig.client.json"
+    },
+    {
       "path": "../locale/tsconfig.client.json"
     },
     {

@@ -750,9 +750,6 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
       ? t('wizAnalyseRunning')
       : analysis.state === 'succeeded'
         ? t('wizAnalysisReady')
-          .replace('{threads}', String(analysis.summary?.threads ?? 0))
-          .replace('{memory}', String(analysis.summary?.memoryGiB ?? 0))
-          .replace('{services}', String(analysis.summary?.services ?? 0))
         : `${t('wizAnalysisFailed')}: ${analysis.error ?? ''}`
   return (
     <div className={styles.step}>

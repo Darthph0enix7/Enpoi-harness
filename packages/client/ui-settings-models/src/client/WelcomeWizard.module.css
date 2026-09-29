@@ -388,7 +388,10 @@
   padding-top: 12px;
 }
 
-/* Small key glyph beside an action label, matching the demo's keyboard hints. */
+/* Small key glyph beside an action label, matching the demo's keyboard hints.
+   It derives its ink and surfaces from the button's own foreground, so the
+   glyph stays visible on the primary variant and in every skin instead of
+   depending on the page's label and layer tokens. */
 .keyHint {
   display: inline-block;
   margin-left: 6px;
@@ -396,9 +399,9 @@
   font-family: var(--dsw-font-family-mono, monospace);
   font-size: 10px;
   line-height: 1.4;
-  color: var(--dsw-alias-label-tertiary);
-  background: var(--dsw-alias-bg-layer-2);
-  border: 0.5px solid var(--dsw-alias-border-l3);
+  color: currentColor;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border: 0.5px solid color-mix(in srgb, currentColor 42%, transparent);
   border-radius: 4px;
 }
 

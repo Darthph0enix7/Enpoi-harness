@@ -62,7 +62,7 @@ function mount() {
   const store = new WelcomeWizardStore(scope, {
     start: async () => ({ ok: true, value: { state: 'idle', stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
     status: async () => ({ ok: true, value: { state: 'idle', stage: '', stageIndex: 0, stageCount: 6, pct: 0 } }),
-  })
+  }, vi.fn())
   const complete = vi.fn()
   const props: WelcomeWizardProps = {
     stepId: 'welcome-wizard',
@@ -192,7 +192,7 @@ describe('WelcomeWizard', () => {
 
     act(() => {
       h.store.store.update((state) => {
-        state.analysis = { state: 'running', stage: 'services', stageIndex: 2, stageCount: 9, pct: 33 }
+        state.analysis = { state: 'running', stage: 'tooling', stageIndex: 3, stageCount: 8, pct: 38 }
       })
     })
     // The live progress surface is the frame-wide chip; the wizard card only
@@ -207,15 +207,12 @@ describe('WelcomeWizard', () => {
     act(() => {
       h.store.store.update((state) => {
         state.analysis = {
-          state: 'succeeded', stage: 'done', stageIndex: 9, stageCount: 9, pct: 100,
-          summary: { threads: 28, memoryGiB: 62, services: 4 },
+          state: 'succeeded', stage: 'done', stageIndex: 8, stageCount: 8, pct: 100,
         }
       })
     })
     const ready = document.querySelector('[data-wiz-analysis-status]')?.textContent ?? ''
-    expect(ready).toContain('28')
-    expect(ready).toContain('62')
-    expect(ready).not.toBe(zh.wizAnalyseRunning)
+    expect(ready).toBe(zh.wizAnalysisReady)
   })
 
   it('shows the demo key glyphs beside Back and Continue', async () => {

@@ -15,7 +15,7 @@ function mount(initial: Partial<SystemAnalysisState> = {}) {
     phase: 'hidden',
     stage: '',
     stageIndex: 0,
-    stageCount: 9,
+    stageCount: 8,
     pct: 0,
     error: null,
     errorCode: null,
@@ -25,6 +25,8 @@ function mount(initial: Partial<SystemAnalysisState> = {}) {
     ...initial,
   })
   const actions = {
+    start: vi.fn(),
+    dismissOffer: vi.fn(),
     open: vi.fn(),
     accept: vi.fn(),
     reject: vi.fn(),
@@ -46,6 +48,18 @@ describe('SystemAnalysisChip', () => {
     expect(document.querySelector('[data-dsh-system-analysis]')).toBeNull()
   })
 
+  it('offers the investigation only through its explicit start and dismiss actions', () => {
+    const { actions } = mount({ phase: 'idle' })
+    expect(document.querySelector('[data-dsh-system-analysis-chip="idle"]')).toBeTruthy()
+    expect(screen.getByText(en.sysAnalysisOffer)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisStart }))
+    expect(actions.start).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisDismiss }))
+    expect(actions.dismissOffer).toHaveBeenCalledTimes(1)
+    // The offer never starts anything on mount.
+    expect(actions.start).toHaveBeenCalledTimes(1)
+  })
+
   it('portals the running bar onto the document body and expands its phases upward', () => {
     const { container } = mount({ phase: 'running', stage: 'tooling', stageIndex: 3, pct: 33 })
     // The shell frame caps every in-frame layer below the first-run modal, so
@@ -61,10 +75,11 @@ describe('SystemAnalysisChip', () => {
     expect(document.querySelector('[data-dsh-system-analysis-phases]')).toBeNull()
     fireEvent.click(document.querySelector('[data-dsh-system-analysis-toggle]')!)
     const phases = document.querySelectorAll('[data-dsh-system-analysis-phases] li')
-    expect(phases).toHaveLength(9)
+    expect(phases).toHaveLength(8)
     expect(phases[2]?.getAttribute('data-state')).toBe('done')
     expect(phases[3]?.getAttribute('data-state')).toBe('active')
     expect(phases[4]?.getAttribute('data-state')).toBe('pending')
+    expect(phases[7]?.textContent).toBe(en.wizPhaseWriting)
     fireEvent.click(document.querySelector('[data-dsh-system-analysis-toggle]')!)
     expect(document.querySelector('[data-dsh-system-analysis-phases]')).toBeNull()
   })
@@ -74,7 +89,7 @@ describe('SystemAnalysisChip', () => {
     expect(screen.getByText('100%')).toBeTruthy()
     expect(document.querySelector('[data-dsh-system-analysis-fill]')?.getAttribute('style')).toContain('width: 100%')
     cleanup()
-    mount({ phase: 'running', stage: 'hardware', stageIndex: 0, pct: -20 })
+    mount({ phase: 'running', stage: 'machine', stageIndex: 0, pct: -20 })
     expect(screen.getByText('0%')).toBeTruthy()
     expect(document.querySelector('[data-dsh-system-analysis-fill]')?.getAttribute('style')).toContain('width: 0%')
   })
@@ -107,8 +122,8 @@ describe('SystemAnalysisChip', () => {
   })
 
   it('shows the failure reason with a retry', () => {
-    const { actions } = mount({ phase: 'failed', error: 'the summariser route failed: quota exhausted' })
-    expect(screen.getByText('the summariser route failed: quota exhausted')).toBeTruthy()
+    const { actions } = mount({ phase: 'failed', error: 'the sysadmin preset is unavailable' })
+    expect(screen.getByText('the sysadmin preset is unavailable')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisRetry }))
     expect(actions.retry).toHaveBeenCalledTimes(1)
   })
@@ -117,8 +132,8 @@ describe('SystemAnalysisChip', () => {
     const { unmount } = mount({ phase: 'failed', errorCode: 'service' })
     expect(screen.getByText(en.sysAnalysisErrorService)).toBeTruthy()
     unmount()
-    mount({ phase: 'failed', errorCode: 'rejected', error: 'the summariser route failed: quota exhausted' })
-    expect(screen.getByText('the summariser route failed: quota exhausted')).toBeTruthy()
+    mount({ phase: 'failed', errorCode: 'rejected', error: 'the sysadmin preset is unavailable' })
+    expect(screen.getByText('the sysadmin preset is unavailable')).toBeTruthy()
   })
 
   it('renders the document with Accept and Reject, and dismisses on an outside click', () => {

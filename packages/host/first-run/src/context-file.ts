@@ -1,12 +1,14 @@
 /**
- * Durable locations and documented defaults of the system profile.
+ * Durable locations, essentials reader, and documented defaults of the system
+ * profile.
  *
- * The system analysis writes one capability-level Markdown document under the
- * harness home, the raw scan JSON beside it, and a decision marker recording
- * whether the operator accepted or rejected the document. A sysadmin-mounted
- * prompt context references the document, so every sysadmin session reads the
- * facts of this machine instead of a default text; before any analysis ran —
- * or after a rejection — it contributes the default below instead.
+ * The system analysis writes one comprehensive Markdown document under the
+ * harness home, the structured JSON profile beside it, and a decision marker
+ * recording whether the operator accepted or rejected the document. A
+ * sysadmin-mounted prompt context contributes only the essentials read from
+ * that JSON plus a reference to the Markdown document, so the full record
+ * stays in one place; before any analysis ran — or after a rejection — it
+ * contributes the default below instead.
  * @module @deepseek-ai/dsh-host-first-run/context-file
  */
 
@@ -17,8 +19,8 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 /** Profile document name under the harness home. */
 export const SYSTEM_PROFILE_FILENAME = 'system-profile.md'
 
-/** Raw scan JSON name under the harness home, beside the profile document. */
-export const SYSTEM_PROFILE_SCAN_FILENAME = 'system-profile.scan.json'
+/** Structured profile JSON name under the harness home, beside the document. */
+export const SYSTEM_PROFILE_JSON_FILENAME = 'system-profile.json'
 
 /** Decision marker name under the harness home. */
 export const SYSTEM_PROFILE_DECISION_FILENAME = 'system-profile.decision'
@@ -40,12 +42,13 @@ export const DEFAULT_SYSTEM_CONTEXT = [
 
 /**
  * Context a sysadmin session reads once a profile is stored. It references the
- * document instead of inlining it: the file is the living record, and a
- * reference stays true as the machine changes.
+ * Markdown document instead of inlining it: the file is the living, full
+ * record, and a reference stays true as the machine changes.
  */
 export const SYSTEM_PROFILE_REFERENCE = [
   'Read $DSH_HOME/system-profile.md for this machine.',
-  'It is the living, capability-level record of this host; confirm anything it does not state with read-only commands.',
+  'It is the living, full record of this host; the structured profile sits beside it as system-profile.json.',
+  'Confirm anything the document does not state with read-only commands.',
 ].join('\n')
 
 /** Absolute path of the profile document. */
@@ -53,9 +56,9 @@ export function systemProfilePath(): string {
   return dshHomePath(SYSTEM_PROFILE_FILENAME)
 }
 
-/** Absolute path of the raw scan JSON. */
-export function systemProfileScanPath(): string {
-  return dshHomePath(SYSTEM_PROFILE_SCAN_FILENAME)
+/** Absolute path of the structured profile JSON. */
+export function systemProfileJsonPath(): string {
+  return dshHomePath(SYSTEM_PROFILE_JSON_FILENAME)
 }
 
 /** Absolute path of the decision marker. */
@@ -86,14 +89,97 @@ export function readSystemProfileOrDefault(path: string = systemProfilePath()): 
   return readSystemProfile(path) ?? DEFAULT_SYSTEM_CONTEXT
 }
 
+/** The compact capability facts the sysadmin context contributes. */
+export interface SystemProfileEssentials {
+  /** What kind of machine this is (`server`, `desktop`, `laptop`, `vm`, `other`). */
+  readonly hostKind?: string
+  /** CPU description including its thread count. */
+  readonly cpu?: string
+  /** Total memory. */
+  readonly memory?: string
+  /** GPU description including video memory, or an explicit absence. */
+  readonly gpu?: string
+  /** Free and total disk capacity. */
+  readonly disk?: string
+}
+
+/** Read one optional string member of a parsed record. */
+function member(value: unknown, key: string): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const entry = (value as Record<string, unknown>)[key]
+  return typeof entry === 'string' && entry.trim() !== '' ? entry.trim() : undefined
+}
+
 /**
- * The prompt contribution for one profile document: a reference once a profile
- * is stored, the documented default otherwise.
- * @param path - document path; defaults to {@link systemProfilePath}.
- * @returns the reference or default text.
+ * Read the essentials the prompt contribution carries from the stored
+ * structured profile. A missing or malformed JSON file degrades to the
+ * reference alone; it never invents machine facts.
+ * @param path - JSON path; defaults to {@link systemProfileJsonPath}.
+ * @returns the present essentials, each absent when the profile does not state it.
  */
-export function systemProfileContextText(path: string = systemProfilePath()): string {
-  return readSystemProfile(path) === null ? DEFAULT_SYSTEM_CONTEXT : SYSTEM_PROFILE_REFERENCE
+export function readSystemProfileEssentials(path: string = systemProfileJsonPath()): SystemProfileEssentials {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const capabilities = typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)['capabilities']
+      : undefined
+    const hostKind = member(parsed, 'hostKind')
+    const cpu = member(capabilities, 'cpu')
+    const memory = member(capabilities, 'memory')
+    const gpu = member(capabilities, 'gpu')
+    const disk = member(capabilities, 'disk')
+    return {
+      ...hostKind === undefined ? {} : { hostKind },
+      ...cpu === undefined ? {} : { cpu },
+      ...memory === undefined ? {} : { memory },
+      ...gpu === undefined ? {} : { gpu },
+      ...disk === undefined ? {} : { disk },
+    }
+  } catch (_absentOrUnparsable) {
+    return {}
+  }
+}
+
+/** Cap on one essentials field, so a verbose profile cannot flood the prompt. */
+const ESSENTIALS_FIELD_MAX = 120
+
+/** Bound one field with an explicit ellipsis when the profile stated more. */
+function boundField(value: string): string {
+  return value.length <= ESSENTIALS_FIELD_MAX ? value : `${value.slice(0, ESSENTIALS_FIELD_MAX - 1)}…`
+}
+
+/**
+ * Render the essentials into one bounded line, or null when the profile states
+ * none. Absence is stated by the document, not guessed here.
+ * @param essentials - the present essentials.
+ * @returns one `System profile essentials: ...` line, or null.
+ */
+export function essentialsLine(essentials: SystemProfileEssentials): string | null {
+  const parts = [
+    essentials.hostKind === undefined ? undefined : boundField(essentials.hostKind),
+    essentials.cpu === undefined ? undefined : `CPU ${boundField(essentials.cpu)}`,
+    essentials.memory === undefined ? undefined : `memory ${boundField(essentials.memory)}`,
+    essentials.gpu === undefined ? undefined : `GPU ${boundField(essentials.gpu)}`,
+    essentials.disk === undefined ? undefined : `disk ${boundField(essentials.disk)}`,
+  ].filter((part): part is string => part !== undefined)
+  return parts.length === 0 ? null : `System profile essentials: ${parts.join('; ')}.`
+}
+
+/**
+ * The prompt contribution for one profile: a bounded essentials line read from
+ * the structured profile plus a reference to the full document, or the
+ * documented default when no profile is stored.
+ * @param path - document path; defaults to {@link systemProfilePath}.
+ * @param jsonPath - structured profile path; defaults to {@link systemProfileJsonPath}.
+ * @returns the essentials-plus-reference text, or the default.
+ */
+export function systemProfileContextText(
+  path: string = systemProfilePath(),
+  jsonPath: string = systemProfileJsonPath(),
+): string {
+  if (readSystemProfile(path) === null) return DEFAULT_SYSTEM_CONTEXT
+  const essentials = essentialsLine(readSystemProfileEssentials(jsonPath))
+  return essentials === null ? SYSTEM_PROFILE_REFERENCE : `${essentials}\n${SYSTEM_PROFILE_REFERENCE}`
 }
 
 /**
@@ -130,26 +216,26 @@ export function writeSystemProfile(markdown: string, path: string = systemProfil
 }
 
 /**
- * Write the raw scan JSON atomically.
- * @param json - serialized scan facts.
- * @param path - JSON path; defaults to {@link systemProfileScanPath}.
+ * Write the structured profile JSON atomically.
+ * @param json - serialized structured profile.
+ * @param path - JSON path; defaults to {@link systemProfileJsonPath}.
  * @returns the absolute path written.
  */
-export function writeSystemProfileScan(json: string, path: string = systemProfileScanPath()): string {
+export function writeSystemProfileJson(json: string, path: string = systemProfileJsonPath()): string {
   return writeAtomic(path, json)
 }
 
 /**
- * Remove the profile document and its raw scan JSON. Missing files are fine:
+ * Remove the profile document and its structured JSON. Missing files are fine:
  * rejection is idempotent.
  * @param path - document path; defaults to {@link systemProfilePath}.
- * @param scanPath - JSON path; defaults to {@link systemProfileScanPath}.
+ * @param jsonPath - JSON path; defaults to {@link systemProfileJsonPath}.
  */
 export function removeSystemProfile(
   path: string = systemProfilePath(),
-  scanPath: string = systemProfileScanPath(),
+  jsonPath: string = systemProfileJsonPath(),
 ): void {
-  for (const target of [path, scanPath]) {
+  for (const target of [path, jsonPath]) {
     try {
       unlinkSync(target)
     } catch (_absent) {

@@ -1,5 +1,5 @@
 ---
-description: "在全新安装上写入免密钥的 Kilo Gateway 路由，并运行只读系统分析作为 sysadmin 的上下文。"
+description: "在全新安装上写入免密钥的 Kilo Gateway 路由，并运行需显式选择的只读 sysadmin 调查以生成系统档案。"
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概要
 
-全新 harness 主目录的两个首次运行事实。种子在全新设置文档首次完整启动时写入免密钥的 Kilo Gateway 路由，并把默认模型指向 `kilo-auto/free`；该路由位于用户层，因此 Models 页面可以移除它，标记会阻止之后的再次写入。分析在用户继续工作时运行一次有界的只读扫描（硬件、操作系统、服务、磁盘，以及存在时的 NVIDIA GPU），通过 `/system-analysis/*` 发布，并保存为 sysadmin 的系统上下文文档。
+全新 harness 主目录的两个首次运行事实。种子在全新设置文档首次完整启动时写入免密钥的 Kilo Gateway 路由，并把默认模型指向 `kilo-auto/free`；该路由位于用户层，因此 Models 页面可以移除它，标记会阻止之后的再次写入。系统分析是显式选择：用户从设置向导的智能体步骤或右下角小窗启动，随后一个有界的 sysadmin 智能体会话使用 harness 自身的工具只读地调查这台机器，覆盖七节清单，并发布结构化 `system-profile.json` 与详尽的 `system-profile.md`，后者以 `## At a glance` 能力摘要开篇。挂载在 sysadmin 预设中的提示上下文只贡献从该 JSON 读取的要点以及对文档的引用。没有任何机制会自行安排运行。
 
 ## 目录
 
@@ -33,17 +33,15 @@ kind: "package-reference"
     model: kilo-auto/free
 ```
 
-在浏览器可达的位置挂载分析路由。
+在浏览器可达的位置挂载分析路由，并在 sysadmin 智能体预设内挂载上下文行。
 
 ```yaml
 - name: '@deepseek-ai/dsh-host-first-run/analysis'
   config:
-    routes: true
-```
+    preset: sysadmin
+    permissionPreset: workspace-write
+    timeoutMinutes: 15
 
-在 sysadmin 智能体预设内挂载上下文行，让扫描成为该智能体的机器上下文，并在扫描运行前使用文档化的默认文本。
-
-```yaml
 - name: '@deepseek-ai/dsh-host-first-run/context'
 ```
 
@@ -53,8 +51,11 @@ kind: "package-reference"
 | `provider`, `model` | `kilo`, `kilo-auto/free` | 种子写入的路由 id 与免费模型 |
 | `seedVersion` | 空 | 标记；任何已存值都表示种子已经决定过 |
 | `routes` | `true` | 注册 `/system-analysis/start`、`/status`、`/context`、`/accept` 与 `/reject` |
+| `preset` | `sysadmin` | 负责调查的智能体预设；仅为该会话挂载 |
+| `permissionPreset` | `workspace-write` | 强制用于调查会话的权限预设；它只开放该运行自己的临时工作区 |
+| `timeoutMinutes` | `15` | 单次调查的硬性上限 |
 
-分析是单例运行：运行中或已结束时 `start` 返回当前视图，`status` 不会改变它，`context` 返回已存文档或 null，`accept`/`reject` 记录操作员的决定。首次运行期间，客户端在完成标记尚未写入时自动启动分析；首次运行之外没有任何调度。每个探测相互独立并限制在五秒；缺少工具只把该节降级为具名行，绝不会让扫描失败。
+运行是单例的，且只在客户端显式操作时启动。运行中或已结束时 `start` 返回当前视图，`status` 不会改变它，`context` 返回已存文档或 null，`accept`/`reject` 记录操作员的决定。调查智能体维护一个待办清单，条目即清单各节，宿主把该清单映射到小窗的阶段轨道；智能体用普通的 `write` 工具把 `profile.json` 与 `system-profile.md` 写入该运行的临时工作区，宿主再把两份文件复制到 harness 主目录。缺少智能体运行时、未知预设或超出时限都会让运行以原因失败于任务视图，且不影响 harness。
 
 -----
 
@@ -66,9 +67,11 @@ kind: "package-reference"
 
 种子等待 Loader 完成（`ctx.root.loader.await()`），确保 `llm-pi-ai`、`agent-default-model` 与 `first-run` 条目已激活，然后按序写入提供方路由、默认模型与标记。失败只记一条警告并保留未写标记；下次启动重试。已带提供方路由的设置文档属于已配置安装：种子只写标记。
 
-扫描使用 `node:os`、`statfsSync` 与有界的 `execFile` 探测（`systemctl`、`nvidia-smi`）；文档在原子上写入 harness 主目录。上下文提供方每次组装读取该文档，缺失时回退到 `DEFAULT_SYSTEM_CONTEXT`。
+一次调查就是配置预设上的一个根智能体会话：运行器解析预设、固定其修订（`acquireScope`）、清空 harness 主目录下的临时工作区、以该工作区为 `cwd` 创建会话、设置配置的权限预设、设置标题，并把清单提示作为开场用户消息发送。提示约束智能体对主机做只读调查，要求使用精确的待办条目驱动阶段轨道，逐节列出清单，要求通过所有路径检查 CUDA（`nvcc`、conda、语言运行时、`nvidia-smi`），把“缺失”定义为所有可行路径都检查之后的状态，并要求在工作区写出 `profile.json` 与 `system-profile.md`（后者以 `## At a glance` 能力摘要开篇）。运行器跟随会话的 `todo_write` 事件推进阶段，等待回合收尾，校验两份文件，允许两次有界的纠正回合，然后原子写入 `system-profile.json` 与 `system-profile.md` 并释放会话。整个运行受配置时限与插件生命周期取消约束。
 
-[`src/index.ts`](src/index.ts) 负责种子，[`src/analysis.ts`](src/analysis.ts) 负责运行与路由，[`src/scan.ts`](src/scan.ts) 负责探测，[`src/context.ts`](src/context.ts) 负责预设作用域内的贡献。不发布运行时不变式伴随模块：已存文档是唯一的持久事实，并在测试中回读。
+上下文提供方每次组装读取该文档，缺失时回退到 `DEFAULT_SYSTEM_CONTEXT`；存在 JSON 时，在引用之前附加一行从其读取的、有界的要点。
+
+[`src/index.ts`](src/index.ts) 负责种子，[`src/analysis.ts`](src/analysis.ts) 负责运行器与路由，[`src/investigation.ts`](src/investigation.ts) 负责会话、提示、阶段映射与工作区，[`src/context.ts`](src/context.ts) 负责预设作用域内的贡献。不发布运行时不变式伴随模块：已存文档是唯一的持久事实，并在测试中回读。
 
 </details>
 
@@ -81,21 +84,30 @@ kind: "package-reference"
 
 #### 模型所见
 
-sysadmin 会话接收一个动态上下文条目 `system-analysis`，其文本为已存扫描文档，或以下逐字默认文本：
+sysadmin 会话接收一个动态上下文条目 `system-analysis`。在任何调查运行之前——或操作员拒绝该文档之后——其文本为以下逐字默认文本：
 
 ```markdown
-System context: no analysis is stored for this machine yet.
-Hardware, operating system, service and disk facts are unknown here.
-Confirm them with read-only commands before acting, or run the first-run system analysis.
+System profile: no analysis is stored for this machine yet.
+Hardware, operating system, service and hosting facts are unknown here.
+Confirm them with read-only commands before acting, or run the system analysis.
+```
+
+档案存好后，该条目变为一行从 `system-profile.json` 读取的要点（主机形态、CPU、内存、GPU、磁盘；缺失字段省略），后接对完整文档的引用：
+
+```markdown
+System profile essentials: server; CPU Xeon E5-2680 v4, 28 threads; memory 62 GiB; GPU Tesla P40, 24 GB; disk 30 GiB free of 232 GiB.
+Read $DSH_HOME/system-profile.md for this machine.
+It is the living, full record of this host; the structured profile sits beside it as system-profile.json.
+Confirm anything the document does not state with read-only commands.
 ```
 
 #### Token 影响
 
-每次组装一个上下文块，受扫描写入的文档大小约束（服务名最多 20 项）。此包不添加工具、模式或章节。
+每次组装一个上下文块，大小受要点行加三行引用约束；完整文档绝不内联。分析行本身不添加提示章节，也不添加工具。
 
 #### KV 缓存影响
 
-上下文文本在两次扫描之间保持稳定，sysadmin 前缀正常缓存；完成的扫描只会替换一次文本，之后的回合保持稳定。
+上下文文本在两次调查之间保持稳定，sysadmin 前缀正常缓存；完成的调查只会替换一次文本，之后的回合保持稳定。调查会话自身的提示每次运行只写入一次。
 
 -----
 
@@ -103,5 +115,7 @@ Confirm them with read-only commands before acting, or run the first-run system 
 ## 已知限制与后续工作
 
 - sysadmin 预设必须挂载 `@deepseek-ai/dsh-host-first-run/context`；该行由 fork 配置文件拥有，harness 仓库只发布导出。
-- 分析仅由首次运行客户端在流程未完成时自动启动；完成标记写入或已记录决定后，不再调度或重复提供。
-- 服务探测假定 `systemd`；其他平台把该节记为不可用。
+- 分析只在显式操作（智能体步骤或小窗）时启动；档案被接受或决定被记录后，不再主动提供运行。
+- 调查会话以 `workspace-write` 运行，且仅限它自己的临时工作区，以便智能体写入两份产物；该目录之外的主机对它仍是只读的，提示禁止其他一切改动。
+- 强制程度取决于部署如何命名权限预设；`permissionPreset` 不可用时只记一条警告，并仅依靠提示中的只读规则继续。
+- 调查会话不挂载到 Workspace，因此会出现在历史中，但不在某个工作区的会话列表里。

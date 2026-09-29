@@ -38,6 +38,8 @@ export interface SettingsOnboardingStep {
  * sources, while the reconnect command remains a plain callback.
  */
 export type SettingsRootInjected = {
+  /** Clear the explicit onboarding request once the requested flow ran. */
+  clearOnboardingRequest: () => void
   /** Request the current shell-owned update action. */
   openDesktopUpdate: () => void
   /**
@@ -49,6 +51,12 @@ export type SettingsRootInjected = {
   /** Request a fresh logical generation and physical WebSocket immediately. */
   reconnect: () => void
   hooks: {
+    /**
+     * Explicit reopen request raised through the `settingsUi` service: the
+     * coordinator mounts the onboarding chain from its first step even with a
+     * retained conversation.
+     */
+    onboardingRequest: HostObservable<{ requested: boolean }>
     /** Shared Electron status for both sidebar locations. */
     desktopUpdate: HostObservable<DesktopUpdateView>
     /** The adaptive classifier: the phone presentation replaces the modal. */
@@ -86,6 +94,11 @@ export type SettingsRootComponentProps =
 export interface SettingsUiService {
   /** Open the panel on `id`; unknown ids fall back to the panel default view. */
   openSection: (id: string) => void
+  /**
+   * Show the onboarding chain now, from its first step, even with a retained
+   * conversation.
+   */
+  requestOnboarding: () => void
 }
 
 declare module '@deepseek-ai/cordis' {
