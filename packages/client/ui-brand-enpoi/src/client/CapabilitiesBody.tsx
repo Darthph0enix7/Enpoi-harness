@@ -20,11 +20,14 @@
  * - Councils: the council registry (`enpoiCouncil.list`) with each council's
  *   label, seats, and retired state.
  * - Tool flags: the stored `capabilities.tools` keys not covered by a role or
- *   council row. The pre-dispatch guard and the tool-schema strip consume
- *   these flags directly, but there is no host registry that enumerates the
- *   core tool names, so only operator-stored flags are listed. Rows stay
- *   dynamic; {@link TOOL_FLAG_COPY} only upgrades the copy of a flag that
- *   already exists (the Oracle reviewer, the background Keeper).
+ *   council row, plus the supervision catalog entries (the Oracle reviewer,
+ *   the background Keeper) listed unconditionally. The pre-dispatch guard and
+ *   the tool-schema strip consume these flags directly, and there is no host
+ *   registry that enumerates the core tool names, so stored keys are the live
+ *   source for every other flag: a fresh home strips the stored capabilities
+ *   section, and without the static supervision set the Oracle would have no
+ *   row anywhere. {@link TOOL_FLAG_COPY} supplies their copy; a registry row
+ *   with the same id always wins over a flag row.
  *
  * Each row carries an enable/disable switch (`ui-primitives` `Switch`) that
  * writes `capabilities.<kind>.<id>` through the shared optimistic
@@ -56,7 +59,7 @@ import {
   type PermissionsConfig,
 } from './permissions-model.ts'
 import { ensureSettingsFresh, getEnpoiNamespacePresence, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
-import { PROTECTED_CAPABILITIES } from './capability-catalog.ts'
+import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './capability-catalog.ts'
 import type { FleetCouncil, FleetCouncilSeat } from './role-registry.ts'
 import css from './CapabilitiesBody.module.css'
 
@@ -186,9 +189,10 @@ export interface LiveRoleEntry {
 
 /**
  * Operator-facing copy for tool flags whose stored id is not self-describing.
- * Purely presentational: the row itself still exists only because the live
- * `capabilities.tools` map stores the flag, an unknown flag keeps the generic
- * copy, and a row the registries below already cover is never duplicated.
+ * Purely presentational: an unknown stored flag keeps the generic copy, and a
+ * row the registries below already cover is never duplicated. The supervision
+ * entries are also listed through {@link SUPERVISION_TOOL_FLAG_IDS} even when
+ * no stored flag names them.
  */
 const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: string; badge?: string }>> = {
   oracle_review: {
@@ -202,6 +206,20 @@ const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: strin
     badge: 'supervision',
   },
 }
+
+/**
+ * Supervision tool-only capabilities the drawer lists unconditionally: the
+ * Oracle reviewer and the background Keeper have no spawnable role row, and a
+ * fresh home strips the stored `capabilities` section, so without this set
+ * neither would have a row anywhere. The list is the union of the shipped
+ * tool-flag copy and the supervision-kind entries of the settings catalog.
+ */
+const SUPERVISION_TOOL_FLAG_IDS: readonly string[] = [
+  ...new Set([
+    ...Object.keys(TOOL_FLAG_COPY),
+    ...KNOWN_CAPABILITIES.filter(cap => cap.kind === 'tool' && cap.category === 'supervision').map(cap => cap.id),
+  ]),
+]
 
 /**
  * One council row (`enpoiCouncil.list`) rendered by the Councils section and
@@ -1018,8 +1036,9 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     ...(s.modelInvocable ? {} : { badge: 'user-only' }),
   }))
   // Delegatable roles only: a tool-only role (the Oracle) has no spawn
-  // affordance here — its switch lives on its tool flag below, under the tool's
-  // own enforcement key. Dynamic by data, no id list.
+  // affordance here — its switch lives on its always-listed supervision tool
+  // flag below, under the tool's own enforcement key. Dynamic by data, no id
+  // list.
   const roleRows: LiveRow[] = view.roles
     .filter(r => r.spawnable !== false)
     .map(r => ({
@@ -1041,9 +1060,13 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   })
   // Stored tool flags the registries above do not already cover: the guard's
   // direct tool vocabulary has no enumeration RPC, so the operator's stored
-  // keys are the live source.
+  // keys are the live source, and the supervision set stays listed even when
+  // no stored flag names it. A registry row with the same id wins, so the id
+  // is never rendered twice.
   const registryIds = new Set([...roleRows, ...councilRows].map(row => row.id))
-  const toolFlagRows: LiveRow[] = Object.keys(caps.tools)
+  const toolFlagIds = new Set<string>(Object.keys(caps.tools))
+  for (const id of SUPERVISION_TOOL_FLAG_IDS) toolFlagIds.add(id)
+  const toolFlagRows: LiveRow[] = [...toolFlagIds]
     .filter(id => !registryIds.has(id))
     .map((id) => {
       const copy = TOOL_FLAG_COPY[id]

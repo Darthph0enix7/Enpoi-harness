@@ -193,7 +193,87 @@ describe('CapabilitiesBody — live capability rows', () => {
     })
   })
 
-  it('shows no hardcoded capability ids when every registry is empty', async () => {
+  it('lists the supervision tool-only rows on a fresh home and defaults them ON', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') return describeResponse({ capabilities: {} }, 21)
+      if (method === 'settings.mutate') return jsonResponse({ result: { ok: true, value: { revision: 22 } } })
+      const registry = registryResponse(method, [])
+      if (registry !== undefined) return registry
+      return jsonResponse({ result: { ok: true, value: {} } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody()
+
+    // A fresh home strips the stored capabilities section, so the Oracle and
+    // the Keeper must still render from the supervision catalog, and an absent
+    // flag reads as ON under the tool rule.
+    expect(await screen.findByText('The Oracle')).toBeTruthy()
+    expect(screen.getByText('Background Context Keeper')).toBeTruthy()
+    expect(screen.getByText('supervision · tool-only')).toBeTruthy()
+    expect(screen.getByLabelText('Disable The Oracle')).toBeTruthy()
+    expect(screen.getByLabelText('Disable Background Context Keeper')).toBeTruthy()
+
+    // Toggling writes the same guard key as any stored tool flag.
+    fireEvent.click(screen.getByLabelText('Disable The Oracle'))
+    expect(screen.getByLabelText('Enable The Oracle')).toBeTruthy()
+    await waitFor(() => {
+      expect(mutateBodies(fetchMock)[0]?.payload.args.ops).toEqual([
+        { op: 'set', path: ['capabilities', 'tools', 'oracle_review'], value: false },
+      ])
+    })
+  })
+
+  it('renders a stored oracle_review: false as off and toggles it back ON', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({ capabilities: { tools: { oracle_review: false } } }, 31)
+      }
+      if (method === 'settings.mutate') return jsonResponse({ result: { ok: true, value: { revision: 32 } } })
+      const registry = registryResponse(method, [])
+      if (registry !== undefined) return registry
+      return jsonResponse({ result: { ok: true, value: {} } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody()
+
+    const oracleSwitch = await screen.findByLabelText('Enable The Oracle')
+    expect(oracleSwitch).toBeTruthy()
+    // The Keeper has no stored flag, so it stays ON.
+    expect(screen.getByLabelText('Disable Background Context Keeper')).toBeTruthy()
+
+    fireEvent.click(oracleSwitch)
+    await waitFor(() => {
+      expect(mutateBodies(fetchMock)[0]?.payload.args.ops).toEqual([
+        { op: 'set', path: ['capabilities', 'tools', 'oracle_review'], value: true },
+      ])
+    })
+    expect(screen.getByLabelText('Disable The Oracle')).toBeTruthy()
+  })
+
+  it('renders one row when a stored flag and a registry row share an id', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({ capabilities: { tools: { fixer: false, roundtable: true } } }, 41)
+      }
+      const registry = registryResponse(method, [])
+      if (registry !== undefined) return registry
+      return jsonResponse({ result: { ok: true, value: {} } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody()
+
+    // The role and council rows win over the stored flags with the same ids;
+    // the supervision pair is the only tool-flag rows.
+    expect(await screen.findByLabelText('Enable Fixer')).toBeTruthy()
+    expect(screen.getAllByLabelText(/Fixer/)).toHaveLength(1)
+    expect(screen.getAllByLabelText(/Architecture Roundtable/)).toHaveLength(1)
+    expect(screen.getAllByRole('switch')).toHaveLength(4)
+  })
+
+  it('lists only the supervision tool-only rows when every other registry is empty', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const method = methodOf(init)
       if (method === 'settings.describe') return describeResponse({ capabilities: {} }, 1)
@@ -206,10 +286,14 @@ describe('CapabilitiesBody — live capability rows', () => {
 
     expect(await screen.findByText('No MCP servers configured. Add one in Settings → Dynamic.')).toBeTruthy()
     expect(screen.queryByText('Plane MCP')).toBeNull()
+    // Settings-catalog names and ids are not rendered; the shipped supervision
+    // entries are the one static set (see the fresh-home spec above).
     expect(screen.queryByText('The Oracle (Supervisor)')).toBeNull()
     expect(screen.queryByText('File Editor')).toBeNull()
     expect(screen.queryByText('Memory Save')).toBeNull()
-    expect(screen.queryAllByRole('switch')).toHaveLength(0)
+    expect(screen.getByText('The Oracle')).toBeTruthy()
+    expect(screen.getByText('Background Context Keeper')).toBeTruthy()
+    expect(screen.getAllByRole('switch')).toHaveLength(2)
   })
 
   it('renders a freshly discovered skill id with no code change', async () => {

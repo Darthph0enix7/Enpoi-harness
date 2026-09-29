@@ -2,12 +2,14 @@
  * Settings-page capability catalog — the operator vocabulary the Settings →
  * Dynamic panels author from.
  *
- * The Capabilities drawer must not read this list: every drawer row comes from
- * a live host source (skills.list, enpoiRoles.list, enpoiCouncil.list, the
- * stored mcpServers/capabilities records). This module exists only because the
- * settings page needs stable labels/descriptions for the shipped tools and
- * skills it lets the operator pre-seed; new live entries still appear in the
- * drawer and the settings panel without a code change.
+ * The Capabilities drawer reads only this list's supervision tool entries
+ * (`kind: 'tool'`, `category: 'supervision'`), which are listed unconditionally
+ * because no host registry enumerates the core tool names. Every other drawer
+ * row comes from a live host source (skills.list, enpoiRoles.list,
+ * enpoiCouncil.list, the stored mcpServers/capabilities records). This module
+ * exists so the settings page has stable labels/descriptions for the shipped
+ * tools and skills it lets the operator pre-seed; new live entries still appear
+ * in the drawer and the settings panel without a code change.
  */
 
 /** Capability family the enforcement state keys on. */
