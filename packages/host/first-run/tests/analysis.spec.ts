@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAnalysisRunner, handleRequest, type AnalysisDependencies } from '../src/analysis.ts'
+import { createAnalysisRunner, handleRequest, stagePct, type AnalysisDependencies } from '../src/analysis.ts'
 import type { SystemScanResult } from '../src/scan.ts'
 
 const RESULT: SystemScanResult = {
@@ -67,6 +67,52 @@ describe('system analysis runner', () => {
     expect(document).toContain('1970-01-01T00:00:01.000Z')
     expect(document).toContain('kilo/kilo-auto/free')
     expect(document).toContain('## Capabilities')
+  })
+
+  it('derives one stage position into a bounded percentage', () => {
+    expect(stagePct(0, 9)).toBe(0)
+    expect(stagePct(8, 9)).toBe(89)
+    expect(stagePct(100, 9)).toBe(89)
+    expect(stagePct(-3, 9)).toBe(0)
+    expect(stagePct(3, 0)).toBe(0)
+  })
+
+  it('publishes non-decreasing percentages inside 0 to 100 for a whole run', async () => {
+    const samples: Array<{ stage: string; stageIndex: number; pct: number }> = []
+    const record = (): void => {
+      const current = runner.status()
+      samples.push({ stage: current.stage, stageIndex: current.stageIndex, pct: current.pct })
+    }
+    const runner = createAnalysisRunner(dependencies({
+      scan: async (onStage) => {
+        for (const stage of ['hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU'] as const) {
+          onStage(stage)
+          record()
+        }
+        return RESULT
+      },
+      summarise: async () => {
+        record()
+        return '## Capabilities\n- test machine'
+      },
+      writeProfile: () => {
+        record()
+        return '/tmp/system-profile.md'
+      },
+    }))
+    runner.start()
+    await settled()
+    expect(samples.map(sample => sample.pct)).toEqual([0, 11, 22, 33, 44, 56, 67, 78, 89])
+    expect(samples.map(sample => sample.stage)).toEqual([
+      'hardware', 'operating system', 'services', 'tooling', 'hosting', 'disk', 'GPU', 'summarising', 'writing profile',
+    ])
+    for (const sample of samples) {
+      expect(sample.pct).toBeGreaterThanOrEqual(0)
+      expect(sample.pct).toBeLessThanOrEqual(100)
+      expect(sample.stageIndex).toBeGreaterThanOrEqual(0)
+      expect(sample.stageIndex).toBeLessThanOrEqual(9)
+    }
+    expect(runner.status().pct).toBe(100)
   })
 
   it('keeps a settled run when start is called again', async () => {

@@ -388,6 +388,24 @@
   padding-top: 12px;
 }
 
+/* Small key glyph beside an action label, matching the demo's keyboard hints. */
+.keyHint {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 4px;
+  font-family: var(--dsw-font-family-mono, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 4px;
+}
+
+.keyHint[data-side='before'] {
+  margin: 0 6px 0 0;
+}
+
 .error {
   margin: 0;
   color: var(--dsw-alias-state-error-primary);
@@ -497,97 +515,15 @@
   transform: scale(1.25);
 }
 
-.dock {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 260px;
-  max-width: calc(100% - 32px);
-  padding: 12px 14px;
-  font-size: 12px;
-  background: var(--dsw-alias-bg-raised);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-sm);
-  box-shadow: var(--dsw-shadow-l2, 0 10px 28px rgb(0 0 0 / 25%));
-}
-
-.dockHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.dockPct {
-  margin-left: auto;
-  color: var(--dsw-alias-label-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.spinner {
-  width: 12px;
-  height: 12px;
-  flex: none;
-  border: 2px solid var(--dsw-alias-border-l3);
-  border-top-color: var(--dsw-alias-brand-primary);
-  border-radius: 50%;
-  animation: dockSpin 800ms linear infinite;
-}
-
-@keyframes dockSpin {
-  to { transform: rotate(1turn); }
-}
-
-.dockTrack {
-  height: 6px;
-  overflow: hidden;
-  background: var(--dsw-alias-border-l2);
-  border-radius: 999px;
-}
-
-.dockFill {
-  height: 100%;
-  background: var(--dsw-alias-brand-primary);
-  border-radius: 999px;
-  transition: width 450ms cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-.dockPhases {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.dockPhases li[data-state='done'] {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.dockPhases li[data-state='active'] {
-  color: var(--dsw-alias-brand-primary);
-  font-weight: 600;
-}
-
-.dockLabel {
-  color: var(--dsw-alias-label-secondary);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .tourHole,
   .tourTip,
   .knob,
-  .switch,
-  .dockFill {
+  .switch {
     transition: none;
   }
 
-  .tourRing,
-  .spinner {
+  .tourRing {
     animation-duration: 1.6s;
   }
 }

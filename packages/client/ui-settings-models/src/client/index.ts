@@ -184,9 +184,13 @@ export function apply(ctx: ClientContext): void {
     t,
   })
   // The frame-wide system-analysis chip owns its own store: it auto-starts the
-  // analysis on a machine with no profile, follows the run, and carries the
-  // accept/reject decision independently of the wizard.
-  const analysisController = new SystemAnalysisStore(systemAnalysisApi)
+  // analysis while the first-run flow is pending, follows the run, and carries
+  // the accept/reject decision independently of the wizard. The gate reads the
+  // wizard store, whose `load()` resolves after the completion marker is known.
+  const analysisController = new SystemAnalysisStore(systemAnalysisApi, () => {
+    const snapshot = wizardController.store.getSnapshot()
+    return snapshot.status === 'ready' && !snapshot.completed
+  })
   const analysisInjected = (): SystemAnalysisChipInjected => ({
     actions: {
       open: () => { void analysisController.open() },
@@ -256,10 +260,12 @@ export function apply(ctx: ClientContext): void {
       for (const dispose of disposers) dispose()
     }
   }, 'ui-settings-models: pushed invalidations')
-  // The chip reads the host state once on activation: a fresh machine starts
-  // the analysis in the background, a stored profile offers the decision.
+  // The chip reads the host state once on activation: a fresh machine in first
+  // run starts the analysis in the background, a stored profile offers the
+  // decision. The completion marker resolves first, so a later boot of a
+  // completed installation never mistakes "loading" for "first run".
   ctx.effect(() => {
-    void analysisController.load()
+    void wizardController.load().then(() => analysisController.load())
     return () => { analysisController.dispose() }
   }, 'ui-settings-models: system-analysis auto-start')
 

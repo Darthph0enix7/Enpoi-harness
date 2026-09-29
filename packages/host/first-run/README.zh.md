@@ -52,9 +52,9 @@ kind: "package-reference"
 | `enabled` | `true` | 未存标记时运行种子 |
 | `provider`, `model` | `kilo`, `kilo-auto/free` | 种子写入的路由 id 与免费模型 |
 | `seedVersion` | 空 | 标记；任何已存值都表示种子已经决定过 |
-| `routes` | `true` | 注册 `/system-analysis/start`、`/status` 与 `/context` |
+| `routes` | `true` | 注册 `/system-analysis/start`、`/status`、`/context`、`/accept` 与 `/reject` |
 
-分析是单例运行：活动或已结束的运行期间 `start` 返回当前视图，`status` 不改变它，`context` 返回已存文档或 null。每个探测相互独立并限制在五秒；缺少工具只把该节降级为具名行，绝不会让扫描失败。
+分析是单例运行：运行中或已结束时 `start` 返回当前视图，`status` 不会改变它，`context` 返回已存文档或 null，`accept`/`reject` 记录操作员的决定。首次运行期间，客户端在完成标记尚未写入时自动启动分析；首次运行之外没有任何调度。每个探测相互独立并限制在五秒；缺少工具只把该节降级为具名行，绝不会让扫描失败。
 
 -----
 
@@ -103,5 +103,5 @@ Confirm them with read-only commands before acting, or run the first-run system 
 ## 已知限制与后续工作
 
 - sysadmin 预设必须挂载 `@deepseek-ai/dsh-host-first-run/context`；该行由 fork 配置文件拥有，harness 仓库只发布导出。
-- 分析只在调用方启动时运行（首次运行向导或操作员）；没有任何调度。
+- 分析仅由首次运行客户端在流程未完成时自动启动；完成标记写入或已记录决定后，不再调度或重复提供。
 - 服务探测假定 `systemd`；其他平台把该节记为不可用。

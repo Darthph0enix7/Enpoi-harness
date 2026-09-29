@@ -271,13 +271,26 @@ export class WelcomeWizardStore {
   ) {}
 
   /**
-   * Begin following the bound scope (idempotent) and publish its current answer.
-   * @returns settlement after the current answer is published.
+   * Begin following the bound scope (idempotent) and publish its current
+   * answer, resolving only once the completion marker is known: a boot-time
+   * reader must never mistake a loading scope for a machine in first run.
+   * @returns settlement after the marker scope left its loading state.
    */
-  load(): Promise<void> {
+  async load(): Promise<void> {
     this.following ??= this.scope.subscribe(() => { this.derive() })
     this.derive()
-    return Promise.resolve()
+    const snapshot = this.scope.getSnapshot()
+    if (snapshot.mode === 'memory' || snapshot.status !== 'loading') return
+    await new Promise<void>((resolve) => {
+      let off: () => void = () => {}
+      const settle = (): void => {
+        if (this.scope.getSnapshot().status === 'loading') return
+        off()
+        resolve()
+      }
+      off = this.scope.subscribe(settle)
+      settle()
+    })
   }
 
   /**

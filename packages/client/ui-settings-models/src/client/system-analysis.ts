@@ -2,9 +2,10 @@
  * Client half of the host `/system-analysis` routes and the frame-wide chip
  * store. The wire is validated at this boundary: a response that is not the
  * expected envelope becomes a displayable failure message, never an exception
- * in the chip. The store auto-starts the analysis on a machine that has no
- * profile and no recorded rejection, follows the run, and carries the
- * accept/reject decision.
+ * in the chip, and a percentage is clamped to the 0..100 the bar can render.
+ * The store auto-starts the analysis while the first-run flow is pending and
+ * the machine has no profile and no recorded decision, follows the run, and
+ * carries the accept/reject decision.
  * @module ui-settings-models/system-analysis
  */
 
@@ -70,6 +71,18 @@ export interface SystemAnalysisState {
 /** How often the chip polls a running analysis. */
 const POLL_MS = 300
 
+/**
+ * Clamp one wire percentage into the 0..100 the progress bar renders. The host
+ * derives its own bounded values; a malformed or older payload must still never
+ * paint a bar past its track.
+ * @param value - percentage as the host reported it.
+ * @returns an integer in 0..100.
+ */
+export function clampPct(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, Math.round(value)))
+}
+
 /** Parse an analysis job payload, dropping unknown fields. */
 function parseJob(value: unknown): SystemAnalysisView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -80,9 +93,9 @@ function parseJob(value: unknown): SystemAnalysisView | undefined {
   return {
     state,
     stage: typeof job.stage === 'string' ? job.stage : '',
-    stageIndex: typeof job.stageIndex === 'number' ? job.stageIndex : 0,
-    stageCount: typeof job.stageCount === 'number' ? job.stageCount : 0,
-    pct: typeof job.pct === 'number' ? job.pct : 0,
+    stageIndex: typeof job.stageIndex === 'number' ? Math.max(0, Math.floor(job.stageIndex)) : 0,
+    stageCount: typeof job.stageCount === 'number' ? Math.max(0, Math.floor(job.stageCount)) : 0,
+    pct: typeof job.pct === 'number' ? clampPct(job.pct) : 0,
     hasProfile: job.hasProfile === true,
     decision: decision === 'accepted' || decision === 'rejected' ? decision : null,
     ...typeof job.error === 'string' ? { error: job.error } : {},
@@ -159,12 +172,19 @@ export class SystemAnalysisStore {
 
   private poll: ReturnType<typeof setInterval> | undefined
 
-  /** @param api - the host analysis calls. */
-  constructor(private readonly api: SystemAnalysisApi) {}
+  /**
+   * @param api - the host analysis calls.
+   * @param firstRunPending - whether the first-run setup flow is still pending;
+   * the analysis starts itself only there, never on a later boot.
+   */
+  constructor(
+    private readonly api: SystemAnalysisApi,
+    private readonly firstRunPending: () => boolean = () => true,
+  ) {}
 
   /**
-   * Read the current state and auto-start the analysis when this machine has
-   * no profile and no recorded rejection.
+   * Read the current state and auto-start the analysis when this machine is in
+   * first run and has no profile and no recorded decision.
    * @returns settlement after the first status answer is applied.
    */
   async load(): Promise<void> {
@@ -173,13 +193,19 @@ export class SystemAnalysisStore {
       this.fail(result.failure)
       return
     }
-    this.apply(result.value)
-    // A machine with no stored profile and no recorded rejection starts the
-    // analysis; a live or failed run keeps its own chip instead.
-    if (!result.value.hasProfile && result.value.decision !== 'rejected'
-      && result.value.state !== 'running' && result.value.state !== 'failed') {
-      await this.start()
+    const view = result.value
+    this.apply(view)
+    // A run already in flight (however it was started) is adopted and followed;
+    // a settled decision or a stored profile needs no chip.
+    if (view.state === 'running') {
+      this.follow()
+      return
     }
+    if (view.state === 'failed' || view.hasProfile || view.decision !== null) return
+    // First-run chrome only: a completed installation with no profile never
+    // starts the analysis on its own.
+    if (!this.firstRunPending()) return
+    await this.start()
   }
 
   /** Start the run, or adopt the one already in flight. */
@@ -269,7 +295,9 @@ export class SystemAnalysisStore {
         return
       }
       if (view.state === 'succeeded') {
-        state.phase = view.hasProfile ? 'ready' : 'hidden'
+        // A stored profile pending a decision is the review surface; one that
+        // already carries a decision is settled and keeps no chrome.
+        state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
         return
       }
       state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'

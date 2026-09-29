@@ -181,25 +181,57 @@ describe('WelcomeWizard', () => {
     await screen.findByText(zh.wizAgentsHeading)
   })
 
-  it('renders the live analysis progress on every step, including done', async () => {
+  it('keeps the analysis progress surface out of the wizard card and states the run in step copy', async () => {
     const h = mount()
     await screen.findByRole('dialog', { name: zh.wizTitle })
+
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(screen.getByText(zh.wizSecurityHeading)).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(screen.getByText(zh.wizWelcomeLead)).toBeTruthy()
+
     act(() => {
       h.store.store.update((state) => {
-        state.analysis = { state: 'running', stage: 'services', stageIndex: 2, stageCount: 6, pct: 33 }
+        state.analysis = { state: 'running', stage: 'services', stageIndex: 2, stageCount: 9, pct: 33 }
       })
     })
-    const dock = document.querySelector('[data-dsh-analysis-dock]')
-    expect(dock).not.toBeNull()
-    expect(document.querySelector('[data-dsh-analysis-spinner]')).not.toBeNull()
-    expect(document.querySelector('[data-dsh-analysis-pct]')?.textContent).toBe('33%')
-    expect(document.querySelector('[data-dsh-analysis-fill]')?.getAttribute('style')).toContain('width: 33%')
-    const phases = Array.from(document.querySelectorAll('[data-dsh-analysis-phases] li'))
-    expect(phases.map(phase => phase.getAttribute('data-state'))).toEqual([
-      'done', 'done', 'active', 'pending', 'pending', 'pending',
-    ])
+    // The live progress surface is the frame-wide chip; the wizard card only
+    // states the run's outcome.
+    const card = screen.getByRole('dialog', { name: zh.wizTitle })
+    expect(document.querySelector('[data-dsh-analysis-dock]')).toBeNull()
+    expect(card.querySelector('[data-dsh-analysis-pct]')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: zh.wizNameDone }))
-    expect(document.querySelector('[data-dsh-analysis-dock]')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameAgents }))
+    expect(document.querySelector('[data-wiz-analysis-status]')?.textContent).toBe(zh.wizAnalyseRunning)
+
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = {
+          state: 'succeeded', stage: 'done', stageIndex: 9, stageCount: 9, pct: 100,
+          summary: { threads: 28, memoryGiB: 62, services: 4 },
+        }
+      })
+    })
+    const ready = document.querySelector('[data-wiz-analysis-status]')?.textContent ?? ''
+    expect(ready).toContain('28')
+    expect(ready).toContain('62')
+    expect(ready).not.toBe(zh.wizAnalyseRunning)
+  })
+
+  it('shows the demo key glyphs beside Back and Continue', async () => {
+    mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    fireEvent.click(screen.getByRole('button', { name: zh.wizStart }))
+    await screen.findByText(zh.wizSecurityHeading)
+
+    const back = document.querySelector('[data-wiz-key="before"]')
+    const forward = document.querySelector('[data-wiz-key="after"]')
+    expect(back?.textContent).toBe('←')
+    expect(forward?.textContent).toBe('→')
+    // The glyph stays out of the accessible name: the buttons read as labels.
+    expect(back?.getAttribute('aria-hidden')).toBe('true')
+    expect(forward?.getAttribute('aria-hidden')).toBe('true')
+    expect(screen.getByRole('button', { name: zh.wizBack })).toBeTruthy()
+    expect(screen.getByRole('button', { name: zh.wizContinue })).toBeTruthy()
   })
 })

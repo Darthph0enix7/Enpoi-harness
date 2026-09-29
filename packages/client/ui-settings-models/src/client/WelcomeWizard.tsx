@@ -118,6 +118,31 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     if (state.status === 'ready' && !state.visible) complete()
   }, [complete, state.status, state.visible])
 
+  // Arrow keys navigate the flow wherever focus sits inside the modal; a text
+  // field keeps its own arrow behaviour. The tour overlay owns its keys while
+  // it runs, so this listener stands down then.
+  useEffect(() => {
+    if (!state.visible || tourStarted) return undefined
+    const current = state.wizard
+    const at = WIZARD_STEPS.indexOf(current.step)
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      if (event.target instanceof HTMLElement
+        && event.target.closest('input, textarea, select, [contenteditable="true"]') !== null) return
+      if (event.key === 'ArrowRight' && current.step !== 'done') {
+        event.preventDefault()
+        store.dispatch({ type: 'continue' })
+        return
+      }
+      if (event.key === 'ArrowLeft' && at > 0 && current.step !== 'done') {
+        event.preventDefault()
+        store.dispatch({ type: 'goto', step: WIZARD_STEPS[at - 1] ?? 'welcome' })
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [store, state.visible, state.wizard, tourStarted])
+
   const kilo = useMemo(
     () => models.rows.find(row => row.entry.provider === WIZARD_FREE_PROVIDER),
     [models.rows],
@@ -142,7 +167,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   const wizard = state.wizard
   const step = wizard.step
   const stepIndex = WIZARD_STEPS.indexOf(step)
-  const canGoBack = stepIndex > 0 && step !== 'done'
 
   const finish = (): void => {
     void store.finish().then(() => { store.close() })
@@ -211,8 +235,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             else if (step === 'tour') store.dispatch({ type: 'skip-tour' })
             else store.dispatch({ type: 'skip' })
           }
-          if (event.key === 'ArrowRight' && step !== 'done') continueStep()
-          if (event.key === 'ArrowLeft' && canGoBack) store.dispatch({ type: 'goto', step: WIZARD_STEPS[stepIndex - 1] ?? 'welcome' })
         }}
       >
         <nav className={styles.rail} aria-label={t('wizSteps')}>
@@ -290,10 +312,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {state.writeFailure !== null && state.writeFailure.step === step && (
             <p className={styles.error} role="alert" data-wiz-write-error>{state.writeFailure.message}</p>
           )}
-
-          {state.analysis !== null && state.analysis !== undefined && (
-            <AnalysisDock t={t} analysis={state.analysis} />
-          )}
         </div>
 
         <AddProviderModal
@@ -336,6 +354,14 @@ function stepNameKey(id: WizardStepId): keyof typeof en {
 
 type T = (key: keyof typeof en) => string
 
+/**
+ * One small key glyph beside a wizard action, matching the demo's key hints.
+ * It stays out of the accessible name: the button reads as its label alone.
+ */
+function KeyHint({ glyph, side }: { glyph: string; side: 'before' | 'after' }): ReactNode {
+  return <kbd className={styles.keyHint} data-side={side} data-wiz-key={side} aria-hidden="true">{glyph}</kbd>
+}
+
 function WelcomeStep({ t, onContinue, onSkipAll }: { t: T; onContinue: () => void; onSkipAll: () => void }): ReactNode {
   return (
     <div className={styles.step}>
@@ -348,7 +374,7 @@ function WelcomeStep({ t, onContinue, onSkipAll }: { t: T; onContinue: () => voi
       </div>
       <p className={styles.fineprint}>{t('wizWelcomeFineprint')}</p>
       <div className={styles.actions}>
-        <Button variant="primary" onClick={onContinue}>{t('wizStart')}</Button>
+        <Button variant="primary" onClick={onContinue}>{t('wizStart')}<KeyHint glyph="→" side="after" /></Button>
         <Button onClick={onSkipAll}>{t('wizSkipTour')}</Button>
       </div>
     </div>
@@ -388,8 +414,8 @@ function SecurityStep({ t, mode, onMode, onContinue, onBack }: {
       </div>
       <p className={styles.fineprint}>{t('wizSandboxFineprint')}</p>
       <div className={styles.actions}>
-        <Button onClick={onBack}>{t('wizBack')}</Button>
-        <Button variant="primary" onClick={onContinue}>{t('wizContinue')}</Button>
+        <Button onClick={onBack}><KeyHint glyph="←" side="before" />{t('wizBack')}</Button>
+        <Button variant="primary" onClick={onContinue}>{t('wizContinue')}<KeyHint glyph="→" side="after" /></Button>
       </div>
     </div>
   )
@@ -428,9 +454,9 @@ function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, 
       </div>
       <p className={styles.fineprint}>{t('wizProviderFineprint')}</p>
       <div className={styles.actions}>
-        <Button onClick={onBack}>{t('wizBack')}</Button>
+        <Button onClick={onBack}><KeyHint glyph="←" side="before" />{t('wizBack')}</Button>
         <Button variant="primary" onClick={onAdd}>{t('wizProviderAdd')}</Button>
-        <Button onClick={onContinue}>{t('wizContinue')}</Button>
+        <Button onClick={onContinue}>{t('wizContinue')}<KeyHint glyph="→" side="after" /></Button>
       </div>
     </div>
   )
@@ -483,8 +509,8 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
       </div>
       <p className={styles.fineprint}>{t('wizIntelligenceFineprint')}</p>
       <div className={styles.actions}>
-        <Button onClick={onBack}>{t('wizBack')}</Button>
-        <Button variant="primary" onClick={onContinue}>{allOff ? t('wizContinueOff') : t('wizContinue')}</Button>
+        <Button onClick={onBack}><KeyHint glyph="←" side="before" />{t('wizBack')}</Button>
+        <Button variant="primary" onClick={onContinue}>{allOff ? t('wizContinueOff') : t('wizContinue')}<KeyHint glyph="→" side="after" /></Button>
       </div>
     </div>
   )
@@ -699,10 +725,10 @@ function TourOverlay({ t, stop, stepNumber, stepCount, onStop, onBack, onFinish,
           ))}
         </div>
         <div className={styles.actions}>
-          <Button onClick={back}>{t('wizBack')}</Button>
+          <Button onClick={back}><KeyHint glyph="←" side="before" />{t('wizBack')}</Button>
           {stop < TOUR_STOPS.length - 1
-            ? <Button variant="primary" onClick={forward}>{t('wizNext')}</Button>
-            : <Button variant="primary" onClick={forward}>{t('wizTourFinish')}</Button>}
+            ? <Button variant="primary" onClick={forward}>{t('wizNext')}<KeyHint glyph="→" side="after" /></Button>
+            : <Button variant="primary" onClick={forward}>{t('wizTourFinish')}<KeyHint glyph="→" side="after" /></Button>}
           <Button onClick={onSkip}>{t('wizSkipTour')}</Button>
         </div>
       </div>
@@ -716,6 +742,18 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
   onAnalyse: () => void
   onSkip: () => void
 }): ReactNode {
+  // One line of step copy states the run's outcome; progress and the review
+  // surface itself live in the frame-wide chip, never in this card.
+  const status = analysis === null || analysis === undefined
+    ? null
+    : analysis.state === 'running'
+      ? t('wizAnalyseRunning')
+      : analysis.state === 'succeeded'
+        ? t('wizAnalysisReady')
+          .replace('{threads}', String(analysis.summary?.threads ?? 0))
+          .replace('{memory}', String(analysis.summary?.memoryGiB ?? 0))
+          .replace('{services}', String(analysis.summary?.services ?? 0))
+        : `${t('wizAnalysisFailed')}: ${analysis.error ?? ''}`
   return (
     <div className={styles.step}>
       <h2 className={styles.heading}>{t('wizAgentsHeading')}</h2>
@@ -728,8 +766,8 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
       <div className={styles.offer}>
         <h3>{t('wizAnalyseTitle')}</h3>
         <p>{t('wizAnalyseBody')}</p>
-        {analysis !== null && analysis !== undefined
-          ? <p className={styles.fineprint}>{t('wizAnalyseRunning')}</p>
+        {status !== null
+          ? <p className={styles.fineprint} data-wiz-analysis-status>{status}</p>
           : (
             <div className={styles.actions}>
               <Button variant="primary" onClick={onAnalyse}>{t('wizAnalyseStart')}</Button>
@@ -737,61 +775,6 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip }: {
             </div>
           )}
       </div>
-    </div>
-  )
-}
-
-/** Display order of the host analysis stages; index maps to `stageIndex`. */
-const ANALYSIS_PHASE_KEYS = [
-  'wizPhaseHardware', 'wizPhaseOs', 'wizPhaseServices', 'wizPhaseTooling', 'wizPhaseHosting',
-  'wizPhaseDisk', 'wizPhaseGpu', 'wizPhaseSummarising', 'wizPhaseWriting',
-] as const
-
-/** One phase's render state from the live job position. */
-function phaseState(analysis: NonNullable<WelcomeWizardState['analysis']>, index: number): 'done' | 'active' | 'pending' {
-  if (analysis.state === 'succeeded') return 'done'
-  if (analysis.state === 'failed') return index < analysis.stageIndex ? 'done' : 'pending'
-  if (index < analysis.stageIndex) return 'done'
-  return index === analysis.stageIndex ? 'active' : 'pending'
-}
-
-/**
- * Live system-analysis progress: the determinate bar and phase rail render the
- * polled host job (`pct`, `stageIndex`), so the indicator moves with the real
- * run instead of a decorative animation.
- */
-function AnalysisDock({ t, analysis }: { t: T; analysis: NonNullable<WelcomeWizardState['analysis']> }): ReactNode {
-  const label = analysis.state === 'running'
-    ? t('wizAnalysisRunning')
-    : analysis.state === 'succeeded'
-      ? t('wizAnalysisReady')
-        .replace('{threads}', String(analysis.summary?.threads ?? 0))
-        .replace('{memory}', String(analysis.summary?.memoryGiB ?? 0))
-        .replace('{services}', String(analysis.summary?.services ?? 0))
-      : analysis.state === 'failed'
-        ? `${t('wizAnalysisFailed')}: ${analysis.error ?? ''}`
-        : ''
-  const phases = ANALYSIS_PHASE_KEYS.slice(0, Math.max(0, Math.min(analysis.stageCount, ANALYSIS_PHASE_KEYS.length)))
-  return (
-    <div className={styles.dock} data-state={analysis.state} data-dsh-analysis-dock role="status">
-      <div className={styles.dockHead}>
-        <strong>{t('wizAnalysisDock')}</strong>
-        {analysis.state === 'running' && <span className={styles.spinner} data-dsh-analysis-spinner aria-hidden="true" />}
-        <span className={styles.dockPct} data-dsh-analysis-pct>{analysis.pct}%</span>
-      </div>
-      <div className={styles.dockTrack} data-dsh-analysis-track>
-        <div className={styles.dockFill} data-dsh-analysis-fill style={{ width: `${analysis.pct}%` }} />
-      </div>
-      {phases.length > 0 && (
-        <ol className={styles.dockPhases} data-dsh-analysis-phases>
-          {phases.map((key, index) => (
-            <li key={key} data-phase={key} data-state={phaseState(analysis, index)}>
-              {t(key)}
-            </li>
-          ))}
-        </ol>
-      )}
-      <span className={styles.dockLabel} data-dsh-analysis-stage>{label}</span>
     </div>
   )
 }

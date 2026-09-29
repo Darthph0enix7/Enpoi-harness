@@ -43,24 +43,67 @@ describe('SystemAnalysisChip', () => {
   it('renders nothing while hidden', () => {
     const { container } = mount()
     expect(container.firstChild).toBeNull()
+    expect(document.querySelector('[data-dsh-system-analysis]')).toBeNull()
   })
 
-  it('shows the live phases, the current stage, and the percentage while running', () => {
+  it('portals the running bar onto the document body and expands its phases upward', () => {
     const { container } = mount({ phase: 'running', stage: 'tooling', stageIndex: 3, pct: 33 })
+    // The shell frame caps every in-frame layer below the first-run modal, so
+    // the chip lives on the body instead of inside the frame's overlay layer.
+    expect(container.firstChild).toBeNull()
+    expect(document.querySelector('[data-dsh-system-analysis]')?.parentElement).toBe(document.body)
     expect(screen.getByText(en.sysAnalysisTitle)).toBeTruthy()
-    expect(container.querySelector('[data-dsh-system-analysis-stage]')?.textContent).toBe(en.wizPhaseTooling)
+    expect(document.querySelector('[data-dsh-system-analysis-stage]')?.textContent).toBe(en.wizPhaseTooling)
     expect(screen.getByText('33%')).toBeTruthy()
-    const phases = container.querySelectorAll('[data-dsh-system-analysis-phases] li')
+    expect(document.querySelector('[data-dsh-system-analysis-fill]')?.getAttribute('style')).toContain('width: 33%')
+
+    // Collapsed: the compact bar is the whole surface, with no phase rail.
+    expect(document.querySelector('[data-dsh-system-analysis-phases]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-dsh-system-analysis-toggle]')!)
+    const phases = document.querySelectorAll('[data-dsh-system-analysis-phases] li')
     expect(phases).toHaveLength(9)
     expect(phases[2]?.getAttribute('data-state')).toBe('done')
     expect(phases[3]?.getAttribute('data-state')).toBe('active')
     expect(phases[4]?.getAttribute('data-state')).toBe('pending')
+    fireEvent.click(document.querySelector('[data-dsh-system-analysis-toggle]')!)
+    expect(document.querySelector('[data-dsh-system-analysis-phases]')).toBeNull()
   })
 
-  it('opens the results from the ready chip', () => {
+  it('clamps a reported percentage into the 0 to 100 the bar renders', () => {
+    mount({ phase: 'running', stage: 'tooling', stageIndex: 3, pct: 150 })
+    expect(screen.getByText('100%')).toBeTruthy()
+    expect(document.querySelector('[data-dsh-system-analysis-fill]')?.getAttribute('style')).toContain('width: 100%')
+    cleanup()
+    mount({ phase: 'running', stage: 'hardware', stageIndex: 0, pct: -20 })
+    expect(screen.getByText('0%')).toBeTruthy()
+    expect(document.querySelector('[data-dsh-system-analysis-fill]')?.getAttribute('style')).toContain('width: 0%')
+  })
+
+  it('opens the results from the whole ready bar', () => {
     const { actions } = mount({ phase: 'ready' })
     fireEvent.click(screen.getByRole('button', { name: new RegExp(en.sysAnalysisReady, 'u') }))
     expect(actions.open).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders an unknown host stage verbatim', () => {
+    mount({ phase: 'running', stage: 'poolside warming', stageIndex: 0, pct: 5 })
+    expect(document.querySelector('[data-dsh-system-analysis-stage]')?.textContent).toBe('poolside warming')
+  })
+
+  it('keeps the panel actions disabled while a decision is in flight', () => {
+    mount({ phase: 'ready', open: true, busy: true, text: '# System profile' })
+    expect(screen.getByRole('button', { name: en.sysAnalysisAccept }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: en.sysAnalysisReject }).hasAttribute('disabled')).toBe(true)
+  })
+
+  it('renders an empty document when no profile text was read', () => {
+    mount({ phase: 'ready', open: true, text: null })
+    expect(document.querySelector('[data-dsh-system-analysis-document]')?.textContent).toBe('')
+  })
+
+  it('shows the localized failure label when the host reported no reason', () => {
+    mount({ phase: 'failed', error: null, errorCode: null })
+    expect(screen.getByText(en.sysAnalysisFailed)).toBeTruthy()
   })
 
   it('shows the failure reason with a retry', () => {

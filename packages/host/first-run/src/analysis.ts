@@ -88,6 +88,20 @@ export interface AnalysisRunner {
 const STAGE_COUNT = ANALYSIS_STAGES.length
 
 /**
+ * Percentage one stage position reports, clamped to the 0..100 the client bar
+ * can render. The published index is bounded to the last stage, so a stage
+ * listener firing more times than the list holds still cannot report hundreds.
+ * @param stageIndex - zero-based position of the stage being entered.
+ * @param stageCount - stages in the run.
+ * @returns the integer percentage for that position.
+ */
+export function stagePct(stageIndex: number, stageCount: number): number {
+  if (stageCount <= 0) return 0
+  const bounded = Math.max(0, Math.min(stageIndex, stageCount - 1))
+  return Math.round((bounded / stageCount) * 100)
+}
+
+/**
  * Build one runner over the injected dependencies.
  * @param dependencies - scan, summariser, storage, and clock.
  * @returns the runner the route plugin and tests drive.
@@ -117,7 +131,7 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies): Analys
       ...job,
       stage,
       stageIndex: bounded,
-      pct: Math.round((bounded / STAGE_COUNT) * 100),
+      pct: stagePct(bounded, STAGE_COUNT),
     }
     stageIndex += 1
   }

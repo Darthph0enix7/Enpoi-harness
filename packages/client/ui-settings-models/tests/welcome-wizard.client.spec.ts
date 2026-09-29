@@ -138,4 +138,33 @@ describe('welcome wizard gating', () => {
     expect(store.store.getSnapshot().status).toBe('error')
     store.dispose()
   })
+
+  it('treats a memory scope as a first run and resolves load immediately', async () => {
+    const store = new WelcomeWizardStore(scope({ mode: 'memory', status: 'ready' }), idleAnalysis)
+    await store.load()
+    expect(store.store.getSnapshot().visible).toBe(true)
+    store.dispose()
+  })
+
+  it('resolves load only after the marker scope leaves its loading state', async () => {
+    const snapshot: WizardScopeSnapshot = { mode: 'host', status: 'loading' }
+    const listeners = new Set<() => void>()
+    const loading: WizardScope = {
+      getSnapshot: () => snapshot,
+      subscribe: (next) => { listeners.add(next); return () => { listeners.delete(next) } },
+      set: async () => true,
+    }
+    const store = new WelcomeWizardStore(loading, idleAnalysis)
+    let settled = false
+    const pending = store.load().then(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    snapshot.status = 'ready'
+    snapshot.value = {}
+    for (const listener of [...listeners]) listener()
+    await pending
+    expect(store.store.getSnapshot().visible).toBe(true)
+    store.dispose()
+  })
 })

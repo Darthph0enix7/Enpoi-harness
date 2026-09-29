@@ -52,9 +52,9 @@ Mount the context row inside the sysadmin agent preset, so the scan becomes that
 | `enabled` | `true` | Run the seed when no marker is stored |
 | `provider`, `model` | `kilo`, `kilo-auto/free` | Route id and free model the seed writes |
 | `seedVersion` | empty | Marker; any stored value means the seed already decided |
-| `routes` | `true` | Register `/system-analysis/start`, `/status`, and `/context` |
+| `routes` | `true` | Register `/system-analysis/start`, `/status`, `/context`, `/accept`, and `/reject` |
 
-The analysis is a singleton run: `start` answers the current view while a run is live or settled, `status` never changes it, and `context` returns the stored document or null. Every probe is independent and bounded to five seconds; a missing tool degrades one section to a named line and never fails the scan.
+The analysis is a singleton run: `start` answers the current view while a run is live or settled, `status` never changes it, `context` returns the stored document or null, and `accept`/`reject` record the operator's decision. The first-run client auto-starts the run while the setup marker is pending; outside first run nothing schedules a run. Every probe is independent and bounded to five seconds; a missing tool degrades one section to a named line and never fails the scan.
 
 -----
 
@@ -103,5 +103,5 @@ The context text is stable between scans, so the sysadmin prefix caches normally
 ## Known Limitations and Deferred Work
 
 - The sysadmin preset must mount `@deepseek-ai/dsh-host-first-run/context`; the fork profile owns that row. The harness repository ships the export only.
-- The analysis runs only when a caller starts it (the first-run wizard or an operator); nothing schedules it.
+- The analysis auto-starts from the first-run client while that flow is pending; once the setup marker is stored or a decision is recorded, nothing schedules or re-offers a run.
 - Service probing assumes `systemd`; other platforms record the section as unavailable.
