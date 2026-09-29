@@ -7,7 +7,10 @@
 .backdrop {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  /* Above the settings modal (1000): the wizard is a takeover surface, and
+     "Run setup again" opens it from inside that modal. Below the analysis
+     chip (1050) and transient menus (1100). */
+  z-index: 1010;
   display: grid;
   place-items: center;
   background: var(--dsw-alias-bg-mask-3);
@@ -427,7 +430,9 @@
 .tourLayer {
   position: fixed;
   inset: 0;
-  z-index: 950;
+  /* Above the wizard backdrop (1010) so the spotlight covers it; still below
+     the analysis chip (1050). */
+  z-index: 1020;
   outline: none;
 }
 
