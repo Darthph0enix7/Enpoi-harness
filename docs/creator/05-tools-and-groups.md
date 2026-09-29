@@ -12,7 +12,7 @@ The frozen wire rosters live in `scripts/tool-inventory/expected-<preset>.json` 
 | sysadmin | 39 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
 | creator | 40 | `scripts/tool-inventory/expected-creator.json` |
 
-Capture notes and counts: `scripts/tool-inventory/roster-baseline.json:1-3`. The creator preset mounts neither `enpoi-tool-groups` nor a filter, so its fixture includes the on-demand families (peer, debug) that orchestrator/sysadmin hide until attached. Diff a live roster against these with `scripts/tool-roster-diff.mjs` (the roster gate).
+Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are frozen at 0.1.7 and lag the live declarations: `preset-creator` now mounts `enpoi-tool-groups` (seat `creator`, `debug` pre-attached through the `toolGroups.seats.creator` document row) and `enpoi-debug`, so its live surface hides `peer` and gains `tool_groups` — the 40-tool fixture still lists `peer_*` and omits `tool_groups`. Probe before quoting a count: `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call); `scripts/tool-roster-diff.mjs` diffs fixtures against the stored baseline offline.
 
 The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:52-158`). Static groups are always presented; on-demand groups must be attached:
 
@@ -47,6 +47,7 @@ A seat is a preset/agent identity. `Config.seat` defaults to `'default'` (`index
 - Operator override: `enpoi-orchestration.toolGroups.seats.<seat>.preAttach` (string[]).
 - Else the union of each group's own `preAttach` entries for that seat (`preAttachFor`, `catalog.ts:218-224`).
 - Unknown ids are ignored and disabled groups dropped; order follows the catalog.
+- The profile's `enpoi-orchestration.toolGroups.seats` document pre-attaches `debug` for `creator` and `broker`; the council seats (`skeptic`, `architect`, `pragmatist`, `referee`, `chair`) declare explicit empty lists. A seat entry replaces the group-level `preAttach` union, so an explicit empty list is how a seat opts out of a group default (`preAttachFor`, `catalog.ts:218-224`). No other seat has a row → nothing pre-attached; read the document before asserting a seat's set.
 - A delegated child carries the **parent's** preset; its real seat is read from its `subagent/descriptor` label — `roundtable seat: pragmatist`, `council chair: …`, etc. (`seatOfAgent`, `index.ts:287-302`; `seatOfDescriptorLabel`, `catalog.ts:243-268`). An unrecognized label falls back to the mount seat.
 
 ## 4. Hiding vs advertising
@@ -79,5 +80,5 @@ The operator surface is the **Capabilities & Tools** drawer (`profiles/web/sideb
 | attach refused "disabled by the operator" | `toolGroups.groups.<id>.enabled: false` | re-enable in settings |
 | tool call fails with "not callable yet" | attached this turn | end the turn; it is callable next turn (`index.ts:544-546`) |
 | tool call fails with `UNKNOWN_TOOL` for a group tool | group never attached | call `tool_groups` attach first |
-| `tool_groups` missing entirely | preset does not mount `enpoi-tool-groups` | mount it in that preset's `agent.cordis.yml` (the creator preset intentionally does not) |
+| `tool_groups` missing entirely | the preset declaration does not mount `enpoi-tool-groups` | add the row to that `preset-<id>` declaration's `config.plugins` in `$PROFILE/cordis.patch.yml`, then restart |
 | attach refuses "failing open" | no `sessionProjections` service | restore the projection plugin; groups keep working only as a static base surface |

@@ -76,12 +76,20 @@ Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, ma
 | 20 | orchestration | `ui-brand-enpoi/src/client/index.ts:257-273` |
 | 21 | permissions | `ui-brand-enpoi/src/client/index.ts:285-290` |
 | 22 | dynamic | `ui-brand-enpoi/src/client/index.ts:277-282` |
+| 90 | setup (Run setup again) | `ui-settings-models/src/client/index.ts:327-333` |
 
 - **Models/add provider** (`ui-settings-models`): provider list + detail, add wizard, discovery, heavy-provider group (docs 03/10).
 - **Orchestration** (`OrchestrationSettings.tsx`): groups High Council (`:59-68`), Context Keeper (`:70-79`), Compaction (`:81-89`), Memory (`:91-94`), Oracle (`:96-98`); per-group reset; edits are hot-swapped (intro `:240`). Compaction shows the derived effective policy for the selected summariser route (`:164-191`).
 - **Permissions**: policy editor over the enpoi-capabilities engine (doc 04).
 - **Capabilities and Agent Models are not settings pages** — they are right sidebar tabs (`index.ts:294-358`); settings cross-links open them through the `settingsUi` service (`settings-nav.ts:16-28`).
 - **Dynamic** (`dynamic/DynamicSettings.tsx`): Roles, Councils, MCPs, Skills, Prompts panels, all editing the `enpoi-orchestration` document hot.
+
+## First-run system analysis
+
+- Frame-wide chip: `shell.overlay` id `system-analysis` (`ui-settings-models/src/client/index.ts:336-342`), portaled to `document.body` at z 1050 — above the settings modal (1000) and the wizard backdrop/tour (1010/1020), below transient menus (1100) (`SystemAnalysisChip.tsx:95-99,164`; `SystemAnalysisChip.module.css:1-10`; `WelcomeWizard.module.css:7-13,427-435`).
+- The chip never starts the first run: hidden → running (bar button reveals the eight-phase rail, pct, 300 ms poll) → ready (the bar is a button; the panel shows the document with Accept/Reject, and a click outside accepts) → hidden once a decision is recorded; failed shows the reason and Retry (`system-analysis.ts:76-77,265-295,311-323`; `SystemAnalysisChip.tsx:91-162`). Reject removes the stored files and records the decision (doc 10).
+- The wizard's agents step is the first-run start (Investigate in the background / Skip this step); a run in flight or settled swaps the buttons for a status line plus Back/Continue — progress and the decision stay in the chip (`WelcomeWizard.tsx:752-797`; `ui-settings-models/src/client/index.ts:175-184`).
+- **Run setup again** (Settings → Setup, order 90) reopens the wizard at step 1 through the settings shell's explicit onboarding request even with a retained conversation; the wizard is a takeover above the settings modal and clears the request when a step completes (`SetupSection.tsx:40-43`; `welcome-wizard.ts:329-342`; `shell-contract.ts:93-102`; `ui-settings-general/src/client/SettingsRoot.tsx:231-245,289-295`).
 
 ## Watchtower
 

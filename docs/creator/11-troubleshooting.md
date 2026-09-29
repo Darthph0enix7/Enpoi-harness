@@ -70,6 +70,13 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Fix: `ds pool <provider>` shows priority, cooldown, auth state; `ds reset-cooldown <provider> [identity]` clears a wedged identity; verify the model is not gated (or sign in); for keyless routes a supplied key switches that route to BYOK. Error classes: `HarnessError` carries the machine-routable class (`$REPO/packages/llm/llm/src/error.ts:13-31`).
 - Gate: error audit `provider-capacity` class must stay at zero; the picker's dimmed reason is the operator-facing truth (doc 03).
 
+### First-run system-analysis chip
+- Symptom: the chip reads failed; Retry starts a fresh investigation from stage 1.
+- Cause: the chip localizes three kinds — `service` (route answered non-OK), `rejected` (host answered `ok: false`, its message shown verbatim), `payload` (job shape not understood); a transport failure shows the raw message (`SystemAnalysisChip.tsx:54-59,171-181`; `system-analysis.ts:29-41,310-322`).
+- State on disk: `$DSH_HOME/system-profile.md` and `$DSH_HOME/system-profile.json` (the stored profile), `$DSH_HOME/system-profile.decision` (`accepted`/`rejected`); a run's scratch workspace is `$DSH_HOME/system-analysis-work` (`context-file.ts:19-26,54-67`; `investigation.ts:50-53`).
+- Fix/reset: Reject removes both profile files and records the decision, so the sysadmin falls back to the "no analysis is stored" default (doc 10) and the ready surface does not return; to start a fresh run by hand, remove both `$DSH_HOME/system-profile.md` and `system-profile.json` plus the decision marker, then reload and start from the wizard's agents step (`analysis.ts:220-224`; `system-analysis.ts:284-293`). The chip's Retry restarts a failed run; the chip itself never offers a first run (`SystemAnalysisChip.tsx:152-162`), and the runner removes both files when a durable write fails, so a half-written publication is never reviewable (`analysis.ts:177-183`).
+- Check: `/system-analysis/status` answers `ok: true` with the job view; after a Reject the sysadmin context must contribute the "no analysis is stored" default (doc 10).
+
 ### Search index building
 - Symptom: cross-session search rejects with the coded `SESSION_QUERY_INDEXING` state.
 - Cause: the first whole-corpus index pass is background work; on a large store it takes minutes. Not an error.

@@ -23,7 +23,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 ## Agents and orchestration
 
 - **agent** — the model loop bound to one session; a **main agent** is the session's own, a **subagent** is a delegated child session.
-- **preset** — an agent composition (`$PROFILE/presets/<name>`): prompt prefix, tool surface, services; `orchestrator`, `creator`, `sysadmin`.
+- **preset** — an agent composition; the live form is a `preset-<id>` declaration row in `$PROFILE/cordis.patch.yml` (`config.plugins`), while `$PROFILE/presets/<id>/` is the pre-merge source; `orchestrator`, `sysadmin`, `creator`.
 - **seat (fleet)** — a named model-routing slot in Agent Models (personas, councils, compaction, keeper); an unassigned seat shows `Inherit`.
 - **seat (UI)** — a named extension position on a surface (composer seats, header seats); props are derived, never named ad hoc.
 - **persona** — the role-specific prompt prefix a subagent receives when delegated (`librarian`, `fixer`, `explorer`, `designer`, `oracle`).
@@ -40,6 +40,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **referee / chair / arbiter** — fixed council roles: scoring, chairing, and neutral rulings; never seats.
 - **Oracle** — tool-only senior reviewer (`oracle_review`), scorecard + verdict contract; cannot be spawned as a worker.
 - **reviewer seat / `review_run`** — read-only test runner for reviewer roles; fixed runner enum, workspace read-only, scratch-only writes.
+- **settlement notice** — the runtime-owned parent message reporting a background child's outcome plus its closing report; one per settled child, distinct from model-authored relay messages.
 - **turn / step** — one user-initiated model run / one model call inside it.
 - **session / session log** — durable JSONL event log under `$DSH_HOME/sessions/`; current format version 4 (v4).
 - **projection** — a derived, registered read over a session (`livingBrief`, `contextPressure`, `oracleScorecard`, …) published live.
@@ -71,6 +72,10 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **The Mark** — the fork's in-chat task card for subagent/Oracle/Council dispatches, shadowing upstream tool rows.
 - **QueueDock** — the composer dock that lists queued messages and subagent settlement notices ("N results pending"; parks results instead of waking a turn).
 - **tool group** — named set of tool names in `enpoi-tool-groups`; `static` groups are always presented, `on-demand` groups attach per session; `preAttach` lists seats that start with a group attached.
+- **`tool_groups`** — the meta-tool (`list`/`attach`/`detach`) over the on-demand families; an attach commits durably but applies from the next turn.
+- **console (operator console)** — the web GUI's read surfaces for a session: the Chat/Trajectory/Watchtower conversation views plus the right-rail tabs (Capabilities, Agent Models, Subagent Sessions, Git, Terminal); no surface is literally named Console.
+- **agent picker** — the composer's preset selector (`conversation.input.agent`): switches an idle session's preset; Settings → Agent presets sets the new-task default.
+- **incident / incident store** — bounded failure rows at `$DSH_HOME/diagnostics/incidents.sqlite` from the logger sink, plugin lifecycle failures, session-event error paths, and client reports; read with `diagnostics_report`.
 - **gate** — one of the four automated acceptance checks (error audit, tool roster diff, token contrast, rebrand) — see doc 11.
-- **grant / pin / Full access / approval** — the permission model: policy outcomes (`allow/ask/deny`), standing grants, exact-command pins, broad-allow, Full access (no prompts; parent judgement applies), approval cards with provenance and parent recommendation — see doc 04.
+- **grant / pin / Full access / approval** — the permission model: policy outcomes (`allow/ask/deny`), standing grants, exact-command pins, broad-allow, Full access (no prompts; parent judgement applies), approval cards naming the child session, agent label, depth, and matched rule, plus a parent recommendation — see doc 04.
 - **pack_sig** — **not a harness term.** It belongs to a different project's document toolchain; do not use it when describing this harness.

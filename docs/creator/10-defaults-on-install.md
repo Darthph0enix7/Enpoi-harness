@@ -27,8 +27,17 @@ Not profile bundles: `dsh-enpoi-oracle`, `dsh-enpoi-debug`, and `dsh-enpoi-tool-
 - What works without sign-in: the free tier — `kilo-auto/free` (256k context, tools, reasoning), `stealth/space-bunny-alpha`, `poolside/laguna-s-2.1:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `dots-studio/dots-3-note-preview:free`; discovery syncs the full catalogue into the route after first boot.
 - What needs sign-in: paid/gated models carry `gated: true` + `gateReason: sign-in required` — `kilo-auto/efficient`, `anthropic/claude-opus-5.5`, `openai/gpt-6-sol`, and the `deepseek/*` set in the same block. The picker dims them with that reason; a `gated` rule can exclude them (doc 03).
 - `enpoi-provider-sync` stamps `gated` from the listing (`isFree === false` ⇒ gated) and merges the gate reason (`enpoi-provider-sync/src/index.ts:106,458,895-899`).
-- Default session route is seeded by the first-run plugin (`packages/host/first-run`): provider `kilo`, model `kilo-auto/free`. The stored `agent-default-model` row appears in the profile patch after the first boot — check the row, do not assume.
+- Default session route is seeded by the first-run plugin (`packages/host/first-run/src/index.ts:19-27,113-128`): provider `kilo`, model `kilo-auto/free`; the seed runs once per settings document (route and default model written only while no provider routes exist, then a stored marker), so a route the operator removed is never re-added. The stored `agent-default-model` row appears in the profile patch after the first boot — check the row, do not assume.
 - Add/remove in Settings → Models or the Add-Provider wizard; discovery runs automatically after add (doc 03).
+
+## First-run system analysis (opt-in)
+
+- Row `first-run-analysis` (`@deepseek-ai/dsh-host-first-run/analysis`, base bundle `packages/bundle/base/cordis.patch.yml:101-102`); routes `/system-analysis/status|start|accept|reject` plus `/context` for the stored document (`packages/host/first-run/src/analysis.ts:33-34,276-305`).
+- Defaults: preset `sysadmin`, route `kilo`/`kilo-auto/free`, permission preset `workspace-write`, 15-minute bound, routes on (`analysis.ts:244-254`); nothing at boot starts or re-offers a run (`:1-9,195-213`).
+- One read-only agent session investigates over eight todo-driven stages — `machine`, `usage`, `hosting`, `tooling`, `runtimes`, `networking`, `resources`, `writing profile` — and must state an evidence path per claim, reporting failed probes instead of dropping them (`investigation.ts:32-34,81-84`); the chip rail follows the session's `todo/write` list (`:107-124,273-277`).
+- Artifacts: `$DSH_HOME/system-profile.md` (header + the agent's Markdown body) and `$DSH_HOME/system-profile.json` (structured profile), written atomically; `$DSH_HOME/system-profile.decision` records `accepted`/`rejected` (`analysis.ts:117-125,157-176`; `context-file.ts:19-26,191-226`). Accept keeps the files; Reject removes both and records the decision (`analysis.ts:216-224`).
+- Sysadmin context: the `first-run-context` row (`@deepseek-ai/dsh-host-first-run/context`), mounted by the orchestrator and sysadmin presets (`$PROFILE/cordis.patch.yml`), contributes one bounded essentials line (120-char fields) plus a reference to `$DSH_HOME/system-profile.md` (`context.ts:29-34`; `context-file.ts:48-52,143-149,176-183`).
+- Before any run — and after a Reject — it contributes the documented default instead: `System profile: no analysis is stored for this machine yet.` (`context-file.ts:37-41`).
 
 ## Default tool set
 

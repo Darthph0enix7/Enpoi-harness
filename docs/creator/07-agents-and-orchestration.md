@@ -4,17 +4,36 @@ How agent presets, seats, councils, the Oracle, and delegation work, and how to 
 
 ## 1. Presets — the session's agent identity
 
-- A preset is a directory `profiles/<profile>/presets/<id>/` holding two files:
-  - `preset.yml` — roster metadata: `name`, `description`, `order`.
-  - `agent.cordis.yml` — the Cordis composition mounted for sessions on this preset: persona prefix, tool rows, skill dirs, each row `- id: / name: / config:`; `disabled:` takes a JS expression.
-- Shipped presets (fork): `orchestrator` (default implementer, order 1), `sysadmin` (ops, 2), `creator` (harness-only repair, 3). Upstream adds headless/web/desktop presets.
-- Upstream row contract: `packages/preset/agent-preset/src/index.ts:11-20` (`id`, `name`, `description`, `order`, `plugins`), registered via `ctx.agentPresets.register`, listed by `packages/preset/agent-preset-registry/src/preset.ts` (roster + `default`/`selectedDefault`).
-- Create a new agent: copy an existing preset dir, change `order`, keep the composition minimal, add skill dirs under `<preset>/skills/` and reference them from a `skill-filesystem` row (`config.customSkillDirs`). Then restart the web service — use `dsh restart --after-turn` from a hosted session, never a bare restart (see 02-install-and-update).
-- Failure modes: a composition that fails to mount is surfaced as `broken` on the roster; a row naming an unmounted plugin disables that row only. If a session "loses" a tool, diff the preset's `agent.cordis.yml` against the plugin's row name before debugging deeper.
+- Live declaration: a `preset-<id>` row in `$PROFILE/cordis.patch.yml` (`name: '@deepseek-ai/dsh-agent-preset'`; `config.plugins` is the composition — persona, tool rows, skill dirs, each row `- id: / name: / config:`, `disabled:` takes a JS expression). The `$PROFILE/presets/<id>/` dirs (`preset.yml` metadata + `agent.cordis.yml` composition) are the pre-merge source; the merged registry does not load them.
+- Shipped presets (fork, order): `orchestrator` (default implementer, 1), `sysadmin` (host ops, 2), `creator` (harness-only repair, 3); the upstream `preset-standard`/`preset-ptc`/`preset-minimal`/`preset-cordis` rows are `disabled: true`. Upstream row contract: `packages/preset/agent-preset/src/index.ts:11-20` (`id`, `name`, `description`, `order`, `plugins`), registered via `ctx.agentPresets.register`, listed by `packages/preset/agent-preset-registry/src/preset.ts` (roster + `default`/`selectedDefault`).
+- Switching: the composer agent picker (`conversation.input.agent`, ui-agent-preset) switches a session's preset mid-flight (idle recomposition; a session with history refuses a new-task default swap), the header label (`conversation.session.header.actions` id `agent-preset`) names the live preset, and Settings → Agent presets sets the new-task default. `enpoi-agent-switch` freezes the original persona bytes and appends the new identity as a trailing `agent-switch` runtime-context delta (order 900), so the switch does not invalidate the cached prompt prefix (`profiles/web/packages/enpoi-agent-switch/src/index.ts:1-23`).
+- Persona split (cache law): `persona.prefix` is the byte-identical shared base across the three presets; per-preset doctrine is `persona.suffix`, rendered last; `tests/preset-prompt-parity.spec.ts` guards parity.
+- Create/retire: add or edit a `preset-<id>` row (copy a declaration, keep `config.plugins` minimal, add skill dirs via `skill-filesystem.config.customSkillDirs`); `disabled: true` retires it. Restart with `dsh restart --after-turn` from a hosted session (02).
+- Failure modes: a composition that fails to mount is surfaced as `broken` on the roster; a row naming an unmounted plugin disables that row only. If a session "loses" a tool, diff the preset declaration's `config.plugins` against the plugin's row name before debugging deeper.
+
+**Main-agent surfaces** (live declarations; all three mount `enpoi-tool-groups` — any group, static or on-demand, can be operator-disabled with `toolGroups.groups.<id>.enabled: false`, and the meta-tool itself with `capabilities.tools.tool_groups === false`; 05 §2/§6):
+
+| Preset | Composition (`config.plugins`, condensed) | On-demand groups |
+|---|---|---|
+| orchestrator | persona, agent-instructions, first-run-context, bash/pwsh, fs, fs-search, jobs, skills (skill-filesystem + tool-skill), goal, plan-mode, orchestration (oracle, debug, tool-groups seat `orchestrator`), compaction (basic, compact, pruner), delegation (subagent `spawn` / `backgroundMode: continuable`, workflow, ralph; control/fork/codex/claude-code off), ask-user, todo, web, presentation `both`, present | `peer`, `debug` — nothing pre-attached |
+| sysadmin | same rows as orchestrator (only the persona suffix and `seat: sysadmin` differ; `present` mounted for surface equality) | same |
+| creator | persona, agent-instructions, bash/pwsh, fs, fs-search, jobs, skill-filesystem (custom skill dir) + tool-skill, plugin-manager tools, cordis tools, enpoi-orchestration (enpoi-debug + enpoi-tool-groups seat `creator`; no oracle), ask-user — no delegation, workflow, web, compaction, planning, todo, or present | `peer` denied by the filter; `debug` pre-attached |
 
 ## 2. Main agents vs subagents
 
 - One session = one main agent (the preset composition). A subagent is a separate child session spawned through the `subagent` tool (`packages/subagent/tool-subagent/src/index.ts`), with its own log, tool surface, and durable id.
+- Specialist roster (role personas, `packages/subagent/tool-subagent/src/index.ts:362-384`; the orchestrator persona names the same four):
+
+| Role | Fleet group | Purpose | Child-surface restriction |
+|---|---|---|---|
+| `fixer` | specialists | bounded implementation: precise scoped edits, builds/tests | shared deny only |
+| `explorer` | specialists | codebase mapping, symbol search, tracing; reports `file:line` | loses `edit`, `write`, `str_replace_editor` |
+| `librarian` | specialists | external docs/API research with citations | loses `edit`, `write`, `str_replace_editor` |
+| `designer` | specialists | UI/UX, styling, frontend craft | shared deny only |
+| `oracle` | supervision | senior reviewer; tool-only, never spawnable (`NON_SPAWNABLE_BUILTINS`, `tool-subagent/src/index.ts:387-394`) | n/a — its own tool protocol |
+
+- Role selection: the `role` argument, else inferred from description+prompt (`tool-subagent/src/index.ts:771-774`); an unknown or tool-only id is refused listing the available roles (`:1017-1029`). The role persona replaces the parent's; every child also gets `SHARED_CHILD_DENY` (`:424-449` — no delegation, councils, oracle, goals, plan mode, jobs, workflows, `ask_user_question`, `send_message`, `interrupt_agent`, `list_agents`) and keeps the whiteboard tools (`SHARED_CHILD_KEEP`, `:459-464`).
+- Enpoi delegation rows: `tool-subagent` (`provider: spawn`, `toolName: subagent`, `backgroundMode: continuable`); `tool-subagent-control`/`list-agents`, fork, codex, and claude-code rows are `disabled: true`. Workers are therefore fresh sessions — no `send_message`, no agent ids, no job ids — and the Oracle is the only continuation (its own plugin). Per-role model routes: `enpoi-orchestration.personas[<role>]` (§3); an empty entry (the shipped default) means the child inherits the parent route.
 - Two shapes (`packages/subagent/subagent/README.md:12,59`): one-shot (single result, optional structured output) and continuable (later messages, interrupt; default `backgroundMode: one-shot`).
 - Context inheritance is explicit, not implied: a fork child sees the parent's completed turns, a fresh child does not — the tool description changes accordingly (`tool-subagent/src/index.ts:260-284`). Children return a result, not intermediate steps.
 - `maxDepth` per delegation (`tool-subagent/src/index.ts:95-102`): omit → Host depth setting, default `1`; `0` forbids delegation; integer → provider-enforced (mount fails loud if the provider has no `depthLimit`); `'provider-managed'` leaves it to the provider.
@@ -54,20 +73,35 @@ How agent presets, seats, councils, the Oracle, and delegation work, and how to 
 ## 6. Delegation rules
 
 - **Budgets:** every delegated child gets a standing clause — `CHILD_TOOL_BUDGET = 20` tool calls is a ceiling for exploration, not a counter to satisfy; report best evidence or report what is missing (`packages/subagent/subagent/src/continuation-messages.ts:99-120`). The clause is appended on every path (continuable, background, foreground — `tool-subagent/src/index.ts:1121,1140`).
+- **Lifecycle (spawn → run → settle):** spawn validates the role and provider capabilities, snapshots the delegated permission state, and appends a `subagent/catalog` fact to the parent after admission (one-shot after the provider returns, continuable after inbox admission — `subagent/README.md:113`); a failed spawn rolls back unpublished resources and publishes no catalog fact. Run happens in the child's own durable session/log; background (continuable) is the default, `run_in_background: false` waits and returns the report in the tool result. Settle injects the one notice.
+- **Ceilings:** `maxDepth` (host `subagent` settings default `1`; a tool row may set an integer or `provider-managed`, `0` forbids delegation), `maxActiveSubagents` default `8` live continuable children (capacity refuses with `ACTIVATION_LIMIT_REACHED`; slots are process-local — `subagent/README.md:47-55`), plus the 20-call budget clause.
 - **Quiet single delivery:** foreground delegation returns one result; background/continuable settlement injects ONE notice into the parent containing the outcome line and the child's closing report only (reasoning and tool blocks stripped) — `continuation-messages.ts:129-195`. A settlement that lands while the parent is parked/reverted is held quietly in the durable next-turn inbox for a root parent (`subagent/README.md:111`).
-- **Ping-pong asks:** children do not stream intermediate steps back; a continuable child can send a message mid-task (`withContinuableReturnGuidance`, `continuation-messages.ts:81-97`) and the parent can send follow-ups — each message is a bounded child turn, while the Oracle keeps its own single-flight mutex so a session can never have two consultations in flight. The design's auto-wake guardrails (per-query wake budget, ping-pong circuit breaker) are recorded in `~/dsh-migration/34-concurrency-and-race-conditions.md` §I5; verify present code before promising them.
+- **One-way workers (this deployment):** children do not stream intermediate steps back. The upstream `send_message` path (`withContinuableReturnGuidance`, `continuation-messages.ts:81-97`) is disarmed here because `send_message` is not registered — the guidance is injected only when the child holds that tool (`continuation.ts:183-184`) — so a follow-up is a fresh dispatch, not a message to a live child. The Oracle keeps its own single-flight mutex (one consultation per session at a time).
+- **Stopping:** the composer's Stop (✕) is `detach` — the turn stops, live continuable descendants keep running; "Stop all agents" is `stop-all` — `enpoi-cascade` interrupts every live continuable descendant under ancestor authority; a revert interrupts only descendants spawned inside the reverted span. Interrupt is PARK-semantic (current turn cancelled; activation stays resident). With no `send_message`, a parked worker is not resumable from the parent — the human can continue it from its sidebar chat tab (host Queue/Steer prompt).
+- **Approvals:** a child's ask forwards to the nearest live root (04 §6); the child's scope is fixed at spawn and cannot widen from inside (the delegation-scope statement, `subagent/README.md:169`).
 - **Nested children:** depth is capped by `maxDepth` (default 1, see §2); stopping a parent parks the descendant tree — the cancel cascade recursively enumerates the whole session tree, including continuable grandchildren (`profiles/web/packages/enpoi-cascade/src/index.ts:58-114`).
 - **Failure forwarding:** a failed child never reports success — `settlementSummary` names the ending (aborted / max-tokens / refusal / error / abnormal) and providers append the failure detail plus any preserved partial answer to the error (`continuation-messages.ts:129-152`; `tool-subagent/src/index.ts:171-180`).
 - **Keeper exemption:** the context keeper is not a subagent, so the ancestor-cancel cascade never enumerates it — it keeps running through stop-all/revert cascades (`enpoi-cascade/src/index.ts:21`; doc 34 invariant I9).
 
-## 7. Enable / disable switches
+## 7. The console — where agent work is visible
+
+No surface is literally named "console"; the operator console is the web GUI. Read it top-down when diagnosing:
+- **Conversation views** (`conversation.view` slots): `chat` (ui-chat, order 0), `trajectory` (ui-trajectory, 10), `watchtower` (ui-brand-enpoi, 30). The upstream `context-lens` "Request Context" view is registered but hidden by default here (`enpoi-orchestration.uiPreferences.hiddenSurfaces.views`, `packages/client/ui-conversation/src/client/hidden-surfaces.ts:18`).
+- **Watchtower** — full-canvas cockpit: Living Brief sections, whiteboard card, and the **Live Debug** card (digest: latch, model, active descendants, last turn end + error, recent tool calls, injection index, subagent tree, pending asks with answer buttons; request summary; incident tail; "Copy debug report"). It reads `session.digest`, `session.requestSnapshot`, and `diagnostics.list` (`WatchtowerView.tsx:164,405-406`; `debug-view.ts`).
+- **Right-rail tabs** (`sidebarRightTabs`): Capabilities, Agent Models (fleet routing, §3), Subagent Sessions (dispatch lineage tree: top-most listed ancestor → current session, role label + status + depth, click opens the child — `SubagentSessionsBody.tsx:6-24`), Git, Terminal.
+- **Sub-agent surfaces:** session header lineage (`conversation.session.header.lineage`) and the catalog action (order -30); a one-shot or parent-offline child takes over the composer read-only (`conversation.composer` priority -10, ui-subagent); The Mark renders in-chat dispatch cards; QueueDock parks settlement notices; a child opens as a sidebar chat tab (`subagentchat` resource).
+- **Debug tool surface:** the `debug` tool group (05 §1) — `session_debug` (digest/snapshot/incidents), `diagnostics_report`, `session_event_*`, `session_search`, `session_trace`; attach it with `tool_groups` in orchestrator/sysadmin sessions, pre-attached for creator.
+
+## 8. Enable / disable switches
 
 - Capabilities Control Center (`enpoi-orchestration.capabilities`) is the master switchboard (`profiles/web/packages/enpoi-capabilities/src/state.ts`, `types.ts:44-70`): `skills[<name>] !== false` strips a skill from the catalog AND shadows it pre-dispatch; `tools[<id>]` false strips the tool from the model-facing list and denies it; `mcp[<id>] === true` is required to mount an MCP server.
 - Protected infrastructure cannot be disabled: `enpoi-contracts`, `enpoi-context-keeper`, `enpoi-cascade`, `enpoi-living-brief`, `read`, `glob`, `grep` (`types.ts:27-35`).
 - The keeper's own tool flag is `capabilities.tools.keeper` (default true); disabled means prose distillation and claims extraction are skipped and consumers degrade to the deterministic fold (`enpoi-context-keeper/src/index.ts:102-113,586-588`).
 - A registry role is hidden from the fleet with `roles[<id>].seat: false` or `disabled: true`; `null` deletes it (`role-registry.ts:203-261`). A role may carry `tools.available` (a tool-id allowlist for its persona, `role-registry.ts:253-257`). A tool-only role (Oracle, `spawnable: false`) is never matched by delegation text (`tool-subagent/src/index.ts:340-350`).
 
-## 8. Failure modes → fix
+## 9. Failure modes → fix
+
+- **Evidence:** incidents in `$DSH_HOME/diagnostics/incidents.sqlite` (sources: logger sink, plugin lifecycle FAILED, session-event error paths, client reports; `diagnostics_report` folds them with stable codes/fingerprints — `profiles/web/packages/enpoi-diagnostics/src/index.ts:6-13`); per-plugin logs `$DSH_HOME/logs/enpoi-*.log` (cascade, keeper, council, git, file-revert, runtime-probe) plus `$DSH_HOME/logs/startup-*.log`; service stdout in the journal. The Cordis logger only buffers, so plugin diagnostics are those files.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -75,6 +109,10 @@ How agent presets, seats, councils, the Oracle, and delegation work, and how to 
 | Council tool missing | Council retired (`disabled: true`) or invalid entry | Council list shows the validation problem; fix the spec or remove `disabled` |
 | Council produces empty deliverable | Chair output failed shape validation and mechanical compilation also failed | Check the council log (`$DSH_HOME/logs/enpoi-council.log`); inspect ledger/referee records in the result |
 | `oracle_review` blocked (`CONCURRENT_CALL_REJECTED`) | Another consultation in flight for the session | Wait for the verdict or the timeout; the child is not cancelled |
-| Child floods the parent with messages | Continuable child sending per-finding messages | Tighten the task prompt; the 20-call budget clause is already appended |
+| Child floods the parent with messages | upstream continuable child sending per-finding messages (`send_message`) | cannot happen here — keep `tool-subagent-control` `disabled: true`; the 20-call budget clause is appended |
 | Keeper still runs after stop-all | Cascade exemption (by design) | Disable it via `capabilities.tools.keeper` if truly unwanted |
-| Preset missing after install | Composition row unmounted / preset dir not shipped | `dsh plugin list`/`cordis_inspect` for the row; see 02-install-and-update |
+| Preset missing after install | `preset-<id>` declaration absent or `disabled: true` | `dsh plugin list`/`cordis_inspect` for the row; see 02-install-and-update |
+| Child fails to start | role unknown/tool-only, provider capability missing (`continuable`, `depthLimit`), or capacity `ACTIVATION_LIMIT_REACHED` | read the tool error verbatim (it names the role list or capability); `session_debug` digest → recent tool calls; `diagnostics_report`; check the preset declaration's delegation rows |
+| Child stuck (running, no progress) | long turn, waiting on an approval, or a parked activation | `session_debug` digest (`state.activeDescendants`, `subagentTree`); Subagent Sessions tab; QueueDock; then Stop all parks it — `$DSH_HOME/logs/enpoi-cascade.log` names refused interrupts |
+| Approval not forwarded | root not live, root mode not interactive/full-access, or the ask undeliverable (fails closed) | 04 §6; `session_debug` `pendingInteractions`; Live Debug ask buttons; confirm the root session is open |
+| Tool missing for a role | on-demand group not attached, capability disabled, role allowlist/deny, or the preset row unmounted | `tool_groups list`; 05 §4/§8; `enpoi-orchestration.roles.<id>.tools.available`; diff the preset declaration |
