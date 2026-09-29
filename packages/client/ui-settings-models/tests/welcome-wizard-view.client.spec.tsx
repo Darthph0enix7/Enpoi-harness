@@ -177,6 +177,26 @@ describe('WelcomeWizard', () => {
     target.remove()
   })
 
+  it('stops at the agents step when the tour finishes with the arrow key', async () => {
+    const target = document.createElement('div')
+    target.setAttribute('data-dsh-tour', 'rightbar')
+    document.body.appendChild(target)
+    mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameTour }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizTourStart }))
+    // Walk to the last stop with the pointer, then finish with the arrow key.
+    for (let i = 0; i < 4; i += 1) fireEvent.click(screen.getByRole('button', { name: zh.wizNext }))
+    const overlay = document.querySelector('[data-dsh-tour-overlay]')
+    expect(overlay).not.toBeNull()
+    fireEvent.keyDown(overlay!, { key: 'ArrowRight' })
+    // The tour hands over to the agents decision: the arrow must not carry the
+    // blind continue past the ask into Done.
+    await screen.findByText(zh.wizAgentsHeading)
+    expect(screen.queryByText(zh.wizDoneHeading)).toBeNull()
+    target.remove()
+  })
+
   it('skips the tour into the agents step', async () => {
     mount()
     await screen.findByRole('dialog', { name: zh.wizTitle })
@@ -185,6 +205,28 @@ describe('WelcomeWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: zh.wizSkipTour }))
     expect(document.querySelector('[data-dsh-tour-overlay]')).toBeNull()
     await screen.findByText(zh.wizAgentsHeading)
+  })
+
+  it('does not let the arrow key answer the agents decision', async () => {
+    const h = mount()
+    await screen.findByRole('dialog', { name: zh.wizTitle })
+    fireEvent.click(screen.getByRole('button', { name: zh.wizNameTour }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizTourStart }))
+    fireEvent.click(screen.getByRole('button', { name: zh.wizSkipTour }))
+    await screen.findByText(zh.wizAgentsHeading)
+    // No run yet: the arrow must not carry the blind continue into Done.
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(screen.getByText(zh.wizAgentsHeading)).toBeTruthy()
+    expect(screen.queryByText(zh.wizDoneHeading)).toBeNull()
+    // A run in flight turns the step into the Continue state, which the arrow
+    // may advance like every other step.
+    act(() => {
+      h.store.store.update((state) => {
+        state.analysis = { state: 'running', stage: 'machine', stageIndex: 0, stageCount: 8, pct: 0 }
+      })
+    })
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(screen.getByText(zh.wizDoneHeading)).toBeTruthy()
   })
 
   it('keeps the analysis progress surface out of the wizard card and states the run in step copy', async () => {

@@ -120,7 +120,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
 
   // Arrow keys navigate the flow wherever focus sits inside the modal; a text
   // field keeps its own arrow behaviour. The tour overlay owns its keys while
-  // it runs, so this listener stands down then.
+  // it runs, so this listener stands down then. The agents step asks a
+  // question, so the arrow must not answer it by advancing while no run is in
+  // flight; that step's own Investigate/Skip/Continue controls own the move.
   useEffect(() => {
     if (!state.visible || tourStarted) return undefined
     const current = state.wizard
@@ -130,6 +132,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
       if (event.target instanceof HTMLElement
         && event.target.closest('input, textarea, select, [contenteditable="true"]') !== null) return
       if (event.key === 'ArrowRight' && current.step !== 'done') {
+        if (current.step === 'agents' && store.store.getSnapshot().analysis == null) return
         event.preventDefault()
         store.dispatch({ type: 'continue' })
         return
@@ -695,9 +698,11 @@ function TourOverlay({ t, stop, stepNumber, stepCount, onStop, onBack, onFinish,
       aria-label={t('wizNameTour')}
       tabIndex={-1}
       onKeyDown={(event) => {
-        if (event.key === 'Escape') onSkip()
-        else if (event.key === 'ArrowRight') forward()
-        else if (event.key === 'ArrowLeft') back()
+        // The layer owns these keys outright: stop the event so the wizard's
+        // document listener can never double-handle a finish or scroll the page.
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onSkip() }
+        else if (event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); forward() }
+        else if (event.key === 'ArrowLeft') { event.preventDefault(); event.stopPropagation(); back() }
       }}
     >
       {rect !== null && (
