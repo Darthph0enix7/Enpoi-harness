@@ -369,3 +369,50 @@
   line-height: 1.5;
   color: var(--dsw-alias-label-primary, #f1f5f9);
 }
+
+/* ── custom command tools (Tools group) ────────────────────────────────── */
+
+.fieldHint {
+  font-size: 10px;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  line-height: 1.4;
+}
+
+.paramRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.paramName {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+.paramType {
+  flex: 0 0 92px;
+  height: 30px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.1));
+  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.05));
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+  font: inherit;
+  font-size: 11px;
+}
+
+.paramRequired {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  flex-shrink: 0;
+}
+
+.paramDesc {
+  flex: 1 1 140px;
+  min-width: 0;
+}

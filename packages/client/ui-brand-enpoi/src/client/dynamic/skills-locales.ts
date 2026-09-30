@@ -41,6 +41,36 @@ export type DynamicSkillsKey =
   | 'detailFailed'
   | 'saveFailed'
   | 'deleteFailed'
+  | 'customToolAdd'
+  | 'customToolNewTitle'
+  | 'customToolEditTitle'
+  | 'customToolBadge'
+  | 'customToolId'
+  | 'customToolName'
+  | 'customToolDescription'
+  | 'customToolCommand'
+  | 'customToolCommandHint'
+  | 'customToolParams'
+  | 'customToolParamName'
+  | 'customToolParamType'
+  | 'customToolParamRequired'
+  | 'customToolParamDescription'
+  | 'customToolParamNamePlaceholder'
+  | 'customToolCommandPlaceholder'
+  | 'customToolAddParam'
+  | 'customToolRemoveParam'
+  | 'customToolCreate'
+  | 'customToolSave'
+  | 'customToolDeleteTitle'
+  | 'customToolDeleteConfirm'
+  | 'customToolErrorId'
+  | 'customToolErrorName'
+  | 'customToolErrorDescription'
+  | 'customToolErrorCommand'
+  | 'customToolErrorParam'
+  | 'customToolCreateFailed'
+  | 'customToolUpdateFailed'
+  | 'customToolDeleteFailed'
 
 /** English copy. */
 export const en: Record<DynamicSkillsKey, string> = {
@@ -90,6 +120,38 @@ export const en: Record<DynamicSkillsKey, string> = {
   detailFailed: 'The skill could not be loaded: {reason}',
   saveFailed: 'Save failed: {reason}',
   deleteFailed: 'Delete failed: {reason}',
+
+  // Custom command tools (Tools group)
+  customToolAdd: '+ Add tool',
+  customToolNewTitle: 'New command tool',
+  customToolEditTitle: 'Edit command tool',
+  customToolBadge: 'custom',
+  customToolId: 'Id',
+  customToolName: 'Name',
+  customToolDescription: 'Description',
+  customToolCommand: 'Command template',
+  customToolCommandHint: 'Use {{param}} placeholders; every value is shell-quoted before execution.',
+  customToolParams: 'Parameters',
+  customToolParamName: 'Name',
+  customToolParamType: 'Type',
+  customToolParamRequired: 'Required',
+  customToolParamDescription: 'Description',
+  customToolParamNamePlaceholder: 'path',
+  customToolCommandPlaceholder: 'gh api {{path}}',
+  customToolAddParam: '+ Add parameter',
+  customToolRemoveParam: 'Remove',
+  customToolCreate: 'Create',
+  customToolSave: 'Save',
+  customToolDeleteTitle: 'Delete tool',
+  customToolDeleteConfirm: 'Delete “{name}”? The tool unregisters and its permission row is removed.',
+  customToolErrorId: 'A kebab-case id is required ([a-z0-9]+(-[a-z0-9]+)*).',
+  customToolErrorName: 'A name is required.',
+  customToolErrorDescription: 'A description is required.',
+  customToolErrorCommand: 'A command is required.',
+  customToolErrorParam: 'Parameter names must be kebab-case and unique.',
+  customToolCreateFailed: 'Could not create the tool: {reason}',
+  customToolUpdateFailed: 'Could not save the tool: {reason}',
+  customToolDeleteFailed: 'Could not delete the tool: {reason}',
 }
 
 /** Simplified Chinese copy. */
@@ -140,4 +202,36 @@ export const zh: Record<DynamicSkillsKey, string> = {
   detailFailed: '技能加载失败：{reason}',
   saveFailed: '保存失败：{reason}',
   deleteFailed: '删除失败：{reason}',
+
+  // Custom command tools (Tools group)
+  customToolAdd: '+ 添加工具',
+  customToolNewTitle: '新建命令工具',
+  customToolEditTitle: '编辑命令工具',
+  customToolBadge: '自定义',
+  customToolId: 'Id',
+  customToolName: '名称',
+  customToolDescription: '描述',
+  customToolCommand: '命令模板',
+  customToolCommandHint: '使用 {{param}} 占位符；执行前每个值都会进行 shell 引号转义。',
+  customToolParams: '参数',
+  customToolParamName: '名称',
+  customToolParamType: '类型',
+  customToolParamRequired: '必填',
+  customToolParamDescription: '描述',
+  customToolParamNamePlaceholder: 'path',
+  customToolCommandPlaceholder: 'gh api {{path}}',
+  customToolAddParam: '+ 添加参数',
+  customToolRemoveParam: '移除',
+  customToolCreate: '创建',
+  customToolSave: '保存',
+  customToolDeleteTitle: '删除工具',
+  customToolDeleteConfirm: '删除「{name}」？工具会注销，其权限行也会移除。',
+  customToolErrorId: '需要 kebab-case 的 Id（[a-z0-9]+(-[a-z0-9]+)*）。',
+  customToolErrorName: '名称不能为空。',
+  customToolErrorDescription: '描述不能为空。',
+  customToolErrorCommand: '命令不能为空。',
+  customToolErrorParam: '参数名必须是 kebab-case 且不重复。',
+  customToolCreateFailed: '创建工具失败：{reason}',
+  customToolUpdateFailed: '保存工具失败：{reason}',
+  customToolDeleteFailed: '删除工具失败：{reason}',
 }

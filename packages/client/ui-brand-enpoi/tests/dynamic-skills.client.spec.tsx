@@ -77,7 +77,7 @@ async function mountPanel(fixture: Fixture = {}) {
   const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
     if (url === '/api/settings.describe') {
       return (fixture.describe ?? (() => jsonResponse({
-        result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 5, value: { capabilities: { tools: {}, skills: {} } } }] } },
+        result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 5, value: { capabilities: { tools: {}, skills: {} }, customTools: [] } }] } },
       })))()
     }
     if (url === '/api/session/list') {
@@ -110,6 +110,22 @@ function defaultFsopsList(rows = [
   skillRow('tier1-workflow', 'Shipped default', { source: 'default', protected: true, editable: false }),
 ]) {
   return () => ok({ root: '/home/sandbox/skills', skills: rows, registry: { ok: true } })
+}
+
+/** The settings.mutate request bodies a mock fetch served, in call order. */
+function mutateBodies(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls
+    .filter(call => String((call as [string])[0]) === '/api/settings.mutate')
+    .map(call => JSON.parse(String((call as [string, RequestInit])[1].body)) as {
+      payload: { args: { ops: Array<Record<string, unknown>> } }
+    })
+}
+
+/** A describe fixture carrying custom tools. */
+function describeWith(customTools: unknown[]) {
+  return () => jsonResponse({
+    result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 5, value: { capabilities: { tools: {}, skills: {} }, customTools } }] } },
+  })
 }
 
 afterEach(() => {
@@ -366,5 +382,98 @@ describe('dynamic skills locale dictionaries', () => {
       expect(en[key].length).toBeGreaterThan(0)
       expect(zh[key].length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('custom command tools', () => {
+  const TOOL = {
+    id: 'echo-tool',
+    name: 'Echo Tool',
+    description: 'Echo a message',
+    params: [{ name: 'message', type: 'string', required: true, description: 'Text to echo' }],
+    command: 'echo {{message}}',
+  }
+
+  it('lists custom tools with a badge and Edit/Delete affordances', async () => {
+    await mountPanel({ describe: describeWith([TOOL]), fsops: { 'skills.list': defaultFsopsList() } })
+    const row = await screen.findByText('Echo Tool')
+    expect(row).toBeTruthy()
+    expect(screen.getAllByText(en.customToolBadge).length).toBeGreaterThan(0)
+    expect(screen.getByText('custom_echo-tool')).toBeTruthy()
+    expect(screen.getByLabelText(`${en.edit}: Echo Tool`)).toBeTruthy()
+    expect(screen.getByLabelText(`${en.delete}: Echo Tool`)).toBeTruthy()
+    expect(screen.getByText('echo {{message}}')).toBeTruthy()
+  })
+
+  it('creates a tool and seeds its permission row with ask', async () => {
+    const fetchMock = await mountPanel({ describe: describeWith([]), fsops: { 'skills.list': defaultFsopsList() } })
+    fireEvent.click(await screen.findByText(en.customToolAdd))
+    fireEvent.change(await screen.findByLabelText(en.customToolId), { target: { value: 'github-repo' } })
+    fireEvent.change(screen.getByLabelText(en.customToolName), { target: { value: 'GitHub Repo' } })
+    fireEvent.change(screen.getByLabelText(en.customToolDescription), { target: { value: 'Query the GitHub API' } })
+    fireEvent.click(screen.getByText(en.customToolAddParam))
+    fireEvent.change(screen.getByLabelText(`${en.customToolParamName} 1`), { target: { value: 'path' } })
+    fireEvent.change(screen.getByLabelText(`${en.customToolParamRequired} 1`), { target: { checked: true } })
+    fireEvent.change(screen.getByLabelText(en.customToolCommand), { target: { value: 'gh api {{path}}' } })
+    fireEvent.click(screen.getByText(en.customToolCreate))
+
+    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
+    const ops = mutateBodies(fetchMock)[0]!.payload.args.ops
+    expect(ops[0]).toMatchObject({ op: 'set', path: ['customTools'] })
+    expect((ops[0]!.value as unknown[])[0]).toMatchObject({ id: 'github-repo', command: 'gh api {{path}}' })
+    expect(ops[1]).toEqual({ op: 'set', path: ['permissions', 'tools', 'custom_github-repo'], value: 'ask' })
+  })
+
+  it('validates the tool form before writing', async () => {
+    const fetchMock = await mountPanel({ describe: describeWith([]), fsops: { 'skills.list': defaultFsopsList() } })
+    fireEvent.click(await screen.findByText(en.customToolAdd))
+    fireEvent.change(await screen.findByLabelText(en.customToolId), { target: { value: 'Bad Id' } })
+    fireEvent.click(screen.getByText(en.customToolCreate))
+    expect(await screen.findByText(en.customToolErrorId)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText(en.customToolId), { target: { value: 'ok-id' } })
+    fireEvent.change(screen.getByLabelText(en.customToolName), { target: { value: 'Ok' } })
+    fireEvent.change(screen.getByLabelText(en.customToolDescription), { target: { value: 'Desc' } })
+    fireEvent.click(screen.getByText(en.customToolCreate))
+    expect(await screen.findByText(en.customToolErrorCommand)).toBeTruthy()
+    expect(mutateBodies(fetchMock)).toHaveLength(0)
+  })
+
+  it('edits a tool in place', async () => {
+    const fetchMock = await mountPanel({ describe: describeWith([TOOL]), fsops: { 'skills.list': defaultFsopsList() } })
+    fireEvent.click(await screen.findByLabelText(`${en.edit}: Echo Tool`))
+    const command = await screen.findByLabelText(en.customToolCommand) as HTMLTextAreaElement
+    expect(command.value).toBe('echo {{message}}')
+    fireEvent.change(command, { target: { value: 'printf %s {{message}}' } })
+    fireEvent.click(screen.getByText(en.customToolSave))
+    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
+    const ops = mutateBodies(fetchMock)[0]!.payload.args.ops
+    expect(ops).toHaveLength(1)
+    expect((ops[0]!.value as Array<Record<string, unknown>>)[0]).toMatchObject({ id: 'echo-tool', command: 'printf %s {{message}}' })
+  })
+
+  it('deletes a tool and unsets its permission row', async () => {
+    const fetchMock = await mountPanel({ describe: describeWith([TOOL]), fsops: { 'skills.list': defaultFsopsList() } })
+    fireEvent.click(await screen.findByLabelText(`${en.delete}: Echo Tool`))
+    expect(await screen.findByText(en.customToolDeleteConfirm.replace('{name}', 'Echo Tool'))).toBeTruthy()
+    fireEvent.click(screen.getByText(en.delete, { selector: 'button[data-tool-delete-confirm]' }))
+    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
+    const ops = mutateBodies(fetchMock)[0]!.payload.args.ops
+    expect(ops[0]).toMatchObject({ op: 'set', path: ['customTools'], value: [] })
+    expect(ops[1]).toEqual({ op: 'unset', path: ['permissions', 'tools', 'custom_echo-tool'] })
+  })
+
+  it('surfaces a rejected write inside the form', async () => {
+    await mountPanel({
+      describe: describeWith([]),
+      fsops: { 'skills.list': defaultFsopsList() },
+      mutate: () => jsonResponse({ result: { ok: false, error: { code: 'settings/rejected', message: 'policy refused', details: {} } } }),
+    })
+    fireEvent.click(await screen.findByText(en.customToolAdd))
+    fireEvent.change(await screen.findByLabelText(en.customToolId), { target: { value: 'ok-id' } })
+    fireEvent.change(screen.getByLabelText(en.customToolName), { target: { value: 'Ok' } })
+    fireEvent.change(screen.getByLabelText(en.customToolDescription), { target: { value: 'Desc' } })
+    fireEvent.change(screen.getByLabelText(en.customToolCommand), { target: { value: 'true' } })
+    fireEvent.click(screen.getByText(en.customToolCreate))
+    expect(await screen.findByText(en.customToolCreateFailed.replace('{reason}', 'policy refused'))).toBeTruthy()
   })
 })

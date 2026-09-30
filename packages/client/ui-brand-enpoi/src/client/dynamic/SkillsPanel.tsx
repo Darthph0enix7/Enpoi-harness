@@ -33,6 +33,14 @@ import {
   updateSkill,
   type SkillRow,
 } from './skills-api.ts'
+import {
+  customToolNameOf,
+  emptyParam,
+  isCustomToolId,
+  parseCustomTools,
+  type CustomToolParam,
+  type CustomToolRecord,
+} from './custom-tools-model.ts'
 
 /** Props of {@link SkillsPanel}: the Dynamic section's locale share (CRUD copy). */
 export type SkillsPanelProps = PropsLocale<'settings.dynamicSkills'>
@@ -61,7 +69,10 @@ interface SettingsPathOp {
 /** The settings.describe view of the enpoi-orchestration namespace (capability subset). */
 interface OrchestrationView {
   revision?: number
-  value?: { capabilities?: { tools?: Record<string, boolean>; skills?: Record<string, boolean> } }
+  value?: {
+    capabilities?: { tools?: Record<string, boolean>; skills?: Record<string, boolean> }
+    customTools?: unknown
+  }
 }
 
 /** One open skill form (create or edit). */
@@ -74,6 +85,17 @@ interface SkillFormState {
   error: string | null
   /** Edit loads the body before the fields are usable. */
   loading: boolean
+}
+
+/** One open custom-tool form (create or edit). */
+interface ToolFormState {
+  mode: 'create' | 'edit'
+  id: string
+  name: string
+  description: string
+  command: string
+  params: CustomToolParam[]
+  error: string | null
 }
 
 /** How many sessions the catalog walk tries before giving up. */
@@ -251,6 +273,10 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
   const [deleting, setDeleting] = useState<PanelSkillRow | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [customTools, setCustomTools] = useState<CustomToolRecord[]>([])
+  const [toolForm, setToolForm] = useState<ToolFormState | null>(null)
+  const [deletingTool, setDeletingTool] = useState<CustomToolRecord | null>(null)
+  const [toolDeleteError, setToolDeleteError] = useState<string | null>(null)
 
   /** Re-read capability flags and the skills catalog (on-disk + registry). */
   const load = async (): Promise<void> => {
@@ -270,6 +296,7 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
       for (const id of PROTECTED_CAPABILITIES) defaults[id] = true
       setTools(defaults)
       setSkillCaps(isRecord(view.value?.capabilities?.skills) ? view.value?.capabilities?.skills as Record<string, boolean> : {})
+      setCustomTools(parseCustomTools(view.value?.customTools))
     }
     const sessions = await fetchSessionIds()
     const sessionId = sessions.ok ? sessions.ids[0] : undefined
@@ -304,6 +331,19 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
         [{ op: 'set', path: ['capabilities', kind === 'tool' ? 'tools' : 'skills', id], value: enabled }],
         view.revision,
       )
+      if (outcome.ok) return null
+      if (!outcome.conflict) return outcome.reason ?? 'settings write was rejected'
+    }
+    return 'settings write conflicted repeatedly'
+  })(), 'settings write timed out')
+
+  /** Apply one fenced settings write with conflict retry; returns the reason on failure. */
+  const writeOps = (ops: SettingsPathOp[]): Promise<string | null> => withWriteTimeout((async () => {
+    for (let attempt = 0; attempt <= MAX_WRITE_RETRIES; attempt++) {
+      const view = await describeOrchestration()
+      if (view === undefined) return t('settingsUnavailable')
+      setRevision(view.revision)
+      const outcome = await postSettingsMutation(ops, view.revision)
       if (outcome.ok) return null
       if (!outcome.conflict) return outcome.reason ?? 'settings write was rejected'
     }
@@ -408,6 +448,83 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
   const closeDelete = (): void => {
     setDeleting(null)
     setDeleteError(null)
+  }
+
+  const patchToolForm = (patch: Partial<ToolFormState>): void => {
+    setToolForm(current => current === null ? current : { ...current, ...patch })
+  }
+
+  const openToolCreate = (): void => {
+    setToolForm({ mode: 'create', id: '', name: '', description: '', command: '', params: [], error: null })
+  }
+
+  const openToolEdit = (tool: CustomToolRecord): void => {
+    setToolForm({
+      mode: 'edit', id: tool.id, name: tool.name, description: tool.description,
+      command: tool.command, params: tool.params.map(param => ({ ...param })), error: null,
+    })
+  }
+
+  const patchToolParam = (index: number, patch: Partial<CustomToolParam>): void => {
+    setToolForm(current => current === null ? current : {
+      ...current,
+      params: current.params.map((param, at) => at === index ? { ...param, ...patch } : param),
+    })
+  }
+
+  const saveToolForm = async (): Promise<void> => {
+    if (toolForm === null || busy) return
+    const id = toolForm.id.trim()
+    const name = toolForm.name.trim()
+    const description = toolForm.description.trim()
+    const command = toolForm.command
+    if (toolForm.mode === 'create' && !isCustomToolId(id)) { patchToolForm({ error: t('customToolErrorId') }); return }
+    if (name === '') { patchToolForm({ error: t('customToolErrorName') }); return }
+    if (description === '') { patchToolForm({ error: t('customToolErrorDescription') }); return }
+    if (command.trim() === '') { patchToolForm({ error: t('customToolErrorCommand') }); return }
+    const params = toolForm.params.map(param => ({ ...param, name: param.name.trim(), description: param.description.trim() }))
+    const names = new Set<string>()
+    for (const param of params) {
+      if (!isCustomToolId(param.name) || names.has(param.name)) { patchToolForm({ error: t('customToolErrorParam') }); return }
+      names.add(param.name)
+    }
+    const record: CustomToolRecord = { id, name, description, params, command }
+    const next = toolForm.mode === 'create'
+      ? [...customTools, record]
+      : customTools.map(tool => tool.id === id ? record : tool)
+    const ops: SettingsPathOp[] = [{ op: 'set', path: ['customTools'], value: next }]
+    if (toolForm.mode === 'create') {
+      // The tool's own permission row defaults to ask, so first use is operator-granted.
+      ops.push({ op: 'set', path: ['permissions', 'tools', customToolNameOf(id)], value: 'ask' })
+    }
+    setBusy(true)
+    patchToolForm({ error: null })
+    const failure = await writeOps(ops)
+    setBusy(false)
+    if (failure !== null) {
+      patchToolForm({ error: t(toolForm.mode === 'create' ? 'customToolCreateFailed' : 'customToolUpdateFailed', { reason: failure }) })
+      return
+    }
+    setToolForm(null)
+    await load()
+  }
+
+  const confirmDeleteTool = async (): Promise<void> => {
+    if (deletingTool === null || busy) return
+    setBusy(true)
+    setToolDeleteError(null)
+    const next = customTools.filter(tool => tool.id !== deletingTool.id)
+    const failure = await writeOps([
+      { op: 'set', path: ['customTools'], value: next },
+      { op: 'unset', path: ['permissions', 'tools', customToolNameOf(deletingTool.id)] },
+    ])
+    setBusy(false)
+    if (failure !== null) {
+      setToolDeleteError(t('customToolDeleteFailed', { reason: failure }))
+      return
+    }
+    setDeletingTool(null)
+    await load()
   }
 
   const toolRows: ToolRow[] = (() => {
@@ -528,7 +645,10 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
       <section className={css.group}>
         <div className={css.groupHead}>
           <span className={css.groupTitle}>{t('toolsTitle')}</span>
-          <span className={css.countBadge}>{toolRows.length}</span>
+          <div className={css.groupActions}>
+            <span className={css.countBadge}>{toolRows.length + customTools.length}</span>
+            <button type="button" className={css.addBtn} data-tools-add="" onClick={openToolCreate}>{t('customToolAdd')}</button>
+          </div>
         </div>
         <div className={css.rows}>
           {tools === null && <div className={css.empty}>{t('loadingTools')}</div>}
@@ -545,6 +665,44 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
                   <div className={css.rowDesc}>{tool.description}</div>
                 </div>
                 {renderSwitch(tool.name, enabled, tool.protected || pending[tool.id] === true, (next) => { toggleTool(tool.id, next) })}
+              </div>
+            )
+          })}
+          {customTools.map((tool) => {
+            const name = customToolNameOf(tool.id)
+            const enabled = tools?.[name] !== false
+            return (
+              <div className={css.row} key={`custom:${tool.id}`} data-custom-tool={tool.id}>
+                <div className={css.rowInfo}>
+                  <div className={css.rowName}>
+                    <span>{tool.name}</span>
+                    <span className={css.badge}>{t('customToolBadge')}</span>
+                    <span className={css.badge}>{name}</span>
+                  </div>
+                  {tool.description !== '' && <div className={css.rowDesc}>{tool.description}</div>}
+                  <div className={css.rowPath} title={tool.command}>{tool.command}</div>
+                </div>
+                <div className={css.rowActions}>
+                  <button
+                    type="button"
+                    className={css.actionBtn}
+                    data-tool-edit={tool.id}
+                    aria-label={`${t('edit')}: ${tool.name}`}
+                    onClick={() => { openToolEdit(tool) }}
+                  >
+                    {t('edit')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.actionBtnDanger}
+                    data-tool-delete={tool.id}
+                    aria-label={`${t('delete')}: ${tool.name}`}
+                    onClick={() => { setToolDeleteError(null); setDeletingTool(tool) }}
+                  >
+                    {t('delete')}
+                  </button>
+                </div>
+                {renderSwitch(tool.name, enabled, pending[name] === true, (next) => { toggleTool(name, next) })}
               </div>
             )
           })}
@@ -619,6 +777,141 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
       >
         <p className={css.confirmText}>{t('deleteConfirm', { name: deleting?.name ?? '' })}</p>
         {deleteError !== null && <p className={css.actionError} role="alert" data-skills-delete-error="">{deleteError}</p>}
+      </Modal>
+
+      <Modal
+        open={toolForm !== null}
+        onClose={() => { if (!busy) setToolForm(null) }}
+        title={toolForm?.mode === 'edit' ? t('customToolEditTitle') : t('customToolNewTitle')}
+        closeLabel={t('cancel')}
+        footer={<>
+          <Button variant="outline" disabled={busy} onClick={() => { setToolForm(null) }}>{t('cancel')}</Button>
+          <Button variant="primary" disabled={busy} data-tool-save="" onClick={() => { void saveToolForm() }}>
+            {toolForm?.mode === 'edit' ? t('customToolSave') : t('customToolCreate')}
+          </Button>
+        </>}
+      >
+        <div className={css.form} data-tool-form="">
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('customToolId')}</span>
+            <Input
+              data-tool-id-input=""
+              aria-label={t('customToolId')}
+              value={toolForm?.id ?? ''}
+              disabled={toolForm?.mode === 'edit'}
+              placeholder="github-repo"
+              onChange={(event) => { patchToolForm({ id: event.target.value }) }}
+            />
+          </label>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('customToolName')}</span>
+            <Input
+              data-tool-name-input=""
+              aria-label={t('customToolName')}
+              value={toolForm?.name ?? ''}
+              placeholder={t('customToolName')}
+              onChange={(event) => { patchToolForm({ name: event.target.value }) }}
+            />
+          </label>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('customToolDescription')}</span>
+            <Input
+              data-tool-description-input=""
+              aria-label={t('customToolDescription')}
+              value={toolForm?.description ?? ''}
+              placeholder={t('customToolDescription')}
+              onChange={(event) => { patchToolForm({ description: event.target.value }) }}
+            />
+          </label>
+          <div className={css.field}>
+            <span className={css.fieldLabel}>{t('customToolParams')}</span>
+            {toolForm?.params.map((param, index) => (
+              <div className={css.paramRow} key={index} data-tool-param={index}>
+                <Input
+                  className={css.paramName ?? ''}
+                  aria-label={`${t('customToolParamName')} ${String(index + 1)}`}
+                  value={param.name}
+                  placeholder={t('customToolParamNamePlaceholder')}
+                  onChange={(event) => { patchToolParam(index, { name: event.target.value }) }}
+                />
+                <select
+                  className={css.paramType}
+                  aria-label={`${t('customToolParamType')} ${String(index + 1)}`}
+                  value={param.type}
+                  onChange={(event) => { patchToolParam(index, { type: event.target.value as CustomToolParam['type'] }) }}
+                >
+                  {(['string', 'number', 'boolean'] as const).map(type => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+                <label className={css.paramRequired}>
+                  <input
+                    type="checkbox"
+                    checked={param.required}
+                    aria-label={`${t('customToolParamRequired')} ${String(index + 1)}`}
+                    onChange={(event) => { patchToolParam(index, { required: event.target.checked }) }}
+                  />
+                  {t('customToolParamRequired')}
+                </label>
+                <Input
+                  className={css.paramDesc ?? ''}
+                  aria-label={`${t('customToolParamDescription')} ${String(index + 1)}`}
+                  value={param.description}
+                  placeholder={t('customToolParamDescription')}
+                  onChange={(event) => { patchToolParam(index, { description: event.target.value }) }}
+                />
+                <button
+                  type="button"
+                  className={css.actionBtnDanger}
+                  data-tool-param-remove={index}
+                  aria-label={`${t('customToolRemoveParam')} ${String(index + 1)}`}
+                  onClick={() => { patchToolForm({ params: (toolForm?.params ?? []).filter((_param, at) => at !== index) }) }}
+                >
+                  {t('customToolRemoveParam')}
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className={css.addBtn}
+              data-tool-param-add=""
+              onClick={() => { patchToolForm({ params: [...(toolForm?.params ?? []), emptyParam()] }) }}
+            >
+              {t('customToolAddParam')}
+            </button>
+          </div>
+          <label className={css.field}>
+            <span className={css.fieldLabel}>{t('customToolCommand')}</span>
+            <textarea
+              className={css.textarea}
+              data-tool-command-input=""
+              aria-label={t('customToolCommand')}
+              rows={4}
+              spellCheck={false}
+              placeholder={t('customToolCommandPlaceholder')}
+              value={toolForm?.command ?? ''}
+              onChange={(event) => { patchToolForm({ command: event.target.value }) }}
+            />
+            <span className={css.fieldHint}>{t('customToolCommandHint')}</span>
+          </label>
+          {toolForm?.error != null && <p className={css.actionError} role="alert" data-tool-form-error="">{toolForm.error}</p>}
+        </div>
+      </Modal>
+
+      <Modal
+        open={deletingTool !== null}
+        onClose={() => { setDeletingTool(null); setToolDeleteError(null) }}
+        title={t('customToolDeleteTitle')}
+        closeLabel={t('cancel')}
+        footer={<>
+          <Button variant="outline" disabled={busy} onClick={() => { setDeletingTool(null); setToolDeleteError(null) }}>{t('cancel')}</Button>
+          <Button variant="primary" disabled={busy} data-tool-delete-confirm="" onClick={() => { void confirmDeleteTool() }}>
+            {t('delete')}
+          </Button>
+        </>}
+      >
+        <p className={css.confirmText}>{t('customToolDeleteConfirm', { name: deletingTool?.name ?? '' })}</p>
+        {toolDeleteError !== null && <p className={css.actionError} role="alert" data-tool-delete-error="">{toolDeleteError}</p>}
       </Modal>
     </div>
   )

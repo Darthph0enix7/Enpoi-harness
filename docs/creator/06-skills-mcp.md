@@ -102,3 +102,12 @@ Tools are registered by plugins on the `ctx.tools` registry; `register()` return
 | `presentCall` | optional UI card hint (`title`, `kind`, `rawInput`) |
 
 A new tool with no `permissions.tools` row falls to `defaults.unknownTools` (ship: `ask`) — add a row to make it run silently (file 04). For the full authoring contract read `docs/cookbook/adding-a-tool.md`, `docs/tool-catalog.md`, and `docs/tool-execution-pipeline.md` in the harness checkout. Registration is verified: a tool that "registers" into nothing makes the mounting plugin fail loud (`enpoi-tool-groups/src/index.ts:471-475`), and the roster gate (`expected-*.json`) catches an unintended surface change.
+
+### 7.1 Operator-authored command tools (no Creator round-trip)
+
+`profiles/web/packages/enpoi-custom-tools` turns records in `enpoi-orchestration.customTools` into real tools, authored in Settings → Dynamic → Skills & tools → Tools → **+ Add tool** (name, description, parameter rows, command template). A record is `{ id, name, description, params: [{ name, type: string|number|boolean, required, description }], command }`; the plugin registers `custom_<id>` via `ctx.tools.register(defineTool(...))` and hot-applies on `settings/document-updated` (add/edit/delete without a restart).
+
+- **Execution**: `{{param}}` placeholders are replaced with POSIX single-quoted values — never raw interpolation — and the rendered command runs through `ctx.shell` under the session's standing sandbox policy; stdout, stderr, exit code, signal, and timeout come back honestly.
+- **Guard**: the plugin provides the `customToolCommands` seam; the enpoi-capabilities `tools/pre-execute` listener renders the command through it and feeds it to the SAME evaluator bash uses (`resolvePolicy` → `evaluateCommandPolicy`: compound splitting, env-prefix stripping, dangerous verbs/wrappers/interpreters). A destructive match asks or denies per the operator's policy and can never be downgraded by the tool's own row.
+- **Permissions**: every custom tool gets its own `permissions.tools.custom_<id>` row, seeded to `ask` on creation (and removed with the tool); the Permissions page lists it automatically from the live tool registry. First use is operator-granted.
+- **V2 (not in scope)**: composite/workflow tools (a tool = a chain of steps).
