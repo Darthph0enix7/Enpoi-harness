@@ -41,6 +41,22 @@ describe('FilesBody', () => {
     expect(script.list).not.toHaveBeenCalled()
   })
 
+  it('roots the operator document view at the navigation root, lists through the fs routes, and opens rows by absolute path', async () => {
+    const OPERATOR = '/home/op/.dsh/profiles/web'
+    const { view, script, tabActions } = mountBody(null, undefined, OPERATOR)
+    // No session workspace exists, yet the operator root renders its tree.
+    expect(view.container.querySelector('[data-files-state="no-workspace"]')).toBeNull()
+    await act(async () => {
+      await vi.waitFor(() => { expect(script.operatorList).toHaveBeenCalledWith(SESSION, OPERATOR, expect.any(AbortSignal)) })
+    })
+    expect(script.list).not.toHaveBeenCalled()
+    await act(() => script.settleOperator({ entries: [{ name: 'cordis.patch.yml', type: 'file' }], truncated: false }))
+    expect(view.container.querySelector('[data-files-state="tree"]')?.getAttribute('data-files-root')).toBe(OPERATOR)
+    expect(names(view.container)).toEqual([`${OPERATOR}/cordis.patch.yml`])
+    fireEvent.click(view.container.querySelector(`[data-files-path="${OPERATOR}/cordis.patch.yml"] button`)!)
+    expect(tabActions.openResource).toHaveBeenCalledWith(fileAddressFor(SESSION, undefined, `${OPERATOR}/cordis.patch.yml`))
+  })
+
   it('lists the root on mount, heads it with its path split at the last segment, and draws directories first with dotfiles kept', async () => {
     const { view, script } = mountBody()
     expect(script.list).not.toHaveBeenCalled()
@@ -156,7 +172,7 @@ describe('FilesBody', () => {
       expect(path?.hasAttribute('data-path-clipped')).toBe(false)
 
       marker.remove()
-      await act(() => new Promise(resolve => { setTimeout(resolve, 400) }))
+      await act(() => new Promise((resolve) => { setTimeout(resolve, 400) }))
       expect(path?.hasAttribute('data-path-clipped')).toBe(true)
 
       // A deferred measurement is dropped with the effect, not run after unmount.
@@ -164,7 +180,7 @@ describe('FilesBody', () => {
       boxWidth = 300
       act(() => { observer.fire() })
       view.unmount()
-      await act(() => new Promise(resolve => { setTimeout(resolve, 400) }))
+      await act(() => new Promise((resolve) => { setTimeout(resolve, 400) }))
       expect(path?.hasAttribute('data-path-clipped')).toBe(true)
     } finally {
       marker.remove()

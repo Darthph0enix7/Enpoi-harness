@@ -5,7 +5,7 @@
  * it as an entry box, and the tree opens files through `tabActions.openResource`
  * for the `dsh-resource://file` viewers to claim.
  */
-import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { SidebarRightNavigationParams, SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import type {} from './locales.ts'
 import type { IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -15,6 +15,17 @@ export const FILES_KIND = 'files'
 
 /** This implementation's identity in the tab system, and the key its body registers under. */
 export const FILES_ID = '@deepseek-ai/dsh-client-ui-sidebar-files'
+
+/**
+ * The operator root one `files` tab was opened with.
+ * @param params - the tab's navigation params, as the owner delivers them.
+ * @returns the absolute root path, or `undefined` for an ordinary workspace tree.
+ */
+export function operatorRootOf(params: SidebarRightNavigationParams): string | undefined {
+  if (params === undefined || typeof params !== 'object' || !('root' in params)) return undefined
+  const root = params.root
+  return typeof root === 'string' && root !== '' ? root : undefined
+}
 
 /**
  * The type's folder glyph: one monochrome outline sharing the rail's line-art

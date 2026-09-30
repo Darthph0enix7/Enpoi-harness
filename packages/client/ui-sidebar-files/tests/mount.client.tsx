@@ -59,10 +59,14 @@ export interface Mounted {
 }
 
 /** One store instance, one face, one owner share. */
-function harness(cwd: string | null, refreshShortcut?: ReturnType<FilesBodyProps['useTabInfo']>['tab']['refreshShortcut']) {
+function harness(
+  cwd: string | null,
+  refreshShortcut?: ReturnType<FilesBodyProps['useTabInfo']>['tab']['refreshShortcut'],
+  operatorRoot?: string,
+) {
   const instance = createFilesStore().create()
   const script = scriptedList()
-  const face = filesFace(script.list, script.watch)(SESSION, instance.actions)
+  const face = filesFace(script.list, script.watch, script.operatorList)(SESSION, instance.actions)
   const controller = new AbortController()
   onTestFinished(async () => {
     controller.abort()
@@ -82,7 +86,11 @@ function harness(cwd: string | null, refreshShortcut?: ReturnType<FilesBodyProps
       panel: { id: 'pane-1' },
       tab: {
         id: TAB, kind: 'files', contentId: 'files', title: zh['type.label'], visible: true,
-        navigation: { address: 'files', params: undefined, revision: 1 },
+        navigation: {
+          address: 'files',
+          params: operatorRoot === undefined ? undefined : { root: operatorRoot },
+          revision: 1,
+        },
         signal: controller.signal,
         actions: tabActions, refreshShortcut,
       },
@@ -101,9 +109,14 @@ function harness(cwd: string | null, refreshShortcut?: ReturnType<FilesBodyProps
  * Mount the body.
  * @param cwd - the session's working directory as `useSessions` reports it; `null` for a session without one.
  * @param refreshShortcut - effective binding advertised by the tab owner.
+ * @param operatorRoot - the navigation params' operator document root; absent mounts an ordinary workspace tree.
  */
-export function mountBody(cwd: string | null = ROOT, refreshShortcut?: ReturnType<FilesBodyProps['useTabInfo']>['tab']['refreshShortcut']): Mounted {
-  const { shared, ...hands } = harness(cwd, refreshShortcut)
+export function mountBody(
+  cwd: string | null = ROOT,
+  refreshShortcut?: ReturnType<FilesBodyProps['useTabInfo']>['tab']['refreshShortcut'],
+  operatorRoot?: string,
+): Mounted {
+  const { shared, ...hands } = harness(cwd, refreshShortcut, operatorRoot)
   const view = render(<FilesBody {...shared as unknown as FilesBodyProps} />)
   return { ...hands, view, remount: () => render(<FilesBody {...shared as unknown as FilesBodyProps} />) }
 }

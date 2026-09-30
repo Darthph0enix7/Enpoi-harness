@@ -26,7 +26,13 @@ describe('createFilesStore', () => {
     const { actions } = store
     const getSnapshot = (): ReturnType<typeof store.getSnapshot> => store.getSnapshot()
     actions.start(TAB, ROOT)
-    expect(getSnapshot().byTab[TAB]).toEqual({ root: ROOT, levels: {}, expanded: [ROOT], scrollTop: 0, autoRefresh: true })
+    expect(getSnapshot().byTab[TAB]).toEqual({ root: ROOT, operator: false, levels: {}, expanded: [ROOT], scrollTop: 0, autoRefresh: true })
+  })
+
+  it('records the operator document mode on the tab it seeds', () => {
+    const store = createFilesStore().create()
+    store.actions.start(TAB, '/home/op/.dsh/profiles/web', true)
+    expect(store.getSnapshot().byTab[TAB]).toMatchObject({ root: '/home/op/.dsh/profiles/web', operator: true })
   })
 
   it('shows a failed initial listing and replaces it with a successful retry', () => {
@@ -86,7 +92,9 @@ describe('createFilesStore', () => {
     actions.scrolled(TAB, 120)
     actions.autoRefresh(TAB, false)
     actions.reset(TAB)
-    expect(getSnapshot().byTab[TAB]).toEqual({ root: ROOT, levels: {}, expanded: [ROOT, child], scrollTop: 120, autoRefresh: false })
+    expect(getSnapshot().byTab[TAB]).toEqual({
+      root: ROOT, operator: false, levels: {}, expanded: [ROOT, child], scrollTop: 120, autoRefresh: false,
+    })
   })
 
   it('keeps the automatic setting independent for each tab', () => {

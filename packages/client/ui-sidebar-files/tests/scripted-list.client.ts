@@ -4,7 +4,7 @@ import type { Mock } from 'vitest'
 import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { ListWorkspaceDirectory, WatchWorkspaceDirectory } from '../src/client/face.ts'
+import type { ListOperatorDirectory, ListWorkspaceDirectory, WatchWorkspaceDirectory } from '../src/client/face.ts'
 import type { DirLevel } from '../src/client/store.ts'
 import { DirectoryWatches } from './scripted-watch.client.ts'
 
@@ -13,6 +13,15 @@ export interface ScriptedList {
   readonly watch: WatchWorkspaceDirectory
   readonly watches: DirectoryWatches
   readonly list: Mock<ListWorkspaceDirectory>
+  /**
+   * The operator document listing, staying pending until the spec settles it.
+   * @param level - what the fs route answers.
+   */
+  readonly operatorList: Mock<ListOperatorDirectory>
+  /** Settle the oldest outstanding operator call and let its store write land. */
+  readonly settleOperator: (level: DirLevel) => Promise<void>
+  /** Paths of operator calls not yet settled, oldest first. */
+  readonly outstandingOperator: () => readonly string[]
   /**
    * Settle the oldest outstanding call and let its store write land.
    * @param result - what the endpoint answers.
@@ -58,6 +67,24 @@ export function scriptedList(): ScriptedList {
     waiters.delete(index)
     return result.promise
   })
+  const operatorPending: Array<{
+    sessionId: SessionId
+    path: string
+    signal: AbortSignal
+    result: Promise<DirLevel>
+    resolve: (level: DirLevel) => void
+  }> = []
+  const operatorList = vi.fn<ListOperatorDirectory>((sessionId, path, signal) => {
+    const result = Promise.withResolvers<DirLevel>()
+    operatorPending.push({ sessionId, path, signal, result: result.promise, resolve: result.resolve })
+    return result.promise
+  })
+  const settleOperator = async (level: DirLevel): Promise<void> => {
+    const call = operatorPending.shift()
+    if (call === undefined) throw new Error('no outstanding operator listing to settle')
+    call.resolve(level)
+    await call.result
+  }
   const land = async (call: PendingList | undefined, result: RemoteResult<DirLevel>): Promise<void> => {
     if (call === undefined) throw new Error('no outstanding listing to settle')
     call.resolve(result)
@@ -67,6 +94,9 @@ export function scriptedList(): ScriptedList {
     watch: watches.watch,
     watches,
     list,
+    operatorList,
+    settleOperator,
+    outstandingOperator: () => operatorPending.map(call => call.path),
     settle: result => land(pending.shift(), result),
     settleLatest: result => land(pending.pop(), result),
     outstanding: () => pending.map(call => call.path),
@@ -79,7 +109,11 @@ export function scriptedList(): ScriptedList {
       for (const call of pending.splice(0)) {
         call.resolve({ ok: false, error: new RemoteError('gateway/internal', 'fixture closed', {}) })
       }
-      await Promise.all([watches.dispose(), ...calls.map(call => call.result)])
+      const operatorResults = operatorPending.splice(0).map((call) => {
+        call.resolve({ entries: [], truncated: false })
+        return call.result
+      })
+      await Promise.all([watches.dispose(), ...calls.map(call => call.result), ...operatorResults])
       waiters.clear()
     },
   }

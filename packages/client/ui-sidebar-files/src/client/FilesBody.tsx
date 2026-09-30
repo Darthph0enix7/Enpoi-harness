@@ -30,6 +30,7 @@ import { fileAddressFor, pathPartsOf, relativizeToCwd } from '@deepseek-ai/dsh-u
 import type { WorkspaceDirectoryEntry } from '@deepseek-ai/dsh-api-workspace-files/types'
 import { childPath, parentPath } from './face.ts'
 import type { FilesInjected } from './face.ts'
+import { operatorRootOf } from './definition.tsx'
 import { createFsOps, failureMessage, saveDownload } from './fsops.ts'
 import { MENU_LABEL_KEYS, menuItemsOf, menuReducer } from './menu.ts'
 import type { MenuActionId, MenuState, MenuTarget, RowTarget } from './menu.ts'
@@ -383,6 +384,11 @@ export function FilesBody({
   const { tab } = useTabInfo()
   const { signal, actions: tabActions } = tab
   const cwd = useSessions(sessions => sessions.byId[sessionId]?.cwd)
+  // The operator document view opens this page with a root override: the tree
+  // then lists the settings document's directory through the fenced fs routes,
+  // not the session workspace. An ordinary open passes no params.
+  const operatorRoot = operatorRootOf(tab.navigation.params)
+  const root = operatorRoot ?? cwd
   const state = useStore(store => store.byTab[tab.id])
   const pathRef = useRef<HTMLDivElement>(null)
   const pathTextRef = useRef<HTMLSpanElement>(null)
@@ -418,10 +424,12 @@ export function FilesBody({
   }, [seeded, signal, tab.id, actions])
   useEffect(() => {
     // A bucket gone because the record aborted must not be re-seeded by a
-    // component that has not unmounted yet.
-    if (state !== undefined || cwd === undefined || signal.aborted) return
-    start(tab.id, cwd, signal)
-  }, [state, cwd, tab.id, signal, start])
+    // component that has not unmounted yet; a bucket for another root (the
+    // navigation moved between workspace and operator roots) is re-seeded.
+    if (root === undefined || signal.aborted) return
+    if (state !== undefined && state.root === root) return
+    start(tab.id, root, signal, operatorRoot !== undefined)
+  }, [state, root, operatorRoot, tab.id, signal, start])
 
   // The header's reload control and the page.refresh command share one
   // reload: the face re-lists every open level in place, so the rows already
@@ -441,7 +449,7 @@ export function FilesBody({
     returnFocusRef.current?.focus()
   }, [])
 
-  if (cwd === undefined) {
+  if (root === undefined) {
     return (
       <div className={css.status} data-files-state="no-workspace">
         <p className={css.statusLine}>{t('noWorkspace')}</p>
@@ -513,8 +521,8 @@ export function FilesBody({
     setNotice(null)
     const relative = relativizeToCwd(target.path, state.root)
     // The tree's paths are the Host's absolute ones; the relative spelling is
-    // what the workspace itself calls the same entry.
-    const text = action === 'copy-path' ? childPath(cwd, relative) : relative
+    // what the tree's own root calls the same entry.
+    const text = action === 'copy-path' ? childPath(state.root, relative) : relative
     void navigator.clipboard.writeText(text).then(() => {
       dispatchMenu({ type: 'copied', action })
     }).catch(reportFailure)
@@ -565,7 +573,9 @@ export function FilesBody({
         removeRow(target.path)
         return
       case 'open':
-        tabActions.openResource(fileAddressFor(sessionId, state.root, target.path))
+        // An operator tree's root is not the session workspace, so its paths
+        // must stay absolute in the address; a workspace tree relativizes.
+        tabActions.openResource(fileAddressFor(sessionId, state.operator ? undefined : state.root, target.path))
         closeMenu()
         return
       case 'download':
@@ -601,8 +611,10 @@ export function FilesBody({
   const tree: TreeContext = {
     state,
     onToggle: (parent, path) => { toggle(tab.id, parent, path, state.expanded, signal) },
-    // Every row is under the tree's root, so its address is session-relative.
-    onOpen: (path) => { tabActions.openResource(fileAddressFor(sessionId, state.root, path)) },
+    // A workspace row is under the tree's root, so its address is
+    // session-relative; an operator row must keep its absolute path, because
+    // the root is not the session workspace.
+    onOpen: (path) => { tabActions.openResource(fileAddressFor(sessionId, state.operator ? undefined : state.root, path)) },
     t,
     menu,
     editing,

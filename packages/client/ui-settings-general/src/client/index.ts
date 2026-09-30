@@ -38,6 +38,7 @@ import { GeneralSection } from './GeneralSection.tsx'
 import { SettingsDocumentAction } from './SettingsDocumentAction.tsx'
 import type { SettingsDocumentActionInjected } from './SettingsDocumentAction.tsx'
 import { SettingsDocumentStore } from './settings-document-store.ts'
+import { createSettingsDocumentView } from './settings-document-open.ts'
 import { en, zh, type SettingsKey } from './locales.ts'
 
 export type {
@@ -51,7 +52,7 @@ export type {
   GeneralSectionComponentProps,
 } from './GeneralSection.tsx'
 export type { SettingsDocumentActionInjected, SettingsDocumentActionProps } from './SettingsDocumentAction.tsx'
-export type { SettingsDocumentState } from './settings-document-store.ts'
+export type { SettingsDocumentLocation, SettingsDocumentState, SettingsDocumentView } from './settings-document-store.ts'
 export { SettingsDocumentStore } from './settings-document-store.ts'
 export type { SettingsKey } from './locales.ts'
 
@@ -103,9 +104,15 @@ export function apply(ctx: ClientContext): void {
   // seat, and the nav label is a thunk the owner resolves per render — no
   // locale/change re-registration wiring.
   const t = ctx.locale.bind(NS)
+  // The Settings shell publishes its close action here once the seat registers;
+  // the document action closes the same panel the header button does.
+  let closeSettingsPanel: () => void = () => {}
   // The shared ConfigForms mirror updates after document commits and reconnects.
   const documentController = ctx.remote.$host.isLoopback
-    ? new SettingsDocumentStore(ctx, ctx.configForms.describe())
+    ? new SettingsDocumentStore(
+      ctx.configForms.describe(),
+      createSettingsDocumentView(ctx, () => { closeSettingsPanel() }),
+    )
     : undefined
   const documentInjected = documentController === undefined
     ? undefined
@@ -196,6 +203,7 @@ export function apply(ctx: ClientContext): void {
     const shellHandle = createSettingsShellStore()
     const shellInstance = shellHandle.create()
     const shellStore: typeof shellHandle = { ...shellHandle, create: () => shellInstance }
+    closeSettingsPanel = () => { shellInstance.actions.close() }
     // The rail trigger and this command share the declared owner store, so the
     // palette entry opens and closes the same surface as the mouse control.
     const disposeCommand = ctx.shortcuts.register({
@@ -231,7 +239,7 @@ export function apply(ctx: ClientContext): void {
       },
       inject: shellInjected,
     }, SettingsRoot)
-    return () => { disposeCommand(); disposeSlot() }
+    return () => { closeSettingsPanel = () => {}; disposeCommand(); disposeSlot() }
   })
 
   ctx.slots.inject('settings.trigger', () =>

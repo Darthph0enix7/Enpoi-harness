@@ -23,6 +23,10 @@
     { "path": "../connection/tsconfig.client.json" },
     { "path": "../../api/remotes/tsconfig.client.json" },
     { "path": "../ui-sidebar" },
+    { "path": "../ui-sidebar-right" },
+    { "path": "../ui-sidebar-files" },
+    { "path": "../../core/session" },
+    { "path": "../../util/workspace-path" },
     { "path": "../shortcuts/tsconfig.client.json" }
   ]
 }

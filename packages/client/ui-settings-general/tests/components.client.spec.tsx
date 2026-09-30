@@ -2,7 +2,7 @@
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { bindSnapshotSelector, RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
+import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
 import type { GeneralSectionComponentProps } from '../src/client/GeneralSection.tsx'
 import { GeneralSection } from '../src/client/GeneralSection.tsx'
 import { CloseLabel, HeaderContent, TriggerContent } from '../src/client/chrome.tsx'
@@ -12,15 +12,17 @@ import { DeveloperToolsRow } from '../src/client/DeveloperToolsRow.tsx'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { SettingsDescribeMirror } from '@deepseek-ai/dsh-client-ui-settings/src/client/settings-mirror.ts'
 import { SettingsDocumentStore } from '../src/client/settings-document-store.ts'
+import { scriptedView } from './view-script.client.ts'
 
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
 const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined, reload: () => {} })) as GlobalStandardProps['useResource']
 const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({ activePanelId: null })
 
-/** Store over a real mirror derived from the same scripted context. */
+/** Store over a real mirror derived from the same scripted context and a scripted door. */
 function derivedDocumentStore(remote: object) {
   const ctx = { remote } as never
-  return new SettingsDocumentStore(ctx, new SettingsDescribeMirror(ctx))
+  const script = scriptedView({ sessionId: 's-1' as never })
+  return { controller: new SettingsDocumentStore(new SettingsDescribeMirror(ctx), script.view), script }
 }
 import { en, zh } from '../src/client/locales.ts'
 import { CurrentVersionRow } from '../src/client/CurrentVersionRow.tsx'
@@ -130,17 +132,13 @@ describe('GeneralSection', () => {
 })
 
 describe('SettingsDocumentAction', () => {
-  it('appears only for a file-backed provider and requests its Host-owned document', async () => {
-    const openDocument = vi.fn(() => Promise.resolve({
-      ok: true as const, value: { opened: true as const },
-    }))
-    const controller = derivedDocumentStore({
+  it('appears only for a file-backed provider and opens it in the harness preview', async () => {
+    const { controller, script } = derivedDocumentStore({
       settings: {
         describe: vi.fn(() => Promise.resolve({
           ok: true as const,
           value: { writable: true, hasDocument: true, namespaces: [] },
         })),
-        openSettingsDocument: openDocument,
       },
     })
     render(<SettingsDocumentAction
@@ -151,16 +149,23 @@ describe('SettingsDocumentAction', () => {
     />)
     const action = await screen.findByRole('button', { name: 'Open configuration file' })
     fireEvent.click(action)
-    await waitFor(() => { expect(openDocument).toHaveBeenCalledWith() })
+    await waitFor(() => { expect(script.calls.reveal).toHaveLength(1) })
+    expect(script.calls.close).toBe(1)
+    expect(script.calls.locate).toBe(1)
+    expect(script.calls.reveal[0]).toEqual({
+      sessionId: 's-1',
+      document: { path: '/home/op/.dsh/profiles/web/cordis.patch.yml', root: '/home/op/.dsh/profiles/web' },
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('stays absent without a document and follows a mirror refresh to available', async () => {
     const describe = vi.fn()
       .mockResolvedValueOnce({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [] } })
       .mockResolvedValueOnce({ ok: true as const, value: { writable: true, hasDocument: true, namespaces: [] } })
-    const ctx = { remote: { settings: { describe, openSettingsDocument: vi.fn() } } } as never
+    const ctx = { remote: { settings: { describe } } } as never
     const mirror = new SettingsDescribeMirror(ctx)
-    const controller = new SettingsDocumentStore(ctx, mirror)
+    const controller = new SettingsDocumentStore(mirror, scriptedView({ sessionId: 's-1' as never }).view)
     const first = render(<SettingsDocumentAction
       {...kit}
       t={t}
@@ -185,19 +190,18 @@ describe('SettingsDocumentAction', () => {
     expect(describe).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the action available and reports a native-open failure', async () => {
-    const controller = derivedDocumentStore({
-      settings: {
-        describe: vi.fn(() => Promise.resolve({
-          ok: true as const,
-          value: { writable: true, hasDocument: true, namespaces: [] },
-        })),
-        openSettingsDocument: vi.fn(() => Promise.resolve({
-          ok: false as const,
-          error: new RemoteError('gateway/internal', 'xdg-open missing', {}),
-        })),
-      },
+  it('keeps the action available and reports a failed reveal', async () => {
+    const script = scriptedView({
+      sessionId: 's-1' as never,
+      locate: () => Promise.reject(new Error('no settings document is available')),
     })
+    const controller = new SettingsDocumentStore(
+      new SettingsDescribeMirror({ remote: { settings: { describe: vi.fn(() => Promise.resolve({
+        ok: true as const,
+        value: { writable: true, hasDocument: true, namespaces: [] },
+      })) } } } as never),
+      script.view,
+    )
     render(<SettingsDocumentAction
       {...kit}
       t={t}
@@ -207,6 +211,7 @@ describe('SettingsDocumentAction', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open configuration file' }))
     expect((await screen.findByRole('alert')).textContent).toBe('Could not open configuration file')
     expect(screen.getByRole('button', { name: 'Open configuration file' })).toBeTruthy()
+    expect(script.calls.close + script.calls.reveal.length).toBe(0)
   })
 })
 

@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceDirectoryListing } from '@deepseek-ai/dsh-api-workspace-files/types'
 import { childPath, createList, filesFace, parentPath } from '../src/client/face.ts'
 import type { WorkspaceFilesListRemote } from '../src/client/face.ts'
+import { FsOpsError } from '../src/client/fsops.ts'
 import { createFilesStore } from '../src/client/store.ts'
 import type { DirLevel } from '../src/client/store.ts'
 import { DirectoryNode } from '../src/client/directory-node.ts'
@@ -20,7 +21,7 @@ const LEVEL: DirLevel = { entries: [{ name: 'src', type: 'directory' }], truncat
 function mount() {
   const instance = createFilesStore().create()
   const script = scriptedList()
-  const face = filesFace(script.list, script.watch)(SESSION, instance.actions)
+  const face = filesFace(script.list, script.watch, script.operatorList)(SESSION, instance.actions)
   const controller = new AbortController()
   onTestFinished(async () => {
     controller.abort()
@@ -50,7 +51,7 @@ describe('filesFace', () => {
     expect(stream.sessionId).toBe(SESSION)
     expect(stream.signal.aborted).toBe(false)
     expect(list).not.toHaveBeenCalled()
-    expect(snapshot()).toEqual({ root: ROOT, expanded: [ROOT], levels: {}, scrollTop: 0, autoRefresh: true })
+    expect(snapshot()).toEqual({ root: ROOT, operator: false, expanded: [ROOT], levels: {}, scrollTop: 0, autoRefresh: true })
     await stream.deliver('ready')
     expect(list).toHaveBeenCalledWith(SESSION, ROOT, stream.signal)
     expect(snapshot()!.levels[ROOT]).toEqual({ kind: 'loading' })
@@ -278,6 +279,45 @@ describe('filesFace', () => {
     expect(snapshot()).toMatchObject({ expanded: [ROOT, child], scrollTop: 120, autoRefresh: false })
     expect(watches.opened.map(stream => stream.path)).toEqual([ROOT, child])
     expect(watches.opened.every(stream => !stream.signal.aborted)).toBe(true)
+  })
+})
+
+describe('filesFace operator document view', () => {
+  const OPERATOR_ROOT = '/home/op/.dsh/profiles/web'
+
+  it('lists the operator root through the fs route and never subscribes the workspace watch', async () => {
+    const { face, operatorList, watches, settleOperator, snapshot, controller } = mount()
+    face.start(TAB, OPERATOR_ROOT, controller.signal, true)
+    expect(snapshot()).toMatchObject({ root: OPERATOR_ROOT, operator: true, expanded: [OPERATOR_ROOT] })
+    await vi.waitFor(() => { expect(operatorList).toHaveBeenCalledWith(SESSION, OPERATOR_ROOT, expect.anything()) })
+    expect(watches.opened).toEqual([])
+    await settleOperator({ entries: [{ name: 'cordis.patch.yml', type: 'file' }], truncated: false })
+    expect(snapshot()!.levels[OPERATOR_ROOT]).toEqual({
+      kind: 'ready', level: { entries: [{ name: 'cordis.patch.yml', type: 'file' }], truncated: false },
+    })
+  })
+
+  it('expands an operator subdirectory through the fs route', async () => {
+    const { face, operatorList, settleOperator, snapshot, controller } = mount()
+    const child = `${OPERATOR_ROOT}/skills`
+    face.start(TAB, OPERATOR_ROOT, controller.signal, true)
+    await vi.waitFor(() => { expect(operatorList).toHaveBeenCalledTimes(1) })
+    await settleOperator({ entries: [{ name: 'skills', type: 'directory' }], truncated: false })
+    face.toggle(TAB, OPERATOR_ROOT, child, [OPERATOR_ROOT], controller.signal)
+    await vi.waitFor(() => { expect(operatorList).toHaveBeenCalledWith(SESSION, child, expect.anything()) })
+    await settleOperator({ entries: [], truncated: false })
+    expect(snapshot()!.levels[child]).toEqual({ kind: 'ready', level: { entries: [], truncated: false } })
+  })
+
+  it('reports an fs-route refusal as the level failure line', async () => {
+    const { face, operatorList, snapshot, controller } = mount()
+    operatorList.mockRejectedValueOnce(new FsOpsError('fs-error', '"x" is outside the settings document directory', 400))
+    face.start(TAB, OPERATOR_ROOT, controller.signal, true)
+    await vi.waitFor(() => { expect(snapshot()!.levels[OPERATOR_ROOT]?.kind).toBe('failed') })
+    expect(snapshot()!.levels[OPERATOR_ROOT]).toEqual({
+      kind: 'failed',
+      failure: expect.objectContaining({ code: 'gateway/internal', message: '"x" is outside the settings document directory' }),
+    })
   })
 })
 

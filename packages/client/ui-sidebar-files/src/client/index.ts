@@ -18,6 +18,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import { FILES_ID, filesDefinition } from './definition.tsx'
 import { createList, createWatch, filesFace } from './face.ts'
+import type { ListOperatorDirectory } from './face.ts'
+import { createFsOps } from './fsops.ts'
 import { FilesBody } from './FilesBody.tsx'
 import { FilesTitle } from './FilesTitle.tsx'
 import { en, zh } from './locales.ts'
@@ -27,6 +29,18 @@ export type { SidebarFilesKey } from './locales.ts'
 export type { DirLevel, FilesState, FilesTabState, LevelState } from './store.ts'
 export type { FilesInjected, ListWorkspaceDirectory, WorkspaceFilesListRemote } from './face.ts'
 export type { FilesBodyProps } from './FilesBody.tsx'
+
+declare module '@deepseek-ai/dsh-client-ui-sidebar-right/client' {
+  interface SidebarRightTabParamsMap {
+    /**
+     * The files page's optional root override, set by the operator document
+     * view: the tree roots at the settings document's directory and lists
+     * through the profile's fenced fs routes instead of the session workspace.
+     * An ordinary open passes none and roots at the session workspace.
+     */
+    files: { root?: string }
+  }
+}
 
 /** This package's copy namespace. */
 const NS = 'sidebarFiles'
@@ -68,7 +82,11 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar-files: dictionaries')
 
   const store = createFilesStore()
-  const inject = filesFace(createList(ctx.remote), createWatch(ctx.remote))
+  // The operator document view lists through the profile's fenced fs routes;
+  // every workspace tree keeps the Remote listing it always used.
+  const fs = createFsOps()
+  const listOperator: ListOperatorDirectory = (sessionId, path, signal) => fs.list(sessionId, path, signal)
+  const inject = filesFace(createList(ctx.remote), createWatch(ctx.remote), listOperator)
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
     { name: 'sidebar.right.pane.tab', key: FILES_ID, locale: NS, store, inject },
     FilesBody,

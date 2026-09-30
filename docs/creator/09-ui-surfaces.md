@@ -65,7 +65,6 @@ Terminal: one PTY registry backs both the sidebar page and the bottom dock; `she
 ## Settings
 
 Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, mask click, close button; phone gets a full-screen list→detail flow at `:212-217`). Sections are `settings.section` registrations, ordered:
-
 | Order | Id | Owner |
 |---|---|---|
 | -10 | account | `ui-settings-account/src/client/index.ts:270` |
@@ -82,6 +81,7 @@ Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, ma
 - **Permissions**: policy editor over the enpoi-capabilities engine (doc 04).
 - **Capabilities and Agent Models are not settings pages** — they are right sidebar tabs (`index.ts:294-358`); settings cross-links open them through the `settingsUi` service (`settings-nav.ts:16-28`).
 - **Dynamic** (`dynamic/DynamicSettings.tsx`): Roles, Councils, MCPs, Skills & tools, Prompts panels, all editing the `enpoi-orchestration` document hot. The Skills & tools panel (`dynamic/SkillsPanel.tsx`) also carries skill CRUD (Add/Edit/Delete over `/sidebar/fsops` `skills.*`, `dynamic/skills-api.ts`): user rows editable, shipped tier rows read-only; tool rows stay capability toggles.
+- **Open configuration file** (loopback only, header action): `ui-settings-general` locates the settings document through the profile's fenced `/sidebar/fsops/settings.document` route, closes Settings, then reveals it in the right panel — the files page rooted at the document's containing directory (an ephemeral operator view: a `files` navigation `root` param, no Workspace entity and no workspace-list entry) and the document itself opened for the preview/editor. The fenced `fs.list`/`fs.write` grants cover exactly that directory; the agents' tool paths (fs/bash policy) never cross those routes. A failed locate leaves Settings open and renders the action's error line.
 
 ## First-run system analysis
 

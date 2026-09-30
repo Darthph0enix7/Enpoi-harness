@@ -18,7 +18,7 @@
  * record goes away the bucket and the tab's listing bookkeeping are forgotten,
  * so no later settlement writes to it.
  */
-import type { ClientRemote, RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ClientRemote, RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { BoundActions } from '@deepseek-ai/dsh-client-store'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -26,6 +26,7 @@ import type { DirLevel, createFilesStore } from './store.ts'
 import type { WorkspaceFileWatchFrame } from '@deepseek-ai/dsh-api-workspace-files/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { DirectoryNode } from './directory-node.ts'
+import { FsOpsError } from './fsops.ts'
 
 /**
  * Observe one directory without recursively watching its descendants.
@@ -137,10 +138,12 @@ export interface FilesInjected {
   /**
    * Seed this tab's tree and list its root.
    * @param tabId - the tab being drawn.
-   * @param root - absolute path of the workspace root.
+   * @param root - absolute path of the workspace root, or the operator document directory.
    * @param signal - the tab record's lifetime.
+   * @param operator - whether the root is the operator document view: levels list through
+   *   the fenced fs routes and watches are replaced by manual reload.
    */
-  readonly start: (tabId: TabId, root: string, signal: AbortSignal) => void
+  readonly start: (tabId: TabId, root: string, signal: AbortSignal, operator?: boolean) => void
   /**
    * List one directory into the store.
    * @param tabId - the tab being drawn.
@@ -160,14 +163,53 @@ export interface FilesInjected {
 }
 
 /**
+ * The operator document listing, bound to the profile's fenced `/sidebar/fsops`
+ * routes. The route refuses any directory outside the settings document's own
+ * directory, so the tree's root override cannot become a general filesystem
+ * browser; a refusal reaches the level as its failure line.
+ */
+export type ListOperatorDirectory = (sessionId: SessionId, path: string, signal: AbortSignal) => Promise<DirLevel>
+
+/**
+ * The operator view's watch: readiness only, no invalidation stream.
+ *
+ * The workspace watcher is workspace-scoped and would report every operator
+ * directory as outside the workspace; the operator view therefore re-lists on
+ * its reload control alone, while the editor keeps its own stat poll for the
+ * document it saves.
+ * @param _path - unused; the fs route carries its own grant.
+ * @param signal - node lifetime; ends the idle wait.
+ * @returns a stream that announces readiness and stays silent until abort.
+ */
+export function inertWatch(_path: string, signal: AbortSignal): AsyncIterable<'ready' | 'change'> {
+  return (async function* () {
+    if (signal.aborted) return
+    yield 'ready' as const
+    await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+  })()
+}
+
+/** One thrown fs-route failure as the tree's failure vocabulary. */
+function failureOf(error: unknown, path: string): RemoteFailure {
+  if (error instanceof RemoteError) return error
+  if (error instanceof FsOpsError) {
+    if (error.code === 'not-found') return new RemoteError('workspace-file/not-found', error.message, { path })
+    if (error.code === 'not-text') return new RemoteError('workspace-file/not-text', error.message, { path })
+  }
+  return new RemoteError('gateway/internal', error instanceof Error ? error.message : String(error), {})
+}
+
+/**
  * Bind the tree's face to one directory listing.
  * @param list - the bound `workspaceFiles.list` call.
  * @param watch - target-scoped directory observation.
+ * @param listOperator - the fenced fs-routes listing used by the operator document view.
  * @returns the Slot `inject` factory: session and bound actions in, face out.
  */
 export function filesFace(
   list: ListWorkspaceDirectory,
   watch: WatchWorkspaceDirectory,
+  listOperator: ListOperatorDirectory,
 ): (sessionId: SessionId, actions: BoundActions<ReturnType<typeof createFilesStore>>) => FilesInjected {
   return (
     sessionId: SessionId,
@@ -175,6 +217,8 @@ export function filesFace(
   ): FilesInjected => {
     /** Per tab, per absolute path: the listing generation a settlement must match; the latest request wins. */
     const generations = new Map<TabId, Map<string, number>>()
+    /** Operator-rooted tabs: their levels come from the fs routes, never the workspace Remote. */
+    const operatorTabs = new Set<TabId>()
     const roots = new Map<TabId, DirectoryNode>()
     const nextGeneration = (tabId: TabId, path: string): number => {
       const byPath = generations.get(tabId) ?? new Map<string, number>()
@@ -187,13 +231,22 @@ export function filesFace(
       if (signal.aborted) return
       const generation = nextGeneration(tabId, path)
       actions.loading(tabId, path)
-      return list(sessionId, path, signal).then((result) => {
+      const settled = operatorTabs.has(tabId)
+        ? listOperator(sessionId, path, signal)
+        : list(sessionId, path, signal).then((result) => {
+          if (!result.ok) throw result.error
+          return result.value
+        })
+      return settled.then((level): DirLevel | undefined => {
         // A newer listing of this level was asked for since, or the record is
         // gone and its bookkeeping with it: nothing left for this one to write.
-        if (signal.aborted || generations.get(tabId)?.get(path) !== generation) return
-        if (result.ok) actions.loaded(tabId, path, result.value)
-        else actions.failed(tabId, path, result.error)
-        return result.ok ? result.value : undefined
+        if (signal.aborted || generations.get(tabId)?.get(path) !== generation) return undefined
+        actions.loaded(tabId, path, level)
+        return level
+      }, (error: unknown): undefined => {
+        if (signal.aborted || generations.get(tabId)?.get(path) !== generation) return undefined
+        actions.failed(tabId, path, failureOf(error, path))
+        return undefined
       })
     }
     return {
@@ -202,19 +255,22 @@ export function filesFace(
         actions.autoRefresh(tabId, enabled)
         roots.get(tabId)?.setAutomatic(enabled)
       },
-      start(tabId, root, signal) {
-        actions.start(tabId, root)
+      start(tabId, root, signal, operator = false) {
+        if (operator) operatorTabs.add(tabId)
+        else operatorTabs.delete(tabId)
+        actions.start(tabId, root, operator)
         signal.addEventListener('abort', () => {
           void roots.get(tabId)?.close()
           roots.delete(tabId)
           generations.delete(tabId)
+          operatorTabs.delete(tabId)
           actions.forget(tabId)
         }, { once: true })
         roots.set(tabId, new DirectoryNode(root,
           (path, lifetime) => load(tabId, path, lifetime),
-          (path, lifetime) => watch(sessionId, path, lifetime),
+          operator ? inertWatch : (path, lifetime) => watch(sessionId, path, lifetime),
           (path, error) => {
-            if (!signal.aborted) actions.failed(tabId, path, new RemoteError('gateway/internal', error instanceof Error ? error.message : String(error), {}))
+            if (!signal.aborted) actions.failed(tabId, path, failureOf(error, path))
           }, signal,
         ).open())
       },

@@ -45,7 +45,7 @@ The General section holds the built-in Coding Tools and Current version rows alo
 
 ### Opening the configuration file
 
-On a loopback browser, the shell renders **Open configuration file** only when the Host confirms that a provider-owned local document can be prepared. The action opens that document in the native text editor (bypassing the browser file association on macOS). Remote browsers never register the action and never issue the privileged settings read.
+On a loopback browser, the shell renders **Open configuration file** only when the Host confirms that a provider-owned local document exists. The action locates the document through the profile's fenced `/sidebar/fsops/settings.document` route, closes the Settings panel, and reveals the document in the harness: the files page rooted at the document's containing directory, and the document itself in the preview/editor pane beside it. The directory comes from the Host, and the fenced listing/write grants cover exactly that directory; the agent tool path never crosses these routes. A failed locate leaves Settings open, keeps the action available, and renders a localized error. Remote browsers never register the action and never issue the privileged settings read.
 
 ### Onboarding steps
 
@@ -77,7 +77,7 @@ The shell is an explicit recovery consumer, so it injects Connection directly ra
 
 ### Document availability
 
-On a loopback page, the Client loads the provider's `hasDocument` capability through `settings/describe` and renders **Open configuration file** only when the Host confirms that a provider-owned local document can be prepared. The action calls the pathless, browser-authenticated `settings/openSettingsDocument` Remote; the Host resolves the provider path again, materializes an absent document, and hands it to a native text editor (`open -t` on macOS, bypassing a browser file association; the desktop file association on Linux and Windows; Windows association after `wslpath -w` translation on WSL). Open failures keep the action available and render a localized error. Reopening the dialog or reconnecting refreshes availability after a transient read failure or Host topology change. Non-loopback pages retain the Client policy that withholds this native action and its settings read.
+On a loopback page, the Client loads the provider's `hasDocument` capability through `settings/describe` and renders **Open configuration file** only when the Host confirms that a provider-owned local document exists. The action asks the fenced `/sidebar/fsops/settings.document` route for the document's absolute path and containing directory; the grant is derived Host-side from the live settings provider, so no caller path can widen it. It then closes Settings, opens the files page with a `root` navigation parameter (an ephemeral operator view — no Workspace entity and no workspace-list entry), and opens the document's `dsh-resource://file/session/<sessionId>/<absolute path>` address for the preview/editor to claim. Open failures keep Settings open and the action available, and render a localized error. Reopening the dialog or reconnecting refreshes availability after a transient read failure or Host topology change. Non-loopback pages retain the Client policy that withholds this action and its settings read.
 
 ### Host half
 
@@ -129,4 +129,4 @@ None.
 
 </details>
 
-**Runtime invariant:** No companion is published. The settings seam validates and publishes the durable onboarding section, while slot conflicts fail loud in the slot core. The local document action is browser state over typed RPC responses and is covered by store/component tests rather than a Cordis runtime relationship.
+**Runtime invariant:** No companion is published. The settings seam validates and publishes the durable onboarding section, while slot conflicts fail loud in the slot core. The local document action is browser state over the fenced settings fs route plus Sidebar navigation and is covered by store/component tests rather than a Cordis runtime relationship.
