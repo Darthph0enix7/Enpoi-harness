@@ -1,8 +1,8 @@
 /**
- * Skills settings API client — the fenced `/sidebar/fsops` `skills.*` routes
- * plus the newest-session address the host uses to merge the read-only
- * registry catalog. Mirrors the sidebar's gateway envelope handling; every
- * failure is a {@link SkillsApiError} carrying the host's code and message.
+ * Skills CRUD API client — the fenced `/sidebar/fsops` `skills.*` routes used
+ * by the Dynamic page's Skills & tools panel. Mirrors the sidebar's gateway
+ * envelope handling; every failure is a {@link SkillsApiError} carrying the
+ * host's code and message.
  */
 
 /** Skill identity as the host reports it: `default`/`profile` rows are editable, `registry` rows are not. */
@@ -64,14 +64,6 @@ export class SkillsApiError extends Error {
 /** Kebab-case skill name, mirroring the host's `isSkillName` (instant local feedback; the host re-checks). */
 export function isSkillName(name: string): boolean {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)
-}
-
-let rpcSeq = 0
-
-/** Unique wire rpcId per request (the gateway echoes it; duplicates race). */
-function nextRpcId(prefix: string): string {
-  rpcSeq += 1
-  return `${prefix}-${rpcSeq}`
 }
 
 /** One skills.* call against the fenced fsops route. */
@@ -173,32 +165,4 @@ export async function updateSkill(input: SkillWriteInput): Promise<void> {
 /** Trash-stage one skill. */
 export async function deleteSkill(name: string): Promise<void> {
   await callSkills('skills.delete', { name })
-}
-
-/** The newest visible session id, for the host's registry merge; undefined when none resolves. */
-export async function newestSessionId(): Promise<string | undefined> {
-  try {
-    const response = await fetch('/api/session/list', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'client-request',
-        method: 'session.list',
-        rpcId: nextRpcId('skills-sessions'),
-        payload: { args: { request: {} } },
-      }),
-    })
-    if (!response.ok) return undefined
-    const json = await response.json() as { result?: { ok?: boolean; value?: { items?: unknown } } }
-    const items = json?.result?.value?.items
-    if (!Array.isArray(items)) return undefined
-    for (const item of items) {
-      if (item === null || typeof item !== 'object') continue
-      const id = (item as Record<string, unknown>).sessionId
-      if (typeof id === 'string' && id !== '') return id
-    }
-  } catch {
-    // No session address: the section degrades to the on-disk profile skills.
-  }
-  return undefined
 }

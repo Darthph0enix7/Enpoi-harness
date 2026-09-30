@@ -35,9 +35,8 @@ import {
   subscribeCompactionPolicy,
 } from './compaction-policy.ts'
 import { PermissionsSettings } from './PermissionsSettings.tsx'
-import { SkillsSettings } from './skills/SkillsSettings.tsx'
-import { en as skillsEn, zh as skillsZh, type SkillsSettingsKey } from './skills/locales.ts'
 import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
+import { en as dynamicSkillsEn, zh as dynamicSkillsZh, type DynamicSkillsKey } from './dynamic/skills-locales.ts'
 import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
 import type { TerminalRegistryState } from './terminal/registry.ts'
@@ -88,8 +87,8 @@ export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'session
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Skills management section copy. */
-    'settings.skills': SkillsSettingsKey
+    /** Skills & tools panel CRUD copy (Dynamic section). */
+    'settings.dynamicSkills': DynamicSkillsKey
   }
 }
 
@@ -282,26 +281,17 @@ export function apply(ctx: Context): void {
   }, OrchestrationSettings))
 
   // 2d. Dynamic entities settings section (doc 59): roles, councils, MCPs,
-  // skills/tools, and the prompts behind them.
+  // skills/tools, and the prompts behind them. The Skills & tools panel owns
+  // skill CRUD over the profile's fenced /sidebar/fsops skills.* routes; its
+  // dialog copy rides this section's locale namespace.
+  ctx.effect(() => ctx.locale.register('settings.dynamicSkills', { zh: dynamicSkillsZh, en: dynamicSkillsEn }), 'enpoi: dynamic skills dictionaries')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'dynamic',
     order: 22,
     label: () => 'Dynamic',
+    locale: 'settings.dynamicSkills',
   }, DynamicSettings))
-
-  // 2e. Skills management settings section: list the live catalog and create,
-  // edit, and delete skill definitions through the profile's fenced
-  // /sidebar/fsops skills.* routes. Sits beside Dynamic, which only toggles
-  // already-installed skills.
-  ctx.effect(() => ctx.locale.register('settings.skills', { zh: skillsZh, en: skillsEn }), 'enpoi: skills section dictionaries')
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'skills',
-    order: 23,
-    label: () => ctx.locale.bind('settings.skills')('nav'),
-    locale: 'settings.skills',
-  }, SkillsSettings))
 
   // 2c. Permission policy settings section (doc 55)
   ctx.slots.inject('settings.section', () => ctx.slots.register({

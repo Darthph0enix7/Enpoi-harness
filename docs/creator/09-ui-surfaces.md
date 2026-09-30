@@ -81,7 +81,7 @@ Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, ma
 - **Orchestration** (`OrchestrationSettings.tsx`): groups High Council (`:59-68`), Context Keeper (`:70-79`), Compaction (`:81-89`), Memory (`:91-94`), Oracle (`:96-98`); per-group reset; edits are hot-swapped (intro `:240`). Compaction shows the derived effective policy for the selected summariser route (`:164-191`).
 - **Permissions**: policy editor over the enpoi-capabilities engine (doc 04).
 - **Capabilities and Agent Models are not settings pages** — they are right sidebar tabs (`index.ts:294-358`); settings cross-links open them through the `settingsUi` service (`settings-nav.ts:16-28`).
-- **Dynamic** (`dynamic/DynamicSettings.tsx`): Roles, Councils, MCPs, Skills, Prompts panels, all editing the `enpoi-orchestration` document hot.
+- **Dynamic** (`dynamic/DynamicSettings.tsx`): Roles, Councils, MCPs, Skills & tools, Prompts panels, all editing the `enpoi-orchestration` document hot. The Skills & tools panel (`dynamic/SkillsPanel.tsx`) also carries skill CRUD (Add/Edit/Delete over `/sidebar/fsops` `skills.*`, `dynamic/skills-api.ts`): user rows editable, shipped tier rows read-only; tool rows stay capability toggles.
 
 ## First-run system analysis
 

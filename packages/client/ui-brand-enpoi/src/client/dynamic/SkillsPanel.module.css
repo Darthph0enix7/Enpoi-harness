@@ -31,8 +31,16 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   padding: 7px 10px;
   border-bottom: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.05));
+}
+
+.groupActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .groupTitle {
@@ -62,6 +70,7 @@
   gap: 8px;
   min-height: 36px;
   padding: 5px 10px;
+  flex-wrap: wrap;
 }
 
 .row + .row {
@@ -73,7 +82,7 @@
   flex-direction: column;
   gap: 1px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 180px;
 }
 
 .rowName {
@@ -230,4 +239,133 @@
 .foot {
   font-size: 9px;
   color: var(--dsw-alias-label-dimmed, #64748b);
+}
+
+/* ── skills CRUD (add / edit / delete) ─────────────────────────────────── */
+
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(103, 220, 231, 0.1);
+  border: 1px solid rgba(103, 220, 231, 0.3);
+  color: #67dce7;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.addBtn:hover {
+  background: rgba(103, 220, 231, 0.18);
+  border-color: rgba(103, 220, 231, 0.5);
+}
+
+.note {
+  font-size: 10px;
+  color: var(--dsw-alias-label-dimmed, #a0b4cc);
+  padding: 4px 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.actionBtn,
+.actionBtnDanger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+}
+
+.actionBtn {
+  background: rgba(103, 220, 231, 0.08);
+  border: 1px solid rgba(103, 220, 231, 0.25);
+  color: #67dce7;
+}
+
+.actionBtn:hover {
+  background: rgba(103, 220, 231, 0.16);
+  border-color: rgba(103, 220, 231, 0.45);
+}
+
+.actionBtnDanger {
+  background: rgba(229, 113, 111, 0.08);
+  border: 1px solid rgba(229, 113, 111, 0.25);
+  color: #e5716f;
+}
+
+.actionBtnDanger:hover {
+  background: rgba(229, 113, 111, 0.16);
+  border-color: rgba(229, 113, 111, 0.45);
+}
+
+/* Fluid dialog body: the shared Modal is 380px wide, so the form must never
+   carry a min-width or a fixed textarea size (clipping at narrow widths). */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+}
+
+.textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 150px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.1));
+  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.05));
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-interactive-bg-hover-accent, rgba(127, 227, 236, 0.45));
+  box-shadow: 0 0 0 2px rgba(127, 227, 236, 0.2);
+}
+
+.confirmText {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, #f1f5f9);
 }
