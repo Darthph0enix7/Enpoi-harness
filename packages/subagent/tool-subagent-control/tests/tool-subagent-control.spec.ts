@@ -119,6 +119,11 @@ describe('dsh-tool-subagent-control', () => {
     expect(schemas[0]!.description).not.toContain('job_output')
     expect(schemas[0]!.description).not.toContain('job id')
     expect(schemas[0]!.description).toContain('receives it at its next step')
+    // Recovery-only continuation: ids come from the settlement notice, and new
+    // work stays a fresh dispatch.
+    expect(schemas[0]!.description).toContain('Recovery only')
+    expect(schemas[0]!.description).toContain('settlement notice names the session id and the stop reason')
+    expect(schemas[0]!.description).toContain('New work is always a fresh subagent dispatch')
     expect(props.agent_id).toMatchObject({
       description: 'The agent id of your direct continuable child, or your direct parent when you are a resident continuable child.',
     })
@@ -182,11 +187,15 @@ describe('dsh-tool-subagent-control', () => {
     const prompt = loaded.events.find(event => event.type === 'user/message'
       && event.data.content.some(block => block.type === 'text' && block.text === 'encoded task'))
     if (prompt?.type !== 'user/message') throw new Error('expected the encoded initial task')
-    const guidance = prompt.data.content.findLast(block => block.type === 'text')?.text ?? ''
+    // The standing budget clause is appended last; the return guidance is the
+    // block carrying the encoded parent id.
+    const texts = prompt.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+    const guidance = texts.find(item => item.startsWith('Your parent agent id is ')) ?? ''
 
     expect(guidance).toContain(`Your parent agent id is ${JSON.stringify(parent.id)}`)
     expect(guidance).toContain(`agent_id: ${JSON.stringify(parent.id)}`)
     expect(guidance).not.toContain(parent.id)
+    expect(texts.at(-1)).toContain('Delegation budget: ')
   })
 
   it('lets a continuable child steer its direct parent with send_message', async () => {
@@ -284,6 +293,7 @@ describe('dsh-tool-subagent-control', () => {
     const prompts = loaded.events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'runtime-context'
       ? event.data.content.flatMap(block => block.type === 'text'
         && !block.text.startsWith('Your parent agent id is ')
+        && !block.text.startsWith('Delegation budget: ')
         ? [block.text]
         : [])
       : [])
@@ -407,6 +417,7 @@ describe('dsh-tool-subagent-control interrupt_agent', () => {
     const prompts = loaded.events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'runtime-context'
       ? event.data.content.flatMap(block => block.type === 'text'
         && !block.text.startsWith('Your parent agent id is ')
+        && !block.text.startsWith('Delegation budget: ')
         ? [block.text]
         : [])
       : [])

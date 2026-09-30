@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, boundContextSummary, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { CHILD_TOOL_BUDGET, createSettlementMessage, withChildBudgetGuidance } from '../src/continuation-messages.ts'
 
 const childId = SessionId('settled-child')
+const subject = `Background subagent ${childId}`
 const summary = { type: 'text', text: `Background subagent ${childId} finished.` }
 const reasoning: ContentBlock = { type: 'reasoning', text: 'private child reasoning' }
 const toolCall: ContentBlock = { type: 'tool-call', id: ToolCallId('child-call'), name: 'read', arguments: '{}' }
@@ -53,6 +54,24 @@ describe('continuable settlement content', () => {
       first,
       second,
     ])
+  })
+
+  it.each([
+    ['aborted', `${subject} was stopped before it finished — inspect its session ${childId} or continue it with a follow-up.`],
+    ['max-tokens', `${subject} ran out of room before it finished — inspect its session ${childId} or continue it with a follow-up.`],
+    ['refusal', `${subject} declined the task — inspect its session ${childId} or continue it with a follow-up.`],
+    ['error', `${subject} failed before it finished — inspect its session ${childId} or continue it with a follow-up.`],
+  ] as const)('names the session and the continue-by-id option for a child stopped with %s', (stopReason, expected) => {
+    const message = createSettlementMessage(childId, { stopReason, output: [{ type: 'text', text: 'partial report' }] })
+
+    expect(message.content[0]).toEqual({ type: 'text', text: expected })
+    expect(message.content).toContainEqual({ type: 'text', text: 'partial report' })
+    expect(message.source).toEqual({
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: boundContextSummary(expected),
+      senderSessionId: childId,
+    })
   })
 })
 

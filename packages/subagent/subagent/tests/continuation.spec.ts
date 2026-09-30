@@ -2816,7 +2816,7 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} ran out of room before it finished.`
+      `Background subagent ${started.childId} ran out of room before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIts closing message:\nhalf an ans',
     )
   })
@@ -2835,7 +2835,7 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} declined the task.`
+      `Background subagent ${started.childId} declined the task — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIt left no closing message.',
     )
   })
@@ -2866,7 +2866,7 @@ describe('continuable settlement delivery', () => {
     const child = await loadStoredSession(ctx.sessionPersistence, started.childId)
     expect(hasUserText(child.events, 'second task')).toBe(false)
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.`
+      `Background subagent ${started.childId} failed before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -2902,7 +2902,7 @@ describe('continuable settlement delivery', () => {
     // task had finished.
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
+      `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -2929,7 +2929,7 @@ describe('continuable settlement delivery', () => {
     // that genuinely finished with no output.
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
+      `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIt left no closing message.',
     )
   })
@@ -2956,7 +2956,7 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
+      `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIt left no closing message.',
     )
   })
@@ -2998,7 +2998,7 @@ describe('continuable settlement delivery', () => {
     expect(hasUserText(child.session.snapshotEvents(), 'never runs')).toBe(false)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
+      `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -3020,7 +3020,7 @@ describe('continuable settlement delivery', () => {
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.\nIt left no closing message.`,
+      `Background subagent ${started.childId} failed before it finished — inspect its session ${started.childId} or continue it with a follow-up.\nIt left no closing message.`,
     )
   })
 
@@ -3160,7 +3160,7 @@ describe('continuable settlement delivery', () => {
     // message when that parent is disposed next is pinned by the test below.
     expect(settlementNotices(parent)).toHaveLength(1)
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
+      `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
       + '\nIt left no closing message.',
     )
     expect(parent.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced')).toBe(true)

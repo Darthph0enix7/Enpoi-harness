@@ -28,8 +28,11 @@ export function apply(ctx: Context): void {
   ctx.tools.register(markAdjacentAgentSendMessageTool(defineTool({
     name: 'send_message',
     description:
-      'Send a message to an agent. A working agent receives it at its next step; an idle agent starts a new turn with it. '
-      + 'Returns delivery confirmation, not the agent\'s answer.',
+      'Send a follow-up into an existing child session by id. Recovery only: when a background child stopped before its '
+      + 'end result, its settlement notice names the session id and the stop reason — inspect that session, then continue '
+      + 'it here instead of re-briefing a fresh child. A working child receives it at its next step; an idle child resumes '
+      + 'with its full history. Returns delivery confirmation, not the child\'s answer. New work is always a fresh subagent '
+      + 'dispatch.',
     parameters: {
       agent_id: {
         type: 'string',

@@ -128,26 +128,30 @@ export function withChildBudgetGuidance(prompt: ContentBlock[]): ContentBlock[] 
  */
 function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
   const subject = `Background subagent ${childId}`
+  // A stopped-before-finished child is recoverable: the notice names the
+  // session so the parent can inspect it or continue it by id. New work stays
+  // a fresh dispatch; this hint is for deliberate recovery only.
+  const recovery = `inspect its session ${childId} or continue it with a follow-up`
   switch (stopReason) {
     case 'completed':
-      // enpoi: no send_message in this deployment — the notice states the
-      // outcome and the closing report; the next task is a fresh dispatch.
+      // enpoi: a completed child is the normal end of a dispatch. A deliberate
+      // follow-up can still reach it by id; the next task is a fresh dispatch.
       return `${subject} finished.`
     case 'aborted':
-      return `${subject} was stopped before it finished.`
+      return `${subject} was stopped before it finished — ${recovery}.`
     case 'max-tokens':
-      return `${subject} ran out of room before it finished.`
+      return `${subject} ran out of room before it finished — ${recovery}.`
     // A pre-step rejection — a hook deny, a policy plugin — discarded input
     // the child had claimed, so the parent must not treat the task as done.
     case 'refusal':
-      return `${subject} declined the task.`
+      return `${subject} declined the task — ${recovery}.`
     case 'error':
-      return `${subject} failed before it finished.`
+      return `${subject} failed before it finished — ${recovery}.`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */
     default:
-      return `${subject} ended abnormally (${String(stopReason)}) before it finished.`
+      return `${subject} ended abnormally (${String(stopReason)}) before it finished — ${recovery}.`
   }
 }
 
