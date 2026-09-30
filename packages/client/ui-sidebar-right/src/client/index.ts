@@ -109,7 +109,7 @@ export function apply(ctx: ClientContext): void {
   const tabs = new SidebarRightTabRegistry(ctx)
   // enpoi: one global rail per browser, restored from localStorage.
   const rail = new SidebarRightRail()
-  // enpoi: hidden surfaces (Adam's duplicate-surface decision). A hidden page
+  // enpoi: hidden surfaces (the duplicate-surface decision). A hidden page
   // kind leaves the rail, the mobile bar, and the guide; a persisted column or
   // lit kind that names one is dropped before it can render, and a named open
   // is refused. The default hides dsh-context's Context page; writing

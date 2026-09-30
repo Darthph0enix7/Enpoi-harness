@@ -5,7 +5,7 @@
  * and follows the profile's client prefs pattern (ui-settings-models/hidden-models):
  * a synchronous localStorage cache the registry reads on every derivation, a
  * local publish, and `refreshFromServer` re-reading the namespace on boot and
- * after a `settings/document-updated` push. Adam's duplicate-surface decision is
+ * after a `settings/document-updated` push. The duplicate-surface decision is
  * the default: dsh-context's Context page is hidden until an operator writes a
  * different list; an empty list restores every registered kind, no code change
  * and no reload of the plugin.
@@ -14,7 +14,7 @@
 /** Device-local cache of the last resolved list. */
 const STORAGE_KEY = 'dsh_hidden_surfaces_sidebar_right_v1'
 
-/** The list in force until a namespace value says otherwise (Adam's decision). */
+/** The list in force until a namespace value says otherwise (the decision). */
 const DEFAULT_HIDDEN_KINDS: readonly string[] = ['dsh-context']
 
 /** Monotonic describe rpcIds: the gateway echoes the id and duplicates race. */

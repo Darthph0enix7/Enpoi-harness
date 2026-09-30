@@ -500,7 +500,7 @@ if (!opt.noComms && fs.existsSync(opt.commsRoot)) {
   inputs.corpora.comms = n
 }
 
-// Adam's recent sessions
+// The operator's recent sessions
 if (!opt.noAdam && opt.adamLimit > 0) {
   const root = path.join(opt.sessionsHome, '--home-adam--')
   let candidates = []

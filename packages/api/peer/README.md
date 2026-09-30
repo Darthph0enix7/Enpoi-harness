@@ -54,7 +54,7 @@ pairings:
     exposure: debug           # answer-only | debug
     sessionId: sess-abc       # this host's session peers may address
     create:                   # present ⇒ peer.create may create/adopt under this alias
-      cwd: /home/adam/projects/thing
+      cwd: /home/user/projects/thing
       agentPreset: sysadmin
     remoteSessionId: sess-xyz # caller-role bookkeeping
     endpoint: https://laptop.pike-acrux.ts.net:8443

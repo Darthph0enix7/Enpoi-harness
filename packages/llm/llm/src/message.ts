@@ -121,7 +121,7 @@ export type ContextFormed =
 export interface ParticipantTag {
   /** Whether the actor is a person or another agent. */
   readonly kind: 'human' | 'peer'
-  /** Stable actor name, unique per device, e.g. `adam` or `serverlocal-orchestrator`. */
+  /** Stable actor name, unique per device, e.g. `laptop-a` or `serverlocal-orchestrator`. */
   readonly name: string
   /** Device the actor acted from, when the producer knows it. */
   readonly device?: string

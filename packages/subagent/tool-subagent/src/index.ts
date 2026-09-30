@@ -476,7 +476,7 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   // it. A child holding it can only orchestrate the tools it can already see,
   // which these lists bound.
   //
-  // Operator defaults (Adam): every sub-agent may run bash (reading,
+  // Operator defaults: every sub-agent may run bash (reading,
   // analysis, tests — not only writing), use skills, search memory, and keep
   // its own todo list. Readers keep only the mutation veto; implementers are
   // unrestricted beyond the shared anti-leak floor.

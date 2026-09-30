@@ -183,7 +183,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       /* v8 ignore next -- list registration validates id at load. */
       if (entry.options.id === undefined) continue
       if (!ctx.configForms.developerTools.enabled.getSnapshot() && entry.options.id === TRAJECTORY_VIEW_ID) continue
-      // enpoi: hidden surfaces (Adam's duplicate-surface decision). The filter
+      // enpoi: hidden surfaces (the duplicate-surface decision). The filter
       // sits at the roster every consumer reads (the tab bar and the active-view
       // resolution), so a hidden view never renders; a stored selection of one
       // no longer resolves and `resolveActiveView` falls back to Chat.
