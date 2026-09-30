@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   ANALYSIS_STAGES, Config, createAnalysisRunner, handleRequest, stagePct,
-  type AnalysisDependencies, type AnalysisRunner,
+  type AnalysisConfig, type AnalysisDependencies, type AnalysisRunner,
 } from '../src/analysis.ts'
 import type { InvestigationOutcome } from '../src/investigation.ts'
 
 describe('analysis plugin config', () => {
   it('defaults the investigation session to the shipped system-analysis permission preset', () => {
-    expect(Config({})).toMatchObject({ permissionPreset: 'system-analysis' })
+    // The schema's call signature takes the resolved config; the loader passes
+    // partial entries and the schema applies every default.
+    expect(Config({} as AnalysisConfig)).toMatchObject({ permissionPreset: 'system-analysis' })
   })
 })
 
