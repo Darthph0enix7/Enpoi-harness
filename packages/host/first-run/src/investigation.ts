@@ -76,7 +76,7 @@ export const SYSTEM_ANALYSIS_PROMPT = [
   '2. `usage` — what the user does with this machine, in general terms: programs or develops software (language runtimes, editors and IDEs, repositories), hosts services, runs AI experiments or local models, keeps personal media, games or does not.',
   '3. `hosting` — what this machine serves, as categories only: containerized services, reverse-proxied web services, a VPN mesh, tunnels to the outside. State which categories are in use, never which projects, containers, ports, or domains.',
   '4. `networking` — how the machine reaches the network, in general terms: a VPN mesh, outbound tunnels, remote access, DNS or proxy tooling. No addresses, domains, or hostnames.',
-  '5. `tooling` — the general tooling and interests: language runtimes, GPU or AI toolchains, databases, build chains, editors and terminals. Confirm an accelerator through the paths that exist on this machine (the driver command, the system binary, the language runtime) before recording it present or absent.',
+  '5. `tooling` — the general tooling and interests: language runtimes, GPU or AI toolchains, databases, build chains, editors and terminals. For an accelerator, separate physically present from reachable from this shell: when the hardware or its driver shows on the bus, record it present and leave shell reachability to the notes; record absent only when the machine itself shows no such hardware.',
   '6. `write profile` — write both files described below.',
   '',
   'Generalization rules for everything you publish:',

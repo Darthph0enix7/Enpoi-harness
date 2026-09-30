@@ -83,6 +83,7 @@ describe('investigation prompt and stage mapping', () => {
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('Never enumerate an inventory')
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('about a dozen commands')
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('Base every claim on what you actually observed')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('physically present')
     for (const key of REQUIRED_PROFILE_KEYS) expect(SYSTEM_ANALYSIS_PROMPT).toContain(`\`${key}\``)
     expect(SYSTEM_ANALYSIS_PROMPT).toContain(PROFILE_JSON_FILENAME)
     expect(SYSTEM_ANALYSIS_PROMPT).toContain(PROFILE_DOCUMENT_FILENAME)
