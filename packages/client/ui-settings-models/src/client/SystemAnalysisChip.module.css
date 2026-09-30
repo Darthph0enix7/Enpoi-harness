@@ -116,12 +116,47 @@
   pointer-events: auto;
 }
 
-button.chip {
-  cursor: pointer;
+/* Ready chip: the open surface keeps the pointer and hover feedback; the
+   dismiss control accepts the review without opening the document. */
+.readyOpen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
   font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
 
-button.chip:hover {
+.readyOpen:hover .body strong {
+  color: var(--dsw-alias-brand-primary);
+}
+
+.readyDismiss {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  corner-shape: round;
+  cursor: pointer;
+}
+
+.readyDismiss:hover {
+  color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
 

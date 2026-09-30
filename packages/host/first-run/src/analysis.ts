@@ -4,9 +4,10 @@
  * `/system-analysis/*`. The run is a singleton, bounded by a configured time
  * limit, and never fatal: a refused preset or a failed investigation reports
  * its reason in the job view and leaves the harness untouched. Accept keeps
- * the stored document; reject removes it and records the decision so no later
- * boot re-offers the analysis. The run only ever starts on an explicit client
- * action; nothing at boot schedules it.
+ * the stored document; reject removes it; either decision, and the one-time
+ * `seen` marker recorded when the undecided document was displayed once,
+ * settles the review so no later boot re-offers the analysis. The run only ever
+ * starts on an explicit client action; nothing at boot schedules it.
  * @module @deepseek-ai/dsh-host-first-run/analysis
  */
 
@@ -19,6 +20,7 @@ import {
   readSystemProfile,
   readSystemProfileDecision,
   removeSystemProfile,
+  removeSystemProfileDecision,
   systemProfilePath,
   writeSystemProfile,
   writeSystemProfileDecision,
@@ -77,6 +79,8 @@ export interface AnalysisDependencies {
   removeProfile: () => void
   readDecision: () => SystemProfileDecision | null
   writeDecision: (decision: SystemProfileDecision) => void
+  /** Clear the decision marker when a new profile is published. */
+  removeDecision: () => void
   /** `provider/model` label the document header records. */
   route: string
   /** Agent preset the document header records. */
@@ -96,6 +100,12 @@ export interface AnalysisRunner {
   accept: () => AnalysisJobView
   /** Remove the stored document and record the rejection. */
   reject: () => AnalysisJobView
+  /**
+   * Record the one-time `seen` marker for a stored profile with no decision,
+   * so the review is never displayed again. A no-op when no profile is stored
+   * or a decision already exists.
+   */
+  seen: () => AnalysisJobView
 }
 
 /** Stage list length drives the progress percentage. */
@@ -183,6 +193,9 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetim
           withoutLeadingTitle(outcome.document),
           '',
         ].join('\n'))
+        // A newly published profile starts undecided: a previous decision or
+        // the one-time seen marker belonged to the document it replaced.
+        dependencies.removeDecision()
         job = {
           ...job,
           state: 'succeeded',
@@ -240,6 +253,13 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetim
       dependencies.writeDecision('rejected')
       return view()
     },
+    seen: () => {
+      // The marker retires the review; it must not create one for a machine
+      // with nothing stored, and it must never overwrite a real decision.
+      if (dependencies.readProfile() === null || dependencies.readDecision() !== null) return view()
+      dependencies.writeDecision('seen')
+      return view()
+    },
   }
 }
 
@@ -287,15 +307,15 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 
 /** Method each path accepts; undefined for a path this plugin does not own. */
 function routeMethod(path: string): 'GET' | 'POST' | undefined {
-  if (path === '/start' || path === '/accept' || path === '/reject') return 'POST'
+  if (path === '/start' || path === '/accept' || path === '/reject' || path === '/seen') return 'POST'
   if (path === '/status' || path === '/context') return 'GET'
   return undefined
 }
 
 /**
  * Handle one `/system-analysis/*` request. The two reads (`status`, `context`)
- * accept GET only and the three actions (`start`, `accept`, `reject`) POST
- * only; a wrong method answers 405 without touching the runner.
+ * accept GET only and the four actions (`start`, `accept`, `reject`, `seen`)
+ * POST only; a wrong method answers 405 without touching the runner.
  * @param runner - the singleton runner.
  * @param req - incoming request.
  * @param res - response owner.
@@ -326,6 +346,10 @@ export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res:
     }
     if (path === '/reject') {
       sendJson(res, 200, { ok: true, job: runner.reject() })
+      return
+    }
+    if (path === '/seen') {
+      sendJson(res, 200, { ok: true, job: runner.seen() })
       return
     }
     sendJson(res, 404, { ok: false, message: `unknown system-analysis path "${path}"` })
@@ -365,6 +389,7 @@ export function apply(ctx: Context, config: AnalysisConfig): void {
     removeProfile: () => { removeSystemProfile() },
     readDecision: () => readSystemProfileDecision(),
     writeDecision: (decision) => { writeSystemProfileDecision(decision) },
+    removeDecision: () => { removeSystemProfileDecision() },
     route: `${config.provider}/${config.model}`,
     preset: config.preset,
     now: () => Date.now(),

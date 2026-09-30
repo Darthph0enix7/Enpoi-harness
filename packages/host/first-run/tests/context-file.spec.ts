@@ -74,6 +74,8 @@ describe('system-profile document', () => {
     expect(readSystemProfileDecision(path)).toBe('rejected')
     writeSystemProfileDecision('accepted', path)
     expect(readSystemProfileDecision(path)).toBe('accepted')
+    writeSystemProfileDecision('seen', path)
+    expect(readSystemProfileDecision(path)).toBe('seen')
     writeFileSync(path, 'maybe\n')
     expect(readSystemProfileDecision(path)).toBeNull()
   })

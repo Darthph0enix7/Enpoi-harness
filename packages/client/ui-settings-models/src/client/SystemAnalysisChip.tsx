@@ -6,8 +6,10 @@
  * investigation is offered only by the setup wizard's agents step. The bar is
  * portaled out of the shell frame so it sits above the application and above
  * the first-run modal; expanding it grows the phase rail upward. Clicking the
- * ready bar opens the stored document with Accept and Reject; clicking
- * elsewhere dismisses the panel and accepts. Nothing here blocks the app.
+ * ready bar opens the stored document with Accept and Reject; the ready chip's
+ * × dismisses the review by accepting it, so an ignored profile stays, and
+ * clicking elsewhere dismisses the panel and accepts. Nothing here blocks the
+ * app.
  * @module ui-settings-models/SystemAnalysisChip
  */
 
@@ -141,13 +143,25 @@ export function SystemAnalysisChip({
         </div>
       )}
       {state.phase === 'ready' && (
-        <button type="button" className={css.chip} data-dsh-system-analysis-chip="ready" onClick={actions.open}>
-          <span className={css.readyDot} aria-hidden="true" />
-          <span className={css.body}>
-            <strong>{t('sysAnalysisReady')}</strong>
-            <span className={css.stage}>{t('sysAnalysisOpenHint')}</span>
-          </span>
-        </button>
+        <div className={css.chip} data-dsh-system-analysis-chip="ready">
+          <button type="button" className={css.readyOpen} onClick={actions.open}>
+            <span className={css.readyDot} aria-hidden="true" />
+            <span className={css.body}>
+              <strong>{t('sysAnalysisReady')}</strong>
+              <span className={css.stage}>{t('sysAnalysisOpenHint')}</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={css.readyDismiss}
+            aria-label={t('sysAnalysisDismiss')}
+            title={t('sysAnalysisDismiss')}
+            data-dsh-system-analysis-dismiss
+            onClick={actions.accept}
+          >
+            ×
+          </button>
+        </div>
       )}
       {state.phase === 'failed' && (
         <div className={css.chip} role="alert" data-dsh-system-analysis-chip="failed">

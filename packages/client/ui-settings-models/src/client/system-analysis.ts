@@ -5,7 +5,9 @@
  * in the chip, and a percentage is clamped to the 0..100 the bar can render.
  * Nothing here starts a run on its own: only the setup wizard's agents step
  * sends `start`, and the chip store follows a run already in flight, shows the
- * stored profile for the decision, or stays hidden.
+ * stored profile for the decision, or stays hidden. A stored profile with no
+ * decision that a load finds after a host restart shows the review once and
+ * fire-and-forget records `seen`, so the next load stays hidden.
  * @module ui-settings-models/system-analysis
  */
 
@@ -21,8 +23,12 @@ export interface SystemAnalysisView {
   error?: string
   /** Whether a profile document is stored right now. */
   hasProfile: boolean
-  /** The operator's recorded decision, or null when none was recorded. */
-  decision: 'accepted' | 'rejected' | null
+  /**
+   * The operator's recorded decision, or null when none was recorded. `seen`
+   * is the one-time marker that retires an ignored review: the profile stays,
+   * the chip hides.
+   */
+  decision: 'seen' | 'accepted' | 'rejected' | null
 }
 
 /** Why one analysis call failed, before the chip localizes it. */
@@ -46,6 +52,8 @@ export interface SystemAnalysisApi {
   context: () => Promise<SystemAnalysisRpcResult<string | null>>
   accept: () => Promise<SystemAnalysisRpcResult<SystemAnalysisView>>
   reject: () => Promise<SystemAnalysisRpcResult<SystemAnalysisView>>
+  /** Record the one-time `seen` marker for an ignored review; idempotent. */
+  seen: () => Promise<SystemAnalysisRpcResult<SystemAnalysisView>>
 }
 
 /** Snapshot rendered by the chip. */
@@ -101,7 +109,7 @@ function parseJob(value: unknown): SystemAnalysisView | undefined {
     stageCount: typeof job.stageCount === 'number' ? Math.max(0, Math.floor(job.stageCount)) : 0,
     pct: typeof job.pct === 'number' ? clampPct(job.pct) : 0,
     hasProfile: job.hasProfile === true,
-    decision: decision === 'accepted' || decision === 'rejected' ? decision : null,
+    decision: decision === 'seen' || decision === 'accepted' || decision === 'rejected' ? decision : null,
     ...typeof job.error === 'string' ? { error: job.error } : {},
   }
 }
@@ -111,7 +119,7 @@ function parseJob(value: unknown): SystemAnalysisView | undefined {
  * @param path - route suffix.
  * @returns the parsed job, or a classified failure.
  */
-async function call(path: 'start' | 'status' | 'accept' | 'reject'): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> {
+async function call(path: 'start' | 'status' | 'accept' | 'reject' | 'seen'): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> {
   try {
     const response = await fetch(`/system-analysis/${path}`, {
       method: path === 'status' ? 'GET' : 'POST',
@@ -156,6 +164,7 @@ export const systemAnalysisApi: SystemAnalysisApi = {
   context: () => readContext(),
   accept: () => call('accept'),
   reject: () => call('reject'),
+  seen: () => call('seen'),
 }
 
 /** Coordinates the chip's status read, poll, and decision. */
@@ -176,13 +185,18 @@ export class SystemAnalysisStore {
 
   private poll: ReturnType<typeof setInterval> | undefined
 
+  /** Whether this page session already recorded the one-time `seen` marker. */
+  private seenRequested = false
+
   /** @param api - the host analysis calls. */
   constructor(private readonly api: SystemAnalysisApi) {}
 
   /**
    * Read the current state and follow a run already in flight. A stored
-   * profile shows the review surface; a machine without one stays hidden.
-   * Nothing here starts a run.
+   * profile shows the review surface once: this load keeps it visible and
+   * fire-and-forget records `seen`, so every later load stays hidden without
+   * touching the files. A machine without a profile stays hidden. Nothing here
+   * starts a run.
    * @returns settlement after the first status answer is applied.
    */
   async load(): Promise<void> {
@@ -192,6 +206,12 @@ export class SystemAnalysisStore {
       return
     }
     this.apply(result.value)
+    // The seen write is fire-and-forget on purpose: a refusal or a slow route
+    // must not change what this session shows, it only leaves the review for
+    // the next load. A settled run answers too, so reloads against a live host
+    // retire the review instead of re-showing it.
+    if ((result.value.state === 'idle' || result.value.state === 'succeeded')
+      && result.value.hasProfile && result.value.decision === null) this.markSeen()
     if (result.value.state === 'running') this.follow()
   }
 
@@ -246,6 +266,17 @@ export class SystemAnalysisStore {
     this.poll = undefined
   }
 
+  /**
+   * Record the one-time `seen` marker for a stored undecided profile, at most
+   * once per page session. The response is deliberately ignored: the current
+   * session keeps the ready surface, only later loads read the marker.
+   */
+  private markSeen(): void {
+    if (this.seenRequested) return
+    this.seenRequested = true
+    void this.api.seen()
+  }
+
   private async decide(action: 'accept' | 'reject'): Promise<void> {
     this.store.update((state) => { state.busy = true })
     const result = action === 'accept' ? await this.api.accept() : await this.api.reject()
@@ -291,8 +322,9 @@ export class SystemAnalysisStore {
       }
       // Idle: nothing to follow here, but the host runner is process-local, so
       // after a restart an idle answer with a stored profile and no recorded
-      // decision still awaits the same review. Every other idle (no profile,
-      // or already decided) stays hidden; the setup wizard's agents step owns
+      // decision still awaits the same review — `load` shows it this once and
+      // retires it with `seen`. Every other idle (no profile, or already
+      // decided or seen) stays hidden; the setup wizard's agents step owns
       // starting a run.
       state.phase = view.hasProfile && view.decision === null ? 'ready' : 'hidden'
     })

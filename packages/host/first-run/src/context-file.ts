@@ -4,9 +4,10 @@
  *
  * The system analysis writes one general Markdown document under the harness
  * home, the structured JSON profile beside it, and a decision marker recording
- * whether the operator accepted or rejected the document. A sysadmin-mounted
- * prompt context contributes only the essentials read from that JSON plus a
- * reference to the Markdown document, so the full record stays in one place;
+ * whether the operator accepted, rejected, or merely saw the document once. A
+ * sysadmin-mounted prompt context contributes only the essentials read from
+ * that JSON plus a reference to the Markdown document, so the full record stays
+ * in one place;
  * before any analysis ran — or after a rejection — it contributes the default
  * below instead.
  * @module @deepseek-ai/dsh-host-first-run/context-file
@@ -25,8 +26,13 @@ export const SYSTEM_PROFILE_JSON_FILENAME = 'system-profile.json'
 /** Decision marker name under the harness home. */
 export const SYSTEM_PROFILE_DECISION_FILENAME = 'system-profile.decision'
 
-/** What the operator decided about a stored profile. */
-export type SystemProfileDecision = 'accepted' | 'rejected'
+/**
+ * What the operator settled on for a stored profile: an explicit accept or
+ * reject, or `seen` when the profile was displayed once without a decision.
+ * A `seen` profile is settled like an accepted one: the files stay and the
+ * review is never offered again.
+ */
+export type SystemProfileDecision = 'accepted' | 'rejected' | 'seen'
 
 /**
  * Context a sysadmin session reads before the analysis has ever run, or after
@@ -252,15 +258,16 @@ export function removeSystemProfile(
 export function readSystemProfileDecision(path: string = systemProfileDecisionPath()): SystemProfileDecision | null {
   try {
     const text = readFileSync(path, 'utf8').trim()
-    return text === 'accepted' || text === 'rejected' ? text : null
+    return text === 'accepted' || text === 'rejected' || text === 'seen' ? text : null
   } catch (_absentOrUnreadable) {
     return null
   }
 }
 
 /**
- * Record the operator's decision about the stored profile.
- * @param decision - the decision to persist.
+ * Record the operator's decision about the stored profile, or the one-time
+ * `seen` marker that retires the review without touching the files.
+ * @param decision - the decision or marker to persist.
  * @param path - marker path; defaults to {@link systemProfileDecisionPath}.
  * @returns the absolute path written.
  */
@@ -269,4 +276,18 @@ export function writeSystemProfileDecision(
   path: string = systemProfileDecisionPath(),
 ): string {
   return writeAtomic(path, `${decision}\n`)
+}
+
+/**
+ * Remove the decision marker so a newly published profile starts undecided.
+ * @param path - marker path; defaults to {@link systemProfileDecisionPath}.
+ * @returns true when a marker was removed, false when none existed.
+ */
+export function removeSystemProfileDecision(path: string = systemProfileDecisionPath()): boolean {
+  try {
+    unlinkSync(path)
+    return true
+  } catch (_absent) {
+    return false
+  }
 }

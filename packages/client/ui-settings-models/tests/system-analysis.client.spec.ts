@@ -30,13 +30,15 @@ function fakeApi(): {
   context: ReturnType<typeof vi.fn>
   accept: ReturnType<typeof vi.fn>
   reject: ReturnType<typeof vi.fn>
+  seen: ReturnType<typeof vi.fn>
 } {
   const start = vi.fn(async (): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> => ({ ok: true, value: view({ state: 'running' }) }))
   const status = vi.fn(async (): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> => ({ ok: true, value: view() }))
   const context = vi.fn(async (): Promise<SystemAnalysisRpcResult<string | null>> => ({ ok: true, value: '# System profile\n' }))
   const accept = vi.fn(async (): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> => ({ ok: true, value: view({ hasProfile: true, decision: 'accepted' }) }))
   const reject = vi.fn(async (): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> => ({ ok: true, value: view({ decision: 'rejected' }) }))
-  return { api: { start, status, context, accept, reject }, start, status, context, accept, reject }
+  const seen = vi.fn(async (): Promise<SystemAnalysisRpcResult<SystemAnalysisView>> => ({ ok: true, value: view({ hasProfile: true, decision: 'seen' }) }))
+  return { api: { start, status, context, accept, reject, seen }, start, status, context, accept, reject, seen }
 }
 
 afterEach(() => {
@@ -79,6 +81,16 @@ describe('analysis percentage', () => {
     expect(await systemAnalysisApi.status()).toEqual({
       ok: true,
       value: { state: 'succeeded', stage: '', stageIndex: 3, stageCount: 8, pct: 33, hasProfile: true, decision: 'accepted' },
+    })
+
+    // The one-time seen marker survives the wire boundary like a real decision.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      job: { state: 'idle', hasProfile: true, decision: 'seen' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    expect(await systemAnalysisApi.status()).toEqual({
+      ok: true,
+      value: { state: 'idle', stage: '', stageIndex: 0, stageCount: 0, pct: 0, hasProfile: true, decision: 'seen' },
     })
   })
 
@@ -170,6 +182,7 @@ describe('system-analysis store', () => {
     await store.load()
     expect(store.store.getSnapshot().phase).toBe('hidden')
     expect(recorded.start).not.toHaveBeenCalled()
+    expect(recorded.seen).not.toHaveBeenCalled()
   })
 
   it('shows the review for a stored undecided profile after a host restart', async () => {
@@ -183,6 +196,52 @@ describe('system-analysis store', () => {
     expect(store.store.getSnapshot()).toMatchObject({ phase: 'ready' })
     expect(restarted.start).not.toHaveBeenCalled()
     store.dispose()
+  })
+
+  it('records seen once for the load that shows the review, so the next load hides it', async () => {
+    const first = fakeApi()
+    first.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle', hasProfile: true }) })
+    const store = new SystemAnalysisStore(first.api)
+    await store.load()
+    // The current session keeps the chip: the seen write is fire-and-forget,
+    // so no response can flash the review away.
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'ready' })
+    expect(first.seen).toHaveBeenCalledTimes(1)
+    expect(first.start).not.toHaveBeenCalled()
+    // The next load reads the marker and stays hidden without another write.
+    first.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle', hasProfile: true, decision: 'seen' }) })
+    await store.load()
+    expect(store.store.getSnapshot().phase).toBe('hidden')
+    expect(first.seen).toHaveBeenCalledTimes(1)
+    store.dispose()
+  })
+
+  it('records seen for a reload against a settled run too, not only an idle host', async () => {
+    const settledHost = fakeApi()
+    settledHost.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'succeeded', hasProfile: true }) })
+    const store = new SystemAnalysisStore(settledHost.api)
+    await store.load()
+    expect(store.store.getSnapshot()).toMatchObject({ phase: 'ready' })
+    expect(settledHost.seen).toHaveBeenCalledTimes(1)
+    store.dispose()
+  })
+
+  it('never records seen for a machine with nothing stored or a decided profile', async () => {
+    const empty = fakeApi()
+    empty.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle' }) })
+    const noProfile = new SystemAnalysisStore(empty.api)
+    await noProfile.load()
+    expect(noProfile.store.getSnapshot().phase).toBe('hidden')
+    expect(empty.seen).not.toHaveBeenCalled()
+
+    const decided = fakeApi()
+    decided.status.mockResolvedValueOnce({ ok: true, value: view({ state: 'idle', hasProfile: true, decision: 'seen' }) })
+    const marked = new SystemAnalysisStore(decided.api)
+    await marked.load()
+    expect(marked.store.getSnapshot().phase).toBe('hidden')
+    expect(decided.seen).not.toHaveBeenCalled()
+    noProfile.dispose()
+    marked.dispose()
   })
 
   it('hides an idle host with no profile or an already decided one', async () => {
@@ -346,6 +405,7 @@ describe('system-analysis store', () => {
     expect(await systemAnalysisApi.start()).toEqual({ ok: true, value: expect.objectContaining({ state: 'running' }) })
     expect(await systemAnalysisApi.accept()).toEqual({ ok: true, value: expect.objectContaining({ state: 'running' }) })
     expect(await systemAnalysisApi.reject()).toEqual({ ok: true, value: expect.objectContaining({ state: 'running' }) })
+    expect(await systemAnalysisApi.seen()).toEqual({ ok: true, value: expect.objectContaining({ state: 'running' }) })
     respond({ ok: true, text: '# profile' })
     expect(await systemAnalysisApi.context()).toEqual({ ok: true, value: '# profile' })
     respond({ ok: true, text: 42 })

@@ -50,12 +50,12 @@ Mount the analysis routes where browsers can reach them, and the context row ins
 | `enabled` | `true` | Run the seed when no marker is stored |
 | `provider`, `model` | `kilo`, `kilo-auto/free` | Route id and free model the seed writes |
 | `seedVersion` | empty | Marker; any stored value means the seed already decided |
-| `routes` | `true` | Register `/system-analysis/start`, `/status`, `/context`, `/accept`, and `/reject` |
+| `routes` | `true` | Register `/system-analysis/start`, `/status`, `/context`, `/accept`, `/reject`, and `/seen` |
 | `preset` | `sysadmin` | Agent preset that investigates; it is mounted for that one session |
 | `permissionPreset` | `system-analysis` | Permission preset enforced on the investigation session; it confines writes to the run's own scratch workspace without approval prompts, since no operator watches the run |
 | `timeoutMinutes` | `15` | Hard bound on one investigation |
 
-The run is a singleton and only ever starts on an explicit client action. `start` answers the current view while a run is live or settled, `status` never changes it, `context` returns the stored document or null, and `accept`/`reject` record the operator's decision. The investigating agent keeps a todo list whose items are the checklist sections, and the host maps that list onto the chip's stage rail; the agent writes `profile.json` and `system-profile.md` into the run's scratch workspace with the ordinary `write` tool, and the host copies both to the harness home. A missing agent runtime, unknown preset, or expired bound fails the run with its reason in the job view and leaves the harness untouched.
+The run is a singleton and only ever starts on an explicit client action. `start` answers the current view while a run is live or settled, `status` never changes it, `context` returns the stored document or null, `accept`/`reject` record the operator's decision, and `seen` records the one-time marker that retires a displayed-but-undecided review without touching the files; it is a no-op without a stored profile or once a decision exists. The investigating agent keeps a todo list whose items are the checklist sections, and the host maps that list onto the chip's stage rail; the agent writes `profile.json` and `system-profile.md` into the run's scratch workspace with the ordinary `write` tool, and the host copies both to the harness home. A missing agent runtime, unknown preset, or expired bound fails the run with its reason in the job view and leaves the harness untouched.
 
 -----
 
@@ -115,7 +115,7 @@ The context text is stable between investigations, so the sysadmin prefix caches
 ## Known Limitations and Deferred Work
 
 - The sysadmin preset must mount `@deepseek-ai/dsh-host-first-run/context`; the fork profile owns that row. The harness repository ships the export only.
-- The analysis starts only on an explicit action (the agents step or the chip); once a profile is accepted or a decision is recorded, nothing re-offers a run.
+- The analysis starts only on an explicit action (the agents step or the chip); once a profile is accepted, rejected, or marked seen, nothing re-offers a run. An ignored profile keeps its files and records `seen`.
 - The investigation session runs the shipped `system-analysis` preset (workspace-write sandbox, approval `never`) scoped to its own scratch workspace so the agent can drop the two artifacts; the host outside that directory stays read-only to it, and the prompt forbids every other mutation.
 - Enforcement depends on the deployment naming its permission presets; an unavailable `permissionPreset` logs a warning and continues with the prompt's read-only rule alone.
 - The investigation session is not attached to a Workspace, so it appears in history but not in a workspace's session list.

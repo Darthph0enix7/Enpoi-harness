@@ -96,6 +96,13 @@ describe('SystemAnalysisChip', () => {
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
 
+  it('dismisses the ready chip by accepting, without opening the document', () => {
+    const { actions } = mount({ phase: 'ready' })
+    fireEvent.click(screen.getByRole('button', { name: en.sysAnalysisDismiss }))
+    expect(actions.accept).toHaveBeenCalledTimes(1)
+    expect(actions.open).not.toHaveBeenCalled()
+  })
+
   it('renders an unknown host stage verbatim', () => {
     mount({ phase: 'running', stage: 'poolside warming', stageIndex: 0, pct: 5 })
     expect(document.querySelector('[data-dsh-system-analysis-stage]')?.textContent).toBe('poolside warming')

@@ -45,6 +45,7 @@ function dependencies(overrides: Partial<AnalysisDependencies> = {}): AnalysisDe
     removeProfile: () => {},
     readDecision: () => null,
     writeDecision: () => {},
+    removeDecision: () => {},
     route: 'kilo/kilo-auto/free',
     preset: 'sysadmin',
     now: () => 1_000,
@@ -100,6 +101,14 @@ describe('system analysis runner', () => {
     // The stored document is stable: no timestamp and no version-like fact.
     expect(document).not.toMatch(/\d{4}-\d{2}-\d{2}T/u)
     expect(documentViolations(document)).toEqual([])
+  })
+
+  it('publishes a new profile undecided: the previous decision marker is cleared', async () => {
+    const removeDecision = vi.fn()
+    const runner = createAnalysisRunner(dependencies({ removeDecision }))
+    runner.start()
+    await settled()
+    expect(removeDecision).toHaveBeenCalledOnce()
   })
 
   it('drops an agent-authored title above the body instead of doubling the header', async () => {
@@ -252,8 +261,8 @@ describe('system analysis runner', () => {
   })
 
   it('accepts by recording the decision and rejecting by removing the document', () => {
-    let decision: 'accepted' | 'rejected' | null = null
-    const writeDecision = vi.fn((next: 'accepted' | 'rejected') => { decision = next })
+    let decision: 'accepted' | 'rejected' | 'seen' | null = null
+    const writeDecision = vi.fn((next: 'accepted' | 'rejected' | 'seen') => { decision = next })
     const removeProfile = vi.fn()
     let stored: string | null = '# System profile\n'
     const runner = createAnalysisRunner(dependencies({
@@ -270,16 +279,48 @@ describe('system analysis runner', () => {
     expect(writeDecision).toHaveBeenLastCalledWith('rejected')
   })
 
-  it('answers start, status, context, accept, reject, and unknown paths over the route', () => {
-    let decision: 'accepted' | 'rejected' | null = null
+  it('records seen once for a stored undecided profile and never touches the files', () => {
+    let decision: 'accepted' | 'rejected' | 'seen' | null = null
+    const writeDecision = vi.fn((next: 'accepted' | 'rejected' | 'seen') => { decision = next })
+    const removeProfile = vi.fn()
+    let stored: string | null = '# System profile\n'
+    const runner = createAnalysisRunner(dependencies({
+      writeDecision,
+      removeProfile,
+      readProfile: () => stored,
+      readDecision: () => decision,
+    }))
+    expect(runner.seen()).toMatchObject({ decision: 'seen', hasProfile: true })
+    expect(writeDecision).toHaveBeenCalledWith('seen')
+    expect(removeProfile).not.toHaveBeenCalled()
+    // A recorded decision makes the marker a no-op: it never overwrites one.
+    expect(runner.seen()).toMatchObject({ decision: 'seen' })
+    expect(writeDecision).toHaveBeenCalledTimes(1)
+    expect(runner.accept()).toMatchObject({ decision: 'accepted' })
+    expect(runner.seen()).toMatchObject({ decision: 'accepted' })
+    expect(writeDecision).toHaveBeenCalledTimes(2)
+    // Nothing stored: seen cannot create a review, and accept/reject still work.
+    decision = null
+    stored = null
+    expect(runner.seen()).toMatchObject({ decision: null })
+    expect(writeDecision).toHaveBeenCalledTimes(2)
+    expect(runner.accept()).toMatchObject({ decision: 'accepted' })
+    expect(runner.reject()).toMatchObject({ decision: 'rejected', hasProfile: false })
+    expect(removeProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers start, status, context, accept, reject, seen, and unknown paths over the route', () => {
+    let decision: 'accepted' | 'rejected' | 'seen' | null = null
     const runner = createAnalysisRunner(dependencies({
       readProfile: () => 'profile text',
       readDecision: () => decision,
       writeDecision: (next) => { decision = next },
     }))
-    expect(reply(runner, '/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'idle' } } })
+    expect(reply(runner, '/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'idle', decision: null } } })
     expect(reply(runner, '/system-analysis/start', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { state: 'running' } } })
     expect(reply(runner, '/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
+    expect(reply(runner, '/system-analysis/seen', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'seen', hasProfile: true } } })
+    expect(reply(runner, '/system-analysis/status')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'seen' } } })
     expect(reply(runner, '/system-analysis/accept', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
     expect(reply(runner, '/system-analysis/reject', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
     expect(reply(runner, '/system-analysis/unknown')).toMatchObject({ status: 404, body: { ok: false } })
@@ -299,7 +340,7 @@ describe('system analysis runner', () => {
   })
 
   it('accepts GET only for the reads and POST only for the actions', () => {
-    let decision: 'accepted' | 'rejected' | null = null
+    let decision: 'accepted' | 'rejected' | 'seen' | null = null
     const runner = createAnalysisRunner(dependencies({
       readProfile: () => 'profile text',
       readDecision: () => decision,
@@ -307,12 +348,14 @@ describe('system analysis runner', () => {
     }))
     expect(reply(runner, '/system-analysis/status', 'POST')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
     expect(reply(runner, '/system-analysis/context', 'POST')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
-    // A refused decision never reaches the runner.
+    // A refused action never reaches the runner, seen included.
     expect(reply(runner, '/system-analysis/accept')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
     expect(reply(runner, '/system-analysis/reject')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
+    expect(reply(runner, '/system-analysis/seen')).toMatchObject({ status: 405, body: { ok: false, message: expect.any(String) } })
     expect(decision).toBeNull()
     // The correct methods still pass.
     expect(reply(runner, '/system-analysis/context')).toMatchObject({ status: 200, body: { ok: true, text: 'profile text' } })
+    expect(reply(runner, '/system-analysis/seen', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'seen' } } })
     expect(reply(runner, '/system-analysis/accept', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'accepted' } } })
     expect(reply(runner, '/system-analysis/reject', 'POST')).toMatchObject({ status: 200, body: { ok: true, job: { decision: 'rejected' } } })
   })
