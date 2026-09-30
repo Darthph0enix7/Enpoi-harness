@@ -254,10 +254,3 @@
   line-height: 1.5;
   color: var(--dsw-alias-label-primary, #f1f5f9);
 }
-
-.protectedHint {
-  margin: 6px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-caption, #94a3b8);
-}

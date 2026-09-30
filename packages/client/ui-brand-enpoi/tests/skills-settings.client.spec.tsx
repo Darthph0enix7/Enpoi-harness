@@ -100,13 +100,22 @@ afterEach(() => {
 })
 
 describe('SkillsSettings', () => {
-  it('lists on-disk and registry rows with source badges and read-only rows without actions', async () => {
+  it('lists on-disk and registry rows with source badges and read-only shipped rows without actions', async () => {
     const fetchMock = await renderSection(routeTable({
       'skills.list': () => ok({
-        root: '/home/sandbox/profiles/web/skills',
+        root: '/home/sandbox/skills',
         skills: [
           profileRow('alpha-skill', 'Alpha routing text'),
-          profileRow('tier1-workflow', 'Shipped default', { source: 'default', protected: true }),
+          profileRow('tier1-workflow', 'Shipped default', { source: 'default', protected: true, editable: false }),
+          {
+            name: 'tier2-workflow',
+            entry: 'tier2-workflow',
+            description: 'Shipped default from the registry',
+            format: 'file',
+            source: 'default',
+            protected: true,
+            editable: false,
+          },
           {
             name: 'remote-skill',
             entry: 'remote-skill',
@@ -123,11 +132,17 @@ describe('SkillsSettings', () => {
     expect(await screen.findByText('alpha-skill')).toBeTruthy()
     expect(screen.getByText('Alpha routing text')).toBeTruthy()
     expect(screen.getByText(en.sourceProfile)).toBeTruthy()
-    expect(screen.getByText(en.sourceDefault)).toBeTruthy()
+    expect(screen.getAllByText(en.sourceDefault)).toHaveLength(2)
     expect(screen.getByText(en.sourceInstalled)).toBeTruthy()
-    // Registry rows carry no edit/delete affordances.
-    expect(screen.queryByLabelText(`${en.edit}: remote-skill`)).toBeNull()
-    expect(screen.queryByLabelText(`${en.delete}: remote-skill`)).toBeNull()
+    expect(screen.getAllByText(en.protectedBadge)).toHaveLength(2)
+    // Every non-editable row (shipped tiers and registry entries) is read-only.
+    for (const name of ['tier1-workflow', 'tier2-workflow', 'remote-skill']) {
+      expect(screen.queryByLabelText(`${en.edit}: ${name}`)).toBeNull()
+      expect(screen.queryByLabelText(`${en.delete}: ${name}`)).toBeNull()
+    }
+    // The editable row keeps both actions.
+    expect(screen.getByLabelText(`${en.edit}: alpha-skill`)).toBeTruthy()
+    expect(screen.getByLabelText(`${en.delete}: alpha-skill`)).toBeTruthy()
     // The registry merge is addressed by the newest session.
     const list = fsopsCalls(fetchMock).find(call => call.method === 'skills.list')
     expect(list?.payload).toEqual({ sessionId: 'sess-1' })
@@ -229,24 +244,32 @@ describe('SkillsSettings', () => {
     await waitFor(() => { expect(screen.queryByText('disposable')).toBeNull() })
   })
 
-  it('surfaces the host tier-protection refusal and keeps the skill', async () => {
+  it('surfaces a host delete failure and keeps the skill', async () => {
     const fetchMock = await renderSection(routeTable({
       'skills.list': () => ok({
         root: '/skills',
-        skills: [profileRow('tier1-workflow', 'Shipped default', { source: 'default', protected: true })],
+        skills: [profileRow('doomed-skill', 'Editable row')],
         registry: { ok: true },
       }),
-      'skills.delete': () => failure('protected', 'skill "tier1-workflow" is a shipped default of this profile and cannot be deleted'),
+      'skills.delete': () => failure('fs-error', 'cannot delete skill "doomed-skill": staging failed'),
     }))
-    fireEvent.click(await screen.findByLabelText(`${en.delete}: tier1-workflow`))
-    expect(await screen.findByText(en.protectedHint)).toBeTruthy()
+    fireEvent.click(await screen.findByLabelText(`${en.delete}: doomed-skill`))
     fireEvent.click(screen.getByText(en.delete, { selector: 'button[data-skill-delete-confirm]' }))
 
-    const error = await screen.findByText(new RegExp('shipped default'))
+    const error = await screen.findByText(new RegExp('staging failed'))
     expect(error.getAttribute('data-skills-delete-error')).not.toBeNull()
     // The refusal never removes the row.
-    expect(screen.queryByText('tier1-workflow')).not.toBeNull()
+    expect(screen.queryByText('doomed-skill')).not.toBeNull()
     expect(fsopsCalls(fetchMock).filter(call => call.method === 'skills.delete')).toHaveLength(1)
+  })
+
+  it('surfaces an edit load failure inside the dialog', async () => {
+    await renderSection(routeTable({
+      'skills.list': () => ok({ root: '/skills', skills: [profileRow('alpha-skill', 'Alpha')], registry: { ok: true } }),
+      'skills.read': () => failure('not-found', 'skill "alpha-skill" does not exist', 404),
+    }))
+    fireEvent.click(await screen.findByLabelText(`${en.edit}: alpha-skill`))
+    expect(await screen.findByText(new RegExp('does not exist'))).toBeTruthy()
   })
 
   it('shows a load failure with Retry, and Retry reloads', async () => {

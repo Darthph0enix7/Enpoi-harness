@@ -280,7 +280,6 @@ export function SkillsSettings({ t }: SkillsSettingsProps) {
         </>}
       >
         <p className={css.confirmText}>{t('deleteConfirm', { name: deleting?.name ?? '' })}</p>
-        {deleting?.protected === true && <p className={css.protectedHint}>{t('protectedHint')}</p>}
         {deleteError !== null && <p className={css.actionError} role="alert" data-skills-delete-error="">{deleteError}</p>}
       </Modal>
     </section>

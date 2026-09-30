@@ -20,7 +20,6 @@ export type SkillsSettingsKey =
   | 'delete'
   | 'deleteTitle'
   | 'deleteConfirm'
-  | 'protectedHint'
   | 'loading'
   | 'empty'
   | 'loadFailed'
@@ -61,7 +60,6 @@ export const en: Record<SkillsSettingsKey, string> = {
 
   deleteTitle: 'Delete skill',
   deleteConfirm: 'Delete “{name}”? The skill moves to the trash and disappears from the catalog.',
-  protectedHint: 'This skill ships with the profile; the server refuses the delete.',
 
   loading: 'Loading skills…',
   empty: 'No skills yet. Create one to give the agent reusable instructions.',
@@ -106,7 +104,6 @@ export const zh: Record<SkillsSettingsKey, string> = {
 
   deleteTitle: '删除技能',
   deleteConfirm: '删除「{name}」？技能会移入回收站并从目录中消失。',
-  protectedHint: '此技能随配置提供，服务端会拒绝删除。',
 
   loading: '正在加载技能…',
   empty: '还没有技能。创建一个，让 Agent 获得可复用的指令。',
