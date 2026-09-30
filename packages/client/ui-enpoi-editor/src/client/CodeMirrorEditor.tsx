@@ -22,6 +22,12 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { SearchQuery, search, setSearchQuery } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import { languageForPath } from './languages.ts'
+import {
+  collectMatches, revealMatch, searchOverlayExtensions, setGotoFlash, setSearchOverlay,
+  type SearchMatches, type SearchOverlay,
+} from './search.ts'
+
+export type { SearchMatches } from './search.ts'
 
 /** The imperative surface the body uses to sync the view with the store. */
 export interface CodeMirrorHandle {
@@ -35,7 +41,7 @@ export interface CodeMirrorHandle {
   setReadOnly(readOnly: boolean): void
   /** Focus the editing surface, for a find bar that is closing. */
   focusEditor(): void
-  /** Move the cursor to a 1-based line and scroll it into view. */
+  /** Move the cursor to a 1-based line, scroll it into view, and flash it briefly. */
   gotoLine(line: number): void
   /** Set the search query, highlight its matches, and reveal the first one. */
   setSearch(text: string, options: { readonly caseSensitive: boolean; readonly regexp: boolean }): SearchMatches
@@ -47,16 +53,11 @@ export interface CodeMirrorHandle {
   clearSearch(): void
 }
 
-/** How many matches a query found, and which of them the view is showing. */
-export interface SearchMatches {
-  /** Total matches in the document. */
-  readonly matches: number
-  /** 0-based position of the revealed match within the document's matches. */
-  readonly index: number
-}
-
 /** Matches above this count are not collected; the counter saturates. */
 const MAX_SEARCH_MATCHES = 5000
+
+/** How long the go-to-line target line stays lit after a jump, in ms. */
+const GOTO_FLASH_MS = 1400
 
 /** Props of the CodeMirror host. */
 export interface CodeMirrorEditorProps {
@@ -135,6 +136,27 @@ const editorTheme = EditorView.theme({
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
     backgroundColor: 'var(--dsw-alias-interactive-bg-hover)',
   },
+  // Search overlay: @codemirror/search's own highlighter only decorates while
+  // its built-in panel is open, so these are the classes the search field's
+  // marks carry; both schemes read them through the warn accent at two
+  // strengths, the revealed match the stronger one.
+  '.cm-searchMatch': {
+    backgroundColor: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 30%, transparent)',
+    borderRadius: '2px',
+  },
+  '.cm-searchMatch.cm-searchMatch-selected': {
+    backgroundColor: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 60%, transparent)',
+    outline: '1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 80%, transparent)',
+  },
+  // The go-to-line target: one line lit, fading out; the state field removes
+  // the decoration after GOTO_FLASH_MS so a repeat jump flashes again.
+  '.cm-gotoFlash': {
+    animation: 'dsw-goto-line-flash 1.4s ease-out',
+  },
+  '@keyframes dsw-goto-line-flash': {
+    from: { backgroundColor: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)' },
+    to: { backgroundColor: 'transparent' },
+  },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--shiki-foreground)' },
 })
 
@@ -154,18 +176,6 @@ const highlightStyle = HighlightStyle.define([
 ])
 
 /**
- * Reveal one match without moving DOM focus, so a focused find field keeps it.
- * @param view - the editor view.
- * @param match - the match range to select and center.
- */
-function revealMatch(view: EditorView, match: { readonly from: number; readonly to: number }): void {
-  view.dispatch({
-    selection: { anchor: match.from, head: match.to },
-    effects: EditorView.scrollIntoView(match.from, { y: 'center' }),
-  })
-}
-
-/**
  * Step through the collected matches, wrapping at either end.
  * @param view - the editor view, or `null` before it mounts.
  * @param state - the collected matches and the revealed index.
@@ -181,8 +191,7 @@ function stepSearch(
   if (view === null || total === 0) return { matches: total, index: state.index }
   const index = (state.index + delta + total) % total
   state.index = index
-  const match = state.matches[index]
-  if (match !== undefined) revealMatch(view, match)
+  revealMatch(view, { ranges: state.matches, index })
   return { matches: total, index }
 }
 
@@ -203,6 +212,8 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
     onViewStateRef.current = props.onViewState
     /** The current query's matches, in document order, and the revealed index. */
     const searchRef = useRef<{ matches: readonly { from: number; to: number }[]; index: number }>({ matches: [], index: 0 })
+    /** The pending go-to-line flash removal, if any. */
+    const flashTimerRef = useRef<number | undefined>(undefined)
     // Mount-time inputs: the view is created once and then driven by the
     // effects/handle, so later prop changes must not re-create it.
     const initialRef = useRef({
@@ -223,11 +234,15 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
         const newLines = text.split('\n')
         const anchor = mapOffsetThroughReplacement(view.state.doc, selection.anchor, newLines)
         const head = mapOffsetThroughReplacement(view.state.doc, selection.head, newLines)
+        // A replaced document invalidates the collected matches: drop the
+        // overlay with it instead of leaving marks on unrelated text.
+        searchRef.current = { matches: [], index: 0 }
         applyingRef.current = true
         try {
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: text },
             selection: { anchor, head },
+            effects: setSearchOverlay.of(null),
           })
         } finally {
           applyingRef.current = false
@@ -253,9 +268,18 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
         const info = view.state.doc.line(target)
         view.dispatch({
           selection: { anchor: info.from },
-          effects: EditorView.scrollIntoView(info.from, { y: 'center' }),
+          effects: [
+            EditorView.scrollIntoView(info.from, { y: 'center' }),
+            setGotoFlash.of(target),
+          ],
         })
         view.focus()
+        if (flashTimerRef.current !== undefined) window.clearTimeout(flashTimerRef.current)
+        flashTimerRef.current = window.setTimeout(() => {
+          flashTimerRef.current = undefined
+          const active = viewRef.current
+          if (active !== null) active.dispatch({ effects: setGotoFlash.of(null) })
+        }, GOTO_FLASH_MS)
       },
       setSearch: (text, options) => {
         const view = viewRef.current
@@ -265,33 +289,28 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
           caseSensitive: options.caseSensitive,
           regexp: options.regexp,
           // A search field is literal text: never expand escape sequences.
-
           literal: true,
         })
         view.dispatch({ effects: setSearchQuery.of(query) })
-        if (text === '') {
+        if (text === '' || !query.valid) {
+          // Empty or syntactically invalid (an unbalanced regex group): the
+          // bar's quiet empty state, never a thrown cursor.
           searchRef.current = { matches: [], index: 0 }
+          view.dispatch({ effects: setSearchOverlay.of(null) })
           return { matches: 0, index: 0 }
         }
-        const matches: { from: number; to: number }[] = []
-        const cursor = query.getCursor(view.state.doc)
-        for (let step = cursor.next(); !step.done && matches.length < MAX_SEARCH_MATCHES; step = cursor.next()) {
-          matches.push(step.value)
-        }
+        const matches = collectMatches(view.state.doc, query, MAX_SEARCH_MATCHES)
         if (matches.length === 0) {
           searchRef.current = { matches: [], index: 0 }
+          view.dispatch({ effects: setSearchOverlay.of(null) })
           return { matches: 0, index: 0 }
         }
         const anchor = view.state.selection.main.from
         const found = matches.findIndex(match => match.from >= anchor)
         const index = found === -1 ? 0 : found
-        const revealed = matches[index]
-        if (revealed === undefined) {
-          searchRef.current = { matches: [], index: 0 }
-          return { matches: 0, index: 0 }
-        }
         searchRef.current = { matches, index }
-        revealMatch(view, revealed)
+        const overlay: SearchOverlay = { ranges: matches, index }
+        revealMatch(view, overlay)
         return { matches: matches.length, index }
       },
       searchNext: () => stepSearch(viewRef.current, searchRef.current, 1),
@@ -300,7 +319,9 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
         const view = viewRef.current
         searchRef.current = { matches: [], index: 0 }
         if (view === null) return
-        view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: '' })) })
+        view.dispatch({
+          effects: [setSearchQuery.of(new SearchQuery({ search: '' })), setSearchOverlay.of(null)],
+        })
       },
     }), [])
 
@@ -316,6 +337,7 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
           highlightActiveLineGutter(),
           history(),
           search(),
+          ...searchOverlayExtensions(),
           EditorState.tabSize.of(2),
           EditorView.contentAttributes.of({ spellcheck: 'false' }),
           wrapCompartment.current.of(initial.wrap ? EditorView.lineWrapping : []),
@@ -373,6 +395,7 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorHandle, CodeMirrorEditorPro
       view.scrollDOM.addEventListener('scroll', reportScroll, { passive: true })
       return () => {
         view.scrollDOM.removeEventListener('scroll', reportScroll)
+        if (flashTimerRef.current !== undefined) window.clearTimeout(flashTimerRef.current)
         view.destroy()
         viewRef.current = null
       }

@@ -222,7 +222,11 @@ export interface SaveBaseline {
   readonly size: number | undefined
 }
 
-/** SHA-256 of one string as lowercase hex, or `undefined` where WebCrypto is unavailable. */
+/**
+ * SHA-256 of one string as lowercase hex.
+ * @param text - the text to digest.
+ * @returns the lowercase hex digest, or `undefined` where WebCrypto is unavailable.
+ */
 export async function sha256Hex(text: string): Promise<string | undefined> {
   // A page served over plain HTTP can lack WebCrypto entirely; the declared
   // lib type always has it, so the optional read is restated here.

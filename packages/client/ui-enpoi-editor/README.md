@@ -15,6 +15,7 @@ The right Sidebar's editable workbench: a session file opened as a tab type at t
 
 - [What it registers](#what-it-registers)
 - [Editing and saving](#editing-and-saving)
+- [Finding and navigating](#finding-and-navigating)
 - [External changes](#external-changes)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
@@ -30,7 +31,7 @@ The right Sidebar's editable workbench: a session file opened as a tab type at t
 - **The body** — the keyed `sidebar.right.pane.tab` seat under the same id: toolbar, banners, the editor or preview, and the loading/missing/failed states. A declared store keyed by tab id holds one file's content, disk baseline, dirty buffer, and view choices so switching tabs and coming back keeps unsaved edits.
 - **Copy** — the `enpoiEditor` locale namespace.
 
-Five source files under `src/client/`: `definition.ts` (the type), `fsops.ts` (the `/sidebar/fsops` client), `machine.ts` (the async read/poll/save decisions), `store.ts` (what a tab keeps), `languages.ts` (the grammar map), and the components `EditorBody.tsx` / `CodeMirrorEditor.tsx` plus `EditorBody.module.css` and `icons.tsx` (the wiring lives in `index.ts`).
+Six source files under `src/client/`: `definition.ts` (the type), `fsops.ts` (the `/sidebar/fsops` client), `machine.ts` (the async read/poll/save decisions), `store.ts` (what a tab keeps), `search.ts` (the find overlay, its reveal, and the go-to-line flash), `languages.ts` (the grammar map), and the components `EditorBody.tsx` / `CodeMirrorEditor.tsx` plus `EditorBody.module.css` and `icons.tsx` (the wiring lives in `index.ts`).
 
 <a id="editing-and-saving"></a>
 ## Editing and saving
@@ -40,6 +41,15 @@ The editor is CodeMirror 6 with line numbers, undo history, a small language set
 A save writes with `expectedSha` — the SHA-256 of the content **last read from disk**, never of the edited buffer. A `409 conflict` raises the conflict banner with **Overwrite** (retries with `expectedSha` omitted, the route's force form) and **Reload**; the buffer survives until the operator chooses. A truncated read (`truncated: true`) is read-only and never saves: the editor drops its save control and shows the notice, because a partial buffer must never replace the file.
 
 I/O is same-origin `POST /sidebar/fsops/<method>` with `content-type: application/json`, wrapped by the injected `EditorFsOps` face: `fs.read` → `{content, sha256, mtimeMs, size, truncated}`, `fs.write` → the new digest/stat (or `409 conflict`), and `fs.stat` → `{mtimeMs, size}`. `not-found` (404) is a state, not an error.
+
+<a id="finding-and-navigating"></a>
+## Finding and navigating
+
+**Find** (`Mod-F` or the toolbar control) opens the themed bar over the editing surface. Matches highlight as the query is typed, `Enter`/`Shift-Enter` (and the chevrons) step through them with wrap-around, and the counter reads `index / total` or the quiet **No matches** state. The case (`Aa`) and regex (`.*`) toggles re-query in place; regex is anchored at the query's own syntax and case-insensitive unless the case toggle is on. Escape sequences are never expanded when regex mode is off — a find field is literal text. An invalid pattern (`(`) is not an error surface: the bar reports **No matches** and clears the marks instead of throwing.
+
+`@codemirror/search`'s own highlighter only decorates matches while its built-in panel is open, so this package owns the overlay: `search.ts` collects the query's ranges, marks every one `cm-searchMatch` and the revealed one `cm-searchMatch-selected` in a `StateField`, and dispatches the overlay, the selection, and a centered `EditorView.scrollIntoView` in one transaction — the match highlights and scrolls into view on the first query as well as on every step. `CodeMirrorEditor.tsx` styles both classes through `--dsw-alias-state-warn-primary` at two strengths, so they follow the active skin in either scheme; decorations map through document changes and clear when a replaced document invalidates the ranges.
+
+**Go to line** (`g` or the toolbar control, while this renderer is selected) moves the cursor to the 1-based line, centers it, focuses the editor, and flashes the target line briefly (`cm-gotoFlash`, a line decoration removed after 1.4 s so a repeat jump flashes again).
 
 <a id="external-changes"></a>
 ## External changes
