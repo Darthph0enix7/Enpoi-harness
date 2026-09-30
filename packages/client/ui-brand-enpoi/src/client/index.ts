@@ -37,6 +37,8 @@ import {
 import { PermissionsSettings } from './PermissionsSettings.tsx'
 import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { en as dynamicSkillsEn, zh as dynamicSkillsZh, type DynamicSkillsKey } from './dynamic/skills-locales.ts'
+import { McpMountsChip } from './McpMountsChip.tsx'
+import { en as mcpMountsEn, zh as mcpMountsZh, type McpMountsKey } from './mcp-mounts-locales.ts'
 import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
 import type { TerminalRegistryState } from './terminal/registry.ts'
@@ -89,6 +91,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Skills & tools panel CRUD copy (Dynamic section). */
     'settings.dynamicSkills': DynamicSkillsKey
+    /** Session header MCP mounts chip copy. */
+    mcpMounts: McpMountsKey
   }
 }
 
@@ -285,6 +289,17 @@ export function apply(ctx: Context): void {
   // skill CRUD over the profile's fenced /sidebar/fsops skills.* routes; its
   // dialog copy rides this section's locale namespace.
   ctx.effect(() => ctx.locale.register('settings.dynamicSkills', { zh: dynamicSkillsZh, en: dynamicSkillsEn }), 'enpoi: dynamic skills dictionaries')
+
+  // 2f. Session header: the MCP mounts chip (on-demand mounting visibility).
+  // The mounted set is the durable `mcpMounts` session projection; the popover
+  // lists the live rows and closes each server through the capabilities remote.
+  ctx.effect(() => ctx.locale.register('mcpMounts', { zh: mcpMountsZh, en: mcpMountsEn }), 'enpoi: mcp mounts dictionaries')
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'mcp-mounts',
+    order: -9,
+    locale: 'mcpMounts',
+  }, McpMountsChip))
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'dynamic',

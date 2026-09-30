@@ -112,6 +112,7 @@ interface ParsedSkill extends SkillText {
   name: string
   description: string
   whenToUse?: string
+  mcp?: string[]
   invocation: SkillInvocationPolicy
   metadata?: Record<string, unknown>
 }
@@ -215,6 +216,7 @@ export class FileSystemSkillProvider implements SkillProvider {
       name: parsed.name,
       description: parsed.description,
       ...parsed.whenToUse !== undefined ? { whenToUse: parsed.whenToUse } : {},
+      ...parsed.mcp !== undefined ? { mcp: parsed.mcp } : {},
       invocation: parsed.invocation,
       source: candidate.source,
       provider: this.name,
@@ -737,6 +739,7 @@ async function discoverRoot(root: SkillRoot, ctx: Context, provider: string): Pr
       name: parsed.name,
       description: parsed.description,
       ...parsed.whenToUse !== undefined ? { whenToUse: parsed.whenToUse } : {},
+      ...parsed.mcp !== undefined ? { mcp: parsed.mcp } : {},
       invocation: parsed.invocation,
       provider,
       source: root.source,
@@ -832,6 +835,7 @@ async function parseSkillFile(path: string, ctx: Context, signal?: AbortSignal, 
     name,
     description,
     ...optionalString(parsed.data, 'whenToUse'),
+    ...optionalStringArray(parsed.data, 'mcp'),
     invocation,
     ...optionalMetadata(parsed.data),
     path: raw.path,
@@ -995,6 +999,14 @@ function stringField(data: Record<string, unknown>, key: string): string | undef
 function optionalString(data: Record<string, unknown>, key: string): { [K in typeof key]?: string } {
   const value = data[key]
   return typeof value === 'string' && value.length > 0 ? { [key]: value } : {}
+}
+
+/** Optional string-array frontmatter (the `mcp: [server]` skill hint). */
+function optionalStringArray(data: Record<string, unknown>, key: string): { [K in typeof key]?: string[] } {
+  const value = data[key]
+  if (!Array.isArray(value)) return {}
+  const entries = value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+  return entries.length > 0 ? { [key]: entries } : {}
 }
 
 function parseInvocationPolicy(data: Record<string, unknown>): SkillInvocationPolicy {

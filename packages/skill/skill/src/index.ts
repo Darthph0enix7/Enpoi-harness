@@ -63,6 +63,11 @@ export interface SkillSummary {
   readonly description: string
   /** Optional extra routing guidance. */
   readonly whenToUse?: string
+  /**
+   * Optional MCP server ids this skill needs. Loading the skill mounts them
+   * for the calling session (on-demand mounting); absent means no hint.
+   */
+  readonly mcp?: readonly string[]
   /** Resolved model and user invocation controls. */
   readonly invocation: SkillInvocationPolicy
   /** Discovery source that produced this winning skill. */

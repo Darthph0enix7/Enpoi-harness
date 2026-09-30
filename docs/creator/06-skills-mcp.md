@@ -66,11 +66,21 @@ The catalog is `enpoi-orchestration.mcpServers.<id>` (`packages/enpoi-capabiliti
 | `apiKeyEnv` | credential reference resolved to a bearer token |
 | `transport`, `toolCallTimeoutMs` | reserved; the mount pins `streamable-http` and `toolCallTimeoutMs ?? 60000` |
 
-A catalog entry alone does nothing: the mount requires `capabilities.mcp[id] === true` (`index.ts:313-318`, `358-365`).
+A catalog entry alone does nothing: the mount requires `capabilities.mcp[id] === true` (`index.ts:313-318`, `358-365`). The record's `mode` decides WHEN it connects: `always-on` (default) auto-mounts at boot and for every session; `on-demand` never auto-connects — the agent mounts it for its session with the `mcp` tool or a skill's `mcp:` hint, and a server that failed once stays down until explicitly mounted. Heavy servers (hundreds of tools) belong on-demand so they stop taxing every query.
 
 **Mount/unmount = the disposable-fiber pattern** (`index.ts:381-425`): one enabled server is one `ctx.plugin(mcpClient.apply, { transport: 'streamable-http', serverName, url, headers, toolCallTimeoutMs, failOnStartupError: false })` fiber, awaited so its tools register before the toggle settles; disabling it or removing it from the catalog calls `fiber.dispose()`, which disconnects and unregisters every tool of that server. A settings update re-runs the sync, a boot retry fires after 3 s, and a failed mount is retried on the next settings change rather than spamming.
 
 Tool names are server-qualified: `mcp__<serverName>__<rawName>`, normalized to the 64-char `[A-Za-z0-9_-]` function-name contract with a 12-hex SHA-256 suffix when normalization is lossy (`packages/mcp/mcp-client/src/tools.ts:48-87`). Registration is two-phase (fetch the full generation, then swap); a conflict rolls back to zero tools from that server, never a partial set (`tools.ts:113-162`).
+
+## 5.1 MCP — on-demand mounting (session-scoped)
+
+Persistent config says what a server IS (configured + allowed + mode); the agent's mounts are SESSION-scoped and durable through the session log (`mcp/mounts` event → `mcpMounts` projection), so a resumed session comes back with exactly the servers it had mounted, and `session/disposed` releases them (an on-demand server nobody else holds disconnects).
+
+- **The `mcp` tool** (one tool, three actions): `list` (configured servers with mode, state `mounted | available | unavailable`, reason, tool count), `mount <server>` (connect + register for THIS session; a failed connection returns the structured reason from the mcp-client path), `unmount <server>` (dispose this session's mount). Permission row: shipped **allow** — `list` is read-only, and mount/unmount only touch servers the operator already configured and allowed, scoped to the calling session and reversible. The mounted server's OWN tools keep their own rows (`defaults.unknownTools` = `ask`), so the dangerous surface still asks.
+- **Surface honesty**: an on-demand server's `mcp__<server>__*` tools are absent from a session that has not mounted it (the `system-prompt/assemble` filter), and the pre-execute listener denies direct calls as the execution backstop. Model-visible ⟺ logged: the drop is announced on stderr and the harness's tool-registry message records the additions/removals.
+- **Skill hint**: a skill's frontmatter may carry `mcp: [server]`; loading the skill mounts the listed servers for the session and attaches a note to the load result (`mcp: mounted "x" for this session (N tools)`, or the failure reason). A skill without the hint behaves exactly as before.
+- **Operator surface**: the session header's MCP chip lists the session's mounted servers (tool counts) and closes each one through the `enpoiCapabilities.mcpUnmount` remote.
+- **Doctrine**: the `mcp:lifecycle` system-prompt section states the lifecycle — mounts for continuing work stay; one-shot errands unmount when done; when unsure, leave it mounted.
 
 ## 6. MCP — auth, status, permissions, removal
 
