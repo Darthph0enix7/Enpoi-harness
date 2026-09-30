@@ -95,9 +95,28 @@ describe('system analysis runner', () => {
     expect(document).toContain('# System profile')
     expect(document).toContain('sysadmin agent on kilo/kilo-auto/free')
     expect(document).toContain('## At a glance')
+    // The header owns the one document title.
+    expect(document.match(/^# /gmu)).toHaveLength(1)
     // The stored document is stable: no timestamp and no version-like fact.
     expect(document).not.toMatch(/\d{4}-\d{2}-\d{2}T/u)
     expect(documentViolations(document)).toEqual([])
+  })
+
+  it('drops an agent-authored title above the body instead of doubling the header', async () => {
+    const writeProfile = vi.fn((_markdown: string) => '/tmp/system-profile.md')
+    const runner = createAnalysisRunner(dependencies({
+      writeProfile,
+      investigate: async (onStage) => {
+        await Promise.resolve()
+        for (const stage of ANALYSIS_STAGES.slice(0, -1)) onStage(stage)
+        return { ...OUTCOME, document: '# System profile\n\n## At a glance\n\n- A self-hosted machine.\n' }
+      },
+    }))
+    runner.start()
+    await settled()
+    const document = writeProfile.mock.calls[0]?.[0] ?? ''
+    expect(document.match(/^# /gmu)).toHaveLength(1)
+    expect(document).toContain('## At a glance')
   })
 
   it('derives one stage position into a bounded percentage', () => {

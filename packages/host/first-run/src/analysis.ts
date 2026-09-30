@@ -130,6 +130,19 @@ function profileHeader(route: string, preset: string): string[] {
 }
 
 /**
+ * Drop the agent's own leading `# …` title when it repeats the header's:
+ * the header owns the document title, and some runs add one anyway.
+ */
+function withoutLeadingTitle(document: string): string {
+  const lines = document.trim().split('\n')
+  if (lines[0]?.startsWith('# ')) {
+    lines.shift()
+    while (lines[0]?.trim() === '') lines.shift()
+  }
+  return lines.join('\n')
+}
+
+/**
  * Build one runner over the injected dependencies.
  * @param dependencies - investigation, storage, and clock.
  * @param lifetime - aborts a live run when the owning plugin unloads.
@@ -167,7 +180,7 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetim
         dependencies.writeProfileJson(JSON.stringify(outcome.profile, null, 2))
         const contextPath = dependencies.writeProfile([
           ...profileHeader(dependencies.route, dependencies.preset),
-          outcome.document.trim(),
+          withoutLeadingTitle(outcome.document),
           '',
         ].join('\n'))
         job = {
