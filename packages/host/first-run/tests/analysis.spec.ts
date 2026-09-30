@@ -46,7 +46,6 @@ function dependencies(overrides: Partial<AnalysisDependencies> = {}): AnalysisDe
     readDecision: () => null,
     writeDecision: () => {},
     removeDecision: () => {},
-    route: 'kilo/kilo-auto/free',
     preset: 'sysadmin',
     now: () => 1_000,
     ...overrides,
@@ -94,7 +93,7 @@ describe('system analysis runner', () => {
     expect(writeProfileJson).toHaveBeenCalledWith(JSON.stringify(OUTCOME.profile, null, 2))
     const document = writeProfile.mock.calls[0]?.[0] ?? ''
     expect(document).toContain('# System profile')
-    expect(document).toContain('sysadmin agent on kilo/kilo-auto/free')
+    expect(document).toContain('sysadmin agent. The structured profile')
     expect(document).toContain('## At a glance')
     // The header owns the one document title.
     expect(document.match(/^# /gmu)).toHaveLength(1)

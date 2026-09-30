@@ -81,8 +81,6 @@ export interface AnalysisDependencies {
   writeDecision: (decision: SystemProfileDecision) => void
   /** Clear the decision marker when a new profile is published. */
   removeDecision: () => void
-  /** `provider/model` label the document header records. */
-  route: string
   /** Agent preset the document header records. */
   preset: string
   now: () => number
@@ -130,11 +128,11 @@ export function stagePct(stageIndex: number, stageCount: number): number {
  * valid as the machine changes, so no timestamp or environment inventory is
  * recorded here.
  */
-function profileHeader(route: string, preset: string): string[] {
+function profileHeader(preset: string): string[] {
   return [
     '# System profile',
     '',
-    `_Read-only investigation by the ${preset} agent on ${route}. The structured profile is stored beside this document as system-profile.json._`,
+    `_Read-only investigation by the ${preset} agent. The structured profile is stored beside this document as system-profile.json._`,
     '',
   ]
 }
@@ -189,7 +187,7 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetim
       try {
         dependencies.writeProfileJson(JSON.stringify(outcome.profile, null, 2))
         const contextPath = dependencies.writeProfile([
-          ...profileHeader(dependencies.route, dependencies.preset),
+          ...profileHeader(dependencies.preset),
           withoutLeadingTitle(outcome.document),
           '',
         ].join('\n'))
@@ -390,7 +388,6 @@ export function apply(ctx: Context, config: AnalysisConfig): void {
     readDecision: () => readSystemProfileDecision(),
     writeDecision: (decision) => { writeSystemProfileDecision(decision) },
     removeDecision: () => { removeSystemProfileDecision() },
-    route: `${config.provider}/${config.model}`,
     preset: config.preset,
     now: () => Date.now(),
   }, lifetime.signal)

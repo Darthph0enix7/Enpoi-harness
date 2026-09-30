@@ -68,7 +68,7 @@ describe('first-run setup live proof', () => {
     expect(job.state, JSON.stringify(job)).toBe('succeeded')
     const profile = await readFile(join(scaffold.harnessHome, 'system-profile.md'), 'utf8')
     expect(profile).toContain('# System profile')
-    expect(profile).toContain('Read-only investigation by the sysadmin agent on kilo/kilo-auto/free')
+    expect(profile).toContain('Read-only investigation by the sysadmin agent.')
     // The generalized document carries the fixed section skeleton and no
     // exact machine facts (versions, addresses, domains).
     for (const section of [
