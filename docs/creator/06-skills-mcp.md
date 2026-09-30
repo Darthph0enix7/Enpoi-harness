@@ -21,6 +21,8 @@ Roots and ranks (`packages/skill/skill-filesystem/src/index.ts:36-40`, `245-264`
 
 Config (`Config`, `index.ts:48-89`): `providerName` (`filesystem`), `includeDefaultRoots` (`true`), `dshHome`/`agentsHome` (env/`~` defaults), `customSkillDirs` (`[]`), `watch` (`true`), `watchUsePolling` (`false`), `watchStabilityThresholdMs` (`200`), `watchPollIntervalMs` (`100`), `watchMaxProjects` (`128`), `watchFollowSymlinks` (`true`), `bundledSkillDir`.
 
+**UI path** — Settings → Skills (the harness `packages/client/ui-brand-enpoi` registers the section; the profile's `packages/enpoi-fs-ops` plugin serves it) lists this profile's skills dir (`$PROFILE/skills`, the `customSkillDirs` root) plus the registry catalog, and creates, edits, and deletes definitions through the fenced `/sidebar/fsops` `skills.*` routes — no filesystem or Creator session needed, the same convenience as the MCP and role panels. Create writes `<root>/<name>/SKILL.md` (kebab-case name, `name`/`description` frontmatter, submitted body); Edit rewrites the `description:` entry and body while preserving every other frontmatter line; Delete moves the bundle to `$DSH_HOME/trash/skills` (never `rm`) and refuses the three shipped tier skills with a `protected` error. Every mutation lands on disk, so the watcher refreshes the agent catalog exactly as a hand-written file does — on the presets that mount this root (`preset-creator` today).
+
 ## 3. Skills — the file contract
 
 Two forms per root, both requiring YAML frontmatter (`skill-filesystem/src/index.ts:723-733`, `797-839`):
@@ -41,7 +43,7 @@ Frontmatter fields:
 
 Legacy keys (`disableModelInvocation`, `modelInvocable`, `userInvocable`) are rejected; booleans accept `true/false/yes/no/on/off/1/0` (`index.ts:1000-1037`).
 
-**Add**: write the file; the watcher invalidates the catalog, so the next turn sees it — no restart. **Remove**: delete it, or keep it installed and shadow it by setting `enpoi-orchestration.capabilities.skills.<name>: false` — the disabled skill vanishes from the catalog, the `skill` tool result, and the `/name` gesture, and its execution is denied before dispatch (B4: `packages/enpoi-capabilities/src/index.ts:531-559`; enforcement `enforcement.ts:72-81`). Zero token cost either way.
+**Add**: write the file, or create it in Settings → Skills (name, description, body) — both write the same `<root>/<name>/SKILL.md`; the watcher invalidates the catalog, so the next turn sees it — no restart. **Remove**: delete it in Settings → Skills (trash-staged; the shipped tier skills are refused), or delete the file, or keep it installed and shadow it by setting `enpoi-orchestration.capabilities.skills.<name>: false` — the disabled skill vanishes from the catalog, the `skill` tool result, and the `/name` gesture, and its execution is denied before dispatch (B4: `packages/enpoi-capabilities/src/index.ts:531-559`; enforcement `enforcement.ts:72-81`). Zero token cost either way.
 
 ## 4. Skills — how they are invoked and permitted
 

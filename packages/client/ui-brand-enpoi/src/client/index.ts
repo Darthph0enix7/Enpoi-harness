@@ -35,6 +35,8 @@ import {
   subscribeCompactionPolicy,
 } from './compaction-policy.ts'
 import { PermissionsSettings } from './PermissionsSettings.tsx'
+import { SkillsSettings } from './skills/SkillsSettings.tsx'
+import { en as skillsEn, zh as skillsZh, type SkillsSettingsKey } from './skills/locales.ts'
 import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { TerminalRegistry } from './terminal/registry.ts'
 import type { TerminalInjected } from './terminal/contract.ts'
@@ -83,6 +85,13 @@ import {
 
 /** Required services: the UI slot registry, right-sidebar tab registry, model directory, sessions, locale, and Remote push. */
 export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'sessions', 'locale', 'remote']
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Skills management section copy. */
+    'settings.skills': SkillsSettingsKey
+  }
+}
 
 /**
  * Cell priority for The Mark's keyed `tool.call.toolview` entries. Lower than
@@ -280,6 +289,19 @@ export function apply(ctx: Context): void {
     order: 22,
     label: () => 'Dynamic',
   }, DynamicSettings))
+
+  // 2e. Skills management settings section: list the live catalog and create,
+  // edit, and delete skill definitions through the profile's fenced
+  // /sidebar/fsops skills.* routes. Sits beside Dynamic, which only toggles
+  // already-installed skills.
+  ctx.effect(() => ctx.locale.register('settings.skills', { zh: skillsZh, en: skillsEn }), 'enpoi: skills section dictionaries')
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'skills',
+    order: 23,
+    label: () => ctx.locale.bind('settings.skills')('nav'),
+    locale: 'settings.skills',
+  }, SkillsSettings))
 
   // 2c. Permission policy settings section (doc 55)
   ctx.slots.inject('settings.section', () => ctx.slots.register({
