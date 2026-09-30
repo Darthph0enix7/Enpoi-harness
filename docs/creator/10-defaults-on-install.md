@@ -77,6 +77,15 @@ Two layers:
 
 Settings-document toggles apply hot on the next spawn/render; bundle list changes (`$PROFILE/package.json` → `dsh.profile.bundles`) need a profile rebuild and `dsh restart --after-turn` (never restart from inside a turn).
 
+## Defaults vs session overrides (capability scoping)
+
+The effective capability surface is **profile DEFAULTS ⊕ SESSION OVERRIDES**:
+
+- **Defaults** live in the `enpoi-orchestration` document (`capabilities.skills/tools/mcp`, plus the per-role availability). Editing on the blank/new-session page of the Capabilities Control Center writes them; every future session inherits, and a session without overrides reads them directly.
+- **Session overrides** live in the session log: the `capabilities/overrides` event carries the complete post-change record (`skills`/`tools`/`mcp` maps; an absent key inherits) and the `capabilityOverrides` projection folds it with a wire view, so a resumed session comes back with exactly its overrides. Editing inside a live session writes only this layer — durable, logged, the default untouched. A per-row **Reset** removes the override.
+- **MCP mounts are session overrides**: the `mcp/mounts` event + `mcpMounts` projection (on-demand servers; always-on servers are implicitly mounted). Reset unmounts.
+- **Runtime application**: the system-prompt tool-surface filter, the skill-catalog filter, and the pre-execute capability backstop all compute the effective state per session (`effectiveCapabilitiesState`), so a default change reaches new sessions and override-free sessions, while an override is hot-applied to its own session only. The surface change is logged (model-visible ⟺ logged).
+
 ## Where "install defaults" come from
 
 - Installer seeds `$DSH_HOME` once: `fresh-settings.yaml` → `settings.yaml`, plus presets, skills, systemd/fish helpers (`$REPO/scripts/install.sh:1-25,627,664`).

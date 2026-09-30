@@ -308,7 +308,42 @@ export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = [
     prefix: 'whiteboard_',
     members: ['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget'],
   },
+  {
+    id: 'peer_*',
+    name: 'Peer (fleet devices)',
+    prefix: 'peer_',
+    members: ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'],
+  },
+  {
+    id: 'memory_*',
+    name: 'Memory',
+    prefix: 'memory_',
+    members: ['memory_save', 'memory_search', 'memory_rescind', 'memory_confirm'],
+  },
+  {
+    id: 'council_*',
+    name: 'Council',
+    prefix: 'council_',
+    members: ['council_list', 'council_register'],
+  },
+  {
+    id: 'session_*',
+    name: 'Session queries',
+    prefix: 'session_',
+    members: ['session_search', 'session_trace', 'session_event_read', 'session_event_search', 'session_event_trace'],
+  },
+  {
+    id: 'reports_*',
+    name: 'Reports & review',
+    prefix: 'reports_',
+    members: ['diagnostics_report', 'fast_report', 'review_run'],
+  },
 ]
+
+/** Curated label overrides where the mechanical humanizer reads wrong. */
+export const TOOL_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
+  mcp: 'MCP servers (mount / unmount)',
+}
 
 /** One MCP server group: the server wildcard key plus its live public tools. */
 export interface McpToolGroup {
@@ -402,14 +437,14 @@ export function buildPermissionToolRows(
 
   for (const id of CORE_PERMISSION_TOOLS) {
     if (folded.has(id)) continue
-    rows.set(id, { id, name: prettyToolName(id), kind: 'tool' })
+    rows.set(id, { id, name: TOOL_LABEL_OVERRIDES[id] ?? prettyToolName(id), kind: 'tool' })
   }
   for (const { family, members } of families) {
     rows.set(family.id, { id: family.id, name: family.name, kind: 'family', members })
   }
   for (const id of nonMcp) {
     if (rows.has(id) || folded.has(id)) continue
-    rows.set(id, { id, name: prettyToolName(id), kind: 'tool' })
+    rows.set(id, { id, name: TOOL_LABEL_OVERRIDES[id] ?? prettyToolName(id), kind: 'tool' })
   }
 
   const groups = groupMcpToolNames(mcpServers, mcpNames).filter(group => group.tools.length > 0)

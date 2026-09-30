@@ -71,15 +71,24 @@ function mutateBodies(fetchMock: ReturnType<typeof vi.fn>): MutateBody[] {
 }
 
 /** Render the tab body with driven framework hooks. */
-async function mountBody() {
+async function mountBody(options: { blank?: boolean; projectionValues?: Record<string, unknown> } = {}) {
   const mod = await import('../src/client/CapabilitiesBody.tsx')
   const openTab = vi.fn()
   // Stable snapshots: the component derives its skill-candidate chain from the
   // session ids, so a fresh array per render would loop the refresh effect.
   const ids = ['sess-1']
+  const state = {
+    ids,
+    byId: {
+      'sess-1': {
+        blank: options.blank ?? true,
+        ...options.projectionValues === undefined ? {} : { projectionValues: options.projectionValues },
+      },
+    },
+  }
   const props = {
     sessionId: 'sess-1',
-    useSessions: (selector: (state: { ids: string[] }) => unknown) => selector({ ids }),
+    useSessions: (selector: (value: typeof state) => unknown) => selector(state),
     useTabInfo: () => ({ tab: { visible: true, actions: { openTab } } }),
   } as unknown as Parameters<typeof mod.CapabilitiesBody>[0]
   render(<mod.CapabilitiesBody {...props} />)
@@ -547,5 +556,102 @@ describe('CapabilitiesBody — shared capability writers', () => {
 
     expect(await mod.toggleCapability('tool', 'read', false)).toBe(false)
     expect(mutateBodies(fetchMock)).toHaveLength(1)
+  })
+})
+
+describe('CapabilitiesBody — defaults vs session overrides', () => {
+  /** Serve the drawer's registries with one skill and one on-demand MCP server. */
+  function scopingFetch() {
+    return vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({
+          mcpServers: { 'plane-mcp': { serverName: 'plane', url: 'http://127.0.0.1:8211/mcp', mode: 'on-demand' } },
+          capabilities: { mcp: { 'plane-mcp': true }, skills: {}, tools: {} },
+        }, 4)
+      }
+      const registry = registryResponse(method, [{ name: 'tier1-workflow', description: 'Guided planning' }], [], [])
+      if (registry !== undefined) return registry
+      if (method === 'settings.mutate') return jsonResponse({ result: { ok: true, value: { revision: 5 } } })
+      return jsonResponse({ result: { ok: true, value: { ok: true, reason: '' } } })
+    })
+  }
+
+  it('labels the blank page as defaults and writes the profile default', async () => {
+    const fetchMock = scopingFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody({ blank: true })
+    expect(await screen.findByText('Editing defaults')).toBeTruthy()
+    expect(screen.getByText(/every future session inherits/)).toBeTruthy()
+    expect(screen.queryByText('session')).toBeNull()
+
+    fireEvent.click(screen.getByLabelText('Disable Tier1 Workflow'))
+    await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
+    expect(mutateBodies(fetchMock)[0]!.payload.args.ops).toEqual([
+      { op: 'set', path: ['capabilities', 'skills', 'tier1-workflow'], value: false },
+    ])
+  })
+
+  it('labels a live session, writes an override, and marks the row', async () => {
+    const fetchMock = scopingFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody({
+      blank: false,
+      projectionValues: { capabilityOverrides: { skills: { 'tier1-workflow': false }, tools: {}, mcp: {} } },
+    })
+    expect(await screen.findByText('This session')).toBeTruthy()
+    expect(screen.getByText(/the profile default is untouched/)).toBeTruthy()
+    // The overridden row carries the marker and a Reset control.
+    expect(screen.getByText('session')).toBeTruthy()
+    expect(screen.getByLabelText('Reset Tier1 Workflow to the profile default')).toBeTruthy()
+    // The effective value is the override (off), not the default (on).
+    expect(screen.getByLabelText('Enable Tier1 Workflow').getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(screen.getByLabelText('Enable Tier1 Workflow'))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/enpoiCapabilities.setCapabilityOverride')).toBe(true)
+    })
+    const call = fetchMock.mock.calls.find(candidate => String(candidate[0]) === '/api/enpoiCapabilities.setCapabilityOverride')!
+    const body = JSON.parse(String((call[1] as RequestInit).body))
+    expect(body.payload.args).toEqual({ sessionId: 'sess-1', kind: 'skills', id: 'tier1-workflow', value: true })
+    // No default write happened.
+    expect(mutateBodies(fetchMock)).toHaveLength(0)
+  })
+
+  it('resets an overridden row to the default', async () => {
+    const fetchMock = scopingFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody({
+      blank: false,
+      projectionValues: { capabilityOverrides: { skills: { 'tier1-workflow': false }, tools: {}, mcp: {} } },
+    })
+    fireEvent.click(await screen.findByLabelText('Reset Tier1 Workflow to the profile default'))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/enpoiCapabilities.setCapabilityOverride')).toBe(true)
+    })
+    const call = fetchMock.mock.calls.find(candidate => String(candidate[0]) === '/api/enpoiCapabilities.setCapabilityOverride')!
+    const body = JSON.parse(String((call[1] as RequestInit).body))
+    expect(body.payload.args).toEqual({ sessionId: 'sess-1', kind: 'skills', id: 'tier1-workflow', value: null })
+  })
+
+  it('shows an agent MCP mount as a session override and resets by unmounting', async () => {
+    const fetchMock = scopingFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody({
+      blank: false,
+      projectionValues: { mcpMounts: { mounted: ['plane-mcp'] }, capabilityOverrides: { skills: {}, tools: {}, mcp: {} } },
+    })
+    expect(await screen.findByText('Plane MCP')).toBeTruthy()
+    // Mounted on-demand server: enabled + marked as a session override.
+    expect(screen.getByLabelText('Disable Plane MCP').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByLabelText('Reset Plane MCP to the profile default')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('Reset Plane MCP to the profile default'))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/enpoiCapabilities.mcpUnmount')).toBe(true)
+    })
+    const call = fetchMock.mock.calls.find(candidate => String(candidate[0]) === '/api/enpoiCapabilities.mcpUnmount')!
+    const body = JSON.parse(String((call[1] as RequestInit).body))
+    expect(body.payload.args).toEqual({ sessionId: 'sess-1', server: 'plane-mcp' })
   })
 })

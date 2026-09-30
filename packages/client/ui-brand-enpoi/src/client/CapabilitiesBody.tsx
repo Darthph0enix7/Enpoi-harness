@@ -60,6 +60,10 @@ import {
 } from './permissions-model.ts'
 import { ensureSettingsFresh, getEnpoiNamespacePresence, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './capability-catalog.ts'
+import {
+  effectiveValueOf, isOverridden, mountServerForSession, scopingModeOf, setCapabilityOverride,
+  unmountServerForSession, type CapabilityOverrideRecord, type ScopingMode,
+} from './capability-scoping.ts'
 import type { FleetCouncil, FleetCouncilSeat } from './role-registry.ts'
 import css from './CapabilitiesBody.module.css'
 
@@ -176,6 +180,8 @@ export interface McpServerEntry {
   url?: string
   apiKeyEnv?: string
   headers?: Record<string, string>
+  /** `on-demand` servers are mounted per session; absent = always-on. */
+  mode?: string
 }
 
 /** One effective role row (`enpoiRoles.list`) rendered by the Subagents section. */
@@ -977,6 +983,26 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   const sessionIds = useSessions(state => state.ids)
   const [pending, setPending] = useState<Record<string, boolean>>({})
   const [writeError, setWriteError] = useState<string | null>(null)
+  // Scoping: the blank/new-session page (or no bound session) edits DEFAULTS;
+  // a live session edits SESSION OVERRIDES. MCP mounts are session overrides.
+  const sessionBlank = useSessions(state => sessionId === undefined ? undefined : state.byId[sessionId]?.blank)
+  const mode: ScopingMode = scopingModeOf(sessionId, sessionBlank)
+  const overrides = useSessions(state => sessionId === undefined
+    ? undefined
+    : state.byId[sessionId]?.projectionValues?.capabilityOverrides as CapabilityOverrideRecord | undefined)
+  const mountedServers = useSessions(state => sessionId === undefined
+    ? undefined
+    : (state.byId[sessionId]?.projectionValues?.mcpMounts as { mounted?: readonly string[] } | undefined)?.mounted)
+  // Optimistic layer: an RPC-appended session event reaches the client's
+  // projection store on the next session frame, so a successful write is
+  // mirrored locally until the durable projection catches up (cleared on the
+  // next projection change; a failed write never sets it).
+  const [optimisticOverrides, setOptimisticOverrides] = useState<CapabilityOverrideRecord | null>(null)
+  const [optimisticMounted, setOptimisticMounted] = useState<readonly string[] | null>(null)
+  useEffect(() => { setOptimisticOverrides(null) }, [overrides])
+  useEffect(() => { setOptimisticMounted(null) }, [mountedServers])
+  const effectiveOverrides = optimisticOverrides ?? overrides
+  const effectiveMounted = optimisticMounted ?? mountedServers
 
   // Candidate chain: the tab's own session first, then the newest sessions the
   // list carries. Bounded so an old session never costs a long retry walk.
@@ -1079,14 +1105,88 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       }
     })
 
+  /** The override family behind one row kind. */
+  const familyOf = (kind: LiveRow['kind']): 'skills' | 'tools' | 'mcp' =>
+    kind === 'skill' ? 'skills' : kind === 'tool' ? 'tools' : 'mcp'
+
+  /** Whether one row's MCP server is on-demand (mounts decide its state). */
+  const rowOnDemand = (row: LiveRow): boolean => row.kind === 'mcp' && view.mcpServers[row.id]?.mode === 'on-demand'
+
+  /** The effective enabled state for one row (defaults ⊕ overrides ⊕ mounts). */
+  const rowEffective = (row: LiveRow): boolean => {
+    const family = familyOf(row.kind)
+    const defaults = family === 'mcp' ? caps.mcp[row.id] : family === 'skills' ? caps.skills[row.id] : caps.tools[row.id]
+    return effectiveValueOf(family, row.id, defaults, effectiveOverrides, effectiveMounted, rowOnDemand(row))
+  }
+
+  /** Whether one row is overridden in this session (marker + reset). */
+  const rowOverridden = (row: LiveRow): boolean =>
+    mode === 'session' && isOverridden(familyOf(row.kind), row.id, effectiveOverrides, effectiveMounted, rowOnDemand(row))
+
   const onToggle = (kind: LiveRow['kind'], id: string, next: boolean): void => {
     setWriteError(null)
     const key = `${kind}:${id}`
     setPending(current => ({ ...current, [key]: true }))
-    void toggleCapability(kind, id, next).then((accepted) => {
+    const done = (accepted: boolean, reason?: string): void => {
       setPending(current => ({ ...current, [key]: false }))
-      if (!accepted) setWriteError(`Could not persist ${id} — the toggle was rolled back.`)
-    })
+      if (!accepted) setWriteError(reason ?? `Could not persist ${id} — the toggle was rolled back.`)
+    }
+    if (mode === 'session' && sessionId !== undefined) {
+      // Session override: an on-demand MCP server toggles its MOUNT; every
+      // other row writes the durable override record.
+      if (kind === 'mcp' && rowOnDemand({ id, name: id, description: '', kind })) {
+        void (next ? mountServerForSession(sessionId, id) : unmountServerForSession(sessionId, id))
+          .then((outcome) => {
+            if (outcome.ok) {
+              const current = effectiveMounted ?? []
+              setOptimisticMounted(next ? [...new Set([...current, id])] : current.filter(server => server !== id))
+            }
+            done(outcome.ok, outcome.reason === '' ? undefined : `Could not ${next ? 'mount' : 'unmount'} ${id}: ${outcome.reason}`)
+          })
+        return
+      }
+      void setCapabilityOverride(sessionId, familyOf(kind), id, next)
+        .then((outcome) => {
+          if (outcome.ok) {
+            const family = familyOf(kind)
+            const base = effectiveOverrides ?? { skills: {}, tools: {}, mcp: {} }
+            setOptimisticOverrides({ ...base, [family]: { ...base[family], [id]: next } })
+          }
+          done(outcome.ok, outcome.reason === '' ? undefined : `Could not override ${id}: ${outcome.reason}`)
+        })
+      return
+    }
+    void toggleCapability(kind, id, next).then((accepted) => { done(accepted) })
+  }
+
+  /** Reset one row to the profile default (session mode only). */
+  const onReset = (kind: LiveRow['kind'], id: string): void => {
+    if (sessionId === undefined) return
+    setWriteError(null)
+    const key = `${kind}:${id}`
+    setPending(current => ({ ...current, [key]: true }))
+    const done = (accepted: boolean, reason?: string): void => {
+      setPending(current => ({ ...current, [key]: false }))
+      if (!accepted) setWriteError(reason ?? `Could not reset ${id}.`)
+    }
+    if (kind === 'mcp' && rowOnDemand({ id, name: id, description: '', kind })) {
+      void unmountServerForSession(sessionId, id)
+        .then((outcome) => {
+          if (outcome.ok) setOptimisticMounted((effectiveMounted ?? []).filter(server => server !== id))
+          done(outcome.ok, outcome.reason === '' ? undefined : `Could not unmount ${id}: ${outcome.reason}`)
+        })
+      return
+    }
+    void setCapabilityOverride(sessionId, familyOf(kind), id, null)
+      .then((outcome) => {
+        if (outcome.ok) {
+          const family = familyOf(kind)
+          const base = effectiveOverrides ?? { skills: {}, tools: {}, mcp: {} }
+          const next = Object.fromEntries(Object.entries(base[family]).filter(([key]) => key !== id))
+          setOptimisticOverrides({ ...base, [family]: next })
+        }
+        done(outcome.ok, outcome.reason === '' ? undefined : `Could not reset ${id}: ${outcome.reason}`)
+      })
   }
 
   const errorBanner = view.skillsError !== null
@@ -1127,7 +1227,8 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
         <div className={c('list')}>
           {rows.map((row) => {
             const isProtected = PROTECTED_CAPABILITIES.has(row.id)
-            const enabled = isProtected ? true : rowEnabled(row, caps)
+            const enabled = isProtected ? true : rowEffective(row)
+            const overridden = !isProtected && rowOverridden(row)
             const key = `${row.kind}:${row.id}`
 
             // MCP rows: connection heartbeat beside the switch. The host's
@@ -1172,19 +1273,35 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                     <span>{row.name}</span>
                     {isProtected && <span className={c('coreBadge')}>Core</span>}
                     {row.badge !== undefined && <span className={c('coreBadge')}>{row.badge}</span>}
+                    {overridden && <span className={c('overrideBadge')} data-capability-override={row.id}>session</span>}
                   </div>
                   <div className={c('rowDesc')}>{row.description}</div>
                   {row.kind === 'mcp' && stFresh && st.error !== undefined && (
                     <div className={c('rowError')} title={st.error}>mount failed: {st.error}</div>
                   )}
                 </div>
-                <Switch
-                  checked={enabled}
-                  onChange={(next) => { onToggle(row.kind, row.id, next) }}
-                  label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
-                  disabled={isProtected || pending[key] === true}
-                  title={isProtected ? 'Protected infrastructure capability' : undefined}
-                />
+                <div className={c('rowActions')}>
+                  {overridden && (
+                    <button
+                      type="button"
+                      className={c('resetBtn')}
+                      data-capability-reset={row.id}
+                      title="Reset to the profile default"
+                      aria-label={`Reset ${row.name} to the profile default`}
+                      disabled={pending[key] === true}
+                      onClick={() => { onReset(row.kind, row.id) }}
+                    >
+                      Reset
+                    </button>
+                  )}
+                  <Switch
+                    checked={enabled}
+                    onChange={(next) => { onToggle(row.kind, row.id, next) }}
+                    label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
+                    disabled={isProtected || pending[key] === true}
+                    title={isProtected ? 'Protected infrastructure capability' : undefined}
+                  />
+                </div>
               </div>
             )
           })}
@@ -1221,6 +1338,14 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
             Manage in Settings
           </button>
         </p>
+        <div className={c('modeBar')} data-capability-mode={mode}>
+          <span className={c('modeBadge')}>{mode === 'session' ? 'This session' : 'Editing defaults'}</span>
+          <span className={c('modeHint')}>
+            {mode === 'session'
+              ? 'Changes apply to this session only; the profile default is untouched. Reset a row to inherit again.'
+              : 'Changes persist as the profile default and every future session inherits them.'}
+          </span>
+        </div>
       </header>
 
       {writeError !== null && (
@@ -1244,7 +1369,11 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       </div>
 
       <footer className={c('foot')}>
-        <span>Switches write capabilities.* and apply from the next query. Add, remove, and edit live in Settings → Dynamic.</span>
+        <span>
+          {mode === 'session'
+            ? 'Switches write session overrides (durable, logged) and apply from the next query. Add, remove, and edit live in Settings → Dynamic.'
+            : 'Switches write the profile defaults and apply from the next query. Add, remove, and edit live in Settings → Dynamic.'}
+        </span>
         <button
           type="button"
           className={c('footLink')}
