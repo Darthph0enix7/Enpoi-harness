@@ -22,6 +22,13 @@ function flatten(rows: EntryOptions[]): EntryOptions[] {
   return rows.flatMap(row => [row, ...row.group && Array.isArray(row.config) ? flatten(row.config as EntryOptions[]) : []])
 }
 
+/** The string `id` of one patch-document node, or undefined for other nodes. */
+function nodeId(node: unknown): string | undefined {
+  if (!isMap(node)) return undefined
+  const id = node.get('id')
+  return typeof id === 'string' ? id : undefined
+}
+
 /** Structural view of the optional `modelChains` registry the LLM runtime reads. */
 export interface ModelChainRegistry {
   /**
@@ -176,6 +183,133 @@ export class ConfigEditor extends Service {
     }
     this.inheritedRowsByProfile.set(loaded, rows)
     return rows
+  }
+
+  /**
+   * Insert a new top-level profile row and reconcile the Loader.
+   *
+   * The row is appended to the profile patch document (comment- and
+   * form-preserving), validated by recomposition, written atomically under the
+   * profile lock, and applied through the same reload path as {@link edit}.
+   * @param row - unique entry id, module name, and complete raw config.
+   * @returns Fulfillment after Loader reconciliation completes.
+   * @throws When the id already exists as an entry or a top-level row, or the
+   *   composed row does not carry exactly the supplied config.
+   */
+  async insert(row: { id: string; name: string; config: Record<string, unknown> }): Promise<void> {
+    if (row.id.trim() === '') throw new Error('config-editor: row id must not be empty')
+    const run = async (): Promise<void> => {
+      await withFileLock(join(this.ownerContext.profileContext.dir, 'package.json'), async () => {
+        if (this.entries().some(entry => entry.options.id === row.id)) {
+          throw new Error(`config-editor: entry "${row.id}" already exists`)
+        }
+        const path = this.documentPath
+        let before: string
+        try { before = await readFile(path, 'utf8') }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          before = '[]\n'
+        }
+        const document = parseDocument(before, {
+          customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+        })
+        if (document.errors[0] !== undefined) throw document.errors[0]
+        if (!isSeq(document.contents)) throw new Error('Profile patch must be a YAML sequence')
+        // Rows are created through an `insert` list: a bare `{ id, name, config }`
+        // row is a patch that only targets an existing entry.
+        const items = document.contents.items
+        const duplicate = items.some((item, index) => {
+          if (!isMap(item)) return false
+          if (document.getIn([index, 'id']) === row.id) return true
+          const insert = item.get('insert')
+          return isSeq(insert) && insert.items.some(child => nodeId(child) === row.id)
+        })
+        if (duplicate) throw new Error(`config-editor: profile row "${row.id}" already exists`)
+        document.add(document.createNode({ insert: [{ id: row.id, name: row.name, config: row.config }] }))
+        const profile = this.ownerContext.profileContext
+        const loaded = loadProfileDirectory('dsh', profile.dir, profile.installAnchor)
+        const patches = readProfilePatches('dsh', profile, { ...loaded, patches: yaml.load(String(document), { schema: entryListSchema }) as PatchOptions[] })
+        const effective = flatten(composeEntries([patches])).find(candidate => candidate.id === row.id)
+        if (effective === undefined || !isDeepStrictEqual(effective.config ?? {}, row.config)) {
+          throw new Error(`config-editor: inserted row "${row.id}" did not compose as declared`)
+        }
+        await writeFileAtomic(path, String(document), { mode: 0o600 })
+        try {
+          await reconcileProfilePatches(this.ownerContext.root, patches, 'dsh', [row.id])
+        } catch (error) {
+          await writeFileAtomic(path, before, { mode: 0o600 })
+          await reconcileProfilePatches(this.ownerContext.root, readProfilePatches('dsh', profile), 'dsh')
+          throw error
+        }
+      })
+    }
+    const hmr = this.ownerContext.get('hmr')
+    await (hmr === undefined ? run() : hmr.runExclusive(run))
+  }
+
+  /**
+   * Remove every top-level profile row for an entry id and reconcile the Loader.
+   *
+   * Only top-level rows are removable: a row inside another layer's `insert`
+   * (a shipped declaration) is not owned by this document.
+   * @param id - unique composition entry id.
+   * @returns Fulfillment after Loader reconciliation completes.
+   * @throws When no top-level row carries the id, or the id still composes
+   *   after removal (for example when a bundle inserts it).
+   */
+  async remove(id: string): Promise<void> {
+    const run = async (): Promise<void> => {
+      await withFileLock(join(this.ownerContext.profileContext.dir, 'package.json'), async () => {
+        const path = this.documentPath
+        let before: string
+        try { before = await readFile(path, 'utf8') }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          before = '[]\n'
+        }
+        const document = parseDocument(before, {
+          customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+        })
+        if (document.errors[0] !== undefined) throw document.errors[0]
+        if (!isSeq(document.contents)) throw new Error('Profile patch must be a YAML sequence')
+        let found = false
+        for (let index = document.contents.items.length - 1; index >= 0; index--) {
+          const node = document.contents.items[index]
+          if (!isMap(node)) continue
+          const insert = node.get('insert')
+          if (isSeq(insert)) {
+            for (let child = insert.items.length - 1; child >= 0; child--) {
+              if (nodeId(insert.items[child]) !== id) continue
+              insert.delete(child)
+              found = true
+            }
+            if (insert.items.length === 0) document.delete(index)
+            continue
+          }
+          // Override/disabled rows for the same id belong to it and go with it.
+          if (document.getIn([index, 'id']) === id) {
+            document.delete(index)
+            found = true
+          }
+        }
+        if (!found) throw new Error(`config-editor: profile row "${id}" is not removable from this document`)
+        const profile = this.ownerContext.profileContext
+        const loaded = loadProfileDirectory('dsh', profile.dir, profile.installAnchor)
+        const patches = readProfilePatches('dsh', profile, { ...loaded, patches: yaml.load(String(document), { schema: entryListSchema }) as PatchOptions[] })
+        const remaining = flatten(composeEntries([patches])).find(candidate => candidate.id === id)
+        if (remaining !== undefined) throw new Error(`config-editor: row "${id}" is still composed by another layer`)
+        await writeFileAtomic(path, String(document), { mode: 0o600 })
+        try {
+          await reconcileProfilePatches(this.ownerContext.root, patches, 'dsh')
+        } catch (error) {
+          await writeFileAtomic(path, before, { mode: 0o600 })
+          await reconcileProfilePatches(this.ownerContext.root, readProfilePatches('dsh', profile), 'dsh')
+          throw error
+        }
+      })
+    }
+    const hmr = this.ownerContext.get('hmr')
+    await (hmr === undefined ? run() : hmr.runExclusive(run))
   }
 
   /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.

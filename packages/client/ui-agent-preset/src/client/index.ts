@@ -219,6 +219,18 @@ export function apply(ctx: ClientContext): void {
     }
   }
 
+  // A committed preset write reloads the profile config; the section refreshes
+  // its own roster, and the picker surfaces (hero chip, composer picker,
+  // header label) must read the new roster too — which no settings push covers.
+  const refreshPresetSeats = (): void => {
+    void unboundSeat.load()
+    for (const seat of seats.values) void seat.load()
+  }
+  const authoringWrite = async (write: () => Promise<string | undefined>): Promise<string | undefined> => {
+    const failure = await write()
+    if (failure === undefined) refreshPresetSeats()
+    return failure
+  }
   const sectionInjected = (): AgentPresetSectionInjected => ({
     hooks: { agentPresetSection: section.store, developerTools: ctx.configForms.developerTools.enabled },
     load: () => section.load(),
@@ -226,6 +238,10 @@ export function apply(ctx: ClientContext): void {
     closeView: () => { section.closeView() },
     ...creatorDraft === undefined ? {} : { startCreatorDraft: creatorDraft },
     makeDefault: (id: string) => section.makeDefault(id, captureBlankSessionSync()),
+    presetDetail: (id: string) => section.presetDetail(id),
+    createPreset: input => authoringWrite(() => section.createPreset(input)),
+    updatePreset: input => authoringWrite(() => section.updatePreset(input)),
+    deletePreset: id => authoringWrite(() => section.deletePreset(id)),
   })
 
   // Ordered after Models: choosing a model is routine, and composing an

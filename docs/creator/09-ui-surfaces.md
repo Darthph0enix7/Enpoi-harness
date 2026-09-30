@@ -71,12 +71,13 @@ Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, ma
 | 0 | general | `ui-settings-general/src/client/index.ts:242-245` |
 | 10 | models (providers) | `ui-settings-models/src/client/index.ts:213-217` |
 | 15 | plugins | `ui-settings-plugins/src/client/index.ts:76-80` |
-| 20 | agent-presets | `ui-agent-preset/src/client/index.ts:234-237` |
+| 20 | agent-presets | `ui-agent-preset/src/client/index.ts:239-243` |
 | 20 | orchestration | `ui-brand-enpoi/src/client/index.ts:257-273` |
 | 21 | permissions | `ui-brand-enpoi/src/client/index.ts:285-290` |
 | 22 | dynamic | `ui-brand-enpoi/src/client/index.ts:277-282` |
 
 - **Models/add provider** (`ui-settings-models`): provider list + detail, add wizard, discovery, heavy-provider group (docs 03/10).
+- **Agent presets** (`ui-agent-preset/src/client/AgentPresetSection.tsx`): the roster with the new-task default, mode help, the read-only composition viewer, the Creator-mode entry, and manual authoring — **+ New preset** clones a base preset into a user preset (id, name, description, persona suffix), **Edit** rewrites name/description/suffix of user presets, **Delete** removes their row; shipped presets stay read-only. The host side is `profiles/web/packages/enpoi-preset-authoring` (fenced `/sidebar/presets`, writes through the harness `configEditor`); see 07.
 - **Orchestration** (`OrchestrationSettings.tsx`): groups High Council (`:59-68`), Context Keeper (`:70-79`), Compaction (`:81-89`), Memory (`:91-94`), Oracle (`:96-98`); per-group reset; edits are hot-swapped (intro `:240`). Compaction shows the derived effective policy for the selected summariser route (`:164-191`).
 - **Permissions**: policy editor over the enpoi-capabilities engine (doc 04).
 - **Capabilities and Agent Models are not settings pages** — they are right sidebar tabs (`index.ts:294-358`); settings cross-links open them through the `settingsUi` service (`settings-nav.ts:16-28`).

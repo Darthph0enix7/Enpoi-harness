@@ -12,20 +12,30 @@ const translations: ReadonlyMap<string, string> = new Map(Object.entries(en))
 function unusedHook(): never {
   throw new Error('This section does not read global slot sources')
 }
+const DEFAULT_AUTHORING: AgentPresetSectionState['authoring'] = { status: 'ready', error: null, rows: [
+  { id: 'standard', rowId: 'preset-standard', name: 'Standard', description: '', builtIn: true, disabled: false, hasPersona: true, suffixChars: 12 },
+  { id: 'mine', rowId: 'preset-mine', name: 'Mine', description: '', builtIn: false, disabled: false, hasPersona: true, suffixChars: 5 },
+] }
 function view(partial: Partial<AgentPresetSectionState> = {}, startCreatorDraft?: () => void, developerTools = true,
   outerClose?: () => void) {
   const store = createSnapshotStore<AgentPresetSectionState>({ status: 'ready', error: null,
     saving: false, rows: [{ id: 'standard', isDefault: true }, { id: 'mine', name: 'Mine', isDefault: false }],
-    view: null, ...partial })
+    authoring: DEFAULT_AUTHORING, view: null, ...partial })
   const actions = { load: vi.fn(async () => {}), view: vi.fn(async () => {}), closeView: vi.fn(), makeDefault: vi.fn(async () => {}),
-    close: vi.fn() }
+    close: vi.fn(), presetDetail: vi.fn(async () => ({ detail: { id: 'mine', rowId: 'preset-mine', name: 'Mine', description: 'Mine desc', order: 9,
+      builtIn: false, disabled: false, hasPersona: true, suffixChars: 5, suffix: 'Old doctrine.' } })),
+    createPreset: vi.fn(async () => undefined), updatePreset: vi.fn(async () => undefined), deletePreset: vi.fn(async () => undefined) }
   const props: AgentPresetSectionProps = { ...actions,
     ...(startCreatorDraft === undefined ? {} : { startCreatorDraft }),
     usePanelInfo: unusedHook, useSessions: unusedHook, useSessionStatus: unusedHook, useSessionRetainInfo: unusedHook,
     useWorkspaces: unusedHook, useResource: unusedHook,
     useAgentPresetSection: bindSnapshotSelector(store),
     useDeveloperTools: bindSnapshotSelector(createSnapshotStore(developerTools)),
-    t: key => translations.get(key) ?? key }
+    t: (key: string, params?: Record<string, unknown>) => {
+      let text = translations.get(key) ?? key
+      for (const [name, value] of Object.entries(params ?? {})) text = text.replaceAll(`{${name}}`, String(value))
+      return text
+    } }
   render(outerClose === undefined ? <AgentPresetSection {...props} />
     : <Modal open onClose={outerClose} title="Settings" closeLabel="Close"><AgentPresetSection {...props} /></Modal>)
   return { ...actions, store }
@@ -57,9 +67,15 @@ it('replaces the default preset group tag with its new-task default status', () 
   expect(within(rowFor('mine')).getByText(en.customGroup)).toBeTruthy()
 })
 it('omits an empty group instead of leaving a heading behind', () => {
-  view({ rows: [{ id: 'standard', isDefault: true }] })
+  view({ rows: [{ id: 'standard', isDefault: true }], authoring: { status: 'idle', error: null, rows: [] } })
   expect(screen.getByRole('heading', { name: en.builtInGroup })).toBeTruthy()
   expect(screen.queryByRole('heading', { name: en.customGroup })).toBeNull()
+})
+it('keeps the custom group entry with manual authoring when the roster has no custom preset', () => {
+  view({ rows: [{ id: 'standard', isDefault: true }] })
+  const group = screen.getByRole('heading', { name: en.customGroup }).closest('section')
+  expect(group).not.toBeNull()
+  expect(within(group!).getByRole('button', { name: en.manualNew })).toBeTruthy()
 })
 it('keeps the custom group and its Creator entry while the roster has none', () => {
   view({ rows: [{ id: 'cordis', isDefault: true }] }, vi.fn())
@@ -266,4 +282,104 @@ it('renders descriptions and allows selection without resize observation', () =>
   expect(screen.getByText('Preset description')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: `${en.setDefault}: Mine` }))
   expect(actions.makeDefault).toHaveBeenCalledWith('mine')
+})
+it('clones a base preset through the New dialog', async () => {
+  const actions = view()
+  fireEvent.click(screen.getByRole('button', { name: en.manualNew }))
+  const dialog = screen.getByRole('dialog', { name: en.manualNewTitle })
+  fireEvent.change(within(dialog).getByLabelText(en.manualId), { target: { value: 'fresh-agent' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualName), { target: { value: 'Fresh Agent' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualDescription), { target: { value: 'Fresh desc' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualPersona), { target: { value: 'You are Fresh.' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualCreate }))
+  await waitFor(() => { expect(actions.createPreset).toHaveBeenCalledOnce() })
+  expect(actions.createPreset).toHaveBeenCalledWith({
+    base: 'standard', id: 'fresh-agent', name: 'Fresh Agent', description: 'Fresh desc', suffix: 'You are Fresh.',
+  })
+  await waitFor(() => { expect(screen.queryByRole('dialog', { name: en.manualNewTitle })).toBeNull() })
+})
+it('validates the manual form before calling the host', async () => {
+  const actions = view()
+  fireEvent.click(screen.getByRole('button', { name: en.manualNew }))
+  const dialog = screen.getByRole('dialog', { name: en.manualNewTitle })
+  fireEvent.change(within(dialog).getByLabelText(en.manualId), { target: { value: 'Bad Id' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualCreate }))
+  expect(await within(dialog).findByText(en.manualErrorId)).toBeTruthy()
+  expect(actions.createPreset).not.toHaveBeenCalled()
+
+  fireEvent.change(within(dialog).getByLabelText(en.manualId), { target: { value: 'ok-id' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualName), { target: { value: 'Ok' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualCreate }))
+  expect(await within(dialog).findByText(en.manualErrorPersona)).toBeTruthy()
+  expect(actions.createPreset).not.toHaveBeenCalled()
+})
+it('keeps the New dialog open with the host failure message', async () => {
+  const actions = view()
+  actions.createPreset.mockResolvedValueOnce('preset "fresh-agent" already exists')
+  fireEvent.click(screen.getByRole('button', { name: en.manualNew }))
+  const dialog = screen.getByRole('dialog', { name: en.manualNewTitle })
+  fireEvent.change(within(dialog).getByLabelText(en.manualId), { target: { value: 'fresh-agent' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualName), { target: { value: 'Fresh' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualPersona), { target: { value: 'Doctrine.' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualCreate }))
+  expect(await screen.findByText(en.manualCreateFailed.replace('{reason}', 'preset "fresh-agent" already exists'))).toBeTruthy()
+  expect(screen.getByRole('dialog', { name: en.manualNewTitle })).toBeTruthy()
+})
+it('edits a user preset with its loaded persona suffix', async () => {
+  const actions = view()
+  fireEvent.click(within(rowFor('mine')).getByRole('button', { name: `${en.manualEdit}: Mine` }))
+  const dialog = await screen.findByRole('dialog', { name: en.manualEditTitle })
+  await waitFor(() => { expect((within(dialog).getByLabelText(en.manualPersona) as HTMLTextAreaElement).value).toBe('Old doctrine.') })
+  expect(actions.presetDetail).toHaveBeenCalledWith('mine')
+  fireEvent.change(within(dialog).getByLabelText(en.manualName), { target: { value: 'Mine v2' } })
+  fireEvent.change(within(dialog).getByLabelText(en.manualPersona), { target: { value: 'New doctrine.' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualSave }))
+  await waitFor(() => { expect(actions.updatePreset).toHaveBeenCalledWith({
+    id: 'mine', name: 'Mine v2', description: 'Mine desc', suffix: 'New doctrine.',
+  }) })
+  await waitFor(() => { expect(screen.queryByRole('dialog', { name: en.manualEditTitle })).toBeNull() })
+})
+it('shows a detail load failure inside the edit dialog', async () => {
+  const actions = view()
+  actions.presetDetail.mockResolvedValueOnce({ error: 'routes offline' })
+  fireEvent.click(within(rowFor('mine')).getByRole('button', { name: `${en.manualEdit}: Mine` }))
+  expect(await screen.findByText(en.manualDetailFailed.replace('{reason}', 'routes offline'))).toBeTruthy()
+})
+it('deletes a user preset after confirmation', async () => {
+  const actions = view()
+  fireEvent.click(within(rowFor('mine')).getByRole('button', { name: `${en.manualDelete}: Mine` }))
+  const dialog = screen.getByRole('dialog', { name: en.manualDeleteTitle })
+  expect(within(dialog).getByText(en.manualDeleteConfirm.replace('{name}', 'Mine'))).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: en.manualDelete }))
+  await waitFor(() => { expect(actions.deletePreset).toHaveBeenCalledWith('mine') })
+  await waitFor(() => { expect(screen.queryByRole('dialog', { name: en.manualDeleteTitle })).toBeNull() })
+})
+it('keeps the delete dialog open with the host failure message', async () => {
+  const actions = view()
+  actions.deletePreset.mockResolvedValueOnce('shipped preset')
+  fireEvent.click(within(rowFor('mine')).getByRole('button', { name: `${en.manualDelete}: Mine` }))
+  fireEvent.click(screen.getByRole('button', { name: en.manualDelete }))
+  expect(await screen.findByText(en.manualDeleteFailed.replace('{reason}', 'shipped preset'))).toBeTruthy()
+  expect(screen.getByRole('dialog', { name: en.manualDeleteTitle })).toBeTruthy()
+})
+it('offers manual actions only on user presets', () => {
+  view()
+  expect(within(rowFor('mine')).getByRole('button', { name: `${en.manualEdit}: Mine` })).toBeTruthy()
+  expect(within(rowFor('mine')).getByRole('button', { name: `${en.manualDelete}: Mine` })).toBeTruthy()
+  expect(within(rowFor('standard')).queryByRole('button', { name: `${en.manualEdit}: ${en.presetStandardName}` })).toBeNull()
+  expect(within(rowFor('standard')).queryByRole('button', { name: `${en.manualDelete}: ${en.presetStandardName}` })).toBeNull()
+})
+it('hides manual authoring when the host routes are unavailable', () => {
+  view({ authoring: { status: 'error', error: 'offline', rows: [] } })
+  expect(screen.queryByRole('button', { name: en.manualNew })).toBeNull()
+  expect(screen.queryByRole('button', { name: `${en.manualEdit}: Mine` })).toBeNull()
+  expect(screen.getByText(en.manualUnavailable)).toBeTruthy()
+})
+it('disables manual authoring while Developer tools are off', () => {
+  view({}, undefined, false)
+  const button = screen.getByRole<HTMLButtonElement>('button', { name: en.manualNew })
+  expect(button.disabled).toBe(true)
+  expect(button.title).toBe(en.enableDevToolsToCreate)
+  fireEvent.click(button)
+  expect(screen.queryByRole('dialog', { name: en.manualNewTitle })).toBeNull()
 })
