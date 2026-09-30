@@ -15,6 +15,7 @@ import {
   WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_SETTINGS_NAMESPACE, WELCOME_NOTICE_VERSION,
 } from '../src/onboarding-copy.ts'
 import { ModelsSection } from '../src/client/ModelsSection.tsx'
+import { SetupRow } from '../src/client/SetupRow.tsx'
 import { DeepSeekOnboardingDialog } from '../src/client/DeepSeekOnboardingDialog.tsx'
 import { WelcomeNotice } from '../src/client/WelcomeNotice.tsx'
 import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
@@ -63,6 +64,7 @@ function declare(slots: SlotRegistry): () => void {
       name: 'root',
       children: {
         'settings.section': { kind: 'list', scope: 'root' },
+        'settings.general.item': { kind: 'list', scope: 'root' },
         'settings.onboarding': { kind: 'list', scope: 'root' },
       },
     } as never,
@@ -86,9 +88,11 @@ describe('ui-settings-models apply', () => {
       expect(slots.entries('settings.onboarding').map(entry => entry.options.id)).toEqual(['welcome-wizard', 'welcome-notice', 'deepseek-official'])
       const onboarding = slots.entries('settings.onboarding').find(entry => entry.options.id === 'deepseek-official')!
       expect((onboarding.inject as () => { automatic: boolean })().automatic).toBe(false)
-      expect(slots.entries('settings.section').map(entry => entry.options.id)).toEqual(['models', 'setup'])
+      expect(slots.entries('settings.section').map(entry => entry.options.id)).toEqual(['models'])
+      expect(slots.entries('settings.general.item').map(entry => entry.options.id)).toEqual(['setup'])
       await plugin.dispose()
       expect(slots.entries('settings.onboarding')).toEqual([])
+      expect(slots.entries('settings.general.item')).toEqual([])
       await host.dispose()
       const after: IndexInjection[] = []
       ctx.emit('webserver/index-inject', after)
@@ -153,16 +157,27 @@ describe('ui-settings-models apply', () => {
     expect(deepSeekInjected.hooks.models).toBe(injected.controller.store)
     expect(typeof deepSeekInjected.operations.storeCredential).toBe('function')
 
+    const setup = before.slots.entries('settings.general.item')[0]!
+    expect(setup.component).toBe(SetupRow)
+    expect(setup.options).toMatchObject({ id: 'setup', order: 90 })
+    const setupInjected = (setup.inject as unknown as () => import('../src/client/SetupRow.tsx').SetupRowInjected)()
+    expect(typeof setupInjected.reopen).toBe('function')
+    // The injected action drives the shared controller; the bench's settingsUi
+    // swallows the onboarding request and the analysis status call fails soft.
+    setupInjected.reopen()
+
     const after = await bench()
     await after.ctx.plugin({ inject: [...inject], apply }).await()
     expect(after.slots.entries('settings.section')).toHaveLength(0)
+    expect(after.slots.entries('settings.general.item')).toHaveLength(0)
     expect(after.slots.entries('settings.onboarding')).toHaveLength(0)
     declare(after.slots)
     await Promise.resolve()
     expect(after.slots.entries('settings.section')[0]!.component).toBe(ModelsSection)
+    expect(after.slots.entries('settings.general.item')[0]!.component).toBe(SetupRow)
     expect(after.slots.entries('settings.onboarding')).toHaveLength(3)
     // The self-inflicted ledger notifications hit the duplicate guard.
-    expect(after.slots.entries('settings.section')).toHaveLength(2)
+    expect(after.slots.entries('settings.section')).toHaveLength(1)
   })
 
   it('the label thunk follows the active locale without re-registration', async () => {
@@ -190,15 +205,18 @@ describe('ui-settings-models apply', () => {
     const b = await bench()
     const redeclare = declare(b.slots)
     await b.ctx.plugin({ inject: [...inject], apply }).await()
-    expect(b.slots.entries('settings.section')).toHaveLength(2)
+    expect(b.slots.entries('settings.section')).toHaveLength(1)
+    expect(b.slots.entries('settings.general.item')).toHaveLength(1)
     // Declarer unload: the cascade removes our entry while our local
     // disposer variable goes stale.
     redeclare()
     expect(b.slots.entries('settings.section')).toHaveLength(0)
+    expect(b.slots.entries('settings.general.item')).toHaveLength(0)
     expect(b.slots.entries('settings.onboarding')).toHaveLength(0)
     declare(b.slots)
     await Promise.resolve()
     expect(b.slots.entries('settings.section')[0]!.component).toBe(ModelsSection)
+    expect(b.slots.entries('settings.general.item')[0]!.component).toBe(SetupRow)
     expect(b.slots.entries('settings.onboarding')).toHaveLength(3)
     // The locale path also recovers through the same ledger re-check.
     b.locale.setLocale('en')

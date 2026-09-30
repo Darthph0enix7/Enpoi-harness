@@ -547,9 +547,12 @@ export function toolGrantApplies(perms: PermissionsConfig, agent: string | undef
 /**
  * The operator-level surface: the acting agents (orchestrator, sysadmin,
  * creator) share one FULL surface — from a permissions perspective they are
- * the same agent: they act, they delegate, they configure. MCP server tools
- * are deliberately absent here: MCP availability is a sidebar capability
- * toggle (per-server, hot-swappable), not a per-role surface decision.
+ * the same agent: they act, they delegate, they configure. The operators
+ * author and present the board, so the full curated `whiteboard_*` family is
+ * theirs (children keep only the host's four-tool keep floor). MCP server
+ * tools are deliberately absent here: MCP availability is a sidebar
+ * capability toggle (per-server, hot-swappable), not a per-role surface
+ * decision.
  */
 const FULL_OPERATOR_SURFACE: readonly string[] = [
   'bash', 'read', 'glob', 'grep', 'read_image',
@@ -560,6 +563,7 @@ const FULL_OPERATOR_SURFACE: readonly string[] = [
   'oracle_review', 'request_evidence', 'roundtable', 'chorus',
   'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
   'job_output', 'job_list', 'job_kill', 'ask_user_question',
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget',
 ]
 
 /**

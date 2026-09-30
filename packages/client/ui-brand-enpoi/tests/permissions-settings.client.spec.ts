@@ -101,6 +101,25 @@ describe('registry role surfaces', () => {
     // The child-keep list is a floor, not an override: the role still keeps them.
     expect(builtRoleAvailability('oracle', 'whiteboard_write', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(true)
   })
+
+  it('reads the whiteboard family row checked for the operator agents, children keep only the host keep floor', () => {
+    const family = buildPermissionToolRows(undefined)
+      .find(row => row.id === 'whiteboard_*')!
+    for (const agent of ['orchestrator', 'sysadmin', 'creator']) {
+      // The operators author the board: the full curated family is theirs.
+      expect(roleSurfaceFor(agent)).toContain('whiteboard_forget')
+      expect(roleRowChecked(family, roleSurfaceFor(agent)!)).toBe(true)
+    }
+    // A child mirrors the subagent runtime's keep list: the four pinned tools,
+    // never `whiteboard_forget` (`SHARED_CHILD_KEEP` in tool-subagent).
+    for (const agent of ['fixer', 'oracle', 'librarian']) {
+      const child = roleSurfaceFor(agent)!
+      expect(child).toEqual(expect.arrayContaining([
+        'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin',
+      ]))
+      expect(child).not.toContain('whiteboard_forget')
+    }
+  })
 })
 
 describe('grantScopeHint', () => {

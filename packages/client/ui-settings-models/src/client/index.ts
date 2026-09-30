@@ -1,8 +1,9 @@
 /**
  * Models settings and product-onboarding plugin, browser half. It registers
- * the Models page plus the ordered internal-testing and official-DeepSeek
- * onboarding dialogs, whose UI shares this package's modal wrapper. The Host
- * settings and credential contracts stay behind their existing wire APIs.
+ * the Models page, the General section's Setup entry, and the ordered
+ * internal-testing and official-DeepSeek onboarding dialogs, whose UI shares
+ * this package's modal wrapper. The Host settings and credential contracts
+ * stay behind their existing wire APIs.
  * Export discipline:
  * packages/client/AGENTS.md.
  */
@@ -37,8 +38,8 @@ import type { WelcomeWizardInjected } from './WelcomeWizard.tsx'
 import { SystemAnalysisChip } from './SystemAnalysisChip.tsx'
 import type { SystemAnalysisChipInjected } from './SystemAnalysisChip.tsx'
 import { SystemAnalysisStore, systemAnalysisApi } from './system-analysis.ts'
-import { SetupSection } from './SetupSection.tsx'
-import type { SetupSectionInjected } from './SetupSection.tsx'
+import { SetupRow } from './SetupRow.tsx'
+import type { SetupRowInjected } from './SetupRow.tsx'
 import { WelcomeNoticeStore } from './welcome-store.ts'
 import { WelcomeWizardStore, WIZARD_SETTINGS_NAMESPACE } from './welcome-wizard.ts'
 import type { WizardAnalysisApi } from './welcome-wizard.ts'
@@ -182,8 +183,8 @@ export function apply(ctx: ClientContext): void {
     },
     status: analysisApi.status,
   }
-  // First-run setup: one store drives the wizard step and the Setup section's
-  // reopen action, so both surfaces agree on the completion marker.
+  // First-run setup: one store drives the wizard step and the General
+  // section's Setup entry, so both surfaces agree on the completion marker.
   const wizardController = new WelcomeWizardStore(
     ctx.configForms.get<Record<string, unknown>>(WIZARD_SETTINGS_NAMESPACE),
     wizardAnalysisApi,
@@ -198,10 +199,8 @@ export function apply(ctx: ClientContext): void {
     schema,
     t,
   })
-  const setupInjected = (): SetupSectionInjected => ({
-    store: wizardController,
-    hooks: { wizard: wizardController.store },
-    t,
+  const setupInjected = (): SetupRowInjected => ({
+    reopen: () => { void wizardController.reopen() },
   })
   const analysisInjected = (): SystemAnalysisChipInjected => ({
     actions: {
@@ -315,16 +314,16 @@ export function apply(ctx: ClientContext): void {
     order: -200,
     inject: wizardInjected,
   }, WelcomeWizard))
-  // The Setup row re-runs the flow later: the store raises the shell's
+  // The Setup entry re-runs the flow later: the store raises the shell's
   // onboarding request, which mounts the wizard immediately through the
   // coordinator whatever the session state is.
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
+  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+    name: 'settings.general.item',
     id: 'setup',
     order: 90,
-    label: () => t('wizSetupNav'),
+    locale: NS,
     inject: setupInjected,
-  }, SetupSection))
+  }, SetupRow))
   ctx.slots.inject('settings.onboarding', () => ctx.slots.register({
     name: 'settings.onboarding',
     id: 'deepseek-official',

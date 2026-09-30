@@ -43,7 +43,7 @@ const CHILD_NAMES = Object.keys(CHILD_SPECS) as Array<keyof typeof CHILD_SPECS>
  * section is superseded by the workspace archived filter.
  */
 const PRODUCT_SECTIONS: readonly string[] = [
-  'general', 'models', 'plugins', 'agent-presets', 'orchestration', 'permissions', 'dynamic', 'setup',
+  'general', 'models', 'plugins', 'agent-presets', 'orchestration', 'permissions', 'dynamic',
 ]
 /** Onboarding steps the web-app roster registers, in coordinator order; all come from ui-settings-models. */
 const PRODUCT_ONBOARDING: readonly { id: string; order: number }[] = [
