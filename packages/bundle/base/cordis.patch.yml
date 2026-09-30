@@ -275,6 +275,9 @@
           danger-full-access:
             sandbox: danger-full-access
             approval: never
+          system-analysis:
+            sandbox: workspace-write
+            approval: never
 
     - id: shell-env
       name: '@deepseek-ai/dsh-shell-env'

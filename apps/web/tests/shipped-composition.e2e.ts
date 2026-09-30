@@ -490,6 +490,11 @@ const EXPECTED_TOOLS = [
   'read',
   'read_image',
   'send_message',
+  'session_event_read',
+  'session_event_search',
+  'session_event_trace',
+  'session_search',
+  'session_trace',
   'skill',
   'subagent',
   'subagent_fork',
@@ -526,7 +531,11 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
   scaffold = await launchWebScaffold({ deepSeekMissingCredential: true })
   const ctx = scaffold.ctx
   expect(ctx.llm.listProviders().some(provider => provider.id === 'deepseek-messages')).toBe(false)
-  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+  // The fresh scaffold boots an empty home, so the shipped first-run seed runs
+  // and points the default seat at the fork's keyless Kilo route (the same
+  // default a real fresh install gets); the shipped deepseek-official route
+  // stays installed and selectable, it is just no longer the default.
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
   const index = await fetch(`http://127.0.0.1:${String(ctx.webServer.port)}`, {
     headers: { 'accept-encoding': 'gzip' },
   })
@@ -542,6 +551,8 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "mode": "normal",
       "retryableCodes": [
         "EMPTY_RESPONSE",
+        "STREAM_CUT",
+        "STREAM_CLOSED",
         "RATE_LIMIT",
         "SERVER",
         "TIMEOUT",
@@ -575,6 +586,8 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "mode": "normal",
       "retryableCodes": [
         "EMPTY_RESPONSE",
+        "STREAM_CUT",
+        "STREAM_CLOSED",
         "RATE_LIMIT",
         "SERVER",
         "TIMEOUT",
@@ -591,11 +604,18 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
     }
   `)
   // The catalog belongs to an AGENT, not to the process: every model-facing row
-  // now lives in a preset mounted under one session's scope, so the global
-  // layer holds nothing and a caller must name the agent to see anything. This
-  // composes from the deployment default — what a session that names no preset
-  // gets — which is the shape this test has always been about.
-  expect(ctx.tools.schemas().map(schema => schema.name)).toEqual([])
+  // now lives in a preset mounted under one session's scope. The fork's Web
+  // composition mounts the session-query tools at the process layer, so those
+  // five are the whole global set and a caller must name the agent to see the
+  // rest. This composes from the deployment default — what a session that
+  // names no preset gets — which is the shape this test has always been about.
+  expect(ctx.tools.schemas().map(schema => schema.name).sort()).toEqual([
+    'session_event_read',
+    'session_event_search',
+    'session_event_trace',
+    'session_search',
+    'session_trace',
+  ])
   const handle = await ctx.agents.create({
     sessionId: SessionId('shipped-composition'),
     setup: agentCtx => ctx.agentPresets.mount(agentCtx).then(() => undefined),
@@ -797,8 +817,12 @@ it('routes one browser-authored Auto request through the same model and asks the
   expect(approvalReasons).toEqual([`Auto review denied tool "bash": ${AUTO_RAW_REASON}`])
   const finalModelInput = JSON.stringify(finalMain?.messages)
   expect(finalModelInput).toContain('the user rejected tool \\"bash\\"')
-  expect(finalModelInput).not.toContain('direct user authorized inspection only')
-  expect(finalModelInput).not.toContain('TEST_ONLY_SECRET_')
+  // The fork echoes the ask reason on a root denial (2c2785f940), so the model
+  // sees the audited rejection line carrying the reviewer's reason — the exact
+  // text the approval card above recorded. The reviewer's structured response
+  // fields still never reach the model (pinned by auto-review.spec.ts too).
+  expect(finalModelInput).toContain('it required approval because: Auto review denied tool \\"bash\\"')
+  expect(finalModelInput).not.toContain('"risk"')
 
   const events = agent.session.snapshotEvents()
   const prompt = events.find((event): event is Extract<SessionEvent, { type: 'user/message' }> => (
@@ -815,8 +839,8 @@ it('routes one browser-authored Auto request through the same model and asks the
   expect(result?.data.error).toBeUndefined()
   const durableModelResult = JSON.stringify(result?.data.message)
   expect(durableModelResult).toContain('the user rejected tool \\"bash\\"')
-  expect(durableModelResult).not.toContain('direct user authorized inspection only')
-  expect(durableModelResult).not.toContain('TEST_ONLY_SECRET_')
+  expect(durableModelResult).toContain('it required approval because: Auto review denied tool \\"bash\\"')
+  expect(durableModelResult).not.toContain('"risk"')
   expect(events.some(event => (
     event.type === 'assistant/message'
       && JSON.stringify(event.data.message).includes(AUTO_FINAL_TEXT)
