@@ -9,10 +9,23 @@ import { en } from '../src/client/locales.ts'
 
 afterEach(cleanup)
 
+// The row reads only its injected action and copy; the framework's standard
+// props are stubs that throw if the component ever touches them.
+const unusedHook = (() => { throw new Error('unused standard hook') }) as never
+
 describe('SetupRow', () => {
   it('reopens the wizard from the General section entry', () => {
     const reopen = vi.fn()
-    const props: SetupRowProps = { reopen, t: makeTranslate(en) }
+    const props: SetupRowProps = {
+      reopen,
+      t: makeTranslate(en),
+      useResource: unusedHook,
+      usePanelInfo: unusedHook,
+      useSessions: unusedHook,
+      useSessionStatus: unusedHook,
+      useSessionRetainInfo: unusedHook,
+      useWorkspaces: unusedHook,
+    }
     render(<SetupRow {...props} />)
     expect(screen.getByText(en.wizSetupNav)).toBeDefined()
     expect(screen.getByText(en.wizSetupIntro)).toBeDefined()
