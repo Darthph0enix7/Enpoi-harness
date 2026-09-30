@@ -320,7 +320,9 @@ function resolveSubagentPersonaModel(
   if (personas === undefined) return undefined
   const routeFor = (candidate: string): AgentOptions | undefined => {
     const entry = personas[candidate]
-    if (entry === undefined) return undefined
+    // A cleared seat materializes as null in the stored document; it routes
+    // like an absent one.
+    if (entry === undefined || entry === null) return undefined
     if (entry.chain !== undefined) {
       const chain = chains?.[entry.chain]
       const link = chain?.disabled === true ? undefined : chain?.links?.[0]
@@ -553,8 +555,8 @@ export interface OrchestrationSettingsHandle {
 
 /** Structural view of the `enpoi-orchestration` document this tool consumes. */
 export interface OrchestrationSettingsDocument {
-  /** Per-role child model route, keyed by role id. */
-  personas?: Record<string, { provider?: string; model?: string; chain?: string }>
+  /** Per-role child model route, keyed by role id; a cleared seat stores null. */
+  personas?: Record<string, { provider?: string; model?: string; chain?: string } | null>
   /** Model-group chains the persona routes may reference, keyed by chain id. */
   chains?: Record<string, {
     /** Ordered failover links; the first enabled link is the initial route. */

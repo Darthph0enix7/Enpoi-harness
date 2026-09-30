@@ -121,6 +121,15 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(disabled.agentOptions).toBeUndefined()
   })
 
+  it('routes a cleared seat (null) like an absent one instead of crashing the dispatch', async () => {
+    const cleared = await captureRequest('Review the parser diff', {
+      roles: { auditor: { persona: 'You are the Auditor.' } },
+      // The stored document materializes cleared seats as explicit nulls.
+      personas: { auditor: null, fixer: null },
+    }, { role: 'auditor' })
+    expect(cleared.agentOptions).toBeUndefined()
+  })
+
   it('retires a built-in role with disabled:true and only hides a seat for seat:false', () => {
     const registry = tool.listRoleRegistry(settingsHandle({
       roles: { oracle: { disabled: true }, designer: { seat: false } },
