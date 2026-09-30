@@ -3,10 +3,10 @@
  * host-side probe list, one bounded agent session on the configured preset
  * investigates the machine read-only with the harness's own tools over a fixed
  * checklist, announces each checklist section through its todo list, and
- * writes the finished structured profile plus the comprehensive Markdown
- * document into a scratch workspace the run owns. The durable writes and the
- * decision belong to the runner; this module owns the session, the prompt, the
- * stage mapping, and the time bound.
+ * writes the finished general profile — a structured JSON summary plus a short
+ * Markdown document — into a scratch workspace the run owns. The durable
+ * writes and the decision belong to the runner; this module owns the session,
+ * the prompt, the stage mapping, the specificity check, and the time bound.
  * @module @deepseek-ai/dsh-host-first-run/investigation
  */
 
@@ -30,7 +30,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 /** Checklist sections one investigation reports, in order, plus the write phase. */
 export const INVESTIGATION_STAGES = [
-  'machine', 'usage', 'hosting', 'tooling', 'runtimes', 'networking', 'resources', 'writing profile',
+  'machine', 'usage', 'hosting', 'networking', 'tooling', 'writing profile',
 ] as const
 
 /** One stage name from {@link INVESTIGATION_STAGES}. */
@@ -40,12 +40,14 @@ export type InvestigationStage = typeof INVESTIGATION_STAGES[number]
 export interface InvestigationOutcome {
   /** Structured profile; the exact keys are {@link REQUIRED_PROFILE_KEYS}. */
   readonly profile: JsonValue
-  /** Comprehensive Markdown profile body with full detail. */
+  /** General Markdown profile body. */
   readonly document: string
 }
 
 /** Top-level keys the structured profile must carry. */
-export const REQUIRED_PROFILE_KEYS = ['hostKind', 'usage', 'capabilities', 'hosting', 'tooling', 'networking'] as const
+export const REQUIRED_PROFILE_KEYS = [
+  'hostKind', 'purpose', 'hardware', 'usage', 'hosting', 'networking', 'tooling',
+] as const
 
 /** Scratch workspace one investigation owns, under the harness home. */
 export function investigationWorkspacePath(): string {
@@ -60,33 +62,34 @@ export const PROFILE_DOCUMENT_FILENAME = 'system-profile.md'
 
 /** The one message that opens the investigation. Kept verbatim and pinned by tests. */
 export const SYSTEM_ANALYSIS_PROMPT = [
-  'Investigate this machine read-only and produce its system profile. You are the sysadmin agent, and this is one bounded, commissioned investigation.',
+  'Investigate this machine read-only and produce a general system profile. You are the sysadmin agent, and this is one bounded, commissioned investigation. The profile must stay useful as the machine changes: describe what kind of machine this is and what it is for, not a snapshot inventory of what happens to run today.',
   '',
   'Read-only means: do not change anything outside your working directory. Run only non-mutating host commands, each bounded with a timeout, and never read secrets (credentials, keys, .env contents, shell histories). The only files you write are the two profile files named below, inside your working directory.',
   '',
   'Keep a todo list with `todo_write` that holds exactly these items, in this order, and mark each one `in_progress` as you start it and `completed` as you finish it:',
-  '`machine`, `usage`, `hosting`, `tooling`, `runtimes`, `networking`, `resources`, `write profile`.',
+  '`machine`, `usage`, `hosting`, `networking`, `tooling`, `write profile`.',
   'The operator watches that list as the run\'s progress.',
   '',
-  'Work section by section and cover every section:',
+  'Work section by section and cover every section. A few broad commands per section are enough, and the whole investigation should take about a dozen commands; prefer one grouped command over several narrow ones:',
   '',
-  '1. `machine` — server or desktop: uptime, load average, kernel and distribution, virtualization or container hints, a graphical session (X11/Wayland/display manager), battery or power supply, package manager, hostname.',
-  '2. `usage` — what this machine is used for: coding (git repositories, editors and IDEs, language toolchains with versions) and personal (media, games, user home layout).',
-  '3. `hosting` — what it serves: container runtimes and running containers, Docker Compose projects, reverse proxies, listening ports and the processes behind them.',
-  '4. `tooling` — installed tooling, done properly, above all accelerators. Check CUDA through EVERY path: the `nvcc` binary, conda environments (`conda env list`, `conda list` for cudatoolkit/pytorch), language runtimes (`python -c "import torch; print(torch.version.cuda)"`), package lists, and the driver (`nvidia-smi`). Also check compute libraries (cuDNN, NCCL), databases, and build chains.',
-  '5. `runtimes` — other AI harnesses and local model servers (llama.cpp/llama-server, Ollama, vLLM, LM Studio, ComfyUI, other agent harnesses) and their service units.',
-  '6. `networking` — VPN and ingress tooling: Tailscale, cloudflared, WireGuard, OpenVPN, plus DNS, proxy, and address facts.',
-  '7. `resources` — disk capacity and headroom per filesystem, GPU inventory and VRAM, memory total and use, CPU class and thread count.',
+  '1. `machine` — what kind of machine this is: server, desktop, laptop, vm, or other; virtualization or container hints; a graphical session (X11/Wayland); battery or power supply; package manager. Hardware in classes: CPU class and thread count, memory size class, GPU presence and class (or an explicit absence), disk type and roughly how much room is left.',
+  '2. `usage` — what the user does with this machine, in general terms: programs or develops software (language runtimes, editors and IDEs, repositories), hosts services, runs AI experiments or local models, keeps personal media, games or does not.',
+  '3. `hosting` — what this machine serves, as categories only: containerized services, reverse-proxied web services, a VPN mesh, tunnels to the outside. State which categories are in use, never which projects, containers, ports, or domains.',
+  '4. `networking` — how the machine reaches the network, in general terms: a VPN mesh, outbound tunnels, remote access, DNS or proxy tooling. No addresses, domains, or hostnames.',
+  '5. `tooling` — the general tooling and interests: language runtimes, GPU or AI toolchains, databases, build chains, editors and terminals. Confirm an accelerator through the paths that exist on this machine (the driver command, the system binary, the language runtime) before recording it present or absent.',
+  '6. `write profile` — write both files described below.',
   '',
-  'Accuracy rules:',
-  '- A capability is absent ONLY when every plausible path to it is absent. Check the system binary, the conda environment, and the language runtime before recording an absence.',
-  '- Never invent a fact. State the evidence path behind every claim ("CUDA 12.8 through the conda PyTorch build; `nvcc` is not on PATH").',
-  '- A failed or unavailable probe is reported as such, with what failed; it is not silently dropped.',
+  'Generalization rules for everything you publish:',
+  '- No exact version numbers, no exact folder, repository, or project names, no domains, no IP addresses, no hostnames, no port numbers, and no container or service names.',
+  '- Never enumerate an inventory; describe categories, roles, and rough sizes, enough for a new maintainer to understand the machine.',
+  '- Hardware is the exception: class-level hardware facts are wanted, because hardware does not change often.',
+  '- Base every claim on what you actually observed. When a probe fails, note what was unavailable in general terms or leave it out; never invent a fact, and never pad the document with the probes themselves.',
+  '- Keep the document stable: it should read the same after a reboot or a new container, so an operator rarely has to regenerate it.',
   '',
   'When every section is done, write both files in your working directory with the `write` tool:',
   `- \`${PROFILE_JSON_FILENAME}\`: the structured JSON profile, an object with the top-level keys ${REQUIRED_PROFILE_KEYS.map(key => `\`${key}\``).join(', ')}.`,
-  '  `hostKind` is one of server, desktop, laptop, vm, other. `capabilities` carries `cpu`, `memory`, `gpu`, `disk`, `accelerators` as SHORT single-line strings (hardware class, count, and headroom only; the detail belongs in the document). `usage`, `hosting`, `tooling`, and `networking` are objects with the concrete facts: names, versions, paths, ports.',
-  `- \`${PROFILE_DOCUMENT_FILENAME}\`: the comprehensive Markdown profile body. Open it with a short \`## At a glance\` capability summary — the machine kind and the CPU, memory, GPU, and disk facts, one line each — then the full detail under \`## Machine\`, \`## Usage\`, \`## Hosting\`, \`## Tooling\`, \`## Runtimes\`, \`## Networking\`, \`## Resources\`: name the actual hardware, toolchains, containers, services, ports, and paths, and state the evidence path for each. Mark fast-changing facts (running containers, free space, versions) as a snapshot of this investigation.`,
+  '  `hostKind` is one of server, desktop, laptop, vm, other. `purpose` is one short line on what the machine is for. `hardware` carries `cpu`, `memory`, `gpu`, `disk` as short class-level single-line strings (for example "server-class x86-64, high core count" or "memory in the tens of GiB"). `usage`, `hosting`, `networking`, and `tooling` are objects holding short general statements or booleans under the categories above.',
+  `- \`${PROFILE_DOCUMENT_FILENAME}\`: the Markdown profile body, around 60 to 120 lines. Open with \`## At a glance\` — the machine kind and its purpose in a few lines — then \`## Hardware\`, \`## Usage & purpose\`, \`## Hosting & services\`, \`## Networking\`, \`## Tooling & interests\`, and \`## Notes & limitations\`. Keep every section short and consistent with the JSON profile.`,
   '',
   'Then stop immediately: call no further tools and reply with one short confirmation sentence.',
 ].join('\n')
@@ -94,7 +97,7 @@ export const SYSTEM_ANALYSIS_PROMPT = [
 /** The one corrective message when a turn ended without a complete profile. */
 export const SYSTEM_ANALYSIS_CORRECTION = [
   'The investigation turn ended before the profile was complete.',
-  `Write both files in your working directory with the write tool: \`${PROFILE_JSON_FILENAME}\` (an object with the top-level keys ${REQUIRED_PROFILE_KEYS.join(', ')}) and \`${PROFILE_DOCUMENT_FILENAME}\` (the full Markdown body with all seven sections).`,
+  `Write both files in your working directory with the write tool: \`${PROFILE_JSON_FILENAME}\` (an object with the top-level keys ${REQUIRED_PROFILE_KEYS.join(', ')}) and \`${PROFILE_DOCUMENT_FILENAME}\` (the general Markdown body with all sections, no version numbers, folder or project names, domains, addresses, or hostnames).`,
   'Then reply with one short confirmation sentence.',
 ].join('\n')
 
@@ -132,12 +135,68 @@ export function isSystemProfile(value: unknown): value is JsonValue {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   if (typeof record['hostKind'] !== 'string') return false
+  if (typeof record['purpose'] !== 'string') return false
   return REQUIRED_PROFILE_KEYS
-    .filter(key => key !== 'hostKind')
+    .filter(key => key !== 'hostKind' && key !== 'purpose')
     .every((key) => {
       const member = record[key]
       return typeof member === 'object' && member !== null && !Array.isArray(member)
     })
+}
+
+/** Kinds of unnecessary specificity a generalized document must not carry. */
+export type DocumentViolationKind = 'IPv4 address' | 'version number' | 'domain-like string'
+
+/** One forbidden specificity found in a published document. */
+export interface DocumentViolation {
+  readonly kind: DocumentViolationKind
+  readonly match: string
+}
+
+/** One bare IPv4 address. */
+const IPV4_PATTERN = /\b\d{1,3}(?:\.\d{1,3}){3}\b/gu
+
+/** One dotted version number such as `12.8` or `24.04.1`. */
+const VERSION_PATTERN = /\b\d+\.\d+(?:\.\d+)*\b/gu
+
+/** Top-level labels that make a dotted string read as a domain. */
+const DOMAIN_TLDS = [
+  'com|net|org|io|ai|app|dev|cloud|vip|xyz|me|sh|gg|co|info|biz',
+  'online|site|tech|store|pro|link|live|world|space|fun|club',
+  'local|internal|lan',
+].join('|')
+
+/**
+ * One domain-like string. File extensions such as `.md` or `.json` and
+ * relative paths do not qualify; a real top-level label does.
+ */
+const DOMAIN_PATTERN = new RegExp(
+  `(?<![a-z0-9-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${DOMAIN_TLDS})\\b`,
+  'giu',
+)
+
+/**
+ * Find the exact machine facts a generalized profile must not publish: IP
+ * addresses, dotted version numbers, and domain-like strings. The runner warns
+ * with the matched facts before publishing; the tests hold documents against
+ * the same rules.
+ * @param document - the Markdown profile body, or the whole stored document.
+ * @returns one entry per distinct match, empty for a generalized document.
+ */
+export function documentViolations(document: string): DocumentViolation[] {
+  const found: DocumentViolation[] = []
+  const collect = (kind: DocumentViolationKind, pattern: RegExp): void => {
+    for (const match of document.matchAll(pattern)) {
+      const matchText = match[0]
+      if (!found.some(entry => entry.kind === kind && entry.match === matchText)) {
+        found.push({ kind, match: matchText })
+      }
+    }
+  }
+  collect('IPv4 address', IPV4_PATTERN)
+  collect('version number', VERSION_PATTERN)
+  collect('domain-like string', DOMAIN_PATTERN)
+  return found
 }
 
 /** Read the two artifacts out of the investigation workspace, or undefined while incomplete. */
@@ -294,6 +353,16 @@ export async function runSystemInvestigation(
       }
       if (outcome === undefined) {
         throw new Error(`the investigation ended without writing ${PROFILE_JSON_FILENAME} and ${PROFILE_DOCUMENT_FILENAME} into its workspace`)
+      }
+      // A document that leaked exact machine facts still publishes — the
+      // analysis is advisory and never fatal — but the operator gets the
+      // matched facts so the profile can be corrected or regenerated.
+      const violations = documentViolations(outcome.document)
+      if (violations.length > 0) {
+        options.ctx.logger.warn(
+          'first-run: the investigation published exact machine facts: %s',
+          violations.map(entry => `${entry.kind} "${entry.match}"`).join(', '),
+        )
       }
       return outcome
     } finally {

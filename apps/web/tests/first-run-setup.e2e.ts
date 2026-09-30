@@ -1,18 +1,27 @@
 // Live first-run proof against a TEMP $DSH_HOME (never the developer's home):
 // the booted real composition must seed the keyless Kilo route into the temp
-// settings document, the background analysis must land the system profile
-// document with its structured JSON beside it and record the operator's
-// decision, and a real settings write must persist for the next launch. The
-// browser wizard UI itself needs a client bundle build, so this lane proves
-// the host half end to end.
+// settings document, the background analysis must land the generalized system
+// profile document with its structured JSON beside it and record the
+// operator's decision, and a real settings write must persist for the next
+// launch. The browser wizard UI itself needs a client bundle build, so this
+// lane proves the host half end to end.
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { launchWebScaffold, type WebScaffold } from './scaffold.ts'
 
+// The same three exact-fact classes the investigation's `documentViolations`
+// check pins in the package unit tests; this lane observes the live document a
+// real model produced, which the package tests cannot.
+const EXACT_FACTS = [
+  /\b\d{1,3}(?:\.\d{1,3}){3}\b/u, // IPv4 address
+  /\b\d+\.\d+(?:\.\d+)*\b/u, // dotted version number
+  /(?<![a-z0-9-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|vip|xyz|me|co|local)\b/iu, // domain-like string
+]
+
 // The scaffold composes the shipped bundles only, so the host's default
 // `sysadmin` preset must exist here for the analysis to run: a minimal
-// read-only composition with the tools the investigation prompt names.
+// read-only composition with the tools the investigation needs.
 const SYSADMIN_PRESET = {
   id: 'sysadmin',
   name: 'Sysadmin',
@@ -49,9 +58,9 @@ describe('first-run setup live proof', () => {
     const started = await scaffold.hostFetch('/system-analysis/start', { method: 'POST' })
     expect(started.ok).toBe(true)
     let job = (await started.json() as { job: { state: string; pct: number } }).job
-    // The investigation is a real agent run on the seeded free route; the live
-    // machine takes about five minutes, so wait up to ten for it to publish or
-    // fail.
+    // The investigation is a real agent run on the seeded free route; it
+    // takes a couple of minutes on a normal machine, so wait up to ten for it
+    // to publish or fail.
     for (let attempt = 0; attempt < 1200 && job.state === 'running'; attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 500))
       job = (await (await scaffold.hostFetch('/system-analysis/status')).json() as { job: { state: string; pct: number } }).job
@@ -60,12 +69,25 @@ describe('first-run setup live proof', () => {
     const profile = await readFile(join(scaffold.harnessHome, 'system-profile.md'), 'utf8')
     expect(profile).toContain('# System profile')
     expect(profile).toContain('Read-only investigation by the sysadmin agent on kilo/kilo-auto/free')
+    // The generalized document carries the fixed section skeleton and no
+    // exact machine facts (versions, addresses, domains).
+    for (const section of [
+      '## At a glance', '## Hardware', '## Usage & purpose', '## Hosting & services',
+      '## Networking', '## Tooling & interests', '## Notes & limitations',
+    ]) {
+      expect(profile).toContain(section)
+    }
+    for (const pattern of EXACT_FACTS) {
+      expect(profile).not.toMatch(pattern)
+    }
     const structured = JSON.parse(await readFile(join(scaffold.harnessHome, 'system-profile.json'), 'utf8')) as {
       hostKind?: unknown
-      capabilities?: unknown
+      purpose?: unknown
+      hardware?: unknown
     }
     expect(typeof structured.hostKind).toBe('string')
-    expect(typeof structured.capabilities).toBe('object')
+    expect(typeof structured.purpose).toBe('string')
+    expect(typeof structured.hardware).toBe('object')
   }, 660_000)
 
   it('records the accepted decision beside the stored profile', async () => {

@@ -3,7 +3,7 @@ import {
   ANALYSIS_STAGES, Config, createAnalysisRunner, handleRequest, stagePct,
   type AnalysisConfig, type AnalysisDependencies, type AnalysisRunner,
 } from '../src/analysis.ts'
-import type { InvestigationOutcome } from '../src/investigation.ts'
+import { documentViolations, type InvestigationOutcome } from '../src/investigation.ts'
 
 describe('analysis plugin config', () => {
   it('defaults the investigation session to the shipped system-analysis permission preset', () => {
@@ -16,13 +16,19 @@ describe('analysis plugin config', () => {
 const OUTCOME: InvestigationOutcome = {
   profile: {
     hostKind: 'server',
-    usage: { coding: 'repositories' },
-    capabilities: { cpu: 'Test CPU, 8 threads', memory: '16 GiB', gpu: 'none' },
-    hosting: { containers: [] },
-    tooling: { cuda: '12.8 through PyTorch' },
-    networking: { tailscale: 'present' },
+    purpose: 'self-hosted machine for software projects, services, and AI experiments',
+    hardware: {
+      cpu: 'server-class x86-64, 28 threads',
+      memory: '64 GiB class',
+      gpu: 'discrete NVIDIA accelerator, 24 GB class',
+      disk: 'SSD storage, moderate headroom',
+    },
+    usage: { development: true, hosting: true },
+    hosting: { containers: true, reverseProxy: true },
+    networking: { vpnMesh: true, tunnels: true },
+    tooling: { languages: 'several managed runtimes' },
   },
-  document: '## Machine\n\n- test machine',
+  document: '## At a glance\n\n- A self-hosted machine for projects and services.',
 }
 
 /** Dependency set with an instantly settling investigation. */
@@ -78,7 +84,7 @@ describe('system analysis runner', () => {
     expect(started.state).toBe('running')
     expect(started.stage).toBe('machine')
     expect(started.startedAt).toBe(1_000)
-    expect(started.stageCount).toBe(8)
+    expect(started.stageCount).toBe(6)
     await settled()
     const done = runner.status()
     expect(done.state).toBe('succeeded')
@@ -87,16 +93,18 @@ describe('system analysis runner', () => {
     expect(writeProfileJson).toHaveBeenCalledWith(JSON.stringify(OUTCOME.profile, null, 2))
     const document = writeProfile.mock.calls[0]?.[0] ?? ''
     expect(document).toContain('# System profile')
-    expect(document).toContain('1970-01-01T00:00:01.000Z')
     expect(document).toContain('sysadmin agent on kilo/kilo-auto/free')
-    expect(document).toContain('## Machine')
+    expect(document).toContain('## At a glance')
+    // The stored document is stable: no timestamp and no version-like fact.
+    expect(document).not.toMatch(/\d{4}-\d{2}-\d{2}T/u)
+    expect(documentViolations(document)).toEqual([])
   })
 
   it('derives one stage position into a bounded percentage', () => {
-    expect(stagePct(0, 8)).toBe(0)
-    expect(stagePct(7, 8)).toBe(88)
-    expect(stagePct(100, 8)).toBe(88)
-    expect(stagePct(-3, 8)).toBe(0)
+    expect(stagePct(0, 6)).toBe(0)
+    expect(stagePct(5, 6)).toBe(83)
+    expect(stagePct(100, 6)).toBe(83)
+    expect(stagePct(-3, 6)).toBe(0)
     expect(stagePct(3, 0)).toBe(0)
   })
 
@@ -121,15 +129,15 @@ describe('system analysis runner', () => {
     }))
     runner.start()
     await settled()
-    expect(samples.map(sample => sample.pct)).toEqual([0, 13, 25, 38, 50, 63, 75, 88])
+    expect(samples.map(sample => sample.pct)).toEqual([0, 17, 33, 50, 67, 83])
     expect(samples.map(sample => sample.stage)).toEqual([
-      'machine', 'usage', 'hosting', 'tooling', 'runtimes', 'networking', 'resources', 'writing profile',
+      'machine', 'usage', 'hosting', 'networking', 'tooling', 'writing profile',
     ])
     for (const sample of samples) {
       expect(sample.pct).toBeGreaterThanOrEqual(0)
       expect(sample.pct).toBeLessThanOrEqual(100)
       expect(sample.stageIndex).toBeGreaterThanOrEqual(0)
-      expect(sample.stageIndex).toBeLessThanOrEqual(8)
+      expect(sample.stageIndex).toBeLessThanOrEqual(ANALYSIS_STAGES.length)
     }
     expect(runner.status().pct).toBe(100)
   })
@@ -138,10 +146,10 @@ describe('system analysis runner', () => {
     const runner = createAnalysisRunner(dependencies({
       investigate: async (onStage) => {
         onStage('tooling')
-        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 3 })
+        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 4 })
         onStage('tooling')
-        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 3 })
-        onStage('resources')
+        expect(runner.status()).toMatchObject({ stage: 'tooling', stageIndex: 4 })
+        onStage('networking')
         onStage('machine')
         expect(runner.status()).toMatchObject({ stage: 'machine', stageIndex: 0 })
         return OUTCOME

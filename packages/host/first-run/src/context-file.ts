@@ -2,13 +2,13 @@
  * Durable locations, essentials reader, and documented defaults of the system
  * profile.
  *
- * The system analysis writes one comprehensive Markdown document under the
- * harness home, the structured JSON profile beside it, and a decision marker
- * recording whether the operator accepted or rejected the document. A
- * sysadmin-mounted prompt context contributes only the essentials read from
- * that JSON plus a reference to the Markdown document, so the full record
- * stays in one place; before any analysis ran — or after a rejection — it
- * contributes the default below instead.
+ * The system analysis writes one general Markdown document under the harness
+ * home, the structured JSON profile beside it, and a decision marker recording
+ * whether the operator accepted or rejected the document. A sysadmin-mounted
+ * prompt context contributes only the essentials read from that JSON plus a
+ * reference to the Markdown document, so the full record stays in one place;
+ * before any analysis ran — or after a rejection — it contributes the default
+ * below instead.
  * @module @deepseek-ai/dsh-host-first-run/context-file
  */
 
@@ -93,13 +93,13 @@ export function readSystemProfileOrDefault(path: string = systemProfilePath()): 
 export interface SystemProfileEssentials {
   /** What kind of machine this is (`server`, `desktop`, `laptop`, `vm`, `other`). */
   readonly hostKind?: string
-  /** CPU description including its thread count. */
+  /** CPU class and thread count. */
   readonly cpu?: string
-  /** Total memory. */
+  /** Memory size class. */
   readonly memory?: string
-  /** GPU description including video memory, or an explicit absence. */
+  /** GPU class, or an explicit absence. */
   readonly gpu?: string
-  /** Free and total disk capacity. */
+  /** Disk type and rough headroom. */
   readonly disk?: string
 }
 
@@ -120,14 +120,14 @@ function member(value: unknown, key: string): string | undefined {
 export function readSystemProfileEssentials(path: string = systemProfileJsonPath()): SystemProfileEssentials {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    const capabilities = typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)['capabilities']
+    const hardware = typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)['hardware']
       : undefined
     const hostKind = member(parsed, 'hostKind')
-    const cpu = member(capabilities, 'cpu')
-    const memory = member(capabilities, 'memory')
-    const gpu = member(capabilities, 'gpu')
-    const disk = member(capabilities, 'disk')
+    const cpu = member(hardware, 'cpu')
+    const memory = member(hardware, 'memory')
+    const gpu = member(hardware, 'gpu')
+    const disk = member(hardware, 'disk')
     return {
       ...hostKind === undefined ? {} : { hostKind },
       ...cpu === undefined ? {} : { cpu },

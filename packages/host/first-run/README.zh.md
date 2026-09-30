@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概要
 
-全新 harness 主目录的两个首次运行事实。种子在全新设置文档首次完整启动时写入免密钥的 Kilo Gateway 路由，并把默认模型指向 `kilo-auto/free`；该路由位于用户层，因此 Models 页面可以移除它，标记会阻止之后的再次写入。系统分析是显式选择：用户从设置向导的智能体步骤或右下角小窗启动，随后一个有界的 sysadmin 智能体会话使用 harness 自身的工具只读地调查这台机器，覆盖七节清单，并发布结构化 `system-profile.json` 与详尽的 `system-profile.md`，后者以 `## At a glance` 能力摘要开篇。挂载在 sysadmin 预设中的提示上下文只贡献从该 JSON 读取的要点以及对文档的引用。没有任何机制会自行安排运行。
+全新 harness 主目录的两个首次运行事实。种子在全新设置文档首次完整启动时写入免密钥的 Kilo Gateway 路由，并把默认模型指向 `kilo-auto/free`；该路由位于用户层，因此 Models 页面可以移除它，标记会阻止之后的再次写入。系统分析是显式选择：用户从设置向导的智能体步骤或右下角小窗启动，随后一个有界的 sysadmin 智能体会话使用 harness 自身的工具只读地调查这台机器，覆盖六个清单阶段，并发布结构化 `system-profile.json` 与简短、概括的 `system-profile.md`，后者以 `## At a glance` 摘要开篇。文档只记录这台机器是什么类型、用于什么，并停在类别层面，不含确切版本、项目名、域名、地址或主机名，因此在机器变化后仍然有用。挂载在 sysadmin 预设中的提示上下文只贡献从该 JSON 读取的要点以及对文档的引用。没有任何机制会自行安排运行。
 
 ## 目录
 
@@ -67,7 +67,7 @@ kind: "package-reference"
 
 种子等待 Loader 完成（`ctx.root.loader.await()`），确保 `llm-pi-ai`、`agent-default-model` 与 `first-run` 条目已激活，然后按序写入提供方路由、默认模型与标记。失败只记一条警告并保留未写标记；下次启动重试。已带提供方路由的设置文档属于已配置安装：种子只写标记。
 
-一次调查就是配置预设上的一个根智能体会话：运行器解析预设、固定其修订（`acquireScope`）、清空 harness 主目录下的临时工作区、以该工作区为 `cwd` 创建会话、设置配置的权限预设、设置标题，并把清单提示作为开场用户消息发送。提示约束智能体对主机做只读调查，要求使用精确的待办条目驱动阶段轨道，逐节列出清单，要求通过所有路径检查 CUDA（`nvcc`、conda、语言运行时、`nvidia-smi`），把“缺失”定义为所有可行路径都检查之后的状态，并要求在工作区写出 `profile.json` 与 `system-profile.md`（后者以 `## At a glance` 能力摘要开篇）。运行器跟随会话的 `todo_write` 事件推进阶段，等待回合收尾，校验两份文件，允许两次有界的纠正回合，然后原子写入 `system-profile.json` 与 `system-profile.md` 并释放会话。整个运行受配置时限与插件生命周期取消约束。
+一次调查就是配置预设上的一个根智能体会话：运行器解析预设、固定其修订（`acquireScope`）、清空 harness 主目录下的临时工作区、以该工作区为 `cwd` 创建会话、设置配置的权限预设、设置标题，并把清单提示作为开场用户消息发送。提示约束智能体对主机做只读调查，要求使用精确的待办条目驱动阶段轨道，列出六个清单阶段（machine、usage、hosting、networking、tooling、write profile），并携带概括规则：不含确切版本号、文件夹/仓库/项目名、域名、IP 地址或主机名，不做清单式枚举，硬件只到类别层面，且每一条断言都以实际观察为依据而不引用探测过程。它要求在工作区写出 `profile.json` 与 `system-profile.md`（约 60 至 120 行，以 `## At a glance` 摘要开篇）。运行器跟随会话的 `todo_write` 事件推进阶段，等待回合收尾，校验两份文件，允许两次有界的纠正回合，然后原子写入 `system-profile.json` 与 `system-profile.md` 并释放会话。已发布的文档若仍带有确切机器事实（IPv4 地址、点分版本号或域名式字符串），仍会被存储，并记录匹配到的事实，因此运行不会仅因风格问题失败。存储文档的头部只添加调查来源；它不含时间戳，因此文档在多次运行之间保持稳定。整个运行受配置时限与插件生命周期取消约束。
 
 上下文提供方每次组装读取该文档，缺失时回退到 `DEFAULT_SYSTEM_CONTEXT`；存在 JSON 时，在引用之前附加一行从其读取的、有界的要点。
 
@@ -95,7 +95,7 @@ Confirm them with read-only commands before acting, or run the system analysis.
 档案存好后，该条目变为一行从 `system-profile.json` 读取的要点（主机形态、CPU、内存、GPU、磁盘；缺失字段省略），后接对完整文档的引用：
 
 ```markdown
-System profile essentials: server; CPU Xeon E5-2680 v4, 28 threads; memory 62 GiB; GPU Tesla P40, 24 GB; disk 30 GiB free of 232 GiB.
+System profile essentials: server; CPU server-class x86-64, 28 threads; memory 64 GiB class; GPU discrete accelerator, 24 GB class; disk SSD storage, moderate headroom.
 Read $DSH_HOME/system-profile.md for this machine.
 It is the living, full record of this host; the structured profile sits beside it as system-profile.json.
 Confirm anything the document does not state with read-only commands.

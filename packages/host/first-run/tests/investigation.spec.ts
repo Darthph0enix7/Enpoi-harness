@@ -4,8 +4,9 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  INVESTIGATION_STAGES, PROFILE_DOCUMENT_FILENAME, PROFILE_JSON_FILENAME, REQUIRED_PROFILE_KEYS,
-  SYSTEM_ANALYSIS_CORRECTION, SYSTEM_ANALYSIS_PROMPT, isSystemProfile, runSystemInvestigation, stageFromTodos,
+  documentViolations, INVESTIGATION_STAGES, PROFILE_DOCUMENT_FILENAME, PROFILE_JSON_FILENAME,
+  REQUIRED_PROFILE_KEYS, SYSTEM_ANALYSIS_CORRECTION, SYSTEM_ANALYSIS_PROMPT, isSystemProfile,
+  runSystemInvestigation, stageFromTodos,
 } from '../src/investigation.ts'
 
 const roots: string[] = []
@@ -23,38 +24,84 @@ function scratch(): string {
 
 const PROFILE = {
   hostKind: 'server',
-  usage: { coding: 'repositories' },
-  capabilities: { cpu: 'Test CPU, 8 threads', memory: '16 GiB', gpu: 'none' },
-  hosting: { containers: [] },
-  tooling: { cuda: '12.8 through PyTorch' },
-  networking: { tailscale: 'present' },
+  purpose: 'self-hosted machine for software projects, services, and AI experiments',
+  hardware: {
+    cpu: 'server-class x86-64, 28 threads',
+    memory: '64 GiB class',
+    gpu: 'discrete NVIDIA accelerator, 24 GB class',
+    disk: 'SSD storage, moderate headroom',
+  },
+  usage: { development: true, hosting: true, aiExperiments: true, personalMedia: true, gaming: false },
+  hosting: { containers: true, reverseProxy: true, vpnMesh: true, tunnels: true },
+  networking: { vpnMesh: true, tunnels: true, remoteAccess: true },
+  tooling: { languages: 'several managed runtimes', accelerators: 'CUDA-capable toolchain', databases: true },
 }
 
+/** A generalized document the prompt asks for; every check below starts from it. */
+const DOCUMENT = [
+  '## At a glance',
+  '',
+  'A self-hosted server used for software projects, containerized services, and AI experiments.',
+  '',
+  '## Hardware',
+  '',
+  '- Server-class x86-64 CPU with many threads, memory in the tens of GiB, one discrete accelerator, and SSD storage.',
+  '',
+  '## Usage & purpose',
+  '',
+  '- Software development and personal projects, self-hosted services, AI experiments, and personal media.',
+  '',
+  '## Hosting & services',
+  '',
+  '- Containerized services behind a reverse proxy, with a VPN mesh and outbound tunnels for remote access.',
+  '',
+  '## Networking',
+  '',
+  '- A VPN mesh, outbound tunnels, and remote access tooling; no public inbound ports.',
+  '',
+  '## Tooling & interests',
+  '',
+  '- General-purpose language runtimes, a CUDA-capable accelerator toolchain, databases, and terminal and IDE workflows.',
+  '',
+  '## Notes & limitations',
+  '',
+  '- Service and container facts change; the hardware picture does not.',
+].join('\n')
+
 describe('investigation prompt and stage mapping', () => {
-  it('pins the checklist, the read-only rule, the todo progress surface, the CUDA paths, and the output contract', () => {
+  it('pins the checklist, the read-only rule, the todo progress surface, the generalization rules, and the output contract', () => {
     for (const stage of INVESTIGATION_STAGES.slice(0, -1)) {
       expect(SYSTEM_ANALYSIS_PROMPT).toContain(`\`${stage}\``)
     }
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('read-only')
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('todo_write')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('nvcc')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('conda')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('torch.version.cuda')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('nvidia-smi')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('absent ONLY when every plausible path to it is absent')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('Generalization rules')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('No exact version numbers')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('no IP addresses')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('no hostnames')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('no domains')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('Never enumerate an inventory')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('about a dozen commands')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('Base every claim on what you actually observed')
     for (const key of REQUIRED_PROFILE_KEYS) expect(SYSTEM_ANALYSIS_PROMPT).toContain(`\`${key}\``)
     expect(SYSTEM_ANALYSIS_PROMPT).toContain(PROFILE_JSON_FILENAME)
     expect(SYSTEM_ANALYSIS_PROMPT).toContain(PROFILE_DOCUMENT_FILENAME)
     expect(SYSTEM_ANALYSIS_PROMPT).toContain('## At a glance')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('capability summary')
-    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Machine')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Hardware')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Usage & purpose')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Hosting & services')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Networking')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Tooling & interests')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('## Notes & limitations')
+    expect(SYSTEM_ANALYSIS_PROMPT).toContain('60 to 120 lines')
+    expect(SYSTEM_ANALYSIS_PROMPT).not.toContain('nvcc')
     expect(SYSTEM_ANALYSIS_CORRECTION).toContain(PROFILE_JSON_FILENAME)
   })
 
   it('maps the in-progress todo item onto the stage rail and keeps unknown items out', () => {
     expect(stageFromTodos([{ content: 'machine', status: 'in_progress' }])).toBe('machine')
-    expect(stageFromTodos([{ content: 'Tooling section (CUDA every path)', status: 'in_progress' }])).toBe('tooling')
-    expect(stageFromTodos([{ content: 'runtimes', status: 'in_progress' }])).toBe('runtimes')
+    expect(stageFromTodos([{ content: 'Tooling section (general classes)', status: 'in_progress' }])).toBe('tooling')
+    expect(stageFromTodos([{ content: 'networking', status: 'in_progress' }])).toBe('networking')
     expect(stageFromTodos([{ content: 'write profile', status: 'in_progress' }])).toBe('writing profile')
     expect(stageFromTodos([{ content: 'publish the profile', status: 'in_progress' }])).toBe('writing profile')
     expect(stageFromTodos([{ content: 'machine', status: 'completed' }])).toBeUndefined()
@@ -68,8 +115,27 @@ describe('investigation prompt and stage mapping', () => {
     expect(isSystemProfile([])).toBe(false)
     expect(isSystemProfile('server')).toBe(false)
     expect(isSystemProfile({ ...PROFILE, hostKind: 7 })).toBe(false)
+    expect(isSystemProfile({ ...PROFILE, purpose: 7 })).toBe(false)
     expect(isSystemProfile({ hostKind: 'server' })).toBe(false)
     expect(isSystemProfile({ ...PROFILE, hosting: [] })).toBe(false)
+  })
+
+  it('keeps a generalized document clean and flags exact machine facts', () => {
+    expect(documentViolations(DOCUMENT)).toEqual([])
+    // The stored document's own references are not domains.
+    expect(documentViolations('system-profile.md and system-profile.json beside kilo/kilo-auto/free')).toEqual([])
+    const flagged = documentViolations([
+      'CUDA 12.8 on Ubuntu 24.04',
+      'The host listens at 192.168.188.95',
+      'Dashboards at enpoi.vip and api.kilo.ai',
+    ].join('\n'))
+    expect(flagged).toContainEqual({ kind: 'version number', match: '12.8' })
+    expect(flagged).toContainEqual({ kind: 'version number', match: '24.04' })
+    expect(flagged).toContainEqual({ kind: 'IPv4 address', match: '192.168.188.95' })
+    expect(flagged).toContainEqual({ kind: 'domain-like string', match: 'enpoi.vip' })
+    expect(flagged).toContainEqual({ kind: 'domain-like string', match: 'api.kilo.ai' })
+    // One match is reported once, however often it appears.
+    expect(documentViolations('enpoi.vip and enpoi.vip')).toEqual([{ kind: 'domain-like string', match: 'enpoi.vip' }])
   })
 })
 
@@ -79,6 +145,7 @@ function run(options: {
   readonly titleRename?: (session: unknown, title: string) => void
   readonly writeOnAttempt?: (attempt: number) => boolean
   readonly hangIdle?: boolean
+  readonly document?: string
 } = {}) {
   const ctx = new Context()
   const workspace = scratch()
@@ -95,7 +162,7 @@ function run(options: {
       attempt += 1
       if (options.writeOnAttempt?.(attempt) === true) {
         writeFileSync(join(workspace, PROFILE_JSON_FILENAME), JSON.stringify(PROFILE))
-        writeFileSync(join(workspace, PROFILE_DOCUMENT_FILENAME), '## Machine\n\n- detailed facts')
+        writeFileSync(join(workspace, PROFILE_DOCUMENT_FILENAME), options.document ?? DOCUMENT)
       }
     },
   }
@@ -148,7 +215,7 @@ describe('runSystemInvestigation', () => {
       onStage: stage => stages.push(stage),
       signal: new AbortController().signal,
     })
-    expect(result).toEqual({ profile: PROFILE, document: '## Machine\n\n- detailed facts' })
+    expect(result).toEqual({ profile: PROFILE, document: DOCUMENT })
     const createOptions = test.agents.create.mock.calls[0]?.[0] as Record<string, unknown>
     expect(createOptions['meta']).toMatchObject({ cwd: test.workspace, agentPreset: 'sysadmin' })
     expect(createOptions['agentOptions']).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
@@ -210,6 +277,21 @@ describe('runSystemInvestigation', () => {
       signal: new AbortController().signal,
     })).resolves.toMatchObject({ profile: { hostKind: 'server' } })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('permission preset'), 'workspace-write', expect.anything())
+    await test.ctx.fiber.dispose()
+  })
+
+  it('warns with the matched facts when the published document leaks exact machine facts', async () => {
+    const leaky = '## At a glance\n\n- Ubuntu 24.04 on 192.168.188.95; dashboards at enpoi.vip'
+    const test = run({ writeOnAttempt: () => true, document: leaky })
+    const warn = vi.spyOn(test.ctx.logger, 'warn')
+    await expect(runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+      onStage: () => {},
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ document: leaky })
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('exact machine facts'),
+      expect.stringContaining('24.04'),
+    )
     await test.ctx.fiber.dispose()
   })
 

@@ -87,18 +87,19 @@ describe('profile essentials', () => {
     expect(readSystemProfileEssentials(jsonPath)).toEqual({})
     writeSystemProfileJson(JSON.stringify({
       hostKind: 'server',
-      capabilities: { cpu: 'Xeon E5-2680 v4, 28 threads', memory: '62 GiB', gpu: 'Tesla P40, 24 GB', disk: '30 GiB free of 232 GiB' },
-      usage: { coding: true },
+      purpose: 'self-hosted services and software projects',
+      hardware: { cpu: 'server-class x86-64, 28 threads', memory: '64 GiB class', gpu: 'discrete NVIDIA accelerator, 24 GB class', disk: 'SSD storage, moderate headroom' },
+      usage: { development: true },
     }), jsonPath)
     expect(readSystemProfileEssentials(jsonPath)).toEqual({
       hostKind: 'server',
-      cpu: 'Xeon E5-2680 v4, 28 threads',
-      memory: '62 GiB',
-      gpu: 'Tesla P40, 24 GB',
-      disk: '30 GiB free of 232 GiB',
+      cpu: 'server-class x86-64, 28 threads',
+      memory: '64 GiB class',
+      gpu: 'discrete NVIDIA accelerator, 24 GB class',
+      disk: 'SSD storage, moderate headroom',
     })
     expect(essentialsLine(readSystemProfileEssentials(jsonPath)))
-      .toBe('System profile essentials: server; CPU Xeon E5-2680 v4, 28 threads; memory 62 GiB; GPU Tesla P40, 24 GB; disk 30 GiB free of 232 GiB.')
+      .toBe('System profile essentials: server; CPU server-class x86-64, 28 threads; memory 64 GiB class; GPU discrete NVIDIA accelerator, 24 GB class; disk SSD storage, moderate headroom.')
     expect(essentialsLine({})).toBeNull()
   })
 
@@ -114,9 +115,9 @@ describe('profile essentials', () => {
     expect(systemProfileContextText(path, jsonPath)).toBe(DEFAULT_SYSTEM_CONTEXT)
     writeSystemProfile('# System profile\n', path)
     expect(systemProfileContextText(path, jsonPath)).toBe(SYSTEM_PROFILE_REFERENCE)
-    writeSystemProfileJson('{"hostKind":"server","capabilities":{"gpu":"Tesla P40, 24 GB"}}', jsonPath)
+    writeSystemProfileJson('{"hostKind":"server","hardware":{"gpu":"discrete NVIDIA accelerator, 24 GB class"}}', jsonPath)
     expect(systemProfileContextText(path, jsonPath)).toBe(
-      `System profile essentials: server; GPU Tesla P40, 24 GB.\n${SYSTEM_PROFILE_REFERENCE}`,
+      `System profile essentials: server; GPU discrete NVIDIA accelerator, 24 GB class.\n${SYSTEM_PROFILE_REFERENCE}`,
     )
   })
 })

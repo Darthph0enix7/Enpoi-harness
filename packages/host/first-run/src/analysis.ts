@@ -114,12 +114,17 @@ export function stagePct(stageIndex: number, stageCount: number): number {
   return Math.round((bounded / stageCount) * 100)
 }
 
-/** The document header written above the agent-authored profile body. */
-function profileHeader(route: string, preset: string, at: number): string[] {
+/**
+ * The document header written above the agent-authored profile body. It names
+ * only the investigation's provenance: the generalized document must stay
+ * valid as the machine changes, so no timestamp or environment inventory is
+ * recorded here.
+ */
+function profileHeader(route: string, preset: string): string[] {
   return [
     '# System profile',
     '',
-    `_Read-only investigation by the ${preset} agent on ${route}, completed ${new Date(at).toISOString()}. The structured profile is stored beside this document as system-profile.json; inventories in both are a snapshot of that investigation._`,
+    `_Read-only investigation by the ${preset} agent on ${route}. The structured profile is stored beside this document as system-profile.json._`,
     '',
   ]
 }
@@ -161,7 +166,7 @@ export function createAnalysisRunner(dependencies: AnalysisDependencies, lifetim
       try {
         dependencies.writeProfileJson(JSON.stringify(outcome.profile, null, 2))
         const contextPath = dependencies.writeProfile([
-          ...profileHeader(dependencies.route, dependencies.preset, dependencies.now()),
+          ...profileHeader(dependencies.route, dependencies.preset),
           outcome.document.trim(),
           '',
         ].join('\n'))
