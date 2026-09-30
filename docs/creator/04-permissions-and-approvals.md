@@ -31,11 +31,12 @@ Implemented in `resolvePolicy` (`policy.ts:560-693`); the listener that calls it
 
 ## 3. Bash: compound commands, patterns, scans
 
-- The raw command is split at quote-depth-0 `&&`, `||`, `;`, `|`, newlines (`splitCompoundCommand`, `policy.ts:167-210`); leading `KEY=VAL` prefixes are stripped (`policy.ts:213-218`). Any sub-command deny denies the whole call; the first ask wins.
-- Pattern matching (`matchBashPattern`, `policy.ts:227-238`): a bare token (`rm`) matches argv0 exactly; a trailing star binds to arguments (`rm*` ≡ `rm`, `rmdir` stays distinct); a pattern containing a space is a glob over the full sub-command.
-- **Opaque executors fail safe**: `bash`/`sh`/`zsh`/`eval`/… and inline (`python -c`, `node -e`, …) always ask regardless of visible verbs (`policy.ts:383-387`, `607-627`).
-- **Hidden-surface scan**: a command embedding a dangerous verb inside `$( )`, backticks, `<(...)`, heredocs, `xargs`, `find -exec` asks explicitly (`policy.ts:333-340`, `631-642`).
-- An Always-allow grant for either scan pins the **exact raw command string** (`policy.ts:616-640`).
+- The raw command is split at quote-depth-0 `&&`, `||`, `;`, `|`, newlines (`splitCompoundCommand`, `policy.ts:184-227`); leading `KEY=VAL` prefixes are stripped (`policy.ts:230-235`). Any sub-command deny denies the whole call; the first ask wins.
+- Pattern matching (`matchBashPattern`, `policy.ts:244-255`): a bare token (`rm`) matches argv0 exactly; a trailing star binds to arguments (`rm*` ≡ `rm`, `rmdir` stays distinct); a pattern containing a space is a glob over the full sub-command.
+- **Interpreter invocations**: an interpreter called with only version/help flags (`--version`, `-V`, `--help`, `-h`) runs no user code and is allowed; a bare interpreter, a shell script path, inline `-c`/`-e`/`--eval` code, `eval`, and `.`/`source` without a path still ask regardless of visible verbs (`policy.ts:417-427`, `596-632`, `667-695`).
+- **Shell wrappers**: `<shell> -c '<inner>'` (optionally behind a `timeout N` / `env …` prefix) has its inner split and evaluated by the same rules, so it asks only when the inner evaluation asks; the recursion is bounded at depth 3, and an unextractable inner (missing, an expansion) keeps the pre-recursion ask (`policy.ts:484-660`, `667-705`).
+- **Hidden-surface scan**: a `$( )`, backtick, `<(...)`, heredoc, `xargs`, or `find -exec` span containing a danger-list verb as a stand-alone shell word asks explicitly (`policy.ts:350`, `375-392`, `695`); a flag fragment (`uname -rm`) and an ordinary argument expansion (`echo "$HOME"`) are not verbs. An expansion used as the command word (`$CMD …`, `$(cmd) …`) is opaque execution and asks (`policy.ts:585-587`, `673`).
+- An Always-allow grant for any scan pins the **exact raw command string** (`policy.ts:619-641`, `885-903`).
 
 ## 4. The approval card
 
