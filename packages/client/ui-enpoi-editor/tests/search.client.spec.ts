@@ -40,7 +40,12 @@ function flashedLines(state: EditorState): Array<{ from: number; class: string }
 }
 
 function query(search: string, options: { caseSensitive?: boolean; regexp?: boolean } = {}): SearchQuery {
-  return new SearchQuery({ search, caseSensitive: options.caseSensitive, regexp: options.regexp, literal: true })
+  return new SearchQuery({
+    search,
+    literal: true,
+    ...options.caseSensitive === undefined ? {} : { caseSensitive: options.caseSensitive },
+    ...options.regexp === undefined ? {} : { regexp: options.regexp },
+  })
 }
 
 describe('collectMatches', () => {

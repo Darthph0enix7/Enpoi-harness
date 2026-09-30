@@ -22,9 +22,11 @@ function view(partial: Partial<AgentPresetSectionState> = {}, startCreatorDraft?
     saving: false, rows: [{ id: 'standard', isDefault: true }, { id: 'mine', name: 'Mine', isDefault: false }],
     authoring: DEFAULT_AUTHORING, view: null, ...partial })
   const actions = { load: vi.fn(async () => {}), view: vi.fn(async () => {}), closeView: vi.fn(), makeDefault: vi.fn(async () => {}),
-    close: vi.fn(), presetDetail: vi.fn(async () => ({ detail: { id: 'mine', rowId: 'preset-mine', name: 'Mine', description: 'Mine desc', order: 9,
+    close: vi.fn(), presetDetail: vi.fn<AgentPresetSectionProps['presetDetail']>(async () => ({ detail: { id: 'mine', rowId: 'preset-mine', name: 'Mine', description: 'Mine desc', order: 9,
       builtIn: false, disabled: false, hasPersona: true, suffixChars: 5, suffix: 'Old doctrine.' } })),
-    createPreset: vi.fn(async () => undefined), updatePreset: vi.fn(async () => undefined), deletePreset: vi.fn(async () => undefined) }
+    createPreset: vi.fn<AgentPresetSectionProps['createPreset']>(async () => undefined),
+    updatePreset: vi.fn<AgentPresetSectionProps['updatePreset']>(async () => undefined),
+    deletePreset: vi.fn<AgentPresetSectionProps['deletePreset']>(async () => undefined) }
   const props: AgentPresetSectionProps = { ...actions,
     ...(startCreatorDraft === undefined ? {} : { startCreatorDraft }),
     usePanelInfo: unusedHook, useSessions: unusedHook, useSessionStatus: unusedHook, useSessionRetainInfo: unusedHook,
