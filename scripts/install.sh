@@ -20,7 +20,7 @@
 #   5. when --profile-source / DSH_PROFILE_SOURCE names the companion profile
 #      (default: the Enpoi web profile repo for --profile web), fetches it into
 #      $DSH_HOME/profiles/<name> before the template seed, seeds the shared
-#      settings/presets/skills, and installs the profile's dependencies;
+#      settings/presets, and installs the profile's dependencies;
 #   6. seeds $DSH_HOME from the shipped templates (initProfile path), installs
 #      the `dsh` shim into ~/.local/bin, and prints the PATH line (only writes
 #      the shell rc when --write-rc is given).
@@ -761,7 +761,7 @@ copy_profile_tree() { # src dst mode(seed|refresh)
       .git|.git/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*) continue;;
       .backup-*|.backup-*/*) continue;;
       settings.yaml|device-patches|device-patches/*) continue;;
-      fresh-settings.yaml|presets|presets/*|skills|skills/*) continue;;
+      fresh-settings.yaml|presets|presets/*) continue;;
     esac
     if [ "$mode" = refresh ]; then
       case "$rel" in cordis.patch.yml) continue;; esac
@@ -821,7 +821,8 @@ seed_profile_home() { # stage
   local stage="$1" fish_dir="$HOME/.config/fish"
   seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
   seed_dir_once "$stage/presets" "$DSH_HOME/.agent-presets"
-  seed_dir_once "$stage/skills" "$DSH_HOME/skills"
+  # Shipped skills stay in the profile skills/ dir, which every preset mounts;
+  # $DSH_HOME/skills holds only operator-created skills.
   seed_dir_once "$stage/skins" "$DSH_HOME/skins"
   seed_file_once "$stage/skin-center-active.json" "$DSH_HOME/skin-center-active.json"
   if [ -d "$fish_dir" ]; then

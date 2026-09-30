@@ -26,7 +26,7 @@
 # repo (the same default source the installer uses, overridable with
 # DSH_SANDBOX_PROFILE_SOURCE / DSH_SANDBOX_PROFILE_REF) and the home-level seed
 # matches scripts/install.sh's seed_profile_home: settings.yaml from
-# fresh-settings.yaml, .agent-presets/, skills/, skins/, and
+# fresh-settings.yaml, .agent-presets/, skins/, and
 # skin-center-active.json. Nothing from the live $DSH_HOME or its profile tree
 # is read or written.
 #
@@ -190,7 +190,8 @@ seed_profile_home() { # stage
   local stage="$1"
   seed_file_once "$stage/fresh-settings.yaml" "$SANDBOX_DIR/settings.yaml"
   seed_dir_once "$stage/presets" "$SANDBOX_DIR/.agent-presets"
-  seed_dir_once "$stage/skills" "$SANDBOX_DIR/skills"
+  # Shipped skills stay in the profile skills/ dir, which every preset mounts;
+  # the sandbox user root holds only operator-created skills.
   seed_dir_once "$stage/skins" "$SANDBOX_DIR/skins"
   seed_file_once "$stage/skin-center-active.json" "$SANDBOX_DIR/skin-center-active.json"
   return 0
