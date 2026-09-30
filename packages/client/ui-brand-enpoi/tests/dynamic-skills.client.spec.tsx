@@ -6,6 +6,9 @@
  * capability toggles unchanged, and locale-dictionary parity.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
+// Load the package's module augmentations (LocaleNamespaceMap) into this program.
+import type {} from '../src/client/index.ts'
+import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { en, zh } from '../src/client/dynamic/skills-locales.ts'
 
@@ -49,8 +52,8 @@ function skillRow(name: string, description: string, extra: Record<string, unkno
 }
 
 /** Translate with `{param}` interpolation, mirroring the locale service. */
-function translate(key: keyof typeof en, params?: Record<string, unknown>): string {
-  let text = en[key]
+function translate(key: LocaleKeysOf<'settings.dynamicSkills'>, params?: Record<string, unknown>): string {
+  let text = (en as Partial<Record<string, string>>)[key] ?? String(key)
   for (const [name, value] of Object.entries(params ?? {})) {
     text = text.replaceAll(`{${name}}`, String(value))
   }
@@ -126,6 +129,7 @@ describe('SkillsPanel', () => {
             name: 'remote-skill',
             entry: 'remote-skill',
             description: 'From another root',
+            path: '/home/sandbox/skills/remote-skill/SKILL.md',
             format: 'file',
             source: 'registry',
             protected: false,
