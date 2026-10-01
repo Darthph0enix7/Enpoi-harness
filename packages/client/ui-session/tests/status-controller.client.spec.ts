@@ -24,6 +24,7 @@ it('preserves unlisted child status through metadata updates and main view ackno
       header: { version: SESSION_FORMAT_VERSION, id: childId, createdAt: 1, isSeeded: false,
         parentSession: parentId, origin: 'subagent' },
       cursor: -1, records: [], hasMore: false,
+      revert: { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq: -1 },
       projections: { asOfSeq: -1, values: {} }, assistantStream: { revision: 0 },
     } satisfies SessionFollowFrame)
   })

@@ -15,7 +15,7 @@ import type {
   SessionPage, SessionPageRequest,
 } from '../../src/types.ts'
 import { entries, historyValue } from '../event-script.client.ts'
-import { followSnapshot, pageThrough } from './history.client.ts'
+import { followSnapshot, pageThrough, type ScriptedPage } from './history.client.ts'
 
 export { followSnapshot } from './history.client.ts'
 
@@ -24,7 +24,7 @@ export const FOLLOW = 'session/follow'
 export const PAGE = 'session/page'
 
 /** A history answer as the Host returns it, possibly still pending. */
-export type HistoryAnswer = RemoteResult<SessionPage> | Promise<RemoteResult<SessionPage>>
+export type HistoryAnswer = RemoteResult<ScriptedPage> | Promise<RemoteResult<ScriptedPage>>
 /** A history answer, or a function of the request that produces one. */
 export type HistorySource<Request> = HistoryAnswer | ((request: Request) => HistoryAnswer)
 

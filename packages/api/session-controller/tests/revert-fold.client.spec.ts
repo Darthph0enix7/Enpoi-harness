@@ -293,7 +293,7 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
   it.each([1, 2, 3, 5, 8, 13, 21, 34])(
     'flat and incremental folds agree at every step (seed %i)',
     async (seed) => {
-      const events = randomScript(seed)
+      const events = randomScript(seed) as unknown as Parameters<typeof hostRevertFold>[0] & Parameters<typeof foldRevertEvents>[0]
       const cut = 10 + (seed % 8)
       const session = await openWith(events.slice(cut, cut + 2), hostRevertFold(events, cut - 1))
       expectFoldEquals(session, revertFoldValue(foldRevertEvents(events, cut + 1), cut + 1))

@@ -29,6 +29,7 @@ import type {
   SessionPageRequest,
   SessionWireEvent,
 } from '../src/types.ts'
+import { emptyRevertFold } from './remote/history.client.ts'
 
 type SessionTransportRemote = Pick<SessionRemote, 'control' | 'follow' | 'page'>
 
@@ -45,7 +46,7 @@ function entry(seq: number): SessionEventEntry {
 }
 
 function page(records: readonly SessionHistoryRecord[], hasMore = false): SessionPage {
-  return { records, hasMore }
+  return { records, hasMore, revert: emptyRevertFold() }
 }
 
 function snapshot(
@@ -65,6 +66,7 @@ function snapshot(
     cursor,
     records,
     hasMore,
+    revert: emptyRevertFold(cursor),
     projections: { asOfSeq: cursor, values: {} },
     assistantStream,
   }
@@ -347,6 +349,7 @@ describe('Session Client stream adapters', () => {
         cursor: -1,
         records: [],
         hasMore: false,
+        revert: { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq: -1 },
         projections: { asOfSeq: -1, values: {} },
       }],
     }], [])

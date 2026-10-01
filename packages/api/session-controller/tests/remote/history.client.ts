@@ -7,6 +7,9 @@ import type {
 import { historyRecordLastSeq } from '../../src/client/sessions/history-records.ts'
 import { foldRevertEvents, revertFoldValue } from '../../src/revert-fold.ts'
 
+/** A scripted page may omit the durable revert block; the builders default it. */
+export type ScriptedPage = Omit<SessionPage, 'revert'> & { readonly revert?: SessionRevertFold }
+
 /** Empty durable revert block for a log with no revert events. */
 export function emptyRevertFold(asOfSeq = -1): SessionRevertFold {
   return { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq }
@@ -32,8 +35,12 @@ export function hostRevertFold(
  * @param throughSeq - inclusive final sequence.
  * @returns the page without records beyond the cursor.
  */
-export function pageThrough(page: SessionPage, throughSeq: number): SessionPage {
-  return { ...page, records: page.records.filter(record => historyRecordLastSeq(record) <= throughSeq) }
+export function pageThrough(page: ScriptedPage, throughSeq: number): SessionPage {
+  return {
+    ...page,
+    revert: page.revert ?? emptyRevertFold(throughSeq),
+    records: page.records.filter(record => historyRecordLastSeq(record) <= throughSeq),
+  }
 }
 
 /**
@@ -45,7 +52,7 @@ export function pageThrough(page: SessionPage, throughSeq: number): SessionPage 
  * @returns the opening frame.
  */
 export function followSnapshot(
-  page: SessionPage & { readonly projections?: SessionProjectionBaseline },
+  page: ScriptedPage & { readonly projections?: SessionProjectionBaseline },
   request: SessionFollowRequest,
   cursor = page.records.length === 0 ? -1 : historyRecordLastSeq(page.records.at(-1)!),
   assistantStream: SessionAssistantStreamBaseline = { revision: 0 },
@@ -63,7 +70,7 @@ export function followSnapshot(
     cursor,
     records: pageThrough(page, cursor).records,
     hasMore: page.hasMore,
-    revert: page.revert,
+    revert: page.revert ?? emptyRevertFold(cursor),
     projections: page.projections ?? { asOfSeq: cursor, values: {} },
     ...(request.assistantStream === true ? { assistantStream } : {}),
   }
