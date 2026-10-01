@@ -229,11 +229,14 @@ export class PermissionPresetService extends TypertRemoteService {
       throw new Error('permission: the mounted bash executor does not confine (no sandboxMode) — presets bundle a sandbox mode, so composing this plugin over an unconfined executor is a misconfiguration')
     }
     const inferredDefault = this.derive(EMPTY_KNOBS)
-    const defaultPreset = config.defaultPreset.get() ?? inferredDefault
-    if (defaultPreset === CUSTOM_PRESET) {
+    // Only the inferred composition default is a mount-time fact. A stored
+    // `defaultPreset` is user-editable and may name a preset the table no
+    // longer carries (or the reserved `auto`); the getter below reports that
+    // value as an unknown default preset, and the setting stays repairable
+    // instead of bricking the mount.
+    if (config.defaultPreset.get() === undefined && inferredDefault === CUSTOM_PRESET) {
       throw new Error('permission: composed sandbox and approval defaults match no preset; configure defaultPreset explicitly')
     }
-    this.resolve(defaultPreset)
     this.defaultSettings = () => {
       const defaultPreset = config.defaultPreset.get() ?? inferredDefault
       if (!Object.hasOwn(this.presets, defaultPreset)) throw new Error(`permission: unknown default preset "${defaultPreset}"`)
