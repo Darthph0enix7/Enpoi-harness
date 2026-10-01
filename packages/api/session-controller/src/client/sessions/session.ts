@@ -17,9 +17,7 @@ import type {
   SessionAssistantStreamBaseline,
   SessionProjectionBaseline,
   SessionRequestId,
-  SessionRevertShadowRange,
-  RevertFileConflict,
-  RevertFileOutcome,
+  SessionRevertFold,
 } from '../../types.ts'
 import type {
   BeginSubmissionInput, PendingSubmissionRetirement, SessionFace, SubmissionHandle,
@@ -31,6 +29,12 @@ import { MutableSessionEventSource } from '../contract/events.ts'
 import type {
   SessionEventLike, SessionEventLikeEntry, SessionLiveEventEntry,
 } from '../contract/events.ts'
+import {
+  adoptRevertFold,
+  emptyRevertFoldState,
+  foldRevertEvent,
+  type RevertFoldState,
+} from '../../revert-fold.ts'
 import { Notifier } from './notifier.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -130,14 +134,18 @@ export class Session implements SessionFace {
   private removed = false
   private promptError: PromptError | null = null
   private lastAgentError: string | null = null
-  /** Active revert boundary (user-message seq the conversation reverts from). */
-  private revertFromSeq: number | null = null
-  /** Half-open spans shadowed by user-origin revert-commits. */
-  private revertShadowRanges: SessionRevertShadowRange[] = []
-  /** File-revert conflicts awaiting operator resolution. */
-  private revertFileConflicts: RevertFileConflict[] = []
-  /** File-revert outcomes by target path after resolutions. */
-  private revertFileOutcomes: Record<string, RevertFileOutcome> = {}
+  /**
+   * Transcript revert state. The durable baseline (boundary, shadow ranges,
+   * file conflicts/outcomes) comes from the Host fold carried by the opening
+   * page or follow snapshot; events appended after its `asOfSeq` fold in here.
+   * The loaded window is never the source, so a page cut between a
+   * `revert/state` marker and its replacement cannot resurrect hidden content.
+   */
+  private revertFold: RevertFoldState = emptyRevertFoldState()
+  /** Highest seq already folded into `revertFold`. */
+  private revertFoldThroughSeq = -1
+  /** Whether `revertFold` descends from a Host block (durable) rather than the loaded window. */
+  private revertFoldDurable = false
   /** Local submission echoes, insertion-ordered (see SessionSnapshot.pendingSubmissions). */
   private pendingSubmissions: readonly PendingSubmission[] = []
   /** Per-echo settlement state; `retiring` latches the first observation so a
@@ -285,7 +293,7 @@ export class Session implements SessionFace {
         mode,
         content,
         clientTimeZone,
-        ...(this.revertFromSeq === null ? {} : { revertFromSeq: this.revertFromSeq }),
+        ...(this.revertFold.revertFromSeq === null ? {} : { revertFromSeq: this.revertFold.revertFromSeq }),
       }, signal)
     } else if (content.some(part => part.type === 'file')) {
       result = {
@@ -668,10 +676,11 @@ export class Session implements SessionFace {
           change.hasMore,
           change.page.projections === undefined ? undefined : projectionsBaseline(change.page.projections),
           change.page.assistantStream,
+          change.page.revert,
         )
         return
       case 'prepend':
-        this.prependWindow(change.entries, change.hasMore)
+        this.prependWindow(change.entries, change.hasMore, change.page.revert)
         return
       case 'append':
         this.publishAssistantEntry(this.assistantStream.acceptDurable(change.entry))
@@ -687,6 +696,7 @@ export class Session implements SessionFace {
     hasMore: boolean,
     projections?: ProjectionsBaseline,
     assistantStream?: SessionAssistantStreamBaseline,
+    revert?: SessionRevertFold,
   ): void {
     // A durable gap-repair page has no assistant baseline. Clearing transient
     // attempts makes a held notification reopen follow once for an atomic
@@ -714,10 +724,12 @@ export class Session implements SessionFace {
     for (const entry of visible) {
       this.observeSubmissionEvent(entry.event)
     }
-    // A complete window replace is authoritative for revert state: rebuild the
-    // fold from the new window instead of layering it over the previous one, so
-    // a gap-repair re-install cannot accumulate duplicate or stale ranges.
-    this.replayRevertState()
+    // A complete window replace is authoritative for revert state: adopt the
+    // Host's durable fold (complete log), then fold only the entries the Host
+    // cut could not cover (merged live entries on gap repair). Without a Host
+    // block (bare object construction and legacy test transports) fall back to
+    // folding the loaded window, which is what this method replaced.
+    this.adoptRevertSource(revert, visible)
     if (projections !== undefined) {
       const inbox = projections.values.inbox as InboxState | undefined
       for (const target of ['next-turn', 'next-step'] as const) {
@@ -757,7 +769,11 @@ export class Session implements SessionFace {
   }
 
   /** Prepend one stream-validated history page. */
-  private prependWindow(entries: readonly SessionEventLikeEntry[], hasMore: boolean): void {
+  private prependWindow(
+    entries: readonly SessionEventLikeEntry[],
+    hasMore: boolean,
+    revert?: SessionRevertFold,
+  ): void {
     if (this.pendingHistory !== null) {
       const pending = this.pendingHistory
       pending.beforeSeq = entries[0] === undefined ? pending.beforeSeq : SessionLogOffset(entries[0].event.seq)
@@ -768,27 +784,54 @@ export class Session implements SessionFace {
     this.baseSeq = entries[0] === undefined ? this.baseSeq : SessionLogOffset(entries[0].event.seq)
     this.hasMore = hasMore
     this.eventSource.prepend(entries, hasMore)
-    // Re-fold revert state over the COMPLETE loaded window: prepended pages
-    // carry older revert/file-* events the incremental fold never saw (the
-    // opening window is only the seed prefix). Reset then replay in order so
-    // the latest boundary/outcomes win.
-    this.replayRevertState()
+    // Prepending cannot move the fold: the Host baseline is taken at the
+    // prepend cursor, which is never ahead of the client's folded prefix, and
+    // older events cannot change a left fold's end state. Adopt only to heal a
+    // window-derived (non-durable) fold whose baseline the Host now covers.
+    if (revert === undefined) this.replayRevertState()
+    else if (!this.revertFoldDurable || revert.asOfSeq > this.revertFoldThroughSeq) {
+      this.adoptRevertSource(revert, entries)
+    }
     this.notifier.markDirty()
   }
 
   /**
-   * Rebuild the revert fold from the complete loaded window. Both window
-   * mutation paths call this instead of folding incrementally, so the fold is
-   * always a pure function of the current window and a re-install is
-   * idempotent.
+   * Adopt a Host-folded durable baseline and fold the entries it does not
+   * cover (the opening page folds none; a gap-repair page folds its merged
+   * live suffix).
+   * @param revert - durable fold delivered with the page, absent on legacy transports.
+   * @param entries - complete window the page published.
+   */
+  private adoptRevertSource(
+    revert: SessionRevertFold | undefined,
+    entries: readonly SessionEventLikeEntry[],
+  ): void {
+    if (revert === undefined) {
+      this.replayRevertState()
+      return
+    }
+    this.revertFold = adoptRevertFold(revert)
+    this.revertFoldThroughSeq = revert.asOfSeq
+    this.revertFoldDurable = true
+    for (const entry of entries) {
+      if (entry.event.seq <= this.revertFoldThroughSeq) continue
+      foldRevertEvent(this.revertFold, entry.event)
+      this.revertFoldThroughSeq = entry.event.seq
+    }
+  }
+
+  /**
+   * Rebuild the revert fold from the complete loaded window. Only the
+   * window-derived fallback uses this; the durable path adopts the Host fold
+   * and never rescans loaded history.
    */
   private replayRevertState(): void {
-    this.revertFromSeq = null
-    this.revertShadowRanges = []
-    this.revertFileOutcomes = {}
-    this.revertFileConflicts = []
+    this.revertFold = emptyRevertFoldState()
+    this.revertFoldThroughSeq = -1
+    this.revertFoldDurable = false
     for (const entry of this.eventSource.getSnapshot().entries) {
-      this.foldRevertState(entry.event)
+      foldRevertEvent(this.revertFold, entry.event)
+      this.revertFoldThroughSeq = entry.event.seq
     }
   }
 
@@ -802,101 +845,9 @@ export class Session implements SessionFace {
     // registered by the feed subscribers above, so the echo-retirement frame
     // scheduled here always runs after the durable node became renderable.
     this.observeSubmissionEvent(event)
-    const revertChanged = this.foldRevertState(event)
+    const revertChanged = foldRevertEvent(this.revertFold, event)
+    if (event.seq > this.revertFoldThroughSeq) this.revertFoldThroughSeq = event.seq
     return awaitingFirstTurn !== this.firstPromptPendingTurn || revertChanged
-  }
-
-  /**
-   * Fold revert state from durable events: a `revert/state` boundary sets or
-   * clears the active revert; a replacement `user/message` (surfaceOp replace)
-   * records the shadowed span and consumes the boundary. Runs on both the live
-   * append path and the reload window so the transcript filter stays correct
-   * across restarts.
-   */
-  private foldRevertState(event: {
-    readonly type: string
-    readonly seq: number
-    readonly data?: unknown
-    readonly surfaceOp?: unknown
-  }): boolean {
-    if (event.type === 'revert/state') {
-      const data = event.data as { readonly fromSeq?: number | null } | undefined
-      // Every revert/state (revert, restore, commit) opens a fresh boundary
-      // window: prior conflicts/outcomes no longer apply (the working-branch
-      // fold cleared them here too).
-      if (this.revertFileConflicts.length > 0) this.revertFileConflicts = []
-      if (Object.keys(this.revertFileOutcomes).length > 0) this.revertFileOutcomes = {}
-      if (data?.fromSeq === null) {
-        if (this.revertFromSeq === null && this.revertShadowRanges.length === 0) return false
-        this.revertFromSeq = null
-        return true
-      }
-      if (data === undefined || this.revertFromSeq === data.fromSeq) return false
-      this.revertFromSeq = data.fromSeq ?? null
-      return true
-    }
-    if (event.type === 'user/message') {
-      // Product rule: the viewer's fold may hide a span only for a
-      // user-initiated revert, i.e. a user-origin replacement that lands while
-      // a `revert/state` boundary is active. Every other `surfaceOp: replace`
-      // writer (automatic or manual compaction, the checkpoint keeper, future
-      // edit/retry flows) must leave the transcript untouched: compaction is a
-      // model-context operation, not a viewer change.
-      // The declared V3 span { op: 'replace', startSeq, endSeq } is inclusive
-      // over the replaced surface nodes, so a revert commit's wide range is
-      // honoured as the half-open span [startSeq, endSeq + 1).
-      const surfaceOp = event.surfaceOp as {
-        readonly op?: string
-        readonly startSeq?: number
-        readonly endSeq?: number
-      } | undefined
-      const sourceKind = (event.data as { readonly source?: { readonly kind?: unknown } } | undefined)?.source?.kind
-      if (surfaceOp?.op === 'replace' && typeof surfaceOp.startSeq === 'number'
-        && typeof surfaceOp.endSeq === 'number'
-        && this.revertFromSeq !== null && sourceKind === 'user') {
-        // Immutable (same reason as the revert/file-* fold below): selectors
-        // compare the snapshot's array identity, so an in-place push would keep
-        // the previous reference and could skip a re-render.
-        this.revertShadowRanges = [...this.revertShadowRanges, { start: surfaceOp.startSeq, end: surfaceOp.endSeq + 1 }]
-        this.revertFromSeq = null
-        return true
-      }
-      return false
-    }
-    if (event.type === 'revert/file-conflict') {
-      const data = event.data as RevertFileConflict | undefined
-      if (data !== undefined) {
-        const index = this.revertFileConflicts.findIndex(c => c.conflictId === data.conflictId)
-        // Immutable update: the snapshot reference must change so selectors
-        // (RevertTray useMemo) re-run — in-place mutation keeps the same
-        // reference and the tray never sees the new conflict.
-        this.revertFileConflicts = index < 0
-          ? [...this.revertFileConflicts, data]
-          : this.revertFileConflicts.map((c, i) => i === index ? data : c)
-        return true
-      }
-      return false
-    }
-    if (event.type === 'revert/file-result') {
-      const data = event.data as { readonly revertSeq?: number; readonly outcomes?: Record<string, RevertFileOutcome> } | undefined
-      if (data?.outcomes !== undefined) {
-        // Immutable update (same reason as above): a fresh object so the
-        // snapshot reference changes and the tray's affected-files list
-        // re-renders.
-        this.revertFileOutcomes = { ...this.revertFileOutcomes, ...data.outcomes }
-        // Only resolve conflicts whose outcome is NOT pending_conflict —
-        // a pending conflict stays actionable (Keep/Force/Save Beside).
-        const resolved = new Set(
-          Object.entries(data.outcomes)
-            .filter(([, out]) => out.status !== 'pending_conflict')
-            .map(([path]) => path),
-        )
-        this.revertFileConflicts = this.revertFileConflicts.filter(c => !resolved.has(c.targetKey))
-        return true
-      }
-      return false
-    }
-    return false
   }
 
   /** Observe durable acceptance even when insertion and claim share one projection notification. */
@@ -1048,10 +999,10 @@ export class Session implements SessionFace {
       lastAgentError: this.lastAgentError,
       promptAttempted: this.promptAttempted,
       awaitingFirstTurn: this.firstPromptPendingTurn,
-      revertFromSeq: this.revertFromSeq,
-      revertShadowRanges: this.revertShadowRanges,
-      revertFileConflicts: this.revertFileConflicts,
-      revertFileOutcomes: this.revertFileOutcomes,
+      revertFromSeq: this.revertFold.revertFromSeq,
+      revertShadowRanges: this.revertFold.revertShadowRanges,
+      revertFileConflicts: this.revertFold.revertFileConflicts,
+      revertFileOutcomes: this.revertFold.revertFileOutcomes,
     }
   }
 

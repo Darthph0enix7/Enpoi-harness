@@ -330,7 +330,10 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
     for (const entry of fresh) this.inputs.set(entry.event.seq, entry)
     this.hasMore = hasMore
     const previousTimeline = this.locationIndex.snapshot()
-    const changedLocations = this.locationIndex.rebuild(this.sortedInputs())
+    // Merge-prepend folds only the new page; a seam that continues an open
+    // Turn/Step or splits an indexed Turn needs the full rebuild.
+    const changedLocations = this.locationIndex.prependOlder(fresh)
+      ?? this.locationIndex.rebuild(this.sortedInputs())
     if (this.locationIndex.snapshot() !== previousTimeline) this.timelineDirty = true
     const affected = this.refreshMatchLocations(changedLocations)
     const pending = new Map<string, PendingMatch[]>()

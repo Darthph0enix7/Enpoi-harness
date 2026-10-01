@@ -950,10 +950,33 @@ export type SessionAssistantStreamFrame =
       | { readonly kind: 'abandoned' }
   }
 
+/**
+ * Durable transcript revert state folded by the Host over the complete log.
+ *
+ * A history page cut is message-aligned and does not pin `revert/state` or
+ * `revert/file-*` markers, so a client that folds only its loaded window can
+ * lose an armed boundary, a shadow range, or a pending file conflict. The Host
+ * folds the full log and ships this baseline with every page and follow
+ * snapshot; clients adopt it before folding later appends.
+ */
+export interface SessionRevertFold {
+  /** Active revert boundary (user-message seq), or null when none is armed. */
+  readonly fromSeq: number | null
+  /** Half-open spans shadowed by user-origin revert commits, in commit order. */
+  readonly shadowRanges: readonly SessionRevertShadowRange[]
+  /** File-revert conflicts still awaiting operator resolution. */
+  readonly conflicts: readonly RevertFileConflict[]
+  /** File-revert outcomes by target path after resolutions on the live boundary. */
+  readonly outcomes: Record<string, RevertFileOutcome>
+  /** Inclusive log seq the fold covers; client folds only later events itself. */
+  readonly asOfSeq: number
+}
+
 /** One contiguous backwards page of a Session log. */
 export interface SessionPage {
   readonly records: readonly SessionHistoryRecord[]
   readonly hasMore: boolean
+  readonly revert: SessionRevertFold
 }
 
 /** Complete opening window followed by ordered durable events and opted-in assistant frames. */
@@ -964,6 +987,7 @@ export type SessionFollowFrame =
     readonly cursor: number
     readonly records: readonly SessionHistoryRecord[]
     readonly hasMore: boolean
+    readonly revert: SessionRevertFold
     readonly projections: SessionProjectionBaseline
     readonly assistantStream?: SessionAssistantStreamBaseline
   }

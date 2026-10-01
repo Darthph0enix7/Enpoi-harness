@@ -1615,4 +1615,81 @@ describe('ConversationNodeAssembler', () => {
     expect(start).toHaveBeenCalledTimes(2)
     expect([...testSnapshot(assembler)?.nodes.values() ?? []][0]?.data).toEqual([0, 1, 2])
   })
+
+  it('merge-prepends an older page to the same assembled view as a full replace', () => {
+    const full: SessionEvent[] = []
+    for (let turn = 1; turn <= 6; turn++) {
+      const base = full.length
+      full.push(
+        at(SessionSeq(base), 'turn/start', { turn }),
+        at(SessionSeq(base + 1), 'step/start', { turn, step: 1 }),
+        at(SessionSeq(base + 2), 'assistant/message', { turn, step: 1 }),
+        at(SessionSeq(base + 3), 'step/end', { turn, step: 1 }),
+        at(SessionSeq(base + 4), 'turn/end', { turn }),
+      )
+    }
+    const definitions = new TestEventDefinitions([fallbackDefinition(() => 'node')])
+    // The test view appends upserts in arrival order, so prepend parity is
+    // asserted over the assembled content (keys and node data), not the view's
+    // own insertion order.
+    const content = (assembler: ConversationNodeAssembler): unknown => {
+      const snapshot = testSnapshot(assembler)
+      return { keys: [...snapshot?.order ?? []].sort(), nodes: snapshot?.nodes }
+    }
+    // Turn-aligned split: the fast merge-prepend path.
+    const incremental = new ConversationNodeAssembler(definitions, new TestViewDefinitions([testView()]))
+    incremental.replaceWindow(full.slice(15).map(input), true)
+    incremental.flush()
+    incremental.prepend(full.slice(0, 15).map(input), false)
+    incremental.flush()
+    const rebuilt = new ConversationNodeAssembler(definitions, new TestViewDefinitions([testView()]))
+    rebuilt.replaceWindow(full.map(input), false)
+    rebuilt.flush()
+    expect(content(incremental)).toEqual(content(rebuilt))
+
+    // Mid-Turn split: the seam continues an open Step, so the same observable
+    // result must come out of the caller's full-rebuild fallback.
+    const fallback = new ConversationNodeAssembler(definitions, new TestViewDefinitions([testView()]))
+    fallback.replaceWindow(full.slice(12).map(input), true)
+    fallback.flush()
+    fallback.prepend(full.slice(0, 12).map(input), false)
+    fallback.flush()
+    expect(content(fallback)).toEqual(content(rebuilt))
+  })
+
+  it('prependOlder folds only the older page and matches a full rebuild', () => {
+    const full: SessionEvent[] = []
+    for (let turn = 1; turn <= 6; turn++) {
+      const base = full.length
+      full.push(
+        at(SessionSeq(base), 'turn/start', { turn }),
+        at(SessionSeq(base + 1), 'step/start', { turn, step: 1 }),
+        at(SessionSeq(base + 2), 'assistant/message', { turn, step: 1 }),
+        at(SessionSeq(base + 3), 'step/end', { turn, step: 1 }),
+        at(SessionSeq(base + 4), 'turn/end', { turn }),
+      )
+    }
+    const project = (index: ConversationLocationIndex): unknown => full.map((event) => {
+      const location = index.locationOf(event)
+      if (location.kind === 'step') return `step:${String(location.turn.turn)}:${String(location.step.step)}`
+      if (location.kind === 'turn') return `turn:${String(location.turn.turn)}`
+      return location.kind
+    })
+    for (const split of [5, 10, 15]) {
+      const incremental = new ConversationLocationIndex()
+      incremental.rebuild(full.slice(split).map(input))
+      expect(incremental.prependOlder(full.slice(0, split).map(input))).toBeDefined()
+      const rebuilt = new ConversationLocationIndex()
+      rebuilt.rebuild(full.map(input))
+      expect(project(incremental)).toEqual(project(rebuilt))
+      expect(incremental.snapshot().turnOrder).toEqual(rebuilt.snapshot().turnOrder)
+      for (const turn of rebuilt.snapshot().turnOrder) {
+        expect(incremental.snapshot().turns.get(turn)?.status).toBe(rebuilt.snapshot().turns.get(turn)?.status)
+      }
+    }
+    // A mid-Turn seam returns undefined so the caller rebuilds the window.
+    const midTurn = new ConversationLocationIndex()
+    midTurn.rebuild(full.slice(12).map(input))
+    expect(midTurn.prependOlder(full.slice(0, 12).map(input))).toBeUndefined()
+  })
 })

@@ -995,4 +995,61 @@ describe('Session history raw journal', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('ships the durable revert fold across a page cut between marker and replacement', async () => {
+    const { ctx } = await harness()
+    onTestFinished(() => ctx.fiber.dispose())
+    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const anchor = appendUserText(session, 'first prompt')
+    session.append('turn/start', { turn: 1 })
+    appendAssistantText(session, 'reply', 1)
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    // Revert while nothing runs, then the cancelled turn settles an
+    // interrupted assistant message at a seq past the marker.
+    const marker = appendExtension(session, 'revert/state', { fromSeq: anchor.seq, cause: 'revert' })
+    const settlement = appendAssistantText(session, 'late interrupted settlement', 1, 2)
+    const shadowed = session.surface.nodes.filter(seq => (seq as number) >= anchor.seq)
+    const replacement = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'after the revert' }], source: { kind: 'user' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: anchor.seq, endSeq: settlement.seq },
+      sourceEventSeqs: [...shadowed],
+    })
+
+    // The page cut lands inside (marker, settlement]: records start after the
+    // marker and the fold must still know the commit shadowed [anchor, settlement].
+    const response = await remote.page({
+      address: { kind: 'session', sessionId: session.id },
+      throughSeq: replacement.seq,
+      beforeSeq: replacement.seq + 1,
+      maxMessages: 1,
+    })
+    if (!response.ok) throw new Error('unreachable')
+    expect(pageEvents(response.value).map(event => event.seq)).toEqual([settlement.seq, replacement.seq])
+    expect(response.value.revert).toEqual({
+      fromSeq: null,
+      shadowRanges: [{ start: anchor.seq, end: settlement.seq + 1 }],
+      conflicts: [],
+      outcomes: {},
+      asOfSeq: replacement.seq,
+    })
+
+    // A request behind the cached cut (never produced by the forward-only
+    // journal, but reachable after a log repair) rebuilds from the prefix.
+    const earlier = await remote.page({
+      address: { kind: 'session', sessionId: session.id },
+      throughSeq: marker.seq,
+      beforeSeq: marker.seq + 1,
+      maxMessages: 1,
+    })
+    if (!earlier.ok) throw new Error('unreachable')
+    expect(earlier.value.revert).toEqual({
+      fromSeq: anchor.seq,
+      shadowRanges: [],
+      conflicts: [],
+      outcomes: {},
+      asOfSeq: marker.seq,
+    })
+  })
 })

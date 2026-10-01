@@ -278,6 +278,104 @@ export class ConversationLocationIndex {
    */
   rebuild(entries: readonly SessionEventLikeEntry[]): ReadonlySet<number> {
     const previousLocations = this.locations
+    const { coordinates, turns, currentTurn, currentStep } = this.foldEvents(entries)
+
+    const previousTurns = this.timeline.turns
+    const nextTurns = new Map<number, TurnLocation>()
+    const orderedDrafts = [...turns.values()].sort((left, right) => left.firstSeq - right.firstSeq)
+    for (const draft of orderedDrafts) {
+      nextTurns.set(draft.turn, this.materializeTurn(draft, previousTurns.get(draft.turn)))
+    }
+
+    const nextOrder = orderedDrafts.map(draft => draft.turn)
+    const turnOrder = this.timeline.turnOrder.length === nextOrder.length
+      && this.timeline.turnOrder.every((turn, index) => turn === nextOrder[index])
+      ? this.timeline.turnOrder
+      : nextOrder
+    let sameMap = previousTurns.size === nextTurns.size
+    if (sameMap) {
+      for (const [turn, value] of nextTurns) {
+        if (previousTurns.get(turn) !== value) {
+          sameMap = false
+          break
+        }
+      }
+    }
+    for (const turn of new Set([...previousTurns.keys(), ...nextTurns.keys()])) {
+      if (previousTurns.get(turn) !== nextTurns.get(turn)) this.changedTurns.add(turn)
+    }
+    this.timeline = sameMap && turnOrder === this.timeline.turnOrder
+      ? this.timeline
+      : { turnOrder, turns: nextTurns }
+    this.coordinates = coordinates
+    this.locations = new Map()
+    this.seqsByTurn = new Map()
+    for (const { event } of entries) {
+      const coordinates = this.coordinates.get(event.seq)
+      if (coordinates?.turn !== undefined) this.indexTurnSeq(coordinates.turn, event.seq)
+      this.locations.set(event.seq, this.resolve(event.seq))
+    }
+    this.currentTurn = currentTurn
+    this.currentStep = currentStep
+
+    const changed = new Set<number>()
+    for (const { event } of entries) {
+      if (!sameLocation(previousLocations.get(event.seq), this.locations.get(event.seq))) {
+        changed.add(event.seq)
+      }
+    }
+    return changed
+  }
+
+  /**
+   * Prepend one older contiguous page without rescanning the loaded window.
+   *
+   * The older page folds from an empty start, so the existing window's
+   * coordinates are unchanged unless the seam continues an open Turn/Step or
+   * splits an already indexed Turn; those cases return `undefined` and the
+   * caller rebuilds the complete window instead.
+   * @param entries - older entries preceding the current window, ascending.
+   * @returns seqs whose resolved Location changed, or undefined to force a rebuild.
+   */
+  prependOlder(entries: readonly SessionEventLikeEntry[]): ReadonlySet<number> | undefined {
+    if (entries.length === 0) return new Set()
+    for (const { event } of entries) {
+      if (this.locations.has(event.seq) || this.coordinates.has(event.seq)) return undefined
+    }
+    const folded = this.foldEvents(entries)
+    if (folded.currentTurn !== undefined || folded.currentStep !== undefined) return undefined
+    const orderedDrafts = [...folded.turns.values()].sort((left, right) => left.firstSeq - right.firstSeq)
+    for (const draft of orderedDrafts) {
+      if (this.timeline.turns.has(draft.turn)) return undefined
+    }
+
+    const turns = new Map(this.timeline.turns)
+    const prepended: number[] = []
+    for (const draft of orderedDrafts) {
+      turns.set(draft.turn, this.materializeTurn(draft, undefined))
+      prepended.push(draft.turn)
+      this.changedTurns.add(draft.turn)
+    }
+    this.timeline = { turnOrder: [...prepended, ...this.timeline.turnOrder], turns }
+    for (const [seq, coordinates] of folded.coordinates) {
+      this.coordinates.set(seq, coordinates)
+      if (coordinates.turn !== undefined) this.indexTurnSeq(coordinates.turn, seq)
+      this.locations.set(seq, this.resolve(seq))
+    }
+    return new Set()
+  }
+
+  /**
+   * Fold one contiguous ascending event run into fresh coordinates and Turn drafts.
+   * @param entries - ascending event entries starting a window.
+   * @returns coordinates, drafts, and the Turn/Step state at the run end.
+   */
+  private foldEvents(entries: readonly SessionEventLikeEntry[]): {
+    readonly coordinates: Map<number, Coordinates>
+    readonly turns: Map<number, TurnDraft>
+    readonly currentTurn: number | undefined
+    readonly currentStep: number | undefined
+  } {
     const turns = new Map<number, TurnDraft>()
     const coordinates = new Map<number, Coordinates>()
     let currentTurn: number | undefined
@@ -349,78 +447,42 @@ export class ConversationLocationIndex {
         currentStep = undefined
       }
     }
+    return { coordinates, turns, currentTurn, currentStep }
+  }
 
-    const previousTurns = this.timeline.turns
-    const nextTurns = new Map<number, TurnLocation>()
-    const orderedDrafts = [...turns.values()].sort((left, right) => left.firstSeq - right.firstSeq)
-    for (const draft of orderedDrafts) {
-      const previousTurn = previousTurns.get(draft.turn)
-      const previousSteps = new Map(previousTurn?.steps.map(step => [step.step, step]) ?? [])
-      const steps = [...draft.steps.values()]
-        .sort((left, right) => left.firstSeq - right.firstSeq)
-        .map((candidate): StepLocation => {
-          const value: StepLocation = {
-            turn: candidate.turn,
-            step: candidate.step,
-            start: candidate.start,
-            end: candidate.end,
-            status: candidate.end !== undefined
-              ? 'closed'
-              : candidate.start === undefined ? 'unknown' : 'open',
-            data: this.stepData(candidate.turn, candidate.step),
-          }
-          const previous = previousSteps.get(candidate.step)
-          return sameStep(previous, value) ? previous as StepLocation : value
-        })
-      const value: TurnLocation = {
-        turn: draft.turn,
-        start: draft.start,
-        end: draft.end,
-        status: draft.end !== undefined ? 'closed' : draft.start === undefined ? 'unknown' : 'open',
-        steps,
-        data: this.turnData(draft.turn),
-      }
-      nextTurns.set(draft.turn, sameTurn(previousTurn, value) ? previousTurn as TurnLocation : value)
-    }
-
-    const nextOrder = orderedDrafts.map(draft => draft.turn)
-    const turnOrder = this.timeline.turnOrder.length === nextOrder.length
-      && this.timeline.turnOrder.every((turn, index) => turn === nextOrder[index])
-      ? this.timeline.turnOrder
-      : nextOrder
-    let sameMap = previousTurns.size === nextTurns.size
-    if (sameMap) {
-      for (const [turn, value] of nextTurns) {
-        if (previousTurns.get(turn) !== value) {
-          sameMap = false
-          break
+  /**
+   * Materialize one Turn draft, preserving the previous Turn reference when equal.
+   * @param draft - folded Turn facts.
+   * @param previousTurn - previously published Turn, when the window already held it.
+   * @returns the reference-stable Turn location.
+   */
+  private materializeTurn(draft: TurnDraft, previousTurn: TurnLocation | undefined): TurnLocation {
+    const previousSteps = new Map(previousTurn?.steps.map(step => [step.step, step]) ?? [])
+    const steps = [...draft.steps.values()]
+      .sort((left, right) => left.firstSeq - right.firstSeq)
+      .map((candidate): StepLocation => {
+        const value: StepLocation = {
+          turn: candidate.turn,
+          step: candidate.step,
+          start: candidate.start,
+          end: candidate.end,
+          status: candidate.end !== undefined
+            ? 'closed'
+            : candidate.start === undefined ? 'unknown' : 'open',
+          data: this.stepData(candidate.turn, candidate.step),
         }
-      }
+        const previous = previousSteps.get(candidate.step)
+        return sameStep(previous, value) ? previous as StepLocation : value
+      })
+    const value: TurnLocation = {
+      turn: draft.turn,
+      start: draft.start,
+      end: draft.end,
+      status: draft.end !== undefined ? 'closed' : draft.start === undefined ? 'unknown' : 'open',
+      steps,
+      data: this.turnData(draft.turn),
     }
-    for (const turn of new Set([...previousTurns.keys(), ...nextTurns.keys()])) {
-      if (previousTurns.get(turn) !== nextTurns.get(turn)) this.changedTurns.add(turn)
-    }
-    this.timeline = sameMap && turnOrder === this.timeline.turnOrder
-      ? this.timeline
-      : { turnOrder, turns: nextTurns }
-    this.coordinates = coordinates
-    this.locations = new Map()
-    this.seqsByTurn = new Map()
-    for (const { event } of entries) {
-      const coordinates = this.coordinates.get(event.seq)
-      if (coordinates?.turn !== undefined) this.indexTurnSeq(coordinates.turn, event.seq)
-      this.locations.set(event.seq, this.resolve(event.seq))
-    }
-    this.currentTurn = currentTurn
-    this.currentStep = currentStep
-
-    const changed = new Set<number>()
-    for (const { event } of entries) {
-      if (!sameLocation(previousLocations.get(event.seq), this.locations.get(event.seq))) {
-        changed.add(event.seq)
-      }
-    }
-    return changed
+    return sameTurn(previousTurn, value) ? previousTurn as TurnLocation : value
   }
 
   /**

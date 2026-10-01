@@ -34,7 +34,7 @@ import {
 } from '@deepseek-ai/dsh-api-gateway/client'
 import { streamHandle } from '@deepseek-ai/dsh-remote-mock'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
-import { followSnapshot, pageThrough } from './remote/history.client.ts'
+import { followSnapshot, pageThrough, emptyRevertFold } from './remote/history.client.ts'
 
 const AVAILABLE_STREAM_CONNECTION = {
   generation: {
@@ -187,7 +187,7 @@ export class FakeApiClient {
   }
   onHistory: (payload: { sessionId: SessionId; throughSeq?: number; beforeSeq?: number; maxMessages?: number })
   => Promise<RemoteResult<SessionPage & { readonly projections?: SessionProjectionBaseline }>> =
-    () => Promise.resolve(ok({ records: [], hasMore: false }))
+    () => Promise.resolve(ok({ records: [], hasMore: false, revert: emptyRevertFold() }))
 
   onPrompt: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
   onAttachment: (payload: unknown) => Promise<RemoteResult<{ attachment: { attachmentId: never; mediaType: 'image/png'; bytes: number; width: number; height: number }; data: string }>> =

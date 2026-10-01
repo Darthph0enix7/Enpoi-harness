@@ -197,6 +197,7 @@ export class SessionEventStream extends RemoteJournalStream<
           page: {
             records: frame.records,
             hasMore: frame.hasMore,
+            revert: frame.revert,
             projections: frame.projections,
             assistantStream: frame.assistantStream,
           },

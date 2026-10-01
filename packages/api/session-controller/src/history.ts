@@ -30,18 +30,32 @@ import type {
   SessionPageRequest,
   SessionProjectionBaseline,
   SessionProjectionValues,
+  SessionRevertFold,
   SessionWireHeader,
   SessionWireEvent,
 } from './types.ts'
 import { SessionAssistantStreamAccumulator } from './assistant-stream.ts'
+import {
+  emptyRevertFoldState,
+  foldRevertEvent,
+  revertFoldValue,
+  type RevertFoldState,
+} from './revert-fold.ts'
 
 const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
+/** Bound on cached per-Session revert folds (cold readers never notify disposal). */
+const REVERT_FOLD_CACHE_MAX = 32
 
 /** Implements cold-safe history operations delegated by the Session Controller. */
 export class SessionHistoryController {
   private readonly closeFollowers = new Set<() => void>()
   private readonly assistantStreams = new Map<SessionId, SessionAssistantStreamAccumulator>()
+  /**
+   * Incremental per-Session revert folds. Each entry covers every event
+   * through `throughSeq`; later requests fold only the appended suffix.
+   */
+  private readonly revertFolds = new Map<SessionId, { throughSeq: number; state: RevertFoldState }>()
 
   /**
    * @param ctx - Host context carrying Session query and projection services.
@@ -61,6 +75,7 @@ export class SessionHistoryController {
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
       this.assistantStreams.delete(agent.session.id)
+      this.revertFolds.delete(agent.session.id)
     }, { global: true })
     ctx.effect(() => () => {
       for (const close of this.closeFollowers) close()
@@ -108,6 +123,7 @@ export class SessionHistoryController {
     return {
       records,
       hasMore: page.hasMore,
+      revert: this.revertFoldAt(addressId(request.address), sourceLog, throughSeq),
     }
   }
 
@@ -196,6 +212,7 @@ export class SessionHistoryController {
         cursor,
         records: pageRecords(page.events),
         hasMore: page.hasMore,
+        revert: this.revertFoldAt(target, events, cursor),
         projections: source.projections === undefined
           ? { asOfSeq: cursor, values: {} }
           : projectionBlock(source.projections),
@@ -238,6 +255,44 @@ export class SessionHistoryController {
       disposeEvent()
       disposeAssistantStream?.()
     }
+  }
+
+  /**
+   * Fold the durable revert state through one journal cut.
+   *
+   * The fold is maintained per Session and only ever extended forward, so a
+   * page read folds the appended suffix rather than the whole log. A request
+   * behind the cached cut (never produced by the forward-only journal cursor,
+   * but possible after a log repair) rebuilds from the log prefix.
+   * @param sessionId - durable Session identity owning the log.
+   * @param events - dense zero-based log events.
+   * @param throughSeq - inclusive final seq the fold must cover.
+   * @returns the durable fold block carried by the page.
+   */
+  private revertFoldAt(
+    sessionId: SessionId,
+    events: readonly SessionEvent[],
+    throughSeq: SessionSeqCursor,
+  ): SessionRevertFold {
+    let cached = this.revertFolds.get(sessionId)
+    if (cached === undefined || cached.throughSeq > throughSeq) {
+      cached = { throughSeq: -1, state: emptyRevertFoldState() }
+    }
+    for (let seq = cached.throughSeq + 1; seq <= throughSeq; seq++) {
+      const event = events[seq]
+      /* v8 ignore next -- dense zero-based logs guarantee an event at every seq through the cursor. */
+      if (event === undefined) break
+      foldRevertEvent(cached.state, event)
+    }
+    cached.throughSeq = throughSeq
+    // LRU touch: reinsert so the oldest untouched Session is evicted first.
+    this.revertFolds.delete(sessionId)
+    this.revertFolds.set(sessionId, cached)
+    while (this.revertFolds.size > REVERT_FOLD_CACHE_MAX) {
+      const oldest = this.revertFolds.keys().next().value as SessionId
+      this.revertFolds.delete(oldest)
+    }
+    return revertFoldValue(cached.state, throughSeq)
   }
 
   private async sourceFor(

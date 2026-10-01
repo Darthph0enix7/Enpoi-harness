@@ -12,7 +12,7 @@ import type {
 import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload/types'
 import type {} from '@deepseek-ai/dsh-client-file-upload'
 import {
-  ReasoningEffortId, assistantStreamChunks, createUserMessage, freezeMessage,
+  ReasoningEffortId, createUserMessage, freezeMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
@@ -61,6 +61,7 @@ import type {
   SessionUpdateQueueValue,
   SessionRequestId,
 } from './types.ts'
+import { SessionCommandIndex, referencedImage } from './session-command-index.ts'
 
 interface SessionReadState {
   readonly id: SessionId
@@ -94,6 +95,9 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): Session
 
 /** Implements Session business commands delegated by the Session Controller Remote service. */
 export class SessionCommandController {
+  /** Lazily built O(1) lookup indexes per Session, advanced by `session/event`. */
+  private readonly commandIndexes = new Map<SessionId, SessionCommandIndex>()
+
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
    * @param agents - sole owner of create, resume, and Session-local model selection.
@@ -103,7 +107,44 @@ export class SessionCommandController {
     private readonly ctx: Context,
     private readonly agents: ApiSessionAgentController,
     private readonly defaultCwd: string,
-  ) {}
+  ) {
+    ctx.on('session/event', (session, event) => {
+      this.commandIndexes.get(session.id)?.ingest(event)
+    }, { global: true })
+    ctx.on('agent/disposed', ({ agent }) => {
+      this.commandIndexes.delete(agent.session.id)
+    }, { global: true })
+  }
+
+  /**
+   * Resolve the derived lookup index for one Session, building it on first use
+   * from the existing durable-read path. A live Session registers only when
+   * the snapshot covers its current seq, so an append racing the build is
+   * still delivered to the live `session/event` listener.
+   * @param sessionId - durable Session identity.
+   * @returns the built or cached index.
+   */
+  private async indexFor(sessionId: SessionId): Promise<SessionCommandIndex> {
+    const cached = this.commandIndexes.get(sessionId)
+    if (cached !== undefined) return cached
+    for (;;) {
+      const state = await this.readSessionState(sessionId)
+      const live = this.ctx.sessions.get(sessionId)
+      if (live !== undefined && live.seq !== state.events.length) continue
+      const index = SessionCommandIndex.fromEvents(state.events)
+      this.commandIndexes.set(sessionId, index)
+      return index
+    }
+  }
+
+  private async hasPromptRequest(agent: Agent, requestId: SessionRequestId): Promise<boolean> {
+    const matches = (message: UserMessage): boolean => {
+      const source = message.source
+      return source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId
+    }
+    if (agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)) return true
+    return (await this.indexFor(agent.session.id)).hasPromptRequest(requestId)
+  }
 
   /**
    * Create or idempotently adopt one ordinary Session.
@@ -348,7 +389,7 @@ export class SessionCommandController {
       )
     }
     const agent = await this.resolveAgent(request.sessionId)
-    if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+    if (await this.hasPromptRequest(agent, request.requestId)) return { accepted: true }
     const source: MessageSource = {
       kind: 'user',
       rpcId: request.requestId,
@@ -456,20 +497,27 @@ export class SessionCommandController {
    * @returns the durable attachment reference and base64-encoded bytes.
    */
   async attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue> {
-    let source: SessionReadState
-    try {
-      source = await this.readSessionState(request.sessionId)
-    } catch (error) {
-      if (error instanceof ApiSessionNotFound) {
-        throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
+    const attached = this.ctx.sessions.get(request.sessionId)
+    let ref: ImageAttachmentRef | undefined
+    if (attached !== undefined) {
+      // Live Session: the derived index already covers every durable event.
+      ref = (await this.indexFor(attached.id)).referencedImage(String(request.attachmentId))
+    } else {
+      let source: SessionReadState
+      try {
+        source = await this.readSessionState(request.sessionId)
+      } catch (error) {
+        if (error instanceof ApiSessionNotFound) {
+          throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
+        }
+        throw new RemoteError(
+          'gateway/internal',
+          `attachment authorization unavailable for session "${request.sessionId}": ${String(error)}`,
+          {},
+        )
       }
-      throw new RemoteError(
-        'gateway/internal',
-        `attachment authorization unavailable for session "${request.sessionId}": ${String(error)}`,
-        {},
-      )
+      ref = referencedImage(source.events, String(request.attachmentId))
     }
-    const ref = referencedImage(source.events, String(request.attachmentId))
     if (ref === undefined) {
       throw new RemoteError(
         'session/attachment-invalid',
@@ -701,7 +749,7 @@ export class SessionCommandController {
       rejectFailure(apiSessionSubagentOwnershipError(request.sessionId))
     }
     const session = agent.session
-    const boundary = latestRevertBoundary(session)
+    const boundary = (await this.indexFor(session.id)).latestRevertBoundary()
     if (boundary === undefined) {
       // No active revert — no-op success.
       return { accepted: true }
@@ -795,6 +843,7 @@ export class SessionCommandController {
     // Agent was cancelled above and the Session's own owner treats the later
     // detach as a no-op.
     this.ctx.sessions.dispose(request.sessionId)
+    this.commandIndexes.delete(request.sessionId)
     return { deleted: true }
   }
 
@@ -880,20 +929,6 @@ function revertAnchorOf(session: Session, seq: number): SessionEvent<'user/messa
   return event
 }
 
-/** Fold the latest `revert/state` boundary over a full event list. */
-function latestRevertBoundary(session: Session): number | undefined {
-  let boundary: number | undefined
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  for (const event of session.snapshotEvents()) {
-    if (event.type === 'revert/state') {
-      const data = event.data as { fromSeq?: number | null }
-      if (data.fromSeq === null) boundary = undefined
-      else if (typeof data.fromSeq === 'number') boundary = data.fromSeq
-    }
-  }
-  return boundary
-}
-
 function rejectFailure(error: { readonly code: RemoteErrorCode; readonly message: string; readonly details: object }): never {
   throw new RemoteError(error.code, error.message, error.details as never)
 }
@@ -921,95 +956,4 @@ function resolvePromptFileReceipts(
     return { type: 'file', attachment }
   })
   return { content: resolved, receiptIds: [...receiptIds] }
-}
-
-function hasPromptRequest(agent: Agent, requestId: SessionRequestId): boolean {
-  const matches = (message: UserMessage): boolean => {
-    const source = message.source
-    return source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId
-  }
-  if (agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)) return true
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  return agent.session.snapshotEvents().some((event) => {
-    if (event.type !== 'user/message') return false
-    const source = event.data.source
-    return source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId
-  })
-}
-function imageBlockIn(
-  content: unknown,
-  match: (ref: ImageAttachmentRef) => boolean,
-): ImageAttachmentRef | undefined {
-  if (!Array.isArray(content)) return undefined
-  for (const value of content) {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
-    const block = value as { readonly type?: unknown; readonly attachment?: unknown }
-    if (block.type === 'image' && typeof block.attachment === 'object' && block.attachment !== null) {
-      const ref = block.attachment as ImageAttachmentRef
-      if (match(ref)) return ref
-    }
-  }
-  return undefined
-}
-
-/** Read only first-party declared content fields; unknown event payloads stay opaque. */
-function imageInEvent(
-  event: SessionEvent,
-  match: (ref: ImageAttachmentRef) => boolean,
-): ImageAttachmentRef | undefined {
-  const data = event.data as {
-    readonly content?: unknown
-    readonly message?: { readonly content?: unknown }
-    readonly inserted?: unknown
-    readonly summary?: unknown
-    readonly rawOutput?: unknown
-  }
-  // First-party event payloads can be present without their producer plugin mounted.
-  const type: string = event.type
-  switch (type) {
-    case 'user/message':
-    case 'tool/ptc-dispatch':
-      return imageBlockIn(data.content, match)
-    case 'system/message':
-    case 'developer/message':
-    case 'tool/result':
-    case 'team/message/queued':
-      return imageBlockIn(data.message?.content, match)
-    case 'agent/inbox/spliced': {
-      const messages = data.inserted
-      if (!Array.isArray(messages)) return undefined
-      for (const message of messages as readonly unknown[]) {
-        if (typeof message !== 'object' || message === null || Array.isArray(message)) continue
-        const found = imageBlockIn((message as { readonly content?: unknown }).content, match)
-        if (found !== undefined) return found
-      }
-      return undefined
-    }
-    case 'compaction/summary':
-      return imageBlockIn(data.summary, match) ?? imageBlockIn(data.rawOutput, match)
-    case 'assistant/message': {
-      const found = imageBlockIn(data.message?.content, match)
-      if (found !== undefined) return found
-      break
-    }
-    case 'assistant/attempt': break
-    default: return undefined
-  }
-  const assistant = event as SessionEvent<'assistant/message' | 'assistant/attempt'>
-  for (const chunk of assistantStreamChunks(assistant.data.stream, 'block-end')) {
-    const found = imageBlockIn([chunk.block], match)
-    if (found !== undefined) return found
-  }
-  return undefined
-}
-
-function referencedImage(
-  events: readonly SessionEvent[],
-  attachmentId: string,
-): ImageAttachmentRef | undefined {
-  for (const event of events) {
-    const found = imageInEvent(event, ref => String(ref.attachmentId) === attachmentId)
-    if (found !== undefined) return found
-  }
-  return undefined
 }

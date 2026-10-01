@@ -189,5 +189,12 @@ export function historyValue(events: readonly SessionEvent[], hasMore = false): 
   return {
     records: entries(events),
     hasMore,
+    revert: {
+      fromSeq: null,
+      shadowRanges: [],
+      conflicts: [],
+      outcomes: {},
+      asOfSeq: events.at(-1)?.seq ?? -1,
+    },
   }
 }
