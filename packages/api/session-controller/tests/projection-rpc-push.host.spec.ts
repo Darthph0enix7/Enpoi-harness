@@ -52,8 +52,27 @@ const capOverrideSchema: z.ZodType<CapOverrideRecord> = z.object({
 
 const EMPTY_CAP_OVERRIDES: CapOverrideRecord = { skills: {}, tools: {}, mcp: {} }
 
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** Test-only: a capability-shaped durable append. */
+    'test/cap-override': CapOverrideRecord
+  }
+}
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionStateMap {
+    'test/cap-override': CapOverrideRecord
+  }
+  interface SessionProjectionMap {
+    'test/cap-override': CapOverrideRecord
+  }
+}
+
 /** The capabilities projection unit shape: non-surface event, wire view. */
-const capOverrideUnit: ProjectionDefinition<'test/cap-override', CapOverrideRecord> = {
+type TestCapUnit = Omit<ProjectionDefinition<'test/cap-override', CapOverrideRecord>, 'wire'> & {
+  wire: { viewSchema: z.ZodType<CapOverrideRecord>; view: (state: CapOverrideRecord) => CapOverrideRecord }
+}
+const capOverrideUnit: TestCapUnit = {
   key: 'test/cap-override',
   stateSchema: capOverrideSchema,
   init: () => EMPTY_CAP_OVERRIDES,
