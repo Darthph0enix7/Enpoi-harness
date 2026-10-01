@@ -159,6 +159,8 @@ class FakeSessions implements ISessions {
   declare readonly selectModel: ISessions['selectModel']
   declare readonly revert: ISessions['revert']
   declare readonly revertRestore: ISessions['revertRestore']
+  declare readonly revertIterations: ISessions['revertIterations']
+  declare readonly revertIterationRestore: ISessions['revertIterationRestore']
   declare readonly resolveFileConflict: ISessions['resolveFileConflict']
   declare readonly delete: ISessions['delete']
   declare readonly searchResultLimit: ISessions['searchResultLimit']

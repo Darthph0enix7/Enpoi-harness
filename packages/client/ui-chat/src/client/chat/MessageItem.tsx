@@ -1,6 +1,6 @@
-import { Fragment, memo, useEffect, useMemo, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { PendingSubmission, SessionIterationVariant } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { MessageImageSource } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { fileExtension, FileTypeIcon, fileSizeText, JsonBlock, projectUserText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatNodeOwnerProps, ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
@@ -167,7 +167,7 @@ function TurnMaxTokensItem({ t }: {
 
 /** Right-aligned bubble shared by user and steering rows. */
 function UserStyleBubble({
-  content, renderMessageImages, actions, pending = false, echo = false, referenceLabels = [], skillNames = [],
+  content, renderMessageImages, actions, pending = false, echo = false, preview = false, referenceLabels = [], skillNames = [],
   previewAttachments, references, swipeRevert, t,
 }: {
   content: readonly unknown[]
@@ -178,6 +178,8 @@ function UserStyleBubble({
   pending?: boolean
   /** Whether this is a local submission echo (invisible marker; the echo renders exactly like its durable replacement). */
   echo?: boolean
+  /** Whether the bubble shows a non-active iteration preview instead of the durable content. */
+  preview?: boolean
   /** Exact session mention labels associated by the adjacent recall node. */
   referenceLabels?: readonly string[]
   /** Skill names the step's `skill-invocation` injections loaded for this message. */
@@ -199,6 +201,7 @@ function UserStyleBubble({
       className={css.userRow}
       data-pending-steering={pending || undefined}
       data-submission-echo={echo || undefined}
+      data-iteration-preview={preview || undefined}
     >
       <div className={css.userStack}>
         {attachments.length > 0 && (
@@ -335,16 +338,83 @@ export function PendingSubmissionBubble({ submission, renderMessageImages, t }: 
   )
 }
 
-/** User and admitted-steering keyed Chat renderer. */
+/**
+ * User and admitted-steering keyed Chat renderer.
+ *
+ * A user message that belongs to an iteration group (more than one variant)
+ * carries the ◀ x/y ▶ navigator. Arrows change a component-local preview only
+ * — the transcript, log, and file state are untouched until the operator
+ * presses Restore, which writes through the Host.
+ */
 export const UserMessageNodeView = memo(function UserMessageNodeView({
   node, renderMessageImages, openFile, openSkill, t, revertAt,
+  iterationGroups, loadIterationPreviews, restoreIteration,
 }: ChatNodeViewProps<'user' | 'steering'>) {
   const data = node.data
+  const group = node.kind === 'user' ? iterationGroups?.get(node.anchorSeq) : undefined
+  const groupAnchor = group?.anchorSeq
+  const variants = group?.variants ?? []
+  const activeVariantSeq = group?.activeVariantSeq ?? null
+  const activeIndex = variants.findIndex(variant => variant.seq === activeVariantSeq)
+  const [previewSeq, setPreviewSeq] = useState<number | null>(null)
+  const [previews, setPreviews] = useState<ReadonlyMap<number, SessionIterationVariant> | null>(null)
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+
+  // A restore (this client's or another client's commit) moves the active
+  // variant: the preview must fall back to the durable content.
+  useEffect(() => {
+    setPreviewSeq(null)
+    setPreviewFailed(false)
+  }, [activeVariantSeq, groupAnchor])
+
+  const previewIndex = previewSeq === null ? activeIndex : variants.findIndex(variant => variant.seq === previewSeq)
+  const selectedIndex = previewIndex < 0 ? Math.max(0, activeIndex) : previewIndex
+  const selectedVariant = previewSeq === null ? undefined : previews?.get(previewSeq)
+
+  // Bounded previews are fetched once per group, on first navigation only.
+  useEffect(() => {
+    if (previewSeq === null || previews !== null || groupAnchor === undefined || loadIterationPreviews === undefined) return
+    let cancelled = false
+    void loadIterationPreviews(groupAnchor).then((groups) => {
+      if (cancelled) return
+      const found = groups.find(candidate => candidate.anchorSeq === groupAnchor)
+      setPreviews(new Map((found?.variants ?? []).map(variant => [variant.seq, variant])))
+    }, () => {
+      if (cancelled) return
+      setPreviews(new Map())
+      setPreviewFailed(true)
+    })
+    return () => { cancelled = true }
+  }, [previewSeq, previews, groupAnchor, loadIterationPreviews])
+
+  const move = useCallback((delta: number) => {
+    if (variants.length === 0) return
+    const next = Math.min(variants.length - 1, Math.max(0, selectedIndex + delta))
+    const nextSeq = variants[next]?.seq
+    if (nextSeq === undefined) return
+    setPreviewSeq(nextSeq === activeVariantSeq ? null : nextSeq)
+  }, [variants, selectedIndex, activeVariantSeq])
+
+  const restore = useCallback(() => {
+    if (previewSeq === null || restoreIteration === undefined || restoring) return
+    setRestoring(true)
+    void restoreIteration(previewSeq).then(
+      () => { setRestoring(false) },
+      () => { setRestoring(false) },
+    )
+  }, [previewSeq, restoreIteration, restoring])
+
+  const previewing = previewSeq !== null
+  const content = previewing
+    ? [{ type: 'text', text: selectedVariant?.text ?? (previewFailed ? t('message.iteration.loadFailed') : t('message.iteration.loading')) }]
+    : data.content
   return (
     <UserStyleBubble
-      content={data.content}
+      content={content}
       references={{ openFile, openSkill }}
       renderMessageImages={renderMessageImages}
+      preview={previewing}
       {...data.referenceLabels === undefined ? {} : { referenceLabels: data.referenceLabels }}
       {...data.skillNames === undefined ? {} : { skillNames: data.skillNames }}
       t={t}
@@ -352,14 +422,56 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
         ? { swipeRevert: () => { revertAt(node.anchorSeq) } }
         : {}}
       actions={text => (
-        <MessageIconActions
-          text={text}
-          time={data.time}
-          clock="start"
-          className={css.actions}
-          onRevert={node.kind === 'user' && revertAt !== undefined ? () => { revertAt(node.anchorSeq) } : undefined}
-          t={t}
-        />
+        <div className={css.iterationActions}>
+          <MessageIconActions
+            text={text}
+            time={data.time}
+            clock="start"
+            className={css.actions}
+            onRevert={node.kind === 'user' && revertAt !== undefined ? () => { revertAt(node.anchorSeq) } : undefined}
+            t={t}
+          />
+          {group !== undefined && variants.length > 1 && (
+            <div className={css.iterationNav} data-iteration-preview={previewing || undefined}>
+              <button
+                type="button"
+                className={css.iterationButton}
+                aria-label={t('message.iteration.previous')}
+                disabled={selectedIndex <= 0}
+                onClick={() => { move(-1) }}
+              >
+                ◀
+              </button>
+              <span className={css.iterationPosition} aria-live="polite">
+                {t('message.iteration.position', { index: selectedIndex + 1, total: variants.length })}
+              </span>
+              <button
+                type="button"
+                className={css.iterationButton}
+                aria-label={t('message.iteration.next')}
+                disabled={selectedIndex >= variants.length - 1}
+                onClick={() => { move(1) }}
+              >
+                ▶
+              </button>
+              {previewing && (
+                <>
+                  <span className={css.iterationStatus} role="status">
+                    {t('message.iteration.preview', { index: selectedIndex + 1, total: variants.length })}
+                  </span>
+                  <button
+                    type="button"
+                    className={css.iterationRestore}
+                    disabled={restoring || restoreIteration === undefined}
+                    onClick={restore}
+                  >
+                    {restoring ? t('message.iteration.restoring') : t('message.iteration.restore')}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       )}
     />
   )

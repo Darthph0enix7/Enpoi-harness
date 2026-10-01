@@ -54,6 +54,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'hook/invoked',
   'hook/result',
   'image/offload',
+  'llm/attempt-failed',
   'llm/retry',
   'llm/retry-started',
   'model/selection',
@@ -64,6 +65,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'revert/file-conflict',
   'revert/file-intent',
   'revert/file-result',
+  'revert/iteration',
   'revert/state',
   'sandbox/mode',
   'schedule/change',
@@ -94,6 +96,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'turn/end',
   'turn/start',
   'user/message',
+  'verify/unmet',
   'web/deepseek-search-llm-request',
   'workspace/changes',
 ])

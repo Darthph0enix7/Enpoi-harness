@@ -4,8 +4,11 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { SESSION_SEARCH_RESULT_LIMIT } from '../../types.ts'
 import type {
+  SessionIterationGroup,
+  SessionRequestId,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
 } from '../../types.ts'
@@ -542,6 +545,38 @@ export class ClientSessions implements ISessions {
       ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
     })
     if (!result.ok) throw new Error(`revert restore failed: ${result.error.code}: ${result.error.message}`)
+  }
+
+  /**
+   * List the durable iteration groups of one Session.
+   * @param opts - session, optional group anchor, and listing bounds.
+   * @returns groups in anchor order with variants in creation order.
+   * @throws {Error} when the host rejects the read.
+   */
+  async revertIterations(opts: {
+    sessionId: SessionId
+    anchorSeq?: number
+    limit?: number
+    beforeVariantSeq?: number
+  }): Promise<readonly SessionIterationGroup[]> {
+    const result = await this.manager.revertIterations(opts)
+    if (!result.ok) throw new Error(`revert iterations failed: ${result.error.code}: ${result.error.message}`)
+    return result.value.groups
+  }
+
+  /**
+   * Restore one iteration variant as the active version.
+   * @param opts - session, target variant seq, and the client-minted request id.
+   * @throws {Error} when the host rejects the target.
+   */
+  async revertIterationRestore(opts: { sessionId: SessionId; variantSeq: number }): Promise<void> {
+    const result = await this.manager.revertIterationRestore({
+      sessionId: opts.sessionId,
+      variantSeq: opts.variantSeq,
+      // The initiator mints the idempotency key; a transport retry re-sends it.
+      requestId: randomUUID() as SessionRequestId,
+    })
+    if (!result.ok) throw new Error(`revert iteration restore failed: ${result.error.code}: ${result.error.message}`)
   }
 
   /**

@@ -1059,6 +1059,28 @@ describe('Trajectory revert Definitions', () => {
     expect(snapshot(value).eventNodes.map(node => node.kind)).toEqual(['user', 'assistant'])
   })
 
+  it('ignores revert/iteration markers entirely', () => {
+    const definition = DEFINITIONS.find(candidate => candidate.kind === 'trajectory-revert')
+    if (definition === undefined) throw new Error('trajectory-revert Definition is not registered')
+    const marker = at(6, 'revert/iteration', {
+      groupAnchor: 3, previousSeq: 3, variantSeq: 9, startSeq: 3, endSeq: 4, cause: 'commit',
+    })
+    // The marker's type is not the Definition's discriminant, so no revert
+    // row is produced and the projection stays byte-identical.
+    expect(definition.match(marker.event)).toBeNull()
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', {
+        id: 'u1', role: 'user', content: [{ type: 'text', text: 'first' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' }),
+      marker,
+      at(7, 'assistant/message', { turn: 1, step: 1, message: assistantMessage('a1', 'one') }),
+    ])
+    expect(snapshot(value).reverts).toEqual([])
+    expect(snapshot(value).eventNodes.map(node => node.kind)).toEqual(['user', 'assistant'])
+  })
+
   it('pins the revert Definition edges the engine cannot reach', () => {
     const definition = DEFINITIONS.find(candidate => candidate.kind === 'trajectory-revert')
     if (definition === undefined) throw new Error('trajectory-revert Definition is not registered')

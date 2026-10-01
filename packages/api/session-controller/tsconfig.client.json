@@ -8,6 +8,7 @@
   "include": [
     "src/client/**/*.ts",
     "src/revert-fold.ts",
+    "src/iteration-fold.ts",
     "src/types.ts",
     "src/remote-events.ts"
   ],

@@ -124,6 +124,8 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
 - File-reference completion uses the shared Agent lookup and can resume a cold Session; the `skills/list` catalog is the non-activating alternative for skill metadata.
 - Accepted/running display memory lives only in Client memory and is lost on page reload.
 - That memory is not shared between tabs: one tab can show a converted row while another still shows `New Session` for the same Session.
+- Iteration restore (`revertIterationRestore`) requires a live Agent; cold restore without one is deferred. The ◀ x/y ▶ preview carries text only — media stays referenced by attachment id.
+- Log rotation/GC is blocked until a retention-pin manifest exists that pins every `revert/iteration` marker and variant seq, every live surface node's `sourceEventSeqs`, every `image/offload` target seq, and `compaction/summary.shadowedSeqs` (DESIGN §4.10/§1.4 I1).
 
 
 <a id="dev-note"></a>

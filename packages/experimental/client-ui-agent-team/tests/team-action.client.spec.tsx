@@ -87,6 +87,7 @@ function bench(options: {
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
   })
   const useSessions = bindSnapshotSelector(sessions)
   const injected: TeamActionInjected = { openTeammate: vi.fn() }

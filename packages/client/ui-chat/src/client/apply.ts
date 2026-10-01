@@ -273,6 +273,10 @@ export function apply(ctx: Context): void {
                 console.error('revert failed', error)
               })
           },
+          loadIterationPreviews: (anchorSeq: number) =>
+            ctx.sessions.revertIterations({ sessionId, anchorSeq }),
+          restoreIteration: (variantSeq: number) =>
+            ctx.sessions.revertIterationRestore({ sessionId, variantSeq }),
         }
       },
     }, ChatView)

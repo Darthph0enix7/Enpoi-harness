@@ -53,6 +53,10 @@ import type {
   SessionRevertValue,
   SessionRevertRestoreRequest,
   SessionRevertRestoreValue,
+  SessionRevertIterationsRequest,
+  SessionRevertIterationsValue,
+  SessionRevertIterationRestoreRequest,
+  SessionRevertIterationRestoreValue,
   SessionFollowFrame,
   SessionFollowRequest,
   SessionForkRequest,
@@ -464,6 +468,26 @@ export class SessionController extends TypertRemoteService {
   @Remote('revertRestore')
   revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue> {
     return this.commands.revertRestore(request)
+  }
+
+  /**
+   * List the Session's durable iteration groups (variant chains).
+   * @param request - session, optional group anchor, and listing bounds.
+   * @returns bounded groups with capped previews and surface-activity flags.
+   */
+  @Remote('revertIterations')
+  revertIterations(request: SessionRevertIterationsRequest): Promise<SessionRevertIterationsValue> {
+    return this.commands.revertIterations(request)
+  }
+
+  /**
+   * Restore one iteration variant as the active version (overwrite-since-point commit).
+   * @param request - session, target variant, and the idempotency request id.
+   * @returns acknowledgement that the restore was accepted.
+   */
+  @Remote('revertIterationRestore')
+  revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue> {
+    return this.commands.revertIterationRestore(request)
   }
 
   /**

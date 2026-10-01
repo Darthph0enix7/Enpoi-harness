@@ -105,6 +105,7 @@ function createSessionsBench(ctx: Context): SessionsBench {
         revertShadowRanges: [],
         revertFileConflicts: [],
         revertFileOutcomes: {},
+        revertIterations: [],
       })
       const projections = new Map<string, HostObservable<unknown>>()
       const session = {

@@ -35,6 +35,7 @@ import {
   foldRevertEvent,
   type RevertFoldState,
 } from '../../revert-fold.ts'
+import { iterationEdges } from '../../iteration-fold.ts'
 import { Notifier } from './notifier.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -1003,6 +1004,7 @@ export class Session implements SessionFace {
       revertShadowRanges: this.revertFold.revertShadowRanges,
       revertFileConflicts: this.revertFold.revertFileConflicts,
       revertFileOutcomes: this.revertFold.revertFileOutcomes,
+      revertIterations: iterationEdges(this.revertFold.iterations),
     }
   }
 

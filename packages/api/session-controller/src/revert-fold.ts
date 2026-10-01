@@ -14,6 +14,13 @@ import type {
   SessionRevertFold,
   SessionRevertShadowRange,
 } from './types.ts'
+import {
+  adoptIterationEdges,
+  emptyIterationFoldState,
+  foldIterationEvent,
+  iterationEdges,
+  type IterationFoldState,
+} from './iteration-fold.ts'
 
 /** Mutable fold accumulator; every applied event replaces changed fields by value. */
 export interface RevertFoldState {
@@ -25,6 +32,8 @@ export interface RevertFoldState {
   revertFileConflicts: RevertFileConflict[]
   /** File-revert outcomes by target path after resolutions. */
   revertFileOutcomes: Record<string, RevertFileOutcome>
+  /** Durable revert-iteration pointer index folded from the same event stream. */
+  iterations: IterationFoldState
 }
 
 /** Structural event fields the fold reads; durable Session events and test doubles qualify. */
@@ -42,6 +51,7 @@ export function emptyRevertFoldState(): RevertFoldState {
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    iterations: emptyIterationFoldState(),
   }
 }
 
@@ -56,6 +66,7 @@ export function adoptRevertFold(fold: SessionRevertFold): RevertFoldState {
     revertShadowRanges: [...fold.shadowRanges],
     revertFileConflicts: [...fold.conflicts],
     revertFileOutcomes: { ...fold.outcomes },
+    iterations: adoptIterationEdges(fold.iterations),
   }
 }
 
@@ -71,9 +82,11 @@ export function revertFoldValue(state: RevertFoldState, asOfSeq: number): Sessio
     shadowRanges: [...state.revertShadowRanges],
     conflicts: [...state.revertFileConflicts],
     outcomes: { ...state.revertFileOutcomes },
+    iterations: iterationEdges(state.iterations),
     asOfSeq,
   }
 }
+
 
 /**
  * Fold one durable event into the accumulator.
@@ -86,6 +99,9 @@ export function revertFoldValue(state: RevertFoldState, asOfSeq: number): Sessio
  * @returns whether the fold changed observable state.
  */
 export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent): boolean {
+  // The iteration pointer index folds the same ordered stream; its change is
+  // OR-ed into every branch below so a marker-only append still republishes.
+  const iterationChanged = foldIterationEvent(state.iterations, event)
   if (event.type === 'revert/state') {
     const data = event.data as { readonly fromSeq?: number | null } | undefined
     // Every revert/state (revert, restore, commit) opens a fresh boundary
@@ -102,11 +118,11 @@ export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent):
       changed = true
     }
     if (data?.fromSeq === null) {
-      if (state.revertFromSeq === null && state.revertShadowRanges.length === 0) return changed
+      if (state.revertFromSeq === null && state.revertShadowRanges.length === 0) return changed || iterationChanged
       state.revertFromSeq = null
       return true
     }
-    if (data === undefined || state.revertFromSeq === data.fromSeq) return changed
+    if (data === undefined || state.revertFromSeq === data.fromSeq) return changed || iterationChanged
     state.revertFromSeq = data.fromSeq ?? null
     return true
   }
@@ -134,7 +150,7 @@ export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent):
       state.revertFromSeq = null
       return true
     }
-    return false
+    return iterationChanged
   }
   if (event.type === 'revert/file-conflict') {
     const data = event.data as RevertFileConflict | undefined
@@ -145,7 +161,7 @@ export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent):
         : state.revertFileConflicts.map((c, i) => i === index ? data : c)
       return true
     }
-    return false
+    return iterationChanged
   }
   if (event.type === 'revert/file-result') {
     const data = event.data as { readonly revertSeq?: number; readonly outcomes?: Record<string, RevertFileOutcome> } | undefined
@@ -161,9 +177,9 @@ export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent):
       state.revertFileConflicts = state.revertFileConflicts.filter(c => !resolved.has(c.targetKey))
       return true
     }
-    return false
+    return iterationChanged
   }
-  return false
+  return iterationChanged
 }
 
 /**

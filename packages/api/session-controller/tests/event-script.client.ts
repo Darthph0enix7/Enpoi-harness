@@ -194,6 +194,7 @@ export function historyValue(events: readonly SessionEvent[], hasMore = false): 
       shadowRanges: [],
       conflicts: [],
       outcomes: {},
+      iterations: [],
       asOfSeq: events.at(-1)?.seq ?? -1,
     },
   }

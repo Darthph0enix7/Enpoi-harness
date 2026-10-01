@@ -11,13 +11,20 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { assistantStreamChunks } from '@deepseek-ai/dsh-llm'
+import {
+  emptyIterationFoldState,
+  foldIterationEvent,
+  type IterationFoldState,
+} from './iteration-fold.ts'
 
-/** Derived prompt-id, revert-boundary, and attachment-reference lookups for one Session. */
+/** Derived prompt-id, revert-boundary, iteration-pointer, and attachment-reference lookups for one Session. */
 export class SessionCommandIndex {
   private readonly promptRequestIds = new Set<string>()
   private readonly attachments = new Map<string, ImageAttachmentRef>()
   private revertFromSeq: number | undefined
   private throughSeq = -1
+  /** Durable revert-iteration pointer index, advanced by the same ingest. */
+  readonly iterations: IterationFoldState = emptyIterationFoldState()
 
   /**
    * Build the index over one durable log snapshot.
@@ -61,6 +68,7 @@ export class SessionCommandIndex {
   }
 
   private apply(event: SessionEvent): void {
+    foldIterationEvent(this.iterations, event)
     if (event.type === 'user/message') {
       const source = event.data.source
       if (source.kind === 'user' && 'rpcId' in source && typeof source.rpcId === 'string') {

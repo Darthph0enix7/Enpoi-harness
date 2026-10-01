@@ -460,6 +460,40 @@ export interface SessionEventMap {
     cause?: 'revert' | 'restore' | 'commit'
   }
   /**
+   * One durable iteration-pointer edge for a user-message position: the
+   * replacement `variantSeq` now stands for the group identified by
+   * `groupAnchor`, having replaced the surface span `startSeq`…`endSeq`
+   * (inclusive). Appended by the writing actor immediately AFTER the
+   * replacement `user/message`, so `variantSeq` is the known seq of the
+   * replacement that just entered the log; `previousSeq` is the variant it
+   * replaced, or null when the group predates the marker (the first commit
+   * records `previousSeq = groupAnchor`). The edges form a tree, not a list:
+   * a commit reverting to an intermediate variant branches.
+   *
+   * Fixed-size integers only: no content, media, or turn bytes are copied, and
+   * the reverted-away versions stay restorable from their original events. The
+   * marker is the fail-safe that survives compaction shadowing the replacement.
+   * Log-only, never surface-eligible, never reaches the model. Appended with
+   * the envelope's `ignorable` marker so a build that does not know the type
+   * skips it instead of refusing the log.
+   */
+  'revert/iteration': {
+    /** Seq of the first variant (the original user message) — the group key. */
+    groupAnchor: number
+    /** The variant this commit replaced, or null when no prior variant is known. */
+    previousSeq: number | null
+    /** The replacement user-message seq appended immediately before this marker. */
+    variantSeq: number
+    /** First surface seq the commit replaced (inclusive). */
+    startSeq: number
+    /** Last surface seq the commit replaced (inclusive). */
+    endSeq: number
+    /** Whether the commit came from an ordinary revert send or an explicit restore. */
+    cause: 'commit' | 'restore'
+    /** Present on restore: the variant whose content was re-materialized. */
+    restoredFromSeq?: number
+  }
+  /**
    * Durable intent record for a file-revert batch, appended by the
    * `enpoi-file-revert` plugin BEFORE any disk mutation. Log-only, ignorable,
    * never surface-eligible. Recovery replays the recorded plan verbatim when

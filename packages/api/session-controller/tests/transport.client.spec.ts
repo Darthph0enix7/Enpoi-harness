@@ -349,7 +349,7 @@ describe('Session Client stream adapters', () => {
         cursor: -1,
         records: [],
         hasMore: false,
-        revert: { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq: -1 },
+        revert: { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, iterations: [], asOfSeq: -1 },
         projections: { asOfSeq: -1, values: {} },
       }],
     }], [])

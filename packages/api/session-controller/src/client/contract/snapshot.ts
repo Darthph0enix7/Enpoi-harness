@@ -3,7 +3,7 @@ import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionRequestId, SessionRevertShadowRange, RevertFileConflict, RevertFileOutcome } from '../../types.ts'
+import type { SessionIterationEdge, SessionRequestId, SessionRevertShadowRange, RevertFileConflict, RevertFileOutcome } from '../../types.ts'
 
 /** One image displayed by a local submission echo before durable admission. */
 export interface PendingSubmissionImage {
@@ -96,4 +96,10 @@ export interface SessionSnapshot {
   readonly revertFileConflicts: readonly RevertFileConflict[]
   /** File-revert outcomes by target path after resolutions. */
   readonly revertFileOutcomes: Readonly<Record<string, RevertFileOutcome>>
+  /**
+   * Durable iteration groups (variant chains), host-folded and extended by
+   * later live markers. The ◀ x/y ▶ control navigates these groups; a
+   * variant is identified by its user-message seq.
+   */
+  readonly revertIterations: readonly SessionIterationEdge[]
 }

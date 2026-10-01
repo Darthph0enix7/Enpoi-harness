@@ -5,8 +5,8 @@ import {
   createScope, MutableSessionEventSource, scopeOf, SESSION_SEARCH_RESULT_LIMIT,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  AgentContext, ISessions, ProjectionsFace, SessionBinding, SessionFace, SessionListState,
-  SessionEventLikeEntry, SessionLiveEventEntry, SessionSearchResultItem,
+  AgentContext, ISessions, ProjectionsFace, SessionBinding, SessionFace, SessionIterationGroup,
+  SessionListState, SessionEventLikeEntry, SessionLiveEventEntry, SessionSearchResultItem,
   SessionReference, SessionReferenceSource, SessionRetainInfo, SessionRetainOptions,
   SessionSnapshot, SessionSummary, SessionTarget, SubmissionHandle,
 } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -317,7 +317,7 @@ export class TestSessions implements ISessions {
   readonly calls: {
     method: 'create' | 'setSubagentCatalogOpen' | 'refreshSubagents' | 'refreshProjections' | 'refresh' | 'loadMore'
       | 'search' | 'requestSnapshot' | 'fork'
-      | 'selectModel' | 'revert' | 'revertRestore' | 'resolveFileConflict' | 'delete'
+      | 'selectModel' | 'revert' | 'revertRestore' | 'revertIterations' | 'revertIterationRestore' | 'resolveFileConflict' | 'delete'
     args: unknown[]
   }[] = []
 
@@ -739,6 +739,23 @@ export class TestSessions implements ISessions {
     this.calls.push({ method: 'revertRestore', args: [opts] })
     return Promise.resolve()
   }
+  /** Fixture stub: records the call and returns no iteration groups. */
+  revertIterations(opts: {
+    sessionId: SessionId
+    anchorSeq?: number
+    limit?: number
+    beforeVariantSeq?: number
+  }): Promise<readonly SessionIterationGroup[]> {
+    this.calls.push({ method: 'revertIterations', args: [opts] })
+    return Promise.resolve([])
+  }
+
+  /** Fixture stub: records the call and acknowledges the restore. */
+  revertIterationRestore(opts: { sessionId: SessionId; variantSeq: number }): Promise<void> {
+    this.calls.push({ method: 'revertIterationRestore', args: [opts] })
+    return Promise.resolve()
+  }
+
 
   /** Fixture stub: records conflict resolution. */
   resolveFileConflict(opts: {

@@ -96,6 +96,7 @@ function sessionSnapshot(openState: SessionSnapshot['openState']): SessionSnapsh
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
     openState,
     openError: null,
     hasMore: false,

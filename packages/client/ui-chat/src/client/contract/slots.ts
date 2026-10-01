@@ -14,6 +14,7 @@ import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DocumentDiffParams } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type { SessionIterationEdge, SessionIterationGroup } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { createChatStore } from '../stores.ts'
 import type { ChatPresentationPolicy } from '../presentation-policy.ts'
 import type { ToolCallId } from './store.ts'
@@ -174,6 +175,12 @@ export interface ChatNodeOwnerProps {
   forkAt: (seq: number) => void
   /** Revert the conversation from the user message anchored at `seq` (Enpoi Harness). */
   revertAt?: (seq: number) => void
+  /** Durable iteration groups keyed by every variant seq (Enpoi Harness ◀ x/y ▶). */
+  iterationGroups?: ReadonlyMap<number, SessionIterationEdge>
+  /** Load bounded previews for one iteration group. */
+  loadIterationPreviews?: (anchorSeq: number) => Promise<readonly SessionIterationGroup[]>
+  /** Restore one iteration variant as the active version (writes through the Host). */
+  restoreIteration?: (variantSeq: number) => Promise<void>
   /**
    * Session-authorized image loader, down-threaded from the Chat view so a
    * chat-node renderer can render the attachment presentation slot directly
@@ -270,6 +277,10 @@ export interface ChatViewInjected {
    * reverted query text lands in the composer draft.
    */
   revertAt: (seq: number) => void
+  /** Load bounded previews for one iteration group (◀ x/y ▶ navigation). */
+  loadIterationPreviews: (anchorSeq: number) => Promise<readonly SessionIterationGroup[]>
+  /** Restore one iteration variant as the active version. */
+  restoreIteration: (variantSeq: number) => Promise<void>
   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined
 }
 

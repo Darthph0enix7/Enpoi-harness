@@ -224,6 +224,31 @@ export interface SessionRevertShadowRange {
   readonly end: number
 }
 
+/** One durable variant edge of a user-message iteration group. */
+export interface SessionIterationEdgeVariant {
+  /** The variant user-message seq. */
+  readonly seq: number
+  /** The variant `seq` replaced (the tree edge), or null when the marker named none. */
+  readonly previousSeq: number | null
+}
+
+/**
+ * One user-message iteration group folded from `revert/iteration` markers and
+ * the pre-marker `surfaceOp.startSeq` fallback. Variants are in durable
+ * creation order; a branch is represented by `previousSeq`, not by a second
+ * list. `activeVariantSeq` is the variant currently representing the group
+ * position (a compaction checkpoint citing it keeps it active) or null when a
+ * later user-origin commit shadowed the whole group.
+ */
+export interface SessionIterationEdge {
+  /** Seq of the original variant (the group key). */
+  readonly anchorSeq: number
+  /** Variant currently representing the group position, or null. */
+  readonly activeVariantSeq: number | null
+  /** Every known variant in creation order. */
+  readonly variants: readonly SessionIterationEdgeVariant[]
+}
+
 /** File-revert conflict awaiting operator resolution (enpoi-file-revert). */
 export interface RevertFileConflict {
   readonly conflictId: string
@@ -765,6 +790,62 @@ export interface SessionRevertRestoreValue {
   readonly accepted: true
 }
 
+/** One listed iteration variant with a bounded preview (never full media bytes). */
+export interface SessionIterationVariant {
+  /** The variant user-message seq. */
+  readonly seq: number
+  /** The variant `seq` replaced (the tree edge), or null when unknown. */
+  readonly previousSeq: number | null
+  /** Event time (unix epoch milliseconds). */
+  readonly time: number
+  /** Whether the variant is currently a surface node or cited by the checkpoint representing it. */
+  readonly surfaceActive: boolean
+  /** Capped text preview; absent when the variant carries no text. */
+  readonly text?: string
+  /** Image/file attachment ids referenced by the variant; bytes stay behind `attachment`. */
+  readonly attachmentIds?: readonly string[]
+}
+
+/** One listed iteration group. */
+export interface SessionIterationGroup {
+  /** Seq of the original variant (the group key). */
+  readonly anchorSeq: number
+  /** Variant currently representing the group position, or null. */
+  readonly activeVariantSeq: number | null
+  /** Variants in creation order, bounded by the request limit. */
+  readonly variants: readonly SessionIterationVariant[]
+}
+
+/** Iteration list request; `anchorSeq` narrows to one group. */
+export interface SessionRevertIterationsRequest {
+  readonly sessionId: SessionId
+  /** When set, list only the group anchored at this seq. */
+  readonly anchorSeq?: number
+  /** Maximum groups and maximum variants per group; the Host caps oversized values. */
+  readonly limit?: number
+  /** Backwards variant cursor: return variants created before this seq. */
+  readonly beforeVariantSeq?: number
+}
+
+/** Iteration list value; previews are capped and media is referenced, never embedded. */
+export interface SessionRevertIterationsValue {
+  readonly groups: readonly SessionIterationGroup[]
+}
+
+/** Iteration restore request; `requestId` is the idempotency key of the replacement message. */
+export interface SessionRevertIterationRestoreRequest {
+  readonly sessionId: SessionId
+  /** The variant whose content becomes the new active version. */
+  readonly variantSeq: number
+  /** Client-minted identity persisted on the replacement and used for idempotent retry. */
+  readonly requestId: SessionRequestId
+}
+
+/** Iteration restore receipt; the replacement seq arrives through the event stream. */
+export interface SessionRevertIterationRestoreValue {
+  readonly accepted: true
+}
+
 /** File-revert conflict resolution request (bridged to enpoi-file-revert). */
 export interface SessionResolveFileConflictRequest {
   readonly sessionId: SessionId
@@ -968,6 +1049,13 @@ export interface SessionRevertFold {
   readonly conflicts: readonly RevertFileConflict[]
   /** File-revert outcomes by target path after resolutions on the live boundary. */
   readonly outcomes: Record<string, RevertFileOutcome>
+  /**
+   * Revert-iteration groups folded from `revert/iteration` markers and the
+   * user-origin `surfaceOp.startSeq` fallback. The client combines this
+   * durable baseline with later live markers, so every attached client's
+   * ◀ x/y ▶ data refreshes from the event stream.
+   */
+  readonly iterations: readonly SessionIterationEdge[]
   /** Inclusive log seq the fold covers; client folds only later events itself. */
   readonly asOfSeq: number
 }

@@ -14,9 +14,10 @@ import type {} from '@deepseek-ai/dsh-client-file-upload'
 import {
   ReasoningEffortId, createUserMessage, freezeMessage,
 } from '@deepseek-ai/dsh-llm'
+import type { AgentIterationIntent } from '@deepseek-ai/dsh-agent'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
-import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset, SessionSeq, foldSurface } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
@@ -51,6 +52,12 @@ import type {
   SessionRevertValue,
   SessionRevertRestoreRequest,
   SessionRevertRestoreValue,
+  SessionRevertIterationsRequest,
+  SessionRevertIterationsValue,
+  SessionRevertIterationRestoreRequest,
+  SessionRevertIterationRestoreValue,
+  SessionIterationGroup,
+  SessionIterationVariant,
   SessionResolveFileConflictRequest,
   SessionResolveFileConflictValue,
   SessionDeleteRequest,
@@ -62,6 +69,14 @@ import type {
   SessionRequestId,
 } from './types.ts'
 import { SessionCommandIndex, referencedImage } from './session-command-index.ts'
+import { truncateUnicodeCodePoints } from './list.ts'
+import { iterationAnchorOf, iterationEdges } from './iteration-fold.ts'
+
+/** Default and maximum groups/variants listed by `revertIterations`. */
+const ITERATION_LIST_LIMIT_DEFAULT = 50
+const ITERATION_LIST_LIMIT_MAX = 200
+/** Preview text cap; a variant body is never returned in full. */
+const ITERATION_PREVIEW_MAX_CODE_POINTS = 2000
 
 interface SessionReadState {
   readonly id: SessionId
@@ -97,6 +112,13 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): Session
 export class SessionCommandController {
   /** Lazily built O(1) lookup indexes per Session, advanced by `session/event`. */
   private readonly commandIndexes = new Map<SessionId, SessionCommandIndex>()
+  /**
+   * Sessions with an in-flight iteration restore. Two concurrent restores
+   * would each validate against the same surface and then queue replacements
+   * against a tail the other moved; serializing them keeps one plan per
+   * surface state (D3).
+   */
+  private readonly restoringSessions = new Set<SessionId>()
 
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
@@ -458,10 +480,21 @@ export class SessionCommandController {
             agent.followup(message)
           } else {
             const shadowedSeqs = nodes.filter(seq => (seq as number) >= revertFromSeq)
+            const iterationIndex = (await this.indexFor(liveSession.id)).iterations
+            const iteration: AgentIterationIntent = {
+              // The reverted message may itself be a later variant; the group
+              // anchor is the original variant that opened the chain.
+              groupAnchor: iterationAnchorOf(iterationIndex, revertFromSeq) ?? revertFromSeq,
+              previousSeq: revertFromSeq,
+              startSeq: revertFromSeq,
+              endSeq: lastSurfaceSeq,
+              cause: 'commit',
+            }
             const intent = {
               surfaceOp: { op: 'replace' as const, startSeq: anchor, endSeq: lastSurfaceSeq },
               sourceEventSeqs: [...shadowedSeqs],
               clearRevert: true,
+              iteration,
             }
             // Revert commits are queue-only (steer was rejected above by the
             // flow-narrowing guard), so the shadowed append always queues.
@@ -653,6 +686,50 @@ export class SessionCommandController {
   }
 
   /**
+   * Cancel running or pending user work for a revert boundary, preserving
+   * child settlement notices (A3): they are captured, the cancel clears the
+   * inbox, and they are re-queued quietly once the aborted activity converges,
+   * so a revert never discards a child result and never wakes a turn to
+   * deliver one.
+   * @param agent - Agent owning the active or queued work.
+   * @param fromSeq - boundary seq carried by the cancel intent.
+   * @param participant - original requester, when the caller is a peer.
+   */
+  private cancelForRevert(
+    agent: Agent,
+    fromSeq: number,
+    participant?: SessionRevertRequest['participant'],
+  ): void {
+    if (agent.status !== 'running' && agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0) return
+    const preserved = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+      .filter(message => message.source.kind !== 'user')
+    agent.cancel(
+      {
+        kind: 'user',
+        ...(participant === undefined ? {} : { participant }),
+        intent: 'revert',
+        revertFromSeq: SessionSeq(fromSeq),
+      },
+      { keepInbox: false },
+    )
+    if (preserved.length > 0) {
+      void agent.whenIdle().then(() => {
+        for (const message of preserved) {
+          try {
+            agent.send(message, 'next-turn', false)
+          } catch {
+            // The Agent was disposed between convergence and this replay:
+            // its inbox can no longer hold the preserved notices.
+          }
+        }
+      }, () => {
+        // Disposal or a failed driver: the preserved notices have no live
+        // inbox left to hold them.
+      })
+    }
+  }
+
+  /**
    * Revert the conversation from a user message: everything after `atSeq`
    * becomes reverted (hidden from the model surface on the next commit) and
    * the reverted query text is returned for the input card. Appends the
@@ -670,38 +747,7 @@ export class SessionCommandController {
     }
     // If a turn is running or inbox has pending work, cancel it first so the
     // revert takes effect immediately instead of rejecting with agent-busy.
-    // Child settlement notices survive the revert (A3): they are captured,
-    // the cancel clears the inbox, and they are re-queued quietly once the
-    // aborted activity converges, so the revert never discards a child result
-    // and never wakes a turn to deliver one.
-    if (agent.status === 'running' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
-      const preserved = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
-        .filter(message => message.source.kind !== 'user')
-      agent.cancel(
-        {
-          kind: 'user',
-          ...(request.participant === undefined ? {} : { participant: request.participant }),
-          intent: 'revert',
-          revertFromSeq: SessionSeq(request.atSeq),
-        },
-        { keepInbox: false },
-      )
-      if (preserved.length > 0) {
-        void agent.whenIdle().then(() => {
-          for (const message of preserved) {
-            try {
-              agent.send(message, 'next-turn', false)
-            } catch {
-              // The Agent was disposed between convergence and this replay:
-              // its inbox can no longer hold the preserved notices.
-            }
-          }
-        }, () => {
-          // Disposal or a failed driver: the preserved notices have no live
-          // inbox left to hold them.
-        })
-      }
-    }
+    this.cancelForRevert(agent, request.atSeq, request.participant)
     const session = agent.session
     const nodes = session.surface.nodes
     const startIdx = nodes.indexOf(SessionSeq(request.atSeq))
@@ -762,6 +808,149 @@ export class SessionCommandController {
     }
     const fromSeq = request.restoreSeq ?? null
     session.append('revert/state', { fromSeq, cause: 'restore' })
+    return { accepted: true }
+  }
+
+  /**
+   * List durable iteration groups for a Session: the variant chains folded
+   * from `revert/iteration` markers plus the pre-marker `surfaceOp.startSeq`
+   * fallback. Cold-safe: an unattached Session folds the full log instead of
+   * activating an Agent. Variant bodies are capped previews; media is returned
+   * as attachment ids, never bytes.
+   * @param request - session, optional group anchor, and listing bounds.
+   * @returns the bounded groups with previews and surface-activity flags.
+   */
+  async revertIterations(request: SessionRevertIterationsRequest): Promise<SessionRevertIterationsValue> {
+    let index: SessionCommandIndex
+    let state: SessionReadState
+    try {
+      index = await this.indexFor(request.sessionId)
+      state = await this.readSessionState(request.sessionId)
+    } catch (error) {
+      if (error instanceof ApiSessionNotFound) {
+        throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
+      }
+      throw error
+    }
+    const attached = this.ctx.sessions.get(request.sessionId)
+    const nodes = attached === undefined ? foldSurface(state.events).nodes : attached.surface.nodes
+    const nodeSet = new Set<number>(nodes)
+    // Only a compaction checkpoint represents the variants it cites; a
+    // replacement's shadowed-source citations are not representations.
+    const cited = new Set<number>()
+    for (const seq of nodes) {
+      const event = state.events[seq]
+      if (event?.type !== 'user/message') continue
+      // The compaction plugin owns this source kind; read it structurally so
+      // this package needs no dependency on the plugin's declaration merge.
+      const kind: string = event.data.source.kind
+      if (kind !== 'compact-checkpoint') continue
+      for (const source of event.sourceEventSeqs ?? []) cited.add(source)
+    }
+    const limit = Math.min(
+      ITERATION_LIST_LIMIT_MAX,
+      Math.max(1, request.limit ?? ITERATION_LIST_LIMIT_DEFAULT),
+    )
+    const groups: SessionIterationGroup[] = []
+    for (const edge of iterationEdges(index.iterations)) {
+      if (groups.length >= limit) break
+      if (request.anchorSeq !== undefined && edge.anchorSeq !== request.anchorSeq) continue
+      const variants: SessionIterationVariant[] = edge.variants
+        .filter(variant => request.beforeVariantSeq === undefined || variant.seq < request.beforeVariantSeq)
+        .slice(-limit)
+        .map((variant) => {
+          const event = state.events[variant.seq]
+          const preview = iterationPreviewOf(event)
+          return {
+            seq: variant.seq,
+            previousSeq: variant.previousSeq,
+            time: event?.time ?? 0,
+            surfaceActive: nodeSet.has(variant.seq) || cited.has(variant.seq),
+            ...preview,
+          }
+        })
+      groups.push({ anchorSeq: edge.anchorSeq, activeVariantSeq: edge.activeVariantSeq, variants })
+    }
+    return { groups }
+  }
+
+  /**
+   * Restore one iteration variant as the surface-active version: cancel
+   * running/pending user work, move the file-revert boundary, and queue a
+   * replacement user message whose content is the target variant's, shadowing
+   * the group's current surface node through the tail (today's
+   * overwrite-since-point commit). The target is validated as a known variant
+   * of a represented group and rejected with `revert-invalid` before any write
+   * when it is missing, foreign, or already active. The replacement carries a
+   * fresh `requestId`, so a retried call is idempotent.
+   * @param request - session, target variant, and the idempotency request id.
+   * @returns acknowledgement that the restore was queued.
+   */
+  async revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue> {
+    const agent = this.ctx.agents.get(request.sessionId)
+    if (agent === undefined) {
+      reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
+    }
+    if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
+      rejectFailure(apiSessionSubagentOwnershipError(request.sessionId))
+    }
+    if (this.restoringSessions.has(request.sessionId)) {
+      reject('session/agent-busy', 'another iteration restore is already in flight for this session', { reason: 'ITERATION_RESTORE_IN_FLIGHT' })
+    }
+    const session = agent.session
+    const index = await this.indexFor(session.id)
+    const group = iterationEdges(index.iterations)
+      .find(candidate => candidate.variants.some(variant => variant.seq === request.variantSeq))
+    if (group === undefined) {
+      reject('revert-invalid', `event ${String(request.variantSeq)} is not a known iteration variant`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    if (group.activeVariantSeq === request.variantSeq) {
+      reject('revert-invalid', `event ${String(request.variantSeq)} is already the active version`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    const variants = new Set(group.variants.map(variant => variant.seq))
+    const anchor = resolveIterationSurfaceAnchor(session, variants)
+    if (anchor === undefined) {
+      reject('revert-invalid', `iteration group ${String(group.anchorSeq)} is no longer represented on the surface`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const target = session.eventAt(SessionSeq(request.variantSeq))
+    if (target === undefined || target.type !== 'user/message') {
+      reject('revert-invalid', `event ${String(request.variantSeq)} is not a user message (iteration target)`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    // Idempotent retry: a duplicate requestId either already appended or is
+    // still pending in the inbox, and must not queue a second replacement.
+    if (await this.hasPromptRequest(agent, request.requestId)) return { accepted: true }
+    const nodes = session.surface.nodes
+    const endSeq = nodes.at(-1)
+    /* v8 ignore next -- the surface always contains the resolved anchor */
+    if (endSeq === undefined) reject('revert-invalid', 'the session surface is empty', { sessionId: request.sessionId, atSeq: request.variantSeq })
+    const plan = assertIterationRestorePlan(request.sessionId, nodes, anchor, endSeq)
+    this.restoringSessions.add(request.sessionId)
+    try {
+      this.cancelForRevert(agent, request.variantSeq)
+      // The boundary moves only after the surface plan is proven valid, so a
+      // rejected plan cannot have triggered the file-revert side effect (D3).
+      session.append('revert/state', { fromSeq: request.variantSeq, cause: 'restore' })
+      const restored = createUserMessage({
+        content: [...target.data.content],
+        source: { kind: 'user', rpcId: request.requestId },
+      })
+      agent.followup(restored, {
+        surfaceOp: { op: 'replace', startSeq: anchor, endSeq },
+        sourceEventSeqs: [...plan],
+        clearRevert: true,
+        iteration: {
+          groupAnchor: group.anchorSeq,
+          previousSeq: group.activeVariantSeq,
+          startSeq: anchor,
+          endSeq,
+          cause: 'restore',
+          restoredFromSeq: request.variantSeq,
+        },
+      })
+    } finally {
+      this.restoringSessions.delete(request.sessionId)
+    }
     return { accepted: true }
   }
 
@@ -919,6 +1108,102 @@ function messageTextOf(data: unknown): string {
       .join(' ')
   }
   return ''
+}
+
+/**
+ * Resolve the surface node currently representing one iteration group.
+ *
+ * The active variant itself when it is a surface node; otherwise the nearest
+ * later surface node whose `sourceEventSeqs` cites a variant — the compaction
+ * checkpoint that replaced the group position. A shadowed variant with no
+ * citing checkpoint is deliberately unresolvable: appending a replacement
+ * anchored there would throw, and the group is no longer on the surface.
+ * @param session - live Agent Session.
+ * @param variants - every variant seq of the group.
+ * @returns the current surface anchor, or undefined when the group is gone.
+ */
+function resolveIterationSurfaceAnchor(
+  session: Session,
+  variants: ReadonlySet<number>,
+): SessionSeq | undefined {
+  const nodes = session.surface.nodes
+  for (let index = nodes.length - 1; index >= 0; index--) {
+    const seq = nodes[index]
+    /* v8 ignore next -- dense node arrays never carry holes */
+    if (seq === undefined) continue
+    if (variants.has(seq)) return seq
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const event = session.eventAt(seq)
+    if (event?.type === 'user/message') {
+      // The compaction plugin owns this source kind; read it structurally.
+      const kind: string = event.data.source.kind
+      if (kind === 'compact-checkpoint'
+        && event.sourceEventSeqs?.some(source => variants.has(source)) === true) return seq
+    }
+  }
+  return undefined
+}
+
+/**
+ * Validate a planned restore replacement against the current surface before any
+ * write. The append path re-validates the same rules; this exists so a rejected
+ * plan cannot leave the file-revert boundary (D3) or the iteration marker
+ * behind.
+ * @param nodes - current model-visible surface sequences.
+ * @param anchor - first replaced node (inclusive); the group's surface anchor.
+ * @param endSeq - last replaced node (inclusive).
+ * @returns every shadowed surface seq, for the replacement's cited sources.
+ * @throws {RemoteError} kind `revert-invalid` when the range or its coverage is invalid.
+ */
+function assertIterationRestorePlan(
+  sessionId: SessionId,
+  nodes: readonly SessionSeq[],
+  anchor: SessionSeq,
+  endSeq: SessionSeq,
+): readonly SessionSeq[] {
+  const startIdx = nodes.indexOf(anchor)
+  if (startIdx === -1) {
+    throw new RemoteError('revert-invalid', `iteration restore anchor ${String(anchor)} is not a surface node`, { sessionId, atSeq: anchor })
+  }
+  const endIdx = nodes.indexOf(endSeq)
+  if (endIdx === -1 || endIdx < startIdx) {
+    throw new RemoteError('revert-invalid', `iteration restore end ${String(endSeq)} is not a surface node after the anchor`, { sessionId, atSeq: endSeq })
+  }
+  const shadowed = nodes.slice(startIdx, endIdx + 1)
+  const sources = new Set(shadowed)
+  if (sources.size !== shadowed.length) {
+    throw new RemoteError('revert-invalid', 'iteration restore plan contains duplicate surface seqs', { sessionId, atSeq: anchor })
+  }
+  return shadowed
+}
+
+/** Bounded preview fields of one iteration variant event. */
+function iterationPreviewOf(event: SessionEvent | undefined): {
+  text?: string
+  attachmentIds?: string[]
+} {
+  if (event === undefined || event.type !== 'user/message') return {}
+  const parts: string[] = []
+  const attachmentIds: string[] = []
+  for (const block of event.data.content) {
+    if (typeof block === 'string') {
+      parts.push(block)
+      continue
+    }
+    if (block.type === 'text') {
+      parts.push(block.text)
+      continue
+    }
+    if (block.type === 'image' || block.type === 'file') {
+      attachmentIds.push(String(block.attachment.attachmentId))
+    }
+  }
+  const text = parts.join('\n')
+  const capped = truncateUnicodeCodePoints(text, ITERATION_PREVIEW_MAX_CODE_POINTS)
+  return {
+    ...capped.length === 0 ? {} : { text: capped },
+    ...attachmentIds.length === 0 ? {} : { attachmentIds },
+  }
 }
 
 /** Validate a revert anchor: an active surface node that is a user message. */

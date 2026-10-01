@@ -458,3 +458,80 @@
     color: var(--dsw-alias-label-primary, #f1f5f9);
   }
 }
+
+/* Iteration navigator: ◀ x/y ▶ with the explicit Restore action. It sits in
+   the message action row, right-aligned; arrows are preview-only. */
+.iterationActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+.iterationNav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
+}
+.iterationButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.iterationButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.iterationButton:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.iterationButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-l2, currentColor);
+  outline-offset: 1px;
+}
+.iterationPosition {
+  font-variant-numeric: tabular-nums;
+}
+.iterationStatus {
+  color: var(--dsw-alias-label-secondary);
+}
+.iterationRestore {
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.3));
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.iterationRestore:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.iterationRestore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.iterationRestore:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-l2, currentColor);
+  outline-offset: 1px;
+}
+.userRow[data-iteration-preview] .bubble {
+  outline: 1px dashed var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.35));
+  outline-offset: 2px;
+}

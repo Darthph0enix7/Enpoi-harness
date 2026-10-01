@@ -1,18 +1,35 @@
 /** Pure history response builders for assembled Session tests. */
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session/types'
 import type {
-  SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest, SessionPage, SessionProjectionBaseline,
-  SessionRevertFold,
+  SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest, SessionHistoryRecord, SessionPage,
+  SessionProjectionBaseline, SessionRevertFold,
 } from '../../src/types.ts'
 import { historyRecordLastSeq } from '../../src/client/sessions/history-records.ts'
-import { foldRevertEvents, revertFoldValue } from '../../src/revert-fold.ts'
+import { emptyRevertFoldState, foldRevertEvent, foldRevertEvents, revertFoldValue } from '../../src/revert-fold.ts'
 
 /** A scripted page may omit the durable revert block; the builders default it. */
 export type ScriptedPage = Omit<SessionPage, 'revert'> & { readonly revert?: SessionRevertFold }
 
 /** Empty durable revert block for a log with no revert events. */
 export function emptyRevertFold(asOfSeq = -1): SessionRevertFold {
-  return { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq }
+  return { fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, iterations: [], asOfSeq }
+}
+
+/**
+ * Fold page records that may start at any seq into the durable block. Unlike
+ * {@link hostRevertFold}, this walks records directly, so a cut page whose
+ * first record is not seq 0 folds correctly.
+ * @param records - aligned page records in seq order.
+ * @param asOfSeq - inclusive fold cut.
+ * @returns the durable revert block.
+ */
+export function hostRevertRecordsFold(
+  records: readonly SessionHistoryRecord[],
+  asOfSeq: number,
+): SessionRevertFold {
+  const state = emptyRevertFoldState()
+  for (const record of records) foldRevertEvent(state, record.event)
+  return revertFoldValue(state, asOfSeq)
 }
 
 /**
@@ -36,10 +53,11 @@ export function hostRevertFold(
  * @returns the page without records beyond the cursor.
  */
 export function pageThrough(page: ScriptedPage, throughSeq: number): SessionPage {
+  const records = page.records.filter(record => historyRecordLastSeq(record) <= throughSeq)
   return {
     ...page,
-    revert: page.revert ?? emptyRevertFold(throughSeq),
-    records: page.records.filter(record => historyRecordLastSeq(record) <= throughSeq),
+    revert: page.revert ?? hostRevertRecordsFold(records, throughSeq),
+    records,
   }
 }
 
@@ -70,7 +88,7 @@ export function followSnapshot(
     cursor,
     records: pageThrough(page, cursor).records,
     hasMore: page.hasMore,
-    revert: page.revert ?? emptyRevertFold(cursor),
+    revert: page.revert ?? hostRevertRecordsFold(pageThrough(page, cursor).records, cursor),
     projections: page.projections ?? { asOfSeq: cursor, values: {} },
     ...(request.assistantStream === true ? { assistantStream } : {}),
   }

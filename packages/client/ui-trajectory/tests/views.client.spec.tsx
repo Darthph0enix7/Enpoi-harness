@@ -134,6 +134,7 @@ function sessionSnapshot(nodes: LegacyConversationSlice['nodes']): SessionSnapsh
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
   }
 }
 
@@ -1591,6 +1592,7 @@ describe('TrajectoryView revert rendering', () => {
           revertFromSeq: null,
           revertShadowRanges: [{ start: 1, end: 9 }],
           revertFileOutcomes: {},
+          revertIterations: [],
           revertFileConflicts: [],
         })}
         {...standaloneDuration()}

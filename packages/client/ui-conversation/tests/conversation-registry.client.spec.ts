@@ -41,6 +41,7 @@ function sessionSnapshot(): SessionSnapshot {
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
   }
 }
 
@@ -101,6 +102,8 @@ function fakeSessions(ctx: Context): { sessions: ISessions; binding: SessionBind
     selectModel: () => Promise.reject(new Error('unused fake Sessions operation')),
     revert: () => Promise.reject(new Error('unused fake Sessions operation')),
     revertRestore: () => Promise.reject(new Error('unused fake Sessions operation')),
+    revertIterations: () => Promise.reject(new Error('unused fake Sessions operation')),
+    revertIterationRestore: () => Promise.reject(new Error('unused fake Sessions operation')),
     resolveFileConflict: () => Promise.reject(new Error('unused fake Sessions operation')),
     delete: () => Promise.reject(new Error('unused fake Sessions operation')),
     scope: id => id === SESSION_ID ? binding.ctx : undefined,

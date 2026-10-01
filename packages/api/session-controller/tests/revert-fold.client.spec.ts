@@ -248,7 +248,7 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
     // Witness: a window-only fold over the same cut resurrects the shadowed
     // settlement, which is the defect the durable source removes.
     const legacy = await openWith([full[2], full[3]], {
-      fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq: -1,
+      fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, iterations: [], asOfSeq: -1,
     })
     expect(hidden(legacy.getSnapshot(), 9)).toBe(false)
   })
@@ -285,7 +285,7 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
     expect(snapshot.revertFileOutcomes).toEqual({ 'src/b.ts': { status: 'applied' } })
 
     const legacy = await openWith([full[4]], {
-      fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, asOfSeq: -1,
+      fromSeq: null, shadowRanges: [], conflicts: [], outcomes: {}, iterations: [], asOfSeq: -1,
     })
     expect(legacy.getSnapshot().revertFileConflicts).toEqual([])
   })

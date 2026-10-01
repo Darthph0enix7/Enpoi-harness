@@ -1032,6 +1032,16 @@ describe('Session history raw journal', () => {
       shadowRanges: [{ start: anchor.seq, end: settlement.seq + 1 }],
       conflicts: [],
       outcomes: {},
+      // The replacement's user-origin surfaceOp also derives the durable
+      // iteration edge (the pre-marker fallback).
+      iterations: [{
+        anchorSeq: anchor.seq,
+        activeVariantSeq: replacement.seq,
+        variants: [
+          { seq: anchor.seq, previousSeq: null },
+          { seq: replacement.seq, previousSeq: anchor.seq },
+        ],
+      }],
       asOfSeq: replacement.seq,
     })
 
@@ -1049,6 +1059,7 @@ describe('Session history raw journal', () => {
       shadowRanges: [],
       conflicts: [],
       outcomes: {},
+      iterations: [],
       asOfSeq: marker.seq,
     })
   })

@@ -51,6 +51,7 @@ const sessionState: SessionState = {
   revertShadowRanges: [],
   revertFileConflicts: [],
   revertFileOutcomes: {},
+  revertIterations: [],
 }
 const sessionList = {
   ids: [SID],

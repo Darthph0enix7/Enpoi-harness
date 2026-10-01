@@ -14,7 +14,7 @@ import type {
   TranscriptViewMode, UserMessageNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {
-  SessionListState, SessionSnapshot,
+  SessionIterationGroup, SessionListState, SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
   ConversationGroupedView,
@@ -109,6 +109,7 @@ function sessionSnapshot(overrides: Partial<TestSessionSnapshot> = {}): TestSess
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
     ...overrides,
   }
 }
@@ -308,6 +309,9 @@ function makeHarness(
     read: () => savedScroll,
   }
   const forkAt = vi.fn()
+  const loadIterationPreviews = vi.fn<(anchorSeq: number) => Promise<readonly SessionIterationGroup[]>>()
+    .mockResolvedValue([])
+  const restoreIteration = vi.fn<(variantSeq: number) => Promise<void>>().mockResolvedValue(undefined)
   // Rows and the harness must observe the same chat-store instance.
   const chat = createChatStore().create()
   const transcriptView = createSnapshotStore<TranscriptViewMode>('compact')
@@ -458,6 +462,8 @@ function makeHarness(
     chatScroll,
     forkAt,
     revertAt: () => {},
+    loadIterationPreviews,
+    restoreIteration,
     // Absent-service default; mention tests override with a real resolver.
     fileMentions: () => undefined,
     t,
@@ -494,6 +500,8 @@ function makeHarness(
     setNodeRenderer: (renderer: React.ComponentProps<typeof ChatNodeSeat>['renderSlot']) => {
       nodeSlotOverride = renderer
     },
+    loadIterationPreviews,
+    restoreIteration,
   }
 }
 
@@ -613,6 +621,90 @@ describe('Chat node rendering', () => {
     expect(view.container.querySelector('[data-chat-node-key="fixture:user:1"]')).not.toBeNull()
     act(() => { h.setSession({ revertFromSeq: null }) })
     expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).not.toBeNull()
+  })
+
+  it('navigates iteration versions as a preview and restores only on the explicit action', async () => {
+    const h = makeHarness({
+      nodes: [user(1, 'first version'), assistant(2, 'answer', 1), user(3, 'second version')],
+      turnEnds: new Map([[1, 2]]),
+      // The committed replacement shadows the original row; only the active
+      // variant is visible, as in a real session.
+      revertShadowRanges: [{ start: 1, end: 2 }],
+      revertIterations: [{
+        anchorSeq: 1,
+        activeVariantSeq: 3,
+        variants: [{ seq: 1, previousSeq: null }, { seq: 3, previousSeq: 1 }],
+      }],
+    })
+    const group: SessionIterationGroup = {
+      anchorSeq: 1,
+      activeVariantSeq: 3,
+      variants: [
+        { seq: 1, previousSeq: null, time: 1_000, surfaceActive: false, text: 'first version' },
+        { seq: 3, previousSeq: 1, time: 3_000, surfaceActive: true, text: 'second version' },
+      ],
+    }
+    h.loadIterationPreviews.mockResolvedValue([group])
+    const view = render(<h.ChatView {...h.props} />)
+
+    // The visible active variant carries the counter; the shadowed original
+    // is not a row, so no second navigator exists.
+    expect(view.getAllByText('2 / 2')).toHaveLength(1)
+    fireEvent.click(view.getByRole('button', { name: '上一个版本' }))
+    // Navigation is preview-only: the Host is not called.
+    expect(h.restoreIteration).not.toHaveBeenCalled()
+    expect(await view.findByText('正在预览第 1 个版本，共 2 个')).not.toBeNull()
+    await waitFor(() => { expect(h.loadIterationPreviews).toHaveBeenCalledWith(1) })
+    // The bubble swaps to the fetched version text.
+    expect(await view.findByText('first version')).not.toBeNull()
+    expect(view.queryByText('second version')).toBeNull()
+
+    fireEvent.click(view.getByRole('button', { name: '恢复此版本' }))
+    await waitFor(() => { expect(h.restoreIteration).toHaveBeenCalledWith(1) })
+  })
+
+  it('drops a local preview when the active variant moves under it', async () => {
+    const h = makeHarness({
+      nodes: [user(1, 'first version'), assistant(2, 'answer', 1), user(3, 'second version')],
+      turnEnds: new Map([[1, 2]]),
+      revertShadowRanges: [{ start: 1, end: 2 }],
+      revertIterations: [{
+        anchorSeq: 1,
+        activeVariantSeq: 3,
+        variants: [{ seq: 1, previousSeq: null }, { seq: 3, previousSeq: 1 }],
+      }],
+    })
+    h.loadIterationPreviews.mockResolvedValue([{
+      anchorSeq: 1,
+      activeVariantSeq: 3,
+      variants: [
+        { seq: 1, previousSeq: null, time: 1_000, surfaceActive: false, text: 'first version' },
+        { seq: 3, previousSeq: 1, time: 3_000, surfaceActive: true, text: 'second version' },
+      ],
+    }])
+    const view = render(<h.ChatView {...h.props} />)
+    fireEvent.click(view.getByRole('button', { name: '上一个版本' }))
+    expect(await view.findByText('正在预览第 1 个版本，共 2 个')).not.toBeNull()
+
+    // Another client restored: the group's active pointer moves and the
+    // preview must fall back to durable content.
+    act(() => {
+      h.setSession({
+        revertIterations: [{
+          anchorSeq: 1,
+          activeVariantSeq: 1,
+          variants: [{ seq: 1, previousSeq: null }, { seq: 3, previousSeq: 1 }],
+        }],
+      })
+    })
+    await waitFor(() => { expect(view.queryByText('正在预览第 1 个版本，共 2 个')).toBeNull() })
+  })
+
+  it('renders no iteration navigator for a message outside any group', () => {
+    const h = makeHarness({ nodes: [user(1, 'standalone')] })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.queryByRole('button', { name: '上一个版本' })).toBeNull()
+    expect(view.queryByRole('button', { name: '下一个版本' })).toBeNull()
   })
 
   it('threads the injected file-mention vocabulary into the closing prose only', () => {

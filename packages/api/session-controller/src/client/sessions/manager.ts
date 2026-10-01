@@ -7,8 +7,10 @@ import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
+  SessionIterationGroup,
   SessionProjectionHints,
   SessionRenameValue,
+  SessionRequestId,
   SessionSummary,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
@@ -697,6 +699,33 @@ export class SessionManager {
       sessionId: opts.sessionId,
       ...opts.restoreSeq === undefined ? {} : { restoreSeq: opts.restoreSeq },
     })
+  }
+
+  /**
+   * List the durable iteration groups of one Session.
+   * @param opts - session, optional group anchor, and listing bounds.
+   * @returns the Remote result carrying the bounded groups.
+   */
+  async revertIterations(
+    opts: { sessionId: SessionId; anchorSeq?: number; limit?: number; beforeVariantSeq?: number },
+  ): Promise<RemoteResult<{ groups: readonly SessionIterationGroup[] }>> {
+    return await this.remote.session.revertIterations({
+      sessionId: opts.sessionId,
+      ...opts.anchorSeq === undefined ? {} : { anchorSeq: opts.anchorSeq },
+      ...opts.limit === undefined ? {} : { limit: opts.limit },
+      ...opts.beforeVariantSeq === undefined ? {} : { beforeVariantSeq: opts.beforeVariantSeq },
+    })
+  }
+
+  /**
+   * Restore one iteration variant as the active version.
+   * @param opts - session, target variant seq, and the client-minted request id.
+   * @returns the Remote result acknowledging the queued restore.
+   */
+  async revertIterationRestore(
+    opts: { sessionId: SessionId; variantSeq: number; requestId: SessionRequestId },
+  ): Promise<RemoteResult<{ accepted: true }>> {
+    return await this.remote.session.revertIterationRestore(opts)
   }
 
   /**

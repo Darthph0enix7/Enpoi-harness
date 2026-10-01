@@ -155,6 +155,10 @@ export class FakeApiClient {
   onRename: (payload: unknown) => Promise<RemoteResult<{ title: string; seq: number }>> = () => Promise.resolve(ok({ title: 'fk-renamed', seq: 0 }))
   onFork: (payload: unknown) => Promise<RemoteResult<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-fork' as SessionId }))
   onRevert: (payload: unknown) => Promise<RemoteResult<SessionRevertValue>> = () => Promise.resolve(ok({ accepted: true, revertedText: 'fk-reverted', revertedCount: 1 }))
+  onRevertIterations: (payload: unknown) => Promise<RemoteResult<{ groups: readonly never[] }>> =
+    () => Promise.resolve(ok({ groups: [] }))
+  onRevertIterationRestore: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> =
+    () => Promise.resolve(ok({ accepted: true as const }))
   onRevertRestore: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
   onResolveFileConflict: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true }))
   onDelete: (payload: unknown) => Promise<RemoteResult<{ deleted: true }>> = () => Promise.resolve(ok({ deleted: true }))
@@ -307,6 +311,8 @@ export class FakeApiClient {
         control: signal => streamHandle(this.openControl(signal)),
         revert: payload => this.record('session.revert', payload, this.onRevert(payload)),
         revertRestore: payload => this.record('session.revertRestore', payload, this.onRevertRestore(payload)),
+        revertIterations: payload => this.record('session.revertIterations', payload, this.onRevertIterations(payload)),
+        revertIterationRestore: payload => this.record('session.revertIterationRestore', payload, this.onRevertIterationRestore(payload)),
         resolveFileConflict: payload => this.record('session.resolveFileConflict', payload, this.onResolveFileConflict(payload)),
         delete: payload => this.record('session.delete', payload, this.onDelete(payload)),
         executionState: payload => this.record('session.executionState', payload, this.onExecutionState(payload)),

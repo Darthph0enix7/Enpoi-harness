@@ -75,7 +75,14 @@ export type {
   PromptError,
   SessionSnapshot,
 } from './contract/snapshot.ts'
-export type { RevertFileConflict, RevertFileOutcome, SessionRevertShadowRange } from '../types.ts'
+export type {
+  RevertFileConflict,
+  RevertFileOutcome,
+  SessionIterationEdge,
+  SessionIterationGroup,
+  SessionIterationVariant,
+  SessionRevertShadowRange,
+} from '../types.ts'
 export type {
   SessionRequestSnapshotBodies,
   SessionRequestSnapshotFull,

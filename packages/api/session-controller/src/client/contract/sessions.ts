@@ -13,6 +13,7 @@ import type { AgentContext } from '../scope.ts'
 import type { SessionSearchResultItem } from '../sessions/manager.ts'
 import type { SessionBinding, SessionListState } from '../sessions/service.ts'
 import type {
+  SessionIterationGroup,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
 } from '../../types.ts'
@@ -180,6 +181,32 @@ export interface ISessions {
    * @throws when the host rejects the restore.
    */
   revertRestore(opts: { sessionId: SessionId; restoreSeq?: number }): Promise<void>
+  /**
+   * List the durable iteration groups of one Session: the variant chains the
+   * ◀ x/y ▶ control navigates. Cold-safe; previews are capped and media is
+   * referenced by attachment id.
+   * @param opts - session, optional group anchor, and listing bounds.
+   * @returns groups in anchor order with variants in creation order.
+   * @throws when the host rejects the read.
+   */
+  revertIterations(opts: {
+    sessionId: SessionId
+    anchorSeq?: number
+    limit?: number
+    beforeVariantSeq?: number
+  }): Promise<readonly SessionIterationGroup[]>
+  /**
+   * Restore one iteration variant as the active version: everything after the
+   * group's current surface node is reverted and the target's content becomes
+   * the new surface message (no fork, no span copy). `requestId` makes a
+   * retried call idempotent and is persisted on the replacement.
+   * @param opts - session, target variant seq, and the client-minted request id.
+   * @throws when the host rejects the target (foreign, missing, or already active).
+   */
+  revertIterationRestore(opts: {
+    sessionId: SessionId
+    variantSeq: number
+  }): Promise<void>
   /**
    * Resolve a file revert conflict (e.g. user manual edits detected or missing file).
    * @param opts - session, conflictId, and the chosen resolution.

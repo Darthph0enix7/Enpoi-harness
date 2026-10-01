@@ -23,6 +23,7 @@
     "src/projection-backfill.ts",
     "src/request-snapshot.ts",
     "src/revert-fold.ts",
+    "src/iteration-fold.ts",
     "src/session-command-index.ts",
     "src/archived-session-gate.ts",
     "src/skill-catalog.ts"

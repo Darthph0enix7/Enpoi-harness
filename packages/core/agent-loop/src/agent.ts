@@ -8,7 +8,9 @@ import type {
   Agent,
   AgentCancelCause,
   AgentEventDispatch,
+  AgentIterationIntent,
   AgentOptions,
+  AgentSurfaceIntentOptions,
   AgentStatus,
   CancelOptions,
   InboxTarget,
@@ -31,8 +33,8 @@ import {
 import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, SurfaceIntent, SurfaceOp, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, Session, SessionId, SurfaceIntent, SurfaceOp, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionSeq, canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
@@ -193,6 +195,8 @@ export class ReactLoopAgent implements Agent {
     surfaceOp: SurfaceOp
     sourceEventSeqs?: SessionSeq[]
     clearRevert?: boolean
+    /** Iteration edge recorded with the replacement, with `variantSeq` filled at append. */
+    iteration?: AgentIterationIntent
   }>()
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
@@ -246,12 +250,15 @@ export class ReactLoopAgent implements Agent {
     sourceEventSeqs?: SessionSeq[]
     /** Append `revert/state { fromSeq: null }` atomically after this message (revert-commit). */
     clearRevert?: boolean
+    /** Append the durable `revert/iteration` edge after this message (revert-iteration commit/restore). */
+    iteration?: AgentIterationIntent
   }): void {
-    if (options?.surfaceOp !== undefined) {
+    if (options?.surfaceOp !== undefined || options?.iteration !== undefined) {
       this.pendingSurfaceOps.set(message.id, {
-        surfaceOp: options.surfaceOp,
+        surfaceOp: options.surfaceOp ?? 'append',
         ...options.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: options.sourceEventSeqs },
         ...options.clearRevert === true ? { clearRevert: true } : {},
+        ...options.iteration === undefined ? {} : { iteration: options.iteration },
       })
     }
     // Waking input cannot join an aborted activity, so it starts the next turn.
@@ -262,16 +269,58 @@ export class ReactLoopAgent implements Agent {
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
-  followup(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void {
+  followup(input: UserMessage, options?: AgentSurfaceIntentOptions): void {
     this.send(input, 'next-turn', true, options)
   }
 
-  steer(input: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void {
+  steer(input: UserMessage, options?: AgentSurfaceIntentOptions): void {
     this.send(input, 'next-step', true, options)
   }
 
   inject(input: UserMessage): void {
     this.send(input, 'next-step', false)
+  }
+
+  /**
+   * Resolve one pending append's surface plan at admission time.
+   *
+   * A restore intent anchors on the group's caller-validated surface node but
+   * recomputes the shadowed tail and cited sources here, so activity that
+   * settled between the restore RPC's validation and this append cannot leave
+   * the replacement with a stale end boundary. Every other pending append uses
+   * the caller's plan unchanged.
+   * @param pending - surface metadata queued with the message.
+   * @returns the surface op, cited sources, and the replaced span for the marker.
+   * @throws when a restore anchor is no longer a surface node.
+   */
+  private resolvePendingSurface(pending: {
+    surfaceOp: SurfaceOp
+    sourceEventSeqs?: SessionSeq[]
+    iteration?: AgentIterationIntent
+  }): { surfaceOp: SurfaceOp; sourceEventSeqs?: SessionSeq[]; startSeq?: number; endSeq?: number } {
+    if (pending.iteration?.cause === 'restore') {
+      const nodes = this.session.surface.nodes
+      const startSeq = SessionSeq(pending.iteration.startSeq)
+      const startIdx = nodes.indexOf(startSeq)
+      if (startIdx === -1) {
+        throw new Error(`session revert-iteration restore: anchor seq ${String(startSeq)} is no longer a surface node`)
+      }
+      const endSeq = nodes.at(-1)
+      /* v8 ignore next -- a found anchor proves the surface is non-empty */
+      if (endSeq === undefined) throw new Error('session revert-iteration restore: the session surface is empty')
+      return {
+        surfaceOp: { op: 'replace', startSeq, endSeq },
+        sourceEventSeqs: [...nodes.slice(startIdx)],
+        startSeq,
+        endSeq,
+      }
+    }
+    const replace = pending.surfaceOp === 'append' ? undefined : pending.surfaceOp
+    return {
+      surfaceOp: pending.surfaceOp,
+      ...pending.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: pending.sourceEventSeqs },
+      ...replace === undefined ? {} : { startSeq: replace.startSeq, endSeq: replace.endSeq },
+    }
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
@@ -524,13 +573,31 @@ export class ReactLoopAgent implements Agent {
         for (const message of decision.messages) {
           const pending = this.pendingSurfaceOps.get(message.id)
           if (pending !== undefined) this.pendingSurfaceOps.delete(message.id)
-          const intent: SurfaceIntent<'user/message'> = pending === undefined
+          const resolved = pending === undefined ? undefined : this.resolvePendingSurface(pending)
+          const intent: SurfaceIntent<'user/message'> = resolved === undefined
             ? { surfaceOp: 'append' }
             : {
-              surfaceOp: pending.surfaceOp,
-              ...pending.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: pending.sourceEventSeqs },
+              surfaceOp: resolved.surfaceOp,
+              ...resolved.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: resolved.sourceEventSeqs },
             }
-          this.session.append('user/message', message, intent)
+          const appended = this.session.append('user/message', message, intent)
+          // Revert-iteration: the replacement's exact seq is known only now, so
+          // the durable edge is appended immediately after it. The marker is
+          // log-only and ignorable, so older builds skip it instead of
+          // refusing the log.
+          if (pending?.iteration !== undefined) {
+            this.session.append('revert/iteration', {
+              groupAnchor: pending.iteration.groupAnchor,
+              previousSeq: pending.iteration.previousSeq,
+              variantSeq: appended.seq,
+              startSeq: resolved?.startSeq ?? pending.iteration.startSeq,
+              endSeq: resolved?.endSeq ?? pending.iteration.endSeq,
+              cause: pending.iteration.cause,
+              ...pending.iteration.restoredFromSeq === undefined
+                ? {}
+                : { restoredFromSeq: pending.iteration.restoredFromSeq },
+            }, { ignorable: true })
+          }
           // Revert-commit: clear the boundary atomically with the shadowing
           // append, so a dropped message can never leave a stale boundary.
           // revert/state is log-only by type registration (never reaches the

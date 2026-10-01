@@ -166,6 +166,47 @@ export type AssistantStreamFrame =
       | { readonly kind: 'abandoned' }
   }
 
+/**
+ * Durable iteration-pointer edge recorded with one surface replacement.
+ *
+ * The receiving Agent computes the replacement's surface plan and appends the
+ * `revert/iteration` marker immediately after the replacement, filling
+ * `variantSeq` with the seq that append assigned. Callers supply the group
+ * fields resolved before the append: `startSeq` must name the group's current
+ * surface node (never a shadowed seq), and the marker's `endSeq` is the last
+ * surface node the replacement shadowed.
+ */
+/**
+ * Optional surface metadata for one appended user message. The fields travel
+ * together from the Host command that decided the surface transition to the
+ * loop that performs the append.
+ */
+export interface AgentSurfaceIntentOptions {
+  /** How the message enters the model surface; defaults to a plain append. */
+  surfaceOp?: SurfaceOp
+  /** Earlier seqs a replacement derives from (every shadowed surface node). */
+  sourceEventSeqs?: SessionSeq[]
+  /** Append `revert/state { fromSeq: null }` immediately after this message. */
+  clearRevert?: boolean
+  /** Append the durable `revert/iteration` edge immediately after this message. */
+  iteration?: AgentIterationIntent
+}
+
+export interface AgentIterationIntent {
+  /** Seq of the first variant (the original user message) — the group key. */
+  groupAnchor: number
+  /** The variant this commit replaced, or null when no prior variant is known. */
+  previousSeq: number | null
+  /** Current surface seq the replacement must start at (validated by the caller). */
+  startSeq: number
+  /** Last surface seq to shadow; `restore` intents recompute it at append time. */
+  endSeq: number
+  /** Whether the commit came from an ordinary revert send or an explicit restore. */
+  cause: 'commit' | 'restore'
+  /** Present on restore: the variant whose content was re-materialized. */
+  restoredFromSeq?: number
+}
+
 declare module './types.ts' {
   interface Agent {
     /** The provider route and model this agent's requests use. */
@@ -224,9 +265,12 @@ declare module './types.ts' {
    * Queue an ordinary follow-up turn and wake the driver. The item becomes the
    * sole ordinary message of its own turn.
    * @param message - identified prompt content and the source that supplied it.
-   * @param options - optional surface metadata for the append (revert-commit shadowing).
+   * @param options - optional surface metadata for the append:
+   *   `surfaceOp`/`sourceEventSeqs` shadow a reverted span, `clearRevert`
+   *   consumes the armed boundary, and `iteration` records the durable
+   *   `revert/iteration` edge after the replacement with its assigned seq.
    */
-    followup(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void
+    followup(message: UserMessage, options?: AgentSurfaceIntentOptions): void
 
     /**
    * Submit steering for the nearest step. An idle driver starts a turn;
@@ -234,9 +278,12 @@ declare module './types.ts' {
    * A rejected step leaves steering parked in the inbox until the next
    * wake; cancellation or disposal may discard pending steering.
    * @param message - identified steering content and the source that supplied it.
-   * @param options - optional surface metadata for the append (revert-commit shadowing).
+   * @param options - optional surface metadata for the append:
+   *   `surfaceOp`/`sourceEventSeqs` shadow a reverted span, `clearRevert`
+   *   consumes the armed boundary, and `iteration` records the durable
+   *   `revert/iteration` edge after the replacement with its assigned seq.
    */
-    steer(message: UserMessage, options?: { surfaceOp?: SurfaceOp; sourceEventSeqs?: SessionSeq[]; clearRevert?: boolean }): void
+    steer(message: UserMessage, options?: AgentSurfaceIntentOptions): void
 
     /**
    * Queue model-facing context for the next pre-step without waking the

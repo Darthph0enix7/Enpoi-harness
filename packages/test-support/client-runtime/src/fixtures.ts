@@ -84,6 +84,7 @@ export function sessionSnapshot(sessionId: SessionId): SessionSnapshot {
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
 
   }
 }

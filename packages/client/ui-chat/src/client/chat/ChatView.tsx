@@ -55,6 +55,9 @@ function observedInputs(
 
 type PendingInput = PendingSubmission | InboxState['next-step'][number]
 
+/** Stable empty list for snapshots that predate the iteration block. */
+const EMPTY_ITERATION_EDGES: readonly never[] = []
+
 type ChatNodeListProps = Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
   readonly entries: readonly RenderEntry[]
   readonly useChatGroup: ChatViewSlotProps['useChatGroup']
@@ -109,12 +112,25 @@ const UNRESOLVED_NODE_ANCHOR = Number.POSITIVE_INFINITY
 export function ChatView({
   useSession, useChat, useChatNode, useChatNodeProcess, useChatGroup, useConversation, useSessions, useStore, actions, renderSlot,
   sessionId, openFile, openSkill, openExternalLink, loadOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, revertAt,
+  loadIterationPreviews, restoreIteration,
   fileMentions, usePresentation, useProjection, t,
 }: ChatViewSlotProps) {
   const order = useChat(s => s.order)
   const nodeStore = useChat(s => s.nodes)
   const revertFromSeq = useSession(s => s.revertFromSeq)
   const revertShadowRanges = useSession(s => s.revertShadowRanges)
+  // Older fixtures and legacy transports may omit the iteration block.
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- wire compatibility
+  const iterationEdges = useSession(s => s.revertIterations ?? EMPTY_ITERATION_EDGES)
+  // Every variant seq resolves to its group, so the visible node of a group
+  // finds the navigator data without a second lookup channel.
+  const iterationGroups = useMemo(() => {
+    const groups = new Map<number, (typeof iterationEdges)[number]>()
+    for (const edge of iterationEdges) {
+      for (const variant of edge.variants) groups.set(variant.seq, edge)
+    }
+    return groups
+  }, [iterationEdges])
   // Revert boundary: hide nodes after the reverted-from message from the
   // transcript (the RevertTray reads them from the store directly), plus the
   // spans shadowed by landed revert-commits (stay hidden after commit).
@@ -294,6 +310,9 @@ export function ChatView({
                 inspectCall={inspectCall}
                 forkAt={forkAt}
                 revertAt={revertAt}
+                iterationGroups={iterationGroups}
+                loadIterationPreviews={loadIterationPreviews}
+                restoreIteration={restoreIteration}
                 loadImage={loadImage}
                 renderMessageImages={renderMessageImages}
                 fileMentions={fileMentions}

@@ -75,6 +75,7 @@ function snapshotWith(queue: UserMessage[], nextStep: UserMessage[] = []): TestS
     revertShadowRanges: [],
     revertFileConflicts: [],
     revertFileOutcomes: {},
+    revertIterations: [],
     testInbox: { 'next-turn': queue, 'next-step': nextStep },
   }
 }
