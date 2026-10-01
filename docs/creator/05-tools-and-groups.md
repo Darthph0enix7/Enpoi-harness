@@ -45,9 +45,10 @@ Registered by `enpoi-tool-groups` for every agent of the preset that mounts it (
 A seat is a preset/agent identity. `Config.seat` defaults to `'default'` (`index.ts:44-52`). Resolution:
 
 - Operator override: `enpoi-orchestration.toolGroups.seats.<seat>.preAttach` (string[]).
-- Else the union of each group's own `preAttach` entries for that seat (`preAttachFor`, `catalog.ts:218-224`).
+- Else the union of each group's own `preAttach` entries for that seat (`preAttachFor`, `catalog.ts:225-233`).
 - Unknown ids are ignored and disabled groups dropped; order follows the catalog.
-- The profile's `enpoi-orchestration.toolGroups.seats` document pre-attaches `debug` for `creator` and `broker`; the council seats (`skeptic`, `architect`, `pragmatist`, `referee`, `chair`) declare explicit empty lists. A seat entry replaces the group-level `preAttach` union, so an explicit empty list is how a seat opts out of a group default (`preAttachFor`, `catalog.ts:218-224`). No other seat has a row → nothing pre-attached; read the document before asserting a seat's set.
+- Shipped group defaults: every group declares `preAttach: []` except `debug`, which names `['orchestrator', 'sysadmin', 'creator', 'broker']` — the three main agents plus the council broker start with the read-only diagnostics surface attached (`catalog.ts:147-160`). The group comment is the reason: a seat-specific attached set would change the presented tool array across an agent switch and invalidate the cached prompt prefix.
+- The profile document (`$PROFILE/cordis.patch.yml` → `toolGroups.seats`) restates `debug` for `creator` and `broker` and pins the council seats (`skeptic`, `architect`, `pragmatist`, `referee`, `chair`) to explicit empty lists. A seat entry replaces the group-level `preAttach` union, so an explicit empty list is how a seat opts out of a group default (`preAttachFor`, `catalog.ts:218-233`). Read the document before asserting a seat's set; an operator override always wins.
 - A delegated child carries the **parent's** preset; its real seat is read from its `subagent/descriptor` label — `roundtable seat: pragmatist`, `council chair: …`, etc. (`seatOfAgent`, `index.ts:287-302`; `seatOfDescriptorLabel`, `catalog.ts:243-268`). An unrecognized label falls back to the mount seat.
 
 ## 4. Hiding vs advertising
@@ -61,17 +62,27 @@ A seat is a preset/agent identity. `Config.seat` defaults to `'default'` (`index
 
 `tool-groups:menu` renders in the system prompt at order `2950` (after tool guidance, before MCP servers): one line per enabled on-demand group with purpose, tool count, and state — `attached`, `not attached`, or `attached — applies from the next turn` (`index.ts:385-409`; `renderMenuText`, `catalog.ts:344-371`). Static groups are omitted (there is nothing to attach). An agent with no on-demand groups gets no section.
 
-## 6. The operator drawer
+## 6. The operator surface (Capabilities Control Center)
 
-The operator surface is the **Capabilities & Tools** drawer (`profiles/web/sidebar-patch/src/client/CapabilitiesView.tsx`): it renders capability groups — MCP Tool Suites, Specialist Skills, Subagents & Debaters, Core System Tools — with on/off toggles backed by `enpoi-orchestration.capabilities`. Tool-group overrides have no dedicated UI yet; edit `enpoi-orchestration.toolGroups` through the settings document (`groups.<id>.enabled`, `seats.<seat>.preAttach`, schema at `packages/enpoi-capabilities/src/index.ts:112-113`, `146-149`). The plugin reads the document hot (`index.ts:277-278`), so an edit applies to the next ensure (next turn).
+The operator surface is the **Capabilities Control Center** right-sidebar tab (`$REPO/packages/client/ui-brand-enpoi/src/client/CapabilitiesBody.tsx`; registration `index.ts:294-358`): it renders the effective surface for its bound session — MCP Tool Suites, Specialist Skills, Subagents, Councils, Tool Flags — as on/off toggles. On a blank/new-session page it authors the profile defaults (`enpoi-orchestration.capabilities`); in a live session it writes durable session overrides (the `capabilities/overrides` event), with a per-row `session` badge and Reset (09, 10 §Defaults vs session overrides). Tool-group overrides still have no dedicated UI: edit `enpoi-orchestration.toolGroups` through the settings document (`groups.<id>.enabled`, `seats.<seat>.preAttach`, schema at `packages/enpoi-capabilities/src/index.ts:140,184`). The plugin reads the document hot (`index.ts:277-278`), so an edit applies to the next ensure (next turn).
 
 ## 7. How groups and permissions interact
 
 1. Groups shape what is *presented* (this file). The permission policy then resolves `allow/ask/deny` per dispatch (file 04).
 2. A group never grants execution rights: attaching `debug` only makes its tools visible; their policy rows (ship: read-only introspection `allow`, `session_debug` `allow`) still decide each call (`packages/enpoi-capabilities/src/policy.ts:111-121`).
-3. A capability-disable (drawer toggle) beats both: the call is denied before policy, and the schema is stripped so the model cannot even attempt it.
+3. A capability-disable (Capabilities toggle) beats both: the call is denied before policy, and the schema is stripped so the model cannot even attempt it.
 
-## 8. Failure modes
+## 8. Custom command tools (operator-authored)
+
+- Data is the `customTools` array in the `enpoi-orchestration` document: `{ id, name, description, params: [{ name, type: string|number|boolean, required, description }], command }`; ids and param names are kebab-case, max 16 params, 8192 command chars (`$PROFILE/packages/enpoi-custom-tools/src/render.ts:8-19,45-63`).
+- Authored in Settings → Dynamic → Skills & tools → Tools → **+ Add tool** (params editor with per-row name/type/required/description; the command template textarea uses `{{param}}` placeholders); Edit and Delete sit on each custom row (`$REPO/packages/client/ui-brand-enpoi/src/client/dynamic/SkillsPanel.tsx:790-903,671-702`).
+- Each record registers one real harness tool `custom_<id>` with the declared JSON parameter schema, hot-applied on `settings/document-updated` (`enpoi-custom-tools/src/index.ts:150-208,256`); the model sees the record's description and parameters.
+- Execution renders the template: every `{{param}}` becomes a POSIX single-quoted shell word (`'…'`, embedded `'` escaped as `'\''`) — never raw interpolation — then runs through `ctx.shell` under the session's standing sandbox policy; stdout, stderr, exit code, signal, and timeout are returned honestly (`render.ts:116-118,144-162`; `index.ts:169-200`).
+- The guard is the same `tools/pre-execute` listener bash uses: the plugin exposes the `customToolCommands` seam, enpoi-capabilities renders the command through it and feeds it into `resolvePolicy`, so dangerous verbs, wrappers, and interpreters ask or deny exactly as for bash — a deny wins (`enpoi-custom-tools/src/index.ts:241-250`; `packages/enpoi-capabilities/src/index.ts:1384-1394`; the same danger evaluation, `policy.ts:939-953`).
+- Permission default: creating a tool writes its `permissions.tools.custom_<id>` row as `ask` in the same settings write as the record, so first use is operator-granted; the Permissions page lists the row automatically from the live registry (`$REPO/packages/client/ui-brand-enpoi/src/client/dynamic/SkillsPanel.tsx:495-498`; `$REPO/packages/client/ui-brand-enpoi/src/client/permissions-model.ts:413-448`). Delete removes the record and unsets that permission row in one write (`$REPO/packages/client/ui-brand-enpoi/src/client/dynamic/SkillsPanel.tsx:516-523`).
+- Failure modes: an invalid record is skipped with its reason on stderr and keeps its last good registration (`index.ts:210-231`); a malformed placeholder or unknown parameter fails before execution (`render.ts:154-160`); without the plug-in the name alone resolves through the matrix/defaults.
+
+## 9. Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
