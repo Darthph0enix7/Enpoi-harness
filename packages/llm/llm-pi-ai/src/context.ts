@@ -96,34 +96,102 @@ function userContent(
   return content
 }
 
-function collectImageRefs(
-  blocks: readonly ContentBlock[],
-  refs: Map<AttachmentId, ImageAttachmentRef>,
-): void {
-  for (const block of blocks) {
-    if (block.type === 'image') {
-      if (block.offloaded !== true) refs.set(block.attachment.attachmentId, block.attachment)
+/** Oldest-first retained image occurrences; one shared attachment repeats per occurrence. */
+function retainedImageRefs(messages: readonly RequestMessage[]): ImageAttachmentRef[] {
+  const refs: ImageAttachmentRef[] = []
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'image' && block.offloaded !== true) refs.push(block.attachment)
     }
+  }
+  return refs
+}
+
+/** Request payload length of one encoded version at the route's `base64` representation. */
+function requestPayloadBytes(bytes: number): number {
+  return Math.ceil(bytes / 3) * 4
+}
+
+/** Materialise one ref per unique attachment id into `versions`, leaving present entries untouched. */
+async function readRequestVersions(
+  refs: readonly ImageAttachmentRef[],
+  attachments: AttachmentStore,
+  budget: PiImageRequestBudget,
+  versions: Map<AttachmentId, RequestImageAttachment>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const missing: ImageAttachmentRef[] = []
+  for (const ref of refs) {
+    if (!versions.has(ref.attachmentId)) missing.push(ref)
+  }
+  const unique = [...new Map(missing.map(ref => [ref.attachmentId, ref])).values()]
+  const prepared = await Promise.all(unique.map(
+    ref => attachments.readImageRequest(ref, requestImageTarget(ref, budget), signal),
+  ))
+  for (const [index, ref] of unique.entries()) {
+    versions.set(ref.attachmentId, prepared[index] as RequestImageAttachment)
   }
 }
 
+/** Request versions plus the oldest-first occurrences an over-budget request must still offload. */
+interface PreparedRequestImages {
+  /** Request versions for every retained attachment; empty when `offloadImages` is nonzero. */
+  versions: Map<AttachmentId, RequestImageAttachment>
+  /** Additional oldest retained occurrences to offload; zero when the request fits. */
+  offloadImages: number
+}
+
+/**
+ * Prepare request versions without materialising occurrences the request cannot
+ * keep. Stored reference sizes (already known, no I/O) size the first parallel
+ * batch to every occurrence that could still fit; the newest-first walk then
+ * stops at the first occurrence whose exact request payload would exceed the
+ * bound, so the oldest occurrences named for offload are never read,
+ * normalised, or encoded. Without a bound every retained occurrence is
+ * materialised.
+ */
 async function prepareRequestImages(
   messages: readonly RequestMessage[],
   attachments: AttachmentStore,
   budget: PiImageRequestBudget,
+  maxRequestImageBytes: number | undefined,
   signal?: AbortSignal,
-): Promise<Map<AttachmentId, RequestImageAttachment>> {
-  const refs = new Map<AttachmentId, ImageAttachmentRef>()
-  for (const message of messages) collectImageRefs(message.content, refs)
-  const orderedRefs = [...refs.values()]
-  const prepared = await Promise.all(orderedRefs.map(
-    ref => attachments.readImageRequest(ref, requestImageTarget(ref, budget), signal),
-  ))
-  const versions = new Map<AttachmentId, RequestImageAttachment>()
-  for (const [index, ref] of orderedRefs.entries()) {
-    versions.set(ref.attachmentId, prepared[index] as RequestImageAttachment)
+): Promise<PreparedRequestImages> {
+  const occurrences = retainedImageRefs(messages)
+  if (maxRequestImageBytes === undefined) {
+    const versions = new Map<AttachmentId, RequestImageAttachment>()
+    await readRequestVersions(occurrences, attachments, budget, versions, signal)
+    return { versions, offloadImages: 0 }
   }
-  return versions
+  // Stored bytes are an upper estimate for transformed versions, so the stored
+  // offload prefix cannot be materialised speculatively without dropping an
+  // image that would have fit; it only bounds how many occurrences a first
+  // batch may still retain.
+  const storedOffload = requiredImageOffload(
+    messages,
+    { representation: 'base64', maxBytes: maxRequestImageBytes },
+    block => block.attachment.bytes,
+  )
+  const total = occurrences.length
+  const firstBatch = Math.min(total, total - storedOffload + 1)
+  const versions = new Map<AttachmentId, RequestImageAttachment>()
+  await readRequestVersions(occurrences.slice(total - firstBatch), attachments, budget, versions, signal)
+  let payloadBytes = 0
+  for (let index = total - 1; index >= 0; index -= 1) {
+    const ref = occurrences[index] as ImageAttachmentRef
+    let version = versions.get(ref.attachmentId)
+    if (version === undefined) {
+      // The exact walk crossed the stored-estimate batch; the remaining older
+      // occurrences are read together before the walk continues deliberately.
+      await readRequestVersions(occurrences.slice(0, index + 1), attachments, budget, versions, signal)
+      version = versions.get(ref.attachmentId) as RequestImageAttachment
+    }
+    if (payloadBytes + requestPayloadBytes(version.bytes) > maxRequestImageBytes) {
+      return { versions: new Map(), offloadImages: index + 1 }
+    }
+    payloadBytes += requestPayloadBytes(version.bytes)
+  }
+  return { versions, offloadImages: 0 }
 }
 
 function toolsOf(options: GenerateOptions): PiTool[] | undefined {
@@ -303,21 +371,22 @@ async function toPiContextWithImages(
   }
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
-  const requestImages = await prepareRequestImages(split.messages, attachments, requestImagePolicy, options.signal)
-  if (maxRequestImageBytes !== undefined) {
-    const offloadImages = requiredImageOffload(
-      split.messages,
-      { representation: 'base64', maxBytes: maxRequestImageBytes },
-      block => (requestImages.get(block.attachment.attachmentId) as RequestImageAttachment).bytes,
+  const bound = maxRequestImageBytes
+  const prepared = await prepareRequestImages(
+    split.messages,
+    attachments,
+    requestImagePolicy,
+    bound,
+    options.signal,
+  )
+  if (prepared.offloadImages > 0 && bound !== undefined) {
+    throw new LlmError(
+      `pi-ai request images exceed the ${bound}-byte base64 bound; ${prepared.offloadImages} more oldest occurrence(s) must be offloaded.`,
+      IMAGE_OFFLOAD_REQUIRED_CODE,
+      { offloadImages: prepared.offloadImages },
     )
-    if (offloadImages > 0) {
-      throw new LlmError(
-        `pi-ai request images exceed the ${maxRequestImageBytes}-byte base64 bound; ${offloadImages} more oldest occurrence(s) must be offloaded.`,
-        IMAGE_OFFLOAD_REQUIRED_CODE,
-        { offloadImages },
-      )
-    }
   }
+  const requestImages = prepared.versions
   const exactMessages = projectOffloadedImages(
     split.messages,
     ref => offloadedImageText(ref, resolveImageAccess(ref)),

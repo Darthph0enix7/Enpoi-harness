@@ -6,7 +6,7 @@ import type {
   ImageRequestTarget,
   RequestImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import { createDeveloperMessage, ToolCallId, createAssistantMessage, createMessage, createToolResultMessage, createUserMessage, offloadedImageText } from '@deepseek-ai/dsh-llm'
+import { createDeveloperMessage, ToolCallId, createAssistantMessage, createMessage, createToolResultMessage, createUserMessage, offloadedImageText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message, RequestUserInput } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import { toPiContext } from '../src/context.ts'
@@ -425,6 +425,93 @@ describe('pi-ai request context conversion', () => {
     ]), imageContext(store, { maxRequestImageBytes: 8 })))
       .rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: 1 } })
   })
+  it('materialises only the retained suffix of an over-budget burst', async () => {
+    // Six 300-byte images cost 400 base64 characters each against a 1000-byte
+    // bound: the two newest fit, the third newest is the tipping occurrence,
+    // and the four oldest must never be read.
+    const refs = Array.from({ length: 6 }, (_, index) => ({
+      ...ref,
+      attachmentId: AttachmentId(`sha256:${String(index).repeat(64)}`),
+      bytes: 300,
+    }))
+    const readImageRequest = vi.fn((value: ImageAttachmentRef) => (
+      Promise.resolve(requestImage(value, new Uint8Array(300)))
+    ))
+    await expect(toPiContext(request([
+      user(refs.map(attachment => ({ type: 'image', attachment }))),
+    ]), imageContext(projectionStore(readImageRequest), { maxRequestImageBytes: 1000 })))
+      .rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: 4 } })
+    const read = readImageRequest.mock.calls.map(call => call[0].attachmentId)
+    expect(read).toHaveLength(3)
+    expect(new Set(read)).toEqual(new Set(refs.slice(3).map(entry => entry.attachmentId)))
+  })
+
+  it('counts duplicate occurrences for offload but materialises one version per attachment', async () => {
+    // The oldest attachment repeats: six occurrences across five attachments.
+    const refs = Array.from({ length: 5 }, (_, index) => ({
+      ...ref,
+      attachmentId: AttachmentId(`sha256:${String(index).repeat(64)}`),
+      bytes: 300,
+    }))
+    const occurrences = [refs[0]!, refs[0]!, refs[1]!, refs[2]!, refs[3]!, refs[4]!]
+    const readImageRequest = vi.fn((value: ImageAttachmentRef) => (
+      Promise.resolve(requestImage(value, new Uint8Array(value.bytes)))
+    ))
+    await expect(toPiContext(request([
+      user(occurrences.map(attachment => ({ type: 'image', attachment }))),
+    ]), imageContext(projectionStore(readImageRequest), { maxRequestImageBytes: 1000 })))
+      .rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: 4 } })
+    const read = readImageRequest.mock.calls.map(call => call[0].attachmentId)
+    expect(read).toHaveLength(3)
+    expect(new Set(read)).toEqual(new Set([refs[2]!.attachmentId, refs[3]!.attachmentId, refs[4]!.attachmentId]))
+  })
+
+  it('uses exact request bytes when stored sizes overstate them instead of over-offloading', async () => {
+    // Stored bytes alone would name five occurrences for offload, but every
+    // request version is tiny, so no occurrence may be offloaded.
+    const refs = Array.from({ length: 6 }, (_, index) => ({
+      ...ref,
+      attachmentId: AttachmentId(`sha256:${String(index).repeat(64)}`),
+      bytes: 400,
+    }))
+    const readImageRequest = vi.fn((value: ImageAttachmentRef) => (
+      Promise.resolve(requestImage(value, new Uint8Array(3)))
+    ))
+    const context = await toPiContext(request([
+      user(refs.map(attachment => ({ type: 'image', attachment }))),
+    ]), imageContext(projectionStore(readImageRequest), { maxRequestImageBytes: 1000 }))
+    expect(context.messages[0]).toMatchObject({
+      content: expect.arrayContaining([expect.objectContaining({ type: 'image' })]),
+    })
+    expect(readImageRequest).toHaveBeenCalledTimes(6)
+  })
+
+  it('names exactly the count the shared budget arithmetic names for every exact size', async () => {
+    const sizes = [30, 10, 300, 30, 3]
+    const refs = sizes.map((bytes, index) => ({
+      ...ref,
+      attachmentId: AttachmentId(`sha256:${String(index).repeat(64)}`),
+      bytes,
+    }))
+    const readImageRequest = vi.fn((value: ImageAttachmentRef) => (
+      Promise.resolve(requestImage(value, new Uint8Array(value.bytes)))
+    ))
+    for (const budget of [4, 44, 100, 448, 512, 1000, 4000]) {
+      const options = request([user(refs.map(attachment => ({ type: 'image', attachment })))])
+      const expected = requiredImageOffload(
+        options.messages,
+        { representation: 'base64', maxBytes: budget },
+        block => block.attachment.bytes,
+      )
+      const attempt = toPiContext(options, imageContext(projectionStore(readImageRequest), { maxRequestImageBytes: budget }))
+      if (expected === 0) {
+        await expect(attempt).resolves.toBeDefined()
+      } else {
+        await expect(attempt).rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: expected } })
+      }
+    }
+  })
+
   it('projects repeated image-block occurrences by their own surface mark', async () => {
     const sized: ImageAttachmentRef = { ...ref, bytes: 3 }
     const shared: ContentBlock = { type: 'image', attachment: sized }
