@@ -832,16 +832,16 @@ export interface SessionRevertIterationsValue {
   readonly groups: readonly SessionIterationGroup[]
 }
 
-/** Iteration restore request; `requestId` is the idempotency key of the replacement message. */
+/** Iteration restore request; `requestId` is the idempotency key of the branch switch. */
 export interface SessionRevertIterationRestoreRequest {
   readonly sessionId: SessionId
-  /** The variant whose content becomes the new active version. */
+  /** The variant whose branch becomes the active surface. */
   readonly variantSeq: number
-  /** Client-minted identity persisted on the replacement and used for idempotent retry. */
+  /** Client-minted identity used for an idempotent retry of the same switch. */
   readonly requestId: SessionRequestId
 }
 
-/** Iteration restore receipt; the replacement seq arrives through the event stream. */
+/** Iteration restore receipt; the branch switch is durable and appends no message. */
 export interface SessionRevertIterationRestoreValue {
   readonly accepted: true
 }

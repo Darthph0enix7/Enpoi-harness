@@ -1022,3 +1022,200 @@ describe('developer message history', () => {
     expect(restored.deriveMessages()).toEqual([replacement])
   })
 })
+
+/** One typed `revert/branch` fixture. */
+function branchEvent(seq: number, data: {
+  groupAnchor: number
+  variantSeq: number
+  previousVariantSeq: number | null
+  startSeq: number
+  endSeq: number
+  shadowedSeqs: number[]
+  restoredSeqs: number[]
+}): SessionEvent<'revert/branch'> {
+  return { type: 'revert/branch', seq: SessionSeq(seq), time: seq, data }
+}
+
+/** One append-origin user message fixture. */
+function branchUserEvent(seq: number, text: string): SessionEvent<'user/message'> {
+  return {
+    type: 'user/message',
+    seq: SessionSeq(seq),
+    time: seq,
+    data: createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+    surfaceOp: 'append',
+  }
+}
+
+/** One append-origin assistant message fixture. */
+function branchAssistantEvent(seq: number, text: string): SessionEvent<'assistant/message'> {
+  return {
+    type: 'assistant/message',
+    seq: SessionSeq(seq),
+    time: seq,
+    data: {
+      turn: 1, step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', ...{ provider: 'mock', model: 'mock' } },
+      }),
+      stream: [],
+    },
+    surfaceOp: 'append',
+  }
+}
+
+describe('revert/branch surface switches', () => {
+  /** A two-branch log: v1+a1 shadowed by v2+a2, then a switch back. */
+  function twoBranchLog(): SessionEvent[] {
+    const v1 = branchUserEvent(0, 'v1')
+    const a1 = branchAssistantEvent(1, 'a1')
+    const v2: SessionEvent<'user/message'> = {
+      type: 'user/message',
+      seq: SessionSeq(2),
+      time: 2,
+      data: createUserMessage({ content: [{ type: 'text', text: 'v2' }], source: { kind: 'user' } }),
+      surfaceOp: { op: 'replace', startSeq: SessionSeq(0), endSeq: SessionSeq(1) },
+      sourceEventSeqs: [SessionSeq(0), SessionSeq(1)],
+    }
+    const a2 = branchAssistantEvent(3, 'a2')
+    return [v1, a1, v2, a2]
+  }
+
+  it('re-activates the target branch by identity and shadows the displaced branch', () => {
+    const folded = foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs: [0, 1],
+      }),
+    ])
+    expect(folded.nodes).toEqual([0, 1])
+    expect(folded.replacements.at(-1)).toEqual({
+      seq: 4, start: 2, end: 3, shadowedSeqs: [2, 3],
+    })
+  })
+
+  it('switches back and forth without duplicating or losing records', () => {
+    const forward = foldSurface(twoBranchLog())
+    expect(forward.nodes).toEqual([2, 3])
+    const back = foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs: [0, 1],
+      }),
+      branchEvent(5, {
+        groupAnchor: 0, variantSeq: 2, previousVariantSeq: 0,
+        startSeq: 0, endSeq: 1, shadowedSeqs: [0, 1], restoredSeqs: [2, 3],
+      }),
+    ])
+    expect(back.nodes).toEqual([2, 3])
+  })
+
+  it('appends a switch through Session.append and derives the restored history', () => {
+    const session = surfaceSession()
+    const original = [...session.surface.nodes]
+    const v2 = session.append('user/message', replacementMessage('v2'), {
+      surfaceOp: { op: 'replace', startSeq: original[0]!, endSeq: original[1]! },
+      sourceEventSeqs: original,
+    })
+    expect([...session.surface.nodes]).toEqual([v2.seq])
+    session.append('revert/branch', {
+      groupAnchor: original[0]!,
+      variantSeq: original[0]!,
+      previousVariantSeq: v2.seq,
+      startSeq: v2.seq,
+      endSeq: v2.seq,
+      shadowedSeqs: [v2.seq],
+      restoredSeqs: original,
+    })
+    expect([...session.surface.nodes]).toEqual([...original])
+    expect(session.surface.replaceGeneration).toBe(2)
+    expect(session.deriveMessages().flatMap(message => message.content)
+      .filter(block => block.type === 'text').map(block => block.text)).toEqual(['hello', 'hi'])
+  })
+
+  it('rejects a switch whose span is not on the current surface', () => {
+    expect(() => foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 99, endSeq: 99, shadowedSeqs: [99], restoredSeqs: [0],
+      }),
+    ])).toThrow('start seq 99 not found in surface')
+    expect(() => foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 99, shadowedSeqs: [2], restoredSeqs: [0],
+      }),
+    ])).toThrow('end seq 99 not found after the start')
+    expect(() => foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 3, endSeq: 2, shadowedSeqs: [2], restoredSeqs: [0],
+      }),
+    ])).toThrow('end seq 2 not found after the start')
+  })
+
+  it('rejects a switch that misdeclares the shadowed span', () => {
+    expect(() => foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 3, shadowedSeqs: [2], restoredSeqs: [0],
+      }),
+    ])).toThrow('shadowedSeqs must name exactly the current span')
+  })
+
+  it('rejects an empty, non-earlier, unsorted, or already-active restored list', () => {
+    const base = twoBranchLog()
+    const switchAt = (restoredSeqs: number[]): SessionEvent<'revert/branch'> => branchEvent(4, {
+      groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+      startSeq: 2, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs,
+    })
+    expect(() => foldSurface([...base, switchAt([])])).toThrow('restoredSeqs must name at least one shadowed event')
+    expect(() => foldSurface([...base, switchAt([0, 4])])).toThrow('restored seq 4 must reference an earlier event')
+    expect(() => foldSurface([...base, switchAt([1, 0])])).toThrow('restoredSeqs must be unique and ascending')
+    expect(() => foldSurface([...base, switchAt([0, 0])])).toThrow('restoredSeqs must be unique and ascending')
+    expect(() => foldSurface([...base, switchAt([0, 2])])).toThrow('restored seq 2 is already an active surface node')
+  })
+
+  it('rejects missing or malformed branch fields', () => {
+    const base = twoBranchLog()
+    // shadowedSeqs absent and restoredSeqs absent.
+    expect(() => foldSurface([
+      ...base,
+      { type: 'revert/branch', seq: SessionSeq(4), time: 4, data: {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2, startSeq: 2, endSeq: 3, restoredSeqs: [0],
+      } } as SessionEvent,
+    ])).toThrow('shadowedSeqs must name exactly the current span')
+    expect(() => foldSurface([
+      ...base,
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs: 'x' as never,
+      }),
+    ])).toThrow('restoredSeqs must name at least one shadowed event')
+    expect(() => foldSurface([
+      ...base,
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs: [0, 'x' as never],
+      }),
+    ])).toThrow('restored seq x must reference an earlier event')
+  })
+
+  it('rejects non-seq span fields', () => {
+    expect(() => foldSurface([
+      ...twoBranchLog(),
+      branchEvent(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 'x' as never, endSeq: 3, shadowedSeqs: [2, 3], restoredSeqs: [0],
+      }),
+    ])).toThrow('startSeq and endSeq must be surface seqs')
+  })
+})

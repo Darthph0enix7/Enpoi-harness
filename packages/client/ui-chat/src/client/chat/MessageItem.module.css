@@ -508,9 +508,6 @@
 .iterationPosition {
   font-variant-numeric: tabular-nums;
 }
-.iterationStatus {
-  color: var(--dsw-alias-label-secondary);
-}
 .iterationRestore {
   padding: 2px 8px;
   border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.3));

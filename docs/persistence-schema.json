@@ -10962,6 +10962,117 @@
       }
     },
     {
+      "key": "event:revert/branch",
+      "kind": "event",
+      "event": "revert/branch",
+      "surface": false,
+      "digest": "13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 7,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "endSeq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "groupAnchor",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "previousVariantSeq",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "restoredSeqs",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "shadowedSeqs",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "startSeq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "variantSeq",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "union",
+            "types": [
+              2,
+              4
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "array",
+            "element": 2
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/branch"
+          }
+        ]
+      }
+    },
+    {
       "key": "event:revert/file-conflict",
       "kind": "event",
       "event": "revert/file-conflict",
@@ -25119,7 +25230,7 @@
         "packages/subagent/tool-subagent/src/model-selection.ts#AllowedModelRoute"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:566",
+        "packages/core/session/src/types.ts:601",
         "packages/llm/llm/src/types.ts:551",
         "packages/session/session-title/src/types.ts:20",
         "packages/subagent/tool-subagent/src/model-selection.ts:9"
@@ -25625,7 +25736,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:576"
+        "packages/core/session/src/types.ts:611"
       ]
     },
     {
@@ -27689,6 +27800,115 @@
           {
             "kind": "literal",
             "value": "deliverables/presented"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 7,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "endSeq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "groupAnchor",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "previousVariantSeq",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "restoredSeqs",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "shadowedSeqs",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "startSeq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "variantSeq",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "union",
+            "types": [
+              2,
+              4
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "array",
+            "element": 2
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "revert/branch"
           }
         ]
       },
@@ -37222,7 +37442,7 @@
         "packages/core/session/src/types.ts#SurfaceOp"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:628"
+        "packages/core/session/src/types.ts:663"
       ]
     },
     {
@@ -43232,7 +43452,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:504"
+        "packages/core/session/src/types.ts:539"
       ]
     },
     {
@@ -49916,7 +50136,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:586"
+        "packages/core/session/src/types.ts:621"
       ]
     },
     {
@@ -50394,7 +50614,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:568"
+        "packages/core/session/src/types.ts:603"
       ]
     },
     {
@@ -52890,7 +53110,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:517"
+        "packages/core/session/src/types.ts:552"
       ]
     },
     {
@@ -83947,7 +84167,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:531"
+        "packages/core/session/src/types.ts:566"
       ]
     },
     {
@@ -84581,7 +84801,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:630"
+        "packages/core/session/src/types.ts:665"
       ]
     },
     {
@@ -88777,7 +88997,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:502"
+        "packages/core/session/src/types.ts:537"
       ]
     },
     {
@@ -90670,6 +90890,78 @@
       },
       "names": [],
       "sources": []
+    },
+    {
+      "digest": "d773c079e6d9e3252dfd134e3220d421f1d75db9de0a6b0bf6720e2fafc62885",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "endSeq",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "groupAnchor",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "previousVariantSeq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "restoredSeqs",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "shadowedSeqs",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "startSeq",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "variantSeq",
+                "type": 1,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "union",
+            "types": [
+              1,
+              3
+            ]
+          },
+          {
+            "kind": "primitive",
+            "type": "null"
+          },
+          {
+            "kind": "array",
+            "element": 1
+          }
+        ]
+      },
+      "names": [],
+      "sources": [
+        "packages/core/session/src/types.ts:515"
+      ]
     },
     {
       "digest": "d85590a5675c6e2fd8164e5792a6cceac714605b8ac228adae5ee668facb1490",
@@ -93490,6 +93782,20 @@
       ]
     },
     {
+      "digest": "ea4e6075f85b7021bf610deefd2e85837a90636cae65ca8613e6945b31de8a20",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "revert/branch"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
       "digest": "ea5a3b4ba34341ea446ff7775695b859ab3b3f73b966da751b37819062afa658",
       "schema": {
         "root": 0,
@@ -94210,7 +94516,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:557"
+        "packages/core/session/src/types.ts:592"
       ]
     },
     {
@@ -94543,7 +94849,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:515"
+        "packages/core/session/src/types.ts:550"
       ]
     },
     {

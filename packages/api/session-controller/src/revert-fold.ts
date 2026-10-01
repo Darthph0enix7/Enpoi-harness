@@ -152,6 +152,42 @@ export function foldRevertEvent(state: RevertFoldState, event: RevertFoldEvent):
     }
     return iterationChanged
   }
+  if (event.type === 'revert/branch') {
+    // A branch switch re-points visibility: the restored branch's span stops
+    // being hidden and the branch it displaced becomes hidden. Unlike a
+    // revert-commit range, these ranges are replaced, not accumulated, so
+    // switching back and forth is exact.
+    const data = event.data as {
+      readonly shadowedSeqs?: unknown
+      readonly restoredSeqs?: unknown
+    } | undefined
+    const shadowed = Array.isArray(data?.shadowedSeqs)
+      ? data.shadowedSeqs.filter((seq): seq is number => typeof seq === 'number')
+      : []
+    const restored = Array.isArray(data?.restoredSeqs)
+      ? data.restoredSeqs.filter((seq): seq is number => typeof seq === 'number')
+      : []
+    if (shadowed.length === 0 && restored.length === 0) return iterationChanged
+    let changed = false
+    if (restored.length > 0) {
+      const next = state.revertShadowRanges.filter(range =>
+        !restored.some(seq => seq >= range.start && seq < range.end))
+      if (next.length !== state.revertShadowRanges.length) {
+        state.revertShadowRanges = next
+        changed = true
+      }
+    }
+    if (shadowed.length > 0) {
+      const start = Math.min(...shadowed)
+      const end = Math.max(...shadowed) + 1
+      const already = state.revertShadowRanges.some(range => range.start === start && range.end === end)
+      if (!already) {
+        state.revertShadowRanges = [...state.revertShadowRanges, { start, end }]
+        changed = true
+      }
+    }
+    return changed || iterationChanged
+  }
   if (event.type === 'revert/file-conflict') {
     const data = event.data as RevertFileConflict | undefined
     if (data !== undefined) {

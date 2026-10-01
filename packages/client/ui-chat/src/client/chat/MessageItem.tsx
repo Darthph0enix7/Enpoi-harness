@@ -455,19 +455,14 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
                 ▶
               </button>
               {previewing && (
-                <>
-                  <span className={css.iterationStatus} role="status">
-                    {t('message.iteration.preview', { index: selectedIndex + 1, total: variants.length })}
-                  </span>
-                  <button
-                    type="button"
-                    className={css.iterationRestore}
-                    disabled={restoring || restoreIteration === undefined}
-                    onClick={restore}
-                  >
-                    {restoring ? t('message.iteration.restoring') : t('message.iteration.restore')}
-                  </button>
-                </>
+                <button
+                  type="button"
+                  className={css.iterationRestore}
+                  disabled={restoring || restoreIteration === undefined}
+                  onClick={restore}
+                >
+                  {t('message.iteration.restore')}
+                </button>
               )}
             </div>
           )}

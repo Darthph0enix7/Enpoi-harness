@@ -33,6 +33,14 @@ export interface IterationFoldState {
   readonly variantBySeq: Map<number, number>
   /** User-message seqs whose `source.kind` is `user`; the fallback filter. */
   readonly userOriginSeqs: Set<number>
+  /**
+   * The shadowed surface records of every inactive variant, ascending. A
+   * branch switch restores one entry and records the branch it shadowed, so
+   * switching back is exact; the active variant has no entry.
+   */
+  readonly branchSeqs: Map<number, number[]>
+  /** Replacement seq → the surface nodes it shadowed, until its marker names the variant. */
+  readonly pendingShadowed: Map<number, number[]>
 }
 
 /** Structural event fields the fold reads; durable Session events and test doubles qualify. */
@@ -41,6 +49,7 @@ export interface IterationFoldEvent {
   readonly seq: number
   readonly data?: unknown
   readonly surfaceOp?: unknown
+  readonly sourceEventSeqs?: unknown
 }
 
 /**
@@ -48,7 +57,13 @@ export interface IterationFoldEvent {
  * @returns an empty accumulator.
  */
 export function emptyIterationFoldState(): IterationFoldState {
-  return { groups: new Map(), variantBySeq: new Map(), userOriginSeqs: new Set() }
+  return {
+    groups: new Map(),
+    variantBySeq: new Map(),
+    userOriginSeqs: new Set(),
+    branchSeqs: new Map(),
+    pendingShadowed: new Map(),
+  }
 }
 
 /**
@@ -90,10 +105,21 @@ export function foldIterationEvent(state: IterationFoldState, event: IterationFo
     if (surfaceOp?.op !== 'replace'
       || typeof surfaceOp.startSeq !== 'number'
       || typeof surfaceOp.endSeq !== 'number') return false
+    const shadowed = Array.isArray(event.sourceEventSeqs)
+      ? event.sourceEventSeqs.filter((seq): seq is number => typeof seq === 'number').sort((left, right) => left - right)
+      : undefined
+    if (shadowed !== undefined && shadowed.length > 0) {
+      // The marker that names this replacement's previous variant may arrive
+      // next; until then the shadowed records belong to that variant.
+      state.pendingShadowed.set(event.seq, shadowed)
+    }
     deactivateShadowed(state, surfaceOp.startSeq, surfaceOp.endSeq)
     // Fallback edges exist only for replacements of an earlier user-origin
-    // message; a checkpoint-anchored restore carries its own marker instead.
+    // message; a checkpoint-anchored replacement carries its own marker.
     if (state.userOriginSeqs.has(surfaceOp.startSeq)) {
+      if (shadowed !== undefined && shadowed.length > 0) {
+        state.branchSeqs.set(surfaceOp.startSeq, shadowed)
+      }
       recordVariant(state, iterationAnchorOf(state, surfaceOp.startSeq) ?? surfaceOp.startSeq, event.seq, surfaceOp.startSeq)
     }
     return true
@@ -106,10 +132,65 @@ export function foldIterationEvent(state: IterationFoldState, event: IterationFo
     } | undefined
     if (typeof data?.groupAnchor !== 'number' || typeof data.variantSeq !== 'number') return false
     const previousSeq = typeof data.previousSeq === 'number' ? data.previousSeq : null
+    if (previousSeq !== null) {
+      const shadowed = state.pendingShadowed.get(data.variantSeq)
+      if (shadowed !== undefined) state.branchSeqs.set(previousSeq, shadowed)
+    }
+    state.pendingShadowed.delete(data.variantSeq)
     // The marker is the durable edge and outranks a fallback derivation.
     return recordVariant(state, data.groupAnchor, data.variantSeq, previousSeq, true)
   }
+  if (event.type === 'revert/branch') {
+    return foldBranchEvent(state, event)
+  }
   return false
+}
+
+/**
+ * Fold one durable branch switch: the shadowed records become the previous
+ * variant's restorable branch, the target variant's entry is cleared, the
+ * group's active pointer moves, and every group represented inside the
+ * restored records becomes active again.
+ */
+function foldBranchEvent(state: IterationFoldState, event: IterationFoldEvent): boolean {
+  const data = event.data as {
+    readonly variantSeq?: unknown
+    readonly previousVariantSeq?: unknown
+    readonly shadowedSeqs?: unknown
+    readonly restoredSeqs?: unknown
+  } | undefined
+  if (typeof data?.variantSeq !== 'number') return false
+  const shadowed = Array.isArray(data.shadowedSeqs)
+    ? data.shadowedSeqs.filter((seq): seq is number => typeof seq === 'number').sort((left, right) => left - right)
+    : []
+  const restored = Array.isArray(data.restoredSeqs)
+    ? data.restoredSeqs.filter((seq): seq is number => typeof seq === 'number').sort((left, right) => left - right)
+    : []
+  if (shadowed.length === 0 && restored.length === 0) return false
+  const shadowedFirst = shadowed[0]
+  const shadowedLast = shadowed[shadowed.length - 1]
+  if (shadowedFirst !== undefined && shadowedLast !== undefined) {
+    deactivateShadowed(state, shadowedFirst, shadowedLast)
+  }
+  if (typeof data.previousVariantSeq === 'number' && shadowed.length > 0) {
+    state.branchSeqs.set(data.previousVariantSeq, shadowed)
+  }
+  state.branchSeqs.delete(data.variantSeq)
+  const groupAnchor = state.variantBySeq.get(data.variantSeq) ?? data.variantSeq
+  const group = state.groups.get(groupAnchor)
+  if (group !== undefined) group.activeVariantSeq = data.variantSeq
+  // The restored records may contain later groups' variants; those branches
+  // are part of the restored suffix and become active with it.
+  const restoredSet = new Set(restored)
+  for (const candidate of state.groups.values()) {
+    // Variant keys are in creation order, so the last match is the branch tip.
+    let latest: number | undefined
+    for (const seq of candidate.variants.keys()) {
+      if (restoredSet.has(seq)) latest = seq
+    }
+    if (latest !== undefined) candidate.activeVariantSeq = latest
+  }
+  return true
 }
 
 /**
@@ -125,6 +206,7 @@ export function foldIterationEvents(
   const state = emptyIterationFoldState()
   for (let seq = 0; seq <= throughSeq && seq < events.length; seq++) {
     const event = events[seq]
+    /* v8 ignore next -- the loop bound guarantees a dense event at every index */
     if (event !== undefined) foldIterationEvent(state, event)
   }
   return state
@@ -145,6 +227,7 @@ export function adoptIterationEdges(edges: readonly SessionIterationEdge[] | und
     const group = state.groups.get(edge.anchorSeq)
     // The wire's active pointer may be null (shadowed away) or an earlier
     // variant than the last created one; both are deliberate, so adopt it.
+    /* v8 ignore next -- recordVariant always creates the group for its anchor */
     if (group !== undefined) group.activeVariantSeq = edge.activeVariantSeq
   }
   return state

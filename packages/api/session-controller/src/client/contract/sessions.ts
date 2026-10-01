@@ -196,12 +196,13 @@ export interface ISessions {
     beforeVariantSeq?: number
   }): Promise<readonly SessionIterationGroup[]>
   /**
-   * Restore one iteration variant as the active version: everything after the
-   * group's current surface node is reverted and the target's content becomes
-   * the new surface message (no fork, no span copy). `requestId` makes a
-   * retried call idempotent and is persisted on the replacement.
-   * @param opts - session, target variant seq, and the client-minted request id.
-   * @throws when the host rejects the target (foreign, missing, or already active).
+   * Switch the active conversation branch to one iteration variant: the
+   * target branch's original records become the model surface and the
+   * displaced branch becomes shadowed. No user message, turn, or model call
+   * runs; the switch is one durable log event. `requestId` makes a retried
+   * call idempotent.
+   * @param opts - session and the target variant seq.
+   * @throws when the host rejects the target (foreign, branchless, or already active).
    */
   revertIterationRestore(opts: {
     sessionId: SessionId

@@ -494,6 +494,41 @@ export interface SessionEventMap {
     restoredFromSeq?: number
   }
   /**
+   * One durable branch switch: the variant `variantSeq`'s branch becomes the
+   * active model surface, and the previously active branch — the exact current
+   * surface nodes `shadowedSeqs` — becomes shadowed. `restoredSeqs` are the
+   * target branch's original surface nodes (its variant plus the records that
+   * followed it), re-activated by identity: no content is copied, no user
+   * message is appended, and no turn or model call runs.
+   *
+   * The surface fold splices `restoredSeqs` in place of the `startSeq`…`endSeq`
+   * span; the log stays append-only and the target branch's events are the same
+   * durable records they always were. `groupAnchor`/`previousVariantSeq`
+   * update the iteration tree, and `restoredSeqs` may include later groups'
+   * variants, so a switch back and forth restores the whole conversation
+   * suffix message-for-message.
+   *
+   * Log-only and required-on-read: a reader that cannot interpret the branch
+   * selection would reconstruct the wrong model history, so it must refuse the
+   * log rather than skip this event.
+   */
+  'revert/branch': {
+    /** Seq of the first variant (the original user message) — the group key. */
+    groupAnchor: number
+    /** The variant whose branch becomes active. */
+    variantSeq: number
+    /** The variant whose branch was active before this switch, or null when unknown. */
+    previousVariantSeq: number | null
+    /** First current surface node the switch shadowed (inclusive). */
+    startSeq: number
+    /** Last current surface node the switch shadowed (inclusive). */
+    endSeq: number
+    /** Exactly the shadowed surface nodes, ascending; the previous branch's records. */
+    shadowedSeqs: number[]
+    /** The target branch's surface nodes that become active, ascending. */
+    restoredSeqs: number[]
+  }
+  /**
    * Durable intent record for a file-revert batch, appended by the
    * `enpoi-file-revert` plugin BEFORE any disk mutation. Log-only, ignorable,
    * never surface-eligible. Recovery replays the recorded plan verbatim when

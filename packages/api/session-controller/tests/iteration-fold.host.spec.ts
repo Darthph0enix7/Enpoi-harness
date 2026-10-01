@@ -11,7 +11,7 @@ import {
   iterationAnchorOf,
   iterationEdges,
 } from '../src/iteration-fold.ts'
-import { foldRevertEvents, revertFoldValue } from '../src/revert-fold.ts'
+import { foldRevertEvent, foldRevertEvents, revertFoldValue } from '../src/revert-fold.ts'
 
 interface FoldEvent {
   readonly type: string
@@ -40,6 +40,28 @@ function marker(seq: number, data: {
   restoredFromSeq?: number
 }): FoldEvent {
   return { type: 'revert/iteration', seq, data }
+}
+
+function replacement(seq: number, startSeq: number, endSeq: number, shadowed: number[]): FoldEvent {
+  return {
+    type: 'user/message',
+    seq,
+    data: { content: [{ type: 'text', text: `variant-${String(seq)}` }], source: { kind: 'user' } },
+    surfaceOp: { op: 'replace', startSeq, endSeq },
+    sourceEventSeqs: shadowed,
+  }
+}
+
+function branch(seq: number, data: {
+  groupAnchor: number
+  variantSeq: number
+  previousVariantSeq: number | null
+  startSeq: number
+  endSeq: number
+  shadowedSeqs: number[]
+  restoredSeqs: number[]
+}): FoldEvent {
+  return { type: 'revert/branch', seq, data }
 }
 
 describe('iteration fold', () => {
@@ -220,5 +242,141 @@ describe('iteration fold', () => {
       activeVariantSeq: 1,
       variants: [{ seq: 0, previousSeq: null }, { seq: 1, previousSeq: 0 }],
     }])
+  })
+  it('switches the active branch and remembers both branches for switching back', () => {
+    const state = foldIterationEvents([
+      user(0, 'v1'),
+      replacement(1, 0, 0, [0]),
+      marker(2, { groupAnchor: 0, previousSeq: 0, variantSeq: 1, startSeq: 0, endSeq: 0, cause: 'commit' }),
+      { type: 'assistant/message', seq: 3, data: {} },
+      branch(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 1,
+        startSeq: 1, endSeq: 3, shadowedSeqs: [1, 3], restoredSeqs: [0],
+      }),
+    ])
+    expect(iterationEdges(state)[0]).toMatchObject({ anchorSeq: 0, activeVariantSeq: 0 })
+    expect(state.branchSeqs.get(1)).toEqual([1, 3])
+    expect(state.branchSeqs.has(0)).toBe(false)
+
+    expect(foldIterationEvent(state, branch(5, {
+      groupAnchor: 0, variantSeq: 1, previousVariantSeq: 0,
+      startSeq: 0, endSeq: 0, shadowedSeqs: [0], restoredSeqs: [1, 3],
+    }))).toBe(true)
+    expect(iterationEdges(state)[0]).toMatchObject({ anchorSeq: 0, activeVariantSeq: 1 })
+    expect(state.branchSeqs.get(0)).toEqual([0])
+    expect(state.branchSeqs.has(1)).toBe(false)
+  })
+
+  it('reactivates later groups contained in the restored suffix', () => {
+    const state = foldIterationEvents([
+      user(0, 'v1'),
+      replacement(1, 0, 0, [0]),
+      marker(2, { groupAnchor: 0, previousSeq: 0, variantSeq: 1, startSeq: 0, endSeq: 0, cause: 'commit' }),
+      user(3, 'w1'),
+      replacement(4, 3, 3, [3]),
+      marker(5, { groupAnchor: 3, previousSeq: 3, variantSeq: 4, startSeq: 3, endSeq: 3, cause: 'commit' }),
+      branch(6, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 1,
+        startSeq: 1, endSeq: 4, shadowedSeqs: [1, 4], restoredSeqs: [0],
+      }),
+    ])
+    expect(iterationEdges(state).find(group => group.anchorSeq === 3)!.activeVariantSeq).toBeNull()
+
+    foldIterationEvent(state, branch(7, {
+      groupAnchor: 0, variantSeq: 1, previousVariantSeq: 0,
+      startSeq: 0, endSeq: 0, shadowedSeqs: [0], restoredSeqs: [1, 4],
+    }))
+    expect(iterationEdges(state).find(group => group.anchorSeq === 3)!.activeVariantSeq).toBe(4)
+    expect(iterationEdges(state).find(group => group.anchorSeq === 0)!.activeVariantSeq).toBe(1)
+  })
+
+  it('ignores malformed markers and branch events without changing state', () => {
+    const state = foldIterationEvents([
+      user(0, 'v1'),
+      replacement(1, 0, 0, [0]),
+      marker(2, { groupAnchor: 0, previousSeq: 0, variantSeq: 1, startSeq: 0, endSeq: 0, cause: 'commit' }),
+    ])
+    // Marker without data, without a variant, and without previousSeq.
+    expect(foldIterationEvent(state, { type: 'revert/iteration', seq: 3, data: undefined })).toBe(false)
+    expect(foldIterationEvent(state, { type: 'revert/iteration', seq: 4, data: { groupAnchor: 0 } })).toBe(false)
+    expect(foldIterationEvent(state, { type: 'revert/iteration', seq: 5, data: { groupAnchor: 0, variantSeq: 9 } })).toBe(true)
+    // Branch event without data, without a variant, with non-array lists, with
+    // non-number entries, and with no usable seqs at all.
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 6, data: undefined })).toBe(false)
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 7, data: { variantSeq: 1 } })).toBe(false)
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 8, data: {
+      variantSeq: 1, previousVariantSeq: 0, shadowedSeqs: 'x', restoredSeqs: 0,
+    } })).toBe(false)
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 9, data: {
+      variantSeq: 1, previousVariantSeq: 0, shadowedSeqs: ['x'], restoredSeqs: ['y'],
+    } })).toBe(false)
+    // A switch with no shadowed records but a restored target still moves the
+    // groups the restored records represent.
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 10, data: {
+      variantSeq: 1, previousVariantSeq: 0, shadowedSeqs: [], restoredSeqs: [0],
+    } })).toBe(true)
+    expect(iterationEdges(state).find(group => group.anchorSeq === 0)!.activeVariantSeq).toBe(0)
+    // A switch whose target names no known group still moves the groups the
+    // restored records represent.
+    expect(foldIterationEvent(state, { type: 'revert/branch', seq: 11, data: {
+      variantSeq: 99, previousVariantSeq: null, shadowedSeqs: [1], restoredSeqs: [0],
+    } })).toBe(true)
+    expect(iterationEdges(state).find(group => group.anchorSeq === 0)!.activeVariantSeq).toBe(0)
+  })
+
+  it('leaves the hidden spans unchanged when a branch event carries no usable seqs', () => {
+    const state = foldRevertEvents([
+      user(0, 'v1'),
+      { type: 'revert/state', seq: 1, data: { fromSeq: 0, cause: 'revert' } },
+      replacement(2, 0, 0, [0]),
+    ])
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }])
+    // Empty or malformed branch data changes nothing.
+    foldRevertEvent(state, { type: 'revert/branch', seq: 3, data: { shadowedSeqs: [], restoredSeqs: [] } })
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }])
+    foldRevertEvent(state, { type: 'revert/branch', seq: 4, data: { shadowedSeqs: 'x', restoredSeqs: 0 } })
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }])
+    // A restored-only switch removes the matching span without adding one.
+    foldRevertEvent(state, { type: 'revert/branch', seq: 5, data: { shadowedSeqs: [], restoredSeqs: [0] } })
+    expect(state.revertShadowRanges).toEqual([])
+    // Restore the state for the remaining assertions.
+    foldRevertEvent(state, { type: 'revert/branch', seq: 6, data: { shadowedSeqs: [0], restoredSeqs: [] } })
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }])
+    // A restored span that matches no current range only adds the shadowed span.
+    foldRevertEvent(state, { type: 'revert/branch', seq: 4, data: {
+      shadowedSeqs: [2], restoredSeqs: [1],
+    } })
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }, { start: 2, end: 3 }])
+    // Re-adding the same shadowed span is idempotent.
+    foldRevertEvent(state, { type: 'revert/branch', seq: 5, data: {
+      shadowedSeqs: [2], restoredSeqs: [],
+    } })
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }, { start: 2, end: 3 }])
+  })
+
+  it('adopts an absent wire block as an empty index', () => {
+    const state = adoptIterationEdges(undefined)
+    expect(iterationEdges(state)).toEqual([])
+  })
+
+  it('re-points the hidden span on a branch switch and restores it on the way back', () => {
+    const state = foldRevertEvents([
+      user(0, 'v1'),
+      { type: 'revert/state', seq: 1, data: { fromSeq: 0, cause: 'revert' } },
+      replacement(2, 0, 0, [0]),
+      { type: 'revert/state', seq: 3, data: { fromSeq: null, cause: 'commit' } },
+      branch(4, {
+        groupAnchor: 0, variantSeq: 0, previousVariantSeq: 2,
+        startSeq: 2, endSeq: 2, shadowedSeqs: [2], restoredSeqs: [0],
+      }),
+    ])
+    // The restored v1 span stops being hidden; the displaced v2 span becomes hidden.
+    expect(state.revertShadowRanges).toEqual([{ start: 2, end: 3 }])
+
+    foldRevertEvent(state, branch(5, {
+      groupAnchor: 0, variantSeq: 2, previousVariantSeq: 0,
+      startSeq: 0, endSeq: 0, shadowedSeqs: [0], restoredSeqs: [2],
+    }))
+    expect(state.revertShadowRanges).toEqual([{ start: 0, end: 1 }])
   })
 })

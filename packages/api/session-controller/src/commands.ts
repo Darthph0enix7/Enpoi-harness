@@ -114,11 +114,17 @@ export class SessionCommandController {
   private readonly commandIndexes = new Map<SessionId, SessionCommandIndex>()
   /**
    * Sessions with an in-flight iteration restore. Two concurrent restores
-   * would each validate against the same surface and then queue replacements
-   * against a tail the other moved; serializing them keeps one plan per
-   * surface state (D3).
+   * would each validate against the same surface and then switch branches
+   * against a surface the other moved; serializing them keeps one switch per
+   * surface state.
    */
   private readonly restoringSessions = new Set<SessionId>()
+  /**
+   * Recently handled iteration-restore request ids per Session, bounded to 32.
+   * A restore appends no user message, so prompt-id idempotency cannot carry
+   * it; a transport retry of the same request id returns the first receipt.
+   */
+  private readonly iterationRestoreRequests = new Map<SessionId, Set<string>>()
 
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
@@ -875,16 +881,19 @@ export class SessionCommandController {
   }
 
   /**
-   * Restore one iteration variant as the surface-active version: cancel
-   * running/pending user work, move the file-revert boundary, and queue a
-   * replacement user message whose content is the target variant's, shadowing
-   * the group's current surface node through the tail (today's
-   * overwrite-since-point commit). The target is validated as a known variant
-   * of a represented group and rejected with `revert-invalid` before any write
-   * when it is missing, foreign, or already active. The replacement carries a
-   * fresh `requestId`, so a retried call is idempotent.
+   * Switch the active conversation branch to one iteration variant: the
+   * target branch's original records become the model surface and the
+   * displaced branch becomes shadowed, through one log-only `revert/branch`
+   * event. No user message, no turn, and no model call is produced — a
+   * restore is a surface-state swap, not a resend. File state follows the
+   * branch position through the existing `revert/state` boundary: the current
+   * branch end is pinned first, the target branch end moves the boundary
+   * (revert backward or un-revert forward), and the boundary is disarmed.
+   * The target is validated as a known variant of a represented group with
+   * restorable branch records; missing, foreign, already-active, or
+   * branchless targets reject with `revert-invalid` before any write.
    * @param request - session, target variant, and the idempotency request id.
-   * @returns acknowledgement that the restore was queued.
+   * @returns acknowledgement that the branch switch committed.
    */
   async revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue> {
     const agent = this.ctx.agents.get(request.sessionId)
@@ -897,6 +906,9 @@ export class SessionCommandController {
     if (this.restoringSessions.has(request.sessionId)) {
       reject('session/agent-busy', 'another iteration restore is already in flight for this session', { reason: 'ITERATION_RESTORE_IN_FLIGHT' })
     }
+    if (this.iterationRestoreRequests.get(request.sessionId)?.has(request.requestId) === true) {
+      return { accepted: true }
+    }
     const session = agent.session
     const index = await this.indexFor(session.id)
     const group = iterationEdges(index.iterations)
@@ -906,6 +918,10 @@ export class SessionCommandController {
     }
     if (group.activeVariantSeq === request.variantSeq) {
       reject('revert-invalid', `event ${String(request.variantSeq)} is already the active version`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    const targetBranch = index.iterations.branchSeqs.get(request.variantSeq)
+    if (targetBranch === undefined || targetBranch.length === 0) {
+      reject('revert-invalid', `iteration variant ${String(request.variantSeq)} has no restorable branch records`, { sessionId: request.sessionId, atSeq: request.variantSeq })
     }
     const variants = new Set(group.variants.map(variant => variant.seq))
     const anchor = resolveIterationSurfaceAnchor(session, variants)
@@ -917,37 +933,52 @@ export class SessionCommandController {
     if (target === undefined || target.type !== 'user/message') {
       reject('revert-invalid', `event ${String(request.variantSeq)} is not a user message (iteration target)`, { sessionId: request.sessionId, atSeq: request.variantSeq })
     }
-    // Idempotent retry: a duplicate requestId either already appended or is
-    // still pending in the inbox, and must not queue a second replacement.
-    if (await this.hasPromptRequest(agent, request.requestId)) return { accepted: true }
     const nodes = session.surface.nodes
     const endSeq = nodes.at(-1)
     /* v8 ignore next -- the surface always contains the resolved anchor */
     if (endSeq === undefined) reject('revert-invalid', 'the session surface is empty', { sessionId: request.sessionId, atSeq: request.variantSeq })
-    const plan = assertIterationRestorePlan(request.sessionId, nodes, anchor, endSeq)
+    const shadowedSeqs = assertIterationRestorePlan(request.sessionId, nodes, anchor, endSeq)
+    const active = new Set<number>(nodes)
+    const restoredSeqs = [...new Set(targetBranch)].sort((left, right) => left - right)
+    const alreadyActive = restoredSeqs.find(seq => active.has(seq))
+    if (alreadyActive !== undefined) {
+      reject('revert-invalid', `restored branch record ${String(alreadyActive)} is already on the surface`, { sessionId: request.sessionId, atSeq: request.variantSeq })
+    }
+    const targetEnd = restoredSeqs[restoredSeqs.length - 1]
+    /* v8 ignore next -- a non-empty branch always has a last record */
+    if (targetEnd === undefined) reject('revert-invalid', 'the restored branch is empty', { sessionId: request.sessionId, atSeq: request.variantSeq })
     this.restoringSessions.add(request.sessionId)
     try {
+      // The running turn belongs to the branch being shadowed; cancel it
+      // without letting its settlement pollute the restored surface.
       this.cancelForRevert(agent, request.variantSeq)
-      // The boundary moves only after the surface plan is proven valid, so a
-      // rejected plan cannot have triggered the file-revert side effect (D3).
-      session.append('revert/state', { fromSeq: request.variantSeq, cause: 'restore' })
-      const restored = createUserMessage({
-        content: [...target.data.content],
-        source: { kind: 'user', rpcId: request.requestId },
+      // File state follows the branch position through the existing
+      // file-revert boundary. The first marker pins the current branch end so
+      // a forward switch is classified as an un-revert; the second moves the
+      // target branch's end; the third disarms the boundary. All three are
+      // log-only and append before the branch switch commits.
+      session.append('revert/state', { fromSeq: endSeq, cause: 'revert' })
+      session.append('revert/state', { fromSeq: targetEnd, cause: 'restore' })
+      session.append('revert/state', { fromSeq: null, cause: 'commit' })
+      // The branch switch itself: the target branch's original records become
+      // the active surface, the displaced branch's records become shadowed.
+      // No user message, no turn, no model call.
+      session.append('revert/branch', {
+        groupAnchor: group.anchorSeq,
+        variantSeq: request.variantSeq,
+        previousVariantSeq: group.activeVariantSeq,
+        startSeq: anchor,
+        endSeq,
+        shadowedSeqs: [...shadowedSeqs],
+        restoredSeqs,
       })
-      agent.followup(restored, {
-        surfaceOp: { op: 'replace', startSeq: anchor, endSeq },
-        sourceEventSeqs: [...plan],
-        clearRevert: true,
-        iteration: {
-          groupAnchor: group.anchorSeq,
-          previousSeq: group.activeVariantSeq,
-          startSeq: anchor,
-          endSeq,
-          cause: 'restore',
-          restoredFromSeq: request.variantSeq,
-        },
-      })
+      const handled = this.iterationRestoreRequests.get(request.sessionId) ?? new Set<string>()
+      handled.add(request.requestId)
+      if (handled.size > 32) {
+        const oldest = handled.values().next().value
+        if (oldest !== undefined) handled.delete(oldest)
+      }
+      this.iterationRestoreRequests.set(request.sessionId, handled)
     } finally {
       this.restoringSessions.delete(request.sessionId)
     }

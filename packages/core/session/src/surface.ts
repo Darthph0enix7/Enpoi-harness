@@ -273,10 +273,19 @@ interface SurfaceReplacePlan extends SurfaceFoldReplacement {
   endIdx: number
 }
 
+/** A validated branch switch that re-activates existing events by identity. */
+interface SurfaceBranchPlan extends SurfaceFoldReplacement {
+  kind: 'branch'
+  startIdx: number
+  endIdx: number
+  restoredSeqs: SessionSeq[]
+}
+
 /** One validated surface transition that has not mutated fold state yet. */
 type SurfacePlan =
   | { kind: 'append'; seq: SessionSeq }
   | SurfaceReplacePlan
+  | SurfaceBranchPlan
   | { kind: 'project'; projection: SessionMessageProjection; messages: ReadonlyMap<SessionSeq, Message> }
 
 /** Create an empty surface fold state. */
@@ -441,6 +450,76 @@ function replacementRange(
 }
 
 /**
+ * Validate one `revert/branch` selection against the current surface without
+ * mutating it. The event names the exact current span it shadows and the
+ * previously shadowed events it re-activates; both sides are checked against
+ * the fold so a hand-written or replayed event cannot corrupt the surface.
+ * @param state - current fold state.
+ * @param event - candidate branch event not yet committed.
+ * @returns the validated branch transition.
+ * @throws when the span, the shadowed list, or the restored list is invalid.
+ */
+function planBranchEvent(
+  state: SurfaceFoldState,
+  event: SessionEvent,
+): SurfaceBranchPlan {
+  const data = event.data as {
+    readonly startSeq?: unknown
+    readonly endSeq?: unknown
+    readonly shadowedSeqs?: unknown
+    readonly restoredSeqs?: unknown
+  }
+  if (!isEventSeq(data.startSeq) || !isEventSeq(data.endSeq)) {
+    throw new Error(`revert/branch at seq ${event.seq}: startSeq and endSeq must be surface seqs`)
+  }
+  const startIdx = state.nodes.indexOf(data.startSeq)
+  if (startIdx === -1) {
+    throw new Error(`revert/branch at seq ${event.seq}: start seq ${String(data.startSeq)} not found in surface`)
+  }
+  const endIdx = state.nodes.indexOf(data.endSeq)
+  if (endIdx === -1 || endIdx < startIdx) {
+    throw new Error(`revert/branch at seq ${event.seq}: end seq ${String(data.endSeq)} not found after the start`)
+  }
+  const shadowedSeqs = state.nodes.slice(startIdx, endIdx + 1)
+  const declaredShadowed = data.shadowedSeqs
+  if (!Array.isArray(declaredShadowed)
+    || declaredShadowed.length !== shadowedSeqs.length
+    || declaredShadowed.some((seq, index) => seq !== shadowedSeqs[index])) {
+    throw new Error(`revert/branch at seq ${event.seq}: shadowedSeqs must name exactly the current span [${String(data.startSeq)}, ${String(data.endSeq)}]`)
+  }
+  const declaredRestored = data.restoredSeqs
+  if (!Array.isArray(declaredRestored) || declaredRestored.length === 0) {
+    throw new Error(`revert/branch at seq ${event.seq}: restoredSeqs must name at least one shadowed event`)
+  }
+  const active = new Set(state.nodes)
+  const restoredSeqs: SessionSeq[] = []
+  let previous = -1
+  for (const seq of declaredRestored) {
+    if (!isEventSeq(seq) || seq >= event.seq) {
+      throw new Error(`revert/branch at seq ${event.seq}: restored seq ${String(seq)} must reference an earlier event`)
+    }
+    if (seq <= previous) {
+      throw new Error(`revert/branch at seq ${event.seq}: restoredSeqs must be unique and ascending`)
+    }
+    if (active.has(seq)) {
+      throw new Error(`revert/branch at seq ${event.seq}: restored seq ${String(seq)} is already an active surface node`)
+    }
+    restoredSeqs.push(seq)
+    previous = seq
+  }
+  return {
+    kind: 'branch',
+    seq: event.seq,
+    start: data.startSeq,
+    end: data.endSeq,
+    shadowedSeqs,
+    startIdx,
+    endIdx,
+    restoredSeqs,
+  }
+}
+
+/**
  * Deep structural equality over the session-event JSON value domain
  * (null/boolean/number/string, arrays, plain objects). Replaces
  * `node:util`'s isDeepStrictEqual to keep this module browser-safe.
@@ -535,6 +614,9 @@ function planSurfaceEvent(
   if (MESSAGE_PROJECTION_EVENT_TYPES.has(event.type)) {
     throw new Error(`session event "${event.type}" requires a message projection; load its owning plugin or supply its projection definition`)
   }
+  // A branch switch is a log-only event with surface semantics: it re-activates
+  // existing events instead of adding a node of its own.
+  if (event.type === 'revert/branch') return planBranchEvent(state, event)
   if (surfaceOp === undefined) return
   if (surfaceOp === 'append') {
     return { kind: 'append', seq: event.seq }
@@ -576,12 +658,16 @@ function applySurfacePlan(
     state.nodes.splice(plan.startIdx, plan.endIdx - plan.startIdx + 1, plan.seq)
     state.replaceGeneration += 1
     state.contentGeneration += 1
+  } else if (plan?.kind === 'branch') {
+    state.nodes.splice(plan.startIdx, plan.endIdx - plan.startIdx + 1, ...plan.restoredSeqs)
+    state.replaceGeneration += 1
+    state.contentGeneration += 1
   } else if (plan?.kind === 'project') {
     for (const [seq, message] of plan.messages) state.projectedMessages.set(seq, message)
     state.projections.add(plan.projection)
     state.contentGeneration += 1
   }
-  if (plan?.kind !== 'replace') return
+  if (plan?.kind !== 'replace' && plan?.kind !== 'branch') return
   return {
     seq: plan.seq,
     start: plan.start,

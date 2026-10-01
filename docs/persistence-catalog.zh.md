@@ -52,6 +52,7 @@
 | `event:plan/mode` | event | `a7cf43ce7c2a4c038feed1885cd7a00d5c6ee2d90a7e0d56b46f78a3e1ca327f` | [`{ type: "plan/mode" }`](#persistence-type-sha256-a7cf43ce7c2a4c038feed1885cd7a00d5c6ee2d90a7e0d56b46f78a3e1ca327f) |
 | `event:request/context` | event | `37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf` | [`{ type: "request/context" }`](#persistence-type-sha256-37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf) |
 | `event:request/header` | event | `4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41` | [`{ type: "request/header" }`](#persistence-type-sha256-4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41) |
+| `event:revert/branch` | event | `13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6` | [`{ type: "revert/branch" }`](#persistence-type-sha256-13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6) |
 | `event:revert/file-conflict` | event | `0dd5d9778443f63729df9c252fdf3e476c6725b59d277cb257c3679de7f64142` | [`{ type: "revert/file-conflict" }`](#persistence-type-sha256-0dd5d9778443f63729df9c252fdf3e476c6725b59d277cb257c3679de7f64142) |
 | `event:revert/file-intent` | event | `61a1ef6dfd7fa95da9e6023325c83c07d981a1e241a04a47e4a66d9f3e28729c` | [`{ type: "revert/file-intent" }`](#persistence-type-sha256-61a1ef6dfd7fa95da9e6023325c83c07d981a1e241a04a47e4a66d9f3e28729c) |
 | `event:revert/file-result` | event | `c41ca325c68f183c2c9f30184966d4982a672e442ffb1462d2476d689482982a` | [`{ type: "revert/file-result" }`](#persistence-type-sha256-c41ca325c68f183c2c9f30184966d4982a672e442ffb1462d2476d689482982a) |
@@ -164,7 +165,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-来源：[`packages/core/session/src/types.ts:597`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:605`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:628`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:659`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:632`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:640`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:663`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:694`](../packages/core/session/src/types.ts)
 
 ## 事件
 
@@ -674,7 +675,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
   }
 ```
 
-来源：[`packages/core/session/src/types.ts:556`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:591`](../packages/core/session/src/types.ts)
 
 <a id="llmretry--log-only"></a>
 
@@ -788,6 +789,50 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 ### `revert/*`
 
+<a id="revertbranch--log-only"></a>
+
+#### `revert/branch` — log-only
+
+```ts persistence-catalog
+/**
+ * One durable branch switch: the variant `variantSeq`'s branch becomes the
+ * active model surface, and the previously active branch — the exact current
+ * surface nodes `shadowedSeqs` — becomes shadowed. `restoredSeqs` are the
+ * target branch's original surface nodes (its variant plus the records that
+ * followed it), re-activated by identity: no content is copied, no user
+ * message is appended, and no turn or model call runs.
+ *
+ * The surface fold splices `restoredSeqs` in place of the `startSeq`…`endSeq`
+ * span; the log stays append-only and the target branch's events are the same
+ * durable records they always were. `groupAnchor`/`previousVariantSeq`
+ * update the iteration tree, and `restoredSeqs` may include later groups'
+ * variants, so a switch back and forth restores the whole conversation
+ * suffix message-for-message.
+ *
+ * Log-only and required-on-read: a reader that cannot interpret the branch
+ * selection would reconstruct the wrong model history, so it must refuse the
+ * log rather than skip this event.
+ */
+'revert/branch': {
+  /** Seq of the first variant (the original user message) — the group key. */
+  groupAnchor: number
+  /** The variant whose branch becomes active. */
+  variantSeq: number
+  /** The variant whose branch was active before this switch, or null when unknown. */
+  previousVariantSeq: number | null
+  /** First current surface node the switch shadowed (inclusive). */
+  startSeq: number
+  /** Last current surface node the switch shadowed (inclusive). */
+  endSeq: number
+  /** Exactly the shadowed surface nodes, ascending; the previous branch's records. */
+  shadowedSeqs: number[]
+  /** The target branch's surface nodes that become active, ascending. */
+  restoredSeqs: number[]
+}
+```
+
+来源：[`packages/core/session/src/types.ts:515`](../packages/core/session/src/types.ts)
+
 <a id="revertfile-conflict--log-only"></a>
 
 #### `revert/file-conflict` — log-only
@@ -818,7 +863,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/core/session/src/types.ts:531`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:566`](../packages/core/session/src/types.ts)
 
 <a id="revertfile-intent--log-only"></a>
 
@@ -841,7 +886,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/core/session/src/types.ts:502`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:537`](../packages/core/session/src/types.ts)
 
 <a id="revertfile-result--log-only"></a>
 
@@ -865,7 +910,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/core/session/src/types.ts:515`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:550`](../packages/core/session/src/types.ts)
 
 <a id="revertiteration--log-only"></a>
 
@@ -1473,7 +1518,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/core/session/src/types.ts:586`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:621`](../packages/core/session/src/types.ts)
 
 ### `web/*`
 
@@ -2619,6 +2664,14 @@ SHA-256: `bdb444c9c1e59dece6bca7c151dc7c78a06944862d3660cb8ecfdd67c344412a`
 
 `"revert"`
 
+<a id="persistence-type-sha256-ea4e6075f85b7021bf610deefd2e85837a90636cae65ca8613e6945b31de8a20"></a>
+
+### `"revert/branch"`
+
+SHA-256: `ea4e6075f85b7021bf610deefd2e85837a90636cae65ca8613e6945b31de8a20`
+
+`"revert/branch"`
+
 <a id="persistence-type-sha256-d2c00445dc9e071597785d5a72e3dc1fe7dcc855fd7725494f1e01d2e664e7b5"></a>
 
 ### `"revert/file-conflict"`
@@ -3374,7 +3427,7 @@ SHA-256: `4a9bef9f27a942520cc2279ca7dd3082556e4bff543f66b5c0333e1bbed1cd86`
 
 SHA-256: `07e1a58c58b593f507b8e7f25723bb0aa42baae6e00f5ecfddf28cb1e64d3235`
 
-来源：[`packages/core/session/src/types.ts:566`](../packages/core/session/src/types.ts) · [`packages/llm/llm/src/types.ts:551`](../packages/llm/llm/src/types.ts) · [`packages/session/session-title/src/types.ts:20`](../packages/session/session-title/src/types.ts) · [`packages/subagent/tool-subagent/src/model-selection.ts:9`](../packages/subagent/tool-subagent/src/model-selection.ts)
+来源：[`packages/core/session/src/types.ts:601`](../packages/core/session/src/types.ts) · [`packages/llm/llm/src/types.ts:551`](../packages/llm/llm/src/types.ts) · [`packages/session/session-title/src/types.ts:20`](../packages/session/session-title/src/types.ts) · [`packages/subagent/tool-subagent/src/model-selection.ts:9`](../packages/subagent/tool-subagent/src/model-selection.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -5023,7 +5076,7 @@ SHA-256: `4e97c3d85c0fc817ee58873c38c25a2474abaaa0af4839311b50b68db3b8cf1a`
 
 SHA-256: `335e242de1fcc17b6ca920fc420d71bec2d76e53e37955c00948b65ab77f05c5`
 
-来源：[`packages/core/session/src/types.ts:628`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:663`](../packages/core/session/src/types.ts)
 
 以下类型之一：
 
@@ -5995,7 +6048,7 @@ SHA-256: `b1664fa89f8eab49a14e7e3168d8bc4da4aa9fd76332f6c4a053d839e5276ae7`
 
 SHA-256: `51cfc1eb3e9c6319b847f2ee3c13bc8070abd9479ee08fd2200e0d7f4022dd9e`
 
-来源：[`packages/core/session/src/types.ts:504`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:539`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6076,7 +6129,7 @@ SHA-256: `e4c18e294232c3ba6c9f1999f168263cc55956147cfe4121720899be8e52edd1`
 
 SHA-256: `b8951c9a913145801d6682f174495ff9f20a942e014d69b1359061371e8e1b92`
 
-来源：[`packages/core/session/src/types.ts:531`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:566`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6116,7 +6169,7 @@ SHA-256: `1528539c63db8b23506f0209a99ce77d8ad138adfbfcee3d4769b7382d93756c`
 
 SHA-256: `6e2bdce79741a98a13c0c384e654ead6321ba7b247dada921e20f7d38d2b525f`
 
-来源：[`packages/core/session/src/types.ts:586`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:621`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6209,7 +6262,7 @@ SHA-256: `c100ec2dc67cf2b28def6cc386af2732c192b180d94a13342746b41e3ed0c014`
 
 SHA-256: `ef6a24df94df359c1f487b3d340cf4a2a3f8e0cedfc5a6c769b5f5421ff990a1`
 
-来源：[`packages/core/session/src/types.ts:557`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:592`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6314,7 +6367,7 @@ SHA-256: `ee975563c16b54e7f6a65320091d0e8cdd907fbdde625c88ccee8e3cd7bb4207`
 
 SHA-256: `7257567bd521fd27cc9b32215522f358da648cc95b737c82f6747bdc850c799a`
 
-来源：[`packages/core/session/src/types.ts:568`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:603`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6512,7 +6565,7 @@ SHA-256: `aba175fb20ffc71112c55efe70458ff5d7dbfb83501892b4ba8d077f0ea5d7ba`
 
 SHA-256: `8127343e3c88578a463c4ded73cc53ac3ee8e9b6c6ef278858d372cd23a92f4c`
 
-来源：[`packages/core/session/src/types.ts:517`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:552`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6551,13 +6604,31 @@ SHA-256: `9e41386b3a0c9572b0d63078492ebb3997da7d3a830d44e0259418bd02f4bcb2`
 | `end` | 必需 | `number` |
 | `start` | 必需 | `number` |
 
+<a id="persistence-type-sha256-d773c079e6d9e3252dfd134e3220d421f1d75db9de0a6b0bf6720e2fafc62885"></a>
+
+### `{ endSeq, groupAnchor, previousVariantSeq, restoredSeqs, … }`
+
+SHA-256: `d773c079e6d9e3252dfd134e3220d421f1d75db9de0a6b0bf6720e2fafc62885`
+
+来源：[`packages/core/session/src/types.ts:515`](../packages/core/session/src/types.ts)
+
+| 属性 | 存在性 | 类型 |
+|---|---|---|
+| `endSeq` | 必需 | `number` |
+| `groupAnchor` | 必需 | `number` |
+| `previousVariantSeq` | 必需 | [`OptionalSessionSeq`](#persistence-type-sha256-3bd652ebfa8726b3ce3937a4f1bd2759e02f86b3a08a20f9e41a8513656fbc5f) |
+| `restoredSeqs` | 必需 | [`number[]`](#persistence-type-sha256-5d03ba38734809bcbd2a55221bd938b3b3fc34b49bb686c6113e9e4931e3aa78) |
+| `shadowedSeqs` | 必需 | [`number[]`](#persistence-type-sha256-5d03ba38734809bcbd2a55221bd938b3b3fc34b49bb686c6113e9e4931e3aa78) |
+| `startSeq` | 必需 | `number` |
+| `variantSeq` | 必需 | `number` |
+
 <a id="persistence-type-sha256-bcf0caf62d964b2fcf5404bd5c909cfa9a21c3f3c96e6b7e36d9e33565223825"></a>
 
 ### `{ endSeq, op, startSeq }`
 
 SHA-256: `bcf0caf62d964b2fcf5404bd5c909cfa9a21c3f3c96e6b7e36d9e33565223825`
 
-来源：[`packages/core/session/src/types.ts:630`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:665`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6695,7 +6766,7 @@ SHA-256: `157e79e022e01ed28ad0e5755dc8cec5a04ef7d5d36f8079c8229be3ad2a30ca`
 
 SHA-256: `0b52320a463f07ca06dba6e2018902a09d76e683a64878305aefda0d0abb70aa`
 
-来源：[`packages/core/session/src/types.ts:576`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:611`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -7978,7 +8049,7 @@ SHA-256: `9890113e97dd3541787bfe6704f2b223d3a890b5325ca0acae2b0398909b413e`
 
 SHA-256: `f2b139ca560f1a7bb44770fe76a56e4d51a56a6ffefd410a0edf6e4b567855bf`
 
-来源：[`packages/core/session/src/types.ts:515`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:550`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -7991,7 +8062,7 @@ SHA-256: `f2b139ca560f1a7bb44770fe76a56e4d51a56a6ffefd410a0edf6e4b567855bf`
 
 SHA-256: `ce1dc3fd5de67ced3b475abc3e2cfa5b51459f4b0223a108ce5f7dc78e193467`
 
-来源：[`packages/core/session/src/types.ts:502`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:537`](../packages/core/session/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -8723,6 +8794,22 @@ SHA-256: `4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41`
 | `seq` | 必需 | `number` |
 | `time` | 必需 | `number` |
 | `type` | 必需 | `"request/header"` |
+
+<a id="persistence-type-sha256-13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6"></a>
+
+<a id="persistence-type-eventrevertbranch"></a>
+
+### `{ type: "revert/branch" }`
+
+SHA-256: `13eb99c2a2d7291fb5d14904e927e07e020e719d0ebb389f2699754c639d96b6`
+
+| 属性 | 存在性 | 类型 |
+|---|---|---|
+| `data` | 必需 | [`{ endSeq, groupAnchor, previousVariantSeq, restoredSeqs, … }`](#persistence-type-sha256-d773c079e6d9e3252dfd134e3220d421f1d75db9de0a6b0bf6720e2fafc62885) |
+| `ignorable` | 可选 | `true` |
+| `seq` | 必需 | `number` |
+| `time` | 必需 | `number` |
+| `type` | 必需 | `"revert/branch"` |
 
 <a id="persistence-type-sha256-0dd5d9778443f63729df9c252fdf3e476c6725b59d277cb257c3679de7f64142"></a>
 

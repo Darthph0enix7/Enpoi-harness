@@ -629,7 +629,7 @@ describe('Chat node rendering', () => {
       turnEnds: new Map([[1, 2]]),
       // The committed replacement shadows the original row; only the active
       // variant is visible, as in a real session.
-      revertShadowRanges: [{ start: 1, end: 2 }],
+      revertShadowRanges: [{ start: 1, end: 3 }],
       revertIterations: [{
         anchorSeq: 1,
         activeVariantSeq: 3,
@@ -650,14 +650,22 @@ describe('Chat node rendering', () => {
     // The visible active variant carries the counter; the shadowed original
     // is not a row, so no second navigator exists.
     expect(view.getAllByText('2 / 2')).toHaveLength(1)
+    // The navigator is minimal: arrows, the counter, and one restore action —
+    // no explanatory version sentence.
+    expect(view.queryByText(/正在预览/)).toBeNull()
+    expect(view.queryByRole('button', { name: '恢复此版本' })).toBeNull()
+
     fireEvent.click(view.getByRole('button', { name: '上一个版本' }))
     // Navigation is preview-only: the Host is not called.
     expect(h.restoreIteration).not.toHaveBeenCalled()
-    expect(await view.findByText('正在预览第 1 个版本，共 2 个')).not.toBeNull()
+    expect(await view.findByText('1 / 2')).not.toBeNull()
     await waitFor(() => { expect(h.loadIterationPreviews).toHaveBeenCalledWith(1) })
-    // The bubble swaps to the fetched version text.
+    // The bubble swaps to the fetched version text and offers the single
+    // explicit restore action; no explanation copy is rendered.
     expect(await view.findByText('first version')).not.toBeNull()
     expect(view.queryByText('second version')).toBeNull()
+    expect(view.queryByText(/正在预览/)).toBeNull()
+    expect(view.queryByText(/共 2 个/)).toBeNull()
 
     fireEvent.click(view.getByRole('button', { name: '恢复此版本' }))
     await waitFor(() => { expect(h.restoreIteration).toHaveBeenCalledWith(1) })
@@ -667,7 +675,7 @@ describe('Chat node rendering', () => {
     const h = makeHarness({
       nodes: [user(1, 'first version'), assistant(2, 'answer', 1), user(3, 'second version')],
       turnEnds: new Map([[1, 2]]),
-      revertShadowRanges: [{ start: 1, end: 2 }],
+      revertShadowRanges: [{ start: 1, end: 3 }],
       revertIterations: [{
         anchorSeq: 1,
         activeVariantSeq: 3,
@@ -684,10 +692,10 @@ describe('Chat node rendering', () => {
     }])
     const view = render(<h.ChatView {...h.props} />)
     fireEvent.click(view.getByRole('button', { name: '上一个版本' }))
-    expect(await view.findByText('正在预览第 1 个版本，共 2 个')).not.toBeNull()
+    expect(await view.findByRole('button', { name: '恢复此版本' })).not.toBeNull()
 
-    // Another client restored: the group's active pointer moves and the
-    // preview must fall back to durable content.
+    // Another client switched branches: the group's active pointer moves and
+    // the preview must fall back to the durable content.
     act(() => {
       h.setSession({
         revertIterations: [{
@@ -697,7 +705,8 @@ describe('Chat node rendering', () => {
         }],
       })
     })
-    await waitFor(() => { expect(view.queryByText('正在预览第 1 个版本，共 2 个')).toBeNull() })
+    await waitFor(() => { expect(view.queryByRole('button', { name: '恢复此版本' })).toBeNull() })
+    expect(await view.findByText('1 / 2')).not.toBeNull()
   })
 
   it('renders no iteration navigator for a message outside any group', () => {

@@ -281,48 +281,6 @@ export class ReactLoopAgent implements Agent {
     this.send(input, 'next-step', false)
   }
 
-  /**
-   * Resolve one pending append's surface plan at admission time.
-   *
-   * A restore intent anchors on the group's caller-validated surface node but
-   * recomputes the shadowed tail and cited sources here, so activity that
-   * settled between the restore RPC's validation and this append cannot leave
-   * the replacement with a stale end boundary. Every other pending append uses
-   * the caller's plan unchanged.
-   * @param pending - surface metadata queued with the message.
-   * @returns the surface op, cited sources, and the replaced span for the marker.
-   * @throws when a restore anchor is no longer a surface node.
-   */
-  private resolvePendingSurface(pending: {
-    surfaceOp: SurfaceOp
-    sourceEventSeqs?: SessionSeq[]
-    iteration?: AgentIterationIntent
-  }): { surfaceOp: SurfaceOp; sourceEventSeqs?: SessionSeq[]; startSeq?: number; endSeq?: number } {
-    if (pending.iteration?.cause === 'restore') {
-      const nodes = this.session.surface.nodes
-      const startSeq = SessionSeq(pending.iteration.startSeq)
-      const startIdx = nodes.indexOf(startSeq)
-      if (startIdx === -1) {
-        throw new Error(`session revert-iteration restore: anchor seq ${String(startSeq)} is no longer a surface node`)
-      }
-      const endSeq = nodes.at(-1)
-      /* v8 ignore next -- a found anchor proves the surface is non-empty */
-      if (endSeq === undefined) throw new Error('session revert-iteration restore: the session surface is empty')
-      return {
-        surfaceOp: { op: 'replace', startSeq, endSeq },
-        sourceEventSeqs: [...nodes.slice(startIdx)],
-        startSeq,
-        endSeq,
-      }
-    }
-    const replace = pending.surfaceOp === 'append' ? undefined : pending.surfaceOp
-    return {
-      surfaceOp: pending.surfaceOp,
-      ...pending.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: pending.sourceEventSeqs },
-      ...replace === undefined ? {} : { startSeq: replace.startSeq, endSeq: replace.endSeq },
-    }
-  }
-
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
     if (!options.keepInbox) {
       this.inbox.clear()
@@ -573,12 +531,11 @@ export class ReactLoopAgent implements Agent {
         for (const message of decision.messages) {
           const pending = this.pendingSurfaceOps.get(message.id)
           if (pending !== undefined) this.pendingSurfaceOps.delete(message.id)
-          const resolved = pending === undefined ? undefined : this.resolvePendingSurface(pending)
-          const intent: SurfaceIntent<'user/message'> = resolved === undefined
+          const intent: SurfaceIntent<'user/message'> = pending === undefined
             ? { surfaceOp: 'append' }
             : {
-              surfaceOp: resolved.surfaceOp,
-              ...resolved.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: resolved.sourceEventSeqs },
+              surfaceOp: pending.surfaceOp,
+              ...pending.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: pending.sourceEventSeqs },
             }
           const appended = this.session.append('user/message', message, intent)
           // Revert-iteration: the replacement's exact seq is known only now, so
@@ -590,8 +547,8 @@ export class ReactLoopAgent implements Agent {
               groupAnchor: pending.iteration.groupAnchor,
               previousSeq: pending.iteration.previousSeq,
               variantSeq: appended.seq,
-              startSeq: resolved?.startSeq ?? pending.iteration.startSeq,
-              endSeq: resolved?.endSeq ?? pending.iteration.endSeq,
+              startSeq: pending.iteration.startSeq,
+              endSeq: pending.iteration.endSeq,
               cause: pending.iteration.cause,
               ...pending.iteration.restoredFromSeq === undefined
                 ? {}
