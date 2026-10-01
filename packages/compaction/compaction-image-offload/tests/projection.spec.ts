@@ -82,6 +82,41 @@ describe('durable image selections', () => {
     expect(marked(session)).toEqual([true, false])
   })
 
+  it('keeps occurrence indexes across duplicate attachments and a compacted history', () => {
+    const session = createSession(SessionId('compacted'))
+    const shared: ImageBlock = { type: 'image', attachment: { ...image.attachment } }
+    const other: ImageBlock = {
+      type: 'image',
+      attachment: { ...image.attachment, attachmentId: `sha256:${'b'.repeat(64)}` as never },
+    }
+    const source = input(session, [shared, other, shared])
+    // A decision recorded before compaction targets the middle occurrence; the
+    // duplicate attachment makes an identity-keyed projection indistinguishable.
+    session.append('image/offload', { targets: [{ seq: source.seq, imageIndexes: [1] }] })
+    expect(marked(session)).toEqual([false, true, false])
+    const checkpoint = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'compacted checkpoint' }], source: { kind: 'user' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: source.seq, endSeq: source.seq },
+      sourceEventSeqs: [source.seq],
+    })
+    const tail = input(session, [shared, shared, other])
+    session.append('image/offload', { targets: [{ seq: tail.seq, imageIndexes: [1, 2] }] })
+
+    // The shadowed decision is gone with its message; the retained tail keeps
+    // per-occurrence indexes even though the first two occurrences share one
+    // attachment identity.
+    expect(marked(session)).toEqual([false, true, true])
+    expect(session.surface.nodes).toEqual([checkpoint.seq, tail.seq])
+    const events = session.snapshotEvents()
+    const fold = foldSurface(events, [imageOffloadProjection])
+    expect(deriveEventMessage(tail, fold.projectedMessages)).toEqual(session.deriveEventMessage(tail))
+    expect(marked(createSession(SessionId('replay'), events))).toEqual([false, true, true])
+    // The shadowed node is absent from the current surface, so its
+    // pre-compaction decision never reaches a request.
+    expect(session.surface.nodes).not.toContain(source.seq)
+  })
+
   it('counts all images in a tool result without changing its call identity', () => {
     const session = createSession(SessionId('tool'))
     const source = session.append('tool/result', {

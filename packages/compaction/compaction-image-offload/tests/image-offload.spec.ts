@@ -64,6 +64,47 @@ function offloadRequired(offloadImages: number): () => never {
   }
 }
 
+/**
+ * Adapter that derives the offload count from the request's own occurrence
+ * order, exactly as the pi-ai context builder counts retained images, so the
+ * retry loop proves the surface walk maps onto the request occurrence list.
+ */
+class ImageCountingAdapter extends ScriptedAdapter {
+  constructor(private readonly maxRequestImageBytes: number) {
+    super([])
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    const offloadImages = oldestOverflowCount(options, this.maxRequestImageBytes)
+    if (offloadImages > 0) {
+      throw new LlmError('request images exceed the route budget', IMAGE_OFFLOAD_REQUIRED_CODE, { offloadImages })
+    }
+    yield * textResponse('sent')
+  }
+}
+
+/** Oldest-first occurrences the route budget must remove, at each occurrence's base64 length. */
+function oldestOverflowCount(options: GenerateOptions, maxRequestImageBytes: number): number {
+  const lengths: number[] = []
+  for (const message of options.messages) {
+    for (const block of message.content) {
+      if (block.type === 'image' && block.offloaded !== true) {
+        lengths.push(Math.ceil(block.attachment.bytes / 3) * 4)
+      }
+    }
+  }
+  const total = lengths.reduce((sum, length) => sum + length, 0)
+  let removed = 0
+  let count = 0
+  for (const length of lengths) {
+    if (total - removed <= maxRequestImageBytes) break
+    removed += length
+    count += 1
+  }
+  return count
+}
+
 async function harness(adapter: ScriptedAdapter): Promise<Context> {
   const ctx = new Context()
   contexts.push(ctx)
@@ -299,6 +340,49 @@ describe('compaction-image-offload', () => {
     expect(decisions(agent.session).map(event => event.data.targets)).toEqual([[
       { seq: 3, imageIndexes: [0] }, { seq: 2, imageIndexes: [0] },
     ]])
+  })
+
+  it('converges with duplicate attachments across a compacted history', async () => {
+    const adapter = new ImageCountingAdapter(8)
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(offload)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = await ctx.agentLoop.create(SessionId('offload-compacted'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [image('old-a'), image('old-b')], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    const source = agent.session.snapshotEvents().filter(event => event.type === 'user/message')[0]!
+    // Compaction replaces the image-bearing span with a text-only checkpoint.
+    const checkpoint = agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'compacted checkpoint' }], source: { kind: 'user' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: source.seq, endSeq: source.seq },
+      sourceEventSeqs: [source.seq],
+    })
+
+    // The retained tail repeats one attachment: these are occurrences, not
+    // unique attachments, so the oldest occurrence alone must be offloaded.
+    agent.followup(createUserMessage({
+      content: [image('dup'), image('dup'), image('other')], source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+
+    const tail = agent.session.snapshotEvents().filter(event => event.type === 'user/message').at(-1)!
+    expect(adapter.requests).toHaveLength(3)
+    expect(offloadedNames(adapter.requests[1]!)).toEqual([])
+    expect(offloadedNames(adapter.requests[2]!)).toEqual(['dup'])
+    const retained = adapter.requests[2]!.messages.at(-1)?.content
+      .filter(block => block.type === 'image' && block.offloaded !== true)
+    expect(retained).toHaveLength(2)
+    expect(decisions(agent.session).map(event => event.data.targets)).toEqual([
+      [{ seq: tail.seq, imageIndexes: [0] }],
+    ])
+    expect(agent.session.surface.nodes).not.toContain(source.seq)
+    expect(agent.session.surface.nodes).toContain(checkpoint.seq)
+    expect(replacements(agent.session)).toHaveLength(1)
   })
 
   it('offloads a tool-result image and leaves later images untouched', async () => {
