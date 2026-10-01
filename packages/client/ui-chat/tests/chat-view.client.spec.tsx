@@ -4227,3 +4227,56 @@ describe('ChatView', () => {
     expect(failedView.container.querySelector('[data-state="error"]')).not.toBeNull()
   })
 })
+
+describe('ChatView virtualization', () => {
+  const longTranscript = () => Array.from({ length: 240 }, (_, index) => user(index + 1, `message ${String(index + 1)}`))
+
+  it('renders only the visible window and keeps the scrollable span for a long transcript', () => {
+    const h = makeHarness({ nodes: longTranscript() })
+    const isScroller = (element: HTMLElement): boolean =>
+      element.querySelector(':scope > [data-chat-flow]') !== null
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.index !== undefined) return new DOMRect(0, 0, 500, 40)
+      if (isScroller(this)) return new DOMRect(0, 0, 500, 400)
+      return new DOMRect(0, 0, 0, 0)
+    })
+    // The virtualizer sizes its scrollport from offsetHeight, which jsdom leaves at zero.
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.index !== undefined) return 40
+      return isScroller(this) ? 400 : 0
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const column = view.container.querySelector<HTMLElement>('[data-chat-flow]')
+    const scroller = column?.parentElement
+    expect(column).not.toBeNull()
+    expect(scroller).not.toBeNull()
+    installScrollMetrics(scroller!, 100_000, 400)
+
+    // The opening window starts at the top; the tail is out of the DOM.
+    expect(view.getByText('message 1')).toBeTruthy()
+    expect(view.queryByText('message 240')).toBeNull()
+    expect(renderedFlowKinds(view.container).length).toBeLessThan(40)
+    const bottom = view.container.querySelector<HTMLElement>('[data-chat-virtual-spacer="bottom"]')
+    expect(Number.parseFloat(bottom?.style.height ?? '0')).toBeGreaterThan(0)
+
+    // A reader scroll repaints the window around the delivered offset.
+    readerScroll(scroller!, 5_000)
+    expect(view.queryByText('message 1')).toBeNull()
+    expect(view.queryByText('message 240')).toBeNull()
+    expect(renderedFlowKinds(view.container).length).toBeGreaterThan(0)
+    expect(renderedFlowKinds(view.container).length).toBeLessThan(40)
+
+    readerScroll(scroller!, 99_600)
+    expect(view.queryByText('message 1')).toBeNull()
+    expect(view.getByText('message 240')).toBeTruthy()
+    expect(view.container.querySelector<HTMLElement>('[data-chat-virtual-spacer="top"]')).not.toBeNull()
+  })
+
+  it('keeps the plain list below the virtualization threshold', () => {
+    const h = makeHarness({ nodes: longTranscript().slice(0, 20) })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(renderedFlowKinds(view.container).length).toBe(20)
+    expect(view.container.querySelector('[data-chat-virtual-spacer="top"]')).toBeNull()
+    expect(view.container.querySelector('[data-chat-virtual-spacer="bottom"]')).toBeNull()
+  })
+})

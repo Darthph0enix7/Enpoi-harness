@@ -4,7 +4,7 @@ import type { ChatSnapshot } from '../contract/snapshot.ts'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { useChatNavigation, type ChatNavigation, type ChatNavigationInput } from './use-chat-navigation.ts'
 import { useChatReading, type ChatReadingState } from './use-chat-reading.ts'
-import { useChatViewport } from './use-chat-viewport.ts'
+import { useChatViewport, type ChatViewport } from './use-chat-viewport.ts'
 
 /** Committed content and Session operations used to reconcile scroll ownership. */
 export interface ChatScrollInput extends ChatNavigationInput {
@@ -26,6 +26,8 @@ interface ChatScrollState extends ChatReadingState {
   readonly navigateToTurn: ChatNavigation['navigateToTurn']
   readonly loadEarlier: ChatNavigation['loadEarlier']
   readonly returnToBottom: () => void
+  /** The DOM scroll owner, shared with the transcript's virtual window. */
+  readonly viewport: ChatViewport
 }
 
 /**
@@ -130,7 +132,7 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
   }, [navigation, reading])
 
   return {
-    listRef, columnRef, ...state, busyTurn,
+    listRef, columnRef, viewport, ...state, busyTurn,
     navigateToTurn: navigation.navigateToTurn,
     loadEarlier: navigation.loadEarlier,
     returnToBottom,

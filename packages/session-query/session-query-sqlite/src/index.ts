@@ -22,7 +22,7 @@ import SessionQueryEngine, {
   SessionQueryError,
   SessionSearchCursor,
   assertSessionHeadersCompatible,
-  buildSessionEventSearchDocuments,
+  buildSessionEventSearchDocumentState,
   readColdSessionLog,
 } from '@deepseek-ai/dsh-session-query'
 import type {
@@ -41,6 +41,11 @@ import {
   type JournalMode,
   openSearchDatabase,
 } from './schema.ts'
+import {
+  LiveDocumentIndex,
+  type LiveDocumentBaseline,
+  type LiveDocumentDelta,
+} from './live-documents.ts'
 import {
   type NormalizedEventRequest,
   type NormalizedSessionRequest,
@@ -167,8 +172,39 @@ interface ObservedSession {
   header: SessionHeader
   inheritedEventCount: SessionLogOffset
   documents: SessionEventSearchDocument[]
+  /** Complete-fold surface baseline; empty for an incremental live observation. */
+  baseline: LiveDocumentBaseline
   fingerprint: string
 }
+
+/** One live session observation; `delta` marks rows written without a full rewrite. */
+interface ObservedLiveSession extends ObservedSession {
+  /** Appended-row changes relative to the cached baseline, or undefined for a full rewrite. */
+  readonly delta: LiveDocumentDelta | undefined
+  /**
+   * True when the stored rows already match this observation. Callers must
+   * never write an unchanged observation: its empty `documents` would replace
+   * a stored index with nothing.
+   */
+  readonly unchanged: boolean
+}
+
+/** One live session's retained incremental projection. */
+interface LiveIndexEntry {
+  readonly session: Session
+  readonly index: LiveDocumentIndex
+  readonly headerKey: string
+  fingerprint: string
+  /**
+   * Whether the database already holds this projection. An uncommitted entry
+   * (a retried observation whose write never landed) must return complete
+   * documents, because a delta needs the stored rows it extends.
+   */
+  committed: boolean
+}
+
+/** Empty complete-fold baseline carried by incremental observations. */
+const EMPTY_BASELINE: LiveDocumentBaseline = { documents: [], nodes: [], shadowed: [] }
 
 interface ObservedPersistedSession {
   header: SessionHeader
@@ -184,7 +220,7 @@ interface PersistenceBinding {
 interface Observation {
   persistenceBinding: PersistenceBinding
   persisted: Map<SessionId, ObservedPersistedSession>
-  live: Map<SessionId, ObservedSession>
+  live: Map<SessionId, ObservedLiveSession>
 }
 
 interface IndexedPersistedRow {
@@ -281,6 +317,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _indexFailure: SessionQueryError | undefined
   private _indexWaited = false
   private _indexWait: Promise<void> | undefined
+  private readonly _liveIndexes = new Map<SessionId, LiveIndexEntry>()
+  private readonly _liveRowIds = new Map<SessionId, Map<SessionSeq, number | bigint>>()
 
   constructor(ctx: Context, config: Config) {
     // The assignment expression resolves before the base constructor can
@@ -553,26 +591,99 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     await this._indexPersistedSession(sessionId, undefined, signal)
   }
 
+  /**
+   * Observe one live session, advancing its retained projection by appended
+   * events only. A cache miss, a replaced Session, a header change, or a log
+   * that is not a strict continuation rebuilds from the complete fold.
+   * @param session - live session to observe.
+   * @returns the observation and, when only appended rows changed, its delta.
+   */
+  private _observeLive(session: Session): ObservedLiveSession {
+    const header = session.header
+    const inheritedEventCount = session.inheritedEventCount
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const events = session.snapshotEvents()
+    const cached = this._liveIndexes.get(header.id)
+    const headerKey = JSON.stringify({ header, inheritedEventCount })
+    if (cached !== undefined && cached.session === session && cached.headerKey === headerKey && cached.committed) {
+      const previousCount = cached.index.foldedEvents
+      if (previousCount === events.length && cached.index.tailEvent === events.at(-1)) {
+        // The stored rows already match this projection; the caller's
+        // fingerprint check keeps this empty observation from being written.
+        return {
+          header, inheritedEventCount, documents: [], baseline: EMPTY_BASELINE,
+          fingerprint: cached.fingerprint, delta: undefined, unchanged: true,
+        }
+      }
+      let delta: LiveDocumentDelta | undefined
+      try {
+        delta = cached.index.foldAppend(events)
+      } catch (error: unknown) {
+        // A partial fold leaves the retained projection unusable; rebuild.
+        this._forgetLive(header.id)
+        throw error
+      }
+      if (delta !== undefined) {
+        // The fingerprint advances with every appended event, even a log-only
+        // one, so cursors invalidate exactly as the whole-session rewrite did.
+        cached.fingerprint = createHash('sha256')
+          .update(cached.fingerprint)
+          .update(JSON.stringify(events.slice(previousCount)))
+          .digest('base64url')
+        return {
+          header, inheritedEventCount, documents: [], baseline: EMPTY_BASELINE,
+          fingerprint: cached.fingerprint, delta, unchanged: false,
+        }
+      }
+    }
+    const observed = observeSession(header, inheritedEventCount, events)
+    this._liveIndexes.set(header.id, {
+      session,
+      headerKey,
+      fingerprint: observed.fingerprint,
+      index: new LiveDocumentIndex(header.id, observed.baseline, events.length, events.at(-1)),
+      committed: false,
+    })
+    return { ...observed, delta: undefined, unchanged: false }
+  }
+
+  /** Drop one session's retained projection and row identity map. */
+  private _forgetLive(id: SessionId): void {
+    this._liveIndexes.delete(id)
+    this._liveRowIds.delete(id)
+  }
+
   /** Upsert one live session's documents when its fingerprint changed. */
   private async _indexLiveSession(session: Session, signal: AbortSignal | undefined): Promise<void> {
-    const observed = observeLive(session)
     await this._serialized(signal, async () => {
       const db = this._requireDb()
+      const observed = this._observeLive(session)
       const row = db.prepare('SELECT fingerprint FROM temp.live_sessions WHERE id = ?').get(session.id) as { fingerprint?: string } | undefined
-      if (row?.fingerprint === observed.fingerprint) return
+      if (row?.fingerprint === observed.fingerprint) {
+        this._markLiveCommitted(session.id)
+        return
+      }
       const persisted = db.prepare('SELECT 1 AS present FROM persisted_sessions WHERE id = ?').get(session.id) !== undefined
       this._localGeneration += 1
-      db.exec('BEGIN IMMEDIATE')
+      let began = false
       try {
-        this._replaceLiveSession(observed, this._localGeneration, persisted)
+        db.exec('BEGIN IMMEDIATE')
+        began = true
+        this._writeLiveSession(observed, this._localGeneration, persisted)
         db.exec('COMMIT')
       } catch (error: unknown) {
-        /* v8 ignore next 5 -- ROLLBACK failure requires a SQLite double fault; the original failure remains actionable. */
-        try {
-          db.exec('ROLLBACK')
-        } catch {
-          // The original SQLite failure remains the actionable cause.
+        /* v8 ignore next -- a BEGIN failure has no transaction to roll back; the common wrapper still reports it. */
+        if (began) {
+          /* v8 ignore next 5 -- ROLLBACK failure requires a SQLite double fault; the original failure remains actionable. */
+          try {
+            db.exec('ROLLBACK')
+          } catch {
+            // The original SQLite failure remains the actionable cause.
+          }
         }
+        // The rolled-back write leaves the retained projection ahead of the
+        // database; the next observation rebuilds from the complete fold.
+        this._forgetLive(session.id)
         throw error
       }
     }).catch((error: unknown) => {
@@ -829,9 +940,12 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         if (persistentChanges.length > 0 || persistentDeletes.length > 0) {
           db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(nextMainGeneration)
         }
-        for (const row of liveDeletes) this._deleteSession('live', row.id as SessionId)
+        for (const row of liveDeletes) {
+          this._deleteSession('live', row.id as SessionId)
+          this._forgetLive(row.id as SessionId)
+        }
         for (const { entry, generation, persisted } of liveReplacements) {
-          this._replaceLiveSession(entry, generation, persisted)
+          this._writeLiveSession(entry, generation, persisted)
         }
         db.exec('COMMIT')
       } catch (error: unknown) {
@@ -844,6 +958,10 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             // The original SQLite failure remains the actionable cause.
           }
         }
+        // Rolled-back rows leave every retained projection ahead of the
+        // database; the next observation rebuilds each from the complete fold.
+        this._liveIndexes.clear()
+        this._liveRowIds.clear()
         throw new SessionQueryError(
           `session-search reconciliation failed: ${errorMessage(error)}`,
           'SESSION_QUERY_INDEX_FAILED',
@@ -914,9 +1032,9 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           )
         }
       }
-      const live = new Map<SessionId, ObservedSession>()
+      const live = new Map<SessionId, ObservedLiveSession>()
       for (const session of this.ctx.sessions.list()) {
-        const observed = observeLive(session)
+        const observed = this._observeLive(session)
         const durable = persisted.get(session.id)
         if (durable !== undefined) assertSessionHeadersCompatible(observed.header, durable.header)
         live.set(session.id, observed)
@@ -973,6 +1091,61 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     }
   }
 
+  /**
+   * Write one observed live session's rows. A complete observation replaces
+   * every row; a delta updates the header row and only the appended documents
+   * plus the documents whose surface classification moved.
+   */
+  private _writeLiveSession(entry: ObservedLiveSession, generation: number, persisted: boolean): void {
+    /* v8 ignore next -- callers return on the stored fingerprint before writing an unchanged observation */
+    if (entry.unchanged) return
+    if (entry.delta === undefined) {
+      this._replaceLiveSession(entry, generation, persisted)
+      this._markLiveCommitted(entry.header.id)
+      return
+    }
+    const db = this._requireDb()
+    db.prepare('UPDATE temp.live_sessions SET fingerprint = ?, persisted = ?, generation = ? WHERE id = ?')
+      .run(entry.fingerprint, persisted ? 1 : 0, generation, entry.header.id)
+    const rowIds = this._liveRowIds.get(entry.header.id) ?? new Map<SessionSeq, number | bigint>()
+    this._liveRowIds.set(entry.header.id, rowIds)
+    if (entry.delta.inserts.length > 0) {
+      const insert = db.prepare(`
+        INSERT INTO temp.live_docs (text, session_id, seq, type, time, surface, codepoint_length)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const document of entry.delta.inserts) {
+        const text = sanitizeFtsText(document.text)
+        const result = insert.run(
+          text,
+          document.sessionId,
+          document.seq,
+          document.type,
+          document.time,
+          document.surface,
+          Array.from(text).length,
+        )
+        rowIds.set(document.seq, result.lastInsertRowid)
+      }
+    }
+    if (entry.delta.surfaceChanges.length > 0) {
+      const update = db.prepare('UPDATE temp.live_docs SET surface = ? WHERE rowid = ?')
+      for (const change of entry.delta.surfaceChanges) {
+        const rowId = rowIds.get(change.seq)
+        /* v8 ignore next -- one indexed document keeps its rowid until the session is deleted */
+        if (rowId === undefined) continue
+        update.run(change.surface, rowId)
+      }
+    }
+    this._markLiveCommitted(entry.header.id)
+  }
+
+  /** Mark one retained projection as matching the committed database rows. */
+  private _markLiveCommitted(id: SessionId): void {
+    const entry = this._liveIndexes.get(id)
+    if (entry !== undefined) entry.committed = true
+  }
+
   private _replacePersistedSession(
     entry: ObservedSession,
     revision: SessionPersistenceRevision,
@@ -1024,9 +1197,10 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       INSERT INTO temp.live_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
+    const rowIds = new Map<SessionSeq, number | bigint>()
     for (const document of entry.documents) {
       const text = sanitizeFtsText(document.text)
-      insert.run(
+      const result = insert.run(
         text,
         document.sessionId,
         document.seq,
@@ -1035,7 +1209,9 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         document.surface,
         Array.from(text).length,
       )
+      rowIds.set(document.seq, result.lastInsertRowid)
     }
+    this._liveRowIds.set(entry.header.id, rowIds)
   }
 
   private _querySessions(
@@ -1262,11 +1438,6 @@ function selectedDocumentsParams(query: string, persistenceVisible: boolean): Ar
   ]
 }
 
-function observeLive(session: Session): ObservedSession {
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  return observeSession(session.header, session.inheritedEventCount, session.snapshotEvents())
-}
-
 function observeSession(
   header: SessionHeader,
   inheritedEventCount: SessionLogOffset,
@@ -1274,10 +1445,12 @@ function observeSession(
 ): ObservedSession {
   const detachedHeader = structuredClone(header)
   const detachedEvents = events.map(event => structuredClone(event))
+  const state = buildSessionEventSearchDocumentState(detachedHeader.id, detachedEvents)
   return {
     header: detachedHeader,
     inheritedEventCount,
-    documents: buildSessionEventSearchDocuments(detachedHeader.id, detachedEvents),
+    documents: state.documents,
+    baseline: { documents: state.documents, nodes: state.nodes, shadowed: state.shadowed },
     fingerprint: createHash('sha256')
       .update(JSON.stringify({ header: detachedHeader, inheritedEventCount, events: detachedEvents }))
       .digest('base64url'),

@@ -80,7 +80,12 @@ export type {
   ProjectionBackfillFailure,
 } from './projection-backfill.ts'
 export { extractSessionEventText } from './extraction.ts'
-export { buildSessionEventRecords, buildSessionEventSearchDocuments } from './documents.ts'
+export {
+  buildSessionEventRecords,
+  buildSessionEventSearchDocumentState,
+  buildSessionEventSearchDocuments,
+  type SessionEventSearchDocumentState,
+} from './documents.ts'
 export {
   compileSessionTextFilter,
   filterSessionEventDocuments,

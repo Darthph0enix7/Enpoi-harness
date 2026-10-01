@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo } from 'react'
+import { Fragment, memo, useMemo, useRef } from 'react'
 import { fileMediaUrl } from '@deepseek-ai/dsh-util-workspace-path'
 import type { ReactNode } from 'react'
 import { JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -156,8 +156,9 @@ function ProcessReasoning({ hidden, reveal, children }: {
   reveal?: (() => void) | undefined
   children: ReactNode
 }) {
-  const ref = useSearchableHidden(hidden, reveal ?? NOOP)
-  return <div ref={ref} data-turn-process-inline={hidden || undefined}>{children}</div>
+  const elementRef = useRef<HTMLDivElement | null>(null)
+  const setRef = useSearchableHidden(hidden, reveal ?? NOOP, elementRef)
+  return <div ref={setRef} data-turn-process-inline={hidden || undefined}>{children}</div>
 }
 
 const NOOP = (): void => {}

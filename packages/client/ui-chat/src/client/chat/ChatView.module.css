@@ -88,6 +88,21 @@
   height: 0;
 }
 
+/* Virtual window spacers stand in for unrendered rows. Their inline height is
+   the only geometry they own; they never take the flow gap themselves. */
+.virtualSpacer {
+  flex: none;
+  width: 100%;
+  pointer-events: none;
+}
+
+/* History controls above the virtual window keep the column's vertical rhythm. */
+.virtualPrefix {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dsh-chat-flow-gap, 16px);
+}
+
 .callRow {
   border-radius: var(--dsw-radius-sm);
 }

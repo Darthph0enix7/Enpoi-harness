@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { JsonBlock } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ConversationLocationDataStore, ConversationTurnDataMap } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -21,6 +21,10 @@ interface ChatNodeSeatProps extends ChatNodeOwnerProps {
   readonly actions: ChatViewSlotProps['actions']
   readonly renderSlot: ChatViewSlotProps['renderSlot']
   readonly t: ChatViewSlotProps['t']
+  /** Virtual-row measurement ref; absent when the transcript renders every row. */
+  readonly measureRef?: ((element: HTMLElement | null) => void) | undefined
+  /** Virtualizer item index for measurement bookkeeping. */
+  readonly dataIndex?: number | undefined
 }
 
 type RoutedChatNodeOwner = {
@@ -47,6 +51,7 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
   cwd, openFile, openSkill, inspectCall, forkAt, revertAt,
   iterationGroups, loadIterationPreviews, restoreIteration,
   loadImage, renderMessageImages, fileMentions, useStore, actions, renderSlot, t,
+  measureRef, dataIndex,
 }: ChatNodeSeatProps) {
   const node = useChatNode(nodeKey)
   const routedNode = node as ChatNode | undefined
@@ -112,7 +117,8 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
   const revealProcess = useCallback(() => {
     if (processMember) setOpen(true)
   }, [processMember, setOpen])
-  const wrapperRef = useSearchableHidden(processHidden, revealProcess)
+  const wrapperRef = useRef<HTMLDivElement | null>(null)
+  const setWrapperRef = useSearchableHidden(processHidden, revealProcess, wrapperRef, measureRef)
   const [disclosureReset] = useState(() => createSnapshotStore(0))
   const turnData = turnDataOf(routedNode)
   const hookContext = useMemo<ChatNodeHookContext>(() => ({ turnData, disclosureReset }), [turnData, disclosureReset])
@@ -151,7 +157,8 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
   const flowKey = groupPart === undefined || groupPart === 'response' ? routedNode.key : JSON.stringify([routedNode.key, groupPart])
   return (
     <div
-      ref={wrapperRef}
+      ref={setWrapperRef}
+      data-index={dataIndex}
       className={css.flowItem}
       data-chat-anchor-key={flowKey}
       data-chat-flow-key={flowKey}

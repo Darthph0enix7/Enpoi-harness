@@ -1,7 +1,8 @@
 // An enclosing `[data-conversation-scroll]` owns scrolling when present;
 // otherwise this view owns it. Each row subscribes to one stable node key.
 
-import { memo, useCallback, useMemo, useRef, useState, type ComponentProps } from 'react'
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from 'react'
+import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual'
 import type {
   NodeKey, RenderEntry, RenderMessageImages,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -15,11 +16,16 @@ import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { ChatGroupSeat } from './ChatGroupSeat.tsx'
-import { chatRenderKey } from './render-entry.ts'
+import {
+  buildChatVirtualItems, chatVirtualItemKey, CHAT_VIRTUALIZATION_THRESHOLD,
+  CHAT_VIRTUAL_INITIAL_VIEWPORT_HEIGHT, CHAT_VIRTUAL_OVERSCAN,
+  estimateChatVirtualHeight, openTurnProcessTail, type ChatVirtualItem,
+} from './chat-virtual-items.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { TurnNavigator } from './TurnNavigator.tsx'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
 import { useChatScroll } from './use-chat-scroll.ts'
+import type { ChatVirtualWindow } from './use-chat-viewport.ts'
 import { fileMediaUrl, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import css from './ChatView.module.css'
 
@@ -58,42 +64,110 @@ type PendingInput = PendingSubmission | InboxState['next-step'][number]
 /** Stable empty list for snapshots that predate the iteration block. */
 const EMPTY_ITERATION_EDGES: readonly never[] = []
 
-type ChatNodeListProps = Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
-  readonly entries: readonly RenderEntry[]
-  readonly useChatGroup: ChatViewSlotProps['useChatGroup']
-  readonly pendingInputs: readonly PendingInput[]
-  readonly lastInputTurn: number | undefined
+/**
+ * Measured height of one virtual row, including its leading CSS margin.
+ * The flow gap lives in `margin-top`; folding it into the measured size keeps
+ * the virtualizer's offsets aligned with the rendered flow for both the 16px
+ * rhythm and the compact-answer 8px rhythm.
+ */
+function measureChatRow(element: Element): number {
+  const height = element.getBoundingClientRect().height
+  const margin = Number.parseFloat(window.getComputedStyle(element).marginTop)
+  return height + (Number.isFinite(margin) ? margin : 0)
 }
 
-const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pendingInputs, lastInputTurn, ...seatProps }: ChatNodeListProps) {
-  const rows = entries.map((entry) => {
-    switch (entry.kind) {
+/** The `data-chat-anchor-key` one render entry publishes. */
+function chatAnchorKey(entry: RenderEntry): string {
+  if (entry.kind === 'group') return `group:${entry.key}`
+  return entry.groupPart === undefined || entry.groupPart === 'response'
+    ? entry.key
+    : JSON.stringify([entry.key, entry.groupPart])
+}
+
+/** The loaded Turn one virtual item belongs to, when it has one. */
+function itemTurn(item: ChatVirtualItem | undefined, nodes: ChatSnapshot['nodes']): number | null {
+  if (item?.kind !== 'entry' || item.entry.kind !== 'node') return null
+  const location = nodes.get(item.entry.key)?.location
+  return location?.kind === 'turn' || location?.kind === 'step' ? location.turn.turn : null
+}
+
+function ChatVirtualRow({ item, index, measureRef, useChatGroup, ...seatProps }: Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
+  readonly item: ChatVirtualItem
+  readonly index: number | undefined
+  readonly measureRef: ((element: HTMLElement | null) => void) | undefined
+  readonly useChatGroup: ChatViewSlotProps['useChatGroup']
+}) {
+  if (item.kind === 'entry') {
+    switch (item.entry.kind) {
       case 'node':
-        return <ChatNodeSeat {...seatProps} key={chatRenderKey(entry)} nodeKey={entry.key}
-          {...entry.groupPart === undefined ? {} : { groupPart: entry.groupPart }} />
+        return <ChatNodeSeat {...seatProps} measureRef={measureRef} dataIndex={index} nodeKey={item.entry.key}
+          {...item.entry.groupPart === undefined ? {} : { groupPart: item.entry.groupPart }} />
       case 'group':
-        return <ChatGroupSeat {...seatProps} key={chatRenderKey(entry)} groupKey={entry.key} useChatGroup={useChatGroup} />
+        return <ChatGroupSeat {...seatProps} measureRef={measureRef} dataIndex={index}
+          groupKey={item.entry.key} useChatGroup={useChatGroup} />
       default:
-        return assertNever(entry)
+        return assertNever(item.entry)
     }
-  })
-  const pendingRows = pendingInputs.map(item => 'requestId' in item ? (
-    <PendingSubmissionBubble key={item.requestId} submission={item}
-      renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
-  ) : (
-    <PendingSteeringBubble key={item.id} content={item.content}
-      renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
-  ))
-  const tail = entries.at(-1)
-  const node = tail?.kind === 'node' ? seatProps.nodeStore.get(tail.key) : undefined
+  }
   // An empty opening control follows one local transcript echo, never steering.
   // All rows share this keyed list so inserting the control keeps the echo mounted.
-  if (node?.kind === 'turn-process' && node.location.kind === 'turn'
-    && node.location.turn.status === 'open' && node.location.turn.turn !== lastInputTurn) {
-    const index = pendingInputs.findIndex(item => 'requestId' in item && item.placement === 'transcript')
-    if (index !== -1) rows.splice(rows.length - 1, 0, ...pendingRows.splice(index, 1))
-  }
-  return [...rows, ...pendingRows]
+  const bubble = 'requestId' in item.input ? (
+    <PendingSubmissionBubble submission={item.input}
+      renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
+  ) : (
+    <PendingSteeringBubble content={item.input.content}
+      renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
+  )
+  return measureRef === undefined
+    ? bubble
+    : <div ref={measureRef} data-index={index} className={css.flowItem}>{bubble}</div>
+}
+
+/** Stable empty window for snapshots that render the plain list. */
+const EMPTY_VIRTUAL_ITEMS: readonly VirtualItem[] = []
+
+type ChatNodeListProps = Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
+  readonly useChatGroup: ChatViewSlotProps['useChatGroup']
+  readonly items: readonly ChatVirtualItem[]
+  readonly virtualize: boolean
+  readonly virtualItems: readonly VirtualItem[]
+  readonly virtualTotalSize: number
+  readonly scrollMargin: number
+  readonly measureElement: (element: HTMLElement | null) => void
+}
+
+const ChatNodeList = memo(function ChatNodeList({
+  items, virtualize, virtualItems, virtualTotalSize, scrollMargin, measureElement, useChatGroup, ...seatProps
+}: ChatNodeListProps) {
+  const rows = virtualize
+    ? virtualItems.flatMap((virtualItem) => {
+      const item = items[virtualItem.index]
+      return item === undefined ? [] : [(
+        <ChatVirtualRow {...seatProps} useChatGroup={useChatGroup} key={chatVirtualItemKey(item)} item={item}
+          index={virtualItem.index} measureRef={measureElement} />
+      )]
+    })
+    : items.map(item => (
+      <ChatVirtualRow {...seatProps} useChatGroup={useChatGroup} key={chatVirtualItemKey(item)} item={item}
+        index={undefined} measureRef={undefined} />
+    ))
+  const first = virtualItems[0]
+  const last = virtualItems.at(-1)
+  const topPad = first === undefined ? 0 : Math.max(0, first.start - scrollMargin)
+  const bottomPad = last === undefined ? 0 : Math.max(0, virtualTotalSize + scrollMargin - last.end)
+  return (
+    <>
+      {topPad > 0 && (
+        <div className={css.virtualSpacer} data-chat-virtual-spacer="top"
+          style={{ height: `${topPad}px`, marginTop: 0 }} aria-hidden="true" />
+      )}
+      {rows}
+      {bottomPad > 0 && (
+        <div className={css.virtualSpacer} data-chat-virtual-spacer="bottom"
+          style={{ height: `${bottomPad}px`, marginTop: 0 }} aria-hidden="true" />
+      )}
+    </>
+  )
 })
 
 /**
@@ -265,6 +339,114 @@ export function ChatView({
     loadedTurns: turnNavigationItems,
   })
 
+  const items = useMemo(
+    () => buildChatVirtualItems(entries, pendingInputs, openTurnProcessTail(entries, nodeStore, lastInputTurn)),
+    [entries, pendingInputs, nodeStore, lastInputTurn],
+  )
+  const virtualize = items.length > CHAT_VIRTUALIZATION_THRESHOLD
+  const getVirtualScrollElement = useCallback(() => {
+    const list = scroll.listRef.current
+    return list === null ? null : list.closest<HTMLElement>('[data-conversation-scroll]') ?? list
+  }, [scroll.listRef])
+  const [virtualScrollMargin, setVirtualScrollMargin] = useState(0)
+  const virtualPrefixRef = useRef<HTMLDivElement | null>(null)
+  // The scrollport keeps its reader position when the list first virtualizes
+  // or re-enables; programmatic writes alone never deliver a scroll event.
+  const getInitialScrollOffset = useCallback(() => getVirtualScrollElement()?.scrollTop ?? 0,
+    [getVirtualScrollElement])
+  const virtualizer = useVirtualizer<HTMLElement, HTMLElement>({
+    count: virtualize ? items.length : 0,
+    enabled: virtualize,
+    getScrollElement: getVirtualScrollElement,
+    initialOffset: getInitialScrollOffset,
+    estimateSize: useCallback((index: number) => estimateChatVirtualHeight(items[index]), [items]),
+    getItemKey: useCallback((index: number) => {
+      const item = items[index]
+      return item === undefined ? `missing:${String(index)}` : chatVirtualItemKey(item)
+    }, [items]),
+    overscan: CHAT_VIRTUAL_OVERSCAN,
+    anchorTo: 'end',
+    followOnAppend: scroll.followingTail ? 'auto' : false,
+    initialRect: { width: 0, height: CHAT_VIRTUAL_INITIAL_VIEWPORT_HEIGHT },
+    scrollMargin: virtualScrollMargin,
+    measureElement: measureChatRow,
+  })
+  // The virtual rows begin after the history controls; their offset within the
+  // scroll element is the virtualizer's coordinate origin.
+  useLayoutEffect(() => {
+    if (!virtualize) return
+    const prefix = virtualPrefixRef.current
+    const scroller = getVirtualScrollElement()
+    if (prefix === null || scroller === null) return
+    const measure = (): void => {
+      const offset = prefix.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+      const next = Math.max(0, offset + prefix.offsetHeight)
+      setVirtualScrollMargin(previous => Math.abs(previous - next) < 0.5 ? previous : next)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(prefix)
+    observer.observe(scroller)
+    return () => { observer.disconnect() }
+  }, [virtualize, getVirtualScrollElement])
+  // Unmounted rows answer navigation and restore by absolute offset instead of
+  // DOM measurement; the delegate is released when the plain list returns.
+  const virtualWindow = useMemo<ChatVirtualWindow>(() => {
+    const indexByKey = new Map<string, number>()
+    for (const [index, item] of items.entries()) {
+      indexByKey.set(chatVirtualItemKey(item), index)
+      if (item.kind === 'entry') indexByKey.set(chatAnchorKey(item.entry), index)
+    }
+    return {
+      landingForAnchor(key) {
+        const index = indexByKey.get(key)
+        const item = index === undefined ? undefined : items[index]
+        if (index === undefined || item === undefined) return null
+        const offset = virtualizer.getOffsetForIndex(index)?.[0]
+        if (offset === undefined) return null
+        return { key, offset, turn: itemTurn(item, nodeStore) }
+      },
+      landingAtOrAfterTurn(turn) {
+        for (const [index, item] of items.entries()) {
+          const candidate = itemTurn(item, nodeStore)
+          if (candidate === null || candidate < turn) continue
+          const offset = virtualizer.getOffsetForIndex(index)?.[0]
+          if (offset === undefined) return null
+          return { key: item.kind === 'entry' ? chatAnchorKey(item.entry) : item.key, offset, turn: candidate }
+        }
+        return null
+      },
+    }
+  }, [items, virtualizer, nodeStore])
+  useLayoutEffect(() => {
+    scroll.viewport.setVirtualWindow(virtualize ? virtualWindow : null)
+    return () => { scroll.viewport.setVirtualWindow(null) }
+  }, [scroll.viewport, virtualize, virtualWindow])
+
+  // Read inside ChatView so the virtualizer's own re-render reaches the list;
+  // the memoized window keeps the list from re-rendering on unrelated updates.
+  const virtualItems = virtualize ? virtualizer.getVirtualItems() : EMPTY_VIRTUAL_ITEMS
+  const virtualTotalSize = virtualize ? virtualizer.getTotalSize() : 0
+
+  const historyPrefix = (
+    <>
+      {openState === 'loading' && <div className={css.hint}>{t('chat.loadingHistory')}</div>}
+      {openState === 'error' && openError !== null && (
+        <div className={css.openError}>
+          {t('chat.loadError', { message: openError.message, code: openError.code })}
+        </div>
+      )}
+      {hasMore && (
+        <div className={css.older}>
+          <button type="button" disabled={loadingOlder} onClick={scroll.loadEarlier}>
+            {loadingOlder ? t('loading') : t('chat.loadOlder')}
+          </button>
+        </div>
+      )}
+    </>
+  )
+
   return (
     <div className={css.frame}>
       {scroll.initialized && (
@@ -278,25 +460,19 @@ export function ChatView({
       )}
       <div className={css.root} data-chat-following-tail={scroll.followingTail ? '' : undefined}>
         <div ref={scroll.listRef} className={css.scroll}>
-          <div ref={scroll.columnRef} className={css.column} data-chat-flow="">
-            {openState === 'loading' && <div className={css.hint}>{t('chat.loadingHistory')}</div>}
-            {openState === 'error' && openError !== null && (
-              <div className={css.openError}>
-                {t('chat.loadError', { message: openError.message, code: openError.code })}
-              </div>
-            )}
-            {hasMore && (
-              <div className={css.older}>
-                <button type="button" disabled={loadingOlder} onClick={scroll.loadEarlier}>
-                  {loadingOlder ? t('loading') : t('chat.loadOlder')}
-                </button>
-              </div>
-            )}
+          <div ref={scroll.columnRef} className={css.column} data-chat-flow=""
+            {...virtualize ? { 'data-chat-virtual': '' } : {}}>
+            {virtualize
+              ? <div ref={virtualPrefixRef} className={css.virtualPrefix}>{historyPrefix}</div>
+              : historyPrefix}
             <MarkdownDelegateProvider openExternalLink={openExternalLink} openFile={requestOpenFile} fileImages={fileImages}>
               <ChatNodeList
-                entries={entries}
-                pendingInputs={pendingInputs}
-                lastInputTurn={lastInputTurn}
+                items={items}
+                virtualize={virtualize}
+                virtualItems={virtualItems}
+                virtualTotalSize={virtualTotalSize}
+                scrollMargin={virtualScrollMargin}
+                measureElement={virtualizer.measureElement}
                 nodeStore={nodeStore}
                 useChatGroup={useChatGroup}
                 useChatNode={useChatNode}

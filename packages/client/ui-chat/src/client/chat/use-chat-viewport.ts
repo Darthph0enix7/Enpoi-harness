@@ -25,6 +25,32 @@ interface ViewportEvents {
   interact: () => void
 }
 
+/** One row located by the transcript's virtual window instead of the DOM. */
+export interface ChatVirtualLanding {
+  /** Row anchor key as it appears on `data-chat-anchor-key`. */
+  readonly key: string
+  /** Absolute content offset of the row's top within the scroll element. */
+  readonly offset: number
+  /** Loaded Turn the row belongs to, or null when it has none. */
+  readonly turn: number | null
+}
+
+/** Virtual-window geometry for transcript rows that are not currently rendered. */
+export interface ChatVirtualWindow {
+  /**
+   * Locate one row by any of its transcript anchor keys.
+   * @param key - anchor key, node key, or group anchor key.
+   * @returns the row's landing, or null when the key is not a loaded item.
+   */
+  landingForAnchor(key: string): ChatVirtualLanding | null
+  /**
+   * Locate the first loaded row at or after a Turn.
+   * @param turn - minimum Turn number.
+   * @returns the row's landing, or null when no loaded item qualifies.
+   */
+  landingAtOrAfterTurn(turn: number): ChatVirtualLanding | null
+}
+
 interface ViewportElements {
   readonly list: HTMLElement
   readonly column: HTMLElement
@@ -49,6 +75,7 @@ export class ChatViewport {
   private turns: ReturnType<ChatSnapshot['navigation']['items']> = []
   private observation: { top: number; landing: ViewportLanding | null } = { top: 0, landing: null }
   private paging: PagingPosition | null = null
+  private virtualWindow: ChatVirtualWindow | null = null
 
   /**
    * Bind to the containing scrollport and observe content and viewport sizes.
@@ -106,6 +133,14 @@ export class ChatViewport {
    */
   updateTurns(turns: ReturnType<ChatSnapshot['navigation']['items']>): void {
     this.turns = turns
+  }
+
+  /**
+   * Adopt or release the transcript's virtual window for unmounted rows.
+   * @param virtualWindow - geometry provider while the list virtualizes, or null.
+   */
+  setVirtualWindow(virtualWindow: ChatVirtualWindow | null): void {
+    this.virtualWindow = virtualWindow
   }
 
   /**
@@ -249,7 +284,9 @@ export class ChatViewport {
     const item = this.turns.find(candidate => candidate.turn === turn)
     if (item === undefined) return null
     const row = this.anchor(item.anchorKey, 'node')
-    return row === null ? null : this.align(row, 24, turn)
+    if (row !== null) return this.align(row, 24, turn)
+    const landing = this.virtualWindow?.landingForAnchor(item.anchorKey) ?? null
+    return landing === null ? null : this.writeVirtualOffset(landing.offset, 24, turn, item.anchorKey)
   }
 
   /**
@@ -263,7 +300,8 @@ export class ChatViewport {
       const candidate = Number(row.dataset.chatTurn)
       if (Number.isSafeInteger(candidate) && candidate >= turn) return this.align(row, 24, candidate)
     }
-    return null
+    const landing = this.virtualWindow?.landingAtOrAfterTurn(turn) ?? null
+    return landing === null ? null : this.writeVirtualOffset(landing.offset, 24, landing.turn ?? turn, landing.key)
   }
 
   /**
@@ -274,6 +312,8 @@ export class ChatViewport {
   restore(position: ChatScrollPosition): ViewportLanding | null {
     const row = this.anchor(position.anchorKey)
     if (row !== null) return this.align(row, position.anchorTop, null)
+    const virtual = this.virtualWindow?.landingForAnchor(position.anchorKey) ?? null
+    if (virtual !== null) return this.writeVirtualOffset(virtual.offset, position.anchorTop, virtual.turn, position.anchorKey)
     const metrics = this.metrics()
     return metrics === null ? null : this.write(position.scrollTop, metrics, null)
   }
@@ -394,6 +434,23 @@ export class ChatViewport {
     }
     this.observation = { top: landing.metrics.top, landing }
     return landing
+  }
+
+  /**
+   * Align one row that is not mounted, using its absolute content offset.
+   * @param offset - the row's top in scroll-element content coordinates.
+   * @param desired - viewport-relative top to land the row at.
+   * @param turn - the row's Turn, when known.
+   * @param key - the row's anchor key for later semantic restores.
+   * @returns the actual clamped landing, or null while detached.
+   */
+  private writeVirtualOffset(
+    offset: number, desired: number, turn: number | null, key: string,
+  ): ViewportLanding | null {
+    const metrics = this.metrics()
+    if (metrics === null) return null
+    const target = Math.max(0, Math.min(metrics.floor, offset - desired))
+    return this.write(target, metrics, turn, { key, top: desired + (target - metrics.top) })
   }
 
   private align(row: HTMLElement, offset: number, turn: number | null): ViewportLanding | null {

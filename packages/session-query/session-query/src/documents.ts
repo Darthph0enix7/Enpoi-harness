@@ -17,7 +17,7 @@ export function buildSessionEventRecords(
   sessionId: SessionId,
   events: readonly SessionEvent[],
 ): SessionEventRecord[] {
-  const surfaceBySeq = classifySurface(events)
+  const surfaceBySeq = classifySurface(events).surfaceBySeq
   return events.map(event => ({
     sessionId,
     seq: event.seq,
@@ -25,6 +25,51 @@ export function buildSessionEventRecords(
     time: event.time,
     surface: surfaceBySeq.get(event.seq) ?? 'log-only',
   }))
+}
+
+/**
+ * Surface classification and searchable documents for one complete raw event log.
+ * The classified surface state is the baseline an incremental provider folds
+ * later appends onto without re-reading the whole log.
+ */
+export interface SessionEventSearchDocumentState {
+  /** Searchable documents in ascending seq order; structural events are omitted. */
+  readonly documents: SessionEventSearchDocument[]
+  /** Current surface event sequences in model-visible order. */
+  readonly nodes: readonly SessionSeq[]
+  /**
+   * Event sequences shadowed by any committed replacement, in replacement
+   * order. A later `revert/branch` that re-activates an event leaves it listed
+   * here, matching the complete-fold classification.
+   */
+  readonly shadowed: readonly SessionSeq[]
+}
+
+/**
+ * Build first-party semantic documents and the surface baseline for one complete raw event log.
+ * @param sessionId - session that owns the log.
+ * @param events - complete contiguous raw event log.
+ * @returns searchable documents plus the surface state that classifies them.
+ */
+export function buildSessionEventSearchDocumentState(
+  sessionId: SessionId,
+  events: readonly SessionEvent[],
+): SessionEventSearchDocumentState {
+  const surface = classifySurface(events)
+  const documents: SessionEventSearchDocument[] = []
+  for (const event of events) {
+    const text = extractSessionEventText(event)
+    if (text.length === 0) continue
+    documents.push({
+      sessionId,
+      seq: event.seq,
+      type: event.type,
+      time: event.time,
+      surface: surface.surfaceBySeq.get(event.seq) ?? 'log-only',
+      text,
+    })
+  }
+  return { documents, nodes: surface.nodes, shadowed: surface.shadowed }
 }
 
 /**
@@ -37,24 +82,16 @@ export function buildSessionEventSearchDocuments(
   sessionId: SessionId,
   events: readonly SessionEvent[],
 ): SessionEventSearchDocument[] {
-  const surfaceBySeq = classifySurface(events)
-  const documents: SessionEventSearchDocument[] = []
-  for (const event of events) {
-    const text = extractSessionEventText(event)
-    if (text.length === 0) continue
-    documents.push({
-      sessionId,
-      seq: event.seq,
-      type: event.type,
-      time: event.time,
-      surface: surfaceBySeq.get(event.seq) ?? 'log-only',
-      text,
-    })
-  }
-  return documents
+  return buildSessionEventSearchDocumentState(sessionId, events).documents
 }
 
-function classifySurface(events: readonly SessionEvent[]): Map<SessionSeq, SessionEventSurface> {
+interface ClassifiedSurface {
+  readonly surfaceBySeq: Map<SessionSeq, SessionEventSurface>
+  readonly nodes: readonly SessionSeq[]
+  readonly shadowed: readonly SessionSeq[]
+}
+
+function classifySurface(events: readonly SessionEvent[]): ClassifiedSurface {
   let folded: ReturnType<typeof foldSurface>
   try {
     folded = foldSurface(events, currentSessionMessageProjections)
@@ -66,10 +103,14 @@ function classifySurface(events: readonly SessionEvent[]): Map<SessionSeq, Sessi
       { cause: error },
     )
   }
-  const result = new Map<SessionSeq, SessionEventSurface>()
-  for (const seq of folded.nodes) result.set(seq, 'current')
+  const surfaceBySeq = new Map<SessionSeq, SessionEventSurface>()
+  const shadowed: SessionSeq[] = []
+  for (const seq of folded.nodes) surfaceBySeq.set(seq, 'current')
   for (const replacement of folded.replacements) {
-    for (const seq of replacement.shadowedSeqs) result.set(seq, 'shadowed')
+    for (const seq of replacement.shadowedSeqs) {
+      surfaceBySeq.set(seq, 'shadowed')
+      shadowed.push(seq)
+    }
   }
-  return result
+  return { surfaceBySeq, nodes: folded.nodes, shadowed }
 }
