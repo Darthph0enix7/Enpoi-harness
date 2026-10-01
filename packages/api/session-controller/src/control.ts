@@ -13,13 +13,24 @@ import type {
   SessionProjectionValues,
 } from './types.ts'
 
-/** Owns the Host-wide Session control stream. */
+/**
+ * Owns the Host-wide Session control stream.
+ *
+ * Frames are append-driven, never turn-driven: every committed append — from
+ * the agent loop, a Remote command handler, or a domain plugin — drives the
+ * projection registry, whose change feed reports each client-visible unit
+ * whose raw value changed. One append therefore emits at most one replacement
+ * frame per changed key; an append that changes no unit emits none.
+ */
 export class SessionControlController {
   private readonly streams = new Set<ControlQueue>()
 
   /** @param ctx - Host context carrying live Agent and projection services. */
   constructor(private readonly ctx: Context) {
-    ctx.sessionProjections.onChanged((session, key, value, seq) => {
+    // The feed subscription is owned by this controller's fiber: a replaced
+    // controller (HMR or plugin reload) must not leave a second listener
+    // broadcasting into the retired generation.
+    const disposeChangeFeed = ctx.sessionProjections.onChanged((session, key, value, seq) => {
       this.broadcast({
         type: 'projection',
         sessionId: session.id,
@@ -29,6 +40,7 @@ export class SessionControlController {
       })
     })
     ctx.effect(() => () => {
+      disposeChangeFeed()
       for (const stream of this.streams) stream.end()
       this.streams.clear()
     }, 'session-controller.control')
