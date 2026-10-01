@@ -416,3 +416,74 @@
   flex: 1 1 140px;
   min-width: 0;
 }
+
+/* ── MCP server hint (skill form) ──────────────────────────────────────── */
+
+.mcpChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcpChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  background: rgba(103, 220, 231, 0.1);
+  border: 1px solid rgba(103, 220, 231, 0.28);
+  color: #67dce7;
+  min-width: 0;
+}
+
+.mcpChipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcpRemove {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.mcpRemove:hover {
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+}
+
+.mcpOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcpOption {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  cursor: pointer;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.1));
+}
+
+.mcpOption:hover {
+  border-color: var(--dsw-alias-border-l4, rgba(255, 255, 255, 0.26));
+  color: var(--dsw-alias-label-primary, #f1f5f9);
+}
+
+.mcpCustom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}

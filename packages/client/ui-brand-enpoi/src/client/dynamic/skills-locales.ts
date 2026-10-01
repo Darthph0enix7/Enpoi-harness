@@ -19,6 +19,13 @@ export type DynamicSkillsKey =
   | 'fieldName'
   | 'fieldDescription'
   | 'fieldBody'
+  | 'fieldMcp'
+  | 'mcpHint'
+  | 'mcpPlaceholder'
+  | 'mcpAdd'
+  | 'mcpRemove'
+  | 'mcpBadge'
+  | 'mcpCustomHint'
   | 'namePlaceholder'
   | 'descriptionPlaceholder'
   | 'bodyPlaceholder'
@@ -93,6 +100,13 @@ export const en: Record<DynamicSkillsKey, string> = {
   fieldName: 'Name',
   fieldDescription: 'Description',
   fieldBody: 'Instructions (Markdown)',
+  fieldMcp: 'MCP servers',
+  mcpHint: 'Loading this skill mounts these servers for the session.',
+  mcpPlaceholder: 'server-id',
+  mcpAdd: 'Add',
+  mcpRemove: 'Remove',
+  mcpBadge: 'mcp: {servers}',
+  mcpCustomHint: 'No MCP servers are configured — enter a server id.',
   namePlaceholder: 'my-skill',
   descriptionPlaceholder: 'Short routing description',
   bodyPlaceholder: '# My skill\n\nWhen this skill applies and what to do.',
@@ -175,6 +189,13 @@ export const zh: Record<DynamicSkillsKey, string> = {
   fieldName: '名称',
   fieldDescription: '描述',
   fieldBody: '指令（Markdown）',
+  fieldMcp: 'MCP 服务器',
+  mcpHint: '加载此技能时会为该会话挂载这些服务器。',
+  mcpPlaceholder: 'server-id',
+  mcpAdd: '添加',
+  mcpRemove: '移除',
+  mcpBadge: 'mcp: {servers}',
+  mcpCustomHint: '尚未配置 MCP 服务器——请直接输入服务器 id。',
   namePlaceholder: 'my-skill',
   descriptionPlaceholder: '简短的路由描述',
   bodyPlaceholder: '# 我的技能\n\n何时适用以及要做什么。',

@@ -71,6 +71,7 @@ interface OrchestrationView {
   revision?: number
   value?: {
     capabilities?: { tools?: Record<string, boolean>; skills?: Record<string, boolean> }
+    mcpServers?: Record<string, unknown>
     customTools?: unknown
   }
 }
@@ -80,6 +81,7 @@ interface SkillFormState {
   mode: 'create' | 'edit'
   name: string
   description: string
+  mcp: string[]
   body: string
   /** Read/write/validation failure shown inside the dialog. */
   error: string | null
@@ -263,6 +265,8 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
   const [tools, setTools] = useState<Record<string, boolean> | null>(null)
   const [skillCaps, setSkillCaps] = useState<Record<string, boolean>>({})
   const [skills, setSkills] = useState<PanelSkillRow[] | null>(null)
+  const [mcpServers, setMcpServers] = useState<string[]>([])
+  const [mcpDraft, setMcpDraft] = useState('')
   const [skillsError, setSkillsError] = useState<string | null>(null)
   const [skillsNote, setSkillsNote] = useState<string | null>(null)
   const [loadingSkills, setLoadingSkills] = useState(true)
@@ -296,6 +300,7 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
       for (const id of PROTECTED_CAPABILITIES) defaults[id] = true
       setTools(defaults)
       setSkillCaps(isRecord(view.value?.capabilities?.skills) ? view.value?.capabilities?.skills as Record<string, boolean> : {})
+      setMcpServers(isRecord(view.value?.mcpServers) ? Object.keys(view.value.mcpServers) : [])
       setCustomTools(parseCustomTools(view.value?.customTools))
     }
     const sessions = await fetchSessionIds()
@@ -393,20 +398,30 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
   }
 
   const openCreate = (): void => {
-    setForm({ mode: 'create', name: '', description: '', body: '', error: null, loading: false })
+    setMcpDraft('')
+    setForm({ mode: 'create', name: '', description: '', mcp: [], body: '', error: null, loading: false })
   }
 
   const openEdit = (row: PanelSkillRow): void => {
-    setForm({ mode: 'edit', name: row.name, description: row.description, body: '', error: null, loading: true })
+    setMcpDraft('')
+    setForm({ mode: 'edit', name: row.name, description: row.description, mcp: row.mcp, body: '', error: null, loading: true })
     void readSkill(row.name).then((detail) => {
       setForm(current => current === null || current.mode !== 'edit' || current.name !== row.name
         ? current
-        : { ...current, description: detail.description, body: detail.body, loading: false })
+        : { ...current, description: detail.description, mcp: detail.mcp, body: detail.body, loading: false })
     }).catch((error: unknown) => {
       setForm(current => current === null || current.mode !== 'edit' || current.name !== row.name
         ? current
         : { ...current, error: t('detailFailed', { reason: errorMessage(error) }), loading: false })
     })
+  }
+
+  /** Append the free-text server id (the fallback when no catalog is configured). */
+  const addMcpDraft = (): void => {
+    const server = mcpDraft.trim()
+    if (form === null || server === '' || form.mcp.includes(server)) return
+    setMcpDraft('')
+    patchForm({ mcp: [...form.mcp, server] })
   }
 
   const saveForm = async (): Promise<void> => {
@@ -418,7 +433,7 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
     setBusy(true)
     patchForm({ error: null })
     try {
-      const input = { name, description, body: form.body }
+      const input = { name, description, mcp: form.mcp, body: form.body }
       if (form.mode === 'create') await createSkill(input)
       else await updateSkill(input)
       setForm(null)
@@ -606,6 +621,11 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
                   <div className={css.rowName}>
                     <span>{skill.name}</span>
                     {!skill.modelInvocable && <span className={css.badge}>{t('userOnly')}</span>}
+                    {skill.mcp.length > 0 && (
+                      <span className={css.badge} data-skill-mcp-badge={skill.name}>
+                        {t('mcpBadge', { servers: skill.mcp.join(', ') })}
+                      </span>
+                    )}
                     {skill.protected && <span className={css.badge}>{t('protectedBadge')}</span>}
                   </div>
                   {skill.description !== '' && <div className={css.rowDesc}>{skill.description}</div>}
@@ -745,6 +765,57 @@ export function SkillsPanel({ t }: SkillsPanelProps) {
               onChange={(event) => { patchForm({ description: event.target.value }) }}
             />
           </label>
+          <div className={css.field}>
+            <span className={css.fieldLabel}>{t('fieldMcp')}</span>
+            {form !== null && form.mcp.length > 0 && (
+              <div className={css.mcpChips} data-skill-mcp-chips="">
+                {form.mcp.map(server => (
+                  <span className={css.mcpChip} key={server} data-skill-mcp-selected={server}>
+                    <span className={css.mcpChipLabel}>{server}</span>
+                    <button
+                      type="button"
+                      className={css.mcpRemove}
+                      data-skill-mcp-remove={server}
+                      aria-label={`${t('mcpRemove')}: ${server}`}
+                      onClick={() => { patchForm({ mcp: form.mcp.filter(value => value !== server) }) }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {mcpServers.length > 0 ? (
+              <div className={css.mcpOptions}>
+                {mcpServers.filter(server => form === null || !form.mcp.includes(server)).map(server => (
+                  <button
+                    type="button"
+                    className={css.mcpOption}
+                    key={server}
+                    data-skill-mcp-option={server}
+                    onClick={() => { patchForm({ mcp: [...(form?.mcp ?? []), server] }) }}
+                  >
+                    {server}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className={css.mcpCustom}>
+                <Input
+                  data-skill-mcp-input=""
+                  aria-label={t('fieldMcp')}
+                  value={mcpDraft}
+                  placeholder={t('mcpPlaceholder')}
+                  onChange={(event) => { setMcpDraft(event.target.value) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addMcpDraft() } }}
+                />
+                <button type="button" className={css.addBtn} data-skill-mcp-add="" onClick={addMcpDraft}>
+                  {t('mcpAdd')}
+                </button>
+              </div>
+            )}
+            <span className={css.fieldHint}>{mcpServers.length === 0 ? t('mcpCustomHint') : t('mcpHint')}</span>
+          </div>
           <label className={css.field}>
             <span className={css.fieldLabel}>{t('fieldBody')}</span>
             <textarea

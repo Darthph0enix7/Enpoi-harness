@@ -15,6 +15,8 @@ export interface SkillRow {
   /** On-disk entry name; equals `name` for entries created here. */
   entry: string
   description: string
+  /** `mcp:` frontmatter hint: servers loaded with this skill (empty when absent). */
+  mcp: string[]
   path?: string
   format: 'directory' | 'file'
   source: SkillSource
@@ -34,6 +36,7 @@ export interface SkillDetailValue {
   name: string
   entry: string
   description: string
+  mcp: string[]
   body: string
   content: string
   path: string
@@ -47,6 +50,8 @@ export interface SkillWriteInput {
   name: string
   description: string
   body: string
+  /** `mcp:` hint: absent leaves an existing line untouched, an empty list removes it. */
+  mcp?: string[]
 }
 
 /** One rejected fenced call. */
@@ -95,6 +100,12 @@ async function callSkills(method: string, payload: Record<string, unknown>): Pro
   throw new SkillsApiError(code, reason, response.status)
 }
 
+/** One string array from an untrusted wire value; [] when unusable. */
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+}
+
 /** One list row from an untrusted wire value; undefined when unusable. */
 function parseRow(value: unknown): SkillRow | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -107,6 +118,7 @@ function parseRow(value: unknown): SkillRow | undefined {
     name: record.name,
     entry: typeof record.entry === 'string' && record.entry !== '' ? record.entry : record.name,
     description: typeof record.description === 'string' ? record.description : '',
+    mcp: parseStringArray(record.mcp),
     ...typeof record.path === 'string' && record.path !== '' ? { path: record.path } : {},
     format: record.format === 'file' ? 'file' : 'directory',
     source,
@@ -143,6 +155,7 @@ export async function readSkill(name: string): Promise<SkillDetailValue> {
     name: typeof record.name === 'string' ? record.name : name,
     entry: typeof record.entry === 'string' ? record.entry : name,
     description: typeof record.description === 'string' ? record.description : '',
+    mcp: parseStringArray(record.mcp),
     body: record.body,
     content: typeof record.content === 'string' ? record.content : record.body,
     path: typeof record.path === 'string' ? record.path : '',

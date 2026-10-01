@@ -121,10 +121,10 @@ function mutateBodies(fetchMock: ReturnType<typeof vi.fn>) {
     })
 }
 
-/** A describe fixture carrying custom tools. */
-function describeWith(customTools: unknown[]) {
+/** A describe fixture carrying custom tools and the MCP server catalog. */
+function describeWith(customTools: unknown[], mcpServers: Record<string, unknown> = {}) {
   return () => jsonResponse({
-    result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 5, value: { capabilities: { tools: {}, skills: {} }, customTools } }] } },
+    result: { ok: true, value: { namespaces: [{ ns: 'enpoi-orchestration', revision: 5, value: { capabilities: { tools: {}, skills: {} }, mcpServers, customTools } }] } },
   })
 }
 
@@ -226,8 +226,82 @@ describe('SkillsPanel', () => {
 
     await waitFor(() => { expect(fsopsCalls(fetchMock).some(call => call.method === 'skills.create')).toBe(true) })
     const create = fsopsCalls(fetchMock).find(call => call.method === 'skills.create')
-    expect(create?.payload).toEqual({ name: 'fresh-skill', description: 'Created here', body: '# Fresh\n\nBody.' })
+    expect(create?.payload).toEqual({ name: 'fresh-skill', description: 'Created here', mcp: [], body: '# Fresh\n\nBody.' })
     expect(await screen.findByText('fresh-skill')).toBeTruthy()
+  })
+
+  it('offers the configured MCP servers as toggles and writes the chosen hint', async () => {
+    let rows: unknown[] = []
+    const fetchMock = await mountPanel({
+      describe: describeWith([], { 'plane-mcp': { url: 'http://plane' }, 'test-mcp': { url: 'http://test' } }),
+      fsops: {
+        'skills.list': () => ok({ root: '/home/sandbox/skills', skills: rows, registry: { ok: true } }),
+        'skills.create': (payload) => {
+          rows = [skillRow(String(payload.name), String(payload.description), { mcp: payload.mcp })]
+          return ok({ name: payload.name, path: '/home/sandbox/skills/x/SKILL.md' })
+        },
+      },
+    })
+    fireEvent.click(await screen.findByText(en.add))
+    fireEvent.change(await screen.findByLabelText(en.fieldName), { target: { value: 'hinted-skill' } })
+    fireEvent.change(screen.getByLabelText(en.fieldDescription), { target: { value: 'Loads a server' } })
+    fireEvent.click(screen.getByText('test-mcp', { selector: 'button[data-skill-mcp-option="test-mcp"]' }))
+    expect(screen.getByLabelText(`${en.mcpRemove}: test-mcp`)).toBeTruthy()
+    fireEvent.click(screen.getByText(en.create))
+
+    await waitFor(() => { expect(fsopsCalls(fetchMock).some(call => call.method === 'skills.create')).toBe(true) })
+    expect(fsopsCalls(fetchMock).find(call => call.method === 'skills.create')?.payload)
+      .toEqual({ name: 'hinted-skill', description: 'Loads a server', mcp: ['test-mcp'], body: '' })
+    expect(await screen.findByText('mcp: test-mcp')).toBeTruthy()
+  })
+
+  it('falls back to free-text server entry when no catalog is configured', async () => {
+    const fetchMock = await mountPanel({
+      describe: describeWith([]),
+      fsops: {
+        'skills.list': defaultFsopsList(),
+        'skills.create': () => ok({ name: 'custom-hint', path: '/home/sandbox/skills/custom-hint/SKILL.md' }),
+      },
+    })
+    fireEvent.click(await screen.findByText(en.add))
+    fireEvent.change(await screen.findByLabelText(en.fieldName), { target: { value: 'custom-hint' } })
+    fireEvent.change(screen.getByLabelText(en.fieldDescription), { target: { value: 'Hint' } })
+    fireEvent.change(screen.getByLabelText(en.fieldMcp), { target: { value: 'free-mcp' } })
+    fireEvent.click(screen.getByText(en.mcpAdd, { selector: 'button[data-skill-mcp-add]' }))
+    fireEvent.click(screen.getByText(en.create))
+
+    await waitFor(() => { expect(fsopsCalls(fetchMock).some(call => call.method === 'skills.create')).toBe(true) })
+    expect(fsopsCalls(fetchMock).find(call => call.method === 'skills.create')?.payload)
+      .toEqual({ name: 'custom-hint', description: 'Hint', mcp: ['free-mcp'], body: '' })
+  })
+
+  it('prefills the hint on Edit and removes it on save', async () => {
+    const fetchMock = await mountPanel({
+      describe: describeWith([], { 'plane-mcp': { url: 'http://plane' } }),
+      fsops: {
+        'skills.list': defaultFsopsList([skillRow('hinted-skill', 'Hinted', { mcp: ['plane-mcp'] })]),
+        'skills.read': () => ok({
+          name: 'hinted-skill',
+          entry: 'hinted-skill',
+          description: 'Hinted',
+          mcp: ['plane-mcp'],
+          body: 'Body.',
+          content: '---\nname: hinted-skill\ndescription: Hinted\nmcp: [plane-mcp]\n---\n\nBody.',
+          path: '/home/sandbox/skills/hinted-skill/SKILL.md',
+          format: 'directory',
+          source: 'profile',
+          protected: false,
+        }),
+        'skills.update': () => ok({ name: 'hinted-skill', path: '/home/sandbox/skills/hinted-skill/SKILL.md' }),
+      },
+    })
+    fireEvent.click(await screen.findByLabelText(`${en.edit}: hinted-skill`))
+    fireEvent.click(await screen.findByLabelText(`${en.mcpRemove}: plane-mcp`))
+    fireEvent.click(screen.getByText(en.save))
+
+    await waitFor(() => { expect(fsopsCalls(fetchMock).some(call => call.method === 'skills.update')).toBe(true) })
+    expect(fsopsCalls(fetchMock).find(call => call.method === 'skills.update')?.payload)
+      .toEqual({ name: 'hinted-skill', description: 'Hinted', mcp: [], body: 'Body.' })
   })
 
   it('validates name and description before calling the host', async () => {
@@ -276,8 +350,24 @@ describe('SkillsPanel', () => {
 
     await waitFor(() => { expect(fsopsCalls(fetchMock).some(call => call.method === 'skills.update')).toBe(true) })
     expect(fsopsCalls(fetchMock).find(call => call.method === 'skills.update')?.payload)
-      .toEqual({ name: 'alpha-skill', description: 'New description', body: '# New\n\nNew body.' })
+      .toEqual({ name: 'alpha-skill', description: 'New description', mcp: [], body: '# New\n\nNew body.' })
     expect(await screen.findByText('New description')).toBeTruthy()
+  })
+
+  it('shows the mcp hint badge on rows that declare servers', async () => {
+    await mountPanel({
+      fsops: {
+        'skills.list': defaultFsopsList([
+          skillRow('hinted-skill', 'Loads a server', { mcp: ['plane-mcp', 'test-mcp'] }),
+          skillRow('plain-skill', 'No hint'),
+        ]),
+      },
+    })
+    expect(await screen.findByText('hinted-skill')).toBeTruthy()
+    const badge = screen.getByText('mcp: plane-mcp, test-mcp')
+    expect(badge.getAttribute('data-skill-mcp-badge')).toBe('hinted-skill')
+    // Only the hinted row carries the badge.
+    expect(screen.getAllByText(/^mcp: /)).toHaveLength(1)
   })
 
   it('surfaces an edit load failure inside the dialog', async () => {
