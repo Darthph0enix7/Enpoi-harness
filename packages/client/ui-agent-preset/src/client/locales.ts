@@ -97,7 +97,7 @@ export const en: Record<AgentPresetSettingsKey, string> = {
   enableDevToolsToCreate: 'Turn on Coding Tools in General settings to start Creator mode',
 
   // Manual authoring (Agent presets section)
-  manualNew: '+ New preset',
+  manualNew: 'New preset',
   manualNewTitle: 'New agent preset',
   manualEditTitle: 'Edit agent preset',
   manualBase: 'Base preset',
@@ -162,7 +162,7 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   enableDevToolsToCreate: '请先在通用设置中开启代码工作工具，再启动创造模式',
 
   // Manual authoring (Agent presets section)
-  manualNew: '+ 新建预设',
+  manualNew: '新建预设',
   manualNewTitle: '新建 Agent 预设',
   manualEditTitle: '编辑 Agent 预设',
   manualBase: '基础预设',
