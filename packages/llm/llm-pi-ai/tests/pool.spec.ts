@@ -90,6 +90,24 @@ describe('classifyFailure', () => {
     // A generic free-tier mention must not hijack a real auth failure.
     expect(classifyFailure('401 Unauthorized: invalid api key on the free tier route')).toBe('AUTH')
   })
+
+  it('classifies subscription/entitlement gates as a rotating ENTITLEMENT class', () => {
+    // The live OpenCode Go message that previously churned a healthy identity.
+    const observed = '403 An active OpenCode Go subscription is required to use Go models.'
+    expect(classifyFailure(observed)).toBe('ENTITLEMENT')
+    // Identity-specific: the pool rotates to an entitled identity, and the
+    // gated one cools long enough to stop the churn.
+    expect(ROTATING_CLASSES.has(classifyFailure(observed))).toBe(true)
+    expect(CLASS_COOLDOWN_MS.ENTITLEMENT).toBe(6 * 3600_000)
+    expect(classifyFailure('Your plan does not include this model.')).toBe('ENTITLEMENT')
+    expect(classifyFailure('You are not entitled to use this model')).toBe('ENTITLEMENT')
+    expect(classifyFailure('Upgrade your plan to access it')).toBe('ENTITLEMENT')
+    // Payment vocabulary stays AUTH; a bare 403 stays AUTH; the route-wide
+    // free-tier client gate stays the terminal POLICY class.
+    expect(classifyFailure('402 payment required: insufficient credits')).toBe('AUTH')
+    expect(classifyFailure('403 Forbidden')).toBe('AUTH')
+    expect(classifyFailure('free tier can only be used from within OpenCode')).toBe('POLICY')
+  })
 })
 
 describe('PoolEngine ordering', () => {
@@ -260,6 +278,32 @@ describe('parseQuotaHeaders', () => {
 
   it('returns undefined when no quota headers are present', () => {
     expect(parseQuotaHeaders({})).toBeUndefined()
+  })
+})
+
+describe('quota persistence', () => {
+  it('round-trips well-typed quota state and drops malformed fields on load', async () => {
+    const now = 10_000_000
+    const e = engine({ now: () => now })
+    e.recordQuota('route', 'id', 'm', { remainingFraction: 0.4, resetTime: '2026-08-23T12:00:00Z', source: 'headers' })
+    await e.flush()
+    const reopened = engine({ now: () => now })
+    await reopened.hydrate('route')
+    expect(reopened.snapshot('route')['id']?.['m']?.quota).toEqual({
+      remainingFraction: 0.4,
+      resetTime: '2026-08-23T12:00:00Z',
+      source: 'headers',
+    })
+
+    await writeFile(join(stateDir, 'other.json'), JSON.stringify({
+      version: 1,
+      identities: {
+        id: { m: { cooldownUntil: 0, consecutiveFailures: 0, quota: { remainingFraction: '0.4', resetTime: 12, source: 7 } } },
+      },
+    }))
+    const sanitized = engine()
+    await sanitized.hydrate('other')
+    expect(sanitized.snapshot('other')['id']?.['m']?.quota).toEqual({ resetTime: 12 })
   })
 })
 

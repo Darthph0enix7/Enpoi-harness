@@ -10,8 +10,9 @@
 
 import { brandString } from '@deepseek-ai/dsh-brand'
 import {
-  STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, FREE_TIER_GATED_CODE,
-  FREE_TIER_GATED_EXPLANATION, isContextWindowExceededError, isFreeTierGatedError, isQuotaExceededError,
+  STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, ENTITLEMENT_GATED_CODE,
+  ENTITLEMENT_GATED_EXPLANATION, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION,
+  isContextWindowExceededError, isEntitlementGatedError, isFreeTierGatedError, isQuotaExceededError,
   LlmError, QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -49,6 +50,13 @@ function classifyPiAiError(message: string): string {
   // in other harnesses", anomalyco/opencode#49621). Policy, not auth: the code
   // stays terminal so the chain neither retries nor rotates keys over it.
   if (isFreeTierGatedError(message)) return FREE_TIER_GATED_CODE
+  // A per-account entitlement gate (OpenCode Go: "An active OpenCode Go
+  // subscription is required to use Go models.") is identity-specific: live
+  // pool state showed sibling identities serving the same model while one
+  // account was gated. A route with a credential pool rotates and cools the
+  // gated identity for a long period; this single-credential layer reports the
+  // terminal code so the caller can fail over to another route or provider.
+  if (isEntitlementGatedError(message)) return ENTITLEMENT_GATED_CODE
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
@@ -179,12 +187,14 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       // detail, instead of collapsing to the generic key message. The raw
       // envelope stays in the log's message when it has no readable pair.
       const detail = code === 'AUTH' ? providerErrorDetail(text) : undefined
-      // A gated free-tier route fails identically on every attempt, so the
-      // user-facing failure carries the policy explanation, not just the
-      // provider's raw 403 envelope.
+      // A gated free-tier or entitlement route fails identically on every
+      // attempt at this layer, so the user-facing failure carries the policy
+      // explanation, not just the provider's raw envelope.
       const explained = code === FREE_TIER_GATED_CODE
         ? `${text} — ${FREE_TIER_GATED_EXPLANATION}`
-        : detail ?? text
+        : code === ENTITLEMENT_GATED_CODE
+          ? `${text} — ${ENTITLEMENT_GATED_EXPLANATION}`
+          : detail ?? text
       return { kind: 'error', failure: { message: explained, code } }
     }
   }

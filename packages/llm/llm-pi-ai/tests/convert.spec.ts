@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION, createMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, ENTITLEMENT_GATED_CODE, ENTITLEMENT_GATED_EXPLANATION, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
@@ -955,6 +955,23 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'HTTP 401: bad key on the free tier route',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+  })
+
+  it('classifies the identity entitlement gate and carries its explanation', () => {
+    const body = '403 {"error":{"message":"An active OpenCode Go subscription is required to use Go models."}}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: `${body} — ${ENTITLEMENT_GATED_EXPLANATION}`,
+        code: ENTITLEMENT_GATED_CODE,
+      },
+    })
+    // The entitlement check runs before the 403→AUTH vocabulary, so the gate is
+    // never mislabelled as a broken credential.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '403 Forbidden',
     }))).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
   })
 

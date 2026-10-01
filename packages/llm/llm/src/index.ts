@@ -38,13 +38,25 @@ import type { ResolvedRetryPolicy } from './retry-policy.ts'
 import type { ProviderRequestId, ReasoningEffortId } from './brand.ts'
 import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
-import { ACCOUNT_QUOTA_EXCEEDED_CODE, HarnessError, INVALID_CREDENTIAL_CODE, STREAM_CLOSED_CODE } from './error.ts'
+import {
+  ACCOUNT_QUOTA_EXCEEDED_CODE,
+  ENTITLEMENT_GATED_CODE,
+  HarnessError,
+  INVALID_CREDENTIAL_CODE,
+  STREAM_CLOSED_CODE,
+} from './error.ts'
 import { STREAM_CUT_CODE } from './assembler.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
 import { writeSessionWireCapture } from './wire-sessions.ts'
 import {
-  contentHasFile, contentHasImage, fileHandleText, projectEmbeddedBase64Text, projectFilesToText, projectImagesForTextModel, projectToolUpdates,
+  contentHasFile,
+  contentHasImage,
+  fileHandleText,
+  projectEmbeddedBase64Text,
+  projectFilesToText,
+  projectImagesForTextModel,
+  projectToolUpdates,
 } from './content.ts'
 import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
@@ -226,6 +238,9 @@ const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
   'AUTH',
   'QUOTA',
   ACCOUNT_QUOTA_EXCEEDED_CODE,
+  // An identity/account entitlement gate is not a dead route: another chain
+  // link (provider or account) may carry a plan that grants the model.
+  ENTITLEMENT_GATED_CODE,
   'MISSING_CREDENTIAL',
 ])
 

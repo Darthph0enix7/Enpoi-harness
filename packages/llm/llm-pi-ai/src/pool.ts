@@ -19,7 +19,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { isContextWindowExceededError, isFreeTierGatedError } from '@deepseek-ai/dsh-llm'
+import { isContextWindowExceededError, isEntitlementGatedError, isFreeTierGatedError } from '@deepseek-ai/dsh-llm'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm'
 import type { PiAiPoolIdentity, PoolStrategy } from './config.ts'
 
@@ -28,13 +28,21 @@ export type PoolFailureClass =
   | 'AUTH'
   | 'QUOTA'
   | 'CAPACITY'
+  | 'ENTITLEMENT'
   | 'GATEWAY_OUTAGE'
   | 'INVALID_REQUEST'
   | 'POLICY'
   | 'UPSTREAM'
 
-/** Failure classes that justify moving to the next identity. */
-export const ROTATING_CLASSES: ReadonlySet<PoolFailureClass> = new Set(['AUTH', 'QUOTA', 'CAPACITY', 'UPSTREAM'])
+/**
+ * Failure classes that justify moving to the next identity. ENTITLEMENT
+ * rotates: the gate is identity-specific (sibling identities have served the
+ * same model while one account was gated), so the pool must reach an entitled
+ * identity rather than failing the whole request.
+ */
+export const ROTATING_CLASSES: ReadonlySet<PoolFailureClass> = new Set([
+  'AUTH', 'QUOTA', 'CAPACITY', 'ENTITLEMENT', 'UPSTREAM',
+])
 
 /** Progressive same-identity retry delays for capacity exhaustion (ms). */
 export const CAPACITY_BACKOFF_TIERS_MS: readonly number[] = [5000, 10_000, 20_000, 30_000, 60_000]
@@ -44,11 +52,18 @@ export const CLASS_COOLDOWN_MS: Readonly<Record<PoolFailureClass, number>> = {
   AUTH: 15 * 60_000,
   QUOTA: 30_000,
   CAPACITY: 60_000,
+  // An entitlement gate is an account/subscription property, not a transient
+  // fault: re-probing it every 30 s produced 233 consecutive failures on one
+  // live identity. Six hours stops the churn while still recovering the same
+  // day after an operator upgrades the plan. The pool's optimistic probe path
+  // re-attempts cooling identities when NONE are healthy, so an early upgrade
+  // is never blocked for the full window when it is the only identity.
+  ENTITLEMENT: 6 * 3600_000,
   GATEWAY_OUTAGE: 0,
   INVALID_REQUEST: 0,
-  // A server-side policy rejection (OpenCode's free-tier client gate) is a
-  // property of the route itself, not of this credential: the key is healthy,
-  // so cooling it down records nothing a later request could act on.
+  // A route-wide server policy gate (OpenCode's free-tier client gate) is a
+  // property of the route itself, not of this credential: rotating or cooling
+  // cannot help, so it terminates instead of rotating.
   POLICY: 0,
   UPSTREAM: 30_000,
 }
@@ -67,7 +82,7 @@ const CAPACITY_RE = /\b503\b|\b529\b|overloaded|capacity|server is busy|model_ca
 // `invalid…api…key`) match the `CODE: message` detail the stream mapper carries
 // for an AUTH failure, where the original 401/403 status text is no longer part
 // of the message.
-// eslint-disable-next-line @stylistic/max-len — the AUTH_RE literal must stay one line (auditable pattern).
+// eslint-disable-next-line @stylistic/max-len -- the AUTH_RE literal must stay one line (auditable pattern).
 const AUTH_RE = /\b401\b|\b402\b|\b403\b|unauthorized|invalid.{0,4}api.{0,4}key|incorrect[_ ]api[_ ]key|permission denied|insufficient (?:credits|balance)|\bauth\b|auth_required|authentication|invalid[_ ]token/i
 
 /** Client-payload vocabulary: the request itself is unserviceable. Deliberately
@@ -144,6 +159,12 @@ export function classifyFailure(message: string): PoolFailureClass {
   // identity down cannot satisfy a policy gate, and the class deliberately
   // stays out of ROTATING_CLASSES.
   if (isFreeTierGatedError(message)) return 'POLICY'
+  // A per-account entitlement gate (OpenCode Go: "An active OpenCode Go
+  // subscription is required to use Go models.") is identity-specific: live
+  // pool state showed sibling identities answering 200 for the same model
+  // while one account was gated. It therefore rotates to the next identity
+  // with a long cooldown instead of failing the whole request.
+  if (isEntitlementGatedError(message)) return 'ENTITLEMENT'
   if (/\b503\b|\b529\b/i.test(message)) return 'CAPACITY'
   if (QUOTA_RE.test(message)) return 'QUOTA'
   if (CAPACITY_RE.test(message)) return 'CAPACITY'
@@ -232,6 +253,21 @@ interface PersistedProviderState {
 
 function emptyModelState(): IdentityModelState {
   return { cooldownUntil: 0, consecutiveFailures: 0 }
+}
+
+/** Keep only well-typed quota fields from a loaded state file. */
+function sanitizeQuota(value: unknown): IdentityQuotaState | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const candidate = value as Partial<IdentityQuotaState>
+  const quota: IdentityQuotaState = {}
+  if (typeof candidate.remainingFraction === 'number' && Number.isFinite(candidate.remainingFraction)) {
+    quota.remainingFraction = candidate.remainingFraction
+  }
+  if (typeof candidate.resetTime === 'string' || typeof candidate.resetTime === 'number') {
+    quota.resetTime = candidate.resetTime
+  }
+  if (typeof candidate.source === 'string') quota.source = candidate.source
+  return Object.keys(quota).length > 0 ? quota : undefined
 }
 
 export interface PoolEngineOptions {
@@ -531,6 +567,7 @@ export class PoolEngine {
         for (const [modelId, entry] of Object.entries(models)) {
           if (typeof entry !== 'object' || entry === null) continue
           const candidate = entry as Partial<IdentityModelState>
+          const quota = sanitizeQuota(candidate.quota)
           identities[identityId][modelId] = {
             cooldownUntil: typeof candidate.cooldownUntil === 'number' && Number.isFinite(candidate.cooldownUntil)
               ? candidate.cooldownUntil
@@ -542,6 +579,7 @@ export class PoolEngine {
               : 0,
             ...typeof candidate.lastStatus === 'number' ? { lastStatus: candidate.lastStatus } : {},
             ...typeof candidate.lastError === 'string' ? { lastError: candidate.lastError } : {},
+            ...quota === undefined ? {} : { quota },
           }
         }
       }

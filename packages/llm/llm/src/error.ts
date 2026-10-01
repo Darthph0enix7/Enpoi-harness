@@ -213,3 +213,40 @@ export const FREE_TIER_GATED_EXPLANATION =
 export function isFreeTierGatedError(detail: string): boolean {
   return /FreeTierError/i.test(detail) || /free tier can only be used/i.test(detail)
 }
+
+/**
+ * Canonical code for a per-account entitlement rejection: the credential is
+ * valid and healthy, but the account's subscription or plan does not grant the
+ * requested model. OpenCode Go answers "An active OpenCode Go subscription is
+ * required to use Go models." when the account's subscription lapses. The gate
+ * is identity-specific: sibling identities on the same route have served the
+ * same model, so a credential pool treats this as a rotating failure and cools
+ * the gated identity for a long period instead of terminating the request.
+ */
+export const ENTITLEMENT_GATED_CODE = 'ENTITLEMENT_GATED'
+
+/**
+ * User-facing explanation carried with {@link ENTITLEMENT_GATED_CODE}: the
+ * rejection is a plan property, not a credential defect, so the caller uses an
+ * identity/account whose plan grants the model, upgrades the plan, or fails
+ * over to another provider.
+ */
+export const ENTITLEMENT_GATED_EXPLANATION =
+  "the account's plan does not include this model (server-side entitlement gate);"
+  + ' use an identity whose plan grants it, upgrade the plan, or fail over to another provider.'
+
+/**
+ * Recognize subscription/entitlement gating: the account is valid but its plan
+ * does not grant the model. Deliberately narrow so payment and quota wording
+ * keeps its own class (a 402 "payment required: insufficient credits" is AUTH
+ * vocabulary, not a plan gate).
+ * @param detail - provider error code/type/message text joined into one string.
+ * @returns true when the detail is an account entitlement gate.
+ */
+export function isEntitlementGatedError(detail: string): boolean {
+  return /\bsubscription\s+(?:is\s+)?required\b/i.test(detail)
+    || /\b(?:need|requires?)\s+(?:an?\s+)?active\s+subscription\b/i.test(detail)
+    || /\bnot\s+entitled\b/i.test(detail)
+    || /\bplan\s+(?:does\s+not|doesn'?t)\s+include\b/i.test(detail)
+    || /\bupgrade\s+(?:your\s+)?plan\b/i.test(detail)
+}

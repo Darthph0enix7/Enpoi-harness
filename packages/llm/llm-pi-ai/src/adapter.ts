@@ -34,6 +34,7 @@ import type {
   Models,
   ModelThinkingLevel,
   MutableModels,
+  ProviderResponse,
   SimpleStreamOptions,
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
@@ -41,6 +42,7 @@ import {
   appendAttemptFailedRecord,
   attributionHeaders,
   contentHasImage,
+  ENTITLEMENT_GATED_EXPLANATION,
   FREE_TIER_GATED_CODE,
   FREE_TIER_GATED_EXPLANATION,
   LlmAdapter,
@@ -64,9 +66,11 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import {
   CAPACITY_BACKOFF_TIERS_MS,
   classifyFailure,
+  parseQuotaHeaders,
   PoolEngine,
   ROTATING_CLASSES,
 } from './pool.ts'
+import type { PoolFailureClass } from './pool.ts'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
@@ -453,19 +457,35 @@ export class PiAiAdapter extends LlmAdapter {
        * only possible Authorization header is deployment-owned. Any supplied
        * key on an authenticated route keeps the normal bearer header.
        */
-      const attemptOptions = (apiKeyOverride: string | undefined): SimpleStreamOptions => {
+      const attemptOptions = (apiKeyOverride: string | undefined, identityId?: string): SimpleStreamOptions => {
         const keyless = profile.keyless && apiKeyOverride === undefined
         const headers: Record<string, string | null> = { ...commonHeaders }
         if (keyless && !hasAuthorizationHeader(commonHeaders)) headers.authorization = null
         return {
           ...profileOptions(profile, reasoning, keyless ? KEYLESS_REQUEST_KEY : apiKeyOverride),
           ...commonOptions,
+          // Pooled attempts attribute the response's rate-limit headers to the
+          // identity that served them, so the Keys card can show live quota for
+          // upstreams that expose it. Responses without those headers record
+          // nothing and leave the previous reading intact.
+          ...identityId === undefined ? {} : {
+            onResponse: (response: ProviderResponse): void => {
+              const engine = this.config.pool
+              if (engine === undefined) return
+              const quota = parseQuotaHeaders(response.headers)
+              if (quota !== undefined) engine.recordQuota(options.provider, identityId, options.model, quota)
+            },
+          },
           ...keyless ? { headers: headers as Record<string, string> } : {},
         }
       }
-      const makeAttempt = (apiKeyOverride: string | undefined, signal: AbortSignal): AsyncGenerator<StreamChunk> =>
+      const makeAttempt = (
+        apiKeyOverride: string | undefined,
+        signal: AbortSignal,
+        identityId?: string,
+      ): AsyncGenerator<StreamChunk> =>
         toStreamChunks(snapshot.models.streamSimple(model, context, {
-          ...attemptOptions(apiKeyOverride),
+          ...attemptOptions(apiKeyOverride, identityId),
           signal,
         }), model.contextWindow, signal)[Symbol.asyncIterator]()
 
@@ -531,6 +551,8 @@ export class PiAiAdapter extends LlmAdapter {
         const deadline = now() + deadlineMs
         let attempts = 0
         let lastFailure = 'no identity was attempted'
+        /** Failure class of every completed attempt, for the exhaustion summary. */
+        const attemptedFailureClasses: PoolFailureClass[] = []
         for (const candidate of resolvableOrder) {
           if (attempts >= maxAttempts || now() > deadline) break
           if (upstream.aborted) {
@@ -549,7 +571,7 @@ export class PiAiAdapter extends LlmAdapter {
           // upstream connection open alongside the next attempt's.
           const attemptController = new AbortController()
           const attemptSignal = AbortSignal.any([watchdog.signal, attemptController.signal])
-          const iterator = makeAttempt(keylessAttempt ? undefined : key, attemptSignal)
+          const iterator = makeAttempt(keylessAttempt ? undefined : key, attemptSignal, identity.id)
           const buffered: StreamChunk[] = []
           let committed = false
           let failure: LlmFailure | undefined
@@ -606,6 +628,7 @@ export class PiAiAdapter extends LlmAdapter {
           }
           if (committed) return
           const failureClass = classifyFailure(failure?.message ?? '')
+          attemptedFailureClasses.push(failureClass)
           // A keyless attempt has no credential to rotate or cool: a 401/403
           // is the route's own answer (e.g. a free tier that now demands a
           // key), so it ends the request terminally instead of burning pool
@@ -621,9 +644,11 @@ export class PiAiAdapter extends LlmAdapter {
           lastFailure = failure?.message ?? lastFailure
           if (!ROTATING_CLASSES.has(failureClass)) {
             // GATEWAY_OUTAGE / INVALID_REQUEST / POLICY: rotating cannot help —
-            // every identity hits the same gateway, payload, or server-side
-            // policy. POLICY keeps its own terminal code and carries the
-            // free-tier client-gate explanation to the caller.
+            // every identity hits the same gateway, payload, or route-wide
+            // server policy. POLICY is OpenCode's free-tier client gate, which
+            // is a property of the route itself and keeps its terminal code and
+            // explanation. Entitlement gates are identity-specific and rotate,
+            // so they never reach this branch.
             throw new LlmError(
               `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`
               + (failureClass === 'POLICY' ? ` — ${FREE_TIER_GATED_EXPLANATION}` : ''),
@@ -663,8 +688,15 @@ export class PiAiAdapter extends LlmAdapter {
               const state = snap[identity.id]?.[options.model]
               const consecutive = state?.consecutiveFailures ?? 1
               const tierIdx = Math.min(Math.max(0, consecutive - 1), CAPACITY_BACKOFF_TIERS_MS.length - 1)
-              const backoffMs = CAPACITY_BACKOFF_TIERS_MS[tierIdx] ?? CAPACITY_BACKOFF_TIERS_MS[0] ?? 5000
-              await engine.backoff(backoffMs, upstream)
+              const tierMs = CAPACITY_BACKOFF_TIERS_MS[tierIdx] ?? CAPACITY_BACKOFF_TIERS_MS[0] ?? 5000
+              // Never let the courtesy delay consume the request budget: a tier
+              // that does not fit inside the remaining deadline is skipped, so
+              // the remaining identities are still attempted before the
+              // deadline instead of being skipped after a 60 s sleep.
+              const remainingMs = deadline - now()
+              if (tierMs < remainingMs) {
+                await engine.backoff(tierMs, upstream)
+              }
             }
           }
         }
@@ -712,6 +744,16 @@ export class PiAiAdapter extends LlmAdapter {
             enriched += `; ${perIdentity})`
           } else {
             enriched += ` (${perIdentity})`
+          }
+          // Name the entitlement cause honestly: an all-gated pool is not a
+          // generic outage, and a mixed pool should still say how many
+          // identities the plan gate blocked.
+          const entitlementAttempts = attemptedFailureClasses
+            .filter(failure => failure === 'ENTITLEMENT').length
+          if (entitlementAttempts > 0) {
+            enriched += entitlementAttempts === attemptedFailureClasses.length
+              ? ` — ${ENTITLEMENT_GATED_EXPLANATION}`
+              : ` — ${entitlementAttempts} of ${attemptedFailureClasses.length} attempts were entitlement-gated`
           }
           throw new LlmError(enriched, 'PROVIDER_POOL_EXHAUSTED')
         }

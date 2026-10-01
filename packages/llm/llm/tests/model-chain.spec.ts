@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
   createUserMessage,
+  ENTITLEMENT_GATED_CODE,
   FREE_TIER_GATED_CODE,
   FREE_TIER_GATED_EXPLANATION,
   LLM_ATTEMPT_FAILED_EVENT,
@@ -768,7 +769,7 @@ describe('model-group failover', () => {
     await ctx.plugin(LlmRuntime)
     const records: CapturedRecord[] = []
     provideSessions(ctx, records)
-    const gated = `403 {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}`
+    const gated = '403 {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}'
     const failing = new FailingAdapter(new LlmError(
       `${gated} — ${FREE_TIER_GATED_EXPLANATION}`,
       FREE_TIER_GATED_CODE,
@@ -803,5 +804,33 @@ describe('model-group failover', () => {
         },
       },
     })
+  })
+
+  it('escalates an identity entitlement gate to the next chain link', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new FailingAdapter(new LlmError(
+      '403 An active OpenCode Go subscription is required to use Go models.',
+      ENTITLEMENT_GATED_CODE,
+    ))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'entitled' ? group('entitled', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'entitled',
+      messages: [],
+    }))
+
+    // Identity/account gate, not a dead route: the next link is tried.
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    expect(answering.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      '[model-chain] entitled: link 1 chain-a/m-a → RETRYABLE (ENTITLEMENT_GATED) → link 2 chain-b/m-b',
+    )
   })
 })

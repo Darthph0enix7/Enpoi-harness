@@ -38,7 +38,12 @@ const POOLED = (baseURL: string, strategy: 'priority-sticky' | 'balanced' = 'pri
   },
 })
 
-function adapterOf(providers: Record<string, unknown>, engine: PoolEngine, creds: Record<string, string | undefined>, deadlineMs?: number): PiAiAdapter {
+function adapterOf(
+  providers: Record<string, unknown>,
+  engine: PoolEngine,
+  creds: Record<string, string | undefined>,
+  deadlineMs?: number,
+): PiAiAdapter {
   return new PiAiAdapter({
     profiles: () => resolveProfiles(providers as Parameters<typeof resolveProfiles>[0]),
     resolveApiKey: () => Promise.resolve('unused'),
@@ -54,7 +59,7 @@ async function streamText(adapter: PiAiAdapter): Promise<string> {
   const chunks: string[] = []
   for await (const c of adapter.stream({ provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })) {
     if (c.type === 'text-delta') chunks.push(c.text)
-    if (c.type === 'finish' && c.reason.kind === 'error') throw (c.reason as any).failure
+    if (c.type === 'finish' && c.reason.kind === 'error') throw (c.reason as { failure: unknown }).failure
   }
   return chunks.join('')
 }
@@ -135,7 +140,7 @@ describe('fake proxy — exhaustive pool matrix', () => {
   })
 
   it('all-cooling probe order is priority-first not cooldown-sorted (oracle Link 2/3)', async () => {
-    let now = 1_000_000
+    const now = 1_000_000
     const engine = engineOf({ now: () => now })
     lastEngine = engine
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'QUOTA', 'Resets in 60min.')
@@ -147,7 +152,7 @@ describe('fake proxy — exhaustive pool matrix', () => {
   it('pool-exhausted includes soonest reset and never shadows a ready identity', async () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1', limits: { requests: 1, windowMs: 60_000 } }, { id: 'pri-2', key: 'k2', limits: { requests: 1, windowMs: 60_000 } }] })
     try {
-      let now = 1_000_000
+      const now = 1_000_000
       const engine = engineOf({ now: () => now })
       lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2', K3: undefined }, 5000)
@@ -235,7 +240,7 @@ describe('CAPACITY backoff tier (oracle #5b)', () => {
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'CAPACITY', '503 overloaded')
     let snap = engine.snapshot('deepseek')
     expect(snap['pri-1']?.['deepseek-v4-flash']?.consecutiveFailures).toBe(1)
-    let tierIdx = Math.min(Math.max(0, 1 - 1), CAPACITY_BACKOFF_TIERS_MS.length - 1)
+    let tierIdx = Math.min(0, CAPACITY_BACKOFF_TIERS_MS.length - 1)
     expect(CAPACITY_BACKOFF_TIERS_MS[tierIdx]).toBe(5000)
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'CAPACITY', '503 overloaded')
     snap = engine.snapshot('deepseek')
@@ -284,7 +289,9 @@ describe('CAPACITY backoff tier (oracle #5b)', () => {
           },
         },
       })
-      const adapter = adapterOf(twoPool(fake.url), engine, { K1: 'k1', K2: 'k2' })
+      // A deadline wide enough that the tiers fit unclamped; the deadline-clamp
+      // behavior itself is covered by adapter-pool.spec.ts.
+      const adapter = adapterOf(twoPool(fake.url), engine, { K1: 'k1', K2: 'k2' }, 600_000)
       fake.setScenario('pri-1', { failMode: '503' })
       fake.setScenario('pri-2', { failMode: '503' })
       await expect(streamText(adapter)).rejects.toMatchObject({ code: 'PROVIDER_POOL_EXHAUSTED' })
@@ -378,7 +385,7 @@ describe('mid-stream (oracle #5e)', () => {
       try {
         for await (const c of adapter.stream({ provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })) {
           chunks.push(c)
-          if ((c as any).type === 'finish' && (c as any).reason?.kind === 'error') throw (c as any).reason.failure
+          if (c.type === 'finish' && c.reason.kind === 'error') throw (c.reason as { failure: unknown }).failure
         }
       } catch (e) {
         caught = e
@@ -426,9 +433,10 @@ describe('MISSING_CREDENTIAL when no resolvable identity (oracle #7)', () => {
       try {
         await streamText(adapter)
         expect.unreachable('should have thrown')
-      } catch (e: any) {
-        expect(e.code).toBe('MISSING_CREDENTIAL')
-        expect(String(e.message)).toContain('deepseek')
+      } catch (e) {
+        const err = e as { code?: string; message?: unknown }
+        expect(err.code).toBe('MISSING_CREDENTIAL')
+        expect(String(err.message)).toContain('deepseek')
       }
     } finally {
       await fake.close()
