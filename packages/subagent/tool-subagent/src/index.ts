@@ -695,17 +695,58 @@ export function listRoleRegistry(
 }
 
 /**
+ * The registry read used to audit a STORED availability list (`permissions.
+ * agents[role].available` and the registry's `tools.available`): operator data
+ * outlives tool renames, so an unresolvable name is dropped with a warning
+ * instead of reaching `tools.restrict()`, whose unknown-allow check would
+ * abort the child's spawn. The code-authored `config.toolFilter` never goes
+ * through this audit — there an unknown name stays a build-time contract and
+ * keeps throwing.
+ */
+interface StoredAvailabilityAudit {
+  /** Whether the registry resolves a tool name for the spawning agent's scope. */
+  readonly isKnown: (name: string) => boolean
+  /** Warning sink for each dropped name. */
+  readonly warn: (message: string) => void
+}
+
+/**
+ * Drop names a stored availability list carries that the live registry no
+ * longer resolves, warning once per name. The known subset keeps its order;
+ * the caller re-deduplicates when composing the filter.
+ * @param available - the stored allowlist, in stored order.
+ * @param role - the role the list belongs to (for the warning).
+ * @param audit - registry lookup plus warning sink.
+ * @returns the resolvable names, in their stored order.
+ */
+function auditStoredAvailability(
+  available: readonly string[],
+  role: string | undefined,
+  audit: StoredAvailabilityAudit,
+): string[] {
+  const kept: string[] = []
+  for (const name of available) {
+    if (audit.isKnown(name)) kept.push(name)
+    else audit.warn(`tool-subagent: role "${role ?? 'unknown'}" stores unavailable tool "${name}" — dropping it so the role still spawns`)
+  }
+  return kept
+}
+
+/**
  * Compose the per-child tool filter: the configured filter merged with the
  * shared worker deny list and the selected role's surface. Configured deny
  * entries survive (first, de-duplicated), the configured `allow` list passes
  * through untouched, and `deny` wins over `allow` in `tools.restrict()`.
- * Unknown deny names are no-ops there. Providers without the `toolFilter`
- * capability keep the configured filter unchanged.
+ * Unknown deny names are no-ops there. A stored availability list is audited
+ * against the live registry first (see {@link StoredAvailabilityAudit});
+ * configured code-authored names are never audited. Providers without the
+ * `toolFilter` capability keep the configured filter unchanged.
  * @param provider - the provider that will start the child.
  * @param configured - the tool instance's configured filter, if any.
  * @param document - the live `enpoi-orchestration` document, if any.
  * @param role - the selected specialist role, if any.
  * @param roleEntry - the registry entry for `role`, when the registry has it.
+ * @param audit - live-registry audit for stored availability names.
  * @returns the composed filter, or the configured filter for a provider that cannot apply one.
  */
 function childToolFilter(
@@ -714,6 +755,7 @@ function childToolFilter(
   document: OrchestrationSettingsDocument | undefined,
   role: string | undefined,
   roleEntry: ResolvedRole | undefined,
+  audit: StoredAvailabilityAudit,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
   // The Oracle is the one child allowed to delegate (operator design: the
@@ -728,14 +770,14 @@ function childToolFilter(
   // is the fallback that gives a user-defined role a surface; absent both, the
   // registry entry's built-in deny extras apply. The shared anti-leak floor is
   // always unioned in, and the whiteboard keep list survives every surface.
-  const available = roleAvailableAllowlist(document, role) ?? roleEntry?.available
-  if (available !== undefined) {
+  const stored = roleAvailableAllowlist(document, role) ?? roleEntry?.available
+  if (stored !== undefined) {
     // Operator-defined surface: allow the named tools plus the whiteboard
     // keep list, deny everything else except the shared anti-leak floor
     // (never widen what SHARED_CHILD_DENY already removes).
     return {
       ...configured,
-      allow: [...new Set([...configured?.allow ?? [], ...available, ...SHARED_CHILD_KEEP])],
+      allow: [...new Set([...configured?.allow ?? [], ...auditStoredAvailability(stored, role, audit), ...SHARED_CHILD_KEEP])],
       deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
@@ -1086,7 +1128,12 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...(() => {
-              const delegated = childToolFilter(subagentProvider, config.toolFilter, document, role, roleEntry)
+              const delegated = childToolFilter(subagentProvider, config.toolFilter, document, role, roleEntry, {
+                // A stored availability name counts as known when the parent's
+                // scope resolves it; the child inherits exactly that surface.
+                isKnown: name => runtimeCtx.tools.get(name, parent) !== undefined,
+                warn: message => runtimeCtx.logger.warn(message),
+              })
               return delegated === undefined ? {} : { toolFilter: delegated }
             })(),
             ...maxDepth !== undefined ? { maxDepth } : {},

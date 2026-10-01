@@ -69,7 +69,7 @@ enpoi-orchestration:
         available: [read, glob, grep, web_search]
 ```
 
-`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换该角色内置的拒绝表，并始终受共享子级下限约束；模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。
+`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换该角色内置的拒绝表，并始终受共享子级下限约束；模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。由于该列表是运维者存储的数据，每次派生都会对照实时注册表检查其中的每个名称：无法解析的名称会被丢弃并给出 `role "…" stores unavailable tool "…"` 警告，子 agent 以已知子集启动，因此工具改名不会让角色无法派发。由代码编写的 `toolFilter` 配置保持严格的 `tools.restrict()` 契约：未知的 allow 名称仍会抛出。
 
 ### 前台与后台模式
 
@@ -228,6 +228,7 @@ Start independent subagent delegations together in one assistant message and con
 - **后台运行不通过本工具公开结果**——一次性任务的最终输出通过通用 Task 接口收集，可继续子 agent 的输出留在其自身会话中，按其 subagent id 读取。结算通知会说明该子 agent 如何结束，并携带其最终 assistant 输出中的非空文本，但它不是本次调用的返回值，也无法在此等待。
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）——可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
 - **随附 fork 工具不能选择子级 LLM 路由**——它们继承父级提供方与模型，使复制的对话前缀仍有资格复用 KV Cache。仅当路由变更能保留复用或公开有界重算成本时，才重新启用选择。
+- **存储的角色可用列表对改名是宽容的**——派生时会丢弃 `tools.available` 或 `permissions.agents[<role>].available` 中实时注册表无法解析的名称，并逐个名称警告一次；子 agent 在没有该工具的情况下启动。由代码编写的 `config.toolFilter` 不经过该审计，未知的 allow 名称仍会失败。
 - **非路由子 agent 策略按实例固定**——另一个 persona、工具过滤器或深度上限需要另一个名称不同的工具。LLM 选择要求启用逐 Session 偏好，且提供方必须声明 `agentOptions`；两个进程内提供方和 DSH SDK 会声明该能力，而 ACP、Codex 与 Claude Code 会拒绝它，而不是忽略它。
 
 <a id="dev-note"></a>

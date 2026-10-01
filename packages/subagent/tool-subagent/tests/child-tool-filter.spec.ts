@@ -133,6 +133,62 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
   })
 
+  it('drops stale names from the registry availability list with a warning and still spawns', async () => {
+    // A stored list outlives tool renames: `todo_read`/`web_fetch` are not in
+    // this deployment's live registry, and an allow name tools.restrict() does
+    // not know would abort the child's spawn. The audit drops them instead.
+    const warnings: string[] = []
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      {
+        provider: 'mock',
+        settingsDocument: {
+          roles: { librarian: { tools: { available: ['read', 'todo_read', 'web_fetch'] } } },
+        },
+      },
+      { onStart: (request) => { seen = request } },
+    )
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    const result = await callSubagent(ctx, { description: 'Librarian: research the API documentation', prompt: 'work' })
+    expect(result.isError).toBe(false)
+    expect(seen?.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
+    expect(warnings.filter(message => message.includes('"todo_read"'))).toHaveLength(1)
+    expect(warnings.filter(message => message.includes('"web_fetch"'))).toHaveLength(1)
+    expect(warnings[0]).toContain('role "librarian"')
+  })
+
+  it('drops stale names from the permissions allowlist with a warning and still spawns', async () => {
+    const warnings: string[] = []
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      {
+        provider: 'mock',
+        settingsDocument: {
+          roles: { fixer: { tools: { available: ['grep'] } } },
+          permissions: { agents: { fixer: { available: ['read', 'web_fetch'] } } },
+        },
+      },
+      { onStart: (request) => { seen = request } },
+    )
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    const result = await callSubagent(ctx, { description: 'Fixer: patch the parser bug', prompt: 'work' })
+    expect(result.isError).toBe(false)
+    expect(seen?.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"web_fetch"')
+    expect(warnings[0]).toContain('role "fixer"')
+  })
+
+  it('leaves a code-authored unknown name for tools.restrict() to reject', async () => {
+    // The strict contract is unchanged for code-authored filters: config.toolFilter
+    // is build-time data, so the audit never drops its names — the real child
+    // composition still throws in tools.restrict() for an unknown allow name.
+    const request = await captureRequest('Do the thing', {
+      toolFilter: { allow: ['read', 'not_a_registered_tool'] },
+    })
+    expect(request.toolFilter?.allow).toContain('not_a_registered_tool')
+  })
+
   it('passes the configured filter through unchanged when the provider cannot apply one', async () => {
     // The capability-less provider runtime rejects the unmodified filter rather
     // than silently applying a partial worker surface.

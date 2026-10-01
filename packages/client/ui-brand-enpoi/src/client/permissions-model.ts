@@ -84,8 +84,8 @@ export interface OrchestrationSettingsView {
 
 /** Shipped code defaults (not YAML): reads, web, and the subagent family allow. */
 const SHIPPED_ALLOW_TOOLS: readonly string[] = [
-  'read', 'glob', 'grep', 'web_search', 'web_fetch',
-  'subagent', 'task', 'workflow', 'job_output', 'job_list', 'job_kill',
+  'read', 'glob', 'grep', 'web_search',
+  'subagent', 'workflow', 'job_output', 'job_list', 'job_kill',
   // Delivery declaration only: no filesystem or network effect, and the
   // unattended peer/driver runs must not stall on an unconfigured ask.
   'present',
@@ -108,11 +108,13 @@ const SHIPPED_ASK_TOOLS: readonly string[] = ['bash', 'str_replace_editor']
  * a presentation overlay only: PRESENCE comes from the live registry
  * projection (`buildPermissionToolRows` appends every registered tool this
  * list does not name), so a tool added by any plugin or upstream build shows
- * up with no code change here.
+ * up with no code change here. Names listed here are shown even when the
+ * deployment does not register them, so it carries only tools this
+ * deployment's registry resolves.
  */
 export const CORE_PERMISSION_TOOLS: readonly string[] = [
-  'bash', 'read', 'glob', 'grep', 'edit', 'write', 'str_replace_editor', 'todo_write',
-  'web_search', 'web_fetch', 'skill', 'plan_mode', 'subagent', 'task', 'workflow',
+  'bash', 'read', 'glob', 'grep', 'edit', 'write', 'todo_write',
+  'web_search', 'skill', 'subagent', 'workflow',
   'job_output', 'job_list', 'job_kill', 'oracle_review', 'request_evidence',
   'roundtable', 'chorus', 'memory_save', 'memory_search', 'memory_rescind',
   'memory_confirm', 'ask_user_question',
@@ -587,14 +589,16 @@ export function toolGrantApplies(perms: PermissionsConfig, agent: string | undef
  * theirs (children keep only the host's four-tool keep floor). MCP server
  * tools are deliberately absent here: MCP availability is a sidebar
  * capability toggle (per-server, hot-swappable), not a per-role surface
- * decision.
+ * decision. Every name must resolve in the deployment's live registry: this
+ * array is written whole into `permissions.agents[role].available`, which the
+ * spawn path applies as a strict `tools.restrict({allow})`.
  */
 const FULL_OPERATOR_SURFACE: readonly string[] = [
   'bash', 'read', 'glob', 'grep', 'read_image',
-  'edit', 'write', 'str_replace_editor',
-  'web_search', 'web_fetch',
-  'todo_write', 'todo_read', 'skill', 'plan_mode', 'exit_plan_mode',
-  'subagent', 'task', 'workflow', 'ralph', 'goal', 'create_goal', 'get_goal', 'update_goal',
+  'edit', 'write',
+  'web_search',
+  'todo_write', 'skill', 'exit_plan_mode',
+  'subagent', 'workflow', 'ralph', 'create_goal', 'get_goal', 'update_goal',
   'oracle_review', 'request_evidence', 'roundtable', 'chorus',
   'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
   'job_output', 'job_list', 'job_kill', 'ask_user_question',
@@ -606,26 +610,29 @@ const FULL_OPERATOR_SURFACE: readonly string[] = [
  * defaults: every sub-agent may run bash (reading, analysis, tests), use
  * skills, search/write memory, and keep its own todo list; readers keep only
  * the mutation veto. MCP rows are deliberately absent — MCP availability is a
- * sidebar capability toggle, not a per-role surface decision.
+ * sidebar capability toggle, not a per-role surface decision. Like
+ * {@link FULL_OPERATOR_SURFACE}, every name must resolve in the deployment's
+ * live registry: a role's `available` list is applied as a strict
+ * `tools.restrict({allow})` at spawn, so a stale name would abort the child.
  */
 export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
   orchestrator: FULL_OPERATOR_SURFACE,
   sysadmin: FULL_OPERATOR_SURFACE,
   creator: FULL_OPERATOR_SURFACE,
-  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
-  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
-  explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save'],
-  librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch'],
-  oracle: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'str_replace_editor', 'todo_write', 'todo_read', 'skill', 'memory_search', 'memory_save', 'memory_rescind', 'memory_confirm', 'web_search', 'web_fetch', 'request_evidence', 'subagent', 'task'],
-  referee: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  chair: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  skeptic: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  architect: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  pragmatist: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  visionary: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  experiencer: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  integrator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
-  curator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'web_fetch', 'memory_search', 'todo_write', 'todo_read'],
+  fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
+  designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
+  explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'skill', 'memory_search', 'memory_save'],
+  librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
+  oracle: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'memory_rescind', 'memory_confirm', 'web_search', 'request_evidence', 'subagent'],
+  referee: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  chair: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  skeptic: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  architect: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  pragmatist: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  visionary: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  experiencer: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  integrator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
+  curator: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
 }
 
 /**

@@ -69,7 +69,7 @@ enpoi-orchestration:
         available: [read, glob, grep, web_search]
 ```
 
-`role` wins over inference. Without it the tool infers a role from the delegation text (explicit registry names first, then task heuristics). An unknown `role` fails the call with the available ids. A role's `tools.available` list replaces that role's built-in deny map and is always bounded by the shared child floor; model routing reads `enpoi-orchestration.personas[<role>]` fresh per spawn, so assigning or clearing a seat model applies to the next delegation without a restart.
+`role` wins over inference. Without it the tool infers a role from the delegation text (explicit registry names first, then task heuristics). An unknown `role` fails the call with the available ids. A role's `tools.available` list replaces that role's built-in deny map and is always bounded by the shared child floor; model routing reads `enpoi-orchestration.personas[<role>]` fresh per spawn, so assigning or clearing a seat model applies to the next delegation without a restart. Because that list is stored operator data, each name is checked against the live registry at spawn: an unresolvable name is dropped with a `role "…" stores unavailable tool "…"` warning and the child starts with the known subset, so a tool rename cannot brick a role. The code-authored `toolFilter` config keeps the strict `tools.restrict()` contract, where an unknown allow name still throws.
 
 ### Foreground and background modes
 
@@ -228,7 +228,7 @@ These limits define what this tool does not return or enforce; they are current 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries nonempty text from its final assistant output, but it is not this call's return value and cannot be awaited here.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
 - **Shipped fork tools cannot select a child LLM route** — they inherit the parent's provider and model to keep the copied conversation prefix eligible for KV Cache reuse. Re-enable selection only when route changes preserve reuse or expose a bounded recomputation cost.
-- **A role's available-list typos are silent** — an unknown tool name in `tools.available` keeps that tool denied rather than failing, matching the permissions matrix path.
+- **Stored role availability is advisory against renames** — the spawn drops a name in `tools.available` or `permissions.agents[<role>].available` that the live registry does not resolve and warns once per name; the child starts without that tool. A code-authored `config.toolFilter` is not audited and still fails on an unknown allow name.
 - **Non-routing child policy is fixed per instance** — another persona, tool filter, or depth cap requires another distinctly named tool. LLM selection requires an enabled per-Session preference and a provider that advertises `agentOptions`; both in-process providers and DSH SDK advertise it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
 <a id="dev-note"></a>

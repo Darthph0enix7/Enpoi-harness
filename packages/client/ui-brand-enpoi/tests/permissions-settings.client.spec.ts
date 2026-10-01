@@ -178,7 +178,7 @@ describe('buildPermissionToolRows', () => {
     )
     const ids = rows.map(row => row.id)
     expect(ids.filter(id => id === 'bash')).toHaveLength(1)
-    expect(ids).toContain('str_replace_editor')
+    expect(ids).toContain('todo_write')
     expect(ids[ids.length - 1]).toBe('mcp__*')
     // The server row is the derived wildcard the resolver honors, with its
     // live tools as members — never a standalone persisted key.

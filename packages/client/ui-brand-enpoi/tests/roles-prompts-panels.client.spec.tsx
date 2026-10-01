@@ -180,7 +180,7 @@ describe('RolesPanel', () => {
         // (SHARED_CHILD_KEEP in tool-subagent).
         available: [
           'bash', 'edit', 'glob', 'grep', 'memory_save', 'memory_search', 'read_image', 'skill',
-          'str_replace_editor', 'todo_read', 'todo_write', 'web_fetch', 'web_search',
+          'todo_write', 'web_search',
           'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'write',
         ],
       },

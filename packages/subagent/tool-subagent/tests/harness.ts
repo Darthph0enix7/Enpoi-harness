@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -45,6 +45,25 @@ const TEST_ALLOWED_MODELS = [
   { provider: 'missing', model },
 ])
 
+/**
+ * Stub globals for the names the stored-availability specs use: the spawn path
+ * audits a stored allowlist against the live registry, so a real deployment
+ * registers these tools and the specs must too.
+ */
+const TEST_REGISTERED_TOOLS = ['bash', 'read', 'grep', 'edit', 'write'] as const
+
+/** Register the stub surface after the ToolRuntime is active. */
+function registerStubTools(ctx: Context): void {
+  for (const name of TEST_REGISTERED_TOOLS) {
+    ctx.tools.register(defineContentToolFixture({
+      name,
+      description: `stub ${name}`,
+      parameters: {},
+      execute: () => Promise.resolve([]),
+    }))
+  }
+}
+
 export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Config> = {}): Promise<Context> {
   const ctx = new Context()
   const { withModelSelection, parentAgentOptions, settingsDocument, settingsHandle, ...config } = toolConfig
@@ -83,6 +102,7 @@ export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Co
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  registerStubTools(ctx)
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SessionProjectionRegistry)
   const provider = await mock.mountScriptedProvider(ctx, { name: 'mock', ...mockConfig })
