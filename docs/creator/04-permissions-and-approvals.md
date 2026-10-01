@@ -50,13 +50,13 @@ When a policy resolves `ask` the registry presents a card (`packages/client/ui-a
 | Reject | `rejected` | corrective tool error to the asker |
 | Cancel / nobody | `cancelled` / `unavailable` | fail closed |
 
-The ask/outcome pair is durable audit (`approval/asked` + `approval/decided`, `packages/interaction/user-approval/src/index.ts:223-242`). Session policy: `'never'` rejects deterministically **before any answerer** (`index.ts:275-283`); a missing/throwing answerer yields `unavailable`; a pending ask expires after `answerTimeoutMs` (default 15 min, `0` disables) and resolves `unavailable` (`index.ts:151`, `315-365`).
+The ask/outcome pair is durable audit (`approval/asked` + `approval/decided`, `packages/interaction/user-approval/src/index.ts:223-242`). For a danger-list rule the card headline states the exact scope of the default action — "Always allow" grants only that exact command, while every command of the verb requires the separate "Allow all `<verb>`" opt-in; an ordinary rule keeps its wording because its default pin is the rule pattern. Session policy: `'never'` rejects deterministically **before any answerer** (`index.ts:275-283`); a missing/throwing answerer yields `unavailable`; a pending ask expires after `answerTimeoutMs` (default 15 min, `0` disables) and resolves `unavailable` (`index.ts:151`, `315-365`).
 
 ## 5. Grants (standing allows)
 
 - Stored in `permissions.grants` keyed by generated id (`g-<base36>-<rand>`, `index.ts:951-953`). Host-written only: the card answers, the host observes `approval/decided` and persists the grant in a revision-fenced settings write, retrying up to 3 times on `SETTINGS_CONFLICT` (`index.ts:948-981`, `1018-1060`).
 - Each grant records `tool`, optional `pattern`, the asking `agent` (audit only) and `global: true` — a card grant covers **all agents** (`policy.ts:24-42`, `819-828`).
-- **Exact-command pin vs broad allow**: for a danger-list ask (`rm`, `rmdir`, `dd`, `mkfs*`, `chmod -R`, …, `policy.ts:347-368`) the card's default "always" pins the exact raw command; the separate "allow all `<verb>`" pins the matched rule pattern and requires the caller to opt in (`policy.ts:765-812`).
+- **Exact-command pin vs broad allow**: for a danger-list ask (`rm`, `rmdir`, `dd`, `mkfs*`, `chmod -R`, …, `policy.ts:347-368`) the card's default "always" pins the exact raw command; the separate "allow all `<verb>`" pins the matched rule pattern and requires the caller to opt in (`policy.ts:765-812`). The ask copy states that scope on the card itself, so "Always allow" is never presented as a verb-level grant.
 - A forwarded child's broad grant needs a **second confirmation card** before it is stored (`packages/enpoi-capabilities/src/forwarding.ts:954-986`).
 - Grants are checked after deny rules in both resolvers; a grant can never turn `deny` into `allow` (`policy.ts:12-14`, `forwarding.ts:8-18`).
 
