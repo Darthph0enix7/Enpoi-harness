@@ -13,6 +13,21 @@
   border-color: var(--dsw-alias-state-business-primary);
 }
 
+/* The wrapper is the field's visual box: paint the ring here so it follows the
+ * rounded border box at the field's full size. The atom's own ring would trace
+ * its smaller, square box, and the atom's single-class `outline: none` loses to
+ * themed `:focus-visible` rules with higher specificity — suppress through the
+ * wrapper so the atom stays silent under every theme. */
+.wrap:has(> .input:focus-visible) {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.wrap .input:focus,
+.wrap .input:focus-visible {
+  outline: none;
+}
+
 .icon {
   display: inline-flex;
   width: 16px;

@@ -14,6 +14,20 @@
 .surface {
   anchor-name: var(--dsh-menu-anchor);
   isolation: isolate;
+  /* Padding a consumer keeps between the surface edge and its scrolling list. */
+  --dsh-menu-inset: 4px;
+}
+
+/* A listbox that scrolls inside the surface (the slash menu keeps the role on
+ * its inner list so a crumb header stays out of the options) follows the
+ * surface's inset shape: themed glass highlights, focus rings, and first/last
+ * row corners then trace the rounded container instead of a square band. */
+.surface > [role='listbox'] {
+  border-radius: calc(var(--dsw-radius-lg) - var(--dsh-menu-inset));
+}
+
+.compact > [role='listbox'] {
+  border-radius: calc(var(--dsw-radius-md) - var(--dsh-menu-inset));
 }
 
 /* Filtering only the background keeps nested menus and fixed overlays free of
