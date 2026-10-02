@@ -73,8 +73,14 @@ const ASK_SENTENCE = 'Approval policy: ask. Operations that require approval may
  * The audit pair must be turn-enclosed: the turn is the durable log's
  * commit/replay boundary, so a bare event appended between turns is
  * indistinguishable from a crash tail and silently dropped on reload.
+ *
+ * Exported for forwarders that must not dispatch a card into an idle session:
+ * a forwarded ask can observe the asking session's idle state and park until
+ * its next `turn/start` instead of letting `request()` reject the ask.
+ * @param session - the session whose log supplies the open-turn fold.
+ * @returns `true` while a `turn/start` is not yet closed by a `turn/end`.
  */
-function hasOpenTurn(session: Session): boolean {
+export function hasOpenTurn(session: Session): boolean {
   for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
     // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const type = session.eventAt(SessionSeq(seq))?.type

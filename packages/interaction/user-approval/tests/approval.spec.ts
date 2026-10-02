@@ -7,7 +7,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ApprovalService, { ApprovalOutcome, ApprovalRequest, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { ApprovalOutcome, ApprovalRequest, hasOpenTurn, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 
 /**
  * A minimal Agent stand-in — the service only reaches `agent.session.append`
@@ -42,6 +42,16 @@ async function mounted(): Promise<Context> {
 function requestOf(agent: Agent, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
   return { agent, toolName: 'echo', ...overrides }
 }
+
+describe('hasOpenTurn', () => {
+  it('folds turn boundaries for forwarders that must not dispatch into an idle session', () => {
+    expect(hasOpenTurn(fakeAgent([]).agent.session)).toBe(false)
+    expect(hasOpenTurn(fakeAgent([{ type: 'user/message' }]).agent.session)).toBe(false)
+    expect(hasOpenTurn(fakeAgent([{ type: 'turn/start' }, { type: 'user/message' }]).agent.session)).toBe(true)
+    expect(hasOpenTurn(fakeAgent([{ type: 'turn/start' }, { type: 'turn/end' }]).agent.session)).toBe(false)
+    expect(hasOpenTurn(fakeAgent([{ type: 'turn/start' }, { type: 'turn/end' }, { type: 'turn/start' }]).agent.session)).toBe(true)
+  })
+})
 
 describe('ApprovalService.request', () => {
   it('throws before appending anything when no turn has ever opened (idle ask)', async () => {
