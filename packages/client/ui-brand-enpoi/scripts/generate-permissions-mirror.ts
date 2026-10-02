@@ -342,8 +342,8 @@ export function renderMirror(
   lines.push('')
   lines.push('/** Shipped per-tool defaults from the host policy resolver. */')
   lines.push("export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({")
-  for (const key of Object.keys(data.shippedToolDefaults)) {
-    lines.push(`  ${quote(key)}: ${quote(data.shippedToolDefaults[key])},`)
+  for (const [key, value] of Object.entries(data.shippedToolDefaults)) {
+    lines.push(`  ${quote(key)}: ${quote(value)},`)
   }
   lines.push('})')
   lines.push('')
