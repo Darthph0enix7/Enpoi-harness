@@ -68,6 +68,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        data-dsh-list-surface=""
       >
         {headless
           ? children

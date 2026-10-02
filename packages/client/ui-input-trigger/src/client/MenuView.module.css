@@ -285,6 +285,10 @@
   background: none;
   box-shadow: none;
   backdrop-filter: none;
+  /* Flattened inside the Sheet: the enclosing sheet panel is the decorated
+     surface, so this card publishes its own square geometry. */
+  --dsh-surface-radius: 0px;
+  --dsh-surface-inset: 0px;
 }
 
 .sheetMenu[data-overflow-below]::after {
@@ -293,6 +297,8 @@
 
 .sheetContent {
   padding: 0 4px 8px;
+  /* Sheet body 4px + this content's 4px side pad (inset-list contract). */
+  --dsh-surface-inset: 8px;
 }
 
 @media (pointer: coarse) {

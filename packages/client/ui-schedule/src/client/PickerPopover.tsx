@@ -48,6 +48,9 @@ export function PickerPopover({ open, anchorRef, label, className, onClose, chil
       // panel is the dialog they announce, named by the row's own label.
       role="dialog"
       aria-label={label}
+      // Inset-list contract (ui-theme base.css): the clock columns' scroll
+      // viewports derive their radius from this card.
+      data-dsh-list-surface=""
       // A click inside the panel belongs to the picker, not to the row that
       // opened it: React bubbles portal events through the React tree.
       onClick={(event) => { event.stopPropagation() }}

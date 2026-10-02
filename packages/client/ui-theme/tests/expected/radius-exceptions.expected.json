@@ -6,9 +6,6 @@
     ".nav: border-radius: 8px",
     ".cell: border-radius: 8px"
   ],
-  "ui-schedule/src/client/PickerPopover.module.css": [
-    ".panel: border-radius: 16px"
-  ],
   "ui-schedule/src/client/ScheduleCatalogAction.module.css": [
     ".trigger: border-radius: 28px",
     ".menu: border-radius: 16px",

@@ -30,3 +30,21 @@ body {
 [data-dsh-automatic-focus]:focus:focus-visible {
   outline: none;
 }
+
+/* ── Rounded surfaces that host an inset scrolling list ────────────────────
+ * A component that rounds its own border box and scrolls a `[role='listbox']`
+ * inside it marks the box with `data-dsh-list-surface` and publishes two values:
+ * `--dsh-surface-radius` (the radius of that box) and `--dsh-surface-inset`
+ * (the gap between the box edge and the list, on the axis of the corner). The
+ * nested list then derives its own concentric radius (inner R = outer R −
+ * inset, floored at zero) from those inherited values, so a theme or skin that
+ * decorates `[role='listbox']` — glass, inset highlight, gradient, or focus
+ * ring — traces the rounded container instead of painting a square band inside
+ * it. Marked surfaces that are themselves the list (`role='listbox'` on the
+ * surface) keep their own border radius: the rule targets descendants only.
+ * Feature CSS keeps its own padding and never restates a list radius. */
+[data-dsh-list-surface] [role='listbox'] {
+  border-radius: max(0px, calc(
+    var(--dsh-surface-radius, var(--dsw-radius-lg)) - var(--dsh-surface-inset, 0px)
+  ));
+}

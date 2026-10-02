@@ -8,11 +8,16 @@
   z-index: 1100;
   display: flex;
   border: 0;
-  border-radius: 16px;
+  border-radius: var(--dsw-radius-lg);
   background: var(--dsw-specific-menu);
   backdrop-filter: var(--dsw-menu-backdrop-filter);
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
   box-shadow: var(--dsw-elevation-prominent);
+  /* Inset-list contract (ui-theme base.css): the clock columns sit inside the
+     card's 3px inner pad. Schedule-owned geometry exemption keeps its radius
+     literal in the ui-theme guard; the radius derives from the token above. */
+  --dsh-surface-radius: var(--dsw-radius-lg);
+  --dsh-surface-inset: 3px;
   /* Elevated surface: the scrolling columns take the l2 thumb tokens, as in
      every other menu card (see ui-theme styles/scrollbar.css). */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);

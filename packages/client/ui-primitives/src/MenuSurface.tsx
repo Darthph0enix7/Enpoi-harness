@@ -32,7 +32,11 @@ export const MenuSurface = forwardRef<HTMLDivElement, MenuSurfaceProps>(function
     '--dsh-menu-anchor': `--dsh-menu-${id.replaceAll(':', '')}`,
   }
   return <>
-    <div {...props} ref={ref} data-menu-material="translucent"
+    {/* The shared inset-list contract marker (ui-theme base.css). A consumer
+        whose menu is visually flattened inside a larger sheet passes
+        `data-dsh-list-surface={undefined}` so the enclosing surface owns the
+        decoration. */}
+    <div data-dsh-list-surface="" {...props} ref={ref} data-menu-material="translucent"
       className={clsx(css.surface, compact && css.compact, className)} style={{ ...style, ...anchorStyle }}>
       <div aria-hidden="true" className={css.material} />
       {children}

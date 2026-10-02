@@ -44,6 +44,9 @@
   background: var(--dsw-alias-bg-layer-2);
   box-shadow: var(--dsw-elevation-prominent);
   animation: modalEnter var(--ds-transition-duration) var(--ds-ease-in-out);
+  /* Inset-list contract (ui-theme base.css): the body's 24px side pad. */
+  --dsh-surface-radius: var(--dsw-radius-panel);
+  --dsh-surface-inset: 24px;
 }
 
 @keyframes modalEnter {

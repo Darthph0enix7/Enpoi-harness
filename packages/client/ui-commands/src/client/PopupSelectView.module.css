@@ -9,7 +9,7 @@
   z-index: 100;
   padding: 3px;
   /* The surface's listbox keeps a concentric radius for this inset. */
-  --dsh-menu-inset: 3px;
+  --dsh-surface-inset: 3px;
   display: flex;
   flex-direction: column;
   min-width: min(220px, 100%);
@@ -155,10 +155,16 @@
   background: none;
   box-shadow: none;
   backdrop-filter: none;
+  /* Flattened inside the Sheet: the enclosing sheet panel is the decorated
+     surface, so this card publishes its own square geometry. */
+  --dsh-surface-radius: 0px;
+  --dsh-surface-inset: 0px;
 }
 
 .sheetContent {
   padding: 0 4px 8px;
+  /* Sheet body 4px + this content's 4px side pad (inset-list contract). */
+  --dsh-surface-inset: 8px;
 }
 
 @media (pointer: coarse) {

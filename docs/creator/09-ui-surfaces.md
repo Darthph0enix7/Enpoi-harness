@@ -114,7 +114,8 @@ Composer seat + `/model` popup share one directory. Search filters models and as
 
 ## Skins/themes
 
-- Skin center (external plugin) persists the active skin in `$DSH_HOME/skin-center-active.json`; `summer-liquid-glass` is the shipped default and **frozen at `1.0.0-frozen`** (`$PROFILE/skins/summer-liquid-glass/README.md`).
+- Skin center (external plugin) persists the active skin in `$DSH_HOME/skin-center-active.json`; `summer-liquid-glass` is the shipped default and **frozen at `1.0.1-frozen`** (`$PROFILE/skins/summer-liquid-glass/README.md`).
+- **Skin surface hook:** shared rounded surfaces that scroll an inset list mark the box `data-dsh-list-surface` and publish `--dsh-surface-radius`/`--dsh-surface-inset` (`MenuSurface`, `Sheet`, `Modal`, the schedule picker); `ui-theme/src/styles/base.css` derives the nested `[role='listbox']` radius from them. A skin decorates the marked surface, never the inset viewport (the profile's `patches.css` targets `[data-dsh-list-surface]` and excludes roles nested inside one). The keyboard ring is themed through `--dsw-focus-ring-color`/`--dsw-focus-ring-width`; a skin's global ring default belongs in a cascade layer (skin-center scopes patches to `html[data-dsh-skin="…"]`, so only layering guarantees unlayered component resets win), never in an unlayered `:focus-visible` rule.
 - Freeze rules: any edit to the skin or its token vocabulary must be deliberate, keep both guards green, bump the version, and re-sync the dotfiles mirror.
 - `dsh-skin-guard.mjs` restores the skin only when the state file says `active: null`; a deliberate switch is never overridden (`:20-40`).
 - Gates: `dsh-token-contrast.mjs` (overlay/state-pill contrast ≥ 4.5:1 both base modes, repaints present, mirror byte-identical) and `dsh-rebrand.mjs --check` (fork branding + contrast) — commands and expected output in doc 11.

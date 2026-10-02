@@ -188,6 +188,8 @@ export function PopupSelectView({ popup, t }: PopupSelectViewProps) {
               className={`${css.card} ${css.sheetCard}`}
               aria-label={t('overlay.aria', { command: String(state.command) })}
               onKeyDown={onKeyDown}
+              // Flattened inside the Sheet: the sheet panel is the decorated surface.
+              data-dsh-list-surface={undefined}
             >
               {cardContent}
             </MenuSurface>

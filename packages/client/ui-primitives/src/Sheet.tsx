@@ -93,6 +93,7 @@ export function Sheet({
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        data-dsh-list-surface=""
       >
         <span className={css.grabber} aria-hidden="true" />
         {headless

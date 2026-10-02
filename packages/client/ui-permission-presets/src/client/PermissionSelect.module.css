@@ -44,6 +44,8 @@
 /* ── Phone sheet presentation ── */
 .sheetContent {
   padding: 0 8px 8px;
+  /* Sheet body 4px + this content's 8px side pad (inset-list contract). */
+  --dsh-surface-inset: 12px;
 }
 
 .sheetList {

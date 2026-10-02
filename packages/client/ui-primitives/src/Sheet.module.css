@@ -27,11 +27,15 @@
   width: 100%;
   max-height: min(85dvh, calc(100dvh - var(--dsh-keyboard-inset, 0px) - 24px));
   overflow: hidden;
-  border-radius: 20px 20px 0 0;
+  border-radius: var(--dsw-radius-xl) var(--dsw-radius-xl) 0 0;
   background: var(--dsw-alias-bg-layer-2);
   box-shadow: var(--dsw-elevation-prominent);
   /* The sheet is the last surface above the system gesture area. */
   padding-bottom: var(--dsh-safe-area-inset-bottom, 0px);
+  /* Inset-list contract (ui-theme base.css): the body's 4px side pad; a
+     consumer whose content adds its own side pad publishes the total. */
+  --dsh-surface-radius: var(--dsw-radius-xl);
+  --dsh-surface-inset: 4px;
 }
 
 .grabber {
@@ -132,7 +136,7 @@
   .panel {
     width: min(520px, 100%);
     max-height: min(80dvh, 640px);
-    border-radius: 20px;
+    border-radius: var(--dsw-radius-xl);
     padding-bottom: 0;
   }
 

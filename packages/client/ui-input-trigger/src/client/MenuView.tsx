@@ -102,6 +102,8 @@ export function MenuView({ menu, headers, onPick, onCrumb, onHover, onDismiss, t
       style={sheetMode ? undefined : { maxHeight }}
       data-trigger-menu=""
       data-overflow-below={hasOverflowBelow || undefined}
+      // Flattened inside the Sheet: the sheet panel is the decorated surface.
+      data-dsh-list-surface={sheetMode ? undefined : ''}
     >
       {state.groups.map((group) => {
         const trail = crumbs.get(group.source)
