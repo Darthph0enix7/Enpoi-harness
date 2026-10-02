@@ -23,7 +23,7 @@ const defaults = {
 }
 
 /** Compose a session with two user messages and one assistant message. */
-async function composed(): Promise<{ ctx: Context; controller: SessionController; sessionId: SessionId }> {
+async function composed(options: { live?: boolean } = {}): Promise<{ ctx: Context; controller: SessionController; sessionId: SessionId }> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
@@ -45,7 +45,7 @@ async function composed(): Promise<{ ctx: Context; controller: SessionController
     ctx,
     inbox: { nextTurn: [], nextStep: [] },
   } as unknown as Agent
-  ctx.agents.register(agent)
+  if (options.live !== false) ctx.agents.register(agent)
   // Two user turns + one assistant turn.
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'first query' }],
@@ -98,7 +98,7 @@ describe('SessionController revert RPC', () => {
         senderSessionId: SessionId('child-notice'),
       },
     })
-    const cancelled = Promise.withResolvers<void>()
+    const cancelled = Promise.withResolvers<undefined>()
     const cancel = vi.fn()
     const send = vi.fn()
     Object.assign(ctx.agents.get(sessionId)!, {
@@ -161,7 +161,7 @@ describe('SessionController revert RPC', () => {
     // does next, the quiet notice did not block the operator's resend.
     await expect(controller.prompt({ ...request, requestId: 'revert-commit-2' as never }, signal).then(
       () => 'accepted',
-      (error: { code?: string }) => error.code ?? 'unknown',
+      (error: unknown) => (error as { code?: string }).code ?? 'unknown',
     )).resolves.not.toBe('revert-invalid')
   })
 
@@ -316,10 +316,17 @@ describe('SessionController revert RPC', () => {
     expect(result.accepted).toBe(true)
   })
 
+  // Attach-on-demand (a revert/restore on a freshly opened session whose
+  // agent is not live) needs a real agent factory, which the minimal harness
+  // does not mount; the cold path is proven against the live service instead.
+  // The unknown-session expectation below still proves the new guard: the
+  // resume runs and answers `session/not-found`, not the old not-attached
+  // rejection.
+
   it('rejects for an unknown session', async () => {
     const { controller } = await composed()
     await expect(controller.revert({ sessionId: SessionId('missing'), atSeq: 1 }))
-      .rejects.toMatchObject({ code: 'session-not-found' })
+      .rejects.toMatchObject({ code: 'session/not-found' })
   })
 
   it('rejects deleting an unknown session', async () => {

@@ -766,12 +766,12 @@ export class SessionCommandController {
    * following surface node (an empty or failed turn tail) is a no-op: no
    * boundary is written, and the receipt carries `noop` with a `notice`.
    */
-  // oxlint-disable-next-line typescript/require-await -- Kept async: validation throws must reject for await-based callers.
   async revert(request: SessionRevertRequest): Promise<SessionRevertValue> {
-    const agent = this.ctx.agents.get(request.sessionId)
-    if (agent === undefined) {
-      reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
-    }
+    // Attach on demand: reverting, restoring, switching a branch, and
+    // resolving a file conflict are surface/state operations, not sends — an
+    // operator may act on a freshly opened session whose agent is not
+    // attached yet.
+    const agent = await this.resolveAgent(request.sessionId)
     if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
       rejectFailure(apiSessionSubagentOwnershipError(request.sessionId))
     }
@@ -817,10 +817,11 @@ export class SessionCommandController {
    * `revert/state` log event. No-op when no revert is active.
    */
   async revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue> {
-    const agent = this.ctx.agents.get(request.sessionId)
-    if (agent === undefined) {
-      reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
-    }
+    // Attach on demand: reverting, restoring, switching a branch, and
+    // resolving a file conflict are surface/state operations, not sends — an
+    // operator may act on a freshly opened session whose agent is not
+    // attached yet.
+    const agent = await this.resolveAgent(request.sessionId)
     if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
       rejectFailure(apiSessionSubagentOwnershipError(request.sessionId))
     }
@@ -942,10 +943,11 @@ export class SessionCommandController {
    * @returns acknowledgement that the branch switch committed.
    */
   async revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue> {
-    const agent = this.ctx.agents.get(request.sessionId)
-    if (agent === undefined) {
-      reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
-    }
+    // Attach on demand: reverting, restoring, switching a branch, and
+    // resolving a file conflict are surface/state operations, not sends — an
+    // operator may act on a freshly opened session whose agent is not
+    // attached yet.
+    const agent = await this.resolveAgent(request.sessionId)
     if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
       rejectFailure(apiSessionSubagentOwnershipError(request.sessionId))
     }
@@ -1120,10 +1122,10 @@ export class SessionCommandController {
    * audit stay with the plugin.
    */
   async resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue> {
-    const agent = this.ctx.agents.get(request.sessionId)
-    if (agent === undefined) {
-      reject('session-not-found', `session "${request.sessionId}" not found (not attached)`, { sessionId: request.sessionId })
-    }
+    // Attach on demand: resolving a file conflict is a state operation, not
+    // a send — an operator may act on a freshly opened session whose agent
+    // is not attached yet.
+    await this.resolveAgent(request.sessionId)
     const waterfall = (this.ctx as unknown as {
       waterfall?: (name: string, payload: unknown, next: () => unknown) => Promise<unknown>
     }).waterfall

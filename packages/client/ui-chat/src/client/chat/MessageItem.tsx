@@ -360,12 +360,14 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
   const [previews, setPreviews] = useState<ReadonlyMap<number, SessionIterationVariant> | null>(null)
   const [previewFailed, setPreviewFailed] = useState(false)
   const [restoring, setRestoring] = useState(false)
+  const [restoreFailed, setRestoreFailed] = useState(false)
 
   // A restore (this client's or another client's commit) moves the active
   // variant: the preview must fall back to the durable content.
   useEffect(() => {
     setPreviewSeq(null)
     setPreviewFailed(false)
+    setRestoreFailed(false)
   }, [activeVariantSeq, groupAnchor])
 
   const previewIndex = previewSeq === null ? activeIndex : variants.findIndex(variant => variant.seq === previewSeq)
@@ -399,9 +401,10 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
   const restore = useCallback(() => {
     if (previewSeq === null || restoreIteration === undefined || restoring) return
     setRestoring(true)
+    setRestoreFailed(false)
     void restoreIteration(previewSeq).then(
       () => { setRestoring(false) },
-      () => { setRestoring(false) },
+      () => { setRestoring(false); setRestoreFailed(true) },
     )
   }, [previewSeq, restoreIteration, restoring])
 
@@ -463,6 +466,11 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
                 >
                   {t('message.iteration.restore')}
                 </button>
+              )}
+              {restoreFailed && (
+                <span className={css.iterationError} role="alert">
+                  {t('message.iteration.restoreFailed')}
+                </span>
               )}
             </div>
           )}
