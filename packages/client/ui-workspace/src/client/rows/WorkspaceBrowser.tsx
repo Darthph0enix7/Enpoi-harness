@@ -335,21 +335,24 @@ function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreePro
  * @param hasMoreSessions - whether an older window remains.
  * @param loadMoreSessions - next-window pull.
  */
+/** Pull further windows until at least this many renderable rows are loaded. */
+const MIN_RENDERABLE_SESSION_ROWS = 12
+
 function useRenderableWindow(
   list: SessionListState,
   rowState: SessionRowState,
   hasMoreSessions: boolean,
   loadMoreSessions: () => void,
 ): void {
-  const hasRenderableRow = useMemo(
+  const renderableCount = useMemo(
     () => visibleSessionIds(list, rowState.archivedSessionIds, rowState.archivedFilter)
-      .some(id => list.byId[id]?.blank === false),
+      .filter(id => list.byId[id]?.blank === false).length,
     [list, rowState.archivedSessionIds, rowState.archivedFilter],
   )
   useEffect(() => {
-    if (list.phase !== 'ready' || !hasMoreSessions || hasRenderableRow) return
+    if (list.phase !== 'ready' || !hasMoreSessions || renderableCount >= MIN_RENDERABLE_SESSION_ROWS) return
     loadMoreSessions()
-  }, [hasRenderableRow, hasMoreSessions, list, loadMoreSessions])
+  }, [renderableCount, hasMoreSessions, list, loadMoreSessions])
 }
 
 /** The scrolling session tree; unmounting drops the sessions subscription and local row limits. */

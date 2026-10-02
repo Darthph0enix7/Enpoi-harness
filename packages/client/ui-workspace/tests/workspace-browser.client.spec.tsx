@@ -39,6 +39,11 @@ const t: WorkspaceBrowserProps['t'] = makeTranslate(zh, commonZh)
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
+/** A window of n renderable (non-blank, non-child) Session summaries. */
+function filledWindow(count: number): SessionSummary[] {
+  return Array.from({ length: count }, (_, index) => summary(`window-${index}`, 1000 - index))
+}
+
 const summary = (id: string, updatedAt: number, overrides: Partial<SessionSummary> = {}): SessionSummary => ({
   id: sid(id), displayTitle: id, running: false, blank: false, updatedAt, ...overrides,
   retainedBy: overrides.retainedBy ?? {},
@@ -2583,10 +2588,19 @@ describe('WorkspaceBrowser session window paging', () => {
     const loadMoreSessions = vi.fn()
     const b = mount({
       loadMoreSessions,
-      useSessions: hook(sessionState([summary('newest', 10)], { hasMore: true })),
+      useSessions: hook(sessionState(filledWindow(16), { hasMore: true })),
     })
     scrollList(listOf(b), { scrollHeight: 400, scrollTop: 300, clientHeight: 50 })
     expect(loadMoreSessions).toHaveBeenCalledOnce()
+  })
+
+  it('tops the window up until the rail holds a first screenful of renderable rows', () => {
+    const loadMoreSessions = vi.fn()
+    mount({
+      loadMoreSessions,
+      useSessions: hook(sessionState([summary('only-one', 10)], { hasMore: true })),
+    })
+    expect(loadMoreSessions).toHaveBeenCalled()
   })
 
   it('pulls the next window when the loaded window holds no renderable row', () => {
@@ -2615,14 +2629,14 @@ describe('WorkspaceBrowser session window paging', () => {
     const loadMoreSessions = vi.fn()
     const exhausted = mount({
       loadMoreSessions,
-      useSessions: hook(sessionState([summary('newest', 10)])),
+      useSessions: hook(sessionState(filledWindow(16))),
     })
     scrollList(listOf(exhausted), { scrollHeight: 400, scrollTop: 300, clientHeight: 50 })
     expect(loadMoreSessions).not.toHaveBeenCalled()
 
     const far = mount({
       loadMoreSessions,
-      useSessions: hook(sessionState([summary('newest', 10)], { hasMore: true })),
+      useSessions: hook(sessionState(filledWindow(16), { hasMore: true })),
     })
     scrollList(listOf(far), { scrollHeight: 4000, scrollTop: 0, clientHeight: 50 })
     expect(loadMoreSessions).not.toHaveBeenCalled()
