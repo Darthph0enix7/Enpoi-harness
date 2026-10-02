@@ -48,6 +48,8 @@ export type RetentionPinCategory =
   | 'surface-source'
   /** A target seq of an `image/offload` decision. */
   | 'offload-target'
+  /** An `image/offload` decision event's own record; deleting it would re-enable the target. */
+  | 'offload-decision'
   /** A seq listed in a `compaction/summary.shadowedSeqs`. */
   | 'compaction-shadowed'
   /** A compaction checkpoint node or a seq it cites. */
@@ -155,8 +157,9 @@ function numberArray(value: unknown): number[] {
  *
  * Pins: every `revert/iteration` and `revert/branch` marker field, every
  * current surface node and its `sourceEventSeqs`, every `image/offload`
- * target, every `compaction/summary.shadowedSeqs`, every compaction
- * checkpoint and the seqs it cites, and every `revert/state` boundary target.
+ * decision and its targets, every `compaction/summary.shadowedSeqs`, every
+ * compaction checkpoint and the seqs it cites, and every `revert/state`
+ * boundary target.
  * @param events - dense zero-based durable events.
  * @param nodes - current surface nodes; folded from the log when omitted.
  * @returns the immutable pin manifest.
@@ -219,6 +222,10 @@ export function computeRetentionPins(
       }
     } else if (type === 'image/offload') {
       const fields = data as { readonly targets?: unknown }
+      // The projection derives each target's `offloaded` flag from this
+      // decision, so removing it would silently re-enable the target even if
+      // the target itself survived the cleanup.
+      pin(manifest, seq, 'offload-decision', `image/offload decision at seq ${String(seq)}`)
       if (!Array.isArray(fields.targets)) continue
       for (const target of fields.targets) {
         if (typeof target !== 'object' || target === null) continue

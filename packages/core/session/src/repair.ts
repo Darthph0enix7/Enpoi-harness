@@ -28,13 +28,29 @@ export const TOOL_OUTCOME_UNKNOWN = 'TOOL_OUTCOME_UNKNOWN'
 export const TOOL_APPROVAL_NOT_DECIDED = 'TOOL_APPROVAL_NOT_DECIDED'
 
 /**
+ * Recovery code for a recorded tool call whose approval was decided against
+ * execution (`rejected`). The approval gate precedes execution, so the call
+ * never began: no outcome exists to be unknown.
+ */
+export const TOOL_APPROVAL_DENIED = 'TOOL_APPROVAL_DENIED'
+
+/**
+ * Recovery code for a recorded tool call whose approval gate lapsed without a
+ * decision (`cancelled` or `unavailable`). The approval gate precedes
+ * execution, so the call never began: no outcome exists to be unknown.
+ */
+export const TOOL_APPROVAL_EXPIRED = 'TOOL_APPROVAL_EXPIRED'
+
+/**
  * Why an open tail turn is closed with synthetic events: `interrupted` is
  * crash recovery over a persisted log; `forked` is a fork seed cut inside the
  * source's open turn. The cause selects the synthetic `turn/end` reason, the
  * model-visible wording of synthetic error tool results, and the
  * deterministic synthetic message-id prefix. The error codes
- * ({@link TOOL_NOT_STARTED} / {@link TOOL_OUTCOME_UNKNOWN}) are shared: both
- * causes state the same fact about the call's recorded lifecycle.
+ * ({@link TOOL_NOT_STARTED} / {@link TOOL_OUTCOME_UNKNOWN} /
+ * {@link TOOL_APPROVAL_NOT_DECIDED} / {@link TOOL_APPROVAL_DENIED} /
+ * {@link TOOL_APPROVAL_EXPIRED}) are shared: both causes state the same fact
+ * about the call's recorded lifecycle.
  */
 export type OpenTurnCloseCause = { readonly kind: 'interrupted' } | { readonly kind: 'forked' }
 
@@ -44,16 +60,20 @@ const CLOSER_TEXT = {
     started: 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.',
     notStarted: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
     approvalPending: 'The tool call was waiting for an approval that was never decided, so the tool was not executed. Retry it if it is still needed.',
+    approvalDenied: 'The tool call\'s approval was rejected, so the tool was not executed. Do not retry it unless the user changes that decision.',
+    approvalExpired: 'The tool call\'s approval gate lapsed without a decision, so the tool was not executed. Retry it if it is still needed.',
   },
   forked: {
     started: 'The history inherited by this branch records this tool call starting but does not include its result. The parent session may have completed it after the fork point. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.',
     notStarted: 'The history inherited by this branch has no record of this tool call starting. The parent session may have executed it after the fork point. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.',
     approvalPending: 'The history inherited by this branch records this tool call waiting for an approval that is not decided in the branch. The parent session may have decided it after the fork point; the tool was not executed before this branch was cut. Retry it if it is still needed, after verifying whether the action already ran.',
+    approvalDenied: 'The history inherited by this branch records this tool call\'s approval being rejected before the fork point, so the tool was not executed. Do not retry it unless the user changes that decision.',
+    approvalExpired: 'The history inherited by this branch records this tool call\'s approval gate lapsing without a decision before the fork point, so the tool was not executed. Retry it if it is still needed.',
   },
 } as const
 
 /**
- * Fold one approval audit event into the closers' undecided-approval state.
+ * Fold one approval audit event into the closers' approval-audit state.
  * The session package does not depend on the approval plugin's merged event
  * declarations, so the two audit types are read structurally: `callId` is the
  * exact tool call an ask belongs to, and only a matching `approval/decided`
@@ -61,18 +81,20 @@ const CLOSER_TEXT = {
  *
  * @param event - one log event, typed structurally by its `type` string.
  * @param asked - per-call ids of unanswered `approval/asked` events, mutated in place.
- * @param decided - ids answered by an `approval/decided` event, mutated in place.
+ * @param decided - approval ids answered by an `approval/decided` event mapped to
+ *   their outcome, mutated in place. The outcome stays structurally read: the
+ *   package does not depend on the approval plugin's outcome vocabulary.
  */
 function observeApprovalEvent(
   event: { readonly type: string; readonly data: unknown },
   asked: Map<ToolCallId, Set<string>>,
-  decided: Set<string>,
+  decided: Map<string, unknown>,
 ): void {
   if (typeof event.data !== 'object' || event.data === null) return
   if (!('id' in event.data) || typeof event.data.id !== 'string') return
   const id = event.data.id
   if (event.type === 'approval/decided') {
-    decided.add(id)
+    decided.set(id, 'outcome' in event.data ? event.data.outcome : undefined)
     return
   }
   if (event.type !== 'approval/asked') return
@@ -84,26 +106,47 @@ function observeApprovalEvent(
 }
 
 /**
- * Whether a recorded call still has an approval ask with no decision. The
- * approval gate runs before the operation, so this call never began and its
- * recovery result must state that fact instead of an unknown outcome.
+ * How the recorded approval asks classify one call's recovery. `undecided`
+ * means at least one ask has no decision; `denied` and `expired` mean every
+ * ask was decided and none granted execution; `unknown` covers a granted or
+ * unrecognized outcome (the call may have begun) and no recorded ask at all.
+ */
+type ApprovalRecovery = 'undecided' | 'denied' | 'expired' | 'unknown'
+
+/**
+ * Classify the approval asks recorded for one call. The approval gate runs
+ * before the operation, so an ask that closed without a grant proves the call
+ * never began. A granted outcome (`allowed-once`, `allowed-always`,
+ * `allowed-always-broad`) or an outcome outside the known vocabulary leaves
+ * the classification `unknown`: the call may have executed.
  *
  * @param callId - the recorded call to inspect.
  * @param asked - per-call approval ask ids collected from the log.
- * @param decided - approval ids answered by a decision.
- * @returns true when at least one ask for the call is undecided.
+ * @param decided - approval ids mapped to the outcome read from the log.
+ * @returns the call's approval recovery classification.
  */
-function approvalUndecided(
+function approvalRecovery(
   callId: ToolCallId,
   asked: ReadonlyMap<ToolCallId, ReadonlySet<string>>,
-  decided: ReadonlySet<string>,
-): boolean {
+  decided: ReadonlyMap<string, unknown>,
+): ApprovalRecovery {
   const pending = asked.get(callId)
-  if (pending === undefined) return false
+  if (pending === undefined) return 'unknown'
+  let denied = false
+  let expired = false
   for (const id of pending) {
-    if (!decided.has(id)) return true
+    if (!decided.has(id)) return 'undecided'
+    const outcome = decided.get(id)
+    if (outcome === 'rejected') denied = true
+    else if (outcome === 'cancelled' || outcome === 'unavailable') expired = true
+    else if (outcome !== 'allowed-once' && outcome !== 'allowed-always' && outcome !== 'allowed-always-broad') {
+      // An unrecognized outcome may have granted execution; stay conservative.
+      return 'unknown'
+    }
   }
-  return false
+  if (denied) return 'denied'
+  if (expired) return 'expired'
+  return 'unknown'
 }
 
 /**
@@ -132,7 +175,7 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: OpenTurn
   // Approval audit state outlives turn boundaries: an ask belongs to one exact
   // call id, so only the open tail's pending calls are ever consulted.
   const askedApprovals = new Map<ToolCallId, Set<string>>()
-  const decidedApprovals = new Set<string>()
+  const decidedApprovals = new Map<string, unknown>()
   for (const event of events) {
     observeApprovalEvent(event, askedApprovals, decidedApprovals)
     switch (event.type) {
@@ -194,8 +237,25 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: OpenTurn
   const text = CLOSER_TEXT[cause.kind]
   for (const [callId, { step, callSeq }] of pendingCalls) {
     const started = callSeq !== undefined
-    const approvalPending = started
-      && approvalUndecided(callId, askedApprovals, decidedApprovals)
+    const approval = started ? approvalRecovery(callId, askedApprovals, decidedApprovals) : 'unknown'
+    let contentText: string
+    let error: { name: string; code: string }
+    if (approval === 'undecided') {
+      contentText = text.approvalPending
+      error = { name: 'ToolApprovalNotDecidedError', code: TOOL_APPROVAL_NOT_DECIDED }
+    } else if (approval === 'denied') {
+      contentText = text.approvalDenied
+      error = { name: 'ToolApprovalDeniedError', code: TOOL_APPROVAL_DENIED }
+    } else if (approval === 'expired') {
+      contentText = text.approvalExpired
+      error = { name: 'ToolApprovalExpiredError', code: TOOL_APPROVAL_EXPIRED }
+    } else if (started) {
+      contentText = text.started
+      error = { name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN }
+    } else {
+      contentText = text.notStarted
+      error = { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED }
+    }
     const message: ToolResultMessage = deepFreeze({
       id: brandString<MessageId>(`${cause.kind}-tool-result-${callId}-${seq}`),
       role: 'tool',
@@ -204,16 +264,9 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: OpenTurn
       source: { kind: 'tool', callId },
       content: [{
         type: 'text',
-        text: approvalPending
-          ? text.approvalPending
-          : started ? text.started : text.notStarted,
+        text: contentText,
       }],
     })
-    const error = approvalPending
-      ? { name: 'ToolApprovalNotDecidedError', code: TOOL_APPROVAL_NOT_DECIDED }
-      : started
-        ? { name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN }
-        : { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED }
     closers.push({
       type: 'tool/result',
       seq: SessionSeq(seq++),

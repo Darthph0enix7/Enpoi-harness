@@ -103,6 +103,11 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Cause: `SHARED_CHILD_DENY` removed `job_output`/`job_list`/`job_kill` (children have no per-bash promotion config).
 - Fix: the job controls are no longer denied — a promoted job is owned by the child's session and fenced by it, and the child context tells it to collect with `job_output (wait: true)` (07 §2). Do not re-add them to the deny floor.
 
+### An interrupted tool call reports an outcome its durable approval already settled
+- Symptom: after a crash, a resumed session shows a synthetic error result for a call whose approval the log already answered — `TOOL_OUTCOME_UNKNOWN` ("may have side effects") although the operator rejected it, or an uninterpreted `TOOL_APPROVAL_*` code.
+- Cause: recovery classifies each unanswered `tool/call` from its durable approval audit. An ask with no decision, a `rejected` decision, and a lapsed gate (`cancelled`/`unavailable`) all prove the gate never granted execution, so the call never began; a granting decision (`allowed-once`/`allowed-always`/`allowed-always-broad`) or an outcome outside that vocabulary may have executed and must stay unknown.
+- Expected: `TOOL_APPROVAL_NOT_DECIDED` (ask never decided), `TOOL_APPROVAL_DENIED` (`rejected`), and `TOOL_APPROVAL_EXPIRED` (lapsed gate) each state "not executed"; retry only the undecided/expired calls when still needed, and verify external state or ask the user before retrying any `TOOL_OUTCOME_UNKNOWN` result. Source: `packages/core/session/src/repair.ts`; codes re-exported from `@deepseek-ai/dsh-session`.
+
 ### Repeated `block.content is not iterable` / `agent/disposed listener threw … 'catch'`
 - Symptom (two high-volume incident families): one warning per V4 tool result from the fast collector, or `agent "…": agent/disposed listener threw: TypeError: Cannot read properties of undefined (reading 'catch')`.
 - Cause: `dsh-fast`'s `flattenToolResultText` assumed the pre-V4 wrapper shape; and `file-reference-local` / `tool-subagent` called `.catch` on a single-shot `Fiber.dispose()` that returns `undefined` when its epoch is already retired (scope disposal runs before `agent/disposed`).

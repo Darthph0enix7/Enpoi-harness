@@ -3,6 +3,8 @@ import { ToolCallId , createMessage, createToolResultMessage } from '@deepseek-a
 import {
   interruptedTurnClosers as repairInterruptedTurn,
   SessionSeq,
+  TOOL_APPROVAL_DENIED,
+  TOOL_APPROVAL_EXPIRED,
   TOOL_APPROVAL_NOT_DECIDED,
   TOOL_NOT_STARTED,
   TOOL_OUTCOME_UNKNOWN,
@@ -39,6 +41,41 @@ function openTurnClosers(events: readonly SessionEvent[], cause: OpenTurnCloseCa
 
 const userTurnStart = (turn: number, seq: number): SessionEvent =>
   ({ type: 'turn/start', seq, time: seq, data: { turn } })
+
+/**
+ * An open turn with one recorded `tool/call` (so it counts as started) plus
+ * the given approval audit events. The call starts at seq 3, so audit events
+ * append at seq 4+.
+ */
+function startedCallWithApprovals(...audit: SessionEvent[]): SessionEvent[] {
+  return [
+    userTurnStart(1, 0),
+    { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+    { type: 'assistant/message', seq: 2, time: 2, data: {
+      turn: 1, step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' },
+        ],
+        source: {
+          kind: 'model',
+          ...{ provider: 'mock', model: 'mock' },
+        },
+      }),
+    } },
+    { type: 'tool/call', seq: 3, time: 3, data: { turn: 1, step: 1, callId: ToolCallId('call-1'), name: 'bash', arguments: '{}' } },
+    ...audit,
+  ]
+}
+
+/** The `approval/asked` + `approval/decided` audit pair for `startedCallWithApprovals`. */
+function approvalPair(outcome: string): SessionEvent[] {
+  return [
+    { type: 'approval/asked', seq: 4, time: 4, data: { id: 'approval-1', toolName: 'bash', callId: ToolCallId('call-1') } },
+    { type: 'approval/decided', seq: 5, time: 5, data: { id: 'approval-1', outcome } },
+  ]
+}
 
 const causes: OpenTurnCloseCause[] = [{ kind: 'interrupted' }, { kind: 'forked' }]
 
@@ -330,28 +367,51 @@ describe.each(causes)('openTurnClosers (cause %o)', (cause) => {
     expect((result as SurfaceEvent).sourceEventSeqs).toEqual([3])
   })
 
-  it('keeps an unknown outcome once the approval was decided', () => {
-    const events: SessionEvent[] = [
-      userTurnStart(1, 0),
-      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
-      { type: 'assistant/message', seq: 2, time: 2, data: {
-        turn: 1, step: 1,
-        message: createMessage({
-          role: 'assistant',
-          content: [
-            { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' },
-          ],
-          source: {
-            kind: 'model',
-            ...{ provider: 'mock', model: 'mock' },
-          },
-        }),
-      } },
-      { type: 'tool/call', seq: 3, time: 3, data: { turn: 1, step: 1, callId: ToolCallId('call-1'), name: 'bash', arguments: '{}' } },
-      { type: 'approval/asked', seq: 4, time: 4, data: { id: 'approval-1', toolName: 'bash', callId: ToolCallId('call-1') } },
-      { type: 'approval/decided', seq: 5, time: 5, data: { id: 'approval-1', outcome: 'allowed-once' } },
-    ]
-    const result = openTurnClosers(events, cause)[0]!
+  it.each(['allowed-once', 'allowed-always', 'allowed-always-broad'])(
+    'keeps an unknown outcome once a granting approval was decided (%s)',
+    (outcome) => {
+      const result = openTurnClosers(startedCallWithApprovals(...approvalPair(outcome)), cause)[0]!
+      expect(result.type === 'tool/result' && result.data.error).toEqual({
+        name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN,
+      })
+      // The call still began, so the result cites its tool/call seq.
+      expect((result as SurfaceEvent).sourceEventSeqs).toEqual([3])
+    },
+  )
+
+  it('states a rejected approval as a denied, not-executed recovery', () => {
+    const result = openTurnClosers(startedCallWithApprovals(...approvalPair('rejected')), cause)[0]!
+    expect(result.type === 'tool/result' && result.data.error).toEqual({
+      name: 'ToolApprovalDeniedError', code: TOOL_APPROVAL_DENIED,
+    })
+    if (result.type !== 'tool/result' || result.data.message.content[0]?.type !== 'text') {
+      throw new Error('expected a text tool result')
+    }
+    expect(result.data.message.content[0].text).toContain('rejected')
+    expect(result.data.message.content[0].text).toContain('not executed')
+    expect((result as SurfaceEvent).sourceEventSeqs).toEqual([3])
+  })
+
+  it.each(['cancelled', 'unavailable'])(
+    'states a %s approval gate as an expired, not-executed recovery',
+    (outcome) => {
+      const result = openTurnClosers(startedCallWithApprovals(...approvalPair(outcome)), cause)[0]!
+      expect(result.type === 'tool/result' && result.data.error).toEqual({
+        name: 'ToolApprovalExpiredError', code: TOOL_APPROVAL_EXPIRED,
+      })
+      if (result.type !== 'tool/result' || result.data.message.content[0]?.type !== 'text') {
+        throw new Error('expected a text tool result')
+      }
+      expect(result.data.message.content[0].text).toContain('laps')
+      expect(result.data.message.content[0].text).toContain('not executed')
+      expect((result as SurfaceEvent).sourceEventSeqs).toEqual([3])
+    },
+  )
+
+  it('keeps an unknown outcome for an approval outcome outside the known vocabulary', () => {
+    // A future granting outcome this reader does not know must not be treated
+    // as proof the call never began.
+    const result = openTurnClosers(startedCallWithApprovals(...approvalPair('some-future-grant')), cause)[0]!
     expect(result.type === 'tool/result' && result.data.error).toEqual({
       name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN,
     })
@@ -458,6 +518,32 @@ describe('openTurnClosers model-visible wording', () => {
     ],
   ])('cause %o, started=%s pins its exact text', (cause, started, text) => {
     expect(resultText(openTurnClosers(openCall(started), cause))).toBe(text)
+  })
+
+  // The denied and lapsed-gate texts are model-visible too: pinned verbatim.
+  it.each([
+    [
+      { kind: 'interrupted' } satisfies OpenTurnCloseCause,
+      'rejected',
+      "The tool call's approval was rejected, so the tool was not executed. Do not retry it unless the user changes that decision.",
+    ],
+    [
+      { kind: 'interrupted' } satisfies OpenTurnCloseCause,
+      'unavailable',
+      "The tool call's approval gate lapsed without a decision, so the tool was not executed. Retry it if it is still needed.",
+    ],
+    [
+      { kind: 'forked' } satisfies OpenTurnCloseCause,
+      'rejected',
+      "The history inherited by this branch records this tool call's approval being rejected before the fork point, so the tool was not executed. Do not retry it unless the user changes that decision.",
+    ],
+    [
+      { kind: 'forked' } satisfies OpenTurnCloseCause,
+      'cancelled',
+      "The history inherited by this branch records this tool call's approval gate lapsing without a decision before the fork point, so the tool was not executed. Retry it if it is still needed.",
+    ],
+  ])('cause %o, decided-but-denied/expired outcome %s pins its exact text', (cause, outcome, text) => {
+    expect(resultText(openTurnClosers(startedCallWithApprovals(...approvalPair(outcome)), cause))).toBe(text)
   })
 
   it('shares the error codes across causes: they state the same call lifecycle fact', () => {

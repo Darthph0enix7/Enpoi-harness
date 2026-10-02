@@ -74,9 +74,9 @@ describe('computeRetentionPins', () => {
     expect(categoriesOf(manifest, 6)).toContain('iteration-marker')
     expect(categoriesOf(manifest, 5)).toContain('branch-record')
     expect(categoriesOf(manifest, 1)).toContain('branch-record')
-    // The offload target (the decision event itself stays removable).
+    // The offload decision and its target are both pinned.
     expect(categoriesOf(manifest, 1)).toContain('offload-target')
-    expect(categoriesOf(manifest, 3)).toEqual([])
+    expect(categoriesOf(manifest, 3)).toContain('offload-decision')
     // Compaction summary sources and the checkpoint's own citations.
     expect(categoriesOf(manifest, 0)).toContain('compaction-shadowed')
     expect(categoriesOf(manifest, 1)).toContain('compaction-shadowed')
@@ -135,6 +135,23 @@ describe('assertRemovalSafe', () => {
     expect(violation[0]?.reasons.length).toBeGreaterThan(0)
     expect((error as Error).message).toContain('refusing to remove')
     expect((error as Error).message).toContain('1 (')
+  })
+
+  it('refuses a plan naming an image/offload decision, so its target cannot silently re-enable', () => {
+    const manifest = computeRetentionPins(pinnedLog())
+    expect(categoriesOf(manifest, 3)).toContain('offload-decision')
+    let error: unknown
+    try {
+      assertRemovalSafe(manifest, [3])
+    } catch (caught: unknown) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(RetentionViolationError)
+    const violation = (error as RetentionViolationError).violations
+    expect(violation.map(entry => entry.seq)).toEqual([3])
+    expect(violation[0]?.reasons.join(' ')).toContain('image/offload decision at seq 3')
+    // The target alone is refused too; neither half of the pair is removable.
+    expect(() => { assertRemovalSafe(manifest, [1]) }).toThrow(RetentionViolationError)
   })
 
   it('admits an all-unpinned plan and is idempotent over duplicates', () => {
