@@ -153,10 +153,10 @@ describe('countPermissionRules', () => {
 })
 
 describe('shippedPolicyFor', () => {
-  it('names the shipped code defaults: reads and web allow, bash and str_replace_editor ask', () => {
+  it('names the shipped code defaults: reads and web allow, bash/str_replace_editor/job_kill ask', () => {
     expect(shippedPolicyFor('read')).toBe('allow')
     expect(shippedPolicyFor('web_search')).toBe('allow')
-    expect(shippedPolicyFor('job_kill')).toBe('allow')
+    expect(shippedPolicyFor('job_kill')).toBe('ask')
     expect(shippedPolicyFor('bash')).toBe('ask')
     expect(shippedPolicyFor('str_replace_editor')).toBe('ask')
     expect(shippedPolicyFor('designer')).toBeUndefined()

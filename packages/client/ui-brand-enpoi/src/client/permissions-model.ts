@@ -15,6 +15,7 @@
  * answering the published revision notifies nobody.
  */
 import type { RoleRegistryMap } from './role-registry.ts'
+import { OPERATOR_SURFACE, SHARED_CHILD_KEEP, SHIPPED_TOOL_DEFAULTS } from './permissions-defaults.generated.ts'
 import { readEnpoiNamespace } from './settings-refresh.ts'
 
 export type PolicyValue = 'allow' | 'ask' | 'deny'
@@ -82,26 +83,14 @@ export interface OrchestrationSettingsView {
   }
 }
 
-/** Shipped code defaults (not YAML): reads, web, and the subagent family allow. */
-const SHIPPED_ALLOW_TOOLS: readonly string[] = [
-  'read', 'glob', 'grep', 'web_search',
-  'subagent', 'workflow', 'job_output', 'job_list', 'job_kill',
-  // Delivery declaration only: no filesystem or network effect, and the
-  // unattended peer/driver runs must not stall on an unconfigured ask.
-  'present',
-  // Read-only introspection, mirroring the enforcement table: these read a
-  // session, its history, diagnostics, or the board and never write.
-  'session_debug', 'diagnostics_report', 'fast_report',
-  'session_search', 'session_trace', 'session_event_search', 'session_event_read', 'session_event_trace',
-  'council_list',
-  // The whiteboard family ships allowed as ONE permanent policy (the curated
-  // `whiteboard_*` row below); mirrors SHIPPED_TOOL_DEFAULTS in the host
-  // policy resolver.
-  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget',
-]
-
-/** Shipped code defaults: destructive-but-expected tools ask. */
-const SHIPPED_ASK_TOOLS: readonly string[] = ['bash', 'str_replace_editor']
+/**
+ * The shipped code defaults (not YAML) live in the GENERATED host mirror
+ * (`permissions-defaults.generated.ts`): `SHIPPED_TOOL_DEFAULTS` and the
+ * `SHIPPED_TOOL_DEFAULT_EXEMPTIONS` families. Never hand-declare a default
+ * here — the parity spec fails when the mirror drifts from the host policy
+ * resolver, and the host completeness spec fails until the mirror is
+ * regenerated when a default changes.
+ */
 
 /**
  * The curated row ORDER and labels of the core tool surface (doc 55). This is
@@ -113,11 +102,15 @@ const SHIPPED_ASK_TOOLS: readonly string[] = ['bash', 'str_replace_editor']
  * deployment's registry resolves.
  */
 export const CORE_PERMISSION_TOOLS: readonly string[] = [
-  'bash', 'read', 'glob', 'grep', 'edit', 'write', 'todo_write',
-  'web_search', 'skill', 'subagent', 'workflow',
+  'bash', 'read', 'read_image', 'glob', 'grep', 'edit', 'write', 'todo_write',
+  'web_search', 'skill',
+  'subagent', 'workflow', 'ralph', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode',
+  'tool_groups', 'present',
   'job_output', 'job_list', 'job_kill', 'oracle_review', 'request_evidence',
   'roundtable', 'chorus', 'memory_save', 'memory_search', 'memory_rescind',
   'memory_confirm', 'ask_user_question',
+  'send_message', 'list_agents', 'interrupt_agent',
+  'mcp', 'council_register', 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager',
 ]
 
 /**
@@ -295,6 +288,12 @@ export interface PolicyFamilyOverlay {
   prefix: string
   /** Tools the family always names, so the permanent policy survives an unmounted plugin. */
   members: readonly string[]
+  /**
+   * Live prefix matches the family deliberately leaves as their own concrete
+   * rows. A member whose shipped policy differs (council registration asks
+   * while listing allows) must not hide behind one family chip.
+   */
+  exclude?: readonly string[]
 }
 
 /**
@@ -326,7 +325,11 @@ export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = [
     id: 'council_*',
     name: 'Council',
     prefix: 'council_',
-    members: ['council_list', 'council_register'],
+    // Registration asks while listing allows: the family keeps only the
+    // allow-classified listing, and the asking register row stays visible as
+    // its own concrete row (a mixed family would hide which decision is which).
+    members: ['council_list'],
+    exclude: ['council_register'],
   },
   {
     id: 'session_*',
@@ -430,7 +433,7 @@ export function buildPermissionToolRows(
 
   const rows = new Map<string, PermissionToolRow>()
   const families = POLICY_FAMILIES.map((family) => {
-    const liveMembers = nonMcp.filter(name => name.startsWith(family.prefix))
+    const liveMembers = nonMcp.filter(name => name.startsWith(family.prefix) && !(family.exclude ?? []).includes(name))
     const members = [...new Set([...family.members, ...liveMembers])]
       .sort((left, right) => left.localeCompare(right))
     return { family, members }
@@ -542,13 +545,11 @@ export type PermissionProvenance = 'agent rule' | 'global rule' | 'standing gran
 
 /**
  * Tools every child keeps regardless of role surface: the pinned whiteboard
- * keep list of the subagent runtime (`SHARED_CHILD_KEEP` in
- * tool-subagent). Mirrored here so the availability eye tells the truth for
+ * keep list of the subagent runtime (`SHARED_CHILD_KEEP` in tool-subagent).
+ * Generated from that host table, so the availability eye tells the truth for
  * roles whose shipped surface predates the keep list.
  */
-export const KEPT_BY_EVERY_ROLE: readonly string[] = [
-  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin',
-]
+export const KEPT_BY_EVERY_ROLE: readonly string[] = SHARED_CHILD_KEEP
 
 /**
  * Whether a tool-level standing grant absorbs an ask for this tool under this
@@ -584,35 +585,24 @@ export function toolGrantApplies(perms: PermissionsConfig, agent: string | undef
 /**
  * The operator-level surface: the acting agents (orchestrator, sysadmin,
  * creator) share one FULL surface — from a permissions perspective they are
- * the same agent: they act, they delegate, they configure. The operators
- * author and present the board, so the full curated `whiteboard_*` family is
- * theirs (children keep only the host's four-tool keep floor). MCP server
- * tools are deliberately absent here: MCP availability is a sidebar
- * capability toggle (per-server, hot-swappable), not a per-role surface
- * decision. Every name must resolve in the deployment's live registry: this
- * array is written whole into `permissions.agents[role].available`, which the
- * spawn path applies as a strict `tools.restrict({allow})`.
+ * the same agent: they act, they delegate, they configure. Generated from the
+ * host's shipped preset inventory (`OPERATOR_SURFACE`), which is the exact
+ * advertised main-agent tool list, so a host surface change must regenerate
+ * the mirror instead of drifting here. MCP server tools are deliberately
+ * absent from the inventory: MCP availability is a sidebar capability toggle
+ * (per-server, hot-swappable), not a per-role surface decision.
  */
-const FULL_OPERATOR_SURFACE: readonly string[] = [
-  'bash', 'read', 'glob', 'grep', 'read_image',
-  'edit', 'write',
-  'web_search',
-  'todo_write', 'skill', 'exit_plan_mode',
-  'subagent', 'workflow', 'ralph', 'create_goal', 'get_goal', 'update_goal',
-  'oracle_review', 'request_evidence', 'roundtable', 'chorus',
-  'memory_save', 'memory_search', 'memory_rescind', 'memory_confirm',
-  'job_output', 'job_list', 'job_kill', 'ask_user_question',
-  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget',
-]
+const FULL_OPERATOR_SURFACE: readonly string[] = OPERATOR_SURFACE
 
 /**
- * The shipped per-role surfaces (mirrors the fork's role tables). Operator
- * defaults: every sub-agent may run bash (reading, analysis, tests), use
- * skills, search/write memory, and keep its own todo list; readers keep only
- * the mutation veto. MCP rows are deliberately absent — MCP availability is a
- * sidebar capability toggle, not a per-role surface decision. Like
- * {@link FULL_OPERATOR_SURFACE}, every name must resolve in the deployment's
- * live registry: a role's `available` list is applied as a strict
+ * The shipped per-role surfaces. The operator rows are the host's advertised
+ * main-agent surface; the specialist/council rows are the client's
+ * conservative fallback surface, parity-guarded against the host's
+ * shared/role child deny tables (the spec fails if a surface ever names a tool
+ * the host hard-denies for that role). MCP rows are deliberately absent — MCP
+ * availability is a sidebar capability toggle, not a per-role surface
+ * decision. Like {@link FULL_OPERATOR_SURFACE}, every name must resolve in the
+ * deployment's live registry: a role's `available` list is applied as a strict
  * `tools.restrict({allow})` at spawn, so a stale name would abort the child.
  */
 export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
@@ -679,12 +669,11 @@ export function provenanceFor(perms: PermissionsConfig, agent: string | undefine
  * The shipped code-default policy for one tool, or undefined when the tool
  * falls back to `defaults.unknownTools`.
  * @param tool - the tools-map key.
- * @returns the shipped policy when doc 55 defines one for this key.
+ * @returns the shipped policy from the generated host mirror, when the host
+ *   policy resolver defines one for this key.
  */
 export function shippedPolicyFor(tool: string): PolicyValue | undefined {
-  if (SHIPPED_ALLOW_TOOLS.includes(tool)) return 'allow'
-  if (SHIPPED_ASK_TOOLS.includes(tool)) return 'ask'
-  return undefined
+  return SHIPPED_TOOL_DEFAULTS[tool]
 }
 
 /**
