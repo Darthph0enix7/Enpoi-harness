@@ -265,6 +265,8 @@ export class FakeApiClient {
       session: {
         canOpenWorkspacePath: () => Promise.resolve(ok(true)),
         initializeDefaultModel: () => Promise.resolve(ok(undefined)),
+        verifyLog: () => Promise.resolve(ok({ ok: true, committedEventCount: 0, issues: [] })),
+        repairLog: () => Promise.resolve(ok({ ok: true, committedEventCount: 0, repairs: [], issues: [] })),
         list: payload => this.record('session.list', payload, this.onList(payload)),
         modelCatalog: () => Promise.resolve({
           ok: true,
