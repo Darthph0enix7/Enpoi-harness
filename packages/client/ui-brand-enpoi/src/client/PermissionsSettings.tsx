@@ -30,6 +30,7 @@ import {
   rowPolicyOps,
   rowPolicyState,
   rowTargets,
+  seatDeniesTool,
   setPermissionPath,
   subscribePermissionsView,
   unsetPermissionPath,
@@ -298,13 +299,18 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
    * Every concrete member of the row (or the row itself) is available to the
    * role. An explicit allowlist IS the answer (the hard gate); only without
    * one does the shipped/registry surface decide — OR-ing the surface back in
-   * would leave every toggle of a shipped-surface tool looking inert.
+   * would leave every toggle of a shipped-surface tool looking inert. A
+   * seat-denied member can never become available: the seat's presentation
+   * filter and pre-execute guard both keep it out, so its row shows off and
+   * carries no toggle.
    */
   const rowAvailable = (row: PermissionToolRow): boolean => {
     const targets = rowTargets(row)
-    return targets.length > 0 && targets.every(target => available !== undefined
-      ? available.includes(target)
-      : builtRoleAvailability(agent, target, registry) === true)
+    return targets.length > 0
+      && !targets.some(target => seatDeniesTool(agent, target))
+      && targets.every(target => available !== undefined
+        ? available.includes(target)
+        : builtRoleAvailability(agent, target, registry) === true)
   }
   return (
     <>
@@ -334,8 +340,10 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
         </div>
         {toolRows.map((row) => {
           const state = rowPolicyState(perms, agent, row)
-          // An aggregate with no live members has nothing to toggle: no eye.
+          // An aggregate with no live members has nothing to toggle, and a
+          // seat-denied row can never be made available: no eye.
           const targets = rowTargets(row)
+          const toggleable = targets.length > 0 && !targets.some(target => seatDeniesTool(agent, target))
           return (
             <PolicyRow
               key={row.id}
@@ -346,7 +354,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
               mixed={state.mixed}
               onCycle={(next) => { onCycleRow(agent, row, next) }}
               available={rowAvailable(row)}
-              onToggleAvailable={targets.length > 0 ? () => { onToggleRow(agent, row) } : undefined}
+              onToggleAvailable={toggleable ? () => { onToggleRow(agent, row) } : undefined}
             />
           )
         })}

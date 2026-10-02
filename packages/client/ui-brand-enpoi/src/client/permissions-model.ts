@@ -15,7 +15,13 @@
  * answering the published revision notifies nobody.
  */
 import type { RoleRegistryMap } from './role-registry.ts'
-import { OPERATOR_SURFACE, SHARED_CHILD_KEEP, SHIPPED_TOOL_DEFAULTS } from './permissions-defaults.generated.ts'
+import {
+  OPERATOR_SURFACE,
+  SHARED_CHILD_KEEP,
+  SHIPPED_SEAT_TOOL_DENY,
+  SHIPPED_TOOL_DEFAULTS,
+  SHIPPED_TOOL_GROUP_CATALOG,
+} from './permissions-defaults.generated.ts'
 import { readEnpoiNamespace } from './settings-refresh.ts'
 
 export type PolicyValue = 'allow' | 'ask' | 'deny'
@@ -275,9 +281,9 @@ export interface RegisteredToolsView {
 }
 
 /**
- * One curated tool family: a presentation overlay that folds a tool prefix
- * into ONE permanent policy row. Membership is derived from the live registry
- * (any registered name with the prefix) plus {@link PolicyFamilyOverlay.members};
+ * Curated tool family: a presentation overlay that folds a tool prefix into
+ * ONE permanent policy row. Membership is derived from the live registry (any
+ * registered name with the prefix) plus {@link PolicyFamilyOverlay.members};
  * the row itself owns no independent settings key — its chip fans out to the
  * concrete member keys.
  */
@@ -285,7 +291,8 @@ export interface PolicyFamilyOverlay {
   /** The row id (also the resolver-independent display key), e.g. `whiteboard_*`. */
   id: string
   name: string
-  prefix: string
+  /** Live prefix matches the family folds in; absent when its members share no prefix. */
+  prefix?: string
   /** Tools the family always names, so the permanent policy survives an unmounted plugin. */
   members: readonly string[]
   /**
@@ -297,53 +304,62 @@ export interface PolicyFamilyOverlay {
 }
 
 /**
- * Curated families. The whiteboard is one permanent policy: its per-feature
- * asks (read/write/pin/unpin/forget) fold into this single row, which fans the
- * chosen policy out to all five concrete keys. Add a family here only for
- * grouping/labelling — presence of ordinary tools follows the live registry.
+ * One family per shipped tool group, derived from the generated catalog. The
+ * catalog is the host's allocation unit — the `tool_groups` menu, the per-seat
+ * pre-attach table, and this page's aggregate rows all read it — so a group
+ * edit in the profile regenerates this list instead of drifting.
+ *
+ * A group folds only when at least two members share one shipped policy; a
+ * member whose policy differs (the asking `council_register` and `job_kill`)
+ * stays its own concrete row, so a family chip never hides a mixed decision.
+ * `core` is skipped: it is the everyday per-tool surface, and folding it would
+ * erase the per-tool decisions this page exists to set.
+ * @returns family overlays in catalog order.
  */
-export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = [
-  {
-    id: 'whiteboard_*',
-    name: 'Whiteboard',
-    prefix: 'whiteboard_',
-    members: ['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget'],
-  },
-  {
-    id: 'peer_*',
-    name: 'Peer (fleet devices)',
-    prefix: 'peer_',
-    members: ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'],
-  },
-  {
-    id: 'memory_*',
-    name: 'Memory',
-    prefix: 'memory_',
-    members: ['memory_save', 'memory_search', 'memory_rescind', 'memory_confirm'],
-  },
-  {
-    id: 'council_*',
-    name: 'Council',
-    prefix: 'council_',
-    // Registration asks while listing allows: the family keeps only the
-    // allow-classified listing, and the asking register row stays visible as
-    // its own concrete row (a mixed family would hide which decision is which).
-    members: ['council_list'],
-    exclude: ['council_register'],
-  },
-  {
-    id: 'session_*',
-    name: 'Session queries',
-    prefix: 'session_',
-    members: ['session_search', 'session_trace', 'session_event_read', 'session_event_search', 'session_event_trace'],
-  },
-  {
-    id: 'reports_*',
-    name: 'Reports & review',
-    prefix: 'reports_',
-    members: ['diagnostics_report', 'fast_report', 'review_run'],
-  },
-]
+function buildPolicyFamilies(): PolicyFamilyOverlay[] {
+  const families: PolicyFamilyOverlay[] = []
+  for (const group of SHIPPED_TOOL_GROUP_CATALOG) {
+    if (!group.enabled || group.id === 'core') continue
+    const byPolicy = new Map<PolicyValue, string[]>()
+    for (const member of group.members) {
+      const policy = shippedPolicyFor(member) ?? 'ask'
+      byPolicy.set(policy, [...(byPolicy.get(policy) ?? []), member])
+    }
+    const modal = [...byPolicy.values()].sort((left, right) => right.length - left.length)[0] ?? []
+    if (modal.length < 2) continue
+    const excluded = group.members.filter(member => !modal.includes(member))
+    const prefix = commonPrefix(modal)
+    families.push({
+      id: `${group.id}_*`,
+      name: group.label,
+      ...(prefix === undefined ? {} : { prefix }),
+      members: modal,
+      ...(excluded.length === 0 ? {} : { exclude: excluded }),
+    })
+  }
+  return families
+}
+
+/** The longest `snake_case` prefix (ending `_`) every name shares, if any. */
+function commonPrefix(names: readonly string[]): string | undefined {
+  const first = names[0]
+  if (first === undefined) return undefined
+  let end = first.length
+  for (const name of names) {
+    let index = 0
+    while (index < end && index < name.length && name[index] === first[index]) index += 1
+    end = index
+  }
+  const prefix = first.slice(0, end)
+  return prefix.endsWith('_') ? prefix : undefined
+}
+
+/**
+ * The tool-policy families, derived from the shipped tool-group catalog at
+ * module load. Add or move a tool in the profile catalog, regenerate the
+ * mirror, and this list follows — it is never hand-maintained here.
+ */
+export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = Object.freeze(buildPolicyFamilies())
 
 /** Curated label overrides where the mechanical humanizer reads wrong. */
 export const TOOL_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
@@ -433,7 +449,9 @@ export function buildPermissionToolRows(
 
   const rows = new Map<string, PermissionToolRow>()
   const families = POLICY_FAMILIES.map((family) => {
-    const liveMembers = nonMcp.filter(name => name.startsWith(family.prefix) && !(family.exclude ?? []).includes(name))
+    const prefix = family.prefix
+    const liveMembers = prefix === undefined ? [] : nonMcp.filter(name =>
+      name.startsWith(prefix) && !(family.exclude ?? []).includes(name))
     const members = [...new Set([...family.members, ...liveMembers])]
       .sort((left, right) => left.localeCompare(right))
     return { family, members }
@@ -577,38 +595,58 @@ export function toolGrantApplies(perms: PermissionsConfig, agent: string | undef
  * @param tool - the tools-map key.
  */
 /**
+ * The operator-level shipped surface. The generated `OPERATOR_SURFACE` is the
+ * host's advertised inventory — the shared main-agent surface WITHOUT the
+ * creator tool group, because that group pre-attaches to the creator seat
+ * alone (orchestrator and sysadmin never see its three tools; the host's seat
+ * guard is the execution backstop). MCP server tools are deliberately absent
+ * from the inventory: MCP availability is a sidebar capability toggle
+ * (per-server, hot-swappable), not a per-role surface decision.
+ */
+const SHARED_OPERATOR_SURFACE: readonly string[] = OPERATOR_SURFACE
+
+/**
+ * The shipped advertised surface for one operator seat: the shared inventory
+ * plus the members of every enabled catalog group the seat pre-attaches that
+ * the shared inventory does not already name, minus the seat's execution deny
+ * backstop. The creator seat therefore holds the shared surface plus the
+ * creator tool group; orchestrator and sysadmin hold the shared surface alone.
+ * @param seat - the operator seat id (preset identity).
+ * @returns the seat's shipped surface, in shared-inventory order.
+ */
+export function operatorSurfaceFor(seat: string): readonly string[] {
+  const extra: string[] = []
+  for (const group of SHIPPED_TOOL_GROUP_CATALOG) {
+    if (!group.enabled || !group.preAttach.includes(seat)) continue
+    // A group the shared inventory already reflects (debug) adds nothing.
+    if (group.preAttach.includes('orchestrator')) continue
+    for (const member of group.members) {
+      if (!extra.includes(member)) extra.push(member)
+    }
+  }
+  const denied = new Set(SHIPPED_SEAT_TOOL_DENY[seat] ?? [])
+  return [...new Set([...SHARED_OPERATOR_SURFACE, ...extra])].filter(name => !denied.has(name))
+}
+
+/**
  * The shipped per-role surfaces (mirrors the fork's ROLE_CHILD_DENY table +
  * the shared worker deny list — the tools each role CAN see by default).
  * Drives the availability eye when the role has no `available` override:
- * built-in-visible tools show on, everything else shows crossed-out.
- */
-/**
- * The operator-level surface: the acting agents (orchestrator, sysadmin,
- * creator) share one FULL surface — from a permissions perspective they are
- * the same agent: they act, they delegate, they configure. Generated from the
- * host's shipped preset inventory (`OPERATOR_SURFACE`), which is the exact
- * advertised main-agent tool list, so a host surface change must regenerate
- * the mirror instead of drifting here. MCP server tools are deliberately
- * absent from the inventory: MCP availability is a sidebar capability toggle
- * (per-server, hot-swappable), not a per-role surface decision.
- */
-const FULL_OPERATOR_SURFACE: readonly string[] = OPERATOR_SURFACE
-
-/**
- * The shipped per-role surfaces. The operator rows are the host's advertised
- * main-agent surface; the specialist/council rows are the client's
- * conservative fallback surface, parity-guarded against the host's
- * shared/role child deny tables (the spec fails if a surface ever names a tool
- * the host hard-denies for that role). MCP rows are deliberately absent — MCP
- * availability is a sidebar capability toggle, not a per-role surface
- * decision. Like {@link FULL_OPERATOR_SURFACE}, every name must resolve in the
+ * built-in-visible tools show on, everything else shows crossed-out. The
+ * operator rows are the host's advertised main-agent surfaces, derived per
+ * seat from the catalog's pre-attach table (see {@link operatorSurfaceFor});
+ * the specialist/council rows are the client's conservative fallback surface,
+ * parity-guarded against the host's shared/role child deny tables (the spec
+ * fails if a surface ever names a tool the host hard-denies for that role).
+ * MCP rows are deliberately absent — MCP availability is a sidebar capability
+ * toggle, not a per-role surface decision. Every name must resolve in the
  * deployment's live registry: a role's `available` list is applied as a strict
  * `tools.restrict({allow})` at spawn, so a stale name would abort the child.
  */
 export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
-  orchestrator: FULL_OPERATOR_SURFACE,
-  sysadmin: FULL_OPERATOR_SURFACE,
-  creator: FULL_OPERATOR_SURFACE,
+  orchestrator: operatorSurfaceFor('orchestrator'),
+  sysadmin: operatorSurfaceFor('sysadmin'),
+  creator: operatorSurfaceFor('creator'),
   fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
   designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
   explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'skill', 'memory_search', 'memory_save'],
@@ -640,6 +678,20 @@ export function roleSurfaceFor(agent: string | undefined, registry?: RoleRegistr
   const surface = Array.isArray(available) ? available : BUILT_ROLE_SURFACE[agent]
   if (surface === undefined) return undefined
   return [...new Set([...surface, ...KEPT_BY_EVERY_ROLE])]
+}
+
+/**
+ * Whether the shipped seat guard structurally denies one tool to one seat.
+ * The Permissions eye must not write an allowlist entry for such a tool: the
+ * seat's presentation filter and its pre-execute guard both ignore the entry,
+ * so a toggle would only paint a false available state.
+ * @param agent - the subject role id, or undefined.
+ * @param tool - the tool name.
+ * @returns true when `SHIPPED_SEAT_TOOL_DENY` names the tool for this seat.
+ */
+export function seatDeniesTool(agent: string | undefined, tool: string): boolean {
+  if (agent === undefined) return false
+  return (SHIPPED_SEAT_TOOL_DENY[agent] ?? []).includes(tool)
 }
 
 /**

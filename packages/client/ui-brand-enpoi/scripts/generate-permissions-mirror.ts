@@ -3,9 +3,14 @@
  * mirror of HOST-OWNED policy data.
  *
  * Sources (all read-only):
- *   - host policy defaults: `$DSH_HOST_POLICY_FILE` or
+ *   - host policy defaults + seat guard: `$DSH_HOST_POLICY_FILE` or
  *     `~/.dsh/profiles/web/packages/enpoi-capabilities/src/policy.ts`
- *     (`SHIPPED_TOOL_DEFAULTS`, `SHIPPED_TOOL_DEFAULT_EXEMPTIONS`);
+ *     (`SHIPPED_TOOL_DEFAULTS`, `SHIPPED_TOOL_DEFAULT_EXEMPTIONS`,
+ *     `SHIPPED_SEAT_TOOL_DENY`);
+ *   - tool-group catalog: `$DSH_TOOL_GROUPS_FILE` or
+ *     `~/.dsh/profiles/web/packages/enpoi-tool-groups/src/catalog.ts`
+ *     (`SHIPPED_TOOL_GROUPS`) — the Permissions page derives its family rows
+ *     from this list so the two systems cannot drift;
  *   - child role tables: `packages/subagent/tool-subagent/src/index.ts`
  *     (`SHARED_CHILD_KEEP`, `SHARED_CHILD_DENY`, `ROLE_CHILD_DENY`);
  *   - main-agent advertised surface: `$DSH_TOOL_INVENTORY_DIR` or
@@ -36,15 +41,30 @@ const REPO_ROOT = resolve(HERE, '..', '..', '..', '..')
 /** Filesystem locations the mirror is built from and written to. */
 export interface MirrorPaths {
   hostPolicy: string
+  toolGroups: string
   roleSource: string
   operatorFixture: string
   output: string
+}
+
+/** One shipped tool group, mirrored from the profile catalog. */
+export interface MirrorToolGroup {
+  id: string
+  label: string
+  purpose: string
+  mode: string
+  members: string[]
+  preAttach: string[]
+  seats?: string[]
+  enabled: boolean
 }
 
 /** The canonical payload embedded in the generated module. */
 export interface MirrorData {
   shippedToolDefaults: Record<string, string>
   shippedToolDefaultExemptions: Array<{ prefix: string; reason: string }>
+  toolGroups: MirrorToolGroup[]
+  seatToolDeny: Record<string, string[]>
   sharedChildKeep: string[]
   sharedChildDeny: string[]
   roleChildDeny: Record<string, string[]>
@@ -56,6 +76,8 @@ export function mirrorPaths(): MirrorPaths {
   return {
     hostPolicy: process.env.DSH_HOST_POLICY_FILE
       ?? join(homedir(), '.dsh', 'profiles', 'web', 'packages', 'enpoi-capabilities', 'src', 'policy.ts'),
+    toolGroups: process.env.DSH_TOOL_GROUPS_FILE
+      ?? join(homedir(), '.dsh', 'profiles', 'web', 'packages', 'enpoi-tool-groups', 'src', 'catalog.ts'),
     roleSource: join(REPO_ROOT, 'packages', 'subagent', 'tool-subagent', 'src', 'index.ts'),
     operatorFixture: join(
       process.env.DSH_TOOL_INVENTORY_DIR ?? join(REPO_ROOT, 'scripts', 'tool-inventory'),
@@ -145,6 +167,40 @@ function stringArrayRecord(node: ts.Expression, context: string): Record<string,
   return out
 }
 
+/** Read one boolean literal. */
+function booleanValue(node: ts.Expression | undefined, context: string): boolean {
+  if (node === undefined || (node.kind !== ts.SyntaxKind.TrueKeyword && node.kind !== ts.SyntaxKind.FalseKeyword)) {
+    throw new Error(`${context}: expected a boolean literal`)
+  }
+  return node.kind === ts.SyntaxKind.TrueKeyword
+}
+
+/** Read an array literal of tool-group definitions (`SHIPPED_TOOL_GROUPS`). */
+function toolGroupArray(node: ts.Expression, context: string): MirrorToolGroup[] {
+  const array = unwrap(node)
+  if (!ts.isArrayLiteralExpression(array)) throw new Error(`${context}: expected an array literal`)
+  return array.elements.map((element, index) => {
+    const entry = unwrap(element)
+    if (!ts.isObjectLiteralExpression(entry)) throw new Error(`${context}[${index}]: expected an object literal`)
+    const fields: Record<string, ts.Expression> = {}
+    for (const member of entry.properties) {
+      fields[propertyName(member, context)] = (member as ts.PropertyAssignment).initializer
+    }
+    const field = (name: string): ts.Expression => fields[name] ?? fail(`${context}[${index}].${name}`)
+    const seats = fields['seats']
+    return {
+      id: stringValue(field('id'), `${context}[${index}].id`),
+      label: stringValue(field('label'), `${context}[${index}].label`),
+      purpose: stringValue(field('purpose'), `${context}[${index}].purpose`),
+      mode: stringValue(field('mode'), `${context}[${index}].mode`),
+      members: stringArray(field('members'), `${context}[${index}].members`),
+      preAttach: stringArray(field('preAttach'), `${context}[${index}].preAttach`),
+      ...(seats === undefined ? {} : { seats: stringArray(seats, `${context}[${index}].seats`) }),
+      enabled: booleanValue(fields['enabled'], `${context}[${index}].enabled`),
+    }
+  })
+}
+
 /** Read an array literal of `{ prefix, reason }` objects. */
 function exemptionArray(node: ts.Expression, context: string): Array<{ prefix: string; reason: string }> {
   const array = unwrap(node)
@@ -225,8 +281,18 @@ export function buildMirrorData(paths: MirrorPaths = mirrorPaths()): {
     initializerOf(policy, 'SHIPPED_TOOL_DEFAULT_EXEMPTIONS') ?? fail('SHIPPED_TOOL_DEFAULT_EXEMPTIONS'),
     'SHIPPED_TOOL_DEFAULT_EXEMPTIONS',
   )
+  const seatToolDeny = canonical(stringArrayRecord(
+    initializerOf(policy, 'SHIPPED_SEAT_TOOL_DENY') ?? fail('SHIPPED_SEAT_TOOL_DENY'), 'SHIPPED_SEAT_TOOL_DENY',
+  ))
 
-  const data: MirrorData = { shippedToolDefaults, shippedToolDefaultExemptions, ...buildRepoMirrorData(paths) }
+  const catalog = parse(paths.toolGroups)
+  const toolGroups = canonical(toolGroupArray(
+    initializerOf(catalog, 'SHIPPED_TOOL_GROUPS') ?? fail('SHIPPED_TOOL_GROUPS'), 'SHIPPED_TOOL_GROUPS',
+  ))
+
+  const data: MirrorData = {
+    shippedToolDefaults, shippedToolDefaultExemptions, toolGroups, seatToolDeny, ...buildRepoMirrorData(paths),
+  }
   const hostDefaultsDigest = digest({ shippedToolDefaults, shippedToolDefaultExemptions })
   const mirrorSourceDigest = digest(data)
   return { data, hostDefaultsDigest, mirrorSourceDigest }
@@ -258,6 +324,7 @@ export function renderMirror(
   lines.push(' * stale mirror would show a wrong decision/provenance.')
   lines.push(' *')
   lines.push(` * Sources: ${paths.hostPolicy}`)
+  lines.push(` *          ${paths.toolGroups}`)
   lines.push(` *          ${paths.roleSource}`)
   lines.push(` *          ${paths.operatorFixture}`)
   lines.push(' *')
@@ -286,6 +353,41 @@ export function renderMirror(
     lines.push(`  { prefix: ${JSON.stringify(exemption.prefix)}, reason: ${JSON.stringify(exemption.reason)} },`)
   }
   lines.push('])')
+  lines.push('')
+  lines.push('/** One shipped tool group (profile `enpoi-tool-groups` catalog). */')
+  lines.push('export interface ShippedToolGroupMirror {')
+  lines.push('  readonly id: string')
+  lines.push('  readonly label: string')
+  lines.push('  readonly purpose: string')
+  lines.push("  readonly mode: 'static' | 'on-demand'")
+  lines.push('  readonly members: readonly string[]')
+  lines.push('  readonly preAttach: readonly string[]')
+  lines.push('  readonly seats?: readonly string[]')
+  lines.push('  readonly enabled: boolean')
+  lines.push('}')
+  lines.push('')
+  lines.push('/** The shipped tool-group catalog: the Permissions family rows derive from this list. */')
+  lines.push('export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Object.freeze([')
+  for (const group of data.toolGroups) {
+    lines.push('  Object.freeze({')
+    lines.push(`    id: ${JSON.stringify(group.id)},`)
+    lines.push(`    label: ${JSON.stringify(group.label)},`)
+    lines.push(`    purpose: ${JSON.stringify(group.purpose)},`)
+    lines.push(`    mode: ${JSON.stringify(group.mode)},`)
+    lines.push(`    members: Object.freeze(${jsonArray(group.members)}),`)
+    lines.push(`    preAttach: Object.freeze(${jsonArray(group.preAttach)}),`)
+    if (group.seats !== undefined) lines.push(`    seats: Object.freeze(${jsonArray(group.seats)}),`)
+    lines.push(`    enabled: ${group.enabled ? 'true' : 'false'},`)
+    lines.push('  }),')
+  }
+  lines.push('])')
+  lines.push('')
+  lines.push('/** Tools the shipped seat guard denies per seat (`SHIPPED_SEAT_TOOL_DENY`). */')
+  lines.push('export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({')
+  for (const seat of Object.keys(data.seatToolDeny)) {
+    lines.push(`  ${JSON.stringify(seat)}: Object.freeze(${jsonArray(data.seatToolDeny[seat] ?? [])}),`)
+  }
+  lines.push('})')
   lines.push('')
   lines.push('/** Tools every child keeps regardless of role surface (host keep list). */')
   lines.push(`export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(${jsonArray(data.sharedChildKeep)})`)
@@ -322,6 +424,9 @@ export function checkMirror(paths: MirrorPaths = mirrorPaths()): {
 } {
   if (!existsSync(paths.hostPolicy)) {
     return { ok: true, skipped: true, reason: `host policy missing at ${paths.hostPolicy}` }
+  }
+  if (!existsSync(paths.toolGroups)) {
+    return { ok: true, skipped: true, reason: `tool-group catalog missing at ${paths.toolGroups}` }
   }
   if (!existsSync(paths.roleSource)) {
     return { ok: true, skipped: true, reason: `role source missing at ${paths.roleSource}` }

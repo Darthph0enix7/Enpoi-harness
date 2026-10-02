@@ -642,8 +642,10 @@ describe('CapabilitiesBody — defaults vs session overrides', () => {
       projectionValues: { mcpMounts: { mounted: ['plane-mcp'] }, capabilityOverrides: { skills: {}, tools: {}, mcp: {} } },
     })
     expect(await screen.findByText('Plane MCP')).toBeTruthy()
-    // Mounted on-demand server: enabled + marked as a session override.
+    // Mounted on-demand server: enabled + marked as a session mount.
     expect(screen.getByLabelText('Disable Plane MCP').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('mounted').getAttribute('data-capability-mount')).toBe('plane-mcp')
+    expect(screen.queryByText('session')).toBeNull()
     expect(screen.getByLabelText('Reset Plane MCP to the profile default')).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText('Reset Plane MCP to the profile default'))
@@ -653,5 +655,45 @@ describe('CapabilitiesBody — defaults vs session overrides', () => {
     const call = fetchMock.mock.calls.find(candidate => String(candidate[0]) === '/api/enpoiCapabilities.mcpUnmount')!
     const body = JSON.parse(String((call[1] as RequestInit).body))
     expect(body.payload.args).toEqual({ sessionId: 'sess-1', server: 'plane-mcp' })
+  })
+
+  it('distinguishes a session mount from a profile default and keeps a session-off override on the plain marker', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = methodOf(init)
+      if (method === 'settings.describe') {
+        return describeResponse({
+          mcpServers: {
+            'always-mcp': { serverName: 'always', url: 'http://127.0.0.1:8212/mcp' },
+            'plane-mcp': { serverName: 'plane', url: 'http://127.0.0.1:8211/mcp', mode: 'on-demand' },
+          },
+          capabilities: { mcp: { 'always-mcp': true, 'plane-mcp': true }, skills: { 'tier1-workflow': true, 'tier3-workflow': true }, tools: {} },
+        }, 4)
+      }
+      const registry = registryResponse(method, [
+        { name: 'tier1-workflow', description: 'Guided planning' },
+        { name: 'tier3-workflow', description: 'All-out implementation' },
+      ], [], [])
+      if (registry !== undefined) return registry
+      return jsonResponse({ result: { ok: true, value: { ok: true, reason: '' } } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountBody({
+      blank: false,
+      projectionValues: {
+        mcpMounts: { mounted: ['plane-mcp'] },
+        capabilityOverrides: { skills: { 'tier1-workflow': true, 'tier3-workflow': false }, tools: {}, mcp: {} },
+      },
+    })
+    expect(await screen.findByText('Always MCP')).toBeTruthy()
+    // Only the session layer's ON rows carry the mount marker: the mounted
+    // on-demand server and the session-enabled skill. The always-on default
+    // carries nothing; the session-OFF skill keeps the plain session marker.
+    const mounted = [...document.querySelectorAll('[data-capability-mount]')]
+      .map(node => node.getAttribute('data-capability-mount'))
+    expect(mounted.sort()).toEqual(['plane-mcp', 'tier1-workflow'])
+    const plain = [...document.querySelectorAll('[data-capability-override]')]
+      .map(node => node.getAttribute('data-capability-override'))
+    expect(plain).toEqual(['tier3-workflow'])
+    expect(screen.getByText('Always MCP')).toBeTruthy()
   })
 })

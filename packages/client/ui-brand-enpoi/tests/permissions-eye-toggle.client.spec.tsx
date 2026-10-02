@@ -164,4 +164,25 @@ describe('permissions availability eye', () => {
     // Concrete rows keep their eye.
     expect(eyeFor('Bash').getAttribute('aria-pressed')).toBe('true')
   })
+
+  it('presents the creator-only tools as available to the creator seat alone', async () => {
+    await mount(
+      { permissions: { defaults: { unknownTools: 'ask' } } },
+      ['read', 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query'],
+    )
+
+    // The creator pre-attaches the creator tool group, so its family row (the
+    // three harness-authoring tools fold into it) shows available.
+    fireEvent.click(screen.getByRole('button', { name: /creator/ }))
+    expect(eyeFor('Creator (harness authoring)').getAttribute('aria-pressed')).toBe('true')
+
+    // Orchestrator and sysadmin hold the shared surface: the row shows off
+    // and carries NO toggle, because the allowlist could never make a
+    // seat-denied tool visible.
+    for (const seat of [/orchestrator/, /sysadmin/]) {
+      fireEvent.click(screen.getByRole('button', { name: seat }))
+      const row = screen.getByText('Creator (harness authoring)').parentElement!.parentElement!
+      expect(within(row).queryByTitle(/this role allowlist/)).toBeNull()
+    }
+  })
 })

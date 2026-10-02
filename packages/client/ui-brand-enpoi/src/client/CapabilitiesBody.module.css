@@ -437,6 +437,25 @@
   white-space: nowrap;
 }
 
+/* A session mount reads as enabled BY this session: a dotted badge (shape,
+   not colour alone) and a thin inset rail, never the solid session-override
+   marker and never the unmarked profile-default/always-on row. */
+.mountBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dotted rgba(103, 220, 231, 0.55);
+  color: #67dce7;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.rowMounted {
+  box-shadow: inset 2px 0 0 rgba(103, 220, 231, 0.5);
+}
+
 .rowActions {
   display: inline-flex;
   align-items: center;

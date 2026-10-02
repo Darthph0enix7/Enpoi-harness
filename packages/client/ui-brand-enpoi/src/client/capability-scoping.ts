@@ -83,6 +83,36 @@ export function isOverridden(
   return overrideValueOf(record, kind, id) !== undefined
 }
 
+/**
+ * Whether the session's own layer is what turns one row ON: a durable session
+ * mount, or a `true` session override. The Capabilities center marks exactly
+ * these rows with its mounted state, so a row the agent or a skill pulled in
+ * this session reads differently from a profile default that happens to be on
+ * and from an always-on server. A `false` override leaves the row off and is
+ * the plain session state, not a mount.
+ * @param kind - capability family.
+ * @param id - capability id.
+ * @param record - the session's override record.
+ * @param mounted - the session's mounted MCP server ids.
+ * @param onDemand - whether the MCP server is on-demand (mounts decide).
+ * @returns true when the session layer is what enables the row.
+ */
+export function isSessionMounted(
+  kind: 'skills' | 'tools' | 'mcp',
+  id: string,
+  record: CapabilityOverrideRecord | undefined,
+  mounted: readonly string[] | undefined,
+  onDemand: boolean,
+): boolean {
+  if (kind === 'mcp') {
+    // A durable mount is a session pull for either mode; an always-on server
+    // can additionally be pulled in by a `true` override when it ships off.
+    if ((mounted ?? []).includes(id)) return true
+    return onDemand ? false : overrideValueOf(record, kind, id) === true
+  }
+  return overrideValueOf(record, kind, id) === true
+}
+
 let rpcSeq = 0
 
 /** Unique wire rpcId per request (the gateway echoes it; duplicates race). */

@@ -61,7 +61,7 @@ import {
 import { ensureSettingsFresh, getEnpoiNamespacePresence, isSettingsCacheFresh, readEnpoiNamespace, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
 import { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './capability-catalog.ts'
 import {
-  effectiveValueOf, isOverridden, mountServerForSession, scopingModeOf, setCapabilityOverride,
+  effectiveValueOf, isOverridden, isSessionMounted, mountServerForSession, scopingModeOf, setCapabilityOverride,
   unmountServerForSession, type CapabilityOverrideRecord, type ScopingMode,
 } from './capability-scoping.ts'
 import type { FleetCouncil, FleetCouncilSeat } from './role-registry.ts'
@@ -1123,6 +1123,14 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   const rowOverridden = (row: LiveRow): boolean =>
     mode === 'session' && isOverridden(familyOf(row.kind), row.id, effectiveOverrides, effectiveMounted, rowOnDemand(row))
 
+  /**
+   * Whether the session's own layer is what turns one row ON — a durable mount
+   * or a `true` override. These rows carry the distinct mounted treatment, so
+   * a session pull never reads like a profile default or an always-on server.
+   */
+  const rowSessionMounted = (row: LiveRow): boolean =>
+    mode === 'session' && isSessionMounted(familyOf(row.kind), row.id, effectiveOverrides, effectiveMounted, rowOnDemand(row))
+
   const onToggle = (kind: LiveRow['kind'], id: string, next: boolean): void => {
     setWriteError(null)
     const key = `${kind}:${id}`
@@ -1229,6 +1237,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
             const isProtected = PROTECTED_CAPABILITIES.has(row.id)
             const enabled = isProtected ? true : rowEffective(row)
             const overridden = !isProtected && rowOverridden(row)
+            const sessionMounted = !isProtected && rowSessionMounted(row)
             const key = `${row.kind}:${row.id}`
 
             // MCP rows: connection heartbeat beside the switch. The host's
@@ -1258,7 +1267,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
             }
 
             return (
-              <div className={c('row')} key={key}>
+              <div className={`${c('row')} ${sessionMounted ? c('rowMounted') : ''}`} key={key}>
                 <div className={c('rowInfo')}>
                   <div className={c('rowName')}>
                     <span
@@ -1273,7 +1282,19 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                     <span>{row.name}</span>
                     {isProtected && <span className={c('coreBadge')}>Core</span>}
                     {row.badge !== undefined && <span className={c('coreBadge')}>{row.badge}</span>}
-                    {overridden && <span className={c('overrideBadge')} data-capability-override={row.id}>session</span>}
+                    {sessionMounted
+                      ? (
+                        <span
+                          className={c('mountBadge')}
+                          data-capability-mount={row.id}
+                          title="Mounted for this session — the profile default is untouched"
+                        >
+                          mounted
+                        </span>
+                      )
+                      : overridden && (
+                        <span className={c('overrideBadge')} data-capability-override={row.id}>session</span>
+                      )}
                   </div>
                   <div className={c('rowDesc')}>{row.description}</div>
                   {row.kind === 'mcp' && stFresh && st.error !== undefined && (

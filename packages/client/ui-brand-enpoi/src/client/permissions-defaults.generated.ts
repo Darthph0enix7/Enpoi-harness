@@ -6,6 +6,7 @@
  * stale mirror would show a wrong decision/provenance.
  *
  * Sources: /home/adam/.dsh/profiles/web/packages/enpoi-capabilities/src/policy.ts
+ *          /home/adam/.dsh/profiles/web/packages/enpoi-tool-groups/src/catalog.ts
  *          /home/adam/deepseek-harness/packages/subagent/tool-subagent/src/index.ts
  *          /home/adam/deepseek-harness/scripts/tool-inventory/expected-orchestrator.json
  *
@@ -19,7 +20,7 @@
 
 export const HOST_DEFAULTS_DIGEST = 'bf4c14fcd185d2e4d5a7ac7ee7c0f7dda4d2dec07f097febff0fa399975dc43b'
 
-export const MIRROR_SOURCE_DIGEST = '4e92d4a40e26375b623dcbc69a815290c7c328c562a1a9e7f3a79824b06c1a1d'
+export const MIRROR_SOURCE_DIGEST = 'febd8eb1e97e6af5204689149bf78d1f7ffcb2de5b9a3acad28b6ef4ae22978b'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -87,11 +88,142 @@ export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason:
   { prefix: 'peer_', reason: "first-party on-demand fleet tools (peer_ask, peer_asks, peer_answer, peer_cancel, peer_status) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device's agent, so until the operator sets a row the unknown-tools ask is the intended gate" },
 ])
 
+/** One shipped tool group (profile `enpoi-tool-groups` catalog). */
+export interface ShippedToolGroupMirror {
+  readonly id: string
+  readonly label: string
+  readonly purpose: string
+  readonly mode: 'static' | 'on-demand'
+  readonly members: readonly string[]
+  readonly preAttach: readonly string[]
+  readonly seats?: readonly string[]
+  readonly enabled: boolean
+}
+
+/** The shipped tool-group catalog: the Permissions family rows derive from this list. */
+export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Object.freeze([
+  Object.freeze({
+    id: 'core',
+    label: 'Core',
+    purpose: 'the everyday implementation surface',
+    mode: 'static',
+    members: Object.freeze(['ask_user_question', 'bash', 'edit', 'glob', 'grep', 'read', 'read_image', 'skill', 'subagent', 'todo_write', 'web_search', 'write', 'present']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'goals',
+    label: 'Goals',
+    purpose: 'create, read, and update the session goal',
+    mode: 'static',
+    members: Object.freeze(['create_goal', 'get_goal', 'update_goal']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'plan',
+    label: 'Plan mode',
+    purpose: 'submit an implementation plan for approval',
+    mode: 'static',
+    members: Object.freeze(['exit_plan_mode']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'councils',
+    label: 'Councils',
+    purpose: 'oracle review, roundtable debate, and chorus brainstorming',
+    mode: 'static',
+    members: Object.freeze(['chorus', 'council_list', 'council_register', 'oracle_review', 'request_evidence', 'roundtable']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'jobs',
+    label: 'Jobs',
+    purpose: 'list, read, and stop background shell jobs',
+    mode: 'static',
+    members: Object.freeze(['job_kill', 'job_list', 'job_output']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'workflow',
+    label: 'Workflows',
+    purpose: 'run deterministic workflow and ralph programs',
+    mode: 'static',
+    members: Object.freeze(['ralph', 'workflow']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'reporting',
+    label: 'Reporting',
+    purpose: 'fast structured progress reports',
+    mode: 'static',
+    members: Object.freeze(['fast_report']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'whiteboard',
+    label: 'Whiteboard',
+    purpose: 'pin, read, and forget durable board notes',
+    mode: 'static',
+    members: Object.freeze(['whiteboard_forget', 'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'memory',
+    label: 'Memory',
+    purpose: 'save, search, confirm, and rescind durable project facts',
+    mode: 'static',
+    members: Object.freeze(['memory_confirm', 'memory_rescind', 'memory_save', 'memory_search']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'peer',
+    label: 'Peer interconnect',
+    purpose: 'cross-device peer sessions: status, ask, answer, cancel',
+    mode: 'on-demand',
+    members: Object.freeze(['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'debug',
+    label: 'Debug & observability',
+    purpose: 'session log, event trace, and diagnostics inspection',
+    mode: 'on-demand',
+    members: Object.freeze(['diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace']),
+    preAttach: Object.freeze(['orchestrator', 'sysadmin', 'creator', 'broker']),
+    enabled: true,
+  }),
+  Object.freeze({
+    id: 'creator',
+    label: 'Creator (harness authoring)',
+    purpose: 'inspect and manage the harness plugin composition',
+    mode: 'on-demand',
+    members: Object.freeze(['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']),
+    preAttach: Object.freeze(['creator']),
+    seats: Object.freeze(['creator']),
+    enabled: true,
+  }),
+])
+
+/** Tools the shipped seat guard denies per seat (`SHIPPED_SEAT_TOOL_DENY`). */
+export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'orchestrator': Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
+  'sysadmin': Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
+})
+
 /** Tools every child keeps regardless of role surface (host keep list). */
 export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin'])
 
 /** Tools denied to every child (host anti-leak floor). */
-export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents'])
+export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents'])
 
 /** Extra per-role child denials (host role table). */
 export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -100,4 +232,4 @@ export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Obje
 })
 
 /** The main-agent advertised surface (shipped preset inventory). */
-export const OPERATOR_SURFACE: readonly string[] = Object.freeze(['ask_user_question', 'bash', 'chorus', 'cordis_inspect_list', 'cordis_inspect_query', 'council_list', 'council_register', 'create_goal', 'diagnostics_report', 'edit', 'exit_plan_mode', 'fast_report', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'mcp', 'memory_confirm', 'memory_rescind', 'memory_save', 'memory_search', 'oracle_review', 'plugin_manager', 'present', 'ralph', 'read', 'read_image', 'request_evidence', 'roundtable', 'send_message', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace', 'skill', 'subagent', 'todo_write', 'tool_groups', 'update_goal', 'web_search', 'whiteboard_forget', 'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'workflow', 'write'])
+export const OPERATOR_SURFACE: readonly string[] = Object.freeze(['ask_user_question', 'bash', 'chorus', 'council_list', 'council_register', 'create_goal', 'diagnostics_report', 'edit', 'exit_plan_mode', 'fast_report', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'mcp', 'memory_confirm', 'memory_rescind', 'memory_save', 'memory_search', 'oracle_review', 'present', 'ralph', 'read', 'read_image', 'request_evidence', 'roundtable', 'send_message', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace', 'skill', 'subagent', 'todo_write', 'tool_groups', 'update_goal', 'web_search', 'whiteboard_forget', 'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'workflow', 'write'])

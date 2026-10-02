@@ -31,14 +31,17 @@ import {
   ROLE_CHILD_DENY,
   SHARED_CHILD_DENY,
   SHARED_CHILD_KEEP,
+  SHIPPED_SEAT_TOOL_DENY,
   SHIPPED_TOOL_DEFAULT_EXEMPTIONS,
   SHIPPED_TOOL_DEFAULTS,
+  SHIPPED_TOOL_GROUP_CATALOG,
 } from '../src/client/permissions-defaults.generated.ts'
 import {
   BUILT_ROLE_SURFACE,
   buildPermissionToolRows,
   KEPT_BY_EVERY_ROLE,
   MAIN_AGENT_IDS,
+  POLICY_FAMILIES,
   rowPolicyState,
   shippedPolicyFor,
 } from '../src/client/permissions-model.ts'
@@ -50,6 +53,9 @@ const INTEGRATED_TOOLS = [
   'tool_groups', 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager',
   'council_register',
 ] as const
+
+/** The tools the creator tool group presents to the creator seat alone. */
+const CREATOR_ONLY: readonly string[] = ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']
 
 /** The first-party on-demand peer family the host documents as exempt. */
 const PEER_TOOLS = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'] as const
@@ -85,6 +91,8 @@ describe('permissions mirror parity', () => {
     expect(MIRROR_SOURCE_DIGEST).toBe(mirrorSourceDigest)
     expect(SHIPPED_TOOL_DEFAULTS).toEqual(data.shippedToolDefaults)
     expect(SHIPPED_TOOL_DEFAULT_EXEMPTIONS).toEqual(data.shippedToolDefaultExemptions)
+    expect(SHIPPED_TOOL_GROUP_CATALOG).toEqual(data.toolGroups)
+    expect(SHIPPED_SEAT_TOOL_DENY).toEqual(data.seatToolDeny)
   })
 
   it('keeps the exemption list documented and non-overlapping with explicit rows', () => {
@@ -124,10 +132,10 @@ describe('shipped defaults drive the client decision', () => {
     }
   })
 
-  it('shows the asking council register as its own row, not behind the allow-classified Council family', () => {
+  it('shows the asking council register as its own row, not behind the allow-classified Councils family', () => {
     const rows = buildPermissionToolRows(undefined, [], ['council_list', 'council_register'])
-    const family = rows.find(row => row.id === 'council_*')!
-    expect(family.members).toEqual(['council_list'])
+    const family = rows.find(row => row.id === 'councils_*')!
+    expect(family.members).toEqual(['chorus', 'council_list', 'oracle_review', 'request_evidence', 'roundtable'])
     const register = rows.find(row => row.id === 'council_register')!
     expect(register.kind).toBe('tool')
     const state = rowPolicyState({}, undefined, register)
@@ -137,12 +145,54 @@ describe('shipped defaults drive the client decision', () => {
 })
 
 describe('role-surface mirror', () => {
-  it('takes the operator surface from the host preset inventory', () => {
-    expect(BUILT_ROLE_SURFACE.orchestrator).toBe(OPERATOR_SURFACE)
-    expect(BUILT_ROLE_SURFACE.sysadmin).toBe(OPERATOR_SURFACE)
-    expect(BUILT_ROLE_SURFACE.creator).toBe(OPERATOR_SURFACE)
+  it('takes the shared operator surface from the host preset inventory', () => {
+    // The generated inventory is the orchestrator's advertised surface: the
+    // shared main-agent block WITHOUT the creator tool group.
+    expect(BUILT_ROLE_SURFACE.orchestrator).toEqual(OPERATOR_SURFACE)
+    expect(BUILT_ROLE_SURFACE.sysadmin).toEqual(OPERATOR_SURFACE)
     for (const tool of INTEGRATED_TOOLS) {
-      expect(OPERATOR_SURFACE, `${tool} missing from the operator surface`).toContain(tool)
+      if (CREATOR_ONLY.includes(tool)) continue
+      expect(OPERATOR_SURFACE, `${tool} missing from the shared operator surface`).toContain(tool)
+    }
+    for (const tool of CREATOR_ONLY) {
+      expect(OPERATOR_SURFACE, `${tool} leaked into the shared operator surface`).not.toContain(tool)
+    }
+  })
+
+  it('extends the creator seat with the creator tool group and keeps the seat deny absent from every seat', () => {
+    // The creator-only group pre-attaches to the creator alone: the creator
+    // surface is the shared inventory plus the three harness-authoring tools.
+    for (const tool of CREATOR_ONLY) {
+      expect(BUILT_ROLE_SURFACE.creator, `${tool} missing from the creator surface`).toContain(tool)
+      expect(BUILT_ROLE_SURFACE.orchestrator).not.toContain(tool)
+      expect(BUILT_ROLE_SURFACE.sysadmin).not.toContain(tool)
+    }
+    expect(BUILT_ROLE_SURFACE.creator).toHaveLength(OPERATOR_SURFACE.length + CREATOR_ONLY.length)
+    // The seat guard is the execution backstop; a shipped surface never names
+    // a tool its own seat denies.
+    for (const [seat, denied] of Object.entries(SHIPPED_SEAT_TOOL_DENY)) {
+      for (const tool of denied) {
+        expect(BUILT_ROLE_SURFACE[seat], `${seat} surfaces its own denied ${tool}`).not.toContain(tool)
+      }
+    }
+  })
+
+  it('derives the policy families from the shipped tool-group catalog', () => {
+    const groups = new Map(SHIPPED_TOOL_GROUP_CATALOG.map(group => [group.id, group]))
+    for (const family of POLICY_FAMILIES) {
+      const group = groups.get(family.id.replace(/_?\*$/, ''))
+      expect(group, `${family.id} names no catalog group`).toBeDefined()
+      expect(family.name).toBe(group?.label)
+      for (const member of family.members) {
+        expect(group?.members, `${family.id} member ${member} is not in ${group?.id}`).toContain(member)
+        for (const other of family.members) {
+          expect(shippedPolicyFor(other) ?? 'ask', `${family.id} folds mixed policies`).toBe(shippedPolicyFor(member) ?? 'ask')
+        }
+      }
+      for (const excluded of family.exclude ?? []) {
+        expect(group?.members, `${family.id} excludes an outside tool ${excluded}`).toContain(excluded)
+        expect(family.members).not.toContain(excluded)
+      }
     }
   })
 
