@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -22,6 +22,9 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 
 const testToolSignal = new AbortController().signal
+
+/** Root ignores file mode bits, and Windows has no POSIX modes: unreadable fixtures need a non-root POSIX host. */
+const cannotMakeUnreadable = process.platform === 'win32' || process.getuid?.() === 0
 
 let dir: string
 let ctx: Context
@@ -103,6 +106,22 @@ describe('search tools over the real subprocess service + the packaged rg', () =
       expect(result.isError).toBe(true)
       expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_INVALID_PATTERN' } })
     })
+
+    it.skipIf(cannotMakeUnreadable)('returns the readable paths plus a warning when a directory is unreadable', async () => {
+      const lockedDir = join(dir, 'locked-dir')
+      await mkdir(lockedDir)
+      await writeFile(join(lockedDir, 'hidden.ts'), 'export const locked = true\n')
+      await chmod(lockedDir, 0o000)
+      try {
+        const result = await call('glob', { pattern: '**/*.ts' }, agent())
+        expect(result.isError).toBe(false)
+        const output = text(result)
+        expect(output).toContain(join('src', 'alpha.ts'))
+        expect(output).toContain('Warning: ripgrep could not search 1 path(s): locked-dir. Results may be incomplete.')
+      } finally {
+        await chmod(lockedDir, 0o755)
+      }
+    })
   })
 
   describe('grep', () => {
@@ -156,6 +175,18 @@ describe('search tools over the real subprocess service + the packaged rg', () =
       const result = await call('grep', { pattern: 'x', path: 'no-such-dir' })
       expect(result.isError).toBe(true)
       expect(result.error).toMatchObject({ info: { code: 'SEARCH_FAILED' } })
+    })
+
+    it.skipIf(cannotMakeUnreadable)('returns the readable matches plus a warning when a file is unreadable', async () => {
+      // ripgrep exits 2 when any file errors but still prints every match from
+      // the readable files; one locked file must not discard the whole search.
+      await writeFile(join(dir, 'locked.ts'), 'export const alpha = 9\n')
+      await chmod(join(dir, 'locked.ts'), 0o000)
+      const result = await call('grep', { pattern: 'alpha' }, agent())
+      expect(result.isError).toBe(false)
+      const output = text(result)
+      expect(output).toContain('alpha.ts')
+      expect(output).toContain('Warning: ripgrep could not search 1 path(s): locked.ts. Results may be incomplete.')
     })
   })
 

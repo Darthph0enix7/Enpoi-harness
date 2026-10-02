@@ -203,40 +203,44 @@ export function sampleAcrossTopLevel(paths: readonly string[], maxItems: number,
 
 /**
  * Format a capped sampled page and its complete-result recovery path. A flat
- * result keeps the plain footer because its sample is the modification-time head.
+ * result keeps the plain footer because its sample is the modification-time
+ * head.
  *
  * @param sample - the inline page and its top-level spread.
  * @param seen - how many paths the complete result holds; always more than the page.
  * @param spillRef - the saved complete-result reference, or `undefined` when unsaved.
+ * @param warning - the partial-result warning naming skipped paths, when the search had per-file errors.
  * @returns the model-facing text.
  */
-export function formatGlobOutput(sample: GlobSample, seen: number, spillRef: SpillRef | undefined): string {
+export function formatGlobOutput(sample: GlobSample, seen: number, spillRef: SpillRef | undefined, warning?: string): string {
   const basis = sample.total === seen
     ? '.'
     : `, sampled across ${sample.shown} of the ${sample.total} top-level entries this pattern matched instead of taken in modification-time order.`
       + (sample.shown < sample.total ? ' Narrow path to inspect a specific subtree.' : '')
-  return formatGlobPage(sample.items, seen, spillRef, basis)
+  return formatGlobPage(sample.items, seen, spillRef, basis, warning)
 }
 
 /** Format one bounded page and the recovery path for its complete sorted result. */
-function formatGlobPage(items: readonly string[], seen: number, spillRef: SpillRef | undefined, basis: string): string {
+function formatGlobPage(items: readonly string[], seen: number, spillRef: SpillRef | undefined, basis: string, warning?: string): string {
   const body = items.join('\n')
   const recovery = spillRef !== undefined
     ? `Full sorted result stored at: ${spillRef.locator}. ${spillRef.retrievalHint}`
     : 'The complete result could not be saved; narrow pattern or path to see more.'
-  return `${body}\n\n(Showing ${items.length} of ${seen} paths${basis} ${recovery})`
+  const notice = warning !== undefined ? `\n\n${warning}` : ''
+  return `${body}\n\n(Showing ${items.length} of ${seen} paths${basis} ${recovery})${notice}`
 }
 
 /** Bound and format one canonical path list for the Native surface relative to its search root. */
-function renderGlobPaths(paths: string[], caps: GlobToolCaps, root: string, spillRef?: SpillRef): string {
-  if (paths.length === 0) return 'No files found'
+function renderGlobPaths(paths: string[], caps: GlobToolCaps, root: string, spillRef?: SpillRef, warning?: string): string {
+  const notice = warning !== undefined ? `\n\n${warning}` : ''
+  if (paths.length === 0) return `No files found${notice}`
   // A result that fits is shown whole, untouched: modification-time order is the
   // tool's contract, and over a complete result it is what answers age questions.
-  if (paths.length <= caps.maxResults) return paths.join('\n')
+  if (paths.length <= caps.maxResults) return `${paths.join('\n')}${notice}`
   if (!caps.sampleOverCapGlobResults) {
-    return formatGlobPage(paths.slice(0, caps.maxResults), paths.length, spillRef, '.')
+    return formatGlobPage(paths.slice(0, caps.maxResults), paths.length, spillRef, '.', warning)
   }
-  return formatGlobOutput(sampleAcrossTopLevel(paths, caps.maxResults, root), paths.length, spillRef)
+  return formatGlobOutput(sampleAcrossTopLevel(paths, caps.maxResults, root), paths.length, spillRef, warning)
 }
 
 /**
@@ -326,9 +330,10 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
         properties: {
           root: { type: 'string', required: true },
           paths: { type: 'array', required: true, items: { type: 'string' } },
+          warning: { type: 'string', description: 'Present when ripgrep could not read some paths; names them and says results may be incomplete.' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: renderGlobPaths(value.paths, caps, value.root) }],
+      render: (_args, value) => [{ type: 'text', text: renderGlobPaths(value.paths, caps, value.root, undefined, value.warning) }],
       presentationMeta: (_args, value) => {
         const page = globCardPage(value.paths, caps, value.root)
         return globSearchMeta({ items: page.items, truncated: page.truncated, seen: value.paths.length }, caps.maxMetaBytes)
@@ -346,7 +351,9 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
         const displayPath = toWorkdirRelative(line, run.workdir)
         all.push(displayPath)
       }
-      return { root, paths: all }
+      // Exit 2 with no parsed path is a failed search, not an empty one.
+      if (run.partial !== undefined && all.length === 0) throw run.partial.failure
+      return { root, paths: all, ...run.partial !== undefined ? { warning: run.partial.warning } : {} }
     },
     presentCall: presentGlobCall,
     presentResult: presentGlobResult,
@@ -355,14 +362,15 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
 
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
-    const value = acceptedDirectCallValue(ctx, tool, exec, result, decision) as { root: string; paths: string[] } | undefined
+    const value = acceptedDirectCallValue(ctx, tool, exec, result, decision) as
+      { root: string; paths: string[]; warning?: string } | undefined
     if (value === undefined) return decision
     const paths = value.paths
     if (paths.length <= caps.maxResults) return decision
     const spillRef = await trySaveFormattedResult(ctx, exec, 'glob-results.txt', paths.join('\n'))
     return {
       kind: 'accept',
-      content: [{ type: 'text', text: renderGlobPaths(paths, caps, value.root, spillRef) }],
+      content: [{ type: 'text', text: renderGlobPaths(paths, caps, value.root, spillRef, value.warning) }],
       ...decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {},
     }
   })

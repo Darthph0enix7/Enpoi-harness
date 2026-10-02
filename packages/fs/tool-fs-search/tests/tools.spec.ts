@@ -682,6 +682,169 @@ describe('exit semantics and failure classification', () => {
   })
 })
 
+describe('exit 2 partial results (unreadable paths)', () => {
+  it('grep recovers the readable matches and warns about an unreadable file', async () => {
+    // The shipped failure: one locked file made ripgrep exit 2 after it had
+    // already printed every match from the readable files. The matches must
+    // survive, with the skipped path surfaced as a warning.
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult([
+      matchLine('a.ts', 1, 'needle'),
+      JSON.stringify({ type: 'summary', data: {} }),
+      '',
+    ].join('\n'), {
+      exitCode: 2,
+      stderr: { text: 'rg: locked.txt: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'needle' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(result.value).toEqual({
+      matches: [{ path: 'a.ts', lineNumber: 1, line: 'needle' }],
+      warning: 'Warning: ripgrep could not search 1 path(s): locked.txt. Results may be incomplete.',
+    })
+    expect(text(result)).toBe('Found 1 match\n\na.ts\nLine 1: needle\n\n'
+      + 'Warning: ripgrep could not search 1 path(s): locked.txt. Results may be incomplete.')
+    expect(subprocess.spawns).toHaveLength(1)
+  })
+
+  it('glob recovers the readable paths and warns about an unreadable directory', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult('a.ts\nb.ts\n', {
+      exitCode: 2,
+      // The directory shape: the tail carries a second `: ` after the path.
+      stderr: { text: 'rg: /w/sub: IO error for operation on /w/sub: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'glob', { pattern: '*.ts' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected glob success')
+    expect(result.value).toEqual({
+      root: '.',
+      paths: ['a.ts', 'b.ts'],
+      warning: 'Warning: ripgrep could not search 1 path(s): sub. Results may be incomplete.',
+    })
+    expect(text(result)).toBe('a.ts\nb.ts\n\n'
+      + 'Warning: ripgrep could not search 1 path(s): sub. Results may be incomplete.')
+  })
+
+  it('does not retry a per-file EAGAIN and still returns the readable matches', async () => {
+    // `rg: <path>: Resource temporarily unavailable` is a locked-file read
+    // error, not a thread-spawn shortage: no reduced-thread retry, just the
+    // partial result.
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult(`${matchLine('/w/a.ts', 1, 'needle')}\n`, {
+      exitCode: 2,
+      stderr: { text: 'rg: /w/locked.txt: Resource temporarily unavailable (os error 11)\n' },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'needle' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(result.value).toEqual({
+      matches: [{ path: 'a.ts', lineNumber: 1, line: 'needle' }],
+      warning: 'Warning: ripgrep could not search 1 path(s): locked.txt. Results may be incomplete.',
+    })
+    expect(subprocess.spawns).toHaveLength(1)
+  })
+
+  it('keeps a skipped path containing a colon whole in the warning', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult(`${matchLine('/w/a.ts', 1, 'needle')}\n`, {
+      exitCode: 2,
+      stderr: { text: 'rg: /w/odd: name.txt: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'needle' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(result.value).toEqual({
+      matches: [{ path: 'a.ts', lineNumber: 1, line: 'needle' }],
+      warning: 'Warning: ripgrep could not search 1 path(s): odd: name.txt. Results may be incomplete.',
+    })
+  })
+
+  it('counts unparseable stderr lines and bounds the named path list', async () => {
+    const { ctx, subprocess } = await setup()
+    const skipped = ['alpha.txt', 'beta.txt', 'gamma.txt', 'delta.txt', 'epsilon.txt', 'zeta.txt']
+      .map(name => `rg: ${name}: Permission denied (os error 13)`)
+    subprocess.handler = () => runResult(`${matchLine('a.ts', 1, 'needle')}\n`, {
+      exitCode: 2,
+      stderr: { text: [...skipped, 'not an rg line', 'rg: : Permission denied (os error 13)', ''].join('\n') },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'needle' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(result.value).toMatchObject({
+      warning: 'Warning: ripgrep could not search 8 path(s): alpha.txt, beta.txt, gamma.txt, delta.txt, epsilon.txt, and 3 more. Results may be incomplete.',
+    })
+  })
+
+  it('falls back to a generic warning when exit 2 printed no stderr', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult(`${matchLine('a.ts', 1, 'needle')}\n`, { exitCode: 2 })
+    const result = await call(ctx, 'grep', { pattern: 'needle' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(result.value).toMatchObject({
+      warning: 'Warning: ripgrep reported errors while searching; results may be incomplete.',
+    })
+  })
+
+  it('fails an exit-2 grep that parsed no match records', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult(`${JSON.stringify({ type: 'summary', data: {} })}\n`, {
+      exitCode: 2,
+      stderr: { text: 'rg: locked.txt: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'needle' })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+    expect(text(result)).toContain('Permission denied')
+    expect(subprocess.spawns).toHaveLength(1)
+  })
+
+  it('fails an exit-2 glob that parsed no paths', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult('', {
+      exitCode: 2,
+      stderr: { text: 'rg: /w/locked: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'glob', { pattern: '*' }, { agent: agent('/w') })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+  })
+
+  it('keeps the warning through a capped grep result and out of the spill artifact', async () => {
+    const { ctx, subprocess, spill } = await setup({ config: { grepMaxMatches: 1 }, spill: true })
+    subprocess.handler = () => runResult([
+      matchLine('a.ts', 1, 'one'),
+      matchLine('a.ts', 2, 'two'),
+      '',
+    ].join('\n'), {
+      exitCode: 2,
+      stderr: { text: 'rg: locked.txt: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'grep', { pattern: 'o' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected grep success')
+    expect(text(result)).toBe('Found 1 of 2 matches\n\na.ts\nLine 1: one\n\n'
+      + '(Full grep result stored at: /spill/grep-results.txt. Use the fake retrieval hint.)\n\n'
+      + 'Warning: ripgrep could not search 1 path(s): locked.txt. Results may be incomplete.')
+    expect(spill?.saves[0]?.content).toBe('Found 2 matches\n\na.ts\nLine 1: one\nLine 2: two')
+  })
+
+  it('keeps the warning through a capped glob result', async () => {
+    const { ctx, subprocess } = await setup({ config: { globMaxResults: 2 } })
+    subprocess.handler = () => runResult('a.ts\nb.ts\nc.ts\n', {
+      exitCode: 2,
+      stderr: { text: 'rg: locked-dir: Permission denied (os error 13)\n' },
+    })
+    const result = await call(ctx, 'glob', { pattern: '*.ts' }, { agent: agent('/w') })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected glob success')
+    expect(text(result)).toBe('a.ts\nb.ts\n\n(Showing 2 of 3 paths. The complete result could not be saved; narrow pattern or path to see more.)\n\n'
+      + 'Warning: ripgrep could not search 1 path(s): locked-dir. Results may be incomplete.')
+  })
+})
+
 describe('raw output acquisition', () => {
   it('fails with SEARCH_RAW_OUTPUT_OVERFLOW when truncated stdout has a raw spill path', async () => {
     const { ctx, subprocess } = await setup({ config: { rawOutputMaxBytes: 16 } })

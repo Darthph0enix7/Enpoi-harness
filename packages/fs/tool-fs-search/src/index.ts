@@ -61,7 +61,7 @@ export {
   toWorkdirRelative,
   trySaveFormattedResult,
 } from './search-core.ts'
-export type { GrepMatch, RipgrepRun, SearchErrorCode } from './search-core.ts'
+export type { GrepMatch, RipgrepPartial, RipgrepRun, SearchErrorCode } from './search-core.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'tool-fs-search'

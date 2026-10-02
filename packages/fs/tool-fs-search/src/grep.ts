@@ -206,28 +206,31 @@ export function formatGrepMatches(matches: GrepMatch[]): string {
  * Format the model-facing `grep` result: a found-count header, the retained
  * matches grouped by file, then — when the result was capped — a footer
  * carrying either the formatted-spill recovery locator or the could-not-save
- * explanation. The omitted count is a budget fact: the search itself completed.
+ * explanation, and finally the partial-result warning when ripgrep skipped
+ * paths. The omitted count is a budget fact: the search itself completed.
  *
  * @param retained - the retention outcome over every parsed match.
  * @param spillRef - the saved complete-result reference, or `undefined` when unsaved.
+ * @param warning - the partial-result warning naming skipped paths, when the search had per-file errors.
  * @returns the model-facing text.
  */
-export function formatGrepOutput(retained: RetainedItems<GrepMatch>, spillRef: SpillRef | undefined): string {
+export function formatGrepOutput(retained: RetainedItems<GrepMatch>, spillRef: SpillRef | undefined, warning?: string): string {
   const header = retained.truncated
     ? `Found ${retained.kept} of ${retained.seen} matches`
     : `Found ${retained.seen} ${matchNoun(retained.seen)}`
   const body = formatGrepMatches(retained.items)
-  if (!retained.truncated) return `${header}\n\n${body}`
+  const notice = warning !== undefined ? `\n\n${warning}` : ''
+  if (!retained.truncated) return `${header}\n\n${body}${notice}`
   const recovery = spillRef !== undefined
     ? `Full grep result stored at: ${spillRef.locator}. ${spillRef.retrievalHint}`
     : 'The complete result could not be saved; narrow pattern, path, or include to see more.'
-  return `${header}\n\n${body}\n\n(${recovery})`
+  return `${header}\n\n${body}\n\n(${recovery})${notice}`
 }
 
 /** Format one already-retained match list for the Native surface. */
-function formatRetainedGrep(retained: RetainedItems<GrepMatch>, spillRef?: SpillRef): string {
+function formatRetainedGrep(retained: RetainedItems<GrepMatch>, spillRef?: SpillRef, warning?: string): string {
   if (retained.seen === 0) return 'No matches found'
-  return formatGrepOutput(retained, spillRef)
+  return formatGrepOutput(retained, spillRef, warning)
 }
 
 /**
@@ -310,11 +313,12 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
               },
             },
           },
+          warning: { type: 'string', description: 'Present when ripgrep could not read some paths; names them and says results may be incomplete.' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: formatRetainedGrep(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes)),
+        text: formatRetainedGrep(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes), undefined, value.warning),
       }],
       presentationMeta: (_args, value) =>
         grepSearchMeta(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes), caps.maxMetaBytes),
@@ -333,7 +337,9 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
         }
         all.push(match)
       }
-      return { matches: all }
+      // Exit 2 with no parsed match is a failed search, not an empty one.
+      if (run.partial !== undefined && all.length === 0) throw run.partial.failure
+      return { matches: all, ...run.partial !== undefined ? { warning: run.partial.warning } : {} }
     },
     presentCall: presentGrepCall,
     presentResult: presentGrepResult,
@@ -342,7 +348,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
 
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
-    const value = acceptedDirectCallValue(ctx, tool, exec, result, decision) as { matches: GrepMatch[] } | undefined
+    const value = acceptedDirectCallValue(ctx, tool, exec, result, decision) as { matches: GrepMatch[]; warning?: string } | undefined
     if (value === undefined) return decision
     const matches = value.matches
     if (matches.length <= caps.maxMatches) return decision
@@ -359,7 +365,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
       kind: 'accept',
       content: [{
         type: 'text',
-        text: formatRetainedGrep(retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes), spillRef),
+        text: formatRetainedGrep(retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes), spillRef, value.warning),
       }],
       ...decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {},
     }

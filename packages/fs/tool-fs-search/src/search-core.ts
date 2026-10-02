@@ -114,6 +114,22 @@ export interface RipgrepRun {
   noMatches: boolean
   /** The resolved working directory the command ran in (the display-relativization base). */
   workdir: string
+  /**
+   * Present when ripgrep exited 2 (at least one error) without a pattern
+   * rejection or a thread-spawn shortage: stdout is complete and holds every
+   * result from the paths ripgrep could read. A caller that parses no results
+   * throws {@link RipgrepPartial.failure}; one that parses results returns them
+   * and surfaces {@link RipgrepPartial.warning}.
+   */
+  partial?: RipgrepPartial
+}
+
+/** The two facts of an exit-2 run whose stdout may still hold recoverable results. */
+export interface RipgrepPartial {
+  /** Bounded, model-facing notice naming the paths ripgrep could not search. */
+  warning: string
+  /** The classified `SEARCH_FAILED`/`SEARCH_INVALID_PATTERN` failure to throw when stdout yields no results. */
+  failure: SearchError
 }
 
 /**
@@ -137,6 +153,65 @@ function classifyRunFailure(toolName: string, exitCode: number, stderrText: stri
     return new SearchError(`${toolName} pattern rejected by ripgrep: ${stderr}`, 'SEARCH_INVALID_PATTERN')
   }
   return new SearchError(`${toolName} search failed (exit ${exitCode})${stderr.length > 0 ? `: ${stderr}` : ''}`, 'SEARCH_FAILED')
+}
+
+/**
+ * The maximum number of skipped paths one partial-result warning names inline;
+ * the remainder is reported as a count.
+ */
+const SKIPPED_PATH_LIMIT = 5
+
+/**
+ * Extract the path from one ripgrep file-error line (`rg: <path>: <message>`),
+ * or `undefined` when the line is not a file error. The split accepts a `: `
+ * boundary only when the text after it is a recognized ripgrep error message,
+ * so a path that itself contains `: ` stays whole.
+ */
+function rgFileErrorPath(line: string): string | undefined {
+  if (!line.startsWith('rg: ')) return undefined
+  const rest = line.slice('rg: '.length)
+  for (let at = rest.indexOf(': '); at !== -1; at = rest.indexOf(': ', at + 2)) {
+    if (!isRgFileErrorTail(rest.slice(at + 2))) continue
+    const path = rest.slice(0, at)
+    return path.length > 0 ? path : undefined
+  }
+  return undefined
+}
+
+/** Whether text after a candidate `rg: <path>: ` boundary is a known ripgrep file-error message. */
+function isRgFileErrorTail(tail: string): boolean {
+  if (/^IO error for operation on\b/u.test(tail)) return true
+  // The trailing `os error` detail marks an OS read failure; a further `: `
+  // means the boundary sat inside the path, so try the next one.
+  return /\(os error \d+\)$/u.test(tail) && !tail.includes(':')
+}
+
+/**
+ * One bounded model-facing warning about the paths ripgrep reported errors for
+ * while still returning results: the count, up to {@link SKIPPED_PATH_LIMIT}
+ * workdir-relative paths, and an omitted remainder count.
+ */
+function skippedPathsWarning(stderrText: string, workdir: string): string {
+  const paths: string[] = []
+  let unparsed = 0
+  for (const line of stderrText.split('\n')) {
+    if (line.trim().length === 0) continue
+    const path = rgFileErrorPath(line)
+    if (path === undefined) {
+      unparsed += 1
+      continue
+    }
+    const display = toWorkdirRelative(path, workdir)
+    // ripgrep prints a relative error path with a `./` prefix, unlike the
+    // results it prints; drop it so the warning names paths the same way.
+    paths.push(display.startsWith(`.${sep}`) ? display.slice(2) : display)
+  }
+  const total = paths.length + unparsed
+  if (total === 0) return 'Warning: ripgrep reported errors while searching; results may be incomplete.'
+  const shown = paths.slice(0, SKIPPED_PATH_LIMIT)
+  const named = shown.length > 0 ? `: ${shown.join(', ')}` : ''
+  const omitted = total - shown.length
+  return `Warning: ripgrep could not search ${total} path(s)${named}${omitted > 0 ? `, and ${omitted} more` : ''}. Results may be incomplete.`
 }
 
 /**
@@ -209,19 +284,22 @@ export function resolveRgPath(): Promise<string> {
  * spill path, and truncated stdout fails as `SEARCH_RAW_OUTPUT_OVERFLOW`.
  *
  * Exit semantics are tool-owned: exit 0 is success with results, exit 1 is
- * success with zero results (`noMatches`), anything else throws a
- * {@link SearchError} (abort/timeout → `SEARCH_ABORTED`, invalid pattern →
- * `SEARCH_INVALID_PATTERN`, the rest → `SEARCH_FAILED` /
- * `SEARCH_RAW_OUTPUT_OVERFLOW`). Both launch-time failure domains are
- * classified: a synchronous throw at spawn CREATION (a NUL in argv, an abort
- * racing the pre-check, a rejected `@vscode/ripgrep` resolution) reports that
- * the command could not start, while a rejection of `handle.done` reports a
- * provider failure without claiming whether execution began. Both become
- * `SEARCH_FAILED` with the original as `cause`; an abort already observed by
- * creation time becomes `SEARCH_ABORTED` instead. A failure whose message or
- * cause chain names `EAGAIN` is retried once after a short backoff with
- * ripgrep's worker pool reduced (`--threads 1`); every other failure keeps its
- * first-error classification.
+ * success with zero results (`noMatches`), exit 2 is errors-with-possible
+ * results (per-file read failures return the matches from readable paths plus a
+ * warning; a pattern rejection or a genuine thread-spawn shortage still
+ * throws), anything else throws a {@link SearchError} (abort/timeout →
+ * `SEARCH_ABORTED`, invalid pattern → `SEARCH_INVALID_PATTERN`, the rest →
+ * `SEARCH_FAILED` / `SEARCH_RAW_OUTPUT_OVERFLOW`). Both launch-time failure
+ * domains are classified: a synchronous throw at spawn CREATION (a NUL in
+ * argv, an abort racing the pre-check, a rejected `@vscode/ripgrep` resolution)
+ * reports that the command could not start, while a rejection of `handle.done`
+ * reports a provider failure without claiming whether execution began. Both
+ * become `SEARCH_FAILED` with the original as `cause`; an abort already
+ * observed by creation time becomes `SEARCH_ABORTED` instead. A failure whose
+ * message or cause chain is a thread/process-spawn `EAGAIN` is retried once
+ * after a short backoff with ripgrep's worker pool reduced (`--threads 1`);
+ * ripgrep's per-file read errors never trigger the retry. Every other failure
+ * keeps its first-error classification.
  *
  * @param ctx - the plugin context; execution uses its `subprocess` service.
  * @param exec - the tool-execution context; supplies the session cwd and the abort signal.
@@ -287,11 +365,17 @@ function reducedThreadArgv(argv: readonly string[]): string[] {
 }
 
 /**
- * Whether a search failure is a transient `EAGAIN` thread/process shortage.
- * The failure can arrive as a spawn-creation throw, a provider rejection, or
- * ripgrep's own nonzero exit after it failed to spawn a worker thread.
+ * Whether a search failure is a transient thread/process-spawn `EAGAIN`
+ * shortage, which the caller may retry with a reduced worker pool. The failure
+ * can arrive as a spawn-creation throw, a provider rejection, or ripgrep's own
+ * nonzero exit after it failed to spawn a worker thread. Only the dedicated
+ * shortage shapes match: Node's spawn error carries the `EAGAIN` code (checked
+ * separately), and ripgrep prints a bare `rg: Resource temporarily unavailable`
+ * or `rg: error spawning` line. A per-file read error prints
+ * `rg: <path>: Resource temporarily unavailable (os error 11)` and is NOT a
+ * thread-spawn failure.
  * @param error - the failure thrown by one attempt.
- * @returns true when the message or cause chain names `EAGAIN`.
+ * @returns true when the message or cause chain is a thread/process-spawn shortage.
  */
 function isThreadSpawnFailure(error: unknown): boolean {
   const seen = new Set<unknown>()
@@ -305,7 +389,7 @@ function isThreadSpawnFailure(error: unknown): boolean {
   return false
 }
 
-const THREAD_SPAWN_FAILURE_PATTERN = /EAGAIN|Resource temporarily unavailable|os error 11/u
+const THREAD_SPAWN_FAILURE_PATTERN = /(?:^|[\s:])rg: (?:Resource temporarily unavailable|error spawning)|\bspawn\b[^\n]*\bEAGAIN\b/u
 
 /**
  * Render one bounded one-line reason for a failing search command, so the
@@ -393,7 +477,22 @@ async function runRipgrepAttempt(
     throw new SearchError(`${toolName} search command was killed by signal ${outcome.signal ?? '(unknown)'}`, 'SEARCH_FAILED')
   }
   if (outcome.exitCode !== 0 && outcome.exitCode !== 1) {
-    throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy)
+    const failure = classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy)
+    // Exit 2 means ripgrep hit errors while searching; it still prints every
+    // match from the paths it could read. A pattern rejection cannot have
+    // results, and a thread-spawn shortage is worth the outer retry, so both
+    // stay throws. Every other exit-2 error becomes a partial run: the tool
+    // throws `failure` when it parses no results and otherwise returns them
+    // with `warning`.
+    if (outcome.exitCode === 2 && failure.code !== 'SEARCH_INVALID_PATTERN' && !isThreadSpawnFailure(failure)) {
+      return {
+        stdout: completeStdout(toolName, stdout, rawOutputMaxBytes),
+        noMatches: false,
+        workdir,
+        partial: { warning: skippedPathsWarning(stderr.text, workdir), failure },
+      }
+    }
+    throw failure
   }
   const text = completeStdout(toolName, stdout, rawOutputMaxBytes)
   return { stdout: text, noMatches: outcome.exitCode === 1, workdir }
