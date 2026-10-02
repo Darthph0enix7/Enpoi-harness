@@ -296,7 +296,7 @@ export function renderMirror(
   lines.push('/** Extra per-role child denials (host role table). */')
   lines.push('export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({')
   for (const role of Object.keys(data.roleChildDeny)) {
-    lines.push(`  ${JSON.stringify(role)}: Object.freeze(${jsonArray(data.roleChildDeny[role])}),`)
+    lines.push(`  ${JSON.stringify(role)}: Object.freeze(${jsonArray(data.roleChildDeny[role] ?? [])}),`)
   }
   lines.push('})')
   lines.push('')

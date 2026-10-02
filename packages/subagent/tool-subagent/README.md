@@ -71,6 +71,8 @@ enpoi-orchestration:
 
 `role` wins over inference. Without it the tool infers a role from the delegation text (explicit registry names first, then task heuristics). An unknown `role` fails the call with the available ids. A role's `tools.available` list replaces that role's built-in deny map and is always bounded by the shared child floor; model routing reads `enpoi-orchestration.personas[<role>]` fresh per spawn, so assigning or clearing a seat model applies to the next delegation without a restart. Because that list is stored operator data, each name is checked against the live registry at spawn: an unresolvable name is dropped with a `role "…" stores unavailable tool "…"` warning and the child starts with the known subset, so a tool rename cannot brick a role. The code-authored `toolFilter` config keeps the strict `tools.restrict()` contract, where an unknown allow name still throws.
 
+The shared child floor denies delegation, councils, oracle review, goals, workflows, `ask_user_question`, and the child-scoped `send_message` relay (the one-delivery rule). The background job controls (`job_output`, `job_list`, `job_kill`) stay available: a child's bash command that outlives the executor timeout is promoted to a job, and the bash contract tells the model to collect it. Job access is fenced by owning session id in the job registry, so a child reads and stops only its own jobs.
+
 ### Foreground and background modes
 
 Under `one-shot` policy, an omitted `run_in_background` waits in the foreground and returns the child's final text; `run_in_background: true` starts a plain parent-owned background job and returns `started background subagent job <id>`, collected with `job_output` and stopped with `job_kill`.

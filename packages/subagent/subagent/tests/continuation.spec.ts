@@ -353,7 +353,14 @@ describe('continuable activation capacity', () => {
     parkParent(ctx, parent)
     try {
       const started = await Promise.all(Array.from({ length: 8 }, () => ctx.subagents.startContinuable(startSpec(parent))))
-      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      const overflow = await ctx.subagents.startContinuable(startSpec(parent))
+        .then(() => undefined, (error: unknown) => error)
+      // The rejection states the cap, that the dispatch was not queued, and
+      // how to retry: wait for a settlement notice, not a poll.
+      expect(overflow).toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      expect(String(overflow)).toContain('active child limit: 8')
+      expect(String(overflow)).toContain('not queued')
+      expect(String(overflow)).toContain('settlement notice')
       release.resolve(undefined)
       await Promise.all(started.map(child => waitNoActivation(ctx, child.childId)))
       const replacement = await ctx.subagents.startContinuable(startSpec(parent))

@@ -177,7 +177,9 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + 'around it. '
     + 'Use the dedicated read, grep, and glob tools to inspect files. Do not shell out to an interpreter '
     + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands require '
-    + 'approval, while the dedicated file tools are the supported, approval-free path.'
+    + 'approval, while the dedicated file tools are the supported, approval-free path. '
+    + 'A bash command that outlives the executor timeout keeps running as a background job owned by '
+    + 'this session; collect its output with job_output (wait: true) instead of re-running the command.'
 
 /**
  * Compose one child inside its creation window: join its parent's preset,

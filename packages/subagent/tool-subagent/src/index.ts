@@ -413,7 +413,7 @@ function nonSpawnableRoleMessage(id: string): string {
  * Tools denied to EVERY child this tool spawns. A worker is a one-shot
  * specialist that reports to the orchestrator: it never delegates, convenes a
  * council or oracle review, curates memory, drives harness-level plan
- * mode/goals/jobs/workflows, or asks the user. Deny-only by design —
+ * mode/goals/workflows, or asks the user. Deny-only by design —
  * `tools.restrict()` skips deny names it does not know, so a tool added
  * upstream stays available unless this list names it.
  *
@@ -422,6 +422,13 @@ function nonSpawnableRoleMessage(id: string): string {
  * result (foreground) the ONLY delivery, and the deny disarms the continuable
  * return-guidance injection (continuation.ts), which would otherwise instruct
  * the child to send a duplicate. Deny wins over allow-lists.
+ *
+ * The background job controls (`job_output`, `job_list`, `job_kill`) are NOT
+ * denied: a child's bash command that outlives the executor timeout is
+ * promoted to a job owned by the child, and the bash contract (promoted-result
+ * text and `run_in_background`) tells the model to collect it. Job access is
+ * fenced by owning session id in the job registry, so a child sees and stops
+ * only its own jobs; collection is orthogonal to the one-delivery rule.
  */
 const SHARED_CHILD_DENY: readonly string[] = [
   'subagent',
@@ -439,9 +446,6 @@ const SHARED_CHILD_DENY: readonly string[] = [
   'goal',
   'ralph',
   'workflow',
-  'job_output',
-  'job_list',
-  'job_kill',
   'ask_user_question',
   // Sub-agents keep their own todo list and their own memory writes (their
   // sessions are isolated; the operator's default is "let them work").
@@ -843,7 +847,7 @@ function detectSubagentRole(
   // retired or tool-only role is never inferred.
   for (const [role, re] of ROLE_SIGNALS) {
     const candidate = registry[role]
-    if (candidate !== undefined && candidate.spawnable !== false && re.test(text)) return role
+    if (candidate !== undefined && candidate.spawnable && re.test(text)) return role
   }
   return undefined
 }
@@ -1055,7 +1059,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           // registry supplies explicit names, personas, and tool surfaces, and
           // an explicit `role` argument is validated before any child starts.
           const settingsHandle = runtimeCtx.get('settings') as OrchestrationSettingsHandle | undefined
-          const document = readOrchestrationDocument(settingsHandle, message => runtimeCtx.logger.warn(message))
+          const document = readOrchestrationDocument(settingsHandle, (message) => { runtimeCtx.logger.warn(message) })
           const registry = listRoleRegistry(settingsHandle, { document })
           const requestedRole = args.role
           if (requestedRole !== undefined && registry[requestedRole] === undefined) {
@@ -1132,7 +1136,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
                 // A stored availability name counts as known when the parent's
                 // scope resolves it; the child inherits exactly that surface.
                 isKnown: name => runtimeCtx.tools.get(name, parent) !== undefined,
-                warn: message => runtimeCtx.logger.warn(message),
+                warn: (message) => { runtimeCtx.logger.warn(message) },
               })
               return delegated === undefined ? {} : { toolFilter: delegated }
             })(),
@@ -1245,6 +1249,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
   }
   const selectForSession = (target: Session): ModelSelectionPolicy | undefined => {
     const freshSession = target.firstLiveSeq === 0
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       && target.eventAt(SessionSeq(0))?.type !== 'session/end-seed'
     let allowedModels = subagentModelSelectionPolicy(ctx.sessionProjections, target)
     if (allowedModels === undefined) {
@@ -1311,7 +1316,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
     if (fiber === undefined) return
     scopedInstalls.delete(candidate)
     /* v8 ignore next 3 -- Cordis Fiber disposal contains registration cleanup failures; this is the final diagnostic sink. */
-    void fiber.dispose().catch((error: unknown) => {
+    void Promise.resolve(fiber.dispose()).catch((error: unknown) => {
       ctx.logger.warn(`tool-subagent: failed to remove recomposed Agent "${candidate.id}" definitions: ${String(error)}`)
     })
   }

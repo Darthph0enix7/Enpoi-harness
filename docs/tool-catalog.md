@@ -598,7 +598,7 @@ exit_plan_mode stays in the model-facing schema while planning is inactive so tr
 
 ### `bash`
 
-Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell; pass `workdir` instead of using `cd`. Managed `$DSH_*` variables expose current harness environment facts. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.
+Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell; pass `workdir` instead of using `cd`. Managed `$DSH_*` variables expose current harness environment facts. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. For reading a file or searching paths/content, prefer `read`, `grep`, or `glob`: their output is bounded and line-numbered, while shell output is truncated to its tail. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.
 
 ```json
 {
@@ -1064,7 +1064,7 @@ The read-before-write/edit policy is added by `@deepseek-ai/dsh-fs-observation-p
 
 ### `glob`
 
-Find files, not directories, whose paths match a glob pattern, including hidden and ignored files. Returns up to 100 paths in modification-time order; a larger result is sampled across top-level entries and reports where the complete list was saved.
+Find files, not directories, whose paths match a glob pattern, including hidden and ignored files. Returns up to 100 paths in modification-time order; a larger result is sampled across top-level entries and reports where the complete list was saved. Prefer this over `bash find`: the result is a bounded, sorted path list instead of a truncated shell blob.
 
 ```json
 {
@@ -1089,7 +1089,7 @@ Source: [`packages/fs/tool-fs-search/src/index.ts`](../packages/fs/tool-fs-searc
 
 ### `grep`
 
-Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. Returns up to 250 matches; a larger result reports where the complete match list was saved.
+Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. Returns up to 250 matches; a larger result reports where the complete match list was saved. Prefer this over `bash grep`/`rg`: matches arrive grouped and line-numbered instead of a truncated shell blob.
 
 ```json
 {
@@ -2098,7 +2098,7 @@ Source: [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/sub
 
 ### `list_agents`
 
-List subagents you started, with their ids, labels, and status. running means it is working; inactive means it is not currently working. You will be notified when a subagent finishes; there is no need to keep checking its status. Use send_message to continue the conversation.
+List subagents you started, with their ids, labels, and status. running means it is working; inactive means it is not currently working. Running children are listed first, then inactive ones by most recent creation. The result shows at most 20 rows (set `limit`, max 100) and a footer with the totals when rows are omitted. You will be notified when a subagent finishes; there is no need to keep checking its status. Use send_message to continue the conversation.
 
 ```json
 {
@@ -2111,6 +2111,10 @@ List subagents you started, with their ids, labels, and status. running means it
         "children",
         "descendants"
       ]
+    },
+    "limit": {
+      "type": "number",
+      "description": "Maximum child rows to show (default 20, max 100). Running children are always shown first; omitted inactive rows are counted in the footer."
     }
   }
 }
@@ -2120,7 +2124,7 @@ Source: [`packages/subagent/tool-subagent-control/src/list-agents.ts`](../packag
 
 ### `send_message`
 
-Send a message to an agent. A working agent receives it at its next step; an idle agent starts a new turn with it. Returns delivery confirmation, not the agent's answer.
+Send a follow-up into an existing child session by id. Recovery only: when a background child stopped before its end result, its settlement notice names the session id and the stop reason — inspect that session, then continue it here instead of re-briefing a fresh child. A working child receives it at its next step; an idle child resumes with its full history. Returns delivery confirmation, not the child's answer. New work is always a fresh subagent dispatch.
 
 ```json
 {

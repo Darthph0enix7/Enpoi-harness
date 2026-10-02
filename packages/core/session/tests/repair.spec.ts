@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { ToolCallId , createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { interruptedTurnClosers as repairInterruptedTurn, SessionSeq, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from '../src/index.ts'
+import {
+  interruptedTurnClosers as repairInterruptedTurn,
+  SessionSeq,
+  TOOL_APPROVAL_NOT_DECIDED,
+  TOOL_NOT_STARTED,
+  TOOL_OUTCOME_UNKNOWN,
+} from '../src/index.ts'
 import { openTurnClosers as closeOpenTurn, type OpenTurnCloseCause } from '../src/repair.ts'
 import type { SessionEvent as LogicalSessionEvent, SurfaceEvent } from '../src/index.ts'
 
@@ -285,6 +291,99 @@ describe.each(causes)('openTurnClosers (cause %o)', (cause) => {
     }
     expect(result.data.message.content[0].text).toContain('retry only if the operation is read-only or idempotent')
     expect(result.data.message.content[0].text).toContain('first verify external state or ask the user')
+  })
+
+  it('states an undecided approval as not executed instead of an unknown outcome', () => {
+    const events: SessionEvent[] = [
+      userTurnStart(1, 0),
+      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+      { type: 'assistant/message', seq: 2, time: 2, data: {
+        turn: 1, step: 1,
+        message: createMessage({
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: ToolCallId('call-1'), name: 'interrupt_agent', arguments: '{}' },
+          ],
+          source: {
+            kind: 'model',
+            ...{ provider: 'mock', model: 'mock' },
+          },
+        }),
+      } },
+      { type: 'tool/call', seq: 3, time: 3, data: { turn: 1, step: 1, callId: ToolCallId('call-1'), name: 'interrupt_agent', arguments: '{}' } },
+      // The approval ask was recorded; the crash left no decision.
+      { type: 'approval/asked', seq: 4, time: 4, data: {
+        id: 'approval-1', toolName: 'interrupt_agent', callId: ToolCallId('call-1'), reason: 'operator policy asks for interrupt_agent',
+      } },
+    ]
+    const closers = openTurnClosers(events, cause)
+    const result = closers[0]!
+    expect(result.type === 'tool/result' && result.data.error).toEqual({
+      name: 'ToolApprovalNotDecidedError', code: TOOL_APPROVAL_NOT_DECIDED,
+    })
+    if (result.type !== 'tool/result' || result.data.message.content[0]?.type !== 'text') {
+      throw new Error('expected a text tool result')
+    }
+    expect(result.data.message.content[0].text).toContain('approval')
+    expect(result.data.message.content[0].text).toContain('not executed')
+    // The call still began in the log, so the result cites its tool/call seq.
+    expect((result as SurfaceEvent).sourceEventSeqs).toEqual([3])
+  })
+
+  it('keeps an unknown outcome once the approval was decided', () => {
+    const events: SessionEvent[] = [
+      userTurnStart(1, 0),
+      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+      { type: 'assistant/message', seq: 2, time: 2, data: {
+        turn: 1, step: 1,
+        message: createMessage({
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' },
+          ],
+          source: {
+            kind: 'model',
+            ...{ provider: 'mock', model: 'mock' },
+          },
+        }),
+      } },
+      { type: 'tool/call', seq: 3, time: 3, data: { turn: 1, step: 1, callId: ToolCallId('call-1'), name: 'bash', arguments: '{}' } },
+      { type: 'approval/asked', seq: 4, time: 4, data: { id: 'approval-1', toolName: 'bash', callId: ToolCallId('call-1') } },
+      { type: 'approval/decided', seq: 5, time: 5, data: { id: 'approval-1', outcome: 'allowed-once' } },
+    ]
+    const result = openTurnClosers(events, cause)[0]!
+    expect(result.type === 'tool/result' && result.data.error).toEqual({
+      name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN,
+    })
+  })
+
+  it('classifies undecided approvals per call, not per step', () => {
+    const events: SessionEvent[] = [
+      userTurnStart(1, 0),
+      { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+      { type: 'assistant/message', seq: 2, time: 2, data: {
+        turn: 1, step: 1,
+        message: createMessage({
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: ToolCallId('ask-call'), name: 'interrupt_agent', arguments: '{}' },
+            { type: 'tool-call', id: ToolCallId('run-call'), name: 'bash', arguments: '{}' },
+          ],
+          source: {
+            kind: 'model',
+            ...{ provider: 'mock', model: 'mock' },
+          },
+        }),
+      } },
+      { type: 'tool/call', seq: 3, time: 3, data: { turn: 1, step: 1, callId: ToolCallId('ask-call'), name: 'interrupt_agent', arguments: '{}' } },
+      { type: 'tool/call', seq: 4, time: 4, data: { turn: 1, step: 1, callId: ToolCallId('run-call'), name: 'bash', arguments: '{}' } },
+      { type: 'approval/asked', seq: 5, time: 5, data: { id: 'approval-1', toolName: 'interrupt_agent', callId: ToolCallId('ask-call') } },
+    ]
+    const results = openTurnClosers(events, cause).filter((event): event is Extract<LogicalSessionEvent, { type: 'tool/result' }> => event.type === 'tool/result')
+    expect(results.map(result => [result.data.message.source.callId, result.data.error?.code])).toEqual([
+      ['ask-call', TOOL_APPROVAL_NOT_DECIDED],
+      ['run-call', TOOL_OUTCOME_UNKNOWN],
+    ])
   })
 
   it('handles tool/call without a matching assistant/message entry gracefully', () => {

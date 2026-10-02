@@ -57,7 +57,12 @@ export interface Inbox {
   /** Input awaiting the next step boundary. */
   readonly nextStep: readonly UserMessage[]
 
-  /** Durably cancel all pending input, clearing next-step before next-turn. */
+  /**
+   * Durably cancel pending operator input, clearing next-step before
+   * next-turn. System-generated observations (settlement notices, relays)
+   * stay pending: they record work that already happened and are claimed by a
+   * later turn instead of being lost to the stop.
+   */
   clear(): void
 
   /**
@@ -221,9 +226,11 @@ declare module './types.ts' {
     readonly ctx: Context
 
     /**
-   * Clear queued and steering work — unless `keepInbox` — and abort the active
-   * turn or between-turn task. The first cause wins for that activity. With no
-   * active activity, cancellation is a no-op and does not arm later work.
+   * Clear queued and steering operator input — unless `keepInbox` — and abort
+   * the active turn or between-turn task. System-generated observations stay
+   * pending for a later turn (see {@link Inbox.clear}). The first cause wins
+   * for that activity. With no active activity, cancellation is a no-op and
+   * does not arm later work.
    * @param cause - the stable caller intent carried by the active operation signal.
    * @param options - cancellation options; `keepInbox` preserves pending work.
    */

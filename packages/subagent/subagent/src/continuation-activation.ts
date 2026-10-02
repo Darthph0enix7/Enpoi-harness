@@ -45,8 +45,8 @@ class ActivationPool {
   reserve(capacity: number): () => void {
     if (this.slots.size >= capacity) {
       throw new SubagentError(
-        `subagent limit reached (active child limit: ${capacity}); wait for an existing child to finish `
-        + 'or complete this work with the current agents',
+        `subagent limit reached (active child limit: ${capacity}); this dispatch was not queued. `
+        + 'Wait for a settlement notice before retrying, or complete this work with the current agents',
         'ACTIVATION_LIMIT_REACHED',
       )
     }
@@ -189,6 +189,7 @@ export class ChildLock {
  */
 function revertBoundaryOf(agent: Agent): number | undefined {
   let boundary: number | undefined
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   for (const event of agent.session.snapshotEvents()) {
     if (event.type !== 'revert/state') continue
     const { fromSeq } = event.data

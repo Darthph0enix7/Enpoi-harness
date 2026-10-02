@@ -106,7 +106,7 @@ async function waitNoActivation(ctx: Context, childId: SessionId): Promise<void>
 }
 
 describe('dsh-tool-subagent-control/list-agents', () => {
-  it('registers list_agents once, globally, with only the optional scope parameter', async () => {
+  it('registers list_agents once, globally, with optional scope and limit parameters', async () => {
     const { ctx } = await setup([])
     const schemas = ctx.tools.schemas().filter(schema => schema.name === 'list_agents')
     expect(schemas).toHaveLength(1)
@@ -114,11 +114,13 @@ describe('dsh-tool-subagent-control/list-agents', () => {
       properties?: Record<string, { enum?: string[]; description?: string }>
       required?: string[]
     }
-    expect(Object.keys(parameters.properties ?? {})).toEqual(['scope'])
+    expect(Object.keys(parameters.properties ?? {})).toEqual(['scope', 'limit'])
     expect(parameters.properties?.scope?.enum).toEqual(['children', 'descendants'])
     expect(parameters.required ?? []).toEqual([])
     expect(parameters.properties?.scope?.description).toContain('accept send_message in any status')
     expect(parameters.properties?.scope?.description).toContain('accept only interrupt_agent')
+    expect(parameters.properties?.limit?.description).toContain('default 20')
+    expect(parameters.properties?.limit?.description).toContain('max 100')
   })
 
   it('renders the empty result as (no subagents)', async () => {
@@ -129,7 +131,7 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     expect(text(result)).toBe('(no subagents)')
   })
 
-  it('renders direct children in array order with registry statuses', async () => {
+  it('renders running children first, then inactive ones by most recent creation', async () => {
     const { ctx, parent } = await setup([textResponse('done')])
     const started = await ctx.subagents.startContinuable({
       provider: 'spawn',
@@ -182,9 +184,43 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     const result = await callTool(ctx, 'list_agents', {}, parent)
     expect(result.isError).toBe(false)
     expect(text(result)).toBe(
-      `${started.childId} [inactive] — real child\n`
-      + 'running-child [running] — still working\n'
-      + 'waiting-child [inactive] — waiting on descendants',
+      'running-child [running] — still working\n'
+      + 'waiting-child [inactive] — waiting on descendants\n'
+      + `${started.childId} [inactive] — real child`,
+    )
+  })
+
+  it('caps the page at limit, always showing running rows and a totals footer', async () => {
+    const { ctx, parent } = await setup([])
+    // 30 historical children; the newest is running. The cap must keep the
+    // running row visible and summarize the 29 inactive ones.
+    const entries: SubagentCatalogEntry[] = Array.from({ length: 30 }, (_, index) => ({
+      id: SessionId(`child-${String(index)}`),
+      createdAt: index,
+      seq: SessionSeq(index + 1),
+      label: `child ${String(index)}`,
+      mode: 'continuable',
+    }))
+    ctx.subagents.listChildren = () => Promise.resolve(entries)
+    vi.spyOn(ctx.agents, 'get').mockImplementation(id =>
+      id === SessionId('child-29') ? { status: 'running' } as never : undefined)
+
+    const result = await callTool(ctx, 'list_agents', {}, parent)
+    expect(result.isError).toBe(false)
+    const lines = text(result).split('\n')
+    expect(lines[0]).toBe('child-29 [running] — child 29')
+    // 19 most recent inactive rows fill the page.
+    expect(lines[1]).toBe('child-28 [inactive] — child 28')
+    expect(lines[19]).toBe('child-10 [inactive] — child 10')
+    expect(lines[20]).toBe('… showing 20 of 30 children (1 running, 29 inactive);')
+    expect(lines[21]).toBe('raise `limit` or narrow `scope` to see more.')
+
+    const narrowed = await callTool(ctx, 'list_agents', { limit: 2 }, parent)
+    expect(text(narrowed)).toBe(
+      'child-29 [running] — child 29\n'
+      + 'child-28 [inactive] — child 28\n'
+      + '… showing 2 of 30 children (1 running, 29 inactive);\n'
+      + 'raise `limit` or narrow `scope` to see more.',
     )
   })
 

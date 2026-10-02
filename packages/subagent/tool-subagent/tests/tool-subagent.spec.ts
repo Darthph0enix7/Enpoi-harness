@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers are typed as any. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1427,6 +1428,12 @@ describe('depth budget configuration', () => {
     expect(requests[0]?.toolFilter).toMatchObject({
       deny: expect.arrayContaining(['subagent', 'roundtable', 'chorus', 'oracle_review']),
     })
+    // Promoted bash jobs stay collectable by the child that owns them: the
+    // bash contract names job_output/job_kill, and the registry fences every
+    // job operation to the owning session id.
+    for (const control of ['job_output', 'job_list', 'job_kill']) {
+      expect(requests[0]?.toolFilter?.deny ?? []).not.toContain(control)
+    }
   })
 
   it('merges an explicit tool filter with the always-on worker deny policy', async () => {

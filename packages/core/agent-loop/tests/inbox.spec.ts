@@ -275,4 +275,50 @@ describe('ReactLoopInbox', () => {
     agent.inbox.clear()
     expect(session.snapshotEvents()).toHaveLength(beforeClear + 2)
   })
+
+  it('preserves system-generated observations and discards only operator input', async () => {
+    const { ctx, session, agent } = await inboxAgent('clear-preserve')
+    const discarded: UserMessage[] = []
+    const inserted: UserMessage[] = []
+    const userTurn = createUserMessage({ content: [{ type: 'text', text: 'queued turn' }], source: { kind: 'user' } })
+    const userStep = createUserMessage({ content: [{ type: 'text', text: 'steer' }], source: { kind: 'user' } })
+    // Any producer kind other than `user` stands for the system-generated
+    // observations (settlement notices, relays) that outlive a stop; the real
+    // `subagent-settled` message is covered by the subagent integration spec.
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+      source: { kind: 'system-prompt' },
+    })
+    agent.inbox.append('next-turn', userTurn)
+    agent.inbox.append('next-step', userStep)
+    agent.inbox.append('next-step', notice)
+    ctx.on('agent/inbox/discarded', ({ message }) => void discarded.push(message))
+    ctx.on('agent/inbox/inserted', ({ message }) => void inserted.push(message))
+
+    agent.inbox.clear()
+
+    expect(agent.inbox.nextTurn).toEqual([])
+    expect(agent.inbox.nextStep).toEqual([notice])
+    expect(discarded).toEqual([userStep, userTurn])
+    expect(inserted).toEqual([])
+    expect(session.snapshotEvents()
+      .flatMap(event => event.type === 'agent/inbox/spliced' ? [event.data] : [])
+      .filter(data => data.outcome === 'canceled')
+      .map(data => data.removedCount)).toEqual([1, 1])
+  })
+
+  it('is a durable no-op when only system-generated observations are pending', async () => {
+    const { session, agent } = await inboxAgent('clear-notice-only')
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+      source: { kind: 'system-prompt' },
+    })
+    agent.inbox.append('next-step', notice)
+    const beforeClear = session.snapshotEvents().length
+
+    agent.inbox.clear()
+
+    expect(agent.inbox.nextStep).toEqual([notice])
+    expect(session.snapshotEvents()).toHaveLength(beforeClear)
+  })
 })

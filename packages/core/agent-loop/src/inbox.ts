@@ -94,10 +94,24 @@ export class ReactLoopInbox implements InboxContract {
     return state['next-turn'].length > 0 || state['next-step'].length > 0
   }
 
-  /** Durably cancel all pending input, clearing next-step before next-turn. */
+  /**
+   * Durably cancel pending operator input, clearing next-step before
+   * next-turn. Only user-authored input is discarded: system-generated
+   * observations (settlement notices, adjacent-agent relays, completion
+   * notices) record work that already happened, so they stay pending for a
+   * later turn instead of vanishing with the stop. Each user message is
+   * spliced on its own, so its durable `outcome: canceled` record and
+   * `agent/inbox/discarded` notification keep the same meaning they had when
+   * the whole list was cleared at once.
+   */
   clear(): void {
-    this.splice('next-step', 0, this.nextStep.length, [])
-    this.splice('next-turn', 0, this.nextTurn.length, [])
+    for (const target of ['next-step', 'next-turn'] as const) {
+      const pending = this.current()[target]
+      // Walk backwards so removing one index never shifts an unvisited one.
+      for (let index = pending.length - 1; index >= 0; index -= 1) {
+        if (pending[index]?.source.kind === 'user') this.splice(target, index, 1, [])
+      }
+    }
   }
 
   /**
