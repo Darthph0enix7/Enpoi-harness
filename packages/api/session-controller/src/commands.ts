@@ -17,8 +17,8 @@ import {
 import type { AgentIterationIntent } from '@deepseek-ai/dsh-agent'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
-import { SessionLogOffset, SessionSeq, foldSurface } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionId, SessionSurface, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
@@ -58,6 +58,10 @@ import type {
   SessionRevertIterationRestoreValue,
   SessionIterationGroup,
   SessionIterationVariant,
+  SessionVerifyLogRequest,
+  SessionVerifyLogValue,
+  SessionRepairLogRequest,
+  SessionRepairLogValue,
   SessionResolveFileConflictRequest,
   SessionResolveFileConflictValue,
   SessionDeleteRequest,
@@ -70,13 +74,28 @@ import type {
 } from './types.ts'
 import { SessionCommandIndex, referencedImage } from './session-command-index.ts'
 import { truncateUnicodeCodePoints } from './list.ts'
-import { iterationAnchorOf, iterationEdges } from './iteration-fold.ts'
+import {
+  iterationAnchorOf,
+  iterationEdges,
+  listIterationGroups,
+  resolveIterationCheckpointAnchor,
+  type IterationFoldState,
+} from './iteration-fold.ts'
+import { foldSurfaceNodes } from './surface-view.ts'
+import { repairSessionLog, verifySessionLog } from './session-verify.ts'
 
 /** Default and maximum groups/variants listed by `revertIterations`. */
 const ITERATION_LIST_LIMIT_DEFAULT = 50
 const ITERATION_LIST_LIMIT_MAX = 200
 /** Preview text cap; a variant body is never returned in full. */
 const ITERATION_PREVIEW_MAX_CODE_POINTS = 2000
+/**
+ * Bound on cancellation settlement before an iteration restore refuses with a
+ * retryable busy error. Internal scheduling constant, not deployment policy:
+ * it only caps how long a restore waits for an already-cancelled turn to
+ * converge before any write.
+ */
+const ITERATION_RESTORE_IDLE_TIMEOUT_MS = 5_000
 
 interface SessionReadState {
   readonly id: SessionId
@@ -487,11 +506,15 @@ export class SessionCommandController {
           } else {
             const shadowedSeqs = nodes.filter(seq => (seq as number) >= revertFromSeq)
             const iterationIndex = (await this.indexFor(liveSession.id)).iterations
+            const chain = resolveCommitIterationChain(liveSession, iterationIndex, revertFromSeq)
             const iteration: AgentIterationIntent = {
               // The reverted message may itself be a later variant; the group
-              // anchor is the original variant that opened the chain.
-              groupAnchor: iterationAnchorOf(iterationIndex, revertFromSeq) ?? revertFromSeq,
-              previousSeq: revertFromSeq,
+              // anchor is the original variant that opened the chain. A revert
+              // anchored at a compaction checkpoint resolves through the
+              // variants the checkpoint cites, so the chain continues instead
+              // of minting a new group keyed by the checkpoint seq.
+              groupAnchor: chain.groupAnchor,
+              previousSeq: chain.previousSeq,
               startSeq: revertFromSeq,
               endSeq: lastSurfaceSeq,
               cause: 'commit',
@@ -743,6 +766,7 @@ export class SessionCommandController {
    * following surface node (an empty or failed turn tail) is a no-op: no
    * boundary is written, and the receipt carries `noop` with a `notice`.
    */
+  // oxlint-disable-next-line typescript/require-await -- Kept async: validation throws must reject for await-based callers.
   async revert(request: SessionRevertRequest): Promise<SessionRevertValue> {
     const agent = this.ctx.agents.get(request.sessionId)
     if (agent === undefined) {
@@ -828,10 +852,8 @@ export class SessionCommandController {
    */
   async revertIterations(request: SessionRevertIterationsRequest): Promise<SessionRevertIterationsValue> {
     let index: SessionCommandIndex
-    let state: SessionReadState
     try {
       index = await this.indexFor(request.sessionId)
-      state = await this.readSessionState(request.sessionId)
     } catch (error) {
       if (error instanceof ApiSessionNotFound) {
         throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
@@ -839,44 +861,68 @@ export class SessionCommandController {
       throw error
     }
     const attached = this.ctx.sessions.get(request.sessionId)
-    const nodes = attached === undefined ? foldSurface(state.events).nodes : attached.surface.nodes
-    const nodeSet = new Set<number>(nodes)
-    // Only a compaction checkpoint represents the variants it cites; a
-    // replacement's shadowed-source citations are not representations.
-    const cited = new Set<number>()
-    for (const seq of nodes) {
-      const event = state.events[seq]
-      if (event?.type !== 'user/message') continue
-      // The compaction plugin owns this source kind; read it structurally so
-      // this package needs no dependency on the plugin's declaration merge.
-      const kind: string = event.data.source.kind
-      if (kind !== 'compact-checkpoint') continue
-      for (const source of event.sourceEventSeqs ?? []) cited.add(source)
+    let events: readonly SessionEvent[] | undefined
+    let nodes: readonly SessionSeq[]
+    if (attached !== undefined) {
+      // The live surface already maintains the node list; the listing never
+      // copies the log (`snapshotEvents`) or scans it.
+      nodes = attached.surface.nodes
+    } else {
+      let state: SessionReadState
+      try {
+        state = await this.readSessionState(request.sessionId)
+      } catch (error) {
+        if (error instanceof ApiSessionNotFound) {
+          throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
+        }
+        throw error
+      }
+      events = state.events
+      nodes = events.length === 0 ? [] : foldSurfaceNodes(events)
     }
     const limit = Math.min(
       ITERATION_LIST_LIMIT_MAX,
       Math.max(1, request.limit ?? ITERATION_LIST_LIMIT_DEFAULT),
     )
-    const groups: SessionIterationGroup[] = []
-    for (const edge of iterationEdges(index.iterations)) {
-      if (groups.length >= limit) break
-      if (request.anchorSeq !== undefined && edge.anchorSeq !== request.anchorSeq) continue
-      const variants: SessionIterationVariant[] = edge.variants
-        .filter(variant => request.beforeVariantSeq === undefined || variant.seq < request.beforeVariantSeq)
-        .slice(-limit)
-        .map((variant) => {
-          const event = state.events[variant.seq]
-          const preview = iterationPreviewOf(event)
-          return {
-            seq: variant.seq,
-            previousSeq: variant.previousSeq,
-            time: event?.time ?? 0,
-            surfaceActive: nodeSet.has(variant.seq) || cited.has(variant.seq),
-            ...preview,
-          }
-        })
-      groups.push({ anchorSeq: edge.anchorSeq, activeVariantSeq: edge.activeVariantSeq, variants })
+    const listed = listIterationGroups(index.iterations, {
+      ...(request.anchorSeq === undefined ? {} : { anchorSeq: request.anchorSeq }),
+      limit,
+      ...(request.beforeVariantSeq === undefined ? {} : { beforeVariantSeq: request.beforeVariantSeq }),
+    })
+    // Resolve surface-activity only for the returned variants: one pass over
+    // the current nodes instead of materializing a membership set of the whole
+    // surface (the M5 budget at 10^6 events).
+    const candidates = new Set<number>()
+    for (const group of listed) {
+      for (const variant of group.variants) candidates.add(variant.seq)
     }
+    const activeCandidates = new Set<number>()
+    if (candidates.size > 0) {
+      for (const node of nodes) {
+        if (candidates.has(node)) activeCandidates.add(node)
+      }
+    }
+    const cited = index.iterations.checkpointCited
+    const groups: SessionIterationGroup[] = listed.map(group => ({
+      anchorSeq: group.anchorSeq,
+      activeVariantSeq: group.activeVariantSeq,
+      variants: group.variants.map((variant): SessionIterationVariant => {
+        const event = attached !== undefined
+          // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+          ? attached.eventAt(SessionSeq(variant.seq))
+          : events?.[variant.seq]
+        const preview = iterationPreviewOf(event)
+        return {
+          seq: variant.seq,
+          previousSeq: variant.previousSeq,
+          time: event?.time ?? 0,
+          // Only a compaction checkpoint represents the variants it cites; a
+          // replacement's shadowed-source citations are not representations.
+          surfaceActive: activeCandidates.has(variant.seq) || cited.has(variant.seq),
+          ...preview,
+        }
+      }),
+    }))
     return { groups }
   }
 
@@ -910,6 +956,22 @@ export class SessionCommandController {
       return { accepted: true }
     }
     const session = agent.session
+    // Bounded serialization against a running turn: the restore plans against
+    // the settled surface, so a settlement append cannot invalidate the branch
+    // lists between planning and the switch. The turn is cancelled first; a
+    // turn that does not settle within the bound refuses with a retryable
+    // busy error before any write (the plan would be stale, and a partial
+    // restore must never land).
+    if (agent.status === 'running' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+      this.cancelForRevert(agent, request.variantSeq)
+      if (!await awaitAgentIdle(agent, ITERATION_RESTORE_IDLE_TIMEOUT_MS)) {
+        reject(
+          'session/agent-busy',
+          'the running turn did not settle before the iteration restore deadline; retry when the session is idle',
+          { reason: 'ITERATION_RESTORE_TURN_ACTIVE' },
+        )
+      }
+    }
     const index = await this.indexFor(session.id)
     const group = iterationEdges(index.iterations)
       .find(candidate => candidate.variants.some(variant => variant.seq === request.variantSeq))
@@ -947,11 +1009,27 @@ export class SessionCommandController {
     const targetEnd = restoredSeqs[restoredSeqs.length - 1]
     /* v8 ignore next -- a non-empty branch always has a last record */
     if (targetEnd === undefined) reject('revert-invalid', 'the restored branch is empty', { sessionId: request.sessionId, atSeq: request.variantSeq })
+    // Validate the branch switch against the current surface before any
+    // write. `revert/state` moves the file-revert boundary when the plugin is
+    // mounted, so a switch that would throw at append time must be refused
+    // before the boundary is touched (D3).
+    const branchData = {
+      groupAnchor: group.anchorSeq,
+      variantSeq: request.variantSeq,
+      previousVariantSeq: group.activeVariantSeq,
+      startSeq: anchor,
+      endSeq,
+      shadowedSeqs: [...shadowedSeqs],
+      restoredSeqs,
+    }
+    ;(session.surface as SessionSurface & SurfaceBranchValidator).validateNext({
+      type: 'revert/branch',
+      seq: SessionSeq(session.seq),
+      time: 0,
+      data: branchData,
+    })
     this.restoringSessions.add(request.sessionId)
     try {
-      // The running turn belongs to the branch being shadowed; cancel it
-      // without letting its settlement pollute the restored surface.
-      this.cancelForRevert(agent, request.variantSeq)
       // File state follows the branch position through the existing
       // file-revert boundary. The first marker pins the current branch end so
       // a forward switch is classified as an un-revert; the second moves the
@@ -963,15 +1041,7 @@ export class SessionCommandController {
       // The branch switch itself: the target branch's original records become
       // the active surface, the displaced branch's records become shadowed.
       // No user message, no turn, no model call.
-      session.append('revert/branch', {
-        groupAnchor: group.anchorSeq,
-        variantSeq: request.variantSeq,
-        previousVariantSeq: group.activeVariantSeq,
-        startSeq: anchor,
-        endSeq,
-        shadowedSeqs: [...shadowedSeqs],
-        restoredSeqs,
-      })
+      session.append('revert/branch', branchData)
       const handled = this.iterationRestoreRequests.get(request.sessionId) ?? new Set<string>()
       handled.add(request.requestId)
       if (handled.size > 32) {
@@ -983,6 +1053,61 @@ export class SessionCommandController {
       this.restoringSessions.delete(request.sessionId)
     }
     return { accepted: true }
+  }
+
+  /**
+   * Verify one Session log against the durability invariants: contiguous
+   * commit, marker targets present, branch records reachable, offload targets
+   * present, compaction sources present, the surface fold resolvable, and the
+   * iteration fold identical to a fresh recompute. This is the host operator
+   * surface; the model-facing session-query tools stay read-only and
+   * workspace-scoped.
+   * @param request - Session to verify.
+   * @returns the findings and the committed prefix length.
+   */
+  async verifyLog(request: SessionVerifyLogRequest): Promise<SessionVerifyLogValue> {
+    const attached = this.ctx.sessions.get(request.sessionId)
+    const events = attached === undefined
+      ? (await this.readSessionStateOrNotFound(request.sessionId)).events
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+      : attached.snapshotEvents()
+    const report = verifySessionLog({
+      events,
+      index: SessionCommandIndex.fromEvents(events).iterations,
+      ...(attached === undefined ? {} : { nodes: attached.surface.nodes }),
+    })
+    return { ok: report.ok, committedEventCount: report.committedEventCount, issues: report.issues }
+  }
+
+  /**
+   * Self-heal one Session log: recover the committed prefix, neutralize
+   * dangling references in the derived view, and rebuild the iteration and
+   * surface folds. A live Session's cached command index is replaced by the
+   * rebuilt fold. Durable events are never rewritten or deleted.
+   * @param request - Session to repair.
+   * @returns the repair receipt and verification of the repaired view.
+   */
+  async repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue> {
+    const attached = this.ctx.sessions.get(request.sessionId)
+    const events = attached === undefined
+      ? (await this.readSessionStateOrNotFound(request.sessionId)).events
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+      : attached.snapshotEvents()
+    const result = repairSessionLog({
+      events,
+      index: SessionCommandIndex.fromEvents(events).iterations,
+      ...(attached === undefined ? {} : { nodes: attached.surface.nodes }),
+    })
+    if (attached !== undefined) {
+      // Adopt the rebuilt folds so the live index self-heals with the receipt.
+      this.commandIndexes.set(request.sessionId, SessionCommandIndex.fromEvents(result.events))
+    }
+    return {
+      ok: result.report.ok,
+      committedEventCount: result.report.committedEventCount,
+      repairs: result.applied,
+      issues: result.report.issues,
+    }
   }
 
   /**
@@ -1096,6 +1221,17 @@ export class SessionCommandController {
       throw apiSessionSubagentOwnershipError(error.sessionId)
     }
     throw new RemoteError('gateway/internal', `failed to create session "${sessionId}": ${String(error)}`, {})
+  }
+
+  private async readSessionStateOrNotFound(sessionId: SessionId): Promise<SessionReadState> {
+    try {
+      return await this.readSessionState(sessionId)
+    } catch (error) {
+      if (error instanceof ApiSessionNotFound) {
+        throw new RemoteError('session/not-found', error.message, { sessionId })
+      }
+      throw error
+    }
   }
 
   private async readSessionState(sessionId: SessionId): Promise<SessionReadState> {
@@ -1237,6 +1373,57 @@ function iterationPreviewOf(event: SessionEvent | undefined): {
   }
 }
 
+/** The append-boundary validator `Session.surface` exposes behind its readonly interface. */
+interface SurfaceBranchValidator {
+  validateNext(event: SessionEvent): void
+}
+
+/**
+ * Resolve the iteration group a revert commit belongs to. A known variant
+ * resolves through the folded index; a revert anchored at a compaction
+ * checkpoint resolves through the variants the checkpoint cites, so the chain
+ * continues in the original group instead of minting a group keyed by the
+ * checkpoint seq. An unknown anchor keeps today's behavior (it opens the
+ * group).
+ */
+function resolveCommitIterationChain(
+  session: Session,
+  index: IterationFoldState,
+  anchorSeq: number,
+): { readonly groupAnchor: number; readonly previousSeq: number } {
+  const direct = iterationAnchorOf(index, anchorSeq)
+  if (direct !== undefined) return { groupAnchor: direct, previousSeq: anchorSeq }
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+  const event = session.eventAt(SessionSeq(anchorSeq))
+  if (event?.type === 'user/message') {
+    // The compaction plugin owns this source kind; read it structurally.
+    const kind: string = event.data.source.kind
+    if (kind === 'compact-checkpoint') {
+      const resolved = resolveIterationCheckpointAnchor(index, event.sourceEventSeqs)
+      if (resolved !== undefined) return resolved
+    }
+  }
+  return { groupAnchor: anchorSeq, previousSeq: anchorSeq }
+}
+
+/**
+ * Wait for the Agent to reach quiescence, bounded. The timer is cleared on
+ * both outcomes; `false` means the bound elapsed first.
+ */
+async function awaitAgentIdle(agent: Agent, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      agent.whenIdle().then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => { resolve(false) }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /** Validate a revert anchor: an active surface node that is a user message. */
 function revertAnchorOf(session: Session, seq: number): SessionEvent<'user/message'> | undefined {
   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
@@ -1246,11 +1433,11 @@ function revertAnchorOf(session: Session, seq: number): SessionEvent<'user/messa
 }
 
 function rejectFailure(error: { readonly code: RemoteErrorCode; readonly message: string; readonly details: object }): never {
-  throw new RemoteError(error.code, error.message, error.details as never)
+  throw new RemoteError(error.code, error.message, error.details)
 }
 
 function reject(code: RemoteErrorCode, message: string, details: object): never {
-  throw new RemoteError(code, message, details as never)
+  throw new RemoteError(code, message, details)
 }
 
 function resolvePromptFileReceipts(

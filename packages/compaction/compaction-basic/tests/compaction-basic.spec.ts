@@ -1080,10 +1080,11 @@ describe('compaction region transaction', () => {
     })
     const nodes = session.surface.nodes
     const prefix = session.deriveMessages().slice(0, 3)
-    await compact.compactRegion(nodes[1]!, nodes[2]!, agent(session, MODEL), SIGNAL)
+    const [startNode, endNode] = [nodes[1]!, nodes[2]!]
+    await compact.compactRegion(startNode, endNode, agent(session, MODEL), SIGNAL)
 
     const { input } = compact.calls[0]!
-    expect(input).toEqual({ messages: prefix, tools })
+    expect(input).toEqual({ messages: prefix, tools, regionSeqs: [startNode, endNode] })
   })
 
   it('omits the summarizer system prompt for an empty system head or a system-less surface', async () => {

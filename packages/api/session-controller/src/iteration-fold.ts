@@ -41,6 +41,13 @@ export interface IterationFoldState {
   readonly branchSeqs: Map<number, number[]>
   /** Replacement seq → the surface nodes it shadowed, until its marker names the variant. */
   readonly pendingShadowed: Map<number, number[]>
+  /**
+   * Every seq cited by a compaction checkpoint's `sourceEventSeqs`. The
+   * checkpoint represents the group position for the variants it cites, so
+   * this set answers "is this variant still represented?" without scanning
+   * the live surface on every listing.
+   */
+  readonly checkpointCited: Set<number>
 }
 
 /** Structural event fields the fold reads; durable Session events and test doubles qualify. */
@@ -63,6 +70,7 @@ export function emptyIterationFoldState(): IterationFoldState {
     userOriginSeqs: new Set(),
     branchSeqs: new Map(),
     pendingShadowed: new Map(),
+    checkpointCited: new Set(),
   }
 }
 
@@ -95,6 +103,16 @@ export function iterationAnchorOf(state: IterationFoldState, seq: number): numbe
 export function foldIterationEvent(state: IterationFoldState, event: IterationFoldEvent): boolean {
   if (event.type === 'user/message') {
     const sourceKind = (event.data as { readonly source?: { readonly kind?: unknown } } | undefined)?.source?.kind
+    if (sourceKind === 'compact-checkpoint') {
+      // A compaction checkpoint represents every variant it cites; the
+      // listing reads this set instead of scanning the live surface.
+      if (Array.isArray(event.sourceEventSeqs)) {
+        for (const cited of event.sourceEventSeqs) {
+          if (typeof cited === 'number') state.checkpointCited.add(cited)
+        }
+      }
+      return false
+    }
     if (sourceKind !== 'user') return false
     state.userOriginSeqs.add(event.seq)
     const surfaceOp = event.surfaceOp as {
@@ -249,6 +267,82 @@ export function iterationEdges(state: IterationFoldState): SessionIterationEdge[
         previousSeq,
       })),
     }))
+}
+
+/**
+ * Resolve the iteration group a **compaction checkpoint** stands for, through
+ * the variants the checkpoint cites. A revert whose anchor is the checkpoint
+ * node must stay in the original group chain instead of minting a new group
+ * keyed by the checkpoint seq.
+ * @param state - folded index.
+ * @param citedSeqs - the checkpoint's `sourceEventSeqs`.
+ * @returns the group anchor and the variant the checkpoint currently represents, or undefined.
+ */
+export function resolveIterationCheckpointAnchor(
+  state: IterationFoldState,
+  citedSeqs: readonly number[] | undefined,
+): { readonly groupAnchor: number; readonly previousSeq: number } | undefined {
+  if (citedSeqs === undefined) return undefined
+  const cited = new Set(citedSeqs)
+  for (const group of state.groups.values()) {
+    let latest: number | undefined
+    for (const seq of group.variants.keys()) {
+      if (cited.has(seq)) latest = seq
+    }
+    if (latest === undefined) continue
+    const active = group.activeVariantSeq
+    return {
+      groupAnchor: group.anchorSeq,
+      previousSeq: active !== null && cited.has(active) ? active : latest,
+    }
+  }
+  return undefined
+}
+
+/** One bounded iteration-group listing row. */
+export interface ListedIterationGroup {
+  /** Seq of the original variant (the group key). */
+  readonly anchorSeq: number
+  /** Variant currently representing the group position, or null. */
+  readonly activeVariantSeq: number | null
+  /** At most `limit` variants, in creation order, oldest dropped first. */
+  readonly variants: readonly { readonly seq: number; readonly previousSeq: number | null }[]
+}
+
+/**
+ * List iteration groups without materializing every group or variant. The
+ * fold's group map is in creation order, so a full listing stops after
+ * `limit` groups; one group keeps only its last `limit` variants.
+ * @param state - folded index.
+ * @param options - group anchor, listing bound, and backwards variant cursor.
+ * @returns the bounded groups.
+ */
+export function listIterationGroups(
+  state: IterationFoldState,
+  options: {
+    readonly anchorSeq?: number
+    readonly limit: number
+    readonly beforeVariantSeq?: number
+  },
+): ListedIterationGroup[] {
+  const listed: ListedIterationGroup[] = []
+  const groups = options.anchorSeq === undefined
+    ? state.groups.values()
+    : (() => {
+      const only = state.groups.get(options.anchorSeq)
+      return only === undefined ? [].values() : [only].values()
+    })()
+  for (const group of groups) {
+    if (listed.length >= options.limit) break
+    const variants: Array<{ seq: number; previousSeq: number | null }> = []
+    for (const [seq, previousSeq] of group.variants) {
+      if (options.beforeVariantSeq !== undefined && seq >= options.beforeVariantSeq) continue
+      variants.push({ seq, previousSeq })
+      if (variants.length > options.limit) variants.shift()
+    }
+    listed.push({ anchorSeq: group.anchorSeq, activeVariantSeq: group.activeVariantSeq, variants })
+  }
+  return listed
 }
 
 /** Clear the active variant of every group whose representation the span shadowed. */

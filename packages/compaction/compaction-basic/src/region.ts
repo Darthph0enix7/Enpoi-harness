@@ -21,7 +21,7 @@ import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameMechanicalOmission, frameSummary, MECHANICAL_SUMMARY_TEXT } from './summarizer.ts'
+import { frameMechanicalOmission, frameSummary, MECHANICAL_SUMMARY_TEXT, SummarizationReplayError } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
@@ -96,11 +96,7 @@ interface TransactionFailure {
 }
 
 /** A framed model summary is not smaller than the span it would replace. */
-class SummaryNotSmallerError extends Error {
-  constructor(message: string) {
-    super(message)
-  }
-}
+class SummaryNotSmallerError extends Error {}
 
 /**
  * The `system/message` holding surface node 0, or `undefined` when another
@@ -427,7 +423,13 @@ async function summarizeCompaction(
     } catch (error: unknown) {
       if (signal?.aborted === true) throw error
       assertStable(dependencies, agent.session, prepared)
-      if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) {
+      // Recover against the exact request that failed: a window-clipped replay
+      // offloads from the messages it carried, not from a superset that could
+      // leave the retried request over its image cap.
+      const replayedSeqs = error instanceof SummarizationReplayError
+        ? error.replayedSourceSeqs
+        : prepared.shadowedSeqs
+      if (!dependencies.recover(error, agent, replayedSeqs, signal)) {
         if (allowMechanicalFallback) {
           const mechanical = mechanicalCompaction(
             dependencies,
@@ -654,15 +656,16 @@ function buildSummarizationInput(
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const head = systemHead(session, session.surface.nodes[0]!)
   const system = head === undefined ? null : session.deriveEventMessage(head)
-  const regionMessages = shadowedSeqs
+  const region = shadowedSeqs
     // shadowedSeqs are current surface seqs, so each is a valid log index.
     // Existing Session history read; migration deferred.
     // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
-    .map(seq => session.deriveEventMessage(session.eventAt(seq)!))
-    .filter((message): message is Message => message !== null)
+    .map(seq => ({ seq, message: session.deriveEventMessage(session.eventAt(seq)!) }))
+    .filter((entry): entry is { seq: SessionSeq; message: Message } => entry.message !== null)
   return {
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: system === null ? regionMessages : [system, ...regionMessages],
+    messages: system === null ? region.map(entry => entry.message) : [system, ...region.map(entry => entry.message)],
+    regionSeqs: region.map(entry => entry.seq),
   }
 }
 

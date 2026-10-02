@@ -6,7 +6,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { contentHasImage, BlockAssembler, LlmError, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
+import {
+  contentHasImage,
+  BlockAssembler,
+  IMAGE_OFFLOAD_REQUIRED_CODE,
+  LlmError,
+  projectImagesForTextModel,
+} from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, RequestUserInput, TokenUsage, ToolSchema,
@@ -98,6 +104,13 @@ export interface SummarizationInput {
   readonly tools?: readonly ToolSchema[]
   /** The derived system head, when present, followed by the shadowed region in surface order. */
   readonly messages: readonly Message[]
+  /**
+   * Durable seqs of the region messages, parallel to the tail of `messages`
+   * after the optional system head. The engine replays a subset when the
+   * summariser window clips the oldest region messages, so recovery needs the
+   * exact seqs the failed request carried — not the whole selected span.
+   */
+  readonly regionSeqs?: readonly SessionSeq[]
 }
 
 /** Optional framing supplied by the engine after it resolves the summariser window. */
@@ -137,6 +150,36 @@ export type SummaryResult = {
     llmStreamCall?: never
   }
 )
+
+/**
+ * An `IMAGE_OFFLOAD_REQUIRED` failure from a summarization replay that carries
+ * the durable seqs of the messages the failed request actually carried. The
+ * compaction recovery passes these to the image-offload waterfall so the
+ * offloaded occurrences match the request's own order: a window-clipped replay
+ * must not offload images from messages it never sent, or the retry repeats the
+ * same refusal.
+ */
+export class SummarizationReplayError extends LlmError {
+  /** Durable seqs of the replayed region messages, ascending by request order. */
+  readonly replayedSourceSeqs: readonly SessionSeq[]
+
+  /**
+   * @param error - the provider refusal that ended the replay.
+   * @param replayedSourceSeqs - durable seqs of the messages the failed request carried.
+   */
+  constructor(error: LlmError, replayedSourceSeqs: readonly SessionSeq[]) {
+    super(error.message, error.code, {
+      ...error.failure.status === undefined ? {} : { status: error.failure.status },
+      ...error.failure.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: error.failure.providerRetryAfterMs },
+      ...error.failure.requestId === undefined ? {} : { requestId: error.failure.requestId },
+      ...error.failure.provider === undefined ? {} : { provider: error.failure.provider },
+      ...error.failure.model === undefined ? {} : { model: error.failure.model },
+      ...error.failure.offloadImages === undefined ? {} : { offloadImages: error.failure.offloadImages },
+      cause: error,
+    })
+    this.replayedSourceSeqs = replayedSourceSeqs
+  }
+}
 
 /** Structural token-meter face used to price the replayed input without an injected dependency. */
 interface MeterFace {
@@ -185,19 +228,20 @@ function replayPrice(ctx: Context, message: Message): number {
 function clipReplayToBudget(
   ctx: Context,
   messages: readonly Message[],
+  regionSeqs: readonly SessionSeq[] | undefined,
   fixedTokens: number,
   budgetTokens: number,
-): { messages: readonly Message[]; windowClipped: boolean } {
+): { messages: readonly Message[]; regionSeqs: readonly SessionSeq[] | undefined; windowClipped: boolean } {
   let total = fixedTokens
   for (const message of messages) total += replayPrice(ctx, message)
-  if (total <= budgetTokens) return { messages, windowClipped: false }
+  if (total <= budgetTokens) return { messages, regionSeqs, windowClipped: false }
 
   // The system head stays pinned: it is the conversation's identity and the
   // anchor the region's newer messages are read against.
-  // oxlint-disable-next-line typescript/no-non-null-assertion -- index 0 exists when the branch can run.
-  const head = messages[0]?.role === 'system' ? messages[0]! : undefined
+  const head = messages[0]?.role === 'system' ? messages[0] : undefined
   const firstRegion = head === undefined ? 0 : 1
   const kept: Message[] = []
+  const keptSeqs: SessionSeq[] = []
   let spent = head === undefined ? fixedTokens : fixedTokens + replayPrice(ctx, head)
   for (let index = messages.length - 1; index >= firstRegion; index -= 1) {
     // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid position.
@@ -205,10 +249,13 @@ function clipReplayToBudget(
     const price = replayPrice(ctx, message)
     if (spent + price > budgetTokens) break
     kept.unshift(message)
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- regionSeqs parallels the region tail.
+    if (regionSeqs !== undefined) keptSeqs.unshift(regionSeqs[index - firstRegion]!)
     spent += price
   }
   return {
     messages: head === undefined ? kept : [head, ...kept],
+    regionSeqs: regionSeqs === undefined ? undefined : keptSeqs,
     windowClipped: true,
   }
 }
@@ -254,8 +301,8 @@ export async function summarizeWithLlm(
     + Math.ceil(JSON.stringify(input.tools ?? []).length / 4) + 4
   const budget = framing?.inputBudgetTokens
   const replay = budget === undefined || budget <= 0
-    ? { messages: input.messages, windowClipped: false }
-    : clipReplayToBudget(ctx, input.messages, fixedTokens, budget)
+    ? { messages: input.messages, regionSeqs: input.regionSeqs, windowClipped: false }
+    : clipReplayToBudget(ctx, input.messages, input.regionSeqs, fixedTokens, budget)
 
   const dispatch = async (
     replayMessages: readonly Message[],
@@ -292,6 +339,15 @@ export async function summarizeWithLlm(
   try {
     dispatched = await dispatch(replay.messages)
   } catch (error: unknown) {
+    // An image-cap refusal is recoverable only against the request the provider
+    // actually saw. Carry the replayed seqs so offload recovery names those
+    // messages, not the clipped-away oldest ones.
+    if (error instanceof LlmError
+      && error.code === IMAGE_OFFLOAD_REQUIRED_CODE
+      && replay.regionSeqs !== undefined
+      && replay.regionSeqs.length > 0) {
+      throw new SummarizationReplayError(error, replay.regionSeqs)
+    }
     // A route refusing media is a request-level fact, never a summariser
     // failure: retry once with every image occurrence replaced by its stable
     // text placeholder so a text-only summariser still condenses the span.

@@ -11,6 +11,7 @@ import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { SessionRepairAction, SessionVerifyIssue } from './verify-types.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
@@ -844,6 +845,38 @@ export interface SessionRevertIterationRestoreRequest {
 /** Iteration restore receipt; the branch switch is durable and appends no message. */
 export interface SessionRevertIterationRestoreValue {
   readonly accepted: true
+}
+
+/** Session-log verification request (host operator command). */
+export interface SessionVerifyLogRequest {
+  readonly sessionId: SessionId
+}
+
+/** Session-log verification receipt. */
+export interface SessionVerifyLogValue {
+  /** True when no error-severity invariant was violated. */
+  readonly ok: boolean
+  /** Number of committed (contiguous, well-formed) events walked. */
+  readonly committedEventCount: number
+  /** Every finding, in log order where a seq applies. */
+  readonly issues: readonly SessionVerifyIssue[]
+}
+
+/** Session-log self-heal request (host operator command). */
+export interface SessionRepairLogRequest {
+  readonly sessionId: SessionId
+}
+
+/** Session-log self-heal receipt. */
+export interface SessionRepairLogValue {
+  /** True when the repaired derived view satisfies every repairable invariant. */
+  readonly ok: boolean
+  /** Number of committed events in the repaired view. */
+  readonly committedEventCount: number
+  /** Every repair applied, in order. */
+  readonly repairs: readonly SessionRepairAction[]
+  /** Remaining findings after repair (only unrepairable ones). */
+  readonly issues: readonly SessionVerifyIssue[]
 }
 
 /** File-revert conflict resolution request (bridged to enpoi-file-revert). */

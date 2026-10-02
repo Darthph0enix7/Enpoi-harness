@@ -956,4 +956,40 @@ describe('compactNow transaction and failure classification', () => {
     compact.gate = undefined
     await expect(region).resolves.toMatchObject({ shadowedSeqs: nodes.slice(0, 2) })
   })
+
+  it('cites the iteration variant a checkpoint replaces so the group anchor resolves through it', async () => {
+    const { compact } = detachedService()
+    const session = closedConversation(1)
+    const [firstNode, lastNode] = session.surface.nodes
+    // A committed revert-iteration variant replaces the whole exchange.
+    const variant = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: `${PROMPT} variant two` }],
+      source: { kind: 'user' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: firstNode!, endSeq: lastNode! },
+      sourceEventSeqs: [firstNode!, lastNode!],
+    })
+    session.append('revert/iteration', {
+      groupAnchor: firstNode!, previousSeq: firstNode!, variantSeq: variant.seq,
+      startSeq: firstNode!, endSeq: lastNode!, cause: 'commit',
+    }, { ignorable: true })
+    session.append('turn/start', { turn: 2 })
+    const agent = fakeAgent(session, () => () => undefined)
+
+    const result = await compact.compactRegion(variant.seq, variant.seq, agent)
+
+    const checkpoint = session.snapshotEvents().findLast(event =>
+      event.type === 'user/message'
+      && (event.data.source as { kind?: string }).kind === 'compact-checkpoint')!
+    expect(result.shadowedSeqs).toEqual([variant.seq])
+    // The checkpoint cites the variant it replaces; that citation is what
+    // session-controller anchor resolution reads to stay in the original group
+    // instead of opening one keyed by the checkpoint seq.
+    expect(checkpoint.sourceEventSeqs).toContain(variant.seq)
+    expect(checkpoint.surfaceOp).toMatchObject({ op: 'replace', startSeq: variant.seq, endSeq: variant.seq })
+    expect([...session.surface.nodes]).not.toContain(variant.seq)
+    // The marker and its variant stay durable and reachable after compaction.
+    expect(session.snapshotEvents().some(event =>
+      event.type === 'revert/iteration' && event.data.variantSeq === variant.seq)).toBe(true)
+  })
 })

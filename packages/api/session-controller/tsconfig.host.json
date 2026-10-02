@@ -25,6 +25,10 @@
     "src/revert-fold.ts",
     "src/iteration-fold.ts",
     "src/session-command-index.ts",
+    "src/session-verify.ts",
+    "src/retention-pins.ts",
+    "src/surface-view.ts",
+    "src/verify-types.ts",
     "src/archived-session-gate.ts",
     "src/skill-catalog.ts"
   ],

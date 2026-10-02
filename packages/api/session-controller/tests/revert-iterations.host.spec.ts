@@ -277,6 +277,46 @@ describe('SessionController revert-iteration RPCs', () => {
     })
   })
 
+  it('continues the original group chain when a revert commit anchors at a compaction checkpoint', async () => {
+    const { controller, sessionId, session, followup, independentSeq, v1Seq, v2Seq, v2AnswerSeq } = await composed()
+    // Compaction replaces the group's current branch with a checkpoint citing
+    // the variants it represents (the anchor-resolution input).
+    const checkpoint = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'compacted summary' }],
+      source: { kind: 'compact-checkpoint', compactionId: 'compaction-anchor' as never },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: v2Seq, endSeq: v2AnswerSeq },
+      sourceEventSeqs: [v1Seq, v2Seq, v2AnswerSeq],
+    })
+    // A later exchange keeps the checkpoint from being the last surface node.
+    const after = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'after the checkpoint' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+
+    await expect(controller.prompt({
+      requestId: 'r-checkpoint-anchor' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'revert from the checkpoint' }],
+      revertFromSeq: checkpoint.seq,
+    }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+
+    expect(followup).toHaveBeenCalledTimes(1)
+    const intent = followup.mock.calls[0]?.[1] as { iteration?: unknown; surfaceOp?: unknown } | undefined
+    // The chain stays in the original group with its active variant; it is
+    // not a new group keyed by the checkpoint seq.
+    expect(intent?.iteration).toEqual({
+      groupAnchor: v1Seq,
+      previousSeq: v2Seq,
+      startSeq: checkpoint.seq,
+      endSeq: after.seq,
+      cause: 'commit',
+    })
+    expect(intent?.surfaceOp).toEqual({ op: 'replace', startSeq: checkpoint.seq, endSeq: after.seq })
+    expect(independentSeq).toBeLessThan(v1Seq)
+  })
+
   it('rejects a branch whose records are gone from the log', async () => {
     const { controller, sessionId, session, v1Seq, v2Seq, v2AnswerSeq } = await composed()
     // A checkpoint that cites v2 but whose branch records were never recorded
@@ -296,14 +336,46 @@ describe('SessionController revert-iteration RPCs', () => {
     })).resolves.toEqual({ accepted: true })
   })
 
-  it('treats a concurrent restore as agent-busy while the first is in flight', async () => {
-    const { controller, sessionId, v1Seq, v2Seq } = await composed()
-    // Hold the first restore inside its serialized window by making the
-    // branch lookup slow is not possible; instead assert the guard directly
-    // through a second call after the first completes is covered above.
-    // Here we only prove both targets remain independently valid.
-    await controller.revertIterationRestore({ sessionId, variantSeq: v1Seq, requestId: 'r-1' as never })
-    await controller.revertIterationRestore({ sessionId, variantSeq: v2Seq, requestId: 'r-2' as never })
-    expect(v1Seq).toBeLessThan(v2Seq)
+  it('refuses a restore while a running turn does not settle, before any write', async () => {
+    const { controller, sessionId, session, ctx, cancel, v1Seq } = await composed()
+    const agent = ctx.agents.get(sessionId)!
+    const stuck = new Promise<void>(() => {})
+    Object.assign(agent, { status: 'running', cancel, whenIdle: () => stuck })
+    const seqBefore = session.seq
+
+    vi.useFakeTimers()
+    try {
+      const restoring = controller.revertIterationRestore({ sessionId, variantSeq: v1Seq, requestId: 'r-busy' as never })
+      const rejection = expect(restoring).rejects.toMatchObject({
+        code: 'session/agent-busy',
+        details: { reason: 'ITERATION_RESTORE_TURN_ACTIVE' },
+      })
+      await vi.advanceTimersByTimeAsync(5_001)
+      await rejection
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // The turn was cancelled, but the stale plan landed no write at all.
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(session.seq).toBe(seqBefore)
+    expect(session.snapshotEvents().some(event => event.type === 'revert/state' || event.type === 'revert/branch')).toBe(false)
+  })
+
+  it('waits for a running turn to settle and then restores the branch', async () => {
+    const { controller, sessionId, session, ctx, independentSeq, v1Seq, v1AnswerSeq, cancel, v2Seq } = await composed()
+    const agent = ctx.agents.get(sessionId)!
+    const settled = Promise.withResolvers<undefined>()
+    Object.assign(agent, { status: 'running', cancel, whenIdle: () => settled.promise })
+
+    const restoring = controller.revertIterationRestore({ sessionId, variantSeq: v1Seq, requestId: 'r-wait' as never })
+    // The restore is planned against the settled surface: settling first is
+    // what makes the branch lists stable between plan and switch.
+    settled.resolve(undefined)
+    await expect(restoring).resolves.toEqual({ accepted: true })
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect([...session.surface.nodes]).toEqual([independentSeq, v1Seq, v1AnswerSeq])
+    expect(session.snapshotEvents().filter(event => event.type === 'revert/branch')).toHaveLength(1)
+    expect(v2Seq).toBeGreaterThan(v1AnswerSeq)
   })
 })

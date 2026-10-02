@@ -57,6 +57,10 @@ import type {
   SessionRevertIterationsValue,
   SessionRevertIterationRestoreRequest,
   SessionRevertIterationRestoreValue,
+  SessionVerifyLogRequest,
+  SessionVerifyLogValue,
+  SessionRepairLogRequest,
+  SessionRepairLogValue,
   SessionFollowFrame,
   SessionFollowRequest,
   SessionForkRequest,
@@ -88,6 +92,32 @@ export type * from './types.ts'
 export { ApiSessionNotFound } from './agent.ts'
 export { SessionFileReferences } from './file-references.ts'
 export { SessionSkillCatalog } from './skill-catalog.ts'
+export {
+  assertRemovalSafe,
+  computeRetentionPins,
+  computeSessionRetentionPins,
+  retentionGuardOf,
+  RetentionViolationError,
+} from './retention-pins.ts'
+export type {
+  RetentionPin,
+  RetentionPinCategory,
+  RetentionPinEvent,
+  RetentionPinManifest,
+  RetentionViolation,
+} from './retention-pins.ts'
+export { repairSessionLog, verifySessionLog } from './session-verify.ts'
+export type {
+  SessionRepairAction,
+  SessionRepairKind,
+  SessionRepairResult,
+  SessionVerificationInput,
+  SessionVerifyEvent,
+  SessionVerifyIssue,
+  SessionVerifyIssueKind,
+  SessionVerifyReport,
+} from './session-verify.ts'
+export { foldSurfaceNodes } from './surface-view.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -488,6 +518,29 @@ export class SessionController extends TypertRemoteService {
   @Remote('revertIterationRestore')
   revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue> {
     return this.commands.revertIterationRestore(request)
+  }
+
+  /**
+   * Verify one Session log against the durability invariants (marker targets,
+   * branch reachability, offload targets, compaction sources, surface and
+   * iteration folds).
+   * @param request - Session to verify.
+   * @returns the findings and the committed prefix length.
+   */
+  @Remote('verifyLog')
+  verifyLog(request: SessionVerifyLogRequest): Promise<SessionVerifyLogValue> {
+    return this.commands.verifyLog(request)
+  }
+
+  /**
+   * Self-heal one Session log: rebuild derived folds and neutralize dangling
+   * references in the derived view without rewriting durable events.
+   * @param request - Session to repair.
+   * @returns the repair receipt and verification of the repaired view.
+   */
+  @Remote('repairLog')
+  repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue> {
+    return this.commands.repairLog(request)
   }
 
   /**
