@@ -2697,7 +2697,7 @@ describe('JsonlSessionPersistence: edge cases', () => {
     await expect(ctx.sessionPersistence.list()).rejects.toThrow(/header id cannot name a storage path/)
   })
 
-  it('open and list reject one id materialized in multiple project directories', async () => {
+  it('open and list report one id materialized in multiple project directories', async () => {
     const id = SessionId('duplicate')
     for (const cwd of ['/a', '/b']) {
       const m = meta(id, cwd)
@@ -2706,8 +2706,15 @@ describe('JsonlSessionPersistence: edge cases', () => {
       await writeFile(rawLogPath(root, cwd, id), content)
     }
 
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+    // One ambiguous id must not take down the whole listing: the kept
+    // artifact lists once, the ignored duplicate is reported with both paths.
+    const listed = await ctx.sessionPersistence.list()
+    expect(listed.map(snapshot => snapshot.header.id)).toEqual([id])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('appears in multiple project directories'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(rawLogPath(root, '/a', id)))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(rawLogPath(root, '/b', id)))
     await expect(ctx.sessionPersistence.open(id, 'read')).rejects.toThrow(/appears in multiple project directories/)
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/appears in multiple project directories/)
   })
 
   it('create rejects an id already on disk under a different project directory', async () => {

@@ -201,6 +201,25 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return typeof (error as NodeJS.ErrnoException | null)?.code === 'string'
 }
 
+/**
+ * Choose the artifact that represents one id listed from multiple project
+ * directories: the numerically highest stored generation wins, matching
+ * {@link JsonlSessionPersistence.resolveGenerationInDirectory}; equal versions
+ * break the tie by path so repeated listings stay deterministic.
+ * @param left - first candidate in discovery order.
+ * @param right - second candidate in discovery order.
+ * @returns the candidate to keep.
+ */
+function preferListedArtifact<Artifact extends { readonly sourceVersion: number; readonly path: string }>(
+  left: Artifact,
+  right: Artifact,
+): Artifact {
+  if (left.sourceVersion !== right.sourceVersion) {
+    return left.sourceVersion > right.sourceVersion ? left : right
+  }
+  return left.path <= right.path ? left : right
+}
+
 /** Preserve an Error abort reason and normalize hostile non-Error reasons. */
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
@@ -1089,28 +1108,44 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string; sourceVersion: number }> = []
-    const ids = new Set<SessionId>()
+    const byId = new Map<SessionId, { header: SessionHeader; path: string; sourceVersion: number }>()
+    // One unlistable or duplicated artifact must not hide the rest of the
+    // root, but it must never disappear without a diagnostic either: collect
+    // one report per artifact and log the batch after discovery.
+    const reports: string[] = []
     for (const selected of await this.listGenerations(signal)) {
       signal?.throwIfAborted()
       let header: SessionHeader | undefined
       try {
         header = await this.readGenerationHeader(selected, undefined, signal)
       } catch (error: unknown) {
-        if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) continue
+        if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
+          reports.push(`session artifact cannot be listed and stays hidden from the session list: ${error.message}`)
+          continue
+        }
         throw error
       }
       if (header === undefined) {
+        reports.push(`session artifact has no readable header and stays hidden from the session list (raw log: ${selected.sourcePath})`)
         continue
       }
-      if (ids.has(header.id)) {
-        throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
+      const candidate = { header, path: selected.sourcePath, sourceVersion: selected.sourceVersion }
+      const existing = byId.get(header.id)
+      if (existing === undefined) {
+        byId.set(header.id, candidate)
+        continue
       }
-      ids.add(header.id)
-      artifacts.push({ header, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
+      const preferred = preferListedArtifact(existing, candidate)
+      const ignored = preferred === existing ? candidate : existing
+      byId.set(header.id, preferred)
+      reports.push(
+        `duplicate JSONL session id "${header.id}" appears in multiple project directories: `
+        + `listing (raw log: ${preferred.path}), ignoring (raw log: ${ignored.path})`,
+      )
     }
+    for (const report of reports) this.ctx.logger.warn(`${this.name}: ${report}`)
     signal?.throwIfAborted()
-    return artifacts
+    return [...byId.values()]
   }
 
   /** Read and translate one selected generation header without inspecting its body. */
