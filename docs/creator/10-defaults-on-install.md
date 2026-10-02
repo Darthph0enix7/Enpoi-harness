@@ -68,7 +68,7 @@ Two layers:
 ## Default seats (fleet)
 
 - Seats come from the role registry. Defaults: every built-in role is seat-enabled unless its entry sets `seat: false`; `spawnable` defaults true except the tool-only Oracle (`$REPO/packages/subagent/tool-subagent/src/index.ts:487-540,669-683,394`).
-- Keeper seat default route: `freellmapi/auto` — the keeper has no parent turn to inherit from (`ui-brand-enpoi/src/client/role-registry.ts:61`).
+- Keeper seat default route: `kilo/kilo-auto/free` — the keyless route first-run seeds, because the keeper has no parent turn to inherit from and a fresh install has no `freellmapi` route. The client label and the plugin Config default must agree (`ui-brand-enpoi/src/client/role-registry.ts:60`; `$PROFILE/packages/enpoi-context-keeper/src/index.ts` Config defaults).
 - Compaction is a **designated seat**: always rendered, inherits the session model by default; a different summariser breaks the prompt-prefix cache (`ui-brand-enpoi/src/client/AgentModelsBody.tsx:12-18,217`; `role-registry.ts:268`).
 - Assign/reset per seat in the Agent Models tab; `Inherit` clears the assignment (doc 07).
 

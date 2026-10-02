@@ -8,11 +8,11 @@ The wire rosters captured in `scripts/tool-inventory/expected-<preset>.json` are
 
 | Preset | Wire tools | Fixture |
 |---|---|---|
-| orchestrator | 53 | `scripts/tool-inventory/expected-orchestrator.json` |
-| sysadmin | 53 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
+| orchestrator | 50 | `scripts/tool-inventory/expected-orchestrator.json` |
+| sysadmin | 50 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
 | creator | 53 | `scripts/tool-inventory/expected-creator.json` |
 
-Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are the re-probed canonical captures; all three main agents advertise the same 53 names, including `tool_groups`, `mcp`, and the session/diagnostics introspection rows. The stored baseline still carries the pre-re-probe 0.1.7 counts, so `scripts/tool-roster-diff.mjs` reports `DRIFT` naming the additions (39/40 → 53) until the baseline is refreshed — a `MATCH` means the baseline caught up, never that the fixtures are stale. Probe before quoting a count: `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call); `scripts/tool-roster-diff.mjs` diffs fixtures against the stored baseline offline.
+Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are the re-probed canonical captures; the creator tool group attaches only to the creator seat, so orchestrator and sysadmin advertise the same 50 names and creator carries the three creator-group tools on top (53). `scripts/tool-roster-diff.mjs` reports `MATCH` against the stored baseline; `DRIFT` means a fixture or the baseline moved — re-probe with `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call) and refresh the fixture and the baseline in the same change.
 
 The **permission** side is complete by construction: `packages/enpoi-capabilities/tests/tool-defaults-completeness.spec.ts` fails a newly advertised preset tool until it has an explicit `SHIPPED_TOOL_DEFAULTS` row or a documented `SHIPPED_TOOL_DEFAULT_EXEMPTIONS` prefix, and the Permissions page reads the generated host mirror instead of a hand-kept list (04 §1).
 

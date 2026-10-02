@@ -10,7 +10,7 @@
  * (`enpoiCouncil.list`, one group per council under its own label), and every
  * persona-assigned id neither claims, so the fleet grows and shrinks with the
  * operator's roles and councils. The keeper seat shows its exact built-in
- * default ("built-in default: freellmapi/auto") instead of "Inherit" — the
+ * default ("built-in default: kilo/kilo-auto/free") instead of "Inherit" — the
  * keeper has no parent turn to inherit from; the compaction seat is always
  * rendered (a designated seat) and inherits the session model by default,
  * because any other summariser breaks the prompt-prefix cache and pays full

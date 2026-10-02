@@ -18,9 +18,10 @@
 #   4. pnpm install --frozen-lockfile + pnpm run build (host), then the
 #      profile's own plugin build when the profile ships one;
 #   5. when --profile-source / DSH_PROFILE_SOURCE names the companion profile
-#      (default: the Enpoi web profile repo for --profile web), fetches it into
-#      $DSH_HOME/profiles/<name> before the template seed, seeds the shared
-#      settings/presets, and installs the profile's dependencies;
+#      (default: the Enpoi web profile repo for --profile web), fetches it at
+#      the selected channel's ref into $DSH_HOME/profiles/<name> before the
+#      template seed, seeds the shared settings/presets, and installs the
+#      profile's dependencies; an explicit --profile-ref wins;
 #   6. seeds $DSH_HOME from the shipped templates (initProfile path), installs
 #      the `dsh` shim into ~/.local/bin, and prints the PATH line (only writes
 #      the shell rc when --write-rc is given).
@@ -30,6 +31,12 @@
 #   restart (only when a unit for this install exists) -> projection backfill
 #   (when present) -> self-check -> roll back to the previous versioned dir and
 #   restore backups on failure. Idempotent, re-runnable.
+#
+# Rolling channels: stable/beta branches can advance without a version bump, so
+# the update decision compares the target ref's commit SHA (git ls-remote, then
+# the GitHub API) with the SHA the installed tree recorded at build time. When
+# the branch moved, the build lands in `<version>-<short-sha>` so two builds of
+# one semver never collide and `current` can roll back to the previous build.
 #
 # Invariants: the repo tree is pull-only and disposable; $DSH_HOME is only ever
 # seeded (never overwritten); versioned dirs make rollback a symlink move.
@@ -99,6 +106,11 @@ AUDIT_RESULT="skipped"
 BACKFILL="skipped"
 BUILD_COMMIT=""
 BUILD_DIRTY=""
+TARGET_COMMIT=""
+INSTALLED_COMMIT=""
+TREE_DIR_NAME=""
+PROFILE_REF_EXPLICIT=0
+PROFILE_REF_DERIVED=0
 PREV_VERSION=""
 CHECK_VERSION=0
 CHECK_HELP=0
@@ -154,7 +166,9 @@ Options:
   --profile-source SRC  companion profile: local dir, local tarball, tarball
                       URL, or git URL (default for --profile web: the Enpoi
                       profile repo; empty disables the profile fetch)
-  --profile-ref REF   git ref fetched from a git profile source (default: HEAD)
+  --profile-ref REF   git ref fetched from a git profile source (default: the
+                      selected channel for the canonical Enpoi profile repo,
+                      HEAD otherwise)
   --service-unit U    systemd user unit / launchd label to restart on update
                       (default: auto-detected only when it references --prefix)
   --dsh-home DIR      harness home override (default: $DSH_HOME or $HOME/.dsh);
@@ -222,8 +236,8 @@ while [ "$#" -gt 0 ]; do
     --profile=*) PROFILE="${arg#*=}"; shift;;
     --profile-source) need_value "$@"; PROFILE_SOURCE="$2"; shift 2;;
     --profile-source=*) PROFILE_SOURCE="${arg#*=}"; shift;;
-    --profile-ref) need_value "$@"; PROFILE_REF="$2"; shift 2;;
-    --profile-ref=*) PROFILE_REF="${arg#*=}"; shift;;
+    --profile-ref) need_value "$@"; PROFILE_REF="$2"; PROFILE_REF_EXPLICIT=1; shift 2;;
+    --profile-ref=*) PROFILE_REF="${arg#*=}"; PROFILE_REF_EXPLICIT=1; shift;;
     --service-unit) need_value "$@"; SERVICE_UNIT="$2"; shift 2;;
     --service-unit=*) SERVICE_UNIT="${arg#*=}"; shift;;
     --dsh-home) need_value "$@"; DSH_HOME="$2"; shift 2;;
@@ -250,6 +264,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ── Portable helpers ────────────────────────────────────────────────────────
+# DSH_PROFILE_REF names an explicit ref exactly like --profile-ref does.
+[ -n "$PROFILE_REF" ] && PROFILE_REF_EXPLICIT=1
+
 run_limited() {
   local seconds="$1"; shift
   if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
@@ -438,6 +455,65 @@ digest_hex() { # stable 40-hex digest for builds without git metadata
   fi
 }
 
+# ── Rolling-channel commit identity ─────────────────────────────────────────
+# A channel branch can advance without a version bump. The target ref's commit
+# SHA and the SHA recorded by the installed tree decide whether an update is a
+# no-op; version comparison alone would skip a moved rolling branch forever.
+
+commit_same() { # a b -> 0 when one SHA is a prefix of the other (short vs full)
+  local a="$1" b="$2"
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "${a#"$b"}" != "$a" ] && return 0
+  [ "${b#"$a"}" != "$b" ] && return 0
+  return 1
+}
+
+installed_tree_commit() { # tree -> the build commit the tree recorded, empty when unknown
+  local tree="$1" commit=""
+  if [ -f "$tree/.dsh-install-complete" ]; then
+    commit="$(json_field "$tree/.dsh-install-complete" commit)"
+  fi
+  if [ -z "$commit" ] && [ -f "$tree/.dsh-build/client-build-environment.json" ]; then
+    commit="$("$NODE" -e 'const fs=require("fs");try{const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o.environment?.DSH_CLIENT_COMMIT_HASH??""))}catch{process.exit(1)}' "$tree/.dsh-build/client-build-environment.json" 2>/dev/null || true)"
+  fi
+  case "$commit" in *[!0-9a-fA-F]*|'') commit="";; esac
+  printf '%s' "$commit"
+}
+
+resolve_target_commit() { # ref url -> target commit SHA, empty when unresolvable
+  local ref="$1" url="$2" sha="" raw=""
+  if [ -n "$ref" ] && [ -n "$url" ] && command -v git >/dev/null 2>&1; then
+    sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/heads/$ref" 2>/dev/null | awk 'NR==1 {print $1}')"
+    if [ -z "$sha" ]; then
+      sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/tags/$ref" "refs/tags/$ref^{}" 2>/dev/null | awk 'NR==1 {print $1}')"
+    fi
+  fi
+  case "$sha" in *[!0-9a-fA-F]*|'') sha="";; esac
+  if [ -z "$sha" ] && [ -n "$ref" ] && [ -n "$url" ]; then
+    case "$url" in
+      https://github.com/*)
+        raw="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$DSH_GITHUB_REPO/commits/$ref" 2>/dev/null || true)"
+        sha="$(printf '%s' "$raw" | head -n 5 | awk -F'"' '/"sha":/ {print $4; exit}')"
+        ;;
+    esac
+  fi
+  case "$sha" in *[!0-9a-fA-F]*|'') sha="";; esac
+  printf '%s' "$sha"
+}
+
+# Resolve the target SHA for the source selected by prepare_source: a local git
+# checkout answers from its own HEAD; the channel archive answers from the ref.
+resolve_target_for_source() {
+  TARGET_COMMIT=""
+  if [ -n "$SOURCE" ] && [ -d "$SOURCE/.git" ]; then
+    TARGET_COMMIT="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
+  elif [ -n "$SOURCE_URL" ]; then
+    TARGET_COMMIT="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
+  fi
+  case "$TARGET_COMMIT" in *[!0-9a-fA-F]*|'') TARGET_COMMIT="";; esac
+  return 0
+}
+
 resolve_build_commit() {
   # The client build embeds a commit hash; tarball installs carry no .git, so
   # the engine accepts DSH_CLIENT_COMMIT_HASH (scripts/client-build-environment.ts).
@@ -534,9 +610,9 @@ prepare_source() {
 }
 
 # ── Install / build ─────────────────────────────────────────────────────────
-install_tree() { # installs $VERSION into $PREFIX/harness/$VERSION; returns nonzero on failure
+install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERSION}; returns nonzero on failure
   local displaced=""
-  HARNESS="$PREFIX/harness/$VERSION"
+  HARNESS="$PREFIX/harness/${TREE_DIR_NAME:-$VERSION}"
   mkdir -p "$PREFIX/harness" || return 1
   if [ -e "$HARNESS" ]; then
     if [ -f "$HARNESS/.dsh-install-complete" ]; then
@@ -578,6 +654,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/$VERSION; returns nonz
     return 1
   fi
   resolve_build_commit
+  if [ -z "$BUILD_COMMIT" ] && [ -n "${TARGET_COMMIT:-}" ]; then BUILD_COMMIT="$TARGET_COMMIT"; fi
   if [ -n "$BUILD_COMMIT" ]; then export DSH_CLIENT_COMMIT_HASH="$BUILD_COMMIT"; fi
   if [ "$BUILD_DIRTY" = true ]; then export DSH_CLIENT_GIT_DIRTY=true; fi
   log "pnpm run build in $HARNESS (this can take many minutes)"
@@ -586,7 +663,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/$VERSION; returns nonz
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
   fi
-  printf '{"version": "%s", "installedAt": "%s"}\n' "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+  printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$VERSION" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
   if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
   return 0
 }
@@ -748,6 +825,42 @@ strip_fresh_patch() { # patch-file
   return 0
 }
 
+# Refuse to seed operator state. This is the same split the profile repo pins
+# in packages/enpoi-capabilities/tests/profile-patch.spec.ts: a source tree
+# that still carries the configured machine's rows after stripping is a
+# packaging bug, and end-user installs must never inherit the operator's
+# providers, default model, UI settings, seats, grants, or MCP catalog.
+assert_fresh_patch() { # patch-file -> 0 when the document carries no operator state
+  local file="$1" id section
+  [ -f "$file" ] || return 0
+  for id in agent-default-model llm-pi-ai ui-settings-general ui-settings-models ui-theme; do
+    if grep -qE "^[[:space:]]*- id:[[:space:]]*$id[[:space:]]*$" "$file"; then
+      warn "profile patch carries operator state row '$id'"
+      return 1
+    fi
+  done
+  if grep -qE '^[[:space:]]*onboardingCompleted:' "$file"; then
+    warn "profile patch carries the onboardingCompleted marker"
+    return 1
+  fi
+  if grep -qE '^[[:space:]]*providers:' "$file"; then
+    warn "profile patch carries a providers block"
+    return 1
+  fi
+  for section in capabilities mcpServers mcpStatus personas roles councils chains catalogRules \
+    uiPreferences permissions whiteboard toolGroups; do
+    if awk -v key="$section" '
+      /^- / { inorch = ($0 == "- id: enpoi-orchestration") }
+      inorch && /^    [A-Za-z0-9_@.\/-]+:/ { k = $0; sub(/^    /, "", k); sub(/:.*/, "", k); if (k == key) found = 1 }
+      END { exit found ? 0 : 1 }
+    ' "$file"; then
+      warn "profile patch carries operator-owned section '$section'"
+      return 1
+    fi
+  done
+  return 0
+}
+
 copy_profile_tree() { # src dst mode(seed|refresh)
   # seed: first install, all shipped files land (the dir is fresh).
   # refresh: user state survives — settings.yaml, cordis.patch.yml (the
@@ -792,7 +905,18 @@ copy_profile_tree() { # src dst mode(seed|refresh)
       # Seed mode only (refresh keeps the live patch above): a fresh home must
       # not inherit the live device's wizard marker, settings rows, or
       # orchestration state.
-      case "$rel" in cordis.patch.yml) strip_fresh_patch "$d";; esac
+      case "$rel" in
+        cordis.patch.yml)
+          strip_fresh_patch "$d"
+          if ! assert_fresh_patch "$d"; then
+            # Never seed operator state: drop the offending document so the
+            # shipped upstream template seeds instead.
+            rm -f "$d"
+            warn "refused to seed operator state from $rel; the shipped template will seed instead"
+            return 1
+          fi
+          ;;
+      esac
     fi
   done < <( cd "$src" && find . -mindepth 1 -print0 )
   return 0
@@ -832,11 +956,30 @@ seed_profile_home() { # stage
   return 0
 }
 
+# The canonical companion profile repo is branch-per-channel like the harness:
+# a channel install must clone the profile's channel branch, not the repo's
+# default HEAD (which tracks the newest template). An explicit --profile-ref /
+# DSH_PROFILE_REF always wins; a ref this script derived is re-derived when the
+# channel changes, and a state file without the derived flag keeps a recorded
+# non-empty ref as an operator pin.
+apply_profile_ref_default() { # from_state(0|1) -> sets PROFILE_REF from $CHANNEL
+  local from_state="${1:-0}"
+  [ "$PROFILE_REF_EXPLICIT" = 1 ] && return 0
+  [ "$PROFILE_SOURCE" = "$DEFAULT_PROFILE_SOURCE" ] || return 0
+  [ -n "$CHANNEL" ] || return 0
+  if [ "$from_state" = 1 ]; then
+    [ -z "$PROFILE_REF" ] || [ "$PROFILE_REF_DERIVED" = 1 ] || return 0
+  fi
+  PROFILE_REF="$CHANNEL"
+  PROFILE_REF_DERIVED=1
+  return 0
+}
+
 prepare_profile() {
   [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; return 0; }
   local kind rc=0 mode=seed fresh=0
   kind="$(profile_source_kind "$PROFILE_SOURCE")"
-  log "profile source: $PROFILE_SOURCE ($kind)"
+  log "profile source: $PROFILE_SOURCE ($kind${PROFILE_REF:+ ref $PROFILE_REF})"
   # A home without this profile's manifest would otherwise be seeded from the
   # shipped upstream template by initProfile; that is a silent behavior change,
   # so a failed fetch is fatal until the profile exists once.
@@ -939,6 +1082,8 @@ write_state() {
     printf '{\n'
     printf '  "prefix": "%s",\n' "$(json_escape "$PREFIX")"
     printf '  "version": "%s",\n' "$(json_escape "$VERSION")"
+    printf '  "harnessDir": "%s",\n' "$(json_escape "${TREE_DIR_NAME:-$VERSION}")"
+    printf '  "commit": "%s",\n' "$(json_escape "$BUILD_COMMIT")"
     printf '  "channel": "%s",\n' "$(json_escape "$CHANNEL")"
     printf '  "ref": "%s",\n' "$(json_escape "${REF:-$CHANNEL}")"
     printf '  "source": "%s",\n' "$(json_escape "$SOURCE")"
@@ -946,6 +1091,7 @@ write_state() {
     printf '  "profile": "%s",\n' "$(json_escape "$PROFILE")"
     printf '  "profileSource": "%s",\n' "$(json_escape "$PROFILE_SOURCE")"
     printf '  "profileRef": "%s",\n' "$(json_escape "$PROFILE_REF")"
+    printf '  "profileRefDerived": %s,\n' "$([ "$PROFILE_REF_DERIVED" = 1 ] && printf 'true' || printf 'false')"
     printf '  "binDir": "%s",\n' "$(json_escape "$BIN_DIR")"
     printf '  "dshHome": "%s",\n' "$(json_escape "$DSH_HOME")"
     printf '  "node": "%s",\n' "$(json_escape "$NODE")"
@@ -1257,7 +1403,7 @@ dry_run_plan() {
   say "  bin dir:   $BIN_DIR"
   say "  channel:   $CHANNEL (ref: $ref)"
   if [ -n "$SOURCE" ]; then say "  source:    $SOURCE"; else say "  source:    $DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"; fi
-  if [ -n "$PROFILE_SOURCE" ]; then say "  profile:   $PROFILE (source: $PROFILE_SOURCE)"; else say "  profile:   $PROFILE (shipped template)"; fi
+  if [ -n "$PROFILE_SOURCE" ]; then say "  profile:   $PROFILE (source: $PROFILE_SOURCE${PROFILE_REF:+, ref: $PROFILE_REF})"; else say "  profile:   $PROFILE (shipped template)"; fi
   if detect_os_arch >/dev/null 2>&1; then :; fi
   if resolve_node 0 >/dev/null 2>&1; then
     say "  node:      $NODE ($NODE_ORIGIN)"
@@ -1291,14 +1437,31 @@ do_install() {
   prune_failed_versions
   step "source: ${SOURCE:-$CHANNEL channel archive}"
   prepare_source
-  log "target version: $VERSION"
-  HARNESS="$PREFIX/harness/$VERSION"
+  resolve_target_for_source
+  log "target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
+  TREE_DIR_NAME="$VERSION"
+  if [ -n "$TARGET_COMMIT" ]; then
+    local short
+    short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
+    if [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
+      && ! commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION")"; then
+      # The canonical dir holds another build of this semver: keep both.
+      TREE_DIR_NAME="$VERSION-$short"
+      log "rolling channel advanced: recorded $(installed_tree_commit "$PREFIX/harness/$VERSION") -> target $short; building into $TREE_DIR_NAME"
+    elif [ ! -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
+      && [ -f "$PREFIX/harness/$VERSION-$short/.dsh-install-complete" ] \
+      && commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION-$short")"; then
+      # A previous rolling install already built this target.
+      TREE_DIR_NAME="$VERSION-$short"
+    fi
+  fi
+  HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
   if [ -f "$HARNESS/.dsh-install-complete" ] && [ "$FORCE" != 1 ]; then
     log "already installed; refreshing seed/shim only"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
     if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
     step "pnpm: already available"
-    step "dependencies and build: reusing the installed $VERSION tree"
+    step "dependencies and build: reusing the installed $TREE_DIR_NAME tree"
   else
     step "pnpm: corepack"
     setup_pnpm || die "could not enable pnpm through corepack"
@@ -1306,7 +1469,7 @@ do_install() {
     step "dependencies and build (this takes a few minutes)"
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
   fi
-  ln -sfn "$VERSION" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $VERSION"
+  ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $TREE_DIR_NAME"
   step "profile: $PROFILE"
   prepare_profile
   step "home: seeding $DSH_HOME and profile dependencies"
@@ -1405,7 +1568,7 @@ prune_failed_versions() {
 }
 
 do_update() {
-  local state="$PREFIX/harness/install-state.json" current backup rc recorded_home
+  local state="$PREFIX/harness/install-state.json" current backup rc recorded_home installed_version
   STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   detect_os_arch
@@ -1416,7 +1579,9 @@ do_update() {
   if [ -z "$REF" ]; then REF="$(json_field "$state" ref)"; fi
   if [ -z "$PROFILE" ]; then PROFILE="$(json_field "$state" profile)"; [ -n "$PROFILE" ] || PROFILE=web; fi
   if [ -z "$PROFILE_SOURCE" ]; then PROFILE_SOURCE="$(json_field "$state" profileSource)"; fi
-  if [ -z "$PROFILE_REF" ]; then PROFILE_REF="$(json_field "$state" profileRef)"; fi
+  if [ -z "$PROFILE_REF" ] && [ "$PROFILE_REF_EXPLICIT" != 1 ]; then PROFILE_REF="$(json_field "$state" profileRef)"; fi
+  if [ "$(json_field "$state" profileRefDerived)" = "true" ]; then PROFILE_REF_DERIVED=1; fi
+  apply_profile_ref_default 1
   if [ -z "$BIN_DIR" ]; then BIN_DIR="$(json_field "$state" binDir)"; [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"; fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(json_field "$state" serviceUnit)"; fi
   resolve_home
@@ -1431,8 +1596,13 @@ do_update() {
   if [ -z "$current" ]; then current="$(json_field "$state" version)"; fi
   [ -n "$current" ] && [ -d "$PREFIX/harness/$current" ] || die "cannot find the active version under $PREFIX/harness (current='$current')"
   PREV_VERSION="$current"
+  # The active tree's own semver and recorded build commit. The directory name
+  # may carry a short-SHA suffix after a rolling rebuild; the manifest does not.
+  installed_version="$(read_version "$PREFIX/harness/$current/package.json" 2>/dev/null || true)"
+  [ -n "$installed_version" ] || installed_version="$(json_field "$state" version)"
+  INSTALLED_COMMIT="$(installed_tree_commit "$PREFIX/harness/$current")"
   if [ "$DRY_RUN" = 1 ]; then
-    local target_value=""
+    local target_value="" dry_target_commit=""
     if [ -z "$SOURCE" ]; then
       say "  source:   $DSH_GITHUB_URL/archive/refs/heads/${REF:-$CHANNEL}.tar.gz (version resolved at fetch time)"
     elif [ -d "$SOURCE" ]; then
@@ -1441,10 +1611,25 @@ do_update() {
     else
       say "  source:   $SOURCE"
     fi
+    if [ -n "$SOURCE" ] && [ -d "$SOURCE/.git" ]; then
+      dry_target_commit="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
+    elif [ -z "$SOURCE" ]; then
+      dry_target_commit="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
+    fi
+    case "$dry_target_commit" in *[!0-9a-fA-F]*|'') dry_target_commit="";; esac
     say "dsh update dry run (no writes)"
     say "  active:   $current ($CHANNEL channel)"
+    [ -n "$installed_version" ] && [ "$installed_version" != "$current" ] && say "  version:  $installed_version"
+    [ -n "$INSTALLED_COMMIT" ] && say "  built:    $INSTALLED_COMMIT"
+    if [ -n "$dry_target_commit" ]; then
+      if commit_same "$dry_target_commit" "$INSTALLED_COMMIT"; then
+        say "  commit:   $dry_target_commit (already built)"
+      else
+        say "  commit:   $dry_target_commit (rolling rebuild -> ${target_value:-<version>}-$(printf '%s' "$dry_target_commit" | cut -c1-7))"
+      fi
+    fi
     [ -n "$target_value" ] && say "  target:   $target_value"
-    if [ -n "$PROFILE_SOURCE" ]; then say "  profile:  $PROFILE (source: $PROFILE_SOURCE)"; else say "  profile:  $PROFILE (no recorded source)"; fi
+    if [ -n "$PROFILE_SOURCE" ]; then say "  profile:  $PROFILE (source: $PROFILE_SOURCE${PROFILE_REF:+, ref: $PROFILE_REF})"; else say "  profile:  $PROFILE (no recorded source)"; fi
     say "  steps:    fetch -> install+build -> profile refresh+deps -> migrations -> switch current -> service restart ($([ -n "$SERVICE_UNIT" ] && printf '%s' "$SERVICE_UNIT" || printf 'none recorded')) -> backfill -> self-check"
     say "  rollback: current link + user-file backups would be restored on failure"
     emit_json update 1
@@ -1457,10 +1642,20 @@ do_update() {
   log "update: active $current on the $CHANNEL channel"
   step "source: ${SOURCE:-$CHANNEL channel archive}"
   prepare_source
-  log "update target: $VERSION"
-  HARNESS="$PREFIX/harness/$VERSION"
+  resolve_target_for_source
+  log "update target: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
+  TREE_DIR_NAME="$VERSION"
 
-  if [ "$VERSION" = "$current" ] && [ "$FORCE" != 1 ]; then
+  # Same semver on a rolling channel: the version is identical but the branch
+  # may have advanced. Only a matching recorded commit is "up to date"; a moved
+  # target rebuilds into <version>-<short-sha> so two builds of one semver do
+  # not collide and rollback can point back at the previous build. An
+  # unresolvable target (no git, no network) keeps the version-only behavior.
+  if [ "$VERSION" = "$installed_version" ] && [ "$FORCE" != 1 ] \
+    && { [ -z "$TARGET_COMMIT" ] || commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; }; then
+    # The no-op path self-checks the ACTIVE tree, whose directory may carry a
+    # short-SHA suffix after an earlier rolling rebuild.
+    HARNESS="$PREFIX/harness/$current"
     if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
     log "already up to date at $VERSION; nothing to fetch/build"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
@@ -1483,8 +1678,16 @@ do_update() {
     emit_json noop 1
     return 0
   fi
-  if ver_lt "$VERSION" "$current" && [ "$FORCE_DOWNGRADE" != 1 ]; then
-    die "refusing to downgrade from $current to $VERSION without --force-downgrade"
+  if [ "$VERSION" = "$installed_version" ] && [ -n "$TARGET_COMMIT" ] \
+    && ! commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; then
+    local short
+    short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
+    TREE_DIR_NAME="$VERSION-$short"
+    log "rolling channel advanced: recorded ${INSTALLED_COMMIT:-<none>} -> target $short; building into $TREE_DIR_NAME"
+  fi
+  HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
+  if ver_lt "$VERSION" "$installed_version" && [ "$FORCE_DOWNGRADE" != 1 ]; then
+    die "refusing to downgrade from ${installed_version:-$current} to $VERSION without --force-downgrade"
   fi
 
   step "pnpm: corepack"
@@ -1512,18 +1715,18 @@ do_update() {
   fi
 
   step "switch, service and backfill"
-  ln -sfn "$VERSION" "$PREFIX/harness/current" || die "could not switch $PREFIX/harness/current to $VERSION"
-  log "switched current -> $VERSION"
+  ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
+  log "switched current -> $TREE_DIR_NAME"
   restart_service
   run_backfill
 
   step "self-check"
   if ! selfcheck; then
-    rollback "$current" "$backup" "$VERSION"
+    rollback "$current" "$backup" "$TREE_DIR_NAME"
     exit 1
   fi
   write_state || warn "could not write $state"
-  prune_versions "$VERSION" "$current"
+  prune_versions "$TREE_DIR_NAME" "$current"
   print_summary update
   emit_json update 1
   return 0
@@ -2126,6 +2329,7 @@ if [ "$UPDATE_MODE" = 0 ] && [ "$REPAIR_MODE" = 0 ] && [ "$UNINSTALL_MODE" = 0 ]
   if [ -z "$PROFILE_SOURCE" ] && [ "$PROFILE" = web ] && [ -n "$DEFAULT_PROFILE_SOURCE" ]; then
     PROFILE_SOURCE="$DEFAULT_PROFILE_SOURCE"
   fi
+  apply_profile_ref_default 0
 else
   if [ "$UPDATE_MODE" = 1 ]; then
     if [ -z "$CHANNEL" ]; then CHANNEL=stable; fi
