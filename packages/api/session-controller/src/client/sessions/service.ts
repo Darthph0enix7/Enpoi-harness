@@ -70,6 +70,12 @@ export interface SessionListState {
    * window; absence means the window ends the list (`loadMore` then no-ops).
    */
   hasMore?: boolean
+  /**
+   * Latest list-pull failure; the rows of the last successful pull stay
+   * present, so consumers report this instead of blanking their surface.
+   * Absent before the first pull settles.
+   */
+  error?: RemoteFailure | null
   /** Shared projection values and explicit-read state, including unopened Sessions. */
   projectionsBySession: Readonly<Record<SessionId, SessionProjectionSnapshot>>
 }
@@ -741,7 +747,7 @@ export class ClientSessions implements ISessions {
   private projectList(): void {
     const previousById = this.list.getSnapshot().byId
     const {
-      items, phase, hasMore, projectionsBySession,
+      items, phase, hasMore, error, projectionsBySession,
     } = this.manager.getListSnapshot()
     const ids: SessionId[] = []
     const byId: Record<SessionId, SessionSummary> = {}
@@ -808,7 +814,7 @@ export class ClientSessions implements ISessions {
         ...(title === undefined ? {} : { title, displayTitle: title }),
       }
     }
-    this.list.set({ ids, byId, phase, hasMore, projectionsBySession })
+    this.list.set({ ids, byId, phase, hasMore, error, projectionsBySession })
   }
 
   private startScopeDrop(

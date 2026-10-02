@@ -34,7 +34,7 @@ import type { WorkspaceBrowserProps } from '../contract/slots.ts'
 import type { ArchivedFilter, GroupNode, SessionNode, SessionOrderBy, SessionRowState } from '../tree.ts'
 import {
   deriveFlat, deriveGroups, deriveSearchResults, orderByRecency, owningGroupKey, owningParentFolder,
-  pinCurrentBlank, reconcileManualOrder, sessionMemberIds, UNGROUPED_KEY,
+  pinCurrentBlank, reconcileManualOrder, sessionMemberIds, UNGROUPED_KEY, visibleSessionIds,
 } from '../tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
 import { AnimatedRows } from './AnimatedRows.tsx'
@@ -292,6 +292,20 @@ type SessionTreeProps = Pick<
   onDelete?: ((sessionId: SessionNode['id']) => void) | undefined
 }
 
+/**
+ * Load-failure notice: a rejected session-list pull keeps the rows already
+ * loaded and reports here instead of leaving the rail silently blank.
+ */
+function SessionListError({ message, t }: Pick<SessionTreeProps, 't'> & { message: string }) {
+  return (
+    <div className={css.emptyState} data-row-key="session-list-error" role="alert">
+      <IconQueueOutlineRegular size={24} />
+      <div>{t('error.list')}</div>
+      <div>{message}</div>
+    </div>
+  )
+}
+
 /** The list-empty placeholder — a glyph over the text; the archived-only view names its filter and offers the way back. */
 function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreeProps, 'rowState' | 'onLeaveArchivedOnly' | 't'>) {
   const archivedOnly = rowState.archivedFilter === 'only'
@@ -306,6 +320,36 @@ function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreePro
       )}
     </div>
   )
+}
+
+/**
+ * Pull further catalog windows while the loaded window holds no renderable
+ * real Session row. A page can be entirely rows this browser hides — subagent
+ * children, archived rows, another session's blank placeholder — and an empty
+ * list offers nothing to scroll, so the paging gesture that would load the
+ * next window never fires; the rail then shows an empty group forever. The
+ * pull is single-flight and cursor-bounded, so this settles when a real row
+ * lands or the catalog ends.
+ * @param list - current session-list snapshot.
+ * @param rowState - registry-global pin/archive sets and the archived filter.
+ * @param hasMoreSessions - whether an older window remains.
+ * @param loadMoreSessions - next-window pull.
+ */
+function useRenderableWindow(
+  list: SessionListState,
+  rowState: SessionRowState,
+  hasMoreSessions: boolean,
+  loadMoreSessions: () => void,
+): void {
+  const hasRenderableRow = useMemo(
+    () => visibleSessionIds(list, rowState.archivedSessionIds, rowState.archivedFilter)
+      .some(id => list.byId[id]?.blank === false),
+    [list, rowState.archivedSessionIds, rowState.archivedFilter],
+  )
+  useEffect(() => {
+    if (list.phase !== 'ready' || !hasMoreSessions || hasRenderableRow) return
+    loadMoreSessions()
+  }, [hasRenderableRow, hasMoreSessions, list, loadMoreSessions])
 }
 
 /** The scrolling session tree; unmounting drops the sessions subscription and local row limits. */
@@ -324,6 +368,8 @@ function SessionTree({
 }: SessionTreeProps) {
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const statuses = useSessionStatus(s => s)
+  useRenderableWindow(list, rowState, hasMoreSessions, loadMoreSessions)
+  const listError = list.error ?? null
   const current = panelActive
     ? undefined
     : Object.values(list.byId).find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
@@ -444,7 +490,8 @@ function SessionTree({
     && workspaceDrag?.over?.id === rootGroups[0].workspaceId
     && workspaceDrag.over.half === 'before'
 
-  const rowKeys: string[] = groups.length === 0 ? ['empty'] : []
+  const rowKeys: string[] = groups.length === 0 && listError === null ? ['empty'] : []
+  if (listError !== null) rowKeys.unshift('session-list-error')
   const renderGroup = (group: GroupNode, depth: number): ReactNode => {
     const workspaceId = group.workspaceId
     const children = childrenByParent.get(group.key) ?? []
@@ -654,7 +701,8 @@ function SessionTree({
         resetKey={JSON.stringify([animationResetKey, sessionLimits])}
         onScroll={loadMoreOnEnd(hasMoreSessions, loadMoreSessions)}
       >
-        {groups.length === 0 && (
+        {listError !== null && <SessionListError message={listError.message} t={t} />}
+        {groups.length === 0 && listError === null && (
           <EmptySessions rowState={rowState} onLeaveArchivedOnly={onLeaveArchivedOnly} t={t} />
         )}
         {groupRows}
@@ -699,6 +747,8 @@ function FlatList({
 }) {
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const statuses = useSessionStatus(s => s)
+  useRenderableWindow(list, rowState, hasMoreSessions, loadMoreSessions)
+  const listError = list.error ?? null
   const rows = useMemo(
     () => deriveFlat(list, sessionIds, rowState, statuses),
     [list, sessionIds, rowState, statuses],
@@ -722,12 +772,15 @@ function FlatList({
       <AnimatedRows
         className={clsx(css.list, css.flatList)}
         label={t('section.sessions')}
-        rowKeys={rows.length === 0 ? ['empty'] : rows.map(row => `session:${row.id}`)}
+        rowKeys={listError !== null
+          ? ['session-list-error', ...rows.map(row => `session:${row.id}`)]
+          : rows.length === 0 ? ['empty'] : rows.map(row => `session:${row.id}`)}
         ready={list.phase === 'ready' && workspaceReady && drag === null}
         resetKey={animationResetKey}
         onScroll={loadMoreOnEnd(hasMoreSessions, loadMoreSessions)}
       >
-        {rows.length === 0 && (
+        {listError !== null && <SessionListError message={listError.message} t={t} />}
+        {rows.length === 0 && listError === null && (
           <EmptySessions rowState={rowState} onLeaveArchivedOnly={onLeaveArchivedOnly} t={t} />
         )}
         {rows.map((node) => {

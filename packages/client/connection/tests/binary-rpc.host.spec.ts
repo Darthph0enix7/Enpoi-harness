@@ -269,6 +269,25 @@ describe('Connection binary RPC', () => {
     await expect(rpc.call('/api', 'fixture/read', {})).rejects.toThrow('invalid binary response')
   })
 
+  it('retries a bodiless 304 the caller did not make conditional instead of failing on its body', async () => {
+    const sends: Array<{ readonly cache: RequestCache | undefined; readonly conditional: string | null }> = []
+    let calls = 0
+    const rpc = createWebConnectionRpc(async (_url, init) => {
+      const headers = new Headers(init.headers)
+      sends.push({ cache: init.cache, conditional: headers.get('if-none-match') })
+      calls += 1
+      if (calls === 1) return new Response(null, { status: 304, headers: { etag: '"unrequested"' } })
+      const { rpcId } = JSON.parse(init.body as string) as { rpcId: string }
+      return Response.json({ type: 'server-response', rpcId, result: { ok: true, value: { n: 1 } } })
+    })
+    await expect(rpc.call('/api', 'fixture/read', { args: { n: 1 } })).resolves.toEqual({ ok: true, value: { n: 1 } })
+    expect(calls).toBe(2)
+    expect(sends).toEqual([
+      { cache: 'no-store', conditional: null },
+      { cache: 'no-store', conditional: null },
+    ])
+  })
+
   it('rejects truncated multipart and late bytes after caller cancellation', async () => {
     const broken = createWebConnectionRpc(async () => new Response('truncated', {
       headers: { 'content-type': 'multipart/form-data; boundary=fixture' },

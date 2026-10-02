@@ -617,7 +617,7 @@ describe('connection node half', () => {
     expect(first.status).toBe(200)
     const etag = first.headers.get('etag')
     expect(etag).toMatch(/^"[A-Za-z0-9_-]+"$/)
-    expect(first.headers.get('cache-control')).toBe('no-cache')
+    expect(first.headers.get('cache-control')).toBe('no-store')
     const modified = first.headers.get('last-modified')
     expect(modified).not.toBeNull()
 

@@ -352,9 +352,13 @@ function validatedResponse(
     /* v8 ignore next -- the insertion above guarantees a first key */
     if (oldest !== undefined) rpcResultValidators.delete(oldest)
   }
+  // no-store, not no-cache: the conditional read is this protocol's own
+  // request header, so no browser or intermediary HTTP cache may store the
+  // response and revalidate POSTs on its own (a bodyless 304 it did not ask
+  // for is unreadable to a caller holding no cached result).
   const headers = {
     'content-type': 'application/json',
-    'cache-control': 'no-cache',
+    'cache-control': 'no-store',
     etag,
     'last-modified': lastModified.toUTCString(),
   }

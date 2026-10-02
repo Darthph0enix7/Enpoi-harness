@@ -71,22 +71,33 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
       const route = `${channel}/${endpoint}`.slice(1)
       const validatorKey = `${channel}\0${endpoint}\0${JSON.stringify(payload) ?? ''}`
       const validator = validators.get(validatorKey)
-      const response = await send(
+      const sendCall = (conditional: boolean): Promise<Response> => send(
         route,
         {
           method: 'POST',
+          // Keep every HTTP cache out of the conditional-read protocol: only
+          // this caller's own validator may turn a call into a bodiless 304.
+          cache: 'no-store',
           headers: {
             'content-type': 'application/json',
-            ...validator === undefined ? {} : { 'if-none-match': validator.etag },
+            ...!conditional || validator === undefined ? {} : { 'if-none-match': validator.etag },
           },
           body: JSON.stringify(message),
           ...signal === undefined ? {} : { signal },
         },
       )
+      let response = await sendCall(true)
       // A Host that still holds the last result answers without a body: reuse it.
       if (response.status === 304 && validator !== undefined) {
         signal?.throwIfAborted()
         return validator.result
+      }
+      // A conditional layer outside this caller (intermediary, stale cache)
+      // answered for a request this caller did not make conditional; retry
+      // once without a validator instead of failing on the bodyless answer.
+      if (response.status === 304) {
+        signal?.throwIfAborted()
+        response = await sendCall(false)
       }
       if (!response.ok) {
         throw new Error(`transport failure for ${channel}/${endpoint}: HTTP ${response.status}`)

@@ -3,7 +3,7 @@ import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { bindSnapshotSelector, makeTranslate, RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
   WorkspaceId, WorkspaceSnapshot, WorkspaceView,
@@ -2587,6 +2587,28 @@ describe('WorkspaceBrowser session window paging', () => {
     })
     scrollList(listOf(b), { scrollHeight: 400, scrollTop: 300, clientHeight: 50 })
     expect(loadMoreSessions).toHaveBeenCalledOnce()
+  })
+
+  it('pulls the next window when the loaded window holds no renderable row', () => {
+    const loadMoreSessions = vi.fn()
+    mount({
+      loadMoreSessions,
+      useSessions: hook(sessionState([
+        summary('child', 30, { origin: 'subagent', parentId: sid('parent') }),
+        summary('placeholder', 20, { blank: true }),
+      ], { hasMore: true })),
+    })
+    expect(loadMoreSessions).toHaveBeenCalledOnce()
+  })
+
+  it('reports a failed list pull instead of rendering an empty rail', () => {
+    const b = mount({
+      useSessions: hook(sessionState([], {
+        error: new RemoteError('gateway/internal', 'list exploded', {}),
+      })),
+    })
+    expect(b.view.container.querySelector('[data-row-key="session-list-error"]')).not.toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain('list exploded')
   })
 
   it('does not pull while the loaded window ends the list or is still far from its end', () => {
