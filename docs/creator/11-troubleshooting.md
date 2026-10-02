@@ -37,7 +37,7 @@ Run from `$REPO`.
 | Gate | Command | Expected |
 |---|---|---|
 | Error ledger | `node scripts/error-audit.mjs --ack $EVIDENCE/error-audit/baseline/acknowledged.json` | `exit 0` (no unexplained signal; exit 2 = harness/usage failure) |
-| Tool rosters | `node scripts/tool-roster-diff.mjs` | `MATCH (39/39/40)` (per-preset rosters vs `scripts/tool-inventory/roster-baseline.json`) |
+| Tool rosters | `node scripts/tool-roster-diff.mjs` | Fixtures are 53/53/53; the stored baseline is the frozen 0.1.7 capture, so the current run reports `DRIFT` naming the additions (39/40 → 53) — a `MATCH` means the baseline was refreshed, never that the fixtures are stale |
 | Token contrast | `node "$PROFILE/scripts/dsh-token-contrast.mjs"` | `PASS`, drift `[]`; floor 4.5:1, both base modes |
 | Branding live | `node "$PROFILE/scripts/dsh-rebrand.mjs" --check --live` | `PASS (live)` — fork title + contrast, probes the served origin |
 
@@ -65,9 +65,9 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Gate: open the page after restart; `settings.describe` must list the namespace.
 
 ### Provider 401 / quota / gated
-- Symptom: turn fails with an auth rejection, `QUOTA` / `ACCOUNT_QUOTA`, or a 402/429 that surfaces as a tool error; or a model is dimmed in the picker.
-- Cause: missing/invalid credential; keyless route whose selected model needs sign-in (`gated: true`, `gateReason: sign-in required`); pool identity cooling after 401/403; free-tier quota exhausted.
-- Fix: `ds pool <provider>` shows priority, cooldown, auth state; `ds reset-cooldown <provider> [identity]` clears a wedged identity; verify the model is not gated (or sign in); for keyless routes a supplied key switches that route to BYOK. Error classes: `HarnessError` carries the machine-routable class (`$REPO/packages/llm/llm/src/error.ts:13-31`).
+- Symptom: turn fails with an auth rejection, `QUOTA` / `ACCOUNT_QUOTA`, an entitlement refusal, or a 402/429 that surfaces as a tool error; or a model is dimmed in the picker.
+- Cause: missing/invalid credential; keyless route whose selected model needs sign-in (`gated: true`, `gateReason: sign-in required`); pool identity cooling after 401/403; an identity-specific entitlement gate; free-tier quota exhausted.
+- Fix: `ds pool <provider>` shows priority, cooldown, auth state; `ds reset-cooldown <provider> [identity]` clears a wedged identity; verify the model is not gated (or sign in); for keyless routes a supplied key switches that route to BYOK. An entitlement-gated identity cools 6 h while the pool rotates to the next identity; the free-tier gate is terminal and never cools (03 §6/§9). Error classes: `HarnessError` carries the machine-routable class (`$REPO/packages/llm/llm/src/error.ts:13-31,226-236`).
 - Gate: error audit `provider-capacity` class must stay at zero; the picker's dimmed reason is the operator-facing truth (doc 03).
 
 ### MCP server will not mount / a tool says "not mounted"
@@ -82,6 +82,31 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - State on disk: `$DSH_HOME/system-profile.md` and `$DSH_HOME/system-profile.json` (the stored profile), `$DSH_HOME/system-profile.decision` (`accepted`/`rejected`/`seen`); a run's scratch workspace is `$DSH_HOME/system-analysis-work` (`context-file.ts:19-35,55-68`; `investigation.ts:50-53`).
 - Fix/reset: Reject removes both profile files and records the decision, so the sysadmin falls back to the "no analysis is stored" default (doc 10) and the ready surface does not return; an ignored profile records `seen` on the load that displayed it, so the chip stays hidden while the files stay. To start a fresh run by hand, remove both `$DSH_HOME/system-profile.md` and `system-profile.json` plus the decision marker, then reload and start from the wizard's agents step (`analysis.ts:247-263`; `system-analysis.ts:204-215,296-325`). The chip's Retry restarts a failed run; the chip itself never offers a first run (`SystemAnalysisChip.tsx:166-179`), and the runner removes both files when a durable write fails, so a half-written publication is never reviewable (`analysis.ts:208-214`).
 - Check: `/system-analysis/status` answers `ok: true` with the job view; after a Reject the sysadmin context must contribute the "no analysis is stored" default (doc 10).
+
+### Verification records a dispatch failure as a failed check
+- Symptom: persisted `verify/unmet` incidents with an empty `messagePreview` after a capacity rejection or another orchestration result; the V4 session looks "failed" although no work failed.
+- Cause: the gate parsed only the retired V3 nested tool-result shape (native V4 results lifted 0 text and 0 `isError` flags), and every tool result counted as verification evidence.
+- Fix: the parser reads `message.isError` and top-level `content[].type:'text'`; `CONTROL_PLANE_TOOLS` (`subagent`, `task`, `create_goal`, `get_goal`, `update_goal`, `send_message`, `interrupt_agent`, `list_agents`) is excluded entirely — it neither opens the gate nor clears a prior work failure — and the dead V3 branch was dropped (`$PROFILE/packages/enpoi-verify-gate/src/index.ts:157-180`; `src/verify.ts:54-66,185`). Gate: the package suite plus a replay over the diagnosis session.
+
+### grep/glob fails although files matched
+- Symptom: `SEARCH_FAILED` while readable files matched, or a pointless reduced-thread retry after a locked file.
+- Cause: any ripgrep exit other than 0/1 threw before parsing stdout, and the thread-spawn `EAGAIN` pattern matched per-file `Resource temporarily unavailable` lines in stderr.
+- Fix: exit 2 now returns the parsed matches plus a bounded `Warning: ripgrep could not search N path(s): … Results may be incomplete.`; zero parsed results still throw; per-file `EAGAIN` no longer retries while a genuine thread-spawn `EAGAIN` still retries once with `--threads 1` (`$REPO/packages/fs/tool-fs-search/src/search-core.ts:194,392,480-492`; `grep.ts:209-233`).
+
+### The sidebar shows only sessions created since the last restart
+- Symptom: older sessions are missing from the rail, search, and open, with no visible error.
+- Cause: a duplicate session id anywhere under the root threw and failed the entire persisted listing — the client kept only in-process additions — and unsupported, corrupt, or malformed headers were skipped silently.
+- Fix: the listing resolves a duplicate once (highest stored generation, path tie-break) and reports it and every skipped artifact with its raw path through the plugin logger; root-level faults still fail loud, and `open`/`load` still reject an ambiguous duplicated id (`$REPO/packages/session/session-persistence-jsonl/src/index.ts:213,1105-1145`). A rail with fewer than a first screenful (12) of renderable rows now tops itself up; a failed pull renders the `SessionListError` row instead of a silent empty rail (09).
+
+### A child's long command ran twice
+- Symptom: a child's bash command that outlived the executor timeout was re-run because the child could not collect the promoted job.
+- Cause: `SHARED_CHILD_DENY` removed `job_output`/`job_list`/`job_kill` (children have no per-bash promotion config).
+- Fix: the job controls are no longer denied — a promoted job is owned by the child's session and fenced by it, and the child context tells it to collect with `job_output (wait: true)` (07 §2). Do not re-add them to the deny floor.
+
+### Repeated `block.content is not iterable` / `agent/disposed listener threw … 'catch'`
+- Symptom (two high-volume incident families): one warning per V4 tool result from the fast collector, or `agent "…": agent/disposed listener threw: TypeError: Cannot read properties of undefined (reading 'catch')`.
+- Cause: `dsh-fast`'s `flattenToolResultText` assumed the pre-V4 wrapper shape; and `file-reference-local` / `tool-subagent` called `.catch` on a single-shot `Fiber.dispose()` that returns `undefined` when its epoch is already retired (scope disposal runs before `agent/disposed`).
+- Fix: `dsh-fast` folds both shapes — the fix is applied in the profile's `node_modules` source and compiled copies, and it is an external package, so a `pnpm install`/upgrade overwrites it until upstream ships it. The two listener sites normalize with `Promise.resolve(fiber.dispose())` (`$REPO/packages/context/file-reference-local/src/index.ts:86`; `$REPO/packages/subagent/tool-subagent/src/index.ts:1319`; regression `packages/context/file-reference-local/tests/agent-dispose-order.spec.ts`).
 
 ### Search index building
 - Symptom: cross-session search rejects with the coded `SESSION_QUERY_INDEXING` state.
@@ -98,4 +123,4 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 
 ## 5. Where the evidence lives
 
-`$EVIDENCE/` — one directory per workstream, each with raw logs and verdict JSONs: `tool-eval`, `coding-trial`, `context-eval`, `error-audit` (including `baseline/acknowledged.json`), `heavy-providers`, `skin-freeze`, `perf`, `permissions`, `agent-comms-e2e`. The open backlog (`82-open-backlog.md`) lists every known open item; the porting playbook (`50-…`) holds the safeguards referenced by the gates. Cite a raw log path when reporting a failure; do not re-run a gate and call it fixed until it goes green on the changed tree.
+`$EVIDENCE/` — one directory per workstream, each with raw logs and verdict JSONs: `tool-eval`, `coding-trial`, `context-eval`, `error-audit` (including `baseline/acknowledged.json`), `heavy-providers`, `skin-freeze`, `perf`, `permissions`, `permissions-mirror`, `agent-comms-e2e`, plus the recent fix lanes `tool-defaults`, `iterations`, `session-scale`, `phase3`, `phase4`, `fleet-fixes`, `verify-gate-fix`, `fs-search-fix`, `incident-fixes`, `live-sessions-ui`, `session-list`, `pool-media`, `keypool-fixes`, `skill-mcp-hint`, `mcp-on-demand`. The open backlog (`82-open-backlog.md`) lists every known open item; the porting playbook (`50-…`) holds the safeguards referenced by the gates. Cite a raw log path when reporting a failure; do not re-run a gate and call it fixed until it goes green on the changed tree.

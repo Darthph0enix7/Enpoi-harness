@@ -44,6 +44,9 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **turn / step** — one user-initiated model run / one model call inside it.
 - **session / session log** — durable JSONL event log under `$DSH_HOME/sessions/`; current format version 4 (v4).
 - **projection** — a derived, registered read over a session (`livingBrief`, `contextPressure`, `oracleScorecard`, …) published live.
+- **revert iteration (variant group)** — a user message committed over an earlier one; the group is the anchor plus its variants, navigated with ◀ x/y ▶ and switched by the `revert/branch` surface splice — a branch swap, never a run (08 §8).
+- **retention pin** — a durable seq a future log cleanup must never remove; `assertRemovalSafe` refuses a cleanup plan that touches one (01 §2).
+- **verifyLog / repairLog** — the host remotes that walk a log's invariants and rebuild derivable state without rewriting durable events (01 §2).
 - **whiteboard** — operator-authored durable facts pinned per session/project/ global scope (`enpoi-whiteboard`), readable by the agent.
 - **memory** — durable project facts store (`enpoi-memory`, SQLite + FTS/backfill) with save/search/confirm/rescind tools.
 - **peer** — cross-device interconnect (`enpoi-peer-bridge`): status, ask, answer, cancel against another harness instance.
@@ -62,6 +65,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **visibility decision** — per-model resolve: `visible|hidden`, `reason`, `source: default|manual|rule|gated`; precedence manual hidden > manual shown
   > gated > hide rules > visible.
 - **error classes** — machine-routable failure kinds on `HarnessError` (`AUTH`, `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT`, …); route on the class, never on message text.
+- **entitlement gate** — an identity-specific provider refusal (the model/plan is not available for that account or key); the pool rotates to the next identity with a 6 h cooldown, unlike the terminal free-tier `POLICY` gate (03 §6).
 
 ## UI and process
 

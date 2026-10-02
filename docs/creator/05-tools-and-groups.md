@@ -4,15 +4,17 @@ The surface a model sees = the mounted tool registry **minus** whatever the tool
 
 ## 1. The default tool set on install
 
-The frozen wire rosters live in `scripts/tool-inventory/expected-<preset>.json` and are the authority for "what does preset X actually advertise":
+The wire rosters captured in `scripts/tool-inventory/expected-<preset>.json` are the authority for "what does preset X actually advertise":
 
 | Preset | Wire tools | Fixture |
 |---|---|---|
-| orchestrator | 39 | `scripts/tool-inventory/expected-orchestrator.json` |
-| sysadmin | 39 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
-| creator | 40 | `scripts/tool-inventory/expected-creator.json` |
+| orchestrator | 53 | `scripts/tool-inventory/expected-orchestrator.json` |
+| sysadmin | 53 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
+| creator | 53 | `scripts/tool-inventory/expected-creator.json` |
 
-Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are frozen at 0.1.7 and lag the live declarations: `preset-creator` now mounts `enpoi-tool-groups` (seat `creator`, `debug` pre-attached through the `toolGroups.seats.creator` document row) and `enpoi-debug`, so its live surface hides `peer` and gains `tool_groups` — the 40-tool fixture still lists `peer_*` and omits `tool_groups`. Probe before quoting a count: `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call); `scripts/tool-roster-diff.mjs` diffs fixtures against the stored baseline offline.
+Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are the re-probed canonical captures; all three main agents advertise the same 53 names, including `tool_groups`, `mcp`, and the session/diagnostics introspection rows. The stored baseline still carries the pre-re-probe 0.1.7 counts, so `scripts/tool-roster-diff.mjs` reports `DRIFT` naming the additions (39/40 → 53) until the baseline is refreshed — a `MATCH` means the baseline caught up, never that the fixtures are stale. Probe before quoting a count: `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call); `scripts/tool-roster-diff.mjs` diffs fixtures against the stored baseline offline.
+
+The **permission** side is complete by construction: `packages/enpoi-capabilities/tests/tool-defaults-completeness.spec.ts` fails a newly advertised preset tool until it has an explicit `SHIPPED_TOOL_DEFAULTS` row or a documented `SHIPPED_TOOL_DEFAULT_EXEMPTIONS` prefix, and the Permissions page reads the generated host mirror instead of a hand-kept list (04 §1).
 
 The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:52-158`). Static groups are always presented; on-demand groups must be attached:
 

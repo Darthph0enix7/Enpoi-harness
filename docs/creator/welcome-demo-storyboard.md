@@ -6,7 +6,7 @@ Read this when: reviewing the first-run welcome flow before it is wired into the
 
 - Page: `apps/web/public/welcome-demo.html`, served later at `/welcome-demo.html` (no build step; works loaded from source and from `file://`).
 - Assets: `apps/web/public/welcome-demo/demo.css`, `demo.js`, `skin-tokens.css`, `dark-liquid-flow.jpg`.
-- `skin-tokens.css` is a verbatim copy of the frozen skin `summer-liquid-glass` v1.0.0-frozen (`~/.dsh/skins/summer-liquid-glass/skin.css`) plus a two-line provenance header; every colour, radius and shadow in `demo.css` resolves through those tokens. Re-copy the file if the skin version ever changes.
+- `skin-tokens.css` is a verbatim copy of the frozen skin `summer-liquid-glass` v1.0.0-frozen (`~/.dsh/skins/summer-liquid-glass/skin.css`) plus a two-line source header; every colour, radius and shadow in `demo.css` resolves through those tokens. Re-copy the file if the skin version ever changes.
 - The page follows the standalone-page pattern of `apps/web/dist/preview.html` (dark boot style, `data-ds-dark-theme`, theme-color metas, public-dir favicons) and the backdrop image + scrim declared in `skin.json`.
 - Side-effect-free by construction: no settings are read or written, no network request is made, and nothing is persisted. All state lives in memory; the URL hash only carries deep links for screenshots and is updated with `history.replaceState`.
 - Reset button (top bar, keyboard `R`) restores the initial state. A `DEMO · nothing is saved` pill is visible on every screen.
