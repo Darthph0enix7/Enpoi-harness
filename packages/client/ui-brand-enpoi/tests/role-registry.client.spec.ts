@@ -76,7 +76,7 @@ describe('role registry helpers', () => {
     const keeper = categories.find(category => category.key === 'supervision')?.seats.find(seat => seat.id === 'keeper')
     expect(keeper?.name).toBe('Context Keeper')
     // The keeper cannot inherit a conversation model: its label names the route.
-    expect(keeper?.defaultLabel).toBe('built-in default: freellmapi/auto')
+    expect(keeper?.defaultLabel).toBe('built-in default: kilo/kilo-auto/free')
     expect(keeper?.defaultKind).toBe('builtin-default')
     expect(fleetSeatState(null, keeper!)).toBe('builtin-default')
     expect(fleetSeatState(undefined, keeper!)).toBe('builtin-default')

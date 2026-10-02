@@ -5,7 +5,11 @@ import { callSubagent, setup, text } from './harness.ts'
 
 // The always-denied worker surface, pinned verbatim as the model-visible
 // contract. Deny-only: `tools.restrict()` skips names it does not know, so
-// upstream additions stay available unless this list names them.
+// upstream additions stay available unless this list names them. The
+// background job controls (`job_output`, `job_list`, `job_kill`) are
+// deliberately NOT denied (D1, doc 86): a child collects its own promoted
+// jobs. The harness-authoring trio and `review_run` are denied because the
+// seat guard and the reviewer gate refuse them to every delegated worker.
 const SHARED_DENY = [
   'subagent',
   'subagent_fork',
@@ -22,15 +26,16 @@ const SHARED_DENY = [
   'goal',
   'ralph',
   'workflow',
-  'job_output',
-  'job_list',
-  'job_kill',
   'ask_user_question',
   // Operator default: sub-agents keep their OWN todo list and their OWN
   // memory writes (isolated sessions), so these are not denied.
   'send_message',
   'interrupt_agent',
   'list_agents',
+  'plugin_manager',
+  'cordis_inspect_list',
+  'cordis_inspect_query',
+  'review_run',
 ]
 
 // Operator default: every sub-agent may run bash, use skills, search/write

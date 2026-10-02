@@ -429,8 +429,19 @@ function nonSpawnableRoleMessage(id: string): string {
  * text and `run_in_background`) tells the model to collect it. Job access is
  * fenced by owning session id in the job registry, so a child sees and stops
  * only its own jobs; collection is orthogonal to the one-delivery rule.
+ *
+ * The harness-authoring tools and `review_run` are named here because the
+ * execution guards refuse them for delegated children: the seat guard in
+ * `enpoi-capabilities` denies the creator trio to every orchestrator- or
+ * sysadmin-parented child, and the reviewer gate in `resolvePolicy` denies
+ * `review_run` to every child that is not a reviewer seat. The creator tool
+ * group and the capabilities advertise filter already hide them today, but a
+ * stored role `available` allowlist or a seat label that resolves to a
+ * seat-restricted group would surface them again; the shared floor is what
+ * makes the catalog and the guards agree in every path. A delegated child is
+ * a worker, never the creator or a reviewer seat.
  */
-const SHARED_CHILD_DENY: readonly string[] = [
+export const SHARED_CHILD_DENY: readonly string[] = [
   'subagent',
   'subagent_fork',
   'subagent_codex',
@@ -452,6 +463,13 @@ const SHARED_CHILD_DENY: readonly string[] = [
   'send_message',
   'interrupt_agent',
   'list_agents',
+  // Harness authoring (creator seat) and reviewer-exec (reviewer seats): the
+  // pre-execute guards refuse them for delegated children, so no child catalog
+  // may carry them.
+  'plugin_manager',
+  'cordis_inspect_list',
+  'cordis_inspect_query',
+  'review_run',
 ]
 
 /**

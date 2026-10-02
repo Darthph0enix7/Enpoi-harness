@@ -212,4 +212,45 @@ describe('role-surface mirror', () => {
       expect(promised, `${role} surfaces host-denied tools`).toEqual([])
     }
   })
+
+  it('never surfaces a tool the creator-only seat guard refuses to a child parent', () => {
+    // A delegated child carries its parent's preset, so every main seat is a
+    // possible execution role for every child surface. The seat guard is the
+    // refusal source the child tables must not fight: orchestrator and sysadmin
+    // deny the harness-authoring trio to their children.
+    const parentSeats = Object.keys(SHIPPED_SEAT_TOOL_DENY)
+    for (const [role, surface] of Object.entries(BUILT_ROLE_SURFACE)) {
+      const seats = MAIN_AGENT_IDS.includes(role) ? [role] : parentSeats
+      for (const seat of seats) {
+        const denied = SHIPPED_SEAT_TOOL_DENY[seat] ?? []
+        const promised = surface.filter(name => denied.includes(name))
+        expect(promised, `${role} surfaces tools seat ${seat} refuses`).toEqual([])
+      }
+    }
+  })
+
+  it('never surfaces review_run outside the reviewer seats', () => {
+    // `review_run` is allow for the reviewer/oracle seats and a named deny for
+    // every other role (host `REVIEW_ROLES` in
+    // `profiles/web/packages/enpoi-capabilities/src/policy.ts`). The shipped
+    // surfaces stay conservative: no role fixture carries it today, and a
+    // non-reviewer fixture that ever adds it fails here.
+    const reviewerRoles = new Set(['oracle', 'reviewer', 'critic', 'referee', 'chair', 'skeptic', 'architect', 'pragmatist'])
+    for (const [role, surface] of Object.entries(BUILT_ROLE_SURFACE)) {
+      if (reviewerRoles.has(role)) continue
+      expect(surface, `${role} surfaces reviewer-exec`).not.toContain('review_run')
+    }
+  })
+
+  it('never surfaces a member of a seat-restricted tool group to another seat', () => {
+    // The creator group is the only `seats`-restricted family: its three tools
+    // are the creator's own surface and stay absent from every other role.
+    for (const [role, surface] of Object.entries(BUILT_ROLE_SURFACE)) {
+      for (const group of SHIPPED_TOOL_GROUP_CATALOG) {
+        if (group.seats === undefined || group.seats.includes(role)) continue
+        const promised = surface.filter(name => group.members.includes(name))
+        expect(promised, `${role} surfaces ${group.id}-restricted tools`).toEqual([])
+      }
+    }
+  })
 })

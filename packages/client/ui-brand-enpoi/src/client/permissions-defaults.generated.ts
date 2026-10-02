@@ -20,7 +20,7 @@
 
 export const HOST_DEFAULTS_DIGEST = 'bf4c14fcd185d2e4d5a7ac7ee7c0f7dda4d2dec07f097febff0fa399975dc43b'
 
-export const MIRROR_SOURCE_DIGEST = 'febd8eb1e97e6af5204689149bf78d1f7ffcb2de5b9a3acad28b6ef4ae22978b'
+export const MIRROR_SOURCE_DIGEST = '944ef1de997026daedcd6b162b99a026988b44547c68c11114bb46553f78171e'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -223,7 +223,7 @@ export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>>
 export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin'])
 
 /** Tools denied to every child (host anti-leak floor). */
-export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents'])
+export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents', 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query', 'review_run'])
 
 /** Extra per-role child denials (host role table). */
 export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({

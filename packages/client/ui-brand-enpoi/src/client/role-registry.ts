@@ -57,8 +57,14 @@ export const ROLE_GROUP_LABELS: Record<RoleGroup, string> = {
 /** Fleet group render order. */
 export const ROLE_GROUP_ORDER: readonly RoleGroup[] = ['supervision', 'specialists', 'council', 'custom']
 
-/** The keeper's plugin Config route — shown as the "Default" sublabel. */
-export const KEEPER_DEFAULT_ROUTE = 'freellmapi/auto'
+/**
+ * The keeper's plugin Config route — shown as the "Default" sublabel. The
+ * keyless kilo seed (`kilo/kilo-auto/free`, written by first-run) is the route
+ * a fresh install can actually reach; the keeper has no parent turn to inherit
+ * from, so its own route is always used. Must match
+ * `$PROFILE/packages/enpoi-context-keeper/src/index.ts` Config defaults.
+ */
+export const KEEPER_DEFAULT_ROUTE = 'kilo/kilo-auto/free'
 
 /** One fleet seat resolved for rendering. */
 export interface FleetSeat {

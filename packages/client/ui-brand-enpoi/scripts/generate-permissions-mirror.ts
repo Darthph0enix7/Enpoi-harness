@@ -336,21 +336,21 @@ export function renderMirror(
   lines.push(' * tool-defaults completeness spec verifies it from the other side.')
   lines.push(' */')
   lines.push('')
-  lines.push(`export const HOST_DEFAULTS_DIGEST = ${JSON.stringify(hostDefaultsDigest)}`)
+  lines.push(`export const HOST_DEFAULTS_DIGEST = ${quote(hostDefaultsDigest)}`)
   lines.push('')
-  lines.push(`export const MIRROR_SOURCE_DIGEST = ${JSON.stringify(mirrorSourceDigest)}`)
+  lines.push(`export const MIRROR_SOURCE_DIGEST = ${quote(mirrorSourceDigest)}`)
   lines.push('')
   lines.push('/** Shipped per-tool defaults from the host policy resolver. */')
   lines.push("export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({")
   for (const key of Object.keys(data.shippedToolDefaults)) {
-    lines.push(`  ${JSON.stringify(key)}: ${JSON.stringify(data.shippedToolDefaults[key])},`)
+    lines.push(`  ${quote(key)}: ${quote(data.shippedToolDefaults[key])},`)
   }
   lines.push('})')
   lines.push('')
   lines.push('/** Host families deliberately left to `defaults.unknownTools` (shipped ask). */')
   lines.push('export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason: string }[] = Object.freeze([')
   for (const exemption of data.shippedToolDefaultExemptions) {
-    lines.push(`  { prefix: ${JSON.stringify(exemption.prefix)}, reason: ${JSON.stringify(exemption.reason)} },`)
+    lines.push(`  { prefix: ${quote(exemption.prefix)}, reason: ${quote(exemption.reason)} },`)
   }
   lines.push('])')
   lines.push('')
@@ -370,10 +370,10 @@ export function renderMirror(
   lines.push('export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Object.freeze([')
   for (const group of data.toolGroups) {
     lines.push('  Object.freeze({')
-    lines.push(`    id: ${JSON.stringify(group.id)},`)
-    lines.push(`    label: ${JSON.stringify(group.label)},`)
-    lines.push(`    purpose: ${JSON.stringify(group.purpose)},`)
-    lines.push(`    mode: ${JSON.stringify(group.mode)},`)
+    lines.push(`    id: ${quote(group.id)},`)
+    lines.push(`    label: ${quote(group.label)},`)
+    lines.push(`    purpose: ${quote(group.purpose)},`)
+    lines.push(`    mode: ${quote(group.mode)},`)
     lines.push(`    members: Object.freeze(${jsonArray(group.members)}),`)
     lines.push(`    preAttach: Object.freeze(${jsonArray(group.preAttach)}),`)
     if (group.seats !== undefined) lines.push(`    seats: Object.freeze(${jsonArray(group.seats)}),`)
@@ -385,7 +385,7 @@ export function renderMirror(
   lines.push('/** Tools the shipped seat guard denies per seat (`SHIPPED_SEAT_TOOL_DENY`). */')
   lines.push('export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({')
   for (const seat of Object.keys(data.seatToolDeny)) {
-    lines.push(`  ${JSON.stringify(seat)}: Object.freeze(${jsonArray(data.seatToolDeny[seat] ?? [])}),`)
+    lines.push(`  ${quote(seat)}: Object.freeze(${jsonArray(data.seatToolDeny[seat] ?? [])}),`)
   }
   lines.push('})')
   lines.push('')
@@ -398,7 +398,7 @@ export function renderMirror(
   lines.push('/** Extra per-role child denials (host role table). */')
   lines.push('export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({')
   for (const role of Object.keys(data.roleChildDeny)) {
-    lines.push(`  ${JSON.stringify(role)}: Object.freeze(${jsonArray(data.roleChildDeny[role] ?? [])}),`)
+    lines.push(`  ${quote(role)}: Object.freeze(${jsonArray(data.roleChildDeny[role] ?? [])}),`)
   }
   lines.push('})')
   lines.push('')
@@ -408,9 +408,23 @@ export function renderMirror(
   return lines.join('\n')
 }
 
+/**
+ * Render one string as a lint-clean TypeScript literal: the repo quote rule
+ * (`@stylistic/quotes`, single, `avoidEscape`) allows double quotes only when
+ * the value itself contains a single quote, so JSON's always-double form is
+ * converted whenever that needs no escaping.
+ * @param value - the string to render.
+ * @returns the literal, including its quotes.
+ */
+function quote(value: string): string {
+  const json = JSON.stringify(value)
+  if (value.includes("'")) return json
+  return `'${json.slice(1, -1).replace(/\\"/g, '"')}'`
+}
+
 /** One JSON array rendered on a single line. */
 function jsonArray(values: readonly string[]): string {
-  return `[${values.map(value => JSON.stringify(value)).join(', ')}]`
+  return `[${values.map(value => quote(value)).join(', ')}]`
 }
 
 /** Build the mirror and report whether the committed file matches. */
