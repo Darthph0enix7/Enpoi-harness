@@ -83,3 +83,9 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **gate** — one of the four automated acceptance checks (error audit, tool roster diff, token contrast, rebrand) — see doc 11.
 - **grant / pin / Full access / approval** — the permission model: policy outcomes (`allow/ask/deny`), standing grants, exact-command pins, broad-allow, Full access (no prompts; parent judgement applies), approval cards naming the child session, agent label, depth, and matched rule, plus a parent recommendation — see doc 04.
 - **pack_sig** — **not a harness term.** It belongs to a different project's document toolchain; do not use it when describing this harness.
+
+## Research
+
+- **research dial** — the scope/budget of a research run: `lookup` (1–3 fetches, inline), `quick` (2–4 sources, mini run dir), `standard` (5–10 sources, 1–2 readers; the default middle ground), `deep` (15–25 sources, 3–6 readers, dossier), `exhaustive` (deep + adversarial counter-searches).
+- **research run** — `.research/<slug>-<timestamp>/` holding `sources/` (+ `index.json`), `claims/` (JSONL, one anchored claim per line), `verification.json|md` from `custom_research-verify`, and the answer/dossier file.
+- **anchored claim** — `{claim, quote, source, url, date, key}` where `quote` is a verbatim contiguous span from the archived source; the verifier checks it mechanically, and only anchored claims are reportable.
