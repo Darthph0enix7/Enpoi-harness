@@ -106,7 +106,7 @@ export function evaluateToolCall(
         const suite = catalogId ?? `${segment}-mcp`
         return {
           allowed: false,
-          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is disabled by the operator (capabilities.mcp.${suite} is not true). Pull it in for this session with a skill's mcp: hint, an explicit mcp mount, or the session switch. Do not attempt to invoke it in this turn otherwise.`,
+          syntheticResult: `[CAPABILITY_DISABLED] MCP Tool suite '${suite}' is not mounted in this session (disabled by the operator, capabilities.mcp.${suite} is not true). Pull it in with a skill's mcp: hint, or mount it with: mcp mount ${suite}. Do not attempt to invoke its tools without mounting first.`,
         }
       }
     }

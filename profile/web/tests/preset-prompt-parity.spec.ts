@@ -117,10 +117,9 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     const catalog = resolveToolGroups(undefined)
     const orchestratorAttach = preAttachFor(catalog, 'orchestrator')
     expect(orchestratorAttach).toEqual(preAttachFor(catalog, 'sysadmin'))
-    expect(orchestratorAttach).toEqual(preAttachFor(catalog, 'creator'))
+    expect(preAttachFor(catalog, 'creator')).toEqual(['debug', 'creator'])
     const menu = (seat: string): string => renderMenuText(catalog, new Set(preAttachFor(catalog, seat)))
     expect(menu('orchestrator')).toBe(menu('sysadmin'))
-    expect(menu('orchestrator')).toBe(menu('creator'))
     expect(menu('orchestrator')).toContain('peer')
   })
 

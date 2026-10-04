@@ -875,16 +875,20 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         if (action === 'mount') {
           if (server === '') return { action, server, ok: false, reason: 'mount requires a server id', text: 'mount requires a server id' }
           const outcome = await mountForSession(session, server)
+          const def = getServerCatalog()[server]
+          const prefix = serverNameOf(server, def)
           const text = outcome.ok
-            ? `mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
+            ? `mounted "${server}" for this session (${String(outcome.toolCount)} tools). Its tools are active immediately (e.g. mcp__${prefix}__*). Call "mcp unmount ${server}" when your task is complete.`
             : `could not mount "${server}": ${outcome.reason}`
           return { action, server, ok: outcome.ok, reason: outcome.reason, text }
         }
         if (action === 'unmount') {
           if (server === '') return { action, server, ok: false, reason: 'unmount requires a server id', text: 'unmount requires a server id' }
           const outcome = await unmountForSession(session, server)
+          const def = getServerCatalog()[server]
+          const prefix = serverNameOf(server, def)
           const text = outcome.ok
-            ? `unmounted "${server}" for this session`
+            ? `unmounted "${server}" for this session. Its tools (mcp__${prefix}__*) are deactivated immediately. Do NOT call any tools from "${server}" as they will be rejected.`
             : `could not unmount "${server}": ${outcome.reason}`
           return { action, server, ok: outcome.ok, reason: outcome.reason, text }
         }
@@ -908,9 +912,11 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       const notes: string[] = []
       for (const server of hints) {
         const outcome = await mountForSession(session, server)
+        const def = getServerCatalog()[server]
+        const prefix = serverNameOf(server, def)
         notes.push(outcome.ok
-          ? `mcp: mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
-          : `mcp: could not mount "${server}": ${outcome.reason}`)
+          ? `[mcp] Auto-mounted MCP server "${server}" (${String(outcome.toolCount)} tools) declared by skill "${skillName}". Its tools (e.g. mcp__${prefix}__*) are ready and callable immediately in this session. Unmount with "mcp unmount ${server}" when your task is complete.`
+          : `[mcp] Could not mount MCP server "${server}" declared by skill "${skillName}": ${outcome.reason}`)
       }
       return notes
     }
@@ -947,7 +953,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     const SKILL_CONTENT_TAG = /<skill_content\s+name=["']([^"']+)["']/g
 
     ctx.on('agent/pre-step', (async (
-      params: { agent?: { session?: SessionLike } },
+      params: { agent?: { session?: SessionLike }; messages?: Array<{ role?: string; source?: unknown; content?: Array<{ type?: string; text?: string }> }> },
       next: () => Promise<{ kind: string; messages?: Array<{ role?: string; source?: unknown; content?: Array<{ type?: string; text?: string }> }> }>,
     ) => {
       const decision = await next()
@@ -956,7 +962,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       if (session === undefined || typeof session.id !== 'string') return decision
 
       const skillNames = new Set<string>()
-      for (const msg of decision.messages) {
+      // Check newly incoming messages for this step (slash command gestures)
+      const incoming = Array.isArray(params?.messages) ? params.messages : []
+      for (const msg of incoming) {
         const source = msg?.source as { kind?: string; name?: string } | undefined
         if (source?.kind === 'skill-invocation' && typeof source.name === 'string' && source.name !== '') {
           skillNames.add(source.name)
@@ -973,10 +981,27 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         }
       }
 
+      // Also check decision.messages for newly injected skill-invocation (from tool-skill pre-step)
+      for (const msg of decision.messages) {
+        const source = msg?.source as { kind?: string; name?: string } | undefined
+        if (source?.kind === 'skill-invocation' && typeof source.name === 'string' && source.name !== '') {
+          skillNames.add(source.name)
+        }
+      }
+
       if (skillNames.size === 0) return decision
 
+      const allNotes: string[] = []
       for (const name of skillNames) {
-        await mountSkillHints(session, name, params.agent)
+        const notes = await mountSkillHints(session, name, params.agent)
+        allNotes.push(...notes)
+      }
+
+      if (allNotes.length > 0) {
+        decision.messages.push(createUserMessage({
+          content: [{ type: 'text', text: allNotes.join('\n') }],
+          source: { kind: 'mcp-mounts', form: 'notice', summary: 'mcp skill auto-mount' },
+        }) as never)
       }
 
       return decision
@@ -987,11 +1012,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       name: 'mcp:lifecycle',
       order: ctx.systemPrompt.getSectionOrder('MCP_SERVERS'),
       text: [
-        'MCP servers are switched on and off by the operator in the Capabilities center, but that switch sets the DEFAULT world: a switched-off server is absent from your surface until a skill\'s mcp: hint, an explicit mount, or the operator\'s session switch pulls it in for the session.',
-        'Within a session, always-on servers are in the default world and on-demand servers mount on demand (or via a skill hint). A pull made for continuing work stays;',
-        'a one-shot errand unmounts when it is done; when unsure, leave it mounted.',
-        'Nothing auto-connects: a server that failed once stays down until you mount it again.',
-      ].join(' '),
+        '## MCP Tools & Lifecycle',
+        '- On-Demand & Skills: MCP servers with tools (prefixed mcp__<server>__*) are default-off or on-demand. When you or the user invoke a skill with an `mcp: [server]` declaration (e.g. via `/skill-name` or the skill tool), the harness automatically mounts those servers on turn start. Their tools are active and callable immediately. You do NOT need to search files, glob, or read SKILL.md to investigate MCP servers for an invoked skill — they are already mounted and ready.',
+        '- Explicit Mounting: If an unmounted server is needed for a task, call `mcp mount <server>` once, then use its tools. Use `mcp list` to see configured servers.',
+        '- Clean Unmounting: When a one-shot errand is done, call `mcp unmount <server>` as your final cleanup step. For continuing multi-step work, leave it mounted.',
+        '- Immediate Deactivation: Unmounting deactivates that server\'s tools immediately in the runtime. Once unmounted, never attempt to call its mcp__<server>__* tools; they will be rejected with CAPABILITY_DISABLED.',
+        '- Tools vs Resources: Tools (mcp__<server>__*) are direct callable functions. The separate tools list_mcp_resources, list_mcp_resource_templates, and read_mcp_resource are solely for server documentation and resource templates.',
+      ].join('\n'),
     })
 
     async function syncMcpMounts(): Promise<void> {
