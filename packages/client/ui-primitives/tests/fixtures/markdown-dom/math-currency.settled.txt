@@ -1,0 +1,142 @@
+<div class="_markdown_404681">
+  <p>
+    #text "instant "
+    <strong>
+      #text "$4"
+    #text " · fast/auto "
+    <strong>
+      #text "$7"
+  <p>
+    #text "Prices $4–$7 here."
+  <p>
+    #text "US$4 paid."
+  <p>
+    #text "digit2$b$c"
+  <p>
+    #text "$x$5"
+  <p>
+    #text "Padded $ x $ stays literal."
+  <p>
+    #text "Tabs $\tx$ and $x\t$ stay literal."
+  <p>
+    #text "Math stays: "
+    <span class="katex">
+      <span class="katex-mathml">
+        <math xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mn>
+                #text "2"
+              <mi>
+                #text "x"
+            <annotation encoding="application/x-tex">
+              #text "2x"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 0.6444em;">
+          <span class="mord">
+            #text "2"
+          <span class="mord mathnormal">
+            #text "x"
+    #text " and "
+    <span class="katex">
+      <span class="katex-mathml">
+        <math xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mo>
+                #text "−"
+              <mn>
+                #text "1"
+            <annotation encoding="application/x-tex">
+              #text "-1"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;">
+          <span class="mord">
+            #text "−"
+          <span class="mord">
+            #text "1"
+    #text " and "
+    <span class="katex">
+      <span class="katex-mathml">
+        <math xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mn>
+                #text "1"
+              <mi mathvariant="normal">
+                #text "/"
+              <mn>
+                #text "2"
+            <annotation encoding="application/x-tex">
+              #text "1/2"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 1em; vertical-align: -0.25em;">
+          <span class="mord">
+            #text "1/2"
+    #text " and "
+    <span class="katex">
+      <span class="katex-mathml">
+        <math xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mi>
+                #text "E"
+              <mo>
+                #text "="
+              <mi>
+                #text "m"
+              <msup>
+                <mi>
+                  #text "c"
+                <mn>
+                  #text "2"
+            <annotation encoding="application/x-tex">
+              #text "E = mc^2"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 0.6833em;">
+          <span class="mord mathnormal" style="margin-right: 0.0576em;">
+            #text "E"
+          <span class="mspace" style="margin-right: 0.2778em;">
+          <span class="mrel">
+            #text "="
+          <span class="mspace" style="margin-right: 0.2778em;">
+        <span class="base">
+          <span class="strut" style="height: 0.8141em;">
+          <span class="mord mathnormal">
+            #text "m"
+          <span class="mord">
+            <span class="mord mathnormal">
+              #text "c"
+            <span class="msupsub">
+              <span class="vlist-t">
+                <span class="vlist-r">
+                  <span class="vlist" style="height: 0.8141em;">
+                    <span style="top: -3.063em; margin-right: 0.05em;">
+                      <span class="pstrut" style="height: 2.7em;">
+                      <span class="sizing reset-size6 size3 mtight">
+                        <span class="mord mtight">
+                          #text "2"
+    #text "."
+  <span class="katex-display">
+    <span class="katex">
+      <span class="katex-mathml">
+        <math display="block" xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mn>
+                #text "12"
+            <annotation encoding="application/x-tex">
+              #text "12"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 0.6444em;">
+          <span class="mord">
+            #text "12"
+  <p>
+    #text "Runaway $a\nb$ across lines."
+  <p>
+    #text "Escaped $4 stays literal."

@@ -11,11 +11,14 @@
  * full parse self-heals it.
  */
 
-import { memo, useMemo, useRef } from 'react'
-import type { ReactNode } from 'react'
+import { memo, useCallback, useMemo, useRef } from 'react'
+import type { ClipboardEvent, ReactNode } from 'react'
 import clsx from 'clsx'
 import { IncrementalMarkdownParser } from './incremental.ts'
 import { parseGfm, parseGfmWithMath } from './parse.ts'
+import {
+  expandRangeToWholeMath, rangeInsideOneCodeBlock, serializeSelectionToCleanHtml, serializeSelectionToMarkdown,
+} from './copy.ts'
 import {
   collectReferenceTargets, createReferenceTargets, renderBlocks, renderFootnoteSection,
   wrapBlockChildren,
@@ -167,6 +170,10 @@ class StreamingRenderer {
  * `body` variant uses the full document typography.
  * The provider's `openFile` enables local Markdown links in settled messages,
  * including `#L24` and `#L24-L30` destinations (ranges open at their first line).
+ * Copying a selection that intersects the rendered content writes Markdown
+ * back to the clipboard (`text/plain` plus KaTeX-free `text/html`), expanding
+ * formula boundaries so a formula is copied whole; any serialization failure
+ * leaves the browser's native copy path in place.
  * @returns A GFM document with TeX math rendered through KaTeX; raw HTML and
  * unsafe protocols are disabled. Local links without an opener remain text;
  * absolute HTTP(S) images render directly.
@@ -183,6 +190,34 @@ export const MarkdownText = memo(function MarkdownText({
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
+  // Copy-as-Markdown: plain copy of rendered output would serialize KaTeX's
+  // clipped MathML arm per glyph and slice formulas, so an intersecting
+  // selection is expanded to whole formulas and serialized to source instead.
+  const onCopy = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+    const selection = window.getSelection()
+    /* v8 ignore next -- window.getSelection() is never null in a live document. */
+    if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) return
+    const range = selection.getRangeAt(0)
+    if (!range.intersectsNode(event.currentTarget)) return
+    try {
+      expandRangeToWholeMath(range)
+      const fragment = range.cloneContents()
+      const markdown = serializeSelectionToMarkdown(
+        fragment,
+        rangeInsideOneCodeBlock(range) ? { rawCode: true } : undefined,
+      )
+      const html = serializeSelectionToCleanHtml(fragment)
+      // React types `clipboardData` non-null, but a synthetic copy event can
+      // carry none; without a clipboard the native path must survive intact.
+      const clipboard = event.clipboardData as DataTransfer | null
+      if (clipboard === null) return
+      event.preventDefault()
+      clipboard.setData('text/plain', markdown)
+      clipboard.setData('text/html', html)
+    } catch {
+      // A serialization failure must leave the native clipboard path untouched.
+    }
+  }, [])
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
@@ -195,5 +230,5 @@ export const MarkdownText = memo(function MarkdownText({
     return streamRef.current.render(text)
   }, [text, streaming, labels, fileMentions, pathImages])
   return <div className={clsx(css.markdown, variant === 'compact' && css.compact)}
-    data-markdown-variant={variant === 'compact' ? variant : undefined}>{children}</div>
+    data-markdown-variant={variant === 'compact' ? variant : undefined} onCopy={onCopy}>{children}</div>
 })

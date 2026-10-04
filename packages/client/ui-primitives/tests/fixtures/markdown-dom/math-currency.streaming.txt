@@ -1,0 +1,28 @@
+<div class="_markdown_404681">
+  <p>
+    #text "instant "
+    <strong>
+      #text "$4"
+    #text " · fast/auto "
+    <strong>
+      #text "$7"
+  <p>
+    #text "Prices $4–$7 here."
+  <p>
+    #text "US$4 paid."
+  <p>
+    #text "digit2$b$c"
+  <p>
+    #text "$x$5"
+  <p>
+    #text "Padded $ x $ stays literal."
+  <p>
+    #text "Tabs $\tx$ and $x\t$ stay literal."
+  <p>
+    #text "Math stays: $2x$ and $-1$ and $1/2$ and $E = mc^2$."
+  <p>
+    #text "$$12$$"
+  <p>
+    #text "Runaway $a\nb$ across lines."
+  <p>
+    #text "Escaped $4 stays literal."

@@ -17,6 +17,7 @@ import { gfm } from 'micromark-extension-gfm'
 import { math } from 'micromark-extension-math'
 import { cjkFriendlyStrong } from './cjkFriendlyStrong.ts'
 import { mathCompatibility } from './mathCompatibility.ts'
+import { mathTextGuard } from './mathTextGuard.ts'
 
 /**
  * Parse GFM markdown (the streaming arm's grammar: no math, so incomplete
@@ -39,7 +40,11 @@ export function parseGfm(text: string): Root {
  */
 export function parseGfmWithMath(text: string): Root {
   return recoverLocalImages(fromMarkdown(text, {
-    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility(), math()],
+    // Upstream single-dollar math is off: `mathTextGuard()` is registered last
+    // so extension combination tries it first (later extensions prepend their
+    // constructs) as the sole acceptor of `$…$`. A guarded rejection then falls
+    // through to upstream, which refuses every one-dollar span.
+    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility(), math({ singleDollarTextMath: false }), mathTextGuard()],
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
   }), text)
 }

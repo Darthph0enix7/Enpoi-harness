@@ -206,7 +206,10 @@ export function CodeBlock({
           </div>
         </div>}
       </div>}
-      <div ref={contentRef} className={css.content} data-code-block-content>{body}</div>
+      <div ref={contentRef} className={css.content} data-code-block-content
+        // The toolbar header only renders a localized language label, so the
+        // copy serializer needs this stable hook for the authored language.
+        data-language={toolbarLabels === undefined ? undefined : lang ?? ''}>{body}</div>
     </div>
   )
 }
