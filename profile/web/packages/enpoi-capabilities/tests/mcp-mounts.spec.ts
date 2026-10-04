@@ -160,8 +160,8 @@ describe('buildMountRows', () => {
     expect(rows.find(row => row.id === 'off-mcp')?.reason).toContain('disabled by the operator')
   })
 
-  it('agent view omits a switched-off server until the session pulls it in', () => {
-    const include = new Set(['unreal-mcp', 'github', 'broken', 'no-url'])
+  it('agent view includes all catalog servers with their truthful states', () => {
+    const include = mcpVisibleIds(catalog, master, new Set(['unreal-mcp', 'github', 'broken']), {})
     const agentRows = buildMountRows(
       catalog,
       master,
@@ -171,7 +171,8 @@ describe('buildMountRows', () => {
       tools,
       { include },
     )
-    expect(agentRows.some(row => row.id === 'off-mcp')).toBe(false)
+    expect(agentRows.some(row => row.id === 'off-mcp')).toBe(true)
+    expect(agentRows.find(row => row.id === 'off-mcp')?.state).toBe('disabled')
     // After the pull it appears as mounted, still marked off-by-default.
     const pulled = new Set(['unreal-mcp', 'github', 'broken', 'off-mcp'])
     const pulledRows = buildMountRows(
@@ -181,9 +182,9 @@ describe('buildMountRows', () => {
       new Set(['unreal-mcp', 'github', 'off-mcp']),
       new Map(),
       tools,
-      { include: new Set([...include, 'off-mcp']) },
+      { include: mcpVisibleIds(catalog, master, pulled, {}) },
     )
-    expect(pulledRows.find(row => row.id === 'off-mcp')).toMatchObject({ state: 'mounted', enabled: false })
+    expect(pulledRows.find(row => row.id === 'off-mcp')?.state).toBe('mounted')
   })
 
   it('an explicitly pulled switched-off server is mounted, not disabled', () => {
