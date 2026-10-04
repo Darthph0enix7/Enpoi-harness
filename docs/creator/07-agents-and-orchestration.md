@@ -29,7 +29,7 @@ How agent presets, seats, councils, the Oracle, and delegation work, and how to 
 |---|---|---|---|
 | `fixer` | specialists | bounded implementation: precise scoped edits, builds/tests | shared deny only |
 | `explorer` | specialists | codebase mapping, symbol search, tracing; reports `file:line` | loses `edit`, `write`, `str_replace_editor` |
-| `librarian` | specialists | external docs/API research with citations; runs the `research` skill end-to-end (dials, archived sources, anchored claims, verification) | shipped default loses `edit`, `write`, `str_replace_editor`; **this profile overrides the surface** (`permissions.agents.librarian.available`) to the full research toolset: `bash`, `read`, `grep`, `write`, `edit`, `web_fetch`, `web_search`, `skill`, `todo_write`, `custom_research-fetch`, `custom_research-verify`, `subagent` |
+| `librarian` | specialists | external docs/API research with citations; runs the `research` skill end-to-end (dials, archived sources, anchored claims, verification) | keeps only `str_replace_editor` denied — the shipped baseline carries the research toolset (`bash`, `read`, `grep`, `write`, `edit`, `web_fetch`, `web_search`, `skill`, `todo_write`, `custom_research-fetch`, `custom_research-verify`, `subagent`); an operator `permissions.agents.librarian.available` entry replaces it wholesale |
 | `designer` | specialists | UI/UX, styling, frontend craft | shared deny only |
 | `oracle` | supervision | senior reviewer; tool-only, never spawnable (`NON_SPAWNABLE_BUILTINS`, `tool-subagent/src/index.ts:396`) | n/a — its own tool protocol |
 

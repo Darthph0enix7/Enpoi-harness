@@ -54,6 +54,7 @@ Declared seats (`ui-conversation/src/client/contract/slots.ts:195-233`):
 
 ## Right panel + rail
 
+- Initial open preference is 35% of frame width (`RIGHTBAR_DEFAULT_RATIO = 0.35`, `packages/client/ui-layout/src/client/columns.ts:29`), clamped between 300px floor and 70% ceiling; user-dragged preferences persist in localStorage (`dsh.client.layout.widths`).
 - The rail never hides; one button per registered page kind, plus the bottom terminal-dock toggle and panel chrome (`ui-sidebar-right/src/client/shell/SidebarRight.tsx:363-440`).
 - Tab kinds come from `sidebarRightTabs.register`; fork operator tabs are `priority: 'extension'` with guide entries at orders 55-59 (`ui-brand-enpoi/src/client/index.ts:294-358`):
 

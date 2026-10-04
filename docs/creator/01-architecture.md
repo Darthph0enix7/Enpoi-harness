@@ -68,7 +68,11 @@ Read this file to answer "how does a dsh machine fit together"; read `02-install
 | `pairings.yaml`, `peer-state.json` | peer seam documents (§7) |
 | `heavy-server-overlay.json` | operator-owned heavy-provider overlay (file 02 §4) |
 | `skills/`, `.agent-presets/` | seeded once by the installer; user-owned after (`scripts/install.sh:662-671`) |
+| `system-profile.{md,scan.json,decision}` | system analysis reports and user acceptance status (file 10 §3) |
+| `.env` | launch-environment secrets (`EXA_API_KEY`), mode 0600 |
 | `diagnostics/update.jsonl` | updater ledger (`scripts/install.sh:883-890`) |
+
+- **Workspace storage** — the session's active workspace / working directory holds project files; research runs archive into `<workspace>/.research/<slug>-<timestamp>/` (`sources/` + `index.json`, `claims/`, `verification.json|md`, `dossier.md`).
 
 ## 6. Provider / session / client planes
 
