@@ -168,27 +168,20 @@ export function mcpWorldOf(
 }
 
 /**
- * The agent-visible ids of one session: the session's world plus the
- * switched-on servers it may still pull (on-demand, unmounted). A server the
- * operator switched OFF is invisible until something pulls it in — "the agent
- * doesn't even see it".
- * @param catalog - the configured servers.
- * @param masterEnabled - ids whose `capabilities.mcp[id]` is true.
- * @param world - the session's world (`mcpWorldOf`).
- * @param sessionOverrides - the session's explicit `capabilities.mcp` overrides.
- * @returns a fresh visible set.
+ * The agent-visible ids of one session: all configured servers in catalog
+ * are visible to `mcp list`, displaying their truthful state:
+ * - mounted (connected in this session)
+ * - available (always-on, ready to use)
+ * - disabled (on-demand / default-off, mountable via `mcp mount <id>` or skill hint)
+ * - unavailable (error / no url)
  */
 export function mcpVisibleIds(
   catalog: Record<string, McpServerRecord>,
-  masterEnabled: ReadonlySet<string>,
-  world: ReadonlySet<string>,
-  sessionOverrides: Readonly<Record<string, boolean>>,
+  _masterEnabled?: ReadonlySet<string>,
+  _world?: ReadonlySet<string>,
+  _sessionOverrides?: Readonly<Record<string, boolean>>,
 ): Set<string> {
-  const visible = new Set(world)
-  for (const id of masterEnabled) {
-    if (catalog[id] !== undefined && sessionOverrides[id] !== false) visible.add(id)
-  }
-  return visible
+  return new Set(Object.keys(catalog))
 }
 
 /**

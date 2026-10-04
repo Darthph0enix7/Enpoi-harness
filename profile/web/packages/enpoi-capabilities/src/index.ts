@@ -893,6 +893,28 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     })
 
     // ── skill hint: `mcp: [server]` frontmatter mounts on load ──────────────
+    async function mountSkillHints(session: SessionLike, skillName: string, agent?: unknown): Promise<string[]> {
+      let hints: string[] = []
+      try {
+        const skills = ctx.get('skills') as
+          | { get?: (name: string, options: Record<string, unknown>) => Promise<{ mcp?: readonly string[] } | undefined> }
+          | undefined
+        const definition = await skills?.get?.(skillName, { scope: agent, cwd: session.header?.cwd })
+        hints = Array.isArray(definition?.mcp) ? [...definition.mcp] : []
+      } catch {
+        return []
+      }
+      if (hints.length === 0) return []
+      const notes: string[] = []
+      for (const server of hints) {
+        const outcome = await mountForSession(session, server)
+        notes.push(outcome.ok
+          ? `mcp: mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
+          : `mcp: could not mount "${server}": ${outcome.reason}`)
+      }
+      return notes
+    }
+
     ctx.on('tools/post-execute', (async (
       exec: { name: string; arguments?: Record<string, unknown>; agent?: { session?: SessionLike } },
       _result: unknown,
@@ -903,24 +925,8 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       const session = exec.agent?.session
       const name = exec.arguments?.name
       if (session === undefined || typeof name !== 'string' || name === '') return downstream
-      let hints: string[] = []
-      try {
-        const skills = ctx.get('skills') as
-          | { get?: (name: string, options: Record<string, unknown>) => Promise<{ mcp?: readonly string[] } | undefined> }
-          | undefined
-        const definition = await skills?.get?.(name, { scope: exec.agent })
-        hints = Array.isArray(definition?.mcp) ? [...definition.mcp] : []
-      } catch {
-        return downstream
-      }
-      if (hints.length === 0) return downstream
-      const notes: string[] = []
-      for (const server of hints) {
-        const outcome = await mountForSession(session, server)
-        notes.push(outcome.ok
-          ? `mcp: mounted "${server}" for this session (${String(outcome.toolCount)} tools)`
-          : `mcp: could not mount "${server}": ${outcome.reason}`)
-      }
+      const notes = await mountSkillHints(session, name, exec.agent)
+      if (notes.length === 0) return downstream
       // The skill tool re-renders its canonical value after post-execute, so a
       // content replacement would be discarded; the note rides as an injected
       // context message instead (model-visible, durable, and honest).
@@ -934,6 +940,46 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           }),
         ],
       }
+    }) as (...args: unknown[]) => unknown)
+
+    // ── skill hint: slash command `/<skill>` or `<skill_content>` mounts on turn start ──
+    const SKILL_GESTURE = /(?:^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
+    const SKILL_CONTENT_TAG = /<skill_content\s+name=["']([^"']+)["']/g
+
+    ctx.on('agent/pre-step', (async (
+      params: { agent?: { session?: SessionLike } },
+      next: () => Promise<{ kind: string; messages?: Array<{ role?: string; source?: unknown; content?: Array<{ type?: string; text?: string }> }> }>,
+    ) => {
+      const decision = await next()
+      if (decision?.kind !== 'enter' || !Array.isArray(decision?.messages)) return decision
+      const session = params?.agent?.session
+      if (session === undefined || typeof session.id !== 'string') return decision
+
+      const skillNames = new Set<string>()
+      for (const msg of decision.messages) {
+        const source = msg?.source as { kind?: string; name?: string } | undefined
+        if (source?.kind === 'skill-invocation' && typeof source.name === 'string' && source.name !== '') {
+          skillNames.add(source.name)
+        }
+        if (Array.isArray(msg?.content)) {
+          for (const part of msg.content) {
+            if (part?.type === 'text' && typeof part.text === 'string') {
+              for (const m of part.text.matchAll(SKILL_CONTENT_TAG)) skillNames.add(m[1])
+              if (msg?.role === 'user') {
+                for (const m of part.text.matchAll(SKILL_GESTURE)) skillNames.add(m[1])
+              }
+            }
+          }
+        }
+      }
+
+      if (skillNames.size === 0) return decision
+
+      for (const name of skillNames) {
+        await mountSkillHints(session, name, params.agent)
+      }
+
+      return decision
     }) as (...args: unknown[]) => unknown)
 
     // ── doctrine: the mount lifecycle line ──────────────────────────────────

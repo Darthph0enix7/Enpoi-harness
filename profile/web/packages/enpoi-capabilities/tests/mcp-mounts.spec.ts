@@ -82,16 +82,13 @@ describe('mcpWorldOf — the default world and explicit pulls', () => {
     expect(mcpWorldOf(catalog, master, new Set(), { 'ondemand-mcp': false }).has('ondemand-mcp')).toBe(false)
   })
 
-  it('agent visibility = the world plus switched-on pullable servers', () => {
+  it('agent visibility = all configured catalog servers visible in mcp list with truthful states', () => {
     const master = new Set(['ondemand-mcp'])
     const world = mcpWorldOf(catalog, master, new Set(), {})
     const visible = mcpVisibleIds(catalog, master, world, {})
-    expect(visible.has('ondemand-mcp')).toBe(true) // switched on, pullable
-    expect(visible.has('off-mcp')).toBe(false) // switched off: the agent does not see it
-    const pulled = mcpWorldOf(catalog, master, new Set(['off-mcp']), {})
-    expect(mcpVisibleIds(catalog, master, pulled, {}).has('off-mcp')).toBe(true)
-    const off = mcpWorldOf(catalog, master, new Set(), { 'ondemand-mcp': false })
-    expect(mcpVisibleIds(catalog, master, off, { 'ondemand-mcp': false }).has('ondemand-mcp')).toBe(false)
+    expect(visible.has('ondemand-mcp')).toBe(true) // on-demand, pullable
+    expect(visible.has('off-mcp')).toBe(true) // default-off, visible with pullable reason
+    expect(visible.has('always-mcp')).toBe(true) // always-on
   })
 })
 
