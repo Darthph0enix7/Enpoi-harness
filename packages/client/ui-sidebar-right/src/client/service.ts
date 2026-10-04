@@ -454,6 +454,17 @@ export class SidebarRightController implements ISidebarRight {
     editor = false,
     filesAnchor = false,
   ): void {
+    if (filesAnchor && placement.paneId === undefined) {
+      const surfaceNow = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
+        ?? (this.binding?.sessionId === sessionId ? this.binding.surfaces[sessionId] : undefined)
+      const existingFiles = surfaceNow === undefined ? undefined
+        : Object.values(surfaceNow.layout.tabs).find(tab => tab.kind === FILES_KIND)
+      if (existingFiles !== undefined) {
+        actions.focusTab(sessionId, existingFiles.id)
+      } else {
+        this.placeTab(sessionId, actions, FILES_KIND, {})
+      }
+    }
     const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
       ?? (this.binding?.sessionId === sessionId ? this.binding.surfaces[sessionId] : undefined)
     const targetPane = surface === undefined ? undefined : placement.paneId ?? activeDockPaneId(surface.layout)

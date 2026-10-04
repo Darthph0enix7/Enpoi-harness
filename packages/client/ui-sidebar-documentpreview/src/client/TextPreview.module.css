@@ -63,6 +63,31 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.pathClickable {
+  cursor: pointer;
+  border-radius: var(--dsw-alias-radius-sm, 4px);
+  padding: 1px 4px;
+  transition: background-color 0.15s ease;
+}
+
+.pathClickable:hover {
+  background-color: var(--dsw-alias-bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.pathInput {
+  width: 100%;
+  height: 22px;
+  padding: 0 6px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-input, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--dsw-alias-border-focus, #3b82f6);
+  border-radius: var(--dsw-alias-radius-sm, 4px);
+  outline: none;
+  box-sizing: border-box;
+}
+
 /* Announced, not applied: the reader keeps the text they are looking at. */
 .changed {
   display: flex;

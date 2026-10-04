@@ -25,7 +25,7 @@ import {
   IconDownloadOutlineMedium, IconEllipsisOutlineMedium, IconLinkOutlineMedium, IconListPenOutlineMedium,
   IconRefreshOutlineMedium, IconSearchOutlineMedium, Menu, Tooltip, classifyFileType,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { pathPartsOf } from '@deepseek-ai/dsh-util-workspace-path'
+import { pathPartsOf, sessionFileAddress } from '@deepseek-ai/dsh-util-workspace-path'
 import type { TextInjected } from './face.ts'
 import { failureLine } from './failure-line.ts'
 import { IconNowrapFill16, IconWrapFill16 } from './icons.tsx'
@@ -84,15 +84,76 @@ function usePathClipped(
   }, [box, text, path, shown])
 }
 
-/** The header's path: directories greyed, the final segment in full ink, faded when clipped. */
-function HeaderPath({ pathRef, pathTextRef, path }: {
+/** The header's path: directories greyed, the final segment in full ink, faded when clipped; click to edit and navigate. */
+function HeaderPath({ pathRef, pathTextRef, path, onNavigate }: {
   pathRef: RefObject<HTMLDivElement>
   pathTextRef: RefObject<HTMLSpanElement>
   path: string
+  onNavigate?: (newPath: string) => void
 }): ReactNode {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(path)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setDraft(path)
+  }, [path])
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+  }, [editing])
+
+  const submit = (): void => {
+    setEditing(false)
+    const trimmed = draft.trim()
+    if (trimmed !== '' && trimmed !== path) {
+      onNavigate?.(trimmed)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className={css.path} data-textpreview-path-editing>
+        <input
+          ref={inputRef}
+          type="text"
+          className={css.pathInput}
+          value={draft}
+          aria-label="File path"
+          onChange={(e) => { setDraft(e.target.value) }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              submit()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              setEditing(false)
+              setDraft(path)
+            }
+          }}
+          onBlur={submit}
+        />
+      </div>
+    )
+  }
+
   const { directory, name } = pathPartsOf(path)
   return (
-    <div ref={pathRef} className={css.path} title={path} data-textpreview-path>
+    <div
+      ref={pathRef}
+      className={clsx(css.path, onNavigate !== undefined && css.pathClickable)}
+      title={path}
+      data-textpreview-path
+      onClick={() => {
+        if (onNavigate !== undefined) {
+          setDraft(path)
+          setEditing(true)
+        }
+      }}
+    >
       <span ref={pathTextRef} className={css.pathText}>
         {directory !== '' && <span className={css.pathDirectory}>{directory}</span>}
         <span className={css.pathName}>{name}</span>
@@ -450,6 +511,15 @@ export function TextPreview({
     )
   }, [content, file, readAllText])
 
+  const handleNavigatePath = useCallback((newPath: string) => {
+    const trimmed = newPath.trim()
+    if (!trimmed) return
+    const address = trimmed.startsWith('dsh-resource://')
+      ? trimmed
+      : sessionFileAddress(file.sessionId, trimmed)
+    tab.actions.openResource(address)
+  }, [file.sessionId, tab.actions])
+
   // A known binary suffix with no matching renderer never reads: no plain-text
   // fallback, no viewer control, only the path and the unsupported line.
   if (selected === undefined && unviewable) {
@@ -457,7 +527,7 @@ export function TextPreview({
     return (
       <div className={css.preview} data-textpreview-state="unsupported" data-textpreview-url={tab.contentId}>
         <div className={css.header}>
-          <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} />
+          <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} />
         </div>
         <div className={css.body} data-textpreview-body>
           <div className={css.empty} data-textpreview-unsupported>
@@ -611,7 +681,7 @@ export function TextPreview({
         </p>
       )}
       <div className={css.header} ref={headerRef} data-textpreview-toolbar>
-        <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} />
+        <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} />
         {candidates.length > 1
           && (
             <Menu

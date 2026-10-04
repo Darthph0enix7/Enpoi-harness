@@ -343,7 +343,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
 
   /** Current background index progress; read-only diagnostic surface. */
   get indexState(): SessionQueryIndexState {
-    return this._indexState
+    return { ...this._indexState }
   }
 
   /** Open eagerly only when activation owns the configured readiness boundary. */
