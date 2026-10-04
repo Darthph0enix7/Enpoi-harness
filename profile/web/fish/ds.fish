@@ -147,72 +147,32 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             tailscale serve --reset
 
         case "doctor"
-            echo "═══════════════════════════════════════════════════════════════"
-            echo " Enpoi Harness Diagnostics (ds doctor)"
-            echo "═══════════════════════════════════════════════════════════════"
-
-            # 1. Systemd service state
-            if test $g_is_linux -eq 1
-                set -l state (systemctl --user is-active dsh-web.service 2>/dev/null; or echo "inactive")
-                if test "$state" = "active"
-                    set -l pid (systemctl --user show dsh-web.service -p MainPID --value 2>/dev/null)
-                    set -l mem (systemctl --user show dsh-web.service -p MemoryCurrent --value 2>/dev/null)
-                    set -l mem_mb (math "$mem / 1024 / 1024" 2>/dev/null; or echo "0")
-                    echo "  ✔ systemd: active (PID $pid, ~$mem_mb MB)"
-                else
-                    echo "  ✖ systemd: $state"
+            # Full diagnostic report lives in the standalone Node script, shared
+            # with `dsh doctor`; pass through flags such as --json or --strict.
+            set -l doctor_script ""
+            for candidate in "$g_dsh_repo/scripts/doctor.mjs" "$g_dsh_home/harness/current/scripts/doctor.mjs"
+                if test -f "$candidate"
+                    set doctor_script "$candidate"
+                    break
                 end
             end
+            if test -z "$doctor_script"
+                echo "✖ doctor.mjs not found (checked $g_dsh_repo/scripts and $g_dsh_home/harness/current/scripts)"
+                return 1
+            end
 
-            # 2. HTTP Probes
-            set -l code (curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3080/ 2>/dev/null)
-            if test "$code" = "200"
-                echo "  ✔ Local HTTP :3080: 200 OK"
+            set -l node_bin ""
+            if test -x "$HOME/.local/share/nvm/v22.22.2/bin/node"
+                set node_bin "$HOME/.local/share/nvm/v22.22.2/bin/node"
             else
-                echo "  ✖ Local HTTP :3080: $code"
+                set node_bin (command -v node 2>/dev/null)
+            end
+            if test -z "$node_bin"
+                echo "✖ No Node.js found (need >= 22.19); install it or add it to PATH"
+                return 1
             end
 
-            set -l ts_code (curl -s -k -o /dev/null -w "%{http_code}" "$g_tailnet_url/" 2>/dev/null; or echo "down")
-            if test "$ts_code" = "200"
-                echo "  ✔ Tailscale HTTPS :8443: 200 OK ($g_tailnet_url)"
-            else
-                echo "  ℹ Tailscale HTTPS :8443: $ts_code ($g_tailnet_url)"
-            end
-
-            # 3. Config & Credentials
-            if test -f "$g_dsh_home/settings.yaml"
-                echo "  ✔ Settings: $g_dsh_home/settings.yaml present"
-            else
-                echo "  ✖ Settings: missing $g_dsh_home/settings.yaml"
-            end
-
-            if test -f "$g_dsh_home/.credentials.yaml"
-                set -l perm (stat -c "%a" "$g_dsh_home/.credentials.yaml" 2>/dev/null; or stat -f "%Lp" "$g_dsh_home/.credentials.yaml" 2>/dev/null)
-                echo "  ✔ Credentials: $g_dsh_home/.credentials.yaml (chmod $perm)"
-            else
-                echo "  ✖ Credentials: missing $g_dsh_home/.credentials.yaml"
-            end
-
-            # 4. Active Providers & Presets RPC probe
-            set -l prov_res (__ds_rpc "llm.providers")
-            if test -n "$prov_res"
-                set -l prov_count (echo "$prov_res" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('result',{}).get('value',{}).get('providers',{})))" 2>/dev/null; or echo "0")
-                echo "  ✔ LLM Providers: $prov_count configured"
-            end
-
-            set -l preset_res (__ds_rpc "agentPreset.list")
-            if test -n "$preset_res"
-                set -l preset_count (echo "$preset_res" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('result',{}).get('value',{}).get('presets',[])))" 2>/dev/null; or echo "0")
-                echo "  ✔ Agent Presets: $preset_count available"
-            end
-
-            # 5. Skills count
-            if test -d "$g_dsh_home/skills"
-                set -l skills_count (find "$g_dsh_home/skills" -mindepth 1 -maxdepth 1 -type d | wc -l)
-                echo "  ✔ Skills: $skills_count installed in $g_dsh_home/skills/"
-            end
-
-            echo "═══════════════════════════════════════════════════════════════"
+            command $node_bin $doctor_script $subargs
 
         case "heal"
             echo "=== Healing Enpoi Harness ==="

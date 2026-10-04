@@ -6,16 +6,38 @@
 
 /* v8 ignore file -- built-bin acceptance exercises this self-executing dispatch. */
 
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { getDshRuntimeVersion, loadLayeredEnv, StartupError } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { parseDshArgs } from './args.ts'
 import { reportStartupFailure } from './startup-diagnostics.ts'
 
 /**
+ * Run the standalone `scripts/doctor.mjs` diagnostic with this process's Node
+ * binary and exit with its status.
+ * @param args - raw `dsh doctor` arguments, forwarded verbatim (for example `--json`).
+ * @returns never resolves; the process exits with the doctor's status.
+ */
+async function runDoctor(args: readonly string[]): Promise<never> {
+  const script = fileURLToPath(new URL('../../../scripts/doctor.mjs', import.meta.url))
+  const child = spawn(process.execPath, [script, ...args], { stdio: 'inherit' })
+  const code = await new Promise<number | null>((resolveExit, rejectExit) => {
+    child.once('error', rejectExit)
+    child.once('close', (exitCode) => {
+      resolveExit(exitCode)
+    })
+  })
+  process.exit(code ?? 1)
+}
+
+/**
  * Run the public dsh command-line interface.
  * @returns a promise that settles when the selected command mode finishes.
  */
 export async function runCli(): Promise<void> {
+  const [command, ...commandArgs] = process.argv.slice(2)
+  if (command === 'doctor') await runDoctor(commandArgs)
   const version = getDshRuntimeVersion()
   const invocation = parseDshArgs(process.argv.slice(2), version)
 
