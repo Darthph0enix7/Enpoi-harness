@@ -1,0 +1,28 @@
+[Unit]
+Description=DeepSeek Harness web UI (source checkout, serverlocal)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/adam/deepseek-harness
+# A reboot (or kill -9) can orphan the settings writer lock, which makes every
+# boot time out and crash-loop (497 restarts on 2026-09-14). Clear it before
+# every start so reboots self-heal.
+ExecStartPre=/usr/bin/rm -f %h/.dsh/settings.yaml.lock
+# Restore the liquid-glass skin if a ui-skin-center write nulled the selection
+ExecStartPre=/home/adam/.local/share/nvm/v22.22.2/bin/node /home/adam/.local/bin/dsh-skin-guard.mjs
+# dsh refuses non-loopback binds by design; we bind 127.0.0.1 and expose via
+# dsh-tailnet.service (socat) + tailscale serve (HTTPS, fixes insecure-context APIs)
+ExecStart=/home/adam/.local/share/nvm/v22.22.2/bin/node --import tsx/esm apps/cli/src/bin.ts web --host 127.0.0.1 --no-open --port 3080 --trusted-host 100.122.163.25:3080 --trusted-host serverlocal:3080 --trusted-host serverlocal.pike-acrux.ts.net:8443 --trusted-host serverlocal.pike-acrux.ts.net --trusted-host 127.0.0.1:3080 --trusted-host localhost:3080
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=%h
+Environment=USER=%u
+Environment=PATH=/home/adam/.opencode/bin:/home/adam/.local/share/nvm/v22.22.2/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DSH_HOME=%h/.dsh
+
+[Install]
+WantedBy=default.target

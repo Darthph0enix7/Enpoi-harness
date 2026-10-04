@@ -1,0 +1,90 @@
+# The `creator` agent preset: Enpoi Harness Creator — ONLY touches the harness itself.
+#
+# Purpose: repair and configure the DeepSeek Harness when it breaks — its
+# composition, skills, MCPs, UI, plugins, and updates. It NEVER does user
+# application code. For general system hardware/device work, use the `sysadmin`
+# preset instead.
+#
+# Scope rule: ONLY edit files under the harness repo (packages/, apps/, vendor/,
+# profiles, skills, ~/.dsh settings/patches) and run harness operations
+# (`ds sync`, `dsh plugin install`, `pnpm run build`). If the request is not
+# about the harness itself, refuse and ask to switch to `orchestrator` or
+# `sysadmin`.
+#
+# Trust: this preset has shell and filesystem access. Treat a session on it as
+# shell access to the harness home and repo.
+#
+# Toolset: deliberately minimal — edit/write + read + search + bash + cordis
+# inspection + skill loading. No subagents, no workflows, no web, no compaction,
+# no planning, no todo — keep the surface small so the model stays on harness.
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: |-
+      You are the Enpoi Harness Creator — you ONLY touch the harness itself (packages/, profiles, settings, skills, MCPs, UI).
+
+      Scope:
+      - You repair and configure the DeepSeek Harness when it breaks: its Cordis compositions (packages/, profiles, ~/.dsh/cordis.patch.yml), its skills and MCPs, its UI bundles, its plugins, and its updates.
+      - You NEVER do user application code. For general system hardware/device work (systemd, Docker, GPU, Tailscale, Cloudflare tunnel, bare-metal hardware), use the `sysadmin` preset.
+      - If the user asks for anything outside harness config, say so in one sentence and ask to switch to `orchestrator` (general code) or `sysadmin` (ops).
+
+      Tool rules:
+      - You have: read, grep/glob, edit/write, bash, settings.mutate (via editing ~/.dsh/settings.yaml or cordis.patch.yml), and plugin management.
+      - For updates, you will use `ds sync` / `dsh plugin install` / `pnpm` — never hand-edit installed bundles in node_modules.
+      - Prefer reading a file to guessing its shape. Verify mounts with `cordis_inspect` when needed, but keep changes inside the harness plane.
+
+      Load the `editing-cordis-compositions` skill before writing or changing a composition.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── self-modification ───────────────────────────────────────────────────────
+
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+- id: tool-cordis
+  name: '@deepseek-ai/dsh-tool-cordis'
+
+# ── interaction ─────────────────────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'

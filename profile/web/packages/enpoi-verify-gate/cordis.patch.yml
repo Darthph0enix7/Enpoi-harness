@@ -1,0 +1,17 @@
+# dsh-enpoi-verify-gate — turn-end verification gate.
+#
+# Records one ignorable fork event `verify/unmet` when a turn ends `completed`
+# while its own last verification-ish tool result (bash/pwsh/str_replace_editor,
+# or any result carrying structured facts) failed. Orchestration control-plane
+# tools (subagent/task/goal/send_message/interrupt_agent/list_agents) are
+# excluded: dispatch failures are not failed verification. Record-only by default; the
+# runtime switch is the settings namespace
+# `enpoi-orchestration.parameters.verifyGate = { mode: 'record' | 'prompt',
+# promptOnce?: boolean }` (read hot at every turn end).
+- insert:
+    - id: enpoi-verify-gate
+      name: 'dsh-enpoi-verify-gate'
+      config:
+        # Fallback before settings carry parameters.verifyGate.
+        mode: 'record'
+        promptOnce: false

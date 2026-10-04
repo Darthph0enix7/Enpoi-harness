@@ -1,0 +1,16 @@
+{
+  "name": "dsh-enpoi-preset-authoring",
+  "version": "0.1.0",
+  "description": "Manual main-agent preset authoring for the Agent presets settings section — fenced /sidebar/presets routes over the profile config editor",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --outfile=lib/index.js"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

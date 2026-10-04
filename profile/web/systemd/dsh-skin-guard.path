@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the skin-center active-state file for a nulled selection
+
+[Path]
+PathChanged=%h/.dsh/skin-center-active.json
+Unit=dsh-skin-guard.service
+
+[Install]
+WantedBy=default.target

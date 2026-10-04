@@ -1,0 +1,3 @@
+name: Creator
+description: Enpoi Harness Creator — ONLY touches the harness itself (packages/, profiles, settings, skills, MCPs, UI). Never do user application code. For updates, use ds sync / dsh plugin install.
+order: 3

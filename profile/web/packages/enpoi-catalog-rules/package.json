@@ -1,0 +1,18 @@
+{
+  "name": "dsh-enpoi-catalog-rules",
+  "version": "0.1.0",
+  "description": "Dynamic rule/filter engine for the synced model catalogue (enpoi-orchestration.catalogRules): visibility reasons, privacy predicates, group selectors, edit previews",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
+  },
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

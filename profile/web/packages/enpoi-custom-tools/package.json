@@ -1,0 +1,16 @@
+{
+  "name": "dsh-enpoi-custom-tools",
+  "version": "0.1.0",
+  "description": "Operator-authored command tools — reads enpoi-orchestration.customTools and registers custom_<id> tools through the harness shell under the shared policy guard",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

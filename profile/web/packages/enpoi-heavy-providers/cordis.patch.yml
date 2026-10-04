@@ -1,0 +1,10 @@
+# dsh-enpoi-heavy-providers bundle patch — mounts the HEAVY provider class.
+#
+# Providers are listed by the harness's provider-template data but install
+# nothing until the operator adds one. This plugin owns the manifests and the
+# `enpoiHeavy` Remote namespace: reuse-on-server (probe → route) or a polled
+# local install job (steps via dsh-subprocess), plus the teardown that removes
+# the route, credential, pool state, discovered-cache entry, and chain links.
+- insert:
+    - id: enpoi-heavy-providers
+      name: 'dsh-enpoi-heavy-providers'

@@ -1,0 +1,16 @@
+{
+  "name": "dsh-enpoi-git",
+  "version": "0.1.0",
+  "description": "Git repository awareness for the right sidebar: status, branches, log, changes, and bounded diffs — Typert Remote namespace enpoiGit",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --outfile=lib/index.js"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

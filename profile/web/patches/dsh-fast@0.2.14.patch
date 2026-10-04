@@ -1,0 +1,80 @@
+diff --git a/lib/index.js b/lib/index.js
+index b2458e2fe4db1fc749a8890867298dff3a9d5f64..f3f87b03c8b464f4baf058c21df3ee4f5ade8e2d 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -254,10 +254,15 @@ function legacySystemText(header) {
+ }
+ /** Flatten a tool result's model-facing text blocks to one string. */
+ function flattenToolResultText(message) {
+-	const block = message.content[0];
+-	if (block === void 0) return "";
+ 	let text = "";
+-	for (const inner of block.content) if (inner.type === "text") text += inner.text;
++	for (const block of message.content) {
++		const nested = block.content;
++		if (Array.isArray(nested)) {
++			for (const inner of nested) if (inner.type === "text" && typeof inner.text === "string") text += inner.text;
++			continue;
++		}
++		if (block.type === "text" && typeof block.text === "string") text += block.text;
++	}
+ 	return text;
+ }
+ /**
+diff --git a/lib/types/collector.js b/lib/types/collector.js
+index 7c3a1e01cfd42c36ba7d7d2d11e7cbf24ca9e907..9269fff33a545b4c057ea821eee2e4e27e098196 100644
+--- a/lib/types/collector.js
++++ b/lib/types/collector.js
+@@ -72,13 +72,18 @@ function legacySystemText(header) {
+ }
+ /** Flatten a tool result's model-facing text blocks to one string. */
+ export function flattenToolResultText(message) {
+-    const block = message.content[0];
+-    if (block === undefined)
+-        return '';
+     let text = '';
+-    for (const inner of block.content) {
+-        if (inner.type === 'text')
+-            text += inner.text;
++    for (const block of message.content) {
++        const nested = block.content;
++        if (Array.isArray(nested)) {
++            for (const inner of nested) {
++                if (inner.type === 'text' && typeof inner.text === 'string')
++                    text += inner.text;
++            }
++            continue;
++        }
++        if (block.type === 'text' && typeof block.text === 'string')
++            text += block.text;
+     }
+     return text;
+ }
+diff --git a/src/collector.ts b/src/collector.ts
+index 24ac22b5fe4bd2f1b2eef33ce619fbe6458f1037..8395eac9a6b14afa1d6cdbe340dcf1e8b18adb14 100644
+--- a/src/collector.ts
++++ b/src/collector.ts
+@@ -101,11 +101,19 @@ function legacySystemText(header: EpochHeader | undefined): string | undefined {
+
+ /** Flatten a tool result's model-facing text blocks to one string. */
+ export function flattenToolResultText(message: ToolResultMessage): string {
+-  const block = message.content[0]
+-  if (block === undefined) return ''
++  // Native V4 lifts the tool-result wrapper, so `message.content` is already a
++  // flat block list. Pre-V4 logs keep the wrapper block, whose nested
++  // `content` list is still folded during migration.
+   let text = ''
+-  for (const inner of block.content) {
+-    if (inner.type === 'text') text += inner.text
++  for (const block of message.content) {
++    const candidate = block as { type?: unknown; text?: unknown; content?: unknown }
++    if (Array.isArray(candidate.content)) {
++      for (const inner of candidate.content as readonly { type?: unknown; text?: unknown }[]) {
++        if (inner.type === 'text' && typeof inner.text === 'string') text += inner.text
++      }
++      continue
++    }
++    if (candidate.type === 'text' && typeof candidate.text === 'string') text += candidate.text
+   }
+   return text
+ }

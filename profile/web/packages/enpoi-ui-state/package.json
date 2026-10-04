@@ -1,0 +1,16 @@
+{
+  "name": "dsh-enpoi-ui-state",
+  "version": "0.1.0",
+  "description": "Per-session UI state (unsent drafts + sidebar surface) for the right sidebar — Typert Remote namespace enpoiUiState",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --outfile=lib/index.js"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

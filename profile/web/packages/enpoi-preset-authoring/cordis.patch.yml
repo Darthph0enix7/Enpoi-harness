@@ -1,0 +1,6 @@
+# dsh-enpoi-preset-authoring — manual preset authoring for the Agent presets
+# settings section. Writes go through the harness config editor (the canonical
+# profile patch writer); see packages/boot/config-editor.
+- insert:
+    - id: enpoi-preset-authoring
+      name: 'dsh-enpoi-preset-authoring'

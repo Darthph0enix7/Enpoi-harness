@@ -1,0 +1,316 @@
+/**
+ * enpoi-heavy-providers — the `enpoiHeavy` Typert Remote namespace.
+ *
+ * Decorated shell over `planner.ts`/`jobs.ts`: the client's Add Provider and
+ * provider-detail surfaces drive install/reuse/removal exclusively through
+ * these endpoints, so a long install never sits in the `settings.mutate`
+ * path. All payload validation happens here at the wire boundary.
+ *
+ * @module dsh-enpoi-heavy-providers/remote
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type { HeavyJobView } from './jobs.js'
+import { HeavyJobManager } from './jobs.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
+import {
+  chooseLocalPath,
+  configuredProfile,
+  detectInstance,
+  detectRuntimes,
+  discoverModels,
+  healthForBase,
+  modeBaseURL,
+  overlayManifest,
+  pendingRestartForManifest,
+  probeHealth,
+  readServerOverlay,
+  removeProvider,
+  routeSettingsNs,
+  settingsNamespaceReady,
+  storeCredential,
+  useDetectedInstance,
+  writeRoute,
+  type HeavyDeps,
+  type LocalPathChoice,
+  type PendingRestart,
+  type RemovalSummary,
+  type ReuseOutcome,
+  type RuntimeProbe,
+} from './planner.js'
+
+/** Longest accepted key string (a credential is a bounded token). */
+const MAX_KEY_CHARS = 4096
+
+/** One runtime probe per minute: status serves several rows per page load. */
+const RUNTIME_TTL_MS = 60_000
+
+/** The host seams the service reads lazily (each may mount after this plugin). */
+export interface HeavyServiceOptions {
+  /** Current deps; read per call so late-mounted services are seen. */
+  deps: () => HeavyDeps
+  /** The shared job manager (one install per provider at a time). */
+  jobs: HeavyJobManager
+  /** Diagnostics sink; defaults to no logging. */
+  log?: (line: string) => void
+}
+
+/** `enpoiHeavy.manifests` result. */
+export interface ManifestsValue {
+  items: readonly HeavyProviderManifest[]
+  problems: readonly string[]
+  /** The host platform install steps execute on (`process.platform`). */
+  platform: string
+}
+
+/** `enpoiHeavy.status` result. */
+export interface StatusValue {
+  id: string
+  /** The effective host manifest (overlay applied) the client renders this row from. */
+  manifest: HeavyProviderManifest
+  configured: boolean
+  mode?: 'reuse' | 'local'
+  health: { ok: boolean; status?: number; error?: string; checkedAt: number }
+  /** The host platform install steps execute on (`process.platform`). */
+  platform: string
+  /** Settings namespace the route profile is written to (`llm-pi-ai` by default). */
+  settingsNs: string
+  /** Whether that namespace is mounted in the running profile; absent when unknown. */
+  settingsReady?: boolean
+  /** Loopback port an already-running instance answered on, when one did. */
+  detectedPort?: number
+  /** Address the detection found; the UI's "running at — use it" offer. */
+  detectedEndpoint?: string
+  /** Container runtimes the machine has (detection is fail-soft). */
+  runtime: RuntimeProbe
+  /** The platform's best local path for this provider (detection first). */
+  preflight: LocalPathChoice
+  unsupported?: HeavyProviderManifest['unsupported']
+  job?: HeavyJobView
+}
+
+/** `enpoiHeavy.reuse` result. */
+export interface ReuseValue extends Partial<ReuseOutcome> {
+  ok: boolean
+  blocked?: { reason: string; plannedWith: string }
+  /** Route namespace absent from the running profile: the write waits for a restart. */
+  pendingRestart?: PendingRestart
+}
+
+/** `enpoiHeavy.install` result. */
+export interface InstallValue {
+  ok: boolean
+  job?: HeavyJobView
+  blocked?: { reason: string; plannedWith: string }
+  /** Route namespace absent from the running profile: the install waits for a restart. */
+  pendingRestart?: PendingRestart
+}
+
+/** `enpoiHeavy.job` result. */
+export interface JobValue {
+  job?: HeavyJobView
+}
+
+/** `enpoiHeavy.remove` result. */
+export interface RemoveValue {
+  ok: boolean
+  summary?: RemovalSummary
+}
+
+/** Validate one wire id against the manifest table. */
+function requireManifest(value: unknown): HeavyProviderManifest {
+  if (typeof value !== 'string' || value === '') {
+    throw new RemoteError('gateway/bad-request', 'enpoiHeavy: id must be a non-empty string', {})
+  }
+  const manifest = manifestById(value)
+  if (manifest === undefined) {
+    throw new RemoteError('gateway/bad-request', `enpoiHeavy: unknown heavy provider "${value}"`, {})
+  }
+  return manifest
+}
+
+/** Normalize an optional key argument. */
+function optionalKey(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new RemoteError('gateway/bad-request', 'enpoiHeavy: key must be a string', {})
+  if (value.length > MAX_KEY_CHARS) throw new RemoteError('gateway/bad-request', 'enpoiHeavy: key is too long', {})
+  return value
+}
+
+/** The service behind the `enpoiHeavy` Remote namespace. */
+export class HeavyProvidersService extends TypertRemoteService {
+  /** Nothing is injected into the service fiber; the plugin passes its deps. */
+  static inject: string[] = []
+
+  private readonly options: HeavyServiceOptions
+  private runtimeCache: { at: number; value: RuntimeProbe } | undefined
+
+  /**
+   * @param ctx - owning context (service registration is automatic).
+   * @param options - deps accessor, job manager, and optional log sink.
+   */
+  constructor(ctx: Context, options: HeavyServiceOptions) {
+    super(ctx, 'enpoiHeavy')
+    this.options = options
+  }
+
+  /** The machine's container runtimes, memoized for one minute. */
+  private async runtime(): Promise<RuntimeProbe> {
+    const now = Date.now()
+    if (this.runtimeCache !== undefined && now - this.runtimeCache.at < RUNTIME_TTL_MS) {
+      return this.runtimeCache.value
+    }
+    const value = await detectRuntimes(this.options.deps().runStep)
+    this.runtimeCache = { at: now, value }
+    return value
+  }
+
+  /** The manifest with the operator's private overlay applied (read per call). */
+  private effectiveManifest(manifest: HeavyProviderManifest): HeavyProviderManifest {
+    return overlayManifest(manifest, readServerOverlay(this.options.deps().dshHome)[manifest.id])
+  }
+
+  /** The declared manifest table (overlay applied) plus any structural problems. */
+  @Remote
+  manifests(): ManifestsValue {
+    const overlay = readServerOverlay(this.options.deps().dshHome)
+    return {
+      items: HEAVY_MANIFESTS.map(manifest => overlayManifest(manifest, overlay[manifest.id])),
+      problems: manifestProblems(),
+      platform: process.platform,
+    }
+  }
+
+  /**
+   * One provider's configured/health/job state plus the detection/preflight
+   * fold the UI renders: an answering instance (`detectedEndpoint`), the
+   * container runtimes found, and the platform's best local path.
+   * @param request - `{ id }`.
+   * @returns the status fold; a probe failure is reported, never thrown.
+   */
+  @Remote
+  async status(request: { id?: unknown }): Promise<StatusValue> {
+    const manifest = this.effectiveManifest(requireManifest(request?.id))
+    const deps = this.options.deps()
+    const settingsNs = routeSettingsNs(manifest)
+    const profile = configuredProfile(deps, manifest.id, settingsNs)
+    const configured = profile !== undefined
+    const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
+    const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
+    const detection = await detectInstance(deps, manifest, configuredBase)
+    const runtime = await this.runtime()
+    const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : undefined)
+    const health = configuredBase === undefined
+      ? detection.health
+      : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
+    const settingsReady = settingsNamespaceReady(deps, settingsNs)
+    const job = this.options.jobs.snapshot(manifest.id)
+    return {
+      id: manifest.id,
+      manifest,
+      settingsNs,
+      ...settingsReady === undefined ? {} : { settingsReady },
+      configured,
+      ...mode === undefined ? {} : { mode },
+      health,
+      platform: process.platform,
+      runtime,
+      preflight,
+      ...detection.ok && detection.port !== undefined ? { detectedPort: detection.port } : {},
+      ...detection.ok ? { detectedEndpoint: detection.baseURL } : {},
+      ...manifest.unsupported === undefined ? {} : { unsupported: manifest.unsupported },
+      ...job === undefined ? {} : { job },
+    }
+  }
+
+  /**
+   * Add by detected instance: probe localhost, discover models, write the
+   * route at the detected address.
+   * @param request - `{ id, key? }`.
+   * @returns the route written, the probe verdict, and whether a key was stored.
+   */
+  @Remote
+  async reuse(request: { id?: unknown; key?: unknown }): Promise<ReuseValue> {
+    const manifest = this.effectiveManifest(requireManifest(request?.id))
+    const key = optionalKey(request?.key)
+    if (manifest.unsupported !== undefined) {
+      return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
+    }
+    const deps = this.options.deps()
+    // The route namespace of a custom-protocol provider (commandcode) only
+    // exists once its adapter plugin is part of the built profile: surface the
+    // ordering fact before attempting a write that would fail at mutate.
+    const pendingRestart = pendingRestartForManifest(deps, manifest)
+    if (pendingRestart !== undefined) {
+      this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
+      return { ok: false, pendingRestart }
+    }
+    const outcome = await useDetectedInstance(deps, manifest, key)
+    this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? 'ok' : 'down'} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`)
+    return { ok: true, ...outcome }
+  }
+
+  /**
+   * Add by local install: start the polled job; the route is written only when
+   * every required step succeeds. A route namespace the running profile has
+   * not mounted yet is reported as the same pending-restart result reuse
+   * returns — the install never starts a job whose finalizer would fail.
+   * @param request - `{ id, key? }`.
+   * @returns the initial job snapshot, the unsupported blocker, or the ordering result.
+   */
+  @Remote
+  install(request: { id?: unknown; key?: unknown }): InstallValue {
+    const manifest = requireManifest(request?.id)
+    const key = optionalKey(request?.key)
+    if (manifest.unsupported !== undefined) {
+      return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
+    }
+    const deps = this.options.deps()
+    const pendingRestart = pendingRestartForManifest(deps, manifest)
+    if (pendingRestart !== undefined) {
+      this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
+      return { ok: false, pendingRestart }
+    }
+    const job = this.options.jobs.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, process.platform).steps, async () => {
+      const current = this.options.deps()
+      // Re-check at the commit point: the namespace may have gone away (or the
+      // install may have been started through another surface) since the guard.
+      const late = pendingRestartForManifest(current, manifest)
+      if (late !== undefined) throw new Error(late.message)
+      const models = await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
+      await writeRoute(current, manifest, 'local', models)
+      await storeCredential(current, manifest, key)
+    })
+    return { ok: true, job }
+  }
+
+  /**
+   * Poll one provider's current job snapshot.
+   * @param request - `{ id }`.
+   * @returns the snapshot, or nothing when no job ever ran.
+   */
+  @Remote
+  job(request: { id?: unknown }): JobValue {
+    const manifest = requireManifest(request?.id)
+    const job = this.options.jobs.snapshot(manifest.id)
+    return job === undefined ? {} : { job }
+  }
+
+  /**
+   * Remove one provider: optional local teardown, then route, credential,
+   * pool state, discovered-cache entry, and chain links.
+   * @param request - `{ id, uninstall? }`.
+   * @returns what was removed; individual sub-failures land in `summary.errors`.
+   */
+  @Remote
+  async remove(request: { id?: unknown; uninstall?: unknown }): Promise<RemoveValue> {
+    const manifest = requireManifest(request?.id)
+    if (request?.uninstall !== undefined && typeof request.uninstall !== 'boolean') {
+      throw new RemoteError('gateway/bad-request', 'enpoiHeavy: uninstall must be a boolean', {})
+    }
+    const summary = await removeProvider(this.options.deps(), manifest, { uninstall: request?.uninstall === true })
+    this.options.log?.(`remove ${manifest.id}: route=${String(summary.routeRemoved)} pool=${String(summary.poolStateRemoved)} cache=${String(summary.cacheEntryRemoved)} teardown=${String(summary.teardown.ok)}`)
+    return { ok: summary.errors.length === 0, summary }
+  }
+}

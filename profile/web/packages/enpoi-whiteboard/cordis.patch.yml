@@ -1,0 +1,23 @@
+# dsh-enpoi-whiteboard bundle patch — orchestrator-authored pinned context.
+#
+# Boards are stored per scope in the shared settings namespace
+# `enpoi-orchestration.whiteboard` (`{ version, docs: { global, projects,
+# sessions } }`; a legacy single-board document migrates in place — a legacy
+# global board carrying `meta.writtenBySessionId` becomes that session's board
+# and leaves `global` empty), authored through the five whiteboard tools
+# (read/write/pin/unpin/forget). A read resolves global → project → session for
+# the assembling agent and injects only that resolved view through the
+# runtime-context seam (systemPrompt.context(), order 140 — after the keeper's
+# state checkpoint at 130 and before the recent tail). The Watchtower card's
+# primary surface is the session half of that resolution; shared project/global
+# entries stay in a collapsed disclosure. A rendered resolved board over the
+# hard budget is refused on write; path entries are flagged stale, never
+# deleted; session buckets are capped by a one-sweep-per-activation GC.
+- insert:
+    - id: enpoi-whiteboard
+      name: 'dsh-enpoi-whiteboard'
+      config:
+        # Hard rendered-token budget (doc 67 §B).
+        budgetTokens: 1500
+        # Bounded GC: newest session boards kept across activations.
+        maxSessionBoards: 200

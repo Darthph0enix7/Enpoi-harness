@@ -1,0 +1,4 @@
+# dsh-enpoi-memory — durable cross-session memory (CBDC) + bounded injection.
+- insert:
+    - id: enpoi-memory
+      name: 'dsh-enpoi-memory'

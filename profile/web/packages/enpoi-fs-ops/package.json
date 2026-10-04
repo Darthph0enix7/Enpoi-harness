@@ -1,0 +1,16 @@
+{
+  "name": "dsh-enpoi-fs-ops",
+  "version": "0.1.0",
+  "description": "File-system operations for the sidebar: rename, delete (trash-staged), mkdir, create, stat — fenced /sidebar/fsops routes",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --outfile=lib/index.js"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

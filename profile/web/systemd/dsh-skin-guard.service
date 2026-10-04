@@ -1,0 +1,8 @@
+[Unit]
+Description=Restore the Enpoi liquid-glass skin when the skin-center selection is nulled
+
+[Service]
+Type=oneshot
+ExecStart=/home/adam/.local/share/nvm/v22.22.2/bin/node /home/adam/.local/bin/dsh-skin-guard.mjs
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,38 @@
+ui-settings-general:
+  welcomeNoticeVersion: 2026-08-13.1
+ui-settings-models:
+  credentialOnboarding: false
+agent-presets:
+  default: orchestrator
+  hideSystem: true
+task-board:
+  enabled: false
+skin-background:
+  enabled: true
+  backgroundOpacity: 80
+  backgroundBlurEmpty: 15
+  backgroundBlurContent: 20
+  inputCardBlur: 8
+ui-theme:
+  preference: dark
+skin-wallpaper:
+  enabled: false
+dsh-better-sidebar:
+  titleBarCompat: false
+  defaultWidthPercent: 20
+  tabsEnabled:
+    diff: true
+    capabilities: true
+enpoi-orchestration:
+  parameters:
+    council:
+      maxDebateTokens: 180000
+      defaultHideLimit: true
+      defaultMaxRounds: 5
+      quorumFraction: 0.6666666666666666
+      debaterTimeoutMs: 90000
+      debaterRetryCount: 1
+      consensusThreshold: 0.8
+      plateauDeltaThreshold: 0.05
+    keeper:
+      structuralDistanceK: 24

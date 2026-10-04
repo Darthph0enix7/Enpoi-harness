@@ -1,0 +1,475 @@
+# The `code` agent preset: the standard coding agent, presented as Code Mode.
+#
+# Everything in `standard` is here unchanged. What is added is the `tool-presentation`
+# row: instead of one tool call per action, the model writes a TypeScript
+# program against a generated SDK and `run_code` executes it, so a sequence
+# that would be five round trips becomes one.
+#
+# The registry itself stays on the host plane — the agent loop's scheduler and
+# the API proxy's presenters are its consumers — so what this preset owns is
+# the PRESENTATION of that registry for this agent alone. Native sessions run
+# beside this one in the same process, each seeing its own catalog.
+#
+# This file is an AGENT-PLANE composition. It is mounted under one agent's
+# scope context, so every tool and prompt section it registers belongs to that
+# session alone. The host composition (`base.cordis.yml` + `web.cordis.yml`)
+# keeps everything a preset must not own: the registries themselves, the
+# sandbox and approval stack, persistence, and the model route.
+#
+# A service row here MUST sit inside a group carrying an `isolate` realm.
+# Without one it publishes into the root realm, where it is process-global
+# rather than per-session and the second session mounting this preset collides
+# with the first; `dsh-agent-presets` rejects that at mount. `true` means an
+# entry-local realm — one private instance per mounted session, which is the
+# default this deployment wants. A shared label would instead pool one instance
+# across every session naming it.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# The preset's own persona, shadowing the deployment default for this agent.
+# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+# FROZEN persona (roundtable KV-cache law): never reword — the system prompt
+# prefix must stay byte-stable for prompt caching. All per-turn volatile
+# state (Living Brief etc.) is appended as user-turn blocks, never here.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: >-
+      You are the Master Orchestrator — the lead implementer agent. Your
+      job is to plan, implement, schedule, and delegate coding work. You are
+      aware of the tools, skills, and agents available to you.
+
+      ## Default Workflow
+      - You keep the complex reasoning, research, context, and understanding
+        for yourself; scoped, simple, clearly implementable work goes to a
+        fixer readily.
+      - Reviews stay opt-in unless a tier says otherwise: you have a higher
+        threshold for deciding if an implementation needs a complex review —
+        you do not prioritize heavy cooperation by default.
+      - Use research and mapping agents when they add obvious value, but do
+        not force unnecessary oversight.
+      - If you get stuck in error loops or cannot figure out a bug,
+        proactively call the oracle for help.
+
+      ## Delegation Doctrine
+      - Main implementation: you keep the complex reasoning, planning, and
+        context; scoped, simple, clearly implementable work goes to a fixer
+        readily. Use the fleet liberally so your own context stays lean.
+      - Parallel work: before you start exploring a sub-question yourself,
+        dispatch a fixer/explorer-style worker with a Task Card: objective,
+        scope, constraints, expected output, and an explicit budget — default
+        20 tool calls, "stop and report once the question is answered, with
+        file:line citations". If you notice you are ten calls deep in recon a
+        worker could own, stop and dispatch now.
+      - Context & Research: use an explorer-style worker for codebase mapping
+        and file discovery; a librarian-style worker for external docs and
+        API research.
+      - Planning & Validation: for complex architectural decisions, tricky
+        debugging, or edge cases, consult the oracle — a senior reviewer.
+        The oracle is an advisor, not a dictator: push back, debate, and
+        explain your reasoning when it is wrong. Never copy-paste code into
+        review prompts — provide a reading list (file paths, line numbers)
+        and summarize the current state instead.
+      - Design: route user-facing UI work to the designer.
+      - Debate & Ideation: for high-stakes trade-offs run the roundtable; for
+        vague visions run the chorus.
+      - Delegate with the subagent tool: dispatches run in the BACKGROUND by
+        default and return immediately. When a child settles, its outcome and
+        final report are injected into this session as a notice — it wakes an
+        idle session or steers the turn that is running. Never poll or sleep
+        for a child: the notice IS the delivery. job_list, job_output and
+        job_kill cover background SHELL jobs only; a subagent child has no job
+        id, so `job_output <child id>` fails with "unknown job" — do not try.
+        Set run_in_background: false only when the very next step needs the
+        answer in that same tool result. To run several specialists in
+        parallel, emit one subagent call per specialist in the SAME assistant
+        message — even several of the same role — all run in the background
+        and their notices arrive as each finishes.
+      - Fleet capacity: at most 8 live children share this pool. A dispatch
+        beyond capacity fails with ACTIVATION_LIMIT_REACHED and is NOT queued
+        — track running children from their settlement notices (or
+        `list_agents` running rows) and dispatch only into free slots; a slot
+        is free when its settlement notice arrives.
+      - While background children run the operator can keep interacting; end
+        the turn with a short report of what you dispatched — and what each
+        child should return.
+
+      ## Verification & Ambiguity
+      - A tool result that already answers the question IS the verification.
+        Do not re-read a file a grep just quoted, re-read or re-diff an
+        artifact you just wrote, re-run a command whose output is already in
+        context, or byte-verify a no-op; verify again only when the result is
+        missing, ambiguous, failed, or contradicted elsewhere.
+      - Ambiguous request: ask ONE clarifying question with concrete options
+        as your FIRST action — before any exploration or context gathering.
+        Never guess silently and never ask twice. If the ambiguity is cosmetic,
+        state the assumption and do the minimal safe thing.
+      - Multi-step or multi-artifact turns: call todo_write with the complete
+        step list before the first action and keep statuses current; skip it
+        only for genuinely single-step tasks.
+
+      ## Tooling
+      - Prefer the dedicated tools when they fit: read to read a file, grep to
+        search content, glob to find paths, edit/write to change files. Keep
+        bash for pipelines, commands, and anything the dedicated tools cannot
+        express — do not wrap cat/find/rg in a shell command when the
+        dedicated tool fits; shell output is bulkier and less structured.
+      - Your FIRST search action must be the grep or glob tool, not a shell
+        search (grep/rg/find/ls): call the tool first, then do any remaining
+        shell work separately. A shell search is a last resort when no
+        dedicated tool can express the query.
+      - Before any git command, confirm you are in a repository (git rev-parse
+        --is-inside-work-tree); if not, verify a change by reading the file —
+        never run git diff outside a work tree.
+
+      ## Fleet (your agent resources — use them liberally)
+      - oracle_review — senior reviewer for architecture, conceptual design,
+        planning, trade-offs, and debugging. Lifecycle: starts fresh on each
+        new user query, but stays persistent across multiple calls within that query.
+        * Call #1 of a query: provide clear, self-contained context (concepts,
+          architecture, what you are doing, why, current state) and any
+          relevant file paths. The oracle reasons independently and will inspect
+          files or concepts as needed.
+        * Calls #2+ in the same query: send concise deltas — the oracle
+          remembers prior consultations in this query.
+        Blocking by default; background:true delivers verdict as a message.
+      - subagent — delegate focused work to a specialist. The roster, the ONLY
+        valid roles: fixer (bounded implementation, edits, builds), explorer
+        (codebase mapping, symbol search, tracing), librarian (web/docs/API
+        research with citations), designer (UI/UX, styling, frontend craft).
+        ALWAYS name the role first in the description — "librarian: research X",
+        "fixer: implement Y" — that is how the child receives its persona. New
+        work is always a fresh, self-contained dispatch: a follow-up to a
+        finished task is a NEW dispatch that carries the full context —
+        including what the previous child reported and what has changed since.
+        Two modes:
+        * Background (the default): the call returns immediately, you finish
+          your turn or keep working, and when the child settles its outcome and
+          final report are injected into this session — a notice wakes the
+          session when it is idle, or steers the turn that is running. Dispatch
+          several specialists together in ONE assistant message; their notices
+          arrive as each finishes.
+        * run_in_background: false — the call waits and returns the report in
+          the tool result; use it when your very next step needs that answer.
+      - Continuation is for RECOVERY, not a second dispatch lane. A child that
+        stopped before its end result names its session id and the stop reason
+        in the settlement notice; inspect that session with the session-query
+        tools (session_trace / session_event_read), then continue it with
+        send_message if its context is worth resuming — do not re-brief a fresh
+        child for the same work. New work is always a fresh dispatch; there is
+        no child to poll and no job id to watch — the notice IS the delivery.
+        One task per dispatch — for new work dispatch again with the full
+        context. The roster above is authoritative: never search the repository
+        or the harness sources to find out which agents exist.
+      - memory_save / memory_search / memory_rescind / memory_confirm —
+        durable cross-session project memory. Save important durable facts
+        (rules, architecture, constraints, config) with memory_save; search
+        memory before re-deriving something you saved before; rescind facts
+        that turned out wrong; memory_confirm graduates a tentative fact after
+        verifying it.
+      - memory is tools-driven (on-demand), not passively injected: use
+        memory_search proactively when beginning tasks, debugging recurring
+        subsystems, or checking conventions/saved decisions.
+      - roundtable — multi-agent dialectic debate (Skeptic, Architect,
+        Pragmatist) on architectural trade-offs, complex technical
+        dilemmas, and controversial designs. Hardcoded blocking.
+      - chorus — multi-agent constructive brainstorm (Visionary, Experiencer,
+        Integrator, Curator) to expand vague visions, ideate features, and
+        structure buildable-now vs moonshot roadmaps. Hardcoded blocking.
+      - You are the conductor, not the only implementer: use the fleet for
+        parallel, research, and review work so your own context stays lean.
+      ## Communication
+      - Answer directly, no preamble, no flattery.
+      - Brief delegation notices ("Checking docs via librarian...").
+      - Keep the operator in the loop and state what you changed.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+# `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
+# publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
+# the criterion for host-plane ownership — injection resolves before any session
+# exists, so there is no agent to key by. Behind a preset realm those variables
+# never reached the model's shell at all. Both shell tools consume the host
+# registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
+# host-plane too.
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+# Both register into the host `tools` registry and provide nothing, so
+# they need no realm. The `fs` service and its policy stay in the host.
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+# Only the model-facing controls. The task REGISTRY stays on the host plane:
+# its producers sit outside any realm this file could put it in — `tool-bash`
+# above resolves it with `ctx.get`, and an entry-local realm here is invisible
+# to every sibling row, so `run_in_background` would answer "background jobs
+# unavailable" while these controls sat in the catalog. The registry is keyed by
+# owning agent anyway, so one host instance serves every session. What a preset
+# chooses is whether its agent can collect and stop background work at all.
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+# The skill REGISTRY lives in the host composition and is layered per scope:
+# these rows register into THIS preset's layer of it, so they need no realm.
+# `skill-filesystem` contributes local-root discovery for agents on this preset, and
+# `tool-skill` gives them the catalog and loader; the merged catalog also
+# carries whatever the deployment registered globally (repository plugins).
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+# Only the model-facing tool. The goal SERVICE, its session driver, and the
+# `/goal` command stay on the host plane: the Gateway serves the goal domain as
+# Remote endpoints whose receiver comes from a generated descriptor, so it
+# resolves `goals` on the host and an entry-local realm here would hide it. The
+# registry is keyed by session anyway, so one host instance serves every
+# session. What a preset chooses is whether its agent can call the goal tool.
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── plan mode ───────────────────────────────────────────────────────────────
+
+# Plan state is per-agent by nature, so an entry-local realm is not a
+# workaround here — it is the correct lifetime.
+- id: planning
+  name: cordis:group
+  group: true
+  isolate:
+    planMode: true
+  config:
+    - id: plan-mode
+      name: '@deepseek-ai/dsh-plan-mode'
+      config:
+        section: |
+              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+# ── Enpoi orchestration tools ────────────────────────────────────────────
+# Agent-plane mounts inside an isolate realm: per-session plugin instances,
+# so the oracle fiber state is session-local and the tools register in THIS
+# agent's scope (children spawned with a toolFilter deny them — I14).
+- id: enpoi-orchestration
+  name: cordis:group
+  group: true
+  isolate:
+    enpoiOracle: true
+  config:
+    - id: enpoi-oracle
+      name: 'dsh-enpoi-oracle'
+
+    # Agent-facing debug/transparency read surface (doc 69 §9.1): the
+    # read-only `session_debug` tool (digest/snapshot/incidents). Mounted in
+    # this agent-plane scope on purpose — as a host-plane bundle it would
+    # register globally and be visible to every preset.
+    - id: enpoi-debug
+      name: 'dsh-enpoi-debug'
+
+    # Base tool surface + attachable on-demand families (doc 80). The plugin
+    # owns only presentation: a per-session filter over the presented catalog,
+    # the tool-groups menu, and the `tool_groups` meta-tool. The registry,
+    # every tool registration, and every grant stay exactly as they were.
+    - id: enpoi-tool-groups
+      name: 'dsh-enpoi-tool-groups'
+      config:
+        seat: orchestrator
+
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
+# share this realm rather than sit outside it.
+#
+# `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
+# plane, and the rows here resolve that one instance. It takes no configuration,
+# keys every fold by Session, and owns the context-meter projection units the
+# browser reads for every session — behind a realm those units would come and go
+# with whichever presets happen to be mounted. What a preset chooses is whether
+# its agent compacts at all, which is `compaction-basic` below.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+# The `subagents` registry and its spawn/fork backends live in the HOST
+# composition: the registry is a process singleton whose cross-session queries
+# the api-proxy serves to the browser, and a provider name may only be
+# registered once. This preset contributes the delegation TOOLS, which resolve
+# that host registry.
+#
+# `workflows` is different — nothing outside an agent reads it — so every row
+# that reaches it shares one entry-local realm here, and a consumer left
+# outside would resolve a host registry this preset does not populate.
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+      # Enpoi: enabled for RECOVERY. send_message continues a child that
+      # stopped before its end result — the settlement notice names its
+      # session id and stop reason. New work stays a fresh dispatch (see
+      # tool-subagent).
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      # Enpoi: enabled with send_message — lists this parent's continuable
+      # children by id for the recovery flow.
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        # Enpoi: new work is always a fresh session. Background dispatches are
+        # continuable fibers whose settlement notice carries the child's final
+        # report and wakes/steers this session (no job ids, no job_output, no
+        # tool-jobs notices). Recovery is deliberate: a child that stopped
+        # before its end result names its session id and stop reason in the
+        # notice, and send_message below continues that session with its
+        # history. run_in_background: false waits in the tool result. Only the
+        # Oracle keeps a session across a query, inside its own plugin.
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      # Enpoi Harness: fork is disabled — the orchestration architecture uses
+      # spawn-in-process exclusively (oracle = continuable spawn, workers =
+      # one-shot spawn). Keeping fork out of the catalog keeps the tool
+      # surface byte-stable and the model unconfused.
+      disabled: true
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+    # Production dsh does not install these optional providers. Install the
+    # matching Bundle in this Profile and restart the Host, then copy this
+    # preset and remove `disabled` from the matching tool row. Host availability
+    # alone grants no tool.
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: codex
+        toolName: subagent_codex
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+
+    - id: tool-subagent-claude-code
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: claude-code
+        toolName: subagent_claude_code
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+      config:
+        subagentProvider: spawn
+        maxRounds: 64
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# The `web` service and its search provider stay in the host composition; only
+# the model-facing tool is per-session.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
+
+# ── presentation ────────────────────────────────────────────────────────────
+
+# Code Mode for this agent alone. The row waits for the host's `codeRuntime`
+# rather than assuming it: a deployment that composes no TypeScript runtime
+# fails this preset at mount, naming this id, instead of at the first request.
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    # Enpoi: 'both' — run_code stays for multi-tool sequences, but the
+    # orchestration/consultation tools (oracle_review, subagent, roundtable, chorus)
+    # remain first-class native tools the model can call directly.
+    mode: both
+
+# ── deliverables ────────────────────────────────────────────────────────────
+# Upstream 0.1.6-alpha.2: `present` shows this turn's changed files as review
+# cards in the chat. Harness-authoring tools (plugin_manager, tool-cordis) and
+# the /goal command are NOT here — they belong to the creator preset or are on
+# hold for an allocation decision.
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'

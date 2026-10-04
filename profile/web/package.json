@@ -1,0 +1,92 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "@linxin666/dsh-client-ui-skin-center": "^0.3.21",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "dsh-context": "0.54.4",
+    "dsh-context-lens": "0.3.1",
+    "dsh-enpoi-agent-switch": "workspace:*",
+    "dsh-enpoi-capabilities": "workspace:*",
+    "dsh-enpoi-cascade": "workspace:*",
+    "dsh-enpoi-catalog-rules": "workspace:*",
+    "dsh-enpoi-context-keeper": "workspace:*",
+    "dsh-enpoi-contracts": "workspace:*",
+    "dsh-enpoi-council": "workspace:*",
+    "dsh-enpoi-custom-tools": "workspace:*",
+    "dsh-enpoi-debug": "workspace:*",
+    "dsh-enpoi-diagnostics": "workspace:*",
+    "dsh-enpoi-file-revert": "workspace:*",
+    "dsh-enpoi-fs-ops": "workspace:*",
+    "dsh-enpoi-git": "workspace:*",
+    "dsh-enpoi-heavy-providers": "workspace:*",
+    "dsh-enpoi-living-brief": "workspace:*",
+    "dsh-enpoi-memory": "workspace:*",
+    "dsh-enpoi-model-chains": "workspace:*",
+    "dsh-enpoi-oracle": "workspace:*",
+    "dsh-enpoi-peer-bridge": "workspace:*",
+    "dsh-enpoi-preset-authoring": "workspace:*",
+    "dsh-enpoi-provider-sync": "workspace:*",
+    "dsh-enpoi-role-registry": "workspace:*",
+    "dsh-enpoi-runtime-probe": "workspace:*",
+    "dsh-enpoi-tool-groups": "workspace:*",
+    "dsh-enpoi-ui-state": "workspace:*",
+    "dsh-enpoi-verify-gate": "workspace:*",
+    "dsh-enpoi-whiteboard": "workspace:*",
+    "dsh-fast": "0.2.14",
+    "dsh-enpoi-commandcode-provider": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "esbuild": "^0.25.0",
+    "vitest": "^4.1.8"
+  },
+  "scripts": {
+    "postinstall": "node scripts/dsh-rebrand.mjs"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@linxin666/dsh-client-ui-skin-center",
+        "dsh-enpoi-diagnostics",
+        "dsh-enpoi-verify-gate",
+        "dsh-enpoi-provider-sync",
+        "dsh-enpoi-living-brief",
+        "dsh-enpoi-context-keeper",
+        "dsh-enpoi-runtime-probe",
+        "dsh-enpoi-heavy-providers",
+        "dsh-enpoi-cascade",
+        "dsh-enpoi-memory",
+        "dsh-enpoi-council",
+        "dsh-enpoi-capabilities",
+        "dsh-enpoi-file-revert",
+        "dsh-enpoi-fs-ops",
+        "dsh-enpoi-git",
+        "dsh-enpoi-ui-state",
+        "dsh-enpoi-agent-switch",
+        "dsh-enpoi-model-chains",
+        "dsh-enpoi-catalog-rules",
+        "dsh-enpoi-custom-tools",
+        "dsh-enpoi-peer-bridge",
+        "dsh-enpoi-role-registry",
+        "dsh-enpoi-preset-authoring",
+        "dsh-enpoi-whiteboard",
+        "dsh-fast",
+        "dsh-context",
+        "dsh-enpoi-commandcode-provider"
+      ]
+    }
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@deepseek-ai/dsh-web-frontend@0.1.7-enpoi.1": "patches/@deepseek-ai__dsh-web-frontend@0.1.7-enpoi.1.patch"
+    },
+    "allowNonAppliedPatches": true,
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

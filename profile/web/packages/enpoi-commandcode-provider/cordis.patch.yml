@@ -1,0 +1,8 @@
+# dsh-enpoi-commandcode-provider bundle patch — mounts the Command Code route.
+#
+# The route stays dormant until the heavy-provider flow (or an operator) writes
+# `providers.commandcode` into this entry's settings section. The adapter then
+# serves the CLI-shaped /alpha/generate protocol through the local keypool.
+- insert:
+    - id: commandcode-provider
+      name: 'dsh-enpoi-commandcode-provider'

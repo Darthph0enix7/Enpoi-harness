@@ -1,0 +1,33 @@
+# dsh-enpoi-context-keeper bundle patch — demand-driven cognition service.
+#
+# The prose Living Brief is materialized ON DEMAND via ensureFreshBrief(),
+# consumed exclusively by the Oracle (call #1) and Council (roundtable/chorus
+# start). Memory claims are batched (every N turn/ends or T minutes).
+# The 30s-debounce push model is retired (Oracle amendment 7).
+- insert:
+    - id: enpoi-context-keeper
+      name: 'dsh-enpoi-context-keeper'
+      config:
+        # Free-quota primary (operator: freellmapi for background/repetitive work)
+        # + one fallback (soft-degrading, never blocks).
+        provider: freellmapi
+        model: auto
+        fallbackProvider: antigravity
+        fallbackModel: gemini-3.7-flash-tiered
+        leaseMs: 45000
+        maxInputEvents: 80
+        maxOutputTokens: 2048
+        # Structural-event distance that triggers a re-distillation.
+        structuralDistanceK: 24
+        # Anti-thrash floor: reuse a distillation younger than this.
+        minRefreshMs: 60000
+        # Failure negative-cache window.
+        negativeCacheMs: 120000
+        # Claims batch: one pass per 8 non-aborted turn/ends or 5 minutes.
+        claimsBatchSize: 8
+        claimsBatchMinutes: 5
+        # State checkpoint staleness floor (doc 67 §A): refresh when >= N
+        # structural events or >= T hours passed since the last checkpoint,
+        # while token pressure is above half the context window.
+        checkpointStaleEvents: 12
+        checkpointStaleHours: 24

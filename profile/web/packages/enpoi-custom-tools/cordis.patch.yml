@@ -1,0 +1,7 @@
+# dsh-enpoi-custom-tools — operator-authored command tools. Reads the shared
+# enpoi-orchestration document (customTools) and registers one real tool per
+# record; execution renders the command with shell-quoted params and runs it
+# through the harness shell under the same policy guard as bash.
+- insert:
+    - id: enpoi-custom-tools
+      name: 'dsh-enpoi-custom-tools'

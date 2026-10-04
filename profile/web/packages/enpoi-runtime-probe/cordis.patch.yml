@@ -1,0 +1,9 @@
+# dsh-enpoi-runtime-probe bundle patch — mounts the startup seam tripwire.
+#
+# Verifies the three pinned engine seams (sessionProjections.register,
+# startContinuable, installModelSelection) at boot and logs loudly with
+# per-seam degradation — a broken upstream seam can never brick the harness
+# (doc 35 §11.2).
+- insert:
+    - id: enpoi-runtime-probe
+      name: 'dsh-enpoi-runtime-probe'

@@ -1,0 +1,5 @@
+# dsh-enpoi-catalog-rules — dynamic visibility/privacy/group selectors for the
+# synced model catalogue (catalogRules service).
+- insert:
+    - id: enpoi-catalog-rules
+      name: 'dsh-enpoi-catalog-rules'

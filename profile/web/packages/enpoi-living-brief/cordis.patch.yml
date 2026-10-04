@@ -1,0 +1,9 @@
+# dsh-enpoi-living-brief bundle patch — mounts the Living Brief projection
+# unit into the Enpoi Harness web profile.
+#
+# The unit folds deterministic session state (phase, files touched, blockers)
+# plus the context keeper's prose updates into one always-fresh snapshot
+# served through ctx.sessionProjections (doc 31 §2, doc 34 I2/I3).
+- insert:
+    - id: enpoi-living-brief
+      name: 'dsh-enpoi-living-brief'

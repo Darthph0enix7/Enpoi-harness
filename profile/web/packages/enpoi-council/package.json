@@ -1,0 +1,21 @@
+{
+  "name": "dsh-enpoi-council",
+  "version": "0.1.0",
+  "description": "High Council multi-agent debate (roundtable) and brainstorming (chorus), plus settings-defined councils (council_register/council_list, enpoiCouncil remote)",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:dsh-enpoi-context-keeper --outfile=lib/index.js"
+  },
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
+  },
+  "peerDependencies": {
+    "dsh-enpoi-context-keeper": "workspace:*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

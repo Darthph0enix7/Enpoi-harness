@@ -1,0 +1,4 @@
+# dsh-enpoi-file-revert — file revert & rollback protection.
+- insert:
+    - id: enpoi-file-revert
+      name: 'dsh-enpoi-file-revert'

@@ -1,0 +1,12 @@
+{
+  "active": "summer-liquid-glass",
+  "initialized": true,
+  "background": {
+    "enabled": true,
+    "backgroundOpacity": 30,
+    "backgroundBlurEmpty": 4,
+    "backgroundBlurContent": 10,
+    "inputCardBlur": 17,
+    "bubbleOpacity": 50
+  }
+}

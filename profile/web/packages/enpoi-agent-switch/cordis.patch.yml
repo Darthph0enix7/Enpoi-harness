@@ -1,0 +1,9 @@
+# dsh-enpoi-agent-switch — cache-preserving mid-session agent switch.
+#
+# On `agent-preset/selected` this plugin shadows the original preset's persona
+# sections on the agent's own scope (so the assembled system prompt never
+# changes) and publishes the newly selected preset's persona as a trailing
+# `agent-switch` runtime-context delta that is replaced in place.
+- insert:
+    - id: enpoi-agent-switch
+      name: 'dsh-enpoi-agent-switch'

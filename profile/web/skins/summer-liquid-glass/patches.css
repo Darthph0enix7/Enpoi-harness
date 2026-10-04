@@ -1,0 +1,307 @@
+/* summer-liquid-glass patches — DOM-level glass polish. The skin-center owns
+   this file's injection: it is added when the skin is active and removed on
+   switch, so every selector here is global (no body-attribute scoping). */
+
+[id="root"] {
+  background: none;
+}
+
+/* The composer's glass is the input CARD alone (the skin-center frost painted
+   on [data-composer-card]). The seat must never carry a session-wide layer of
+   its own: the shell's rc.8 seat gradient and this skin's former seat ::before
+   mask (gradient + blur(34px), inset 0) spanned the whole conversation column,
+   so the card read as one more pane of the glazed session instead of a blob
+   floating over it — left/right filled bands with a second translucent layer
+   (operator's input-card report). ConversationRoot already paints no seat
+   ground (background: none), and the skin-center scene neutralizer removed the
+   same layer only while backdrop art was mounted; deleting the rule here makes
+   the card the sole composer glass in every state, marker or not. */
+[data-phase="active"] [class*="composerSeat"] {
+  background: none !important;
+}
+
+/* The skin's ring is a default, never an override. The skin-center force-scopes
+   every patches selector under html[data-dsh-skin="…"] (specificity 0-1-1), so
+   :where() alone cannot yield to a component's single-class `outline: none`.
+   A cascade layer does: every unlayered base and component rule outranks a
+   layered rule regardless of specificity, while a focused element with no
+   component rule still takes the skin's ring. The colour rides the shared
+   --dsw-focus-ring-color hook set in skin.css. */
+@layer dsh-skin-default {
+  :where(:focus-visible) {
+    outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+    outline-offset: 2px;
+  }
+}
+
+a {
+  color: #67DCE7;
+}
+
+a:hover {
+  color: #86e2ea;
+  text-decoration: underline;
+}
+
+a:visited {
+  color: #b18df0;
+}
+
+/* Floating glass surfaces: frosted blur, inner highlight, diffuse shadow.
+   Decoration lands on the rounded surface, never on a role container nested
+   inside one: a role="dialog"/"menu"/"listbox" that sits inside a
+   `[data-dsh-list-surface]` box (a menu's scrolling viewport, the clock columns, a
+   sheet's option list, the move-to-folder list) is an inset scroll region —
+   the surface that carries the radius owns the glass. The shared surfaces
+   mark themselves with data-dsh-list-surface (MenuSurface, Sheet, Modal, the
+   schedule picker) and share the concentric radius contract in ui-theme's
+   base.css, so any surface the base adds later is covered without this file
+   learning its class names. `-webkit-backdrop-filter` is deliberately
+   absent: lightningcss dedupes it against the standard property and emits
+   only the prefixed one, which Chromium then ignores (all blur lost). */
+[role="dialog"]:not([data-dsh-list-surface] *),
+[role="menu"]:not([data-dsh-list-surface] *),
+[role="listbox"]:not([data-dsh-list-surface] *),
+[data-dsh-list-surface],
+[data-gitgraph-dialog] {
+  backdrop-filter: blur(30px) saturate(145%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 30px rgba(0, 7, 18, 0.25);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.07) 0%,
+    rgba(255, 255, 255, 0.015) 18%,
+    rgba(255, 255, 255, 0) 42%
+  );
+}
+
+/* The chat header's sub-agent hover list: portalled to body as a bare
+   role="tree" (outside the role set above), so it stayed blur-less and the
+   chat text under it read through. Same glass, token-driven strength. The
+   menu token resolves to the float tier (68% alpha), so give the list the
+   overlay ground the other glass floats carry. */
+body > [role="tree"] {
+  background-color: var(--dsw-alias-bg-overlay);
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 30px rgba(0, 7, 18, 0.25);
+}
+
+/* dsh-context's Context Insights overlay card. It carries no role, so the
+   dialog glass above never matches it, and its own
+   `background: var(--dsw-alias-bg-layer-1)` resolves to the skin's
+   translucent layer tier with no blur — the transcript read straight through.
+   Same glass as the dialog set. */
+.lc-ov-card.lc-ov-card {
+  background-color: var(--dsw-alias-bg-overlay);
+  backdrop-filter: blur(30px) saturate(145%);
+}
+
+/* dsh-context's ContextIcon hard-codes six fills as presentation attributes
+   on its paths, so the emblem stayed multi-coloured in every host (chat
+   footer entry, right rail, pane title, menu). Presentation attributes lose
+   to any CSS rule, so repaint them with the inherited color and the icon
+   follows whatever label tone its host already sets. */
+path[fill="#4A5699"],
+path[fill="#C45FA0"],
+path[fill="#6277BA"],
+path[fill="#E5594F"],
+path[fill="#F0D043"],
+path[fill="#F39A2B"] {
+  fill: currentColor;
+}
+
+/* Upstream Plugins page (add / activate / remove): the panel scrolls straight
+   on the app frame with no surface of its own, so the wallpaper kept full
+   contrast behind its rows. Give it the composer card's darkened + blurred
+   glass, hot-swappable from the skin-center input-card blur setting. */
+[data-plugin-panel] {
+  background: var(--dsw-specific-input-major, rgba(13, 20, 35, 0.65));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
+[role="tooltip"] {
+  backdrop-filter: blur(20px) saturate(135%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 10px 28px rgba(0, 7, 18, 0.3);
+  /* The skin re-points --dsw-static-neutral-bluish-00 at its darkest navy for
+     filled surfaces, but the tooltip uses that token as the text color on its
+     own dark bubble — keep the bubble's copy light with the scale's light end. */
+  color: var(--dsw-static-neutral-bluish-1000, #F8F3F5);
+}
+
+/* Thin-glass buttons: hover lifts the inner edge, press darkens (no scale). */
+button:not(:disabled):hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+button:not(:disabled):active {
+  filter: brightness(0.92);
+  box-shadow: inset 0 1px 2px rgba(0, 7, 18, 0.35);
+}
+
+button,
+a {
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+    box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+
+/* git-graph commit-graph palette. */
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n+1),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n+1) { color: #67DCE7; }
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n+2),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n+2) { color: #CBE77D; }
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n+3),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n+3) { color: #F3B75F; }
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n+4),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n+4) { color: #DD8FAC; }
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n+5),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n+5) { color: #86e2ea; }
+[data-gitgraph-lanes] > [data-gitgraph-glyph="node"]:nth-child(6n),
+[data-gitgraph-lanes] > [data-gitgraph-glyph="merge"]:nth-child(6n) { color: #d6ee9a; }
+
+[data-gitgraph-ref]:not([data-gitgraph-ref-current]) {
+  background: rgba(103, 220, 231, 0.12);
+  border: 1px solid rgba(103, 220, 231, 0.1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  a {
+    transition: none;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --dsw-glass-normal: rgba(10, 18, 31, 0.82);
+    --dsw-glass-high: rgba(7, 15, 27, 0.92);
+    --dsw-glass-float: rgba(16, 22, 37, 0.9);
+  }
+}
+
+/* ── enpoi: sidebar nav accent legibility ──────────────────────────────────
+   The v2 skin set --dsw-specific-sidebar-nav-item-active-accent to a dark
+   navy (#1f3a56), but the sidebar rail renders it as the ICON COLOR of the
+   active/clicked item — dark-on-dark, unreadable. The accent is a foreground
+   token; give it the theme's bright cyan instead. (The matching fill tokens,
+   --dsw-specific-sidebar-nav-item-active/-hover, stay dark: those ARE
+   backgrounds.) */
+:root {
+  --dsw-specific-sidebar-nav-item-active-accent: #7FE3EC;
+}
+
+/* enpoi: fullscreen right-column surfaces need an opaque ground. The glass
+   token --dsw-alias-bg-base is translucent by design, so a pushed file/tree
+   panel on a phone let the chat text bleed through (mobile-1-08/09), and the
+   narrow desktop frame's automatic (or the operator's manual) fullscreen has
+   the same presentation without the mobile marker. Near-opaque ground per the
+   phone blur policy — real blur stays reserved for small overlays. */
+:root { --dsh-mobile-surface-bg: #121927; }
+[data-mobile-frame] [data-sidebar-right-panel='fullscreen'],
+[data-sidebar-right-panel='fullscreen'] {
+  background-color: var(--dsh-mobile-surface-bg);
+}
+
+/* ── enpoi: upstream file cards on the chat glass ─────────────────────────
+   The card FILL is upstream's own now: --dsw-static-neutral-850/800 carry
+   upstream's dark-mode values (see skin.css), so the changed-files,
+   delivered-file and plan cards are dark tiles wherever upstream paints
+   them. The earlier per-surface repaint is gone with the light-blue token;
+   what remains is only what a token cannot express — this skin's translucent
+   ground, the shared input-card blur, and the house 8px radius/gutter for the
+   two cards that sit inside the transcript. The modules' own label tokens are
+   legible on the glass ground, so no ink overrides are kept. */
+
+[data-changed-files] {
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.14));
+  border-radius: 8px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.55));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
+/* The upstream header paints the opaque fill itself; on the glass ground it
+   must not re-cover the rounded card. */
+[data-changed-files] > button:first-child {
+  padding: 12px;
+  background: transparent;
+}
+
+[data-changed-files] > button:first-child:hover:not(:disabled),
+[data-changed-files] > button:first-child:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* House density for the file rows and the fold control. */
+[data-changed-files] > ul > li > button,
+[data-changed-files] > ul + button {
+  padding: 12px;
+}
+
+[data-presented-file] {
+  height: auto;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.14));
+  border-radius: 8px;
+  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.55));
+  backdrop-filter: blur(var(--dsh-input-card-blur, 8px)) saturate(140%);
+}
+
+[data-presented-files-row] [data-presented-file]:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* ── enpoi: state-pill legibility (frozen 2026-09-27) ──────────────────────
+   Upstream's dark theme maps --dsw-alias-state-error-primary AND -secondary
+   onto red-400, so the pool error pill rendered error-primary ink on an
+   error-secondary ground — 1.21:1 in this skin (red on red). Repaint it in
+   the same shape as the other state pills: the error ink over a dimmed error
+   ground (>= 5:1 over the night glass). The matching trajectory chips are
+   fixed at the token level in skin.css (their success/warn tertiary grounds
+   were lightened too far); dsh-token-contrast.mjs gates both. */
+[class*="poolPillError"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* ── enpoi: badge legibility (frozen 2026-09-27) ──────────────────────────
+   Four module-level pairings the token map cannot reach:
+   - agent-preset .brokenBadge: error-primary fill with --dsw-alias-bg-layer-3
+     as ink; the skin's layer tokens are translucent dark, 2.24:1.
+   - ui-primitives solid tag: label-primary fill, same dark layer as ink (the
+     layer token is an upstream light-mode inversion this dark skin cannot
+     share), 2.85:1.
+   - composer .badge: sidebar-accent fill with button-info-fill ink, 3.10:1.
+   - RevertTray .badgeError: upstream raw reds on the dark glass, 4.11:1.
+   The two error pills take the poolPillError shape (dim error ground + error
+   ink); the solid tag and the accent badge keep their fills and take the
+   skin's dark ink tokens. dsh-token-contrast.mjs gates all four. */
+[class*="brokenBadge"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+[data-tone='solid'] {
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+[class*="optionLine"] > [class*="badge"] {
+  color: var(--dsw-alias-brand-primary-invert);
+}
+
+[class*="badgeError"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Menu material: this skin deliberately does NOT define
+   --dsw-menu-backdrop-filter. ui-theme owns it (gradient-shadow-text.css,
+   injected at runtime — the live body computes blur(40px) saturate(150%)),
+   and this file's [role="menu"]/[role="listbox"]/[role="dialog"] rule layers
+   the skin's 30px/145% glass on top. dsh-token-contrast.mjs asserts the
+   upstream definition stays present, because MenuSurface.module.css consumes
+   it and menus lose their blur if it ever vanishes. */

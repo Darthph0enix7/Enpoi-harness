@@ -976,6 +976,11 @@ apply_profile_ref_default() { # from_state(0|1) -> sets PROFILE_REF from $CHANNE
 }
 
 prepare_profile() {
+  if [ -z "$PROFILE_SOURCE" ] || [ "$PROFILE_SOURCE" = "$DEFAULT_PROFILE_SOURCE" ]; then
+    if [ -n "${HARNESS:-}" ] && [ -d "$HARNESS/profile/$PROFILE" ]; then
+      PROFILE_SOURCE="$HARNESS/profile/$PROFILE"
+    fi
+  fi
   [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; return 0; }
   local kind rc=0 mode=seed fresh=0
   kind="$(profile_source_kind "$PROFILE_SOURCE")"

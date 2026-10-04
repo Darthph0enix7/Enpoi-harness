@@ -1,0 +1,57 @@
+# dsh-enpoi-provider-sync bundle patch — mounts the provider-catalog sync
+# plugin into the Enpoi Harness web profile.
+#
+# The plugin refreshes each configured `llm-pi-ai` provider route's model list
+# from the provider's own `GET {baseURL}/models` endpoint and writes the
+# adopted entries back through the settings seam, so the pi-ai adapter
+# re-registers live (hot-swap, no restart). It runs once after boot and then
+# on the configured interval.
+- insert:
+    - id: enpoi-provider-sync
+      name: 'dsh-enpoi-provider-sync'
+      config:
+        # One pass shortly after boot, then every 6 hours.
+        intervalMs: 21600000
+        syncOnStart: true
+        syncDelayMs: 8000
+        # Known endpoints for routes whose profile leaves baseURL to the
+        # pi-ai catalog default (baseURL set in the profile always wins).
+        # A route listed here but not yet configured is still fetched: its
+        # models land in the shared discovered-model cache (source:
+        # discovered) so the provider editor can save the preset and the
+        # picker can list them before any models are written to settings.
+        # Kilo is seeded as an endpoint, not as a model list: discovery is
+        # primary because Kilo rotates its free pool server-side, and a
+        # hand-copied :free list would go stale silently. Anonymous, no key.
+        #
+        # HEAVY providers (freellmapi, antigravity, commandcode) are NOT
+        # seeded here: they are preset-only until the operator adds one, and
+        # an uninstalled heavy route must never be probed/written by the
+        # hourly pass. Once added, the route itself is configured and syncs
+        # through `baseURL` like every other route.
+        endpoints:
+          deepseek: https://api.deepseek.com
+          openrouter: https://openrouter.ai/api/v1
+          huggingface: https://router.huggingface.co/v1
+          kilo: https://api.kilo.ai/api/gateway
+        # Capacity fallbacks for models the live /models endpoint does not
+        # describe (most OpenAI-style listings carry only ids). Catalog
+        # routes still inherit pi-ai catalog capacities for known ids; these
+        # defaults cover brand-new ids. `prefixes` matches by model-id
+        # prefix; `default` covers everything else on the route.
+        capacityDefaults:
+          opencode-go:
+            default: { contextWindow: 1000000, maxTokens: 16384 }
+          opencode:
+            default: { contextWindow: 1000000, maxTokens: 64000 }
+          minimax:
+            default: { contextWindow: 1000000, maxTokens: 16384 }
+          deepseek:
+            default: { contextWindow: 1000000, maxTokens: 8192 }
+          huggingface:
+            default: { contextWindow: 262144, maxTokens: 8192 }
+          antigravity:
+            prefixes:
+              gemini: { contextWindow: 1048576, maxTokens: 65536 }
+              claude: { contextWindow: 1000000, maxTokens: 64000 }
+            default: { contextWindow: 1048576, maxTokens: 65536 }

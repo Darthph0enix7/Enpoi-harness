@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek Harness tailnet forwarder (Tailscale IP :3080 -> 127.0.0.1:3080)
+After=dsh-web.service network-online.target tailscaled.service
+Requires=dsh-web.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:3080,bind=100.122.163.25,fork,reuseaddr TCP:127.0.0.1:3080
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

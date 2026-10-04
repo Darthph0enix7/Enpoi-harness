@@ -1,0 +1,4 @@
+# dsh-enpoi-oracle — mounts the oracle consultation tool into the web profile.
+- insert:
+    - id: enpoi-oracle
+      name: 'dsh-enpoi-oracle'

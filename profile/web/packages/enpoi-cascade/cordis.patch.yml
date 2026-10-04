@@ -1,0 +1,4 @@
+# dsh-enpoi-cascade — mounts the user-stop cancellation cascade.
+- insert:
+    - id: enpoi-cascade
+      name: 'dsh-enpoi-cascade'

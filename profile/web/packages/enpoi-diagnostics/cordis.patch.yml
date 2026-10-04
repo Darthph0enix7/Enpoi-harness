@@ -1,0 +1,21 @@
+# dsh-enpoi-diagnostics — incident bus, deterministic pattern rollups, and the
+# agent/operator report surfaces (doc 68 P1: capture + visibility).
+#
+# Owns $DSH_HOME/diagnostics/incidents.sqlite. Everything is fail-open: a
+# failure inside diagnostics is swallowed, counted once, and never blocks a
+# turn, a boot, or any other plugin.
+- insert:
+    - id: enpoi-diagnostics
+      name: 'dsh-enpoi-diagnostics'
+      config:
+        # Row caps (hard bounds; oldest rows/patterns are evicted first).
+        maxIncidents: 5000
+        maxPatterns: 2000
+        # Occurrences of one fingerprint inside this window collapse into one
+        # incident row (`count` carries the burst size, `at` is the bucket start).
+        cooldownMs: 300000
+        # Queued-incident flush cadence; capture never writes synchronously.
+        flushMs: 250
+        captureLogs: true
+        captureSessionEvents: true
+        capturePluginLifecycle: true

@@ -1,0 +1,11 @@
+# dsh-enpoi-capabilities — capabilities control center (guard + runtime-context line + skill shadows).
+#
+# The entry id is `enpoi-orchestration`, not the package name: after the 0.1.7
+# settings→plugin-Config migration the settings service imports the
+# `enpoi-orchestration` section of the legacy `settings.yaml` into the profile
+# entry of the SAME id, and every other enpoi plugin reads the shared document
+# back through that entry (`dsh-enpoi-contracts:readOrchestrationDocument`).
+# This plugin owns the document's Config schema (volatile fields → live form).
+- insert:
+    - id: enpoi-orchestration
+      name: 'dsh-enpoi-capabilities'

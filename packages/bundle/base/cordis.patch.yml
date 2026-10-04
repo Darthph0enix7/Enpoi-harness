@@ -501,6 +501,13 @@
     - id: web-fetch-http
       name: '@deepseek-ai/dsh-web-fetch-http'
 
+    # The welcome wizard's host controller (the `webSetup` Remote namespace).
+    # Baked into the base composition so every fresh home has it without any
+    # profile-template change; the provider catalog it serves lives in this
+    # package, so catalog updates ship with harness versions.
+    - id: web-setup
+      name: '@deepseek-ai/dsh-web-setup'
+
     - id: tool-web
       name: '@deepseek-ai/dsh-tool-web'
       config:

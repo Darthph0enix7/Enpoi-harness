@@ -1,0 +1,4 @@
+# dsh-enpoi-git — repository awareness for the right sidebar (enpoiGit Remote namespace).
+- insert:
+    - id: enpoi-git
+      name: 'dsh-enpoi-git'

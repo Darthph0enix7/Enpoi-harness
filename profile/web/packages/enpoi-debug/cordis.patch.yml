@@ -1,0 +1,11 @@
+# dsh-enpoi-debug — agent-facing debug/transparency read surface (doc 69 §9.1).
+#
+# DELIBERATELY NOT listed in the profile's `dsh.profile.bundles`: a host-plane
+# mount would register `session_debug` into the global tools layer, making it
+# visible to every agent. The plugin is mounted inside the `enpoi-orchestration`
+# group of the `orchestrator` and `sysadmin` presets only, so the tool lands in
+# those agents' own tools layer and nowhere else. This patch file exists so the
+# package still follows the house bundle-patch shape if it is ever promoted.
+- insert:
+    - id: enpoi-debug
+      name: 'dsh-enpoi-debug'

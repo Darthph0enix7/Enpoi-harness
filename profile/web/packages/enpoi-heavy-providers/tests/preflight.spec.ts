@@ -1,0 +1,125 @@
+/**
+ * Detection and runtime preflight: localhost probes are fail-soft and prefer
+ * the recorded port, the machine's container runtimes are detected with one
+ * shell probe, and chooseLocalPath picks the platform's best path — vendor
+ * desktop app, Docker, or Podman — or names the exact missing requirement.
+ */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+import { manifestById } from '../src/manifests.js'
+import {
+  chooseLocalPath,
+  detectInstance,
+  detectRuntimes,
+  instanceCandidates,
+  overlayManifest,
+  readServerOverlay,
+  type FetchLike,
+  type HeavyDeps,
+  type RuntimeProbe,
+} from '../src/planner.js'
+
+const scratch: string[] = []
+afterEach(() => {
+  for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+function scratchDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'heavy-preflight-'))
+  scratch.push(dir)
+  return dir
+}
+
+function depsWith(fetch: FetchLike): HeavyDeps {
+  const dir = scratchDir()
+  return {
+    home: dir,
+    dshHome: join(dir, '.dsh'),
+    fetchImpl: fetch,
+    runStep: async () => ({ exitCode: 0, output: '' }),
+  }
+}
+
+const found: FetchLike = vi.fn(async (url) => url.includes(':3002')
+  ? { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+  : { ok: false, status: 503, text: async () => 'down' })
+
+it('detection returns the answering loopback instance and its port', async () => {
+  const detection = await detectInstance(depsWith(found), manifestById('freellmapi')!)
+  expect(detection.ok).toBe(true)
+  expect(detection.port).toBe(3002)
+  expect(detection.baseURL).toBe('http://127.0.0.1:3002/v1')
+  expect(detection.url).toBe('http://127.0.0.1:3002/api/ping')
+})
+
+it('detection is fail-soft: nothing answers, no throw, the failure is reported', async () => {
+  const fetch: FetchLike = vi.fn(async () => { throw new Error('ECONNREFUSED') })
+  const detection = await detectInstance(depsWith(fetch), manifestById('antigravity')!)
+  expect(detection.ok).toBe(false)
+  expect(detection.health.ok).toBe(false)
+  expect(detection.health.error).toContain('ECONNREFUSED')
+  expect(detection.baseURL).toBe('http://127.0.0.1:8082')
+  expect(detection.port).toBe(8082)
+})
+
+it('candidate order is recorded port, declared endpoint, then default port, deduplicated', () => {
+  const manifest = manifestById('freellmapi')!
+  expect(instanceCandidates(manifest).map(candidate => candidate.url)).toEqual(['http://127.0.0.1:3002/api/ping'])
+  const recorded = instanceCandidates(manifest, 'http://127.0.0.1:4555/v1')
+  expect(recorded.map(candidate => candidate.url)).toEqual([
+    'http://127.0.0.1:4555/api/ping',
+    'http://127.0.0.1:3002/api/ping',
+  ])
+})
+
+it('runtime detection reads one combined probe and fails soft when the runner throws', async () => {
+  const probe = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\navailable:podman\n' }))
+  expect(await detectRuntimes(probe)).toEqual({ docker: true, podman: true })
+  const empty = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: '' }))
+  expect(await detectRuntimes(empty)).toEqual({ docker: false, podman: false })
+  const failing = vi.fn(async (_step: { command: string }): Promise<never> => { throw new Error('no subprocess seam') })
+  expect(await detectRuntimes(failing)).toEqual({ docker: false, podman: false })
+  expect(probe.mock.calls[0]?.[0].command).toContain('command -v docker')
+})
+
+it('preflight picks the per-platform best path and names what is missing', () => {
+  const freellmapi = manifestById('freellmapi')!
+  const docker: RuntimeProbe = { docker: true, podman: false }
+  const podman: RuntimeProbe = { docker: false, podman: true }
+  const bare: RuntimeProbe = { docker: false, podman: false }
+
+  expect(chooseLocalPath(freellmapi, 'linux', docker).path).toBe('docker')
+  expect(chooseLocalPath(freellmapi, 'linux', podman).path).toBe('podman')
+  const missing = chooseLocalPath(freellmapi, 'linux', bare)
+  expect(missing.path).toBe('unsupported')
+  expect(missing.requires).toEqual(['docker'])
+  expect(missing.missing).toEqual(['Docker Engine + Compose (or Podman)'])
+
+  expect(chooseLocalPath(freellmapi, 'darwin', bare).path).toBe('vendor-app')
+  expect(chooseLocalPath(freellmapi, 'win32', bare).path).toBe('vendor-app')
+  expect(chooseLocalPath(manifestById('antigravity')!, 'linux', bare).path).toBe('node')
+  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true }, 3210).path).toBe('detected')
+})
+
+it('the private overlay retargets reuse endpoints and dashboards; absent or malformed files mean no override', () => {
+  const dir = scratchDir()
+  const manifest = manifestById('freellmapi')!
+  expect(readServerOverlay(dir)).toEqual({})
+  expect(overlayManifest(manifest, undefined)).toBe(manifest)
+
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), '{ not json', 'utf8')
+  expect(readServerOverlay(dir)).toEqual({})
+
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), JSON.stringify({
+    providers: { freellmapi: { reuseBaseURL: 'http://example.internal:9000/v1', reuseHealthURL: 'http://example.internal:9000/ping', dashboardUrl: 'http://example.internal:9000' } },
+  }), 'utf8')
+  const entry = readServerOverlay(dir)['freellmapi']
+  const overlaid = overlayManifest(manifest, entry)
+  expect(overlaid.reuse.baseURL).toBe('http://example.internal:9000/v1')
+  expect(overlaid.reuse.health.url).toBe('http://example.internal:9000/ping')
+  expect(overlaid.dashboardUrl).toBe('http://example.internal:9000')
+  // The shipped table is never mutated.
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3002/v1')
+})

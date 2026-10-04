@@ -1,0 +1,31 @@
+{
+  "name": "dsh-enpoi-verify-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn-end verification gate: records a fork `verify/unmet` event when a completed turn's own last verification failed (record-only by default; optional one-shot follow-up)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
+  },
+  "dependencies": {
+    "dsh-enpoi-contracts": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:*",
+    "@deepseek-ai/schemastery": "workspace:~"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

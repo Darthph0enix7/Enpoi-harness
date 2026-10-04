@@ -1,0 +1,10 @@
+# dsh-enpoi-fs-ops — file-system operations for the sidebar.
+- insert:
+    - id: enpoi-fs-ops
+      name: 'dsh-enpoi-fs-ops'
+      config:
+        # The Skills section's CRUD target: the user root every preset reads.
+        # The shipped tiers stay canonical in the profile's own `skills/` dir
+        # and arrive here read-only through the registry merge.
+        skillsDir: !!js "process.getBuiltinModule('node:path').resolve(process.env.DSH_HOME
+          || process.getBuiltinModule('node:os').homedir() + '/.dsh', 'skills')"

@@ -1,0 +1,14 @@
+packages:
+  - .
+  - packages/*
+
+nodeLinker: hoisted
+autoInstallPeers: false
+allowBuilds:
+  cloudflared: true
+  cpu-features: true
+  esbuild: true
+  node-pty: true
+  ssh2: true
+patchedDependencies:
+  dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch

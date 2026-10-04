@@ -1,0 +1,3 @@
+name: Orchestrator
+description: The Enpoi Harness default agent — primary implementer working directly with the operator; dispatches workers and consults the oracle/council when needed.
+order: 1

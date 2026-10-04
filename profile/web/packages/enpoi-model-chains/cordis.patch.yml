@@ -1,0 +1,4 @@
+# dsh-enpoi-model-chains — settings-defined model failover chains (modelChains service).
+- insert:
+    - id: enpoi-model-chains
+      name: 'dsh-enpoi-model-chains'

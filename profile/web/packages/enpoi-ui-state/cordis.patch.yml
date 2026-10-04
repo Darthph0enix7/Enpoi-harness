@@ -1,0 +1,4 @@
+# dsh-enpoi-ui-state — per-session UI state store (enpoiUiState Remote namespace).
+- insert:
+    - id: enpoi-ui-state
+      name: 'dsh-enpoi-ui-state'
