@@ -15,18 +15,21 @@ Conventions. `$PROFILE` = the active profile dir (default `$DSH_HOME/profiles/we
 - Degrade posture: a store failure returns an empty report with `ok: false` instead of failing the turn (`tools.ts:1-8`).
 - Known gap: fiber deaths **before** the diagnostics plugin mounts have no ledger line (pre-boot listener proposed, open backlog item 11).
 
-## 2. `ds doctor`
+## 2. `ds doctor` and `dsh doctor`
 
-Fish function in the profile (`$PROFILE/fish/ds.fish:149-260`). On a non-fish shell run the equivalent checks:
+Both run the same standalone diagnostic, `scripts/doctor.mjs`: `dsh doctor` through the CLI (`apps/cli/src/bin.ts:22-30,40`) or the installed shim (`scripts/update.sh:32-59`); `ds doctor` through the fish function (`$PROFILE/fish/ds.fish:149-176`), which resolves `scripts/doctor.mjs` from `$REPO` or `$DSH_HOME/harness/current`, requires Node ≥22.19, and forwards flags (`ds doctor --json`, `--strict`). `dsh doctor` is the form that works from any shell — including Windows — and the one a script, support report, or first-run self-check should call.
 
-| Check | What it does |
-|---|---|
-| Service | Linux: `systemctl --user is-active dsh-web.service` + PID/RSS; other platforms use the unit the installer created |
-| HTTP | `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3080/` → expect `200` |
-| Settings/credentials | `$DSH_HOME/settings.yaml` present; `$DSH_HOME/.credentials.yaml` present and `chmod 600` |
-| Providers | RPC `llm.providers` → count configured |
-| Presets | RPC `agentPreset.list` → count |
-| Skills | count of dirs under `$DSH_HOME/skills/` |
+Flags: `--json`, `--strict`, `--no-color`, `--home <path>`, `--port <port>`, `--service <unit>`, `--profile <name>`, `--help`, `--version`; env defaults `DSH_HOME` / `DSH_PORT` / `DSH_PROFILE` / `DSH_SERVICE_UNIT`.
+
+| Section | What it checks | Failure posture |
+|---|---|---|
+| Service & HTTP | `systemctl --user show <unit>` state/PID/memory/restarts (Linux only), local HTTP probe on the configured port | unit not active or probe unreachable/5xx → error, with a suggested fix |
+| Host & Environment | Node.js ≥22.19 (version + executable), platform/CPU/uptime, free space on `$DSH_HOME` and `/` (warn ≥90%, error ≥97%), `.credentials.yaml` presence and mode 0600, `.env` presence and mode | missing or insecure secrets → warn; unsupported Node → error |
+| Providers & Keys | `settings.yaml` (root or `profiles/<name>/`), configured LLM providers with per-provider key presence, `agent-default-model`, credential-vault refs, web-search provider + its key, live `llm.providers` RPC when the server answers | no providers / missing keys / unknown default provider → warn; RPC unavailable is informational (settings.yaml is used instead) |
+| Diagnostics | `incidents.sqlite` presence, top recurring warning/error patterns (muted patterns reported separately), incidents in the last 24 h, error-priority journal lines | recurring errors or journal errors after the current service start → warn; pre-start lines are informational |
+| Sessions | session-store inventory (sessions/projects) and the session-query index at `$DSH_HOME/cache/session-query/index.sqlite` | missing index → warn (suggest `ds backfill`) |
+
+Exit status: `0` healthy, `1` any error (`--strict` also fails on warnings), `2` usage failure. `--json` prints the whole report (checks, host, service, http, settings, providers, defaultModel, credentials, env, webKeys, webSearch, rpc, diagnostics, patterns, incidents24h, journal, sessions, sessionIndex, summary) for scripts and bug reports.
 
 `ds heal` also exists (chmod credentials, restart, 20s health probe) but it restarts the service — only run it when the caller is not the session host.
 

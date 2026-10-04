@@ -8,7 +8,7 @@ This directory is the Creator's knowledge base: everything needed to diagnose, c
 |---|---|---|
 | `00-index.md` | This map + the ground rules. | Starting any harness task. |
 | `01-architecture.md` | Process model (web service hosts sessions), durability (append-only logs, session format v4, retention pins, verify/repair), plugin/fiber model, profiles and config layers, on-disk layout, peer seam. | You need to know where a thing lives or which process owns it. |
-| `02-install-and-update.md` | Installer (per-OS, no sudo, versioned dirs, shim), channels (stable/beta), the overlay, `ds update`, safe restart (`dsh restart --after-turn`), rollback. | Installing, updating, restarting, or rolling back a machine. |
+| `02-install-and-update.md` | Installer (per-OS, no sudo, versioned dirs, shim), the locked Git-bootstrap distribution model (offline-bundled profile, no npm), channels (stable/beta), the overlay, `ds update`/`dsh update`, safe restart (`dsh restart --after-turn`), rollback. | Installing, updating, restarting, or rolling back a machine. |
 | `03-providers-and-models.md` | models.dev catalogue + sync, adding/removing providers, discovery, keyless routes, heavy providers, key pools, model groups/chains, reasoning effort, rules/filters, error classes. | A model is missing, dimmed, rejected, or must be added/removed. |
 | `04-permissions-and-approvals.md` | allow/ask/deny, grants + exact-command pins + broad-allow, Full access, forwarded child approvals, hard rails, per-agent rules. | An agent asks, is denied, or you must change approval policy. |
 | `05-tools-and-groups.md` | Default tool set + permission-completeness guard, on-demand tool groups (catalog, attach/detach, seat pre-attach), hiding vs advertising, tool permissions. | A tool is absent, over-advertised, or must be grouped/hidden. |
@@ -17,7 +17,7 @@ This directory is the Creator's knowledge base: everything needed to diagnose, c
 | `08-context-management.md` | Tool-result pruner, context keeper + Living Brief, compaction (LLM + mechanical fallback, smart/mechanical toggle, coverage notes), summariser seat, revert iterations (◀ x/y ▶ branch history), whiteboard, memory, incremental search indexing, insights/backfill, what never changes the transcript. | Context is filling, the brief is stale, or compaction misbehaves. |
 | `09-ui-surfaces.md` | Shell + sidebars, every settings page (orchestration, permissions, models/providers, general, …), context panel/insights, Watchtower, review surfaces, the first-run system-analysis chip and wizard reopen, model picker, skins/themes + freeze rules, dock, session actions (window top-up, iteration navigator, chat virtualization), toasts. | A surface is missing, misplaced, or must be changed. |
 | `10-defaults-on-install.md` | Default plugins, the Kilo Gateway keyless preset, the opt-in first-run system analysis, default tools, skin, seats; what is optional (keeper/compactor/whiteboard/heavy providers) and how to toggle. | Comparing a machine to a fresh install, or changing a default. |
-| `11-troubleshooting.md` | Diagnostics ledger + `ds doctor`, the four gates with exact commands, common failures symptom→cause→fix (session listing, search partial results, verify-gate control plane, crash-recovery codes), the first-run system-analysis chip, evidence locations. | Something is broken; before/after any fix. |
+| `11-troubleshooting.md` | Diagnostics ledger + `ds doctor` and `dsh doctor` (checks and exit codes), the four gates with exact commands, common failures symptom→cause→fix (session listing, search partial results, verify-gate control plane, crash-recovery codes), the first-run system-analysis chip, evidence locations. | Something is broken; before/after any fix. |
 | `12-glossary.md` | Every harness term in one line (seat, fiber, profile, overlay, heavy provider, gate, group, grant, rail, preset, council, broker, vault, projection, …). | A word in another file is unclear. |
 
 ## The rules (non-negotiable)
@@ -41,6 +41,13 @@ These files ship with the code and must work on any OS and any machine. Write `$
 - **Change loop.** Make the smallest change; rebuild the owning artifact (client bundle / `lib/`); run the gates in doc 11 that cover the surface. A client rebuild silently reverts fork branding — re-run `dsh-rebrand.mjs` every time.
 - **Never restart the service from inside a turn.** A restart command run from a tool call kills the process hosting the turn: the tool result never returns. Use `dsh restart --after-turn` (default: bounded whole-service idle wait, 10 min); `dsh restart --cancel` withdraws it; detached `dsh restart --now` only from a caller that is not the session host.
 - **Verify, then report.** "Done" means the gate is green on the changed tree, not that the edit was made. Cite the command and its output.
+
+## Distribution model (locked)
+
+- **Git-bootstrap, one line.** `curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash` clones the harness at the channel ref, installs and builds it, seeds `$DSH_HOME`, and writes the `dsh` shim (02 §1). The repo is pull-only and disposable; everything the user owns lives in `$DSH_HOME`.
+- **The profile is offline-bundled.** The Enpoi profile (plugins, skills, research scripts, shipped composition) lives in `$REPO/profile/<name>`; the installer seeds `$DSH_HOME/profiles/<name>` from that tree, with no profile-repo fetch on the default path (`scripts/install.sh:979-1005`; 02 §0).
+- **Updates ride the same tree.** `dsh update` re-fetches the channel ref, rebuilds, refreshes the profile, runs migrations, restarts safely, and rolls back on failure (02 §4).
+- **npm publication is deferred / not used.** The fork is not published to any registry and the package family keeps its upstream names; there is no rename, no `@enpoi/*` scope, and no npm install path. Decision A7 (`~/dsh-migration/81-packaging-distribution-and-channels.md`); do not wire npm installs meanwhile.
 
 ## Companion material
 

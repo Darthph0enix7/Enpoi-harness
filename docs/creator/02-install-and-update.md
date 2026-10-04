@@ -2,6 +2,13 @@
 
 Read this file to install a machine, move it between channels, update it, or restart the service without killing a live turn. `$DSH_HOME` defaults to `~/.dsh` (`packages/util/home-paths/src/index.ts:84-91`); `<prefix>` is the install root (`--prefix`, default `$HOME/.dsh`). Every command below is verifiable from `scripts/install.sh`, `scripts/update.sh`, and `apps/cli/src/*` — cite them when explaining.
 
+## 0. Distribution model (locked)
+
+- **Git-bootstrap is the only distribution path.** One line — `curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash` — clones the harness at the channel ref, installs dependencies, builds, seeds `$DSH_HOME`, and writes the `dsh` shim (`scripts/install.sh:5-7`; §1 below). The clone is pull-only and disposable; all user state (settings, credentials, sessions, presets, skills) lives in `$DSH_HOME`.
+- **The profile is bundled with the harness (100% offline).** The Enpoi profile tree (`profile/<name>` — plugins, skills, research scripts, shipped composition rows) ships inside the repo; `prepare_profile` seeds `$DSH_HOME/profiles/<name>` from `$HARNESS/profile/<name>` when that directory exists, so a fresh install performs no profile fetch (`scripts/install.sh:979-1005`). `--profile-source` / `DSH_PROFILE_SOURCE` remain overrides for development, not the default path.
+- **Updates use the same tree.** `dsh update` refreshes the recorded channel ref in place, rebuilds, re-seeds the profile, runs migrations, restarts the service safely, and rolls back on failure (§4). No registry and no fork artifact fetch sit in the update path.
+- **npm publication is deferred / not used.** The fork is not published to npm, the package family keeps its upstream `@deepseek-ai/*` names, and no rename or `@enpoi/*` scope is planned for distribution (locked decision A7; `~/dsh-migration/81-packaging-distribution-and-channels.md`). `npx @deepseek-ai/dsh` is upstream's mechanism for the unforked harness — do not document or wire it for this fork.
+
 ## 1. The installer (`scripts/install.sh`)
 
 - Entry: `curl -fsSL <install.sh-url> | bash`, `./scripts/install.sh [options]`, or `install.sh --update` (`scripts/install.sh:5-7,105-150`).
