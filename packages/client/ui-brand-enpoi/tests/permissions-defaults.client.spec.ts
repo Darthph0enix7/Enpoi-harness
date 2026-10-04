@@ -102,7 +102,8 @@ describe('permissions mirror parity', () => {
     for (const exemption of SHIPPED_TOOL_DEFAULT_EXEMPTIONS) {
       expect(exemption.prefix.length, 'exemption prefix must be non-empty').toBeGreaterThan(0)
       expect(exemption.reason.length, `exemption ${exemption.prefix} needs a reason`).toBeGreaterThan(20)
-      const explicit = Object.keys(SHIPPED_TOOL_DEFAULTS).filter(tool => tool.startsWith(exemption.prefix))
+      const explicit = Object.keys(SHIPPED_TOOL_DEFAULTS).filter(tool =>
+        tool.startsWith(exemption.prefix) && !(exemption.except ?? []).includes(tool))
       expect(explicit, `an explicit row inside exempted family ${exemption.prefix} is dead code`).toEqual([])
     }
   })
@@ -205,7 +206,7 @@ describe('role-surface mirror', () => {
     for (const [role, surface] of Object.entries(BUILT_ROLE_SURFACE)) {
       if (MAIN_AGENT_IDS.includes(role)) continue
       const denied = new Set([
-        ...SHARED_CHILD_DENY.filter(name => !(role === 'oracle' && name === 'subagent')),
+        ...SHARED_CHILD_DENY.filter(name => !((role === 'oracle' || role === 'librarian') && name === 'subagent')),
         ...(ROLE_CHILD_DENY[role] ?? []),
       ].filter(name => !SHARED_CHILD_KEEP.includes(name)))
       const promised = surface.filter(name => denied.has(name))

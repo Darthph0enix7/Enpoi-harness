@@ -650,7 +650,7 @@ export const BUILT_ROLE_SURFACE: Record<string, readonly string[]> = {
   fixer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
   designer: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
   explorer: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'skill', 'memory_search', 'memory_save'],
-  librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search'],
+  librarian: ['bash', 'read', 'glob', 'grep', 'read_image', 'write', 'edit', 'todo_write', 'skill', 'memory_search', 'memory_save', 'web_search', 'web_fetch', 'custom_research-fetch', 'custom_research-verify', 'whiteboard_read', 'subagent'],
   oracle: ['bash', 'read', 'glob', 'grep', 'read_image', 'edit', 'write', 'todo_write', 'skill', 'memory_search', 'memory_save', 'memory_rescind', 'memory_confirm', 'web_search', 'request_evidence', 'subagent'],
   referee: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],
   chair: ['bash', 'read', 'glob', 'grep', 'read_image', 'web_search', 'memory_search', 'todo_write'],

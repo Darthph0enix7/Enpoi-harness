@@ -46,11 +46,11 @@ describe('createLayoutStore', () => {
   it('remembers a closed sidebar and the first-open right default as device preferences', () => {
     const first = createLayoutStore().create()
     first.actions.openRightbar(true, false)
-    expect(first.store.getSnapshot().layoutInfo.rightbar).toBe(864)
+    expect(first.store.getSnapshot().layoutInfo.rightbar).toBe(672)
     first.actions.toggleSidebar()
     const reopened = createLayoutStore().create()
     expect(reopened.store.getSnapshot().layoutInfo.sidebar).toBe(0)
-    expect(reopened.store.getSnapshot().layoutInfo.rightbar).toBe(864)
+    expect(reopened.store.getSnapshot().layoutInfo.rightbar).toBe(672)
   })
 
   it('keeps a hydrated width across opening and closing without reseeding it', () => {
@@ -95,7 +95,7 @@ describe('createLayoutStore', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setSidebar(400)
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 400, rightbar: 864 })
+    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 400, rightbar: 672 })
   })
 
   it('clamps the sidebar to 264–420px', () => {
@@ -202,18 +202,18 @@ describe('main panel selection', () => {
 })
 
 describe('right panel', () => {
-  it('initializes at 45% of the latest frame only on first opening', () => {
+  it('initializes at 35% of the latest frame only on first opening', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setViewportWidth(1000)
     expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(450)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
     actions.setViewportWidth(2000)
     actions.openRightbar(true, true)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(450)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
     actions.closeRightbar()
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(450)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
   })
 
   it('keeps track and fullscreen reports independent and clears both on close', () => {

@@ -39,10 +39,15 @@ const SHARED_DENY = [
 ]
 
 // Operator default: every sub-agent may run bash, use skills, search/write
-// memory and keep its own todo list — readers keep only the mutation veto.
+// memory and keep its own todo list — explorers keep only the mutation veto,
+// while the research librarian authors its claims. The librarian is the second
+// delegating child (the deep dial fans out to leaf readers), so the generic
+// subagent survives its shared floor, like the Oracle's.
+const SHARED_DENY_DELEGATING = SHARED_DENY.filter(name => name !== 'subagent')
+
 const ROLE_EXTRAS = {
   explorer: ['edit', 'write', 'str_replace_editor'],
-  librarian: ['edit', 'write', 'str_replace_editor'],
+  librarian: ['str_replace_editor'],
   fixer: [],
   designer: [],
 }
@@ -65,18 +70,29 @@ async function captureRequest(
 
 describe('dsh-tool-subagent per-child tool filter', () => {
   it.each([
-    ['explorer', 'Explorer: map the delegation surface', ROLE_EXTRAS.explorer],
-    ['librarian', 'Librarian: research the API documentation', ROLE_EXTRAS.librarian],
-    ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer],
-    ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer],
+    ['explorer', 'Explorer: map the delegation surface', ROLE_EXTRAS.explorer, SHARED_DENY],
+    ['librarian', 'Librarian: research the API documentation', ROLE_EXTRAS.librarian, SHARED_DENY_DELEGATING],
+    ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer, SHARED_DENY],
+    ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer, SHARED_DENY],
     // The Oracle is tool-only: a description naming it is NOT a role selection,
     // so the generic delegation keeps the full shared deny set.
-    ['none (tool-only Oracle)', 'Oracle: architecture review', []],
+    ['none (tool-only Oracle)', 'Oracle: architecture review', [], SHARED_DENY],
     // No role inferred: shared set only.
-    ['unknown', 'Do the thing', []],
-  ])('denies the shared worker set plus %s extras at spawn', async (_role, description, extras) => {
+    ['unknown', 'Do the thing', [], SHARED_DENY],
+  ])('denies the shared worker set plus %s extras at spawn', async (_role, description, extras, shared) => {
     const request = await captureRequest(description)
-    expect(request.toolFilter).toEqual({ deny: [...SHARED_DENY, ...extras] })
+    expect(request.toolFilter).toEqual({ deny: [...shared, ...extras] })
+  })
+
+  it('keeps the generic subagent for the librarian research fan-out and denies it to other workers', async () => {
+    const librarian = await captureRequest('Librarian: research the API documentation')
+    const deny = librarian.toolFilter?.deny ?? []
+    expect(deny).not.toContain('subagent')
+    // Only the generic delegation tool survives; the provider-specific
+    // variants stay on the shared floor.
+    expect(deny).toEqual(expect.arrayContaining(['subagent_fork', 'subagent_codex', 'subagent_claude_code']))
+    const fixer = await captureRequest('Fixer: patch the parser bug')
+    expect(fixer.toolFilter?.deny).toContain('subagent')
   })
 
   it('merges an existing configured deny list first and de-duplicates the union', async () => {

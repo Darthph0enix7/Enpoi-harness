@@ -7,9 +7,12 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {
-  CredentialInfo, LlmDiscoveredModel, LlmModelDiscoveryRequest,
+  ClientRemote, CredentialInfo, LlmDiscoveredModel, LlmModelDiscoveryRequest,
   SettingsNamespaceView, SettingsPathOpView,
 } from '@deepseek-ai/dsh-api-remotes/client'
+import type {
+  WebSetupApplyOutcome, WebSetupOperations, WebSetupStatusOutcome, WebSetupValidateOutcome,
+} from './web-setup.ts'
 
 /** What one namespace write answered. */
 export type SettingsWriteOutcome =
@@ -29,6 +32,26 @@ export type ModelDiscoveryOutcome =
   | { readonly kind: 'found'; readonly models: readonly LlmDiscoveredModel[] }
   /** The interrogation was refused, with the Host's own diagnostic. */
   | { readonly kind: 'refused'; readonly message: string }
+
+/**
+ * The generated `webSetup` Remote face. api-remotes mounts the contribution
+ * whenever the assembly selects it; an install without the web-setup
+ * controller has no `remote.webSetup` service at all.
+ */
+type WebSetupFace = ClientRemote['webSetup']
+
+/**
+ * Read the web-setup namespace service from the optional-dependency store.
+ * `remote.webSetup` is optional: declaring it in `inject` would park this
+ * plugin's fiber on installs without the web-setup controller, so the read
+ * goes through `ctx.get`, which resolves the service whenever it is mounted
+ * and yields undefined otherwise; every caller degrades to a refused outcome.
+ * @param ctx - the page plugin's context.
+ * @returns the namespace face, or undefined when the service is not mounted.
+ */
+function webSetupFace(ctx: ClientContext): WebSetupFace | undefined {
+  return ctx.get('remote.webSetup') as WebSetupFace | undefined
+}
 
 /** The Host operations the Models page and its cards invoke. */
 export interface ModelsOperations {
@@ -71,6 +94,8 @@ export interface ModelsOperations {
    * @returns the candidates, or the refusal.
    */
   discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<ModelDiscoveryOutcome>
+  /** The web-search step's status, canary, and atomic apply calls. */
+  webSetup: WebSetupOperations
 }
 
 /**
@@ -104,6 +129,41 @@ export function createModelsOperations(ctx: ClientContext): ModelsOperations {
       return response.ok
         ? { kind: 'found', models: response.value }
         : { kind: 'refused', message: response.error.message }
+    },
+    webSetup: {
+      status: async (): Promise<WebSetupStatusOutcome> => {
+        const face = webSetupFace(ctx)
+        if (face === undefined) return { kind: 'refused', message: '' }
+        const response = await face.status()
+        return response.ok
+          ? { kind: 'status', status: response.value }
+          : { kind: 'refused', message: response.error.message }
+      },
+      validateProvider: async (request): Promise<WebSetupValidateOutcome> => {
+        const face = webSetupFace(ctx)
+        if (face === undefined) return { kind: 'refused', message: '' }
+        const response = await face.validateProvider(request)
+        if (!response.ok) return { kind: 'refused', message: response.error.message }
+        const validation = response.value
+        return validation.ok
+          ? { kind: 'validated', latencyMs: validation.latencyMs ?? 0 }
+          : { kind: 'invalid', reason: validation.error ?? '' }
+      },
+      applySetup: async (request): Promise<WebSetupApplyOutcome> => {
+        const face = webSetupFace(ctx)
+        if (face === undefined) return { kind: 'refused', message: '' }
+        const response = await face.applySetup(request)
+        if (!response.ok) return { kind: 'refused', message: response.error.message }
+        const result = response.value
+        // A pending restart is an accepted apply whose reconcile could not be
+        // hot-mounted; it is not a refusal, and the wizard advances with the
+        // host's own diagnostic on the notice line.
+        if (result.pendingRestart !== undefined) {
+          return { kind: 'applied', applied: result.applied, pendingRestart: result.pendingRestart }
+        }
+        if (!result.ok) return { kind: 'refused', message: result.error ?? '' }
+        return { kind: 'applied', applied: result.applied, pendingRestart: null }
+      },
     },
   }
 }

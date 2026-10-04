@@ -490,9 +490,12 @@ export const SHARED_CHILD_KEEP: readonly string[] = [
 /**
  * Extra tools denied per inferred specialist role, unioned with
  * {@link SHARED_CHILD_DENY}. Each role keeps only the surface its work needs:
- * explorers and librarians read and search but never mutate; fixers and
- * designers implement but never run code or reach the web. A role outside
- * this map (e.g. `oracle`) receives the shared set only.
+ * explorers read and search but never mutate; the librarian is the research
+ * worker and authors its own claim files, so `write`/`edit` are part of its
+ * work (the generic `subagent` survives through {@link childToolFilter} for
+ * the deep dial's fan-out); fixers and designers implement but never run code
+ * or reach the web. A role outside this map (e.g. `oracle`) receives the
+ * shared set only.
  */
 const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   // `run_code` is deliberately absent everywhere: the PTC presentation
@@ -502,10 +505,11 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   //
   // Operator defaults: every sub-agent may run bash (reading,
   // analysis, tests — not only writing), use skills, search memory, and keep
-  // its own todo list. Readers keep only the mutation veto; implementers are
-  // unrestricted beyond the shared anti-leak floor.
+  // its own todo list. Readers keep the mutation veto; the research librarian
+  // writes its claims; implementers are unrestricted beyond the shared
+  // anti-leak floor.
   explorer: ['edit', 'write', 'str_replace_editor'],
-  librarian: ['edit', 'write', 'str_replace_editor'],
+  librarian: ['str_replace_editor'],
 }
 
 /** Grouping label for one role seat on the operator's orchestration surfaces. */
@@ -780,11 +784,13 @@ function childToolFilter(
   audit: StoredAvailabilityAudit,
 ): Config['toolFilter'] {
   if (!provider.capabilities.toolFilter) return configured
-  // The Oracle is the one child allowed to delegate (operator design: the
-  // reviewer spawns its own researchers). Every other role keeps the shared
-  // subagent veto.
+  // The Oracle and the Librarian are the children allowed to delegate
+  // (operator design: the reviewer spawns its own researchers; the librarian's
+  // deep research dial fans out to leaf readers). Every other role keeps the
+  // shared subagent veto.
   const keepTool = (name: string): boolean => SHARED_CHILD_KEEP.includes(name)
-  const sharedDeny = (role === 'oracle'
+  const delegatingRole = role === 'oracle' || role === 'librarian'
+  const sharedDeny = (delegatingRole
     ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
     : SHARED_CHILD_DENY).filter(name => !keepTool(name))
   // Layer precedence (doc 61 WP-S6): the permission allowlist is the operator's

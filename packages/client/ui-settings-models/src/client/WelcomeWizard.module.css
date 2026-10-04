@@ -20,6 +20,7 @@
 .dialog {
   display: grid;
   grid-template-columns: 220px minmax(0, 720px);
+  grid-template-rows: minmax(0, 1fr);
   max-width: min(960px, calc(100vw - 48px));
   max-height: calc(100vh - 64px);
   overflow: hidden;
@@ -111,9 +112,11 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 420px;
+  min-height: 0;
+  max-height: 100%;
   padding: 28px 32px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .eyebrow {
@@ -225,7 +228,9 @@
   transition: background 220ms ease, border-color 220ms ease;
 }
 
-.toggle[data-on='true'] .switch {
+.switch[aria-checked='true'],
+.toggle[data-on='true'] .switch,
+.fetchRow[data-on] .switch {
   background: color-mix(in srgb, var(--dsw-alias-brand-primary) 34%, transparent);
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent);
 }
@@ -242,7 +247,9 @@
   transition: transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1), background 220ms ease;
 }
 
-.toggle[data-on='true'] .knob {
+.switch[aria-checked='true'] .knob,
+.toggle[data-on='true'] .knob,
+.fetchRow[data-on] .knob {
   background: var(--dsw-alias-brand-primary);
   transform: translateX(17px);
 }
@@ -313,6 +320,12 @@
   background: var(--dsw-alias-interactive-bg-hover-accent);
 }
 
+/* The recommended offer carries the brand accent before it is selected. */
+.radio[data-recommended] {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 38%, transparent);
+  border-left-width: 3px;
+}
+
 .radio strong {
   color: var(--dsw-alias-label-primary);
   font-weight: 650;
@@ -320,6 +333,231 @@
 
 .radio span {
   color: var(--dsw-alias-label-secondary);
+}
+
+/* The web-search step: provider select, the detail band, and the fetch fold. */
+.webSelectGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.selectRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  padding: 6px 32px 6px 12px;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13.5px;
+  background-color: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+}
+
+.select:focus {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+
+/* Select variant of .input: replaces the OS arrow with the shared 12px chevron */
+.selectInput {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 12px;
+}
+
+.webGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.radioHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.keyBand {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--dsw-specific-input-major);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-left: 3px solid var(--dsw-alias-brand-primary);
+  border-radius: var(--dsw-radius-md);
+}
+
+.fieldLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+}
+
+.keyRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.keyInput {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 36px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.keyInput:focus {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+
+.warningNote {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--dsw-static-amber-400);
+  font-size: 12.5px;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--dsw-static-amber-500) 12%, var(--dsw-alias-bg-layer-1));
+  border: 1px solid color-mix(in srgb, var(--dsw-static-amber-500) 32%, transparent);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.honestNote {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--dsw-static-green-500);
+  font-size: 12.5px;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--dsw-static-green-500) 11%, var(--dsw-alias-bg-layer-1));
+  border: 1px solid color-mix(in srgb, var(--dsw-static-green-500) 30%, transparent);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.dashboardLink {
+  color: var(--dsw-alias-brand-primary);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+.dashboardLink:hover {
+  text-decoration: underline;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 2px solid var(--dsw-alias-border-l3);
+  border-top-color: var(--dsw-alias-brand-primary);
+  border-radius: 50%;
+  animation: wizSpin 0.8s linear infinite;
+}
+
+@keyframes wizSpin {
+  to { transform: rotate(360deg); }
+}
+
+.validNote {
+  margin: 0;
+  color: var(--dsw-alias-state-success-primary);
+  font-size: 13px;
+}
+
+.fetchFold {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+}
+
+.fetchHeader {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.fetchSummary {
+  padding: 12px 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.fetchBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.fetchRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--dsw-specific-input-major);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.fetchRow[data-on] {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
+}
+
+.fetchRow[data-coming-soon] {
+  border-style: dashed;
+}
+
+.fetchText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.fetchText strong {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.fetchText span {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.pendingNotice {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--dsw-static-amber-400);
+  font-size: 12.5px;
+  background: color-mix(in srgb, var(--dsw-static-amber-500) 12%, var(--dsw-alias-bg-layer-1));
+  border: 1px solid color-mix(in srgb, var(--dsw-static-amber-500) 32%, transparent);
+  border-radius: var(--dsw-radius-sm);
 }
 
 .route[data-state='configured'] {
@@ -333,8 +571,12 @@
 }
 
 .route span {
+  min-width: 0;
+  overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The live provider rows on the first-provider step: the add's own refresh
@@ -360,12 +602,19 @@
   border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
 }
 
+/* Both cells ellipsize: the row is a two-column flex line whose content is
+   data (a route id, a long display name) the layout cannot wrap. */
 .providerRow strong {
+  min-width: 0;
+  overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .providerRow span {
+  min-width: 0;
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
@@ -440,12 +689,20 @@
 /* The layer carries role="dialog" for assistive tech, and glass skins style
    every dialog with a backdrop filter, inner highlight and gradient. This
    layer is a light dim over the real interface, so it cancels that material
-   and keeps the UI visible; the class + attribute selector outranks a skin's
-   prefixed [role="dialog"] rule. */
+   and keeps the UI visible. The cancel has to be `!important`: the
+   skin-center force-scopes its patches under `html[data-dsh-skin="…"]`,
+   which lifts the skin's dialog rule to (0,3,1) — one element past this
+   module's class-and-attribute selector (0,3,0) — so specificity alone cannot
+   outrank it, and the page-wide blur it wins with hides the whole interface
+   behind the spotlight, not just the surround. Both filter spellings are
+   declared so a skin carrying only the prefixed alias is cancelled too; the
+   bundler collapses the pair to the standard property, which is the same
+   property as the alias in Chromium. */
 .tourLayer.tourLayer[data-dsh-tour-overlay] {
-  backdrop-filter: none;
-  background-image: none;
-  box-shadow: none;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background-image: none !important;
+  box-shadow: none !important;
 }
 
 .tourLayer:focus {
@@ -534,5 +791,48 @@
 
   .tourRing {
     animation-duration: 1.6s;
+  }
+}
+
+/* Narrow widths (the wizard was the only modal without one): the fixed 220px
+   rail collapses into a horizontal, scrollable strip of step chips, so the
+   panel keeps the full width and long zh labels ellipsize instead of pushing
+   the strip wider. The accessible name stays on each rail button. */
+@media (max-width: 560px) {
+  .dialog {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .rail {
+    flex-direction: row;
+    gap: 4px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--dsw-alias-border-l2);
+  }
+
+  .railItem {
+    flex: none;
+  }
+
+  .railLabel {
+    max-width: 76px;
+  }
+
+  .panel {
+    min-height: 0;
+    padding: 18px 16px;
+  }
+
+  .keyRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .keyInput {
+    flex: none;
   }
 }

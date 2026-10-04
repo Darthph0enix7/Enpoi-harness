@@ -62,7 +62,7 @@ export interface MirrorToolGroup {
 /** The canonical payload embedded in the generated module. */
 export interface MirrorData {
   shippedToolDefaults: Record<string, string>
-  shippedToolDefaultExemptions: Array<{ prefix: string; reason: string }>
+  shippedToolDefaultExemptions: Array<{ prefix: string; except?: string[]; reason: string }>
   toolGroups: MirrorToolGroup[]
   seatToolDeny: Record<string, string[]>
   sharedChildKeep: string[]
@@ -201,21 +201,27 @@ function toolGroupArray(node: ts.Expression, context: string): MirrorToolGroup[]
   })
 }
 
-/** Read an array literal of `{ prefix, reason }` objects. */
-function exemptionArray(node: ts.Expression, context: string): Array<{ prefix: string; reason: string }> {
+/** Read an array literal of `{ prefix, reason, except? }` objects. */
+function exemptionArray(node: ts.Expression, context: string): Array<{ prefix: string; except?: string[]; reason: string }> {
   const array = unwrap(node)
   if (!ts.isArrayLiteralExpression(array)) throw new Error(`${context}: expected an array literal`)
   return array.elements.map((element, index) => {
     const entry = unwrap(element)
     if (!ts.isObjectLiteralExpression(entry)) throw new Error(`${context}[${index}]: expected an object literal`)
     const fields: Record<string, string> = {}
+    let except: string[] | undefined
     for (const member of entry.properties) {
-      fields[propertyName(member, context)] = stringValue((member as ts.PropertyAssignment).initializer, context)
+      const name = propertyName(member, context)
+      if (name === 'except') {
+        except = stringArray((member as ts.PropertyAssignment).initializer, `${context}[${index}].except`)
+        continue
+      }
+      fields[name] = stringValue((member as ts.PropertyAssignment).initializer, context)
     }
     if (fields.prefix === undefined || fields.reason === undefined) {
       throw new Error(`${context}[${index}]: needs both prefix and reason`)
     }
-    return { prefix: fields.prefix, reason: fields.reason }
+    return { prefix: fields.prefix, ...(except === undefined ? {} : { except }), reason: fields.reason }
   })
 }
 
@@ -348,9 +354,12 @@ export function renderMirror(
   lines.push('})')
   lines.push('')
   lines.push('/** Host families deliberately left to `defaults.unknownTools` (shipped ask). */')
-  lines.push('export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason: string }[] = Object.freeze([')
+  lines.push('export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?: readonly string[]; reason: string }[] = Object.freeze([')
   for (const exemption of data.shippedToolDefaultExemptions) {
-    lines.push(`  { prefix: ${quote(exemption.prefix)}, reason: ${quote(exemption.reason)} },`)
+    const except = exemption.except === undefined || exemption.except.length === 0
+      ? ''
+      : `, except: [${exemption.except.map((name: string) => quote(name)).join(', ')}]`
+    lines.push(`  { prefix: ${quote(exemption.prefix)}${except}, reason: ${quote(exemption.reason)} },`)
   }
   lines.push('])')
   lines.push('')

@@ -1,5 +1,5 @@
 /**
- * First-run welcome overlay: the approved seven-step flow rendered over the
+ * First-run welcome overlay: the approved eight-step flow rendered over the
  * real application. Steps read real state (the provider directory, the
  * analysis run) and write real settings through the Models operations; any
  * step can be skipped and the harness stays usable. The overlay shows once,
@@ -12,10 +12,11 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ModelsSettingsState, ModelsSettingsStore, ModelsWire } from './store.ts'
-import { protocolChoices } from './store.ts'
+import { protocolChoices, providerKeyConfigured } from './store.ts'
 import type { ModelsOperations } from './operations.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import { AddProviderModal } from './AddProviderModal.tsx'
+import { WelcomeWebStep } from './WelcomeWebStep.tsx'
 import {
   WIZARD_FREE_PROVIDER, WIZARD_STEPS, intelligenceWrites, sandboxWrite, skippedSteps,
   type IntelligenceChoice, type SandboxMode, type WizardStepId, type WizardWrite,
@@ -90,7 +91,7 @@ async function applyWrites(operations: ModelsOperations, writes: readonly Wizard
   return null
 }
 
-/** The seven-step overlay. */
+/** The eight-step overlay. */
 export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   const { complete, useWizard, useModels, store, modelsController, operations, api, schema, t } = props
   const state = useWizard(snapshot => snapshot)
@@ -103,10 +104,18 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   // The tour is its own overlay layer: while it runs the wizard dialog is not
   // rendered at all, so exactly one layer owns the screen.
   const [tourStarted, setTourStarted] = useState(false)
+  // The dialog is the modal's focus anchor: every step change moves focus into
+  // the panel so the arrow keys and Escape act on the step the user sees.
+  const dialogRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     if (state.status === 'idle') void store.load()
   }, [store, state.status])
+
+  useEffect(() => {
+    if (!state.visible || tourStarted) return
+    dialogRef.current?.focus({ preventScroll: true })
+  }, [state.visible, state.wizard.step, tourStarted])
 
   useEffect(() => {
     if (models.status === 'idle') void modelsController.load()
@@ -119,10 +128,13 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   }, [complete, state.status, state.visible])
 
   // Arrow keys navigate the flow wherever focus sits inside the modal; a text
-  // field keeps its own arrow behaviour. The tour overlay owns its keys while
-  // it runs, so this listener stands down then. The agents step asks a
-  // question, so the arrow must not answer it by advancing while no run is in
-  // flight; that step's own Investigate/Skip/Continue controls own the move.
+  // field keeps its own arrow behaviour, and a focused radio group keeps its
+  // arrows for moving the selection instead of answering or skipping the step.
+  // The tour overlay owns its keys while it runs, so this listener stands down
+  // then. The agents step asks a question, so the arrow must not answer it by
+  // advancing while no run is in flight; the web step validates and writes on
+  // its own Continue, so the blind arrow skip must not bypass it. Those steps'
+  // own controls own the move.
   useEffect(() => {
     if (!state.visible || tourStarted) return undefined
     const current = state.wizard
@@ -130,9 +142,10 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
       if (event.target instanceof HTMLElement
-        && event.target.closest('input, textarea, select, [contenteditable="true"]') !== null) return
+        && event.target.closest('input, textarea, select, [contenteditable="true"], [role="radio"]') !== null) return
       if (event.key === 'ArrowRight' && current.step !== 'done') {
         if (current.step === 'agents' && store.store.getSnapshot().analysis == null) return
+        if (current.step === 'web') return
         event.preventDefault()
         store.dispatch({ type: 'continue' })
         return
@@ -164,6 +177,13 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     return [...byId.values()]
   }, [models.rows])
   const protocols = useMemo(() => protocolChoices(models.namespaces.get('llm-pi-ai'), schema), [models.namespaces, schema])
+  // The web step's shared-key offer reuses the live DeepSeek credential state:
+  // the row's resolved reference, or the conventional derived one, as the
+  // Models join already described it.
+  const deepSeekConfigured = useMemo(() => {
+    const row = models.rows.find(candidate => candidate.entry.provider === 'deepseek-official')
+    return row !== undefined && providerKeyConfigured(row)
+  }, [models.rows])
 
   if (!state.visible) return null
 
@@ -233,6 +253,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
   return (
     <div className={styles.backdrop} role="presentation">
       <section
+        ref={dialogRef}
         className={styles.dialog}
         role="dialog"
         aria-modal="true"
@@ -285,6 +306,23 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
               onBack={() => { store.dispatch({ type: 'goto', step: 'security' }) }}
             />
           )}
+          {step === 'web' && (
+            <WelcomeWebStep
+              t={t}
+              operations={operations}
+              deepSeekConfigured={deepSeekConfigured}
+              onApplied={(pendingRestart) => {
+                // The host accepted the writes; a reconcile that needs a
+                // restart is named on every later step until the wizard closes,
+                // with the host's own diagnostic alongside the notice.
+                if (pendingRestart !== null) store.notePendingRestart(pendingRestart.message)
+                store.dispatch({ type: 'configured' })
+                store.dispatch({ type: 'continue' })
+              }}
+              onSkip={() => { store.dispatch({ type: 'skip' }) }}
+              onBack={() => { store.dispatch({ type: 'goto', step: 'provider' }) }}
+            />
+          )}
           {step === 'intelligence' && (
             <IntelligenceStep
               t={t}
@@ -293,7 +331,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
               compactionLlm={compactionLlm}
               onCompactionLlm={setCompactionLlm}
               onContinue={intelligenceContinue}
-              onBack={() => { store.dispatch({ type: 'goto', step: 'provider' }) }}
+              onBack={() => { store.dispatch({ type: 'goto', step: 'web' }) }}
             />
           )}
           {step === 'tour' && (
@@ -328,6 +366,11 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {state.writeFailure !== null && state.writeFailure.step === step && (
             <p className={styles.error} role="alert" data-wiz-write-error>{state.writeFailure.message}</p>
           )}
+          {state.pendingRestart !== null && (
+            <p className={styles.pendingNotice} role="status" data-wiz-pending-restart>
+              {t('wizWebPendingRestart')} {state.pendingRestart}
+            </p>
+          )}
         </div>
 
         <AddProviderModal
@@ -359,6 +402,7 @@ function stepNameKey(id: WizardStepId): keyof typeof en {
     case 'welcome': return 'wizNameWelcome'
     case 'security': return 'wizNameSecurity'
     case 'provider': return 'wizNameProvider'
+    case 'web': return 'wizNameWeb'
     case 'intelligence': return 'wizNameIntelligence'
     case 'tour': return 'wizNameTour'
     case 'agents': return 'wizNameAgents'
@@ -463,8 +507,8 @@ function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, 
             className={styles.providerRow}
             data-state={provider.configured ? 'configured' : 'installed'}
           >
-            <strong>{provider.name}</strong>
-            <span>{provider.id}</span>
+            <strong title={provider.name}>{provider.name}</strong>
+            <span title={provider.id}>{provider.id}</span>
           </div>
         ))}
       </div>
@@ -592,14 +636,19 @@ function sameRect(left: TourRect | null, right: TourRect | null): boolean {
 }
 
 /**
- * Place the tip beside the spotlight for one stop, clamped to the viewport; a
- * target that is not on screen centers the tip and leaves the scrim intact.
+ * Place the tip beside the spotlight for one stop, clamped to the viewport. A
+ * target this build does not mount (the Context Dashboard trigger on a fresh
+ * install, for example) has no spotlight to sit beside: the tip centers on the
+ * viewport alone, so the stop stays readable instead of pointing at nothing.
  */
 function tipAt(rect: TourRect | null, place: typeof TOUR_STOPS[number]['place'], size: { width: number; height: number }): { left: number; top: number } {
   const width = window.innerWidth || 1024
   const height = window.innerHeight || 768
   if (rect === null) {
-    return { left: Math.max(16, (width - size.width) / 2), top: 72 }
+    return {
+      left: Math.max(16, (width - size.width) / 2),
+      top: Math.max(64, (height - size.height) / 2),
+    }
   }
   const hole = {
     left: rect.left - TOUR_PAD,
@@ -818,6 +867,7 @@ function DoneStep({ t, skipped, analysis, error, saving, onFinish, onReplay }: {
     switch (id) {
       case 'security': return 'wizSkippedSecurity'
       case 'provider': return 'wizSkippedProvider'
+      case 'web': return 'wizSkippedWeb'
       case 'intelligence': return 'wizSkippedIntelligence'
       case 'tour': return 'wizSkippedTour'
       case 'agents': return 'wizSkippedAgents'

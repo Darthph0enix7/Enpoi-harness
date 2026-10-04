@@ -110,3 +110,48 @@ describe('ModelsSection theme styles', () => {
     expect(focus).toContain('var(--dsw-alias-brand-primary)')
   })
 })
+
+/** The wizard ships its own sheet; its narrow-width behaviour is structural. */
+const wizardCss = readFileSync(fileURLToPath(new URL('../src/client/WelcomeWizard.module.css', import.meta.url)), 'utf8')
+
+/** The body of one at-rule block, by its header, via brace matching. */
+function atRuleBlock(sheet: string, header: string): string {
+  const start = sheet.indexOf(header)
+  if (start < 0) throw new Error(`sheet has no \`${header}\` block`)
+  const open = sheet.indexOf('{', start)
+  let depth = 0
+  for (let index = open; index < sheet.length; index += 1) {
+    if (sheet[index] === '{') depth += 1
+    else if (sheet[index] === '}') {
+      depth -= 1
+      if (depth === 0) return sheet.slice(open + 1, index)
+    }
+  }
+  throw new Error(`\`${header}\` block is unclosed`)
+}
+
+describe('WelcomeWizard narrow-width styles', () => {
+  it('collapses the fixed 220px rail into a scrollable strip below 560px', () => {
+    const narrow = atRuleBlock(wizardCss, '@media (max-width: 560px)')
+    expect(narrow).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(narrow).toContain('overflow-x: auto')
+    expect(narrow).toContain('flex-direction: row')
+    // Long zh labels ellipsize inside the strip instead of widening it.
+    expect(narrow).toContain('.railLabel')
+    expect(narrow).toContain('max-width: 76px')
+    // The step controls stack once the panel loses its width.
+    expect(narrow).toContain('.keyRow')
+    expect(narrow).toContain('align-items: stretch')
+  })
+
+  it('ellipsizes provider names and route strings that can overflow', () => {
+    expect(block('.providerRow strong', wizardCss)).toContain('text-overflow: ellipsis')
+    expect(block('.providerRow span', wizardCss)).toContain('text-overflow: ellipsis')
+    expect(block('.route span', wizardCss)).toContain('text-overflow: ellipsis')
+  })
+
+  it('closes every block in the wizard sheet', () => {
+    const bare = wizardCss.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect((bare.match(/\}/g) ?? []).length).toBe((bare.match(/\{/g) ?? []).length)
+  })
+})

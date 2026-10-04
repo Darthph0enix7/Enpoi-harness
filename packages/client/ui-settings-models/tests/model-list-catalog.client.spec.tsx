@@ -15,6 +15,11 @@ function operations(discoverModels: ModelsOperations['discoverModels']): ModelsO
     storeCredential: vi.fn(),
     removeCredential: vi.fn(),
     writeSettings: vi.fn(),
+    webSetup: {
+      status: vi.fn(),
+      validateProvider: vi.fn(),
+      applySetup: vi.fn(),
+    },
   }
 }
 

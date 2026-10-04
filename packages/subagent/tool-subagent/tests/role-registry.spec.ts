@@ -36,12 +36,16 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(registry['librarian']?.persona).toContain('You are the Librarian')
     expect(registry['librarian']?.builtin).toBe(true)
     expect(registry['explorer']?.deny).toEqual(['edit', 'write', 'str_replace_editor'])
+    // The research librarian authors its claim files, so only the generic
+    // mutating editor stays out; `subagent` survives via childToolFilter.
+    expect(registry['librarian']?.deny).toEqual(['str_replace_editor'])
   })
 
   it('keeps built-in personas and tool surfaces when the registry is empty', async () => {
     const request = await captureRequest('Librarian: research the API documentation', undefined)
     expect(request.persona).toContain('You are the Librarian')
-    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['edit', 'write', 'subagent']))
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['str_replace_editor']))
+    expect(request.toolFilter?.deny).not.toContain('subagent')
   })
 
   it('merges a settings entry over a built-in persona', async () => {
@@ -50,7 +54,7 @@ describe('dsh-tool-subagent settings role registry', () => {
     })
     expect(request.persona).toBe('You are the Archive Keeper.')
     // Fields the entry omits keep their built-in definition.
-    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['edit', 'write']))
+    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['str_replace_editor']))
   })
 
   it('spawns a settings-defined role by name with its persona and allowlist', async () => {

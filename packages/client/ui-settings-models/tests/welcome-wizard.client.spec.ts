@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  WIZARD_COMPLETED_FIELD, WIZARD_VERSION, WelcomeWizardStore, initialWizardState,
+  WIZARD_COMPLETED_FIELD, WIZARD_STEPS, WIZARD_VERSION, WelcomeWizardStore, initialWizardState,
   intelligenceWrites, sandboxWrite, skippedSteps, skipWholeTour, wizardReducer,
   type WizardAnalysisView, type WizardScope, type WizardScopeSnapshot,
 } from '../src/client/welcome-wizard.ts'
+import { en, zh } from '../src/client/locales.ts'
 
 describe('welcome wizard state machine', () => {
   it('advances with continue, marking the left step at its default', () => {
@@ -23,10 +24,33 @@ describe('welcome wizard state machine', () => {
     expect(skippedSteps(state)).toEqual(['security'])
   })
 
-  it('skips the whole tour from the welcome step: steps 2 to 6 skipped', () => {
+  it('skips the whole tour from the welcome step: steps 2 to 7 skipped', () => {
     const state = skipWholeTour()
     expect(state.step).toBe('done')
-    expect(skippedSteps(state)).toEqual(['security', 'provider', 'intelligence', 'tour', 'agents'])
+    expect(skippedSteps(state)).toEqual(['security', 'provider', 'web', 'intelligence', 'tour', 'agents'])
+  })
+
+  it('inserts the web step after the provider step', () => {
+    expect(WIZARD_STEPS).toEqual([
+      'welcome', 'security', 'provider', 'web', 'intelligence', 'tour', 'agents', 'done',
+    ])
+    let state = initialWizardState()
+    for (let i = 0; i < 3; i += 1) state = wizardReducer(state, { type: 'continue' })
+    expect(state.step).toBe('web')
+    expect(wizardReducer(state, { type: 'continue' }).step).toBe('intelligence')
+  })
+
+  it('marks an explicit skip of the web step for the Done page', () => {
+    let state = initialWizardState()
+    for (let i = 0; i < 3; i += 1) state = wizardReducer(state, { type: 'continue' })
+    state = wizardReducer(state, { type: 'skip' })
+    expect(state.step).toBe('intelligence')
+    expect(state.states.web).toBe('skipped')
+    expect(skippedSteps(state)).toEqual(['web'])
+  })
+
+  it('keeps the en and zh dictionaries in exact key parity', () => {
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
   })
 
   it('restarts to the initial state', () => {
@@ -205,6 +229,39 @@ describe('welcome wizard gating', () => {
       store.dispose()
       vi.useRealTimers()
     }
+  })
+
+  it('treats the previous wizard version as an unfinished flow', async () => {
+    const store = new WelcomeWizardStore(
+      scope({ mode: 'host', status: 'ready', value: { [WIZARD_COMPLETED_FIELD]: '2026-09-28.1' } }),
+      idleAnalysis,
+      noRequest,
+    )
+    await store.load()
+    expect(store.store.getSnapshot().completed).toBe(false)
+    expect(store.store.getSnapshot().visible).toBe(true)
+    store.dispose()
+  })
+
+  it('keeps a pending-restart notice across steps and clears it on replay', async () => {
+    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis, noRequest)
+    await store.load()
+    store.notePendingRestart('restart to load web-search-brave')
+    expect(store.store.getSnapshot().pendingRestart).toBe('restart to load web-search-brave')
+    store.dispatch({ type: 'continue' })
+    expect(store.store.getSnapshot().pendingRestart).toBe('restart to load web-search-brave')
+    store.dispatch({ type: 'restart' })
+    expect(store.store.getSnapshot().pendingRestart).toBeNull()
+    store.dispose()
+  })
+
+  it('clears a pending-restart notice when the setup reopens for a fresh walk', async () => {
+    const store = new WelcomeWizardStore(scope({ mode: 'host', status: 'ready', value: {} }), idleAnalysis, noRequest)
+    await store.load()
+    store.notePendingRestart('restart to load web-search-brave')
+    await store.reopen()
+    expect(store.store.getSnapshot().pendingRestart).toBeNull()
+    store.dispose()
   })
 
   it('keeps a refused step write on its own step and clears it on navigation', async () => {

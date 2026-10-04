@@ -1,5 +1,5 @@
 /**
- * First-run welcome wizard state: the seven steps of the approved flow, the
+ * First-run welcome wizard state: the eight steps of the approved flow, the
  * real settings writes each configured step offers, and the durable
  * `onboardingCompleted` marker that shows the wizard once. The state machine
  * is pure; the store adds the settings scope, the reopen entry, and the
@@ -26,7 +26,7 @@ export interface WizardScope {
 }
 
 /** Bump only when the first-run flow changes materially; the marker is compared for exact equality. */
-export const WIZARD_VERSION = '2026-09-28.1'
+export const WIZARD_VERSION = '2026-10-03.1'
 
 /** Settings namespace holding the completion marker. */
 export const WIZARD_SETTINGS_NAMESPACE = WELCOME_NOTICE_SETTINGS_NAMESPACE
@@ -38,8 +38,8 @@ export const WIZARD_COMPLETED_FIELD = 'onboardingCompleted'
 export const WIZARD_FREE_PROVIDER = 'kilo'
 export const WIZARD_FREE_MODEL = 'kilo-auto/free'
 
-/** The seven steps, in order. */
-export const WIZARD_STEPS = ['welcome', 'security', 'provider', 'intelligence', 'tour', 'agents', 'done'] as const
+/** The eight steps, in order. */
+export const WIZARD_STEPS = ['welcome', 'security', 'provider', 'web', 'intelligence', 'tour', 'agents', 'done'] as const
 
 /** One step identity. */
 export type WizardStepId = typeof WIZARD_STEPS[number]
@@ -174,14 +174,18 @@ export function skippedSteps(state: WizardState): WizardStepId[] {
 }
 
 /**
- * The whole-tour skip: steps 2 to 6 are skipped, nothing else changes.
+ * The whole-tour skip: steps 2 to 7 are skipped, nothing else changes.
  * @returns state at the Done step with the skipped range recorded.
  */
 export function skipWholeTour(): WizardState {
   const state = initialWizardState()
   return {
     step: 'done',
-    states: { ...state.states, security: 'skipped', provider: 'skipped', intelligence: 'skipped', tour: 'skipped', agents: 'skipped' },
+    states: {
+      ...state.states,
+      security: 'skipped', provider: 'skipped', web: 'skipped',
+      intelligence: 'skipped', tour: 'skipped', agents: 'skipped',
+    },
   }
 }
 
@@ -220,6 +224,13 @@ export interface WelcomeWizardState {
    * the next navigation; a failure on one step never surfaces on another.
    */
   writeFailure: WizardWriteFailure | null
+  /**
+   * A web-setup apply the Host accepted but can only reconcile after a restart,
+   * carrying the Host's own diagnostic. It is not a step-scoped error: the line
+   * travels with every later step until the wizard closes or reopens, because
+   * the capability stays latent until the process restarts.
+   */
+  pendingRestart: string | null
   /** Durable or process-local completion of the setup flow. */
   completed: boolean
   /** Process-local reopen from the Setup entry; overrides completion. */
@@ -248,6 +259,7 @@ export class WelcomeWizardStore {
     status: 'idle',
     error: null,
     writeFailure: null,
+    pendingRestart: null,
     completed: false,
     reopened: false,
     visible: false,
@@ -304,6 +316,9 @@ export class WelcomeWizardStore {
       state.wizard = wizardReducer(state.wizard, action)
       // A step-local write note never survives leaving its step.
       if (action.type !== 'configured') state.writeFailure = null
+      // Replay starts a fresh flow: a restart notice from the previous run is
+      // no longer true of the state the user is now walking.
+      if (action.type === 'restart') state.pendingRestart = null
     })
   }
 
@@ -327,6 +342,14 @@ export class WelcomeWizardStore {
   }
 
   /**
+   * Record a web-setup apply that only takes effect after a process restart.
+   * @param message - the Host's restart diagnostic, shown beside the notice.
+   */
+  notePendingRestart(message: string): void {
+    this.store.update((state) => { state.pendingRestart = message })
+  }
+
+  /**
    * Reopen the wizard from the Setup entry, whatever the marker says. The
    * shell's onboarding request is raised too, so the coordinator mounts the
    * wizard immediately even with a retained conversation. The host runner is
@@ -341,6 +364,7 @@ export class WelcomeWizardStore {
       state.reopened = true
       state.wizard = initialWizardState()
       state.writeFailure = null
+      state.pendingRestart = null
       state.visible = true
     })
     this.requestOnboarding()

@@ -18,9 +18,9 @@
  * tool-defaults completeness spec verifies it from the other side.
  */
 
-export const HOST_DEFAULTS_DIGEST = 'bf4c14fcd185d2e4d5a7ac7ee7c0f7dda4d2dec07f097febff0fa399975dc43b'
+export const HOST_DEFAULTS_DIGEST = '7e379351280482025780538c8649913732300a5d549bbc04fc4c764e30500651'
 
-export const MIRROR_SOURCE_DIGEST = '944ef1de997026daedcd6b162b99a026988b44547c68c11114bb46553f78171e'
+export const MIRROR_SOURCE_DIGEST = 'f8ff55a0203f8900386ce311a3f95e1a744957ea430f784c05dc4c13c7c4b4ef'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -32,6 +32,8 @@ export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'd
   'council_list': 'allow',
   'council_register': 'ask',
   'create_goal': 'allow',
+  'custom_research-fetch': 'allow',
+  'custom_research-verify': 'allow',
   'diagnostics_report': 'allow',
   'edit': 'allow',
   'exit_plan_mode': 'allow',
@@ -71,6 +73,7 @@ export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'd
   'todo_write': 'allow',
   'tool_groups': 'allow',
   'update_goal': 'allow',
+  'web_fetch': 'allow',
   'web_search': 'allow',
   'whiteboard_forget': 'allow',
   'whiteboard_pin': 'allow',
@@ -82,8 +85,8 @@ export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'd
 })
 
 /** Host families deliberately left to `defaults.unknownTools` (shipped ask). */
-export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; reason: string }[] = Object.freeze([
-  { prefix: 'custom_', reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate' },
+export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?: readonly string[]; reason: string }[] = Object.freeze([
+  { prefix: 'custom_', except: ['custom_research-fetch', 'custom_research-verify'], reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate. The first-party research tools (doc 88) are the documented exception: their commands are fixed, local, and read-only, and they carry explicit allow rows above so an unattended research run never parks on a card' },
   { prefix: 'mcp__', reason: 'tools of mounted MCP servers are third-party surface; the MCP wildcard ladder and the unknown-tools ask gate them until the operator trusts a row or a server wildcard' },
   { prefix: 'peer_', reason: "first-party on-demand fleet tools (peer_ask, peer_asks, peer_answer, peer_cancel, peer_status) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device's agent, so until the operator sets a row the unknown-tools ask is the intended gate" },
 ])
@@ -228,7 +231,7 @@ export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', '
 /** Extra per-role child denials (host role table). */
 export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'explorer': Object.freeze(['edit', 'write', 'str_replace_editor']),
-  'librarian': Object.freeze(['edit', 'write', 'str_replace_editor']),
+  'librarian': Object.freeze(['str_replace_editor']),
 })
 
 /** The main-agent advertised surface (shipped preset inventory). */
