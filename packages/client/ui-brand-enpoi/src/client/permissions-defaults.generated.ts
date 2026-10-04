@@ -18,9 +18,9 @@
  * tool-defaults completeness spec verifies it from the other side.
  */
 
-export const HOST_DEFAULTS_DIGEST = '7e379351280482025780538c8649913732300a5d549bbc04fc4c764e30500651'
+export const HOST_DEFAULTS_DIGEST = '8d93d6e784cad7141f24344b872b100023c7dcb82abc17bf0bdf241e99a019d7'
 
-export const MIRROR_SOURCE_DIGEST = 'f8ff55a0203f8900386ce311a3f95e1a744957ea430f784c05dc4c13c7c4b4ef'
+export const MIRROR_SOURCE_DIGEST = 'da4d4ab349c0f6f379b954eb7bc949b94c8c2dc0612c10f48285a3a5fa88899a'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -59,6 +59,7 @@ export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'd
   'read_image': 'allow',
   'request_evidence': 'allow',
   'roundtable': 'allow',
+  'run_code': 'allow',
   'send_message': 'allow',
   'session_debug': 'allow',
   'session_event_read': 'allow',

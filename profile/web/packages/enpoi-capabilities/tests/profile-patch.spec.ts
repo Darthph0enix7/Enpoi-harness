@@ -39,13 +39,13 @@ const STATE_SECTIONS = [
 ]
 
 describe('web profile patch template guard', () => {
-  it('presents every tool-presentation row as native (run_code is not advertised)', () => {
+  it('presents every tool-presentation row as both (native tools + run_code)', () => {
     const rows = PATCH.split('- id: tool-presentation').slice(1)
     expect(rows.length).toBeGreaterThan(0)
     for (const row of rows) {
       const config = row.slice(0, row.indexOf('\n\n'))
-      expect(config).toContain('mode: native')
-      expect(config).not.toContain('mode: both')
+      expect(config).toContain('mode: both')
+      expect(config).not.toContain('mode: native')
       expect(config).not.toContain('mode: ptc')
     }
   })

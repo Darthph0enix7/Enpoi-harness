@@ -173,6 +173,7 @@ export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   // only where the operator defines the customTools rows.
   'custom_research-fetch': 'allow', 'custom_research-verify': 'allow',
   todo_write: 'allow',
+  run_code: 'allow',
   memory_search: 'allow', memory_save: 'allow', memory_rescind: 'allow', memory_confirm: 'allow',
   oracle_review: 'allow', request_evidence: 'allow',
   roundtable: 'allow', chorus: 'allow', subagent: 'allow', task: 'allow',

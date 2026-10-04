@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  dsh-fast@0.2.14: ca5c868041fd32a154353f198f7459182113c11b71633188bf9674add6354a7a
+  dsh-fast@0.2.14: 1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6
 
 importers:
 
@@ -112,7 +112,7 @@ importers:
         version: link:packages/enpoi-whiteboard
       dsh-fast:
         specifier: 0.2.14
-        version: 0.2.14(patch_hash=ca5c868041fd32a154353f198f7459182113c11b71633188bf9674add6354a7a)
+        version: 0.2.14(patch_hash=1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6)
     devDependencies:
       '@types/node':
         specifier: ^26.3.0
@@ -1454,7 +1454,7 @@ snapshots:
     dependencies:
       zod: 4.6.5
 
-  dsh-fast@0.2.14(patch_hash=ca5c868041fd32a154353f198f7459182113c11b71633188bf9674add6354a7a):
+  dsh-fast@0.2.14(patch_hash=1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6):
     dependencies:
       tsdown: 0.22.14(typescript@5.9.3)
       typescript: 5.9.3

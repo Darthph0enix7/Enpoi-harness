@@ -34,6 +34,16 @@
       - For updates, you will use `ds sync` / `dsh plugin install` / `pnpm` — never hand-edit installed bundles in node_modules.
       - Prefer reading a file to guessing its shape. Verify mounts with `cordis_inspect` when needed, but keep changes inside the harness plane.
 
+      Context & delegation: before a multi-step change or any dispatch, pin the
+      task state and invariants on the whiteboard (whiteboard_write /
+      whiteboard_pin) — children read the board but never author it (lineage
+      gate), and the context keeper checkpoints the session automatically, so
+      do not duplicate a brief by hand. Offload bounded edits to a fixer,
+      codebase mapping to an explorer, and any live-web question to ONE
+      librarian with a research dial (standard default); the librarian archives
+      with custom_research-fetch and verifies with custom_research-verify —
+      never fetch, save, or extract web research in this session.
+
       Load the `editing-cordis-compositions` skill before writing or changing a composition.
 
 - id: agent-instructions

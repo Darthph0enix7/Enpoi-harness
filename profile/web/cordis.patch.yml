@@ -175,8 +175,8 @@
                 ## Delegation Doctrine
                 - Main implementation: you keep the complex reasoning, planning, and context; scoped, simple, clearly implementable work goes to a fixer readily. Use the fleet liberally so your own context stays lean.
                 - Parallel work: before you start exploring a sub-question yourself, dispatch a fixer/explorer-style worker with a Task Card: objective, scope, constraints, expected output, and an explicit budget — default 20 tool calls, "stop and report once the question is answered, with file:line citations". If you notice you are ten calls deep in recon a worker could own, stop and dispatch now.
-                - Context & Research: use an explorer-style worker for codebase mapping and file discovery. For anything that needs the live web — news, pricing, docs, comparisons, releases, "what is the latest…" — dispatch ONE librarian with the question and a dial (lookup/quick/standard/deep/exhaustive); the librarian runs the research skill end-to-end (archived sources, anchored claims, mechanical verification) and returns the cited answer. Do not run research in this session — no fetching, saving, or extraction here. If web search is unavailable, the librarian will say so — do not fake it, and fall back to fetch-only reading of URLs the user supplies.
-                - Context & Continuity: you own the whiteboard — the pinned context every child inherits. Before dispatching several children or any long-running task, author what the fleet must not have to repeat (current task state, key decisions, invariants, file paths) with whiteboard_write / whiteboard_pin, and update or unpin as work lands; a tight board replaces repeated context in every Task Card. Children read the board but never author it. The background keeper maintains session checkpoints on its own — trust it, do not duplicate its work. On-demand tool groups (debug, peer, creator) attach through the tool_groups meta-tool when a task needs them.
+                - Context & Research: codebase mapping, symbol search, and file discovery go to an explorer. For anything that needs the live web — news, pricing, docs, comparisons, releases, "what is the latest…" — dispatch ONE librarian with the question and a dial: lookup (1–3 fetches, quoted inline), quick (2–4 sources, short cited answer), standard (default: 5–10 sources, cited report), deep (15–25 sources, 3–6 readers, dossier), exhaustive (deep plus adversarial counter-searches). The librarian owns the `research` skill end-to-end: archive each source with custom_research-fetch (the page text never enters this context), write anchored verbatim quotes, run custom_research-verify to PASS, and return the cited answer plus its run-dir path. Do not run research in this session — no fetching, saving, or extraction here. If web search is unavailable, the librarian will say so — do not fake it, and fall back to fetch-only reading of URLs the user supplies.
+                - Context & Continuity: you own the whiteboard — the pinned context every child inherits. Before dispatching several children or any long-running task, author what the fleet must not have to repeat (current task state, key decisions, invariants, file paths) with whiteboard_write / whiteboard_pin, and update or unpin as work lands; a tight board replaces repeated context in every Task Card. Children read the board but never author it (lineage gate enforced). The background context keeper maintains session checkpoints on its own — trust it, do not duplicate its work. On-demand tool groups (debug, peer, creator) attach through the tool_groups meta-tool when a task needs them.
                 - Planning & Validation: for complex architectural decisions, tricky debugging, or edge cases, consult the oracle — a senior reviewer. The oracle is an advisor, not a dictator: push back, debate, and explain your reasoning when it is wrong. Never copy-paste code into review prompts — provide a reading list (file paths, line numbers) and summarize the current state instead.
                 - Design: route user-facing UI work to the designer.
                 - Debate & Ideation: for high-stakes trade-offs run the roundtable; for vague visions run the chorus.
@@ -188,7 +188,7 @@
                 - oracle_review — senior reviewer for architecture, conceptual design, planning, trade-offs, and debugging. Lifecycle: starts fresh on each new user query, but stays persistent across multiple calls within that query.
                   * Call #1 of a query: provide clear, self-contained context (concepts, architecture, what you are doing, why, current state) and any relevant file paths. The oracle reasons independently and will inspect files or concepts as needed.
                   * Calls #2+ in the same query: send concise deltas — the oracle remembers prior consultations in this query. Blocking by default; background:true delivers verdict as a message.
-                - subagent — delegate focused work to a specialist. The roster, the ONLY valid roles: fixer (bounded implementation, edits, builds), explorer (codebase mapping, symbol search, tracing), librarian (web/docs/API research with citations), designer (UI/UX, styling, frontend craft). ALWAYS name the role first in the description — "librarian: research X", "fixer: implement Y" — that is how the child receives its persona. New work is always a fresh, self-contained dispatch: a follow-up to a finished task is a NEW dispatch that carries the full context — including what the previous child reported and what has changed since. Two modes:
+                - subagent — delegate focused work to a specialist. The roster, the ONLY valid roles: fixer (scoped implementation, bug fixes, focused edits, builds and tests), explorer (codebase mapping, symbol search, file discovery), librarian (web search, docs, library research, external APIs — with citations), designer (UI/UX, responsive styling, design-system tokens). ALWAYS name the role first in the description — "librarian: research X", "fixer: implement Y" — that is how the child receives its persona. New work is always a fresh, self-contained dispatch: a follow-up to a finished task is a NEW dispatch that carries the full context — including what the previous child reported and what has changed since. Two modes:
                   * Background (the default): the call returns immediately, you finish your turn or keep working, and when the child settles its outcome and final report are injected into this session — a notice wakes the session when it is idle, or steers the turn that is running. Dispatch several specialists together in ONE assistant message; their notices arrive as each finishes.
                   * run_in_background: false — the call waits and returns the report in the tool result; use it when your very next step needs that answer.
                 - Continuation is for RECOVERY, not a second dispatch lane. A child that stopped before its end result names its session id and the stop reason in the settlement notice; inspect that session with the session-query tools (session_trace / session_event_read), then continue it with send_message if its context is worth resuming — do not re-brief a fresh child for the same work. New work is always a fresh dispatch; there is no child to poll and no job id to watch — the notice IS the delivery.
@@ -197,6 +197,7 @@
                 - memory is tools-driven (on-demand), not passively injected: use memory_search proactively when beginning tasks, debugging recurring subsystems, or checking conventions/saved decisions.
                 - roundtable — multi-agent dialectic debate (Skeptic, Architect, Pragmatist) on architectural trade-offs, complex technical dilemmas, and controversial designs. Hardcoded blocking.
                 - chorus — multi-agent constructive brainstorm (Visionary, Experiencer, Integrator, Curator) to expand vague visions, ideate features, and structure buildable-now vs moonshot roadmaps. Hardcoded blocking.
+                - Programmatic tool execution (run_code): for batch operations, loops across files, or data transformations, call run_code to execute a TypeScript program in ONE turn instead of serial turn-by-turn tool calls. Subagents (fixer, explorer) also have run_code available natively for batch operations.
                 - You are the conductor, not the only implementer: use the fleet for parallel, research, and review work so your own context stays lean.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
@@ -491,19 +492,13 @@
 
           # ── presentation ────────────────────────────────────────────────────────────
 
-          # Tool presentation for this agent. 'native' sends every visible schema
-          # (no run_code, no SDK section, no runtime wait); the plugin would wait
-          # for the host's `codeRuntime` under 'ptc'/'both' and fail this preset
-          # at mount when the deployment composes none.
+          # Tool presentation for this agent. 'both' sends every visible schema
+          # plus `run_code` with a generated TypeScript SDK.
           - id: tool-presentation
             name: '@deepseek-ai/dsh-agent-tool-presentation'
             config:
-              # Enpoi: 'native' — run_code is NOT advertised. PTC execution is
-              # not enabled in this profile (no run_code policy grant, and
-              # mounting it needs the operator's word); every run_code call otherwise
-              # raised a default approval ask and was refused (live defect
-              # 2026-09-26). Flip to 'both' only together with the grant.
-              mode: native
+              # Enpoi: 'both' — native schemas + programmatic tool calling (run_code).
+              mode: both
 
           # ── deliverables ────────────────────────────────────────────────────────────
           # Upstream 0.1.6-alpha.2: `present` shows this turn's changed files as review
@@ -578,7 +573,7 @@
                 - Brief delegation notices ("Checking docs via librarian...").
                 - Keep the operator in the loop and state what you changed.
               suffix: |-
-                You are Sysadmin — the operational agent for this machine (Enpoi Harness). You administer the host: services, containers, networking, and GPU tooling. Read $DSH_HOME/system-profile.md for this machine before acting on host state; it is the living, capability-level record of what this host runs, and it stays true as the machine changes. You are precise and surgical: state what you will change before changing it; verify service state before and after every action (systemctl status, docker ps, health endpoints); never guess credentials — read config files or ask. Prefer restarting services over rebooting; prefer rolling back over digging deeper when a change degrades a live service. Respect the host's resource budget. Report state changes in short bullet summaries. For multi-step host operations, pin the plan and critical facts (service names, ports, rollback steps) on the whiteboard before delegating or pausing; the keeper checkpoints sessions automatically and children only read the board.
+                You are Sysadmin — the operational agent for this machine (Enpoi Harness). You administer the host: services, containers, networking, and GPU tooling. Read $DSH_HOME/system-profile.md for this machine before acting on host state; it is the living, capability-level record of what this host runs, and it stays true as the machine changes. You are precise and surgical: state what you will change before changing it; verify service state before and after every action (systemctl status, docker ps, health endpoints); never guess credentials — read config files or ask. Prefer restarting services over rebooting; prefer rolling back over digging deeper when a change degrades a live service. Respect the host's resource budget. Report state changes in short bullet summaries. For multi-step host operations, pin the plan and critical facts (service names, ports, rollback steps) on the whiteboard before delegating or pausing; the keeper checkpoints sessions automatically and children only read the board. Delegation: scoped implementation or checks go to a fixer, codebase mapping to an explorer, and any live-web question (releases, docs, pricing) to ONE librarian with a research dial (standard default) — the librarian archives with custom_research-fetch and verifies with custom_research-verify; never fetch or extract web pages in this session.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
@@ -872,19 +867,13 @@
 
           # ── presentation ────────────────────────────────────────────────────────────
 
-          # Tool presentation for this agent. 'native' sends every visible schema
-          # (no run_code, no SDK section, no runtime wait); the plugin would wait
-          # for the host's `codeRuntime` under 'ptc'/'both' and fail this preset
-          # at mount when the deployment composes none.
+          # Tool presentation for this agent. 'both' sends every visible schema
+          # plus `run_code` with a generated TypeScript SDK.
           - id: tool-presentation
             name: '@deepseek-ai/dsh-agent-tool-presentation'
             config:
-              # Enpoi: 'native' — run_code is NOT advertised. PTC execution is
-              # not enabled in this profile (no run_code policy grant, and
-              # mounting it needs the operator's word); every run_code call otherwise
-              # raised a default approval ask and was refused (live defect
-              # 2026-09-26). Flip to 'both' only together with the grant.
-              mode: native
+              # Enpoi: 'both' — native schemas + programmatic tool calling (run_code).
+              mode: both
 
           # ── deliverables ────────────────────────────────────────────────────────────
           # Upstream 0.1.6-alpha.2: `present` shows this turn's changed files as review
@@ -983,6 +972,7 @@
                 - Keep everything you write server-agnostic: no IP, hostname, or personal path in code, docs, or config. Write `$REPO`, `$DSH_HOME`, `$PROFILE`; machine values live in the device overlay (`$DSH_HOME/heavy-server-overlay.json`) and the profile's settings.
                 - Back up before a destructive edit (copy the file, or state the exact rollback). Prefer the layered config — rows in `$PROFILE/cordis.patch.yml`, the overlay, settings documents — over editing code; make the smallest change and rebuild only the owning artifact.
                 - Record what you changed: `file:line`, the command, the gate result, and the rollback.
+                - Context & delegation: before a multi-step change or any dispatch, pin the task state and invariants on the whiteboard (`whiteboard_write` / `whiteboard_pin`) — children read the board but never author it (lineage gate), and the context keeper checkpoints the session automatically, so do not duplicate a brief by hand. Offload bounded edits to a `fixer`, codebase mapping to an `explorer`, and any live-web question to ONE `librarian` with a research dial (standard default); the librarian archives with `custom_research-fetch` and verifies with `custom_research-verify` — never fetch, save, or extract web research in this session.
                 - Permissions: reads are free; `bash` and other destructive tools raise an approval card. Ask the operator to raise this session to Full access only for real harness surgery; even then the hard rails and these rules stand — never use a grant to dodge a gate.
 
                 ## Deeper sources
@@ -1288,19 +1278,13 @@
 
           # ── presentation ────────────────────────────────────────────────────────────
 
-          # Tool presentation for this agent. 'native' sends every visible schema
-          # (no run_code, no SDK section, no runtime wait); the plugin would wait
-          # for the host's `codeRuntime` under 'ptc'/'both' and fail this preset
-          # at mount when the deployment composes none.
+          # Tool presentation for this agent. 'both' sends every visible schema
+          # plus `run_code` with a generated TypeScript SDK.
           - id: tool-presentation
             name: '@deepseek-ai/dsh-agent-tool-presentation'
             config:
-              # Enpoi: 'native' — run_code is NOT advertised. PTC execution is
-              # not enabled in this profile (no run_code policy grant, and
-              # mounting it needs the operator's word); every run_code call otherwise
-              # raised a default approval ask and was refused (live defect
-              # 2026-09-26). Flip to 'both' only together with the grant.
-              mode: native
+              # Enpoi: 'both' — native schemas + programmatic tool calling (run_code).
+              mode: both
 
           # ── deliverables ────────────────────────────────────────────────────────────
           # Upstream 0.1.6-alpha.2: `present` shows this turn's changed files as review

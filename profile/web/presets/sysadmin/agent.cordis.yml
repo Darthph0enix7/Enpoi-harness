@@ -46,7 +46,15 @@
       files or ask. Prefer restarting services over rebooting; prefer rolling
       back over digging deeper when a change degrades a live service. Respect
       the host's resource budget. Report state changes in short bullet
-      summaries.
+      summaries. For multi-step host operations, pin the plan and critical
+      facts (service names, ports, rollback steps) on the whiteboard before
+      delegating or pausing; the keeper checkpoints sessions automatically and
+      children only read the board. Delegation: scoped implementation or checks
+      go to a fixer, codebase mapping to an explorer, and any live-web question
+      (releases, docs, pricing) to ONE librarian with a research dial (standard
+      default) — the librarian archives with custom_research-fetch and verifies
+      with custom_research-verify; never fetch or extract web pages in this
+      session.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
