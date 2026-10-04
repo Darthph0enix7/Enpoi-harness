@@ -102,6 +102,9 @@
       "path": "../../document/office-to-pdf"
     },
     {
+      "path": "../../web/web-setup"
+    },
+    {
       "path": "../account-controller"
     },
     {

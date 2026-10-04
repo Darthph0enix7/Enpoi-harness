@@ -6,6 +6,7 @@ import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import accountRemote from '@deepseek-ai/dsh-api-account-controller/remote'
 import settingsControllerRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import officeToPdfRemote from '@deepseek-ai/dsh-office-to-pdf/remote'
+import webSetupRemote from '@deepseek-ai/dsh-web-setup/remote'
 import goalsRemote from '@deepseek-ai/dsh-goal/remote'
 import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
 import llmRemote from '@deepseek-ai/dsh-llm/remote'
@@ -43,6 +44,7 @@ export type {} from '@deepseek-ai/dsh-api-account-controller/remote'
 export type {} from '@deepseek-ai/dsh-goal/remote'
 export type {} from '@deepseek-ai/dsh-schedule/remote'
 export type {} from '@deepseek-ai/dsh-office-to-pdf/remote'
+export type {} from '@deepseek-ai/dsh-web-setup/remote'
 export type {} from '@deepseek-ai/dsh-llm/remote'
 export type {} from '@deepseek-ai/dsh-host-plugin-inventory/remote'
 export type {} from '@deepseek-ai/dsh-message-feedback/remote'
@@ -142,6 +144,12 @@ export type {
   LlmConfigurableProvider, LlmDiscoveredModel,
   LlmModelDiscoveryRequest, LlmProviderInfo,
 } from '@deepseek-ai/dsh-llm/types'
+// Web setup vocabulary for the webSetup namespace: the effective provider
+// selection, its credential state, the canary result, and the apply request.
+export type {
+  WebSetupApplyRequest, WebSetupApplyResult, WebSetupCredentialState,
+  WebSetupMountedProvider, WebSetupStatus, WebSetupValidateRequest, WebSetupValidation,
+} from '@deepseek-ai/dsh-web-setup/types'
 // Reference-discovery result vocabulary for the fileReferences and
 // sessionReferenceResolver namespaces.
 export type { FileReferenceCandidate } from '@deepseek-ai/dsh-file-reference/types'
@@ -180,6 +188,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       fileUploadsRemote, sessionReferencesRemote,
       permissionPresetsRemote, subagentsRemote, sessionRemote, jobRemote, workspaceRemote, workspaceFilesRemote, terminalRemote,
       officeToPdfRemote,
+      webSetupRemote,
     ]) {
       disposers.push(await ctx.remote.$mount(contribution))
     }

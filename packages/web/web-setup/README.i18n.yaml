@@ -1,0 +1,64 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/web/web-setup/README.md
+/:
+  en: 9f6db9745a834bf1
+  zh: 94b90722677e75bc
+/deepseek-ai-dsh-web-setup:
+  en: 4bf4bb2f215b08bf
+  zh: bc894fe1e5030b08
+/deepseek-ai-dsh-web-setup/summary:
+  en: f8dac1481348373b
+  zh: 9231177d7ca1677a
+/deepseek-ai-dsh-web-setup/table-of-contents:
+  en: 8e295f78565ec141
+  zh: 3d2416e5a21b3f36
+/deepseek-ai-dsh-web-setup/use-this-package:
+  en: d7c5d368c15ab082
+  zh: 0c3fba2d97a72157
+/deepseek-ai-dsh-web-setup/use-this-package/config:
+  en: 3b953226aa278006
+  zh: dbb05cc5d578e3f0
+/deepseek-ai-dsh-web-setup/use-this-package/host-seams:
+  en: 13091a6925c6064a
+  zh: 5efaa7b43ff40d32
+/deepseek-ai-dsh-web-setup/the-websetup-remote-namespace:
+  en: 3e94e07b230b6aa2
+  zh: c0e892cff21052a0
+/deepseek-ai-dsh-web-setup/the-websetup-remote-namespace/status:
+  en: 4454e7da08bf8a43
+  zh: 9f29f0c5a09652d1
+/deepseek-ai-dsh-web-setup/the-websetup-remote-namespace/validateprovider-request-signal:
+  en: 9e7e6dd3dfe5ac7a
+  zh: 1cc71b48309acebd
+/deepseek-ai-dsh-web-setup/the-websetup-remote-namespace/applysetup-request:
+  en: 3a1291b0c235a4b8
+  zh: e00fcded344c9811
+/deepseek-ai-dsh-web-setup/provider-catalog:
+  en: 105e1d9afd608931
+  zh: 56229ad705d270c7
+/deepseek-ai-dsh-web-setup/apply-semantics:
+  en: 80bdef481a3ef70e
+  zh: 40d0904e7f8bcdbe
+/deepseek-ai-dsh-web-setup/design-notes:
+  en: e955d9812754f3b2
+  zh: 0e72d9a0b1bf196f
+/deepseek-ai-dsh-web-setup/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-web-setup/model-experience/web-tool-catalog-through-profile-rows:
+  en: 2d75b15192fbc90f
+  zh: 72415b00398b1189
+/deepseek-ai-dsh-web-setup/model-experience/web-tool-catalog-through-profile-rows/what-the-model-sees:
+  en: 511f1470c4837000
+  zh: 55af1da058b1ad92
+/deepseek-ai-dsh-web-setup/model-experience/web-tool-catalog-through-profile-rows/token-effect:
+  en: 7c407e26e5fc3937
+  zh: b49866202ae7654c
+/deepseek-ai-dsh-web-setup/model-experience/web-tool-catalog-through-profile-rows/kv-cache-effect:
+  en: 8cb5ed0eee7303e0
+  zh: eb15743338a37c0b
+/deepseek-ai-dsh-web-setup/known-limitations-and-deferred-work:
+  en: 1961036736fe3a6c
+  zh: c38074bf19ee0674

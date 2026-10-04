@@ -1,0 +1,61 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/web/web-search-searxng/README.md
+/:
+  en: f0bba24c27d26bd5
+  zh: 2b4e4d52c937be35
+/deepseek-ai-dsh-web-search-searxng:
+  en: bbd2343526932028
+  zh: 9c036d33c506b6a9
+/deepseek-ai-dsh-web-search-searxng/summary:
+  en: d835225783d6fc1d
+  zh: 2c679b623aaa7e36
+/deepseek-ai-dsh-web-search-searxng/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-web-search-searxng/use-this-package:
+  en: c0837e1ef1387de6
+  zh: 9504d8cd629263ca
+/deepseek-ai-dsh-web-search-searxng/use-this-package/when-to-choose-it:
+  en: 1fcc3ca826c21fe9
+  zh: 5eb01b9d9662e13c
+/deepseek-ai-dsh-web-search-searxng/use-this-package/minimal-configuration:
+  en: ccc7804c5ceeb0d7
+  zh: 72ad4a07f28c73d8
+/deepseek-ai-dsh-web-search-searxng/use-this-package/what-a-search-returns:
+  en: ad3bd6027aa3b56b
+  zh: cba447bdb7a45f66
+/deepseek-ai-dsh-web-search-searxng/use-this-package/failures-and-recovery:
+  en: bf4417edef30b9c3
+  zh: ed7dc41fa8080be3
+/deepseek-ai-dsh-web-search-searxng/understand-the-implementation:
+  en: 9842c69ad3636bb3
+  zh: 3cdc3f816cbdd0cb
+/deepseek-ai-dsh-web-search-searxng/understand-the-implementation/design-philosophy:
+  en: ab03b31c665bffc3
+  zh: 5c561ed72c585843
+/deepseek-ai-dsh-web-search-searxng/understand-the-implementation/source-map:
+  en: 08abff44bbcb206e
+  zh: f81227a8d69451a6
+/deepseek-ai-dsh-web-search-searxng/understand-the-implementation/request-and-mapping-flow:
+  en: 59c939b4df540f14
+  zh: a7cdaff1cc60ac2a
+/deepseek-ai-dsh-web-search-searxng/further-exploration:
+  en: 8f414cc74bffb265
+  zh: 93a80342f56d0d3e
+/deepseek-ai-dsh-web-search-searxng/model-experience:
+  en: 184a4166642ebb67
+  zh: a213e6a0d5d9bf65
+/deepseek-ai-dsh-web-search-searxng/model-experience/kv-cache-effect:
+  en: 40294c1c31b74824
+  zh: d75d48f485447a74
+/deepseek-ai-dsh-web-search-searxng/known-limitations-and-deferred-work:
+  en: b979c3d07753ad55
+  zh: 88c159cf8e9eceab
+/deepseek-ai-dsh-web-search-searxng/known-limitations-and-deferred-work/dev-note:
+  en: 7f775cc79dbce94b
+  zh: 12b8f68f9e7c48ca
+/deepseek-ai-dsh-web-search-searxng/known-limitations-and-deferred-work/dev-note/future-per-query-recency-and-instance-authentication:
+  en: a6c4f6773fe6785c
+  zh: f9e330c8e9ff140b

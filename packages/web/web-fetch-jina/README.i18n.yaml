@@ -1,0 +1,61 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/web/web-fetch-jina/README.md
+/:
+  en: 623c8e9b4e3af6d1
+  zh: 6c5361d3f4d09deb
+/deepseek-ai-dsh-web-fetch-jina:
+  en: 9f3d751c7388ee8a
+  zh: d10dc37d8568a32a
+/deepseek-ai-dsh-web-fetch-jina/summary:
+  en: 605ce3f1eca26bcf
+  zh: 165d59250a857211
+/deepseek-ai-dsh-web-fetch-jina/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-web-fetch-jina/use-this-package:
+  en: e5f7f22d62634eb0
+  zh: 3adfbce86d762847
+/deepseek-ai-dsh-web-fetch-jina/use-this-package/when-to-choose-it:
+  en: 53371fce1928ca5c
+  zh: e45533d9e75f4f91
+/deepseek-ai-dsh-web-fetch-jina/use-this-package/minimal-configuration:
+  en: 3185f5b67e1e7e94
+  zh: eb398763229936af
+/deepseek-ai-dsh-web-fetch-jina/use-this-package/what-a-fetch-returns:
+  en: 9129e0b4b0b98ccc
+  zh: 5fa43e6d7e1b4f3f
+/deepseek-ai-dsh-web-fetch-jina/use-this-package/failures-and-recovery:
+  en: c7dd6286ad6c79fe
+  zh: 00eaf9f5c9adc90f
+/deepseek-ai-dsh-web-fetch-jina/understand-the-implementation:
+  en: 9842c69ad3636bb3
+  zh: 3cdc3f816cbdd0cb
+/deepseek-ai-dsh-web-fetch-jina/understand-the-implementation/design-philosophy:
+  en: df360e014029656b
+  zh: 4f0c6ce63ed9b637
+/deepseek-ai-dsh-web-fetch-jina/understand-the-implementation/source-map:
+  en: 5512fb9aec2e9dc9
+  zh: 8a9a87b48af64a7b
+/deepseek-ai-dsh-web-fetch-jina/understand-the-implementation/request-and-mapping-flow:
+  en: a688170b933eafa1
+  zh: 1a5928ca4a4a9b52
+/deepseek-ai-dsh-web-fetch-jina/further-exploration:
+  en: 384ec91bfe3d9250
+  zh: cc253e87cbff3a43
+/deepseek-ai-dsh-web-fetch-jina/model-experience:
+  en: 6c9f6cad295d06d1
+  zh: 78fcd9767fa85154
+/deepseek-ai-dsh-web-fetch-jina/model-experience/kv-cache-effect:
+  en: 40294c1c31b74824
+  zh: d75d48f485447a74
+/deepseek-ai-dsh-web-fetch-jina/known-limitations-and-deferred-work:
+  en: 0e4756d69552d7b5
+  zh: 3da659ba9807b78f
+/deepseek-ai-dsh-web-fetch-jina/known-limitations-and-deferred-work/dev-note:
+  en: 7f775cc79dbce94b
+  zh: 12b8f68f9e7c48ca
+/deepseek-ai-dsh-web-fetch-jina/known-limitations-and-deferred-work/dev-note/future-extraction-controls-and-the-post-form:
+  en: a148ebb966080d18
+  zh: 791832b9707bc46b

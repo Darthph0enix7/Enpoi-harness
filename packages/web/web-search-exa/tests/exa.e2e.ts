@@ -10,14 +10,25 @@ const maybe = apiKey !== undefined && apiKey.length > 0 ? describe : describe.sk
 
 maybe('ExaSearchProvider real API', () => {
   it('returns sources for a live query', async () => {
-    const provider = new ExaSearchProvider({
+    const provider = new ExaSearchProvider(() => ({
       apiKey: apiKey!,
       baseURL: process.env.EXA_BASE_URL ?? EXA_DEFAULT_BASE_URL,
       searchType: EXA_DEFAULT_SEARCH_TYPE,
       highlightsPerResult: EXA_DEFAULT_HIGHLIGHTS_PER_RESULT,
-    })
+    }))
     const result = await provider.search({ query: 'DeepSeek Harness', maxResults: 5 })
     expect(result.sources.length).toBeGreaterThan(0)
     for (const source of result.sources) expect(source.url).toMatch(/^https?:\/\//)
+
+    const withText = new ExaSearchProvider(() => ({
+      apiKey: apiKey!,
+      baseURL: process.env.EXA_BASE_URL ?? EXA_DEFAULT_BASE_URL,
+      searchType: EXA_DEFAULT_SEARCH_TYPE,
+      highlightsPerResult: EXA_DEFAULT_HIGHLIGHTS_PER_RESULT,
+      text: { maxCharacters: 400 },
+    }))
+    const textResult = await withText.search({ query: 'DeepSeek Harness', maxResults: 3 })
+    expect(textResult.sources.length).toBeGreaterThan(0)
+    for (const source of textResult.sources) expect((source.snippet ?? '').length).toBeGreaterThan(0)
   }, 30_000)
 })
