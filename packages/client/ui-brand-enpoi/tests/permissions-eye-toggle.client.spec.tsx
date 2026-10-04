@@ -153,16 +153,10 @@ describe('permissions availability eye', () => {
     expect(mutations[0]!.payload.args.ops[0]!.value).toEqual(['bash', 'read'])
   })
 
-  it('offers no toggle on an aggregate row with no live members', async () => {
+  it('concrete rows keep their eye toggle on the role allowlist', async () => {
     await mount({ permissions: { defaults: { unknownTools: 'ask' } } }, ['bash', 'read'])
-
-    // The always-rendered MCP master has zero members here: nothing to add.
-    // ('All MCP tools' also appears in the intro copy — take the row label.)
-    const masterName = screen.getAllByText('All MCP tools').find(el => el.className.includes('rowName'))!
-    const master = masterName.parentElement!.parentElement!
-    expect(within(master).queryByTitle(/this role allowlist/)).toBeNull()
-    // Concrete rows keep their eye.
     expect(eyeFor('Bash').getAttribute('aria-pressed')).toBe('true')
+    expect(eyeFor('Read').getAttribute('aria-pressed')).toBe('true')
   })
 
   it('presents the creator-only tools as available to the creator seat alone', async () => {

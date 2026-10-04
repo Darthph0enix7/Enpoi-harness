@@ -632,8 +632,8 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
           <b>Global is the source of truth</b> — agent panes inherit it and override only where you set a rule.
           Legend: <b>filled segment</b> = your rule · <b>dashed segment</b> = shipped default applying · the eye = whether the
           role sees the tool at all (unavailable tools are stripped — their policy is irrelevant). Reads and web ship
-          allow; bash and unknown tools ship ask. Rows grouped under a server, <b>Whiteboard</b>, or <b>All MCP tools</b> are
-          derived: they set every tool they cover at once, while the per-tool rows stay the source of truth. Everything is
+          allow; bash and unknown tools ship ask; mounted MCP servers default to allow. Rows grouped under <b>Whiteboard</b> are
+          derived: they set every tool they cover at once. Everything is
           settings-backed and applies from the next dispatch.
         </span>
       </div>

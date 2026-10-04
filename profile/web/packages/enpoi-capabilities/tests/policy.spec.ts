@@ -260,10 +260,12 @@ describe('resolution order (Oracle-amended)', () => {
   it('mcp wildcards: exact > server > family > default', () => {
     const cfg: PermissionPolicyConfig = { tools: { 'mcp__plane__*': 'ask' } }
     expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg }).kind).toBe('ask')
-    expect(resolvePolicy({ toolName: 'mcp__ue__do_thing', config: cfg }).kind).toBe('ask')   // mcp__* not set → default ask
+    expect(resolvePolicy({ toolName: 'mcp__ue__do_thing', config: cfg }).kind).toBe('allow')   // unconfigured MCP tool defaults to allow!
     const cfg2: PermissionPolicyConfig = { tools: { 'mcp__plane__create_page': 'allow', 'mcp__*': 'deny' } }
     expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg2 }).kind).toBe('allow')
     expect(resolvePolicy({ toolName: 'mcp__ue__do_thing', config: cfg2 }).kind).toBe('deny')
+    const cfg3: PermissionPolicyConfig = { tools: { 'mcp__plane__*': 'allow' } }
+    expect(resolvePolicy({ toolName: 'mcp__plane__create_page', config: cfg3 }).kind).toBe('allow')
   })
 
   it('mcp wildcards resolve the server by the longest known catalog name (a__b ids)', () => {
@@ -747,8 +749,9 @@ describe('never-policy tool surface (forwarding makes asks usable)', () => {
   })
 
   it('drops an unconfigured tool only when the unknown-tools default itself denies', () => {
-    const kept = advertisedToolNames(TOOLS, 'never', { agent: 'fixer', config: { defaults: { unknownTools: 'deny' } } })
-    expect(kept).not.toContain('mcp__demo__mutate')
+    const toolsWithUnknown = [...TOOLS, 'unknown_plugin_tool']
+    const kept = advertisedToolNames(toolsWithUnknown, 'never', { agent: 'fixer', config: { defaults: { unknownTools: 'deny' } } })
+    expect(kept).not.toContain('unknown_plugin_tool')
     expect(kept).toContain('read')
     expect(kept).toContain('str_replace_editor')
   })
@@ -851,8 +854,8 @@ describe('mcp lifecycle tool default', () => {
   it('ships allow: list is read-only and mount/unmount are session-scoped and reversible', () => {
     expect(SHIPPED_TOOL_DEFAULTS.mcp).toBe('allow')
     expect(resolvePolicy({ toolName: 'mcp', config: EMPTY }).kind).toBe('allow')
-    // The mounted server's own tools keep their own rows (unknownTools = ask).
-    expect(resolvePolicy({ toolName: 'mcp__unreal__spawn_actor', config: EMPTY }).kind).toBe('ask')
+    // The mounted server's own tools default to allow (no prompt on unconfigured mounted tools).
+    expect(resolvePolicy({ toolName: 'mcp__unreal__spawn_actor', config: EMPTY }).kind).toBe('allow')
   })
 })
 

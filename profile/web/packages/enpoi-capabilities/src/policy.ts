@@ -435,9 +435,13 @@ export function mcpLadder(
   const check = (key: string): PolicyDecision | null => {
     const policy = table[key]
     if (policy === undefined) return null
-    return policy === 'deny'
-      ? { kind: 'deny', reason: `operator policy denies ${toolName}`, source: `matrix:${key}` }
-      : { kind: 'ask', reason: `operator policy asks for ${key}`, source: `matrix:${key}`, grantTier: 'tool' }
+    if (policy === 'deny') {
+      return { kind: 'deny', reason: `operator policy denies ${toolName}`, source: `matrix:${key}` }
+    }
+    if (policy === 'ask') {
+      return { kind: 'ask', reason: `operator policy asks for ${key}`, source: `matrix:${key}`, grantTier: 'tool' }
+    }
+    return { kind: 'allow', source: `matrix:${key}` }
   }
   const exact = check(toolName)
   if (exact !== null) return exact
@@ -1197,6 +1201,11 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
     }
     return { kind: 'allow', source: `agent:${agent}` }
   }
+  // Agent-tier MCP wildcard ladder (e.g. if the agent has mcp__plane__* set).
+  if (isMcpToolName(toolName) && agentCfg?.tools !== undefined) {
+    const agentLadder = mcpLadder(toolName, agentCfg.tools, input.mcpServerNames)
+    if (agentLadder !== null) return agentLadder
+  }
   const globalPolicy = input.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName]
   if (globalPolicy !== undefined) {
     if (globalPolicy === 'deny') return { kind: 'deny', reason: `operator policy denies ${toolName}`, source: 'matrix:global' }
@@ -1208,10 +1217,11 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
     }
     return { kind: 'allow', source: 'matrix:global' }
   }
-  // MCP wildcard ladder at the global tier.
+  // MCP wildcard ladder at the global tier. When unconfigured, mounted MCP tools default to allow!
   if (isMcpToolName(toolName)) {
     const ladder = mcpLadder(toolName, input.config.tools, input.mcpServerNames)
     if (ladder !== null) return ladder
+    return { kind: 'allow', source: 'defaults:mcp' }
   }
   const fallback: PermissionPolicy = input.config.defaults?.unknownTools ?? 'ask'
   if (fallback === 'deny') return { kind: 'deny', reason: `unconfigured tool ${toolName} denied by default`, source: 'defaults' }

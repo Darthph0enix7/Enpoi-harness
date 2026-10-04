@@ -470,8 +470,7 @@ export function buildPermissionToolRows(
     rows.set(id, { id, name: TOOL_LABEL_OVERRIDES[id] ?? prettyToolName(id), kind: 'tool' })
   }
 
-  const groups = groupMcpToolNames(mcpServers, mcpNames).filter(group => group.tools.length > 0)
-  const concreteMcp: string[] = []
+  const groups = groupMcpToolNames(mcpServers, mcpNames)
   for (const group of groups) {
     rows.set(group.wildcard, {
       id: group.wildcard,
@@ -479,16 +478,7 @@ export function buildPermissionToolRows(
       kind: 'mcp-group',
       members: group.tools,
     })
-    for (const tool of group.tools) {
-      rows.set(tool, { id: tool, name: tool, kind: 'tool' })
-      concreteMcp.push(tool)
-    }
   }
-  concreteMcp.sort((left, right) => left.localeCompare(right))
-  // Derived master: never an independently persisted key. Its members are the
-  // concrete MCP tool names; the server rows above pre-cover a server's future
-  // tools only through their own derived chips.
-  rows.set('mcp__*', { id: 'mcp__*', name: 'All MCP tools', kind: 'mcp-master', members: concreteMcp })
   return [...rows.values()]
 }
 
@@ -712,6 +702,7 @@ export function builtRoleAvailability(agent: string | undefined, tool: string, r
 export function provenanceFor(perms: PermissionsConfig, agent: string | undefined, tool: string): PermissionProvenance {
   if (agent !== undefined && perms.agents?.[agent]?.tools?.[tool] !== undefined) return 'agent rule'
   if (perms.tools?.[tool] !== undefined) return 'global rule'
+  if (tool.startsWith('mcp__')) return 'inherit (default)'
   // A standing grant only matters where the shipped/configured answer asks.
   if (effectivePolicy(perms, agent, tool) === 'allow' && toolGrantApplies(perms, agent, tool)) return 'standing grant'
   return 'inherit (default)'
@@ -725,6 +716,7 @@ export function provenanceFor(perms: PermissionsConfig, agent: string | undefine
  *   policy resolver defines one for this key.
  */
 export function shippedPolicyFor(tool: string): PolicyValue | undefined {
+  if (tool.startsWith('mcp__')) return 'allow'
   return SHIPPED_TOOL_DEFAULTS[tool]
 }
 
@@ -745,6 +737,7 @@ export function effectivePolicy(perms: PermissionsConfig, agent: string | undefi
   }
   const globalPolicy = perms.tools?.[tool]
   if (globalPolicy !== undefined) return globalPolicy
+  if (tool.startsWith('mcp__')) return 'allow'
   const fallback = shippedPolicyFor(tool) ?? perms.defaults?.unknownTools ?? 'ask'
   if (fallback === 'ask' && toolGrantApplies(perms, agent, tool)) return 'allow'
   return fallback
@@ -760,10 +753,10 @@ function ownOverrideOf(perms: PermissionsConfig, agent: string | undefined, tool
  * Whether a row is a DERIVED aggregate: it owns no settings key of its own,
  * its chip state comes from its members, and a click fans out to them.
  * @param row - the policy row.
- * @returns true for `mcp-group`, `mcp-master`, and `family` rows.
+ * @returns true for `family` rows.
  */
 export function isAggregateRow(row: PermissionToolRow): boolean {
-  return row.kind === 'mcp-group' || row.kind === 'mcp-master' || row.kind === 'family'
+  return row.kind === 'family'
 }
 
 /**

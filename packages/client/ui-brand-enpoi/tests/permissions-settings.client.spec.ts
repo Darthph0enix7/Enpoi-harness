@@ -170,7 +170,7 @@ describe('shippedPolicyFor', () => {
 })
 
 describe('buildPermissionToolRows', () => {
-  it('derives rows from the live registry: core order, family folding, MCP groups, derived master last', () => {
+  it('derives rows from the live registry: core order, family folding, MCP server rows, no unzipped individual tools', () => {
     const rows = buildPermissionToolRows(
       { plane: { serverName: 'plane' } },
       ['mcp__plane__list_projects', 'mcp__plane__create_issue'],
@@ -179,22 +179,18 @@ describe('buildPermissionToolRows', () => {
     const ids = rows.map(row => row.id)
     expect(ids.filter(id => id === 'bash')).toHaveLength(1)
     expect(ids).toContain('todo_write')
-    expect(ids[ids.length - 1]).toBe('mcp__*')
-    // The server row is the derived wildcard the resolver honors, with its
-    // live tools as members — never a standalone persisted key.
+    // The server row is the wildcard the resolver honors, with its tools grouped
     expect(rows.find(row => row.id === 'mcp__plane__*')).toMatchObject({
       name: 'plane (MCP)',
       kind: 'mcp-group',
       members: ['mcp__plane__create_issue', 'mcp__plane__list_projects'],
     })
     expect(ids).not.toContain('mcp__plane*')
-    expect(rows.find(row => row.id === 'mcp__plane__list_projects')).toMatchObject({ kind: 'tool' })
-    // The master is a derived aggregate over every concrete MCP name.
-    expect(rows.find(row => row.id === 'mcp__*')).toMatchObject({
-      name: 'All MCP tools',
-      kind: 'mcp-master',
-      members: ['mcp__plane__create_issue', 'mcp__plane__list_projects'],
-    })
+    // No individual MCP tool rows unzipped into the matrix!
+    expect(rows.find(row => row.id === 'mcp__plane__list_projects')).toBeUndefined()
+    expect(ids).not.toContain('mcp__plane__create_issue')
+    // No redundant mcp__* master row
+    expect(ids).not.toContain('mcp__*')
     // The whiteboard folds into ONE family row; its members are not separate rows.
     expect(rows.find(row => row.id === 'whiteboard_*')).toMatchObject({
       name: 'Whiteboard',
@@ -207,18 +203,20 @@ describe('buildPermissionToolRows', () => {
   it('appends a tool the curated list does not name (presence follows the registry)', () => {
     const rows = buildPermissionToolRows(undefined, [], ['brand_new_tool', 'mcp__ghost__x'])
     expect(rows.find(row => row.id === 'brand_new_tool')).toMatchObject({ name: 'Brand New Tool', kind: 'tool' })
-    // An MCP name whose server left the catalog still gets a group from the `__` segment.
+    // An MCP name whose server left the catalog still gets a server row from the `__` segment.
     expect(rows.find(row => row.id === 'mcp__ghost__*')).toMatchObject({ kind: 'mcp-group', members: ['mcp__ghost__x'] })
+    // But no individual unzipped row!
+    expect(rows.find(row => row.id === 'mcp__ghost__x')).toBeUndefined()
   })
 
-  it('drops a catalog server with no live tools (presence is the registry, not the catalog)', () => {
+  it('catalog servers keep their row even with no live tools', () => {
     const rows = buildPermissionToolRows({ ue: {} }, [])
-    expect(rows.map(row => row.id)).not.toContain('mcp__ue__*')
+    expect(rows.map(row => row.id)).toContain('mcp__ue__*')
+    expect(rows.find(row => row.id === 'mcp__ue__*')).toMatchObject({ name: 'ue (MCP)', kind: 'mcp-group' })
   })
 
-  it('always ends with the derived mcp__* master row and keeps core rows when no registry is given', () => {
+  it('keeps core rows when no registry is given', () => {
     const rows = buildPermissionToolRows(undefined, [])
-    expect(rows[rows.length - 1]).toEqual({ id: 'mcp__*', name: 'All MCP tools', kind: 'mcp-master', members: [] })
     expect(rows.map(row => row.id)).toContain('read')
     expect(rows.map(row => row.id)).not.toContain('mcp__x*')
     // The permanent whiteboard policy survives an unmounted plugin.
@@ -299,25 +297,25 @@ describe('fetchRegisteredToolNames', () => {
 })
 
 describe('derived aggregate rows', () => {
-  const master: PermissionToolRow = {
-    id: 'mcp__*',
-    name: 'All MCP tools',
-    kind: 'mcp-master',
-    members: ['mcp__plane__a', 'mcp__plane__b'],
+  const familyRow: PermissionToolRow = {
+    id: 'whiteboard_*',
+    name: 'Whiteboard',
+    kind: 'family',
+    members: ['whiteboard_read', 'whiteboard_write'],
   }
 
   it('fans a toggle out to every member and unsets the legacy aggregate key', () => {
-    expect(isAggregateRow(master)).toBe(true)
-    expect(rowTargets(master)).toEqual(['mcp__plane__a', 'mcp__plane__b'])
-    expect(rowPolicyOps(master, ['tools'], 'allow')).toEqual([
-      { op: 'set', path: ['tools', 'mcp__plane__a'], value: 'allow' },
-      { op: 'set', path: ['tools', 'mcp__plane__b'], value: 'allow' },
-      { op: 'unset', path: ['tools', 'mcp__*'] },
+    expect(isAggregateRow(familyRow)).toBe(true)
+    expect(rowTargets(familyRow)).toEqual(['whiteboard_read', 'whiteboard_write'])
+    expect(rowPolicyOps(familyRow, ['tools'], 'allow')).toEqual([
+      { op: 'set', path: ['tools', 'whiteboard_read'], value: 'allow' },
+      { op: 'set', path: ['tools', 'whiteboard_write'], value: 'allow' },
+      { op: 'unset', path: ['tools', 'whiteboard_*'] },
     ])
-    expect(rowPolicyOps(master, ['agents', 'oracle', 'tools'], undefined)).toEqual([
-      { op: 'unset', path: ['agents', 'oracle', 'tools', 'mcp__plane__a'] },
-      { op: 'unset', path: ['agents', 'oracle', 'tools', 'mcp__plane__b'] },
-      { op: 'unset', path: ['agents', 'oracle', 'tools', 'mcp__*'] },
+    expect(rowPolicyOps(familyRow, ['agents', 'oracle', 'tools'], undefined)).toEqual([
+      { op: 'unset', path: ['agents', 'oracle', 'tools', 'whiteboard_read'] },
+      { op: 'unset', path: ['agents', 'oracle', 'tools', 'whiteboard_write'] },
+      { op: 'unset', path: ['agents', 'oracle', 'tools', 'whiteboard_*'] },
     ])
     // A plain row writes only itself.
     expect(rowPolicyOps({ id: 'bash', name: 'Bash' }, ['tools'], 'deny'))
@@ -325,37 +323,33 @@ describe('derived aggregate rows', () => {
   })
 
   it('derives uniform, mixed, and legacy states from the member rules', () => {
-    const uniform: PermissionsConfig = { tools: { 'mcp__plane__a': 'allow', 'mcp__plane__b': 'allow' } }
-    expect(rowPolicyState(uniform, undefined, master)).toMatchObject({ ownOverride: 'allow', mixed: false, provenance: 'derived' })
-    const mixed: PermissionsConfig = { tools: { 'mcp__plane__a': 'allow', 'mcp__plane__b': 'deny' } }
-    expect(rowPolicyState(mixed, undefined, master)).toMatchObject({ ownOverride: undefined, mixed: true, provenance: 'mixed' })
-    // A persisted legacy `mcp__*` key is surfaced until the next click folds it.
-    const legacy: PermissionsConfig = { tools: { 'mcp__*': 'deny' } }
-    expect(rowPolicyState(legacy, undefined, master)).toMatchObject({ ownOverride: 'deny', mixed: false, provenance: 'legacy aggregate' })
+    const uniform: PermissionsConfig = { tools: { 'whiteboard_read': 'allow', 'whiteboard_write': 'allow' } }
+    expect(rowPolicyState(uniform, undefined, familyRow)).toMatchObject({ ownOverride: 'allow', mixed: false, provenance: 'derived' })
+    const mixed: PermissionsConfig = { tools: { 'whiteboard_read': 'allow', 'whiteboard_write': 'deny' } }
+    expect(rowPolicyState(mixed, undefined, familyRow)).toMatchObject({ ownOverride: undefined, mixed: true, provenance: 'mixed' })
+    // A persisted legacy key is surfaced until the next click folds it.
+    const legacy: PermissionsConfig = { tools: { 'whiteboard_*': 'deny' } }
+    expect(rowPolicyState(legacy, undefined, familyRow)).toMatchObject({ ownOverride: 'deny', mixed: false, provenance: 'legacy aggregate' })
     // Inherit everywhere resolves through the shipped/default answer.
-    expect(rowPolicyState({ defaults: { unknownTools: 'ask' } }, undefined, master)).toMatchObject({ mixed: false, provenance: 'derived' })
+    expect(rowPolicyState({ defaults: { unknownTools: 'ask' } }, undefined, familyRow)).toMatchObject({ mixed: false, provenance: 'derived' })
   })
 
   it('checks a role aggregate only when every member is on the allowlist', () => {
-    expect(roleRowChecked(master, ['mcp__plane__a', 'mcp__plane__b'])).toBe(true)
-    expect(roleRowChecked(master, ['mcp__plane__a'])).toBe(false)
+    expect(roleRowChecked(familyRow, ['whiteboard_read', 'whiteboard_write'])).toBe(true)
+    expect(roleRowChecked(familyRow, ['whiteboard_read'])).toBe(false)
     expect(roleRowChecked({ id: 'bash', name: 'Bash' }, ['bash'])).toBe(true)
-    // An empty aggregate has nothing to check and toggles nothing.
-    expect(roleRowChecked({ id: 'mcp__*', name: 'All MCP tools', kind: 'mcp-master', members: [] }, ['bash'])).toBe(false)
   })
 
   it('marks an aggregate mixed when the members resolve to different effective policies', () => {
     const perms: PermissionsConfig = {
-      defaults: { unknownTools: 'ask' },
-      grants: { g: { id: 'g', tool: 'mcp__plane__a' } },
+      tools: { whiteboard_read: 'allow', whiteboard_write: 'deny' },
     }
-    // No own rules, but a grant makes one member allow and the other ask.
-    expect(rowPolicyState(perms, undefined, master)).toMatchObject({ ownOverride: undefined, mixed: true, provenance: 'mixed' })
+    expect(rowPolicyState(perms, undefined, familyRow)).toMatchObject({ ownOverride: undefined, mixed: true, provenance: 'mixed' })
   })
 
   it('surfaces a legacy aggregate key on an empty-member row', () => {
-    const empty: PermissionToolRow = { id: 'mcp__*', name: 'All MCP tools', kind: 'mcp-master', members: [] }
-    expect(rowPolicyState({ tools: { 'mcp__*': 'deny' } }, undefined, empty))
+    const empty: PermissionToolRow = { id: 'whiteboard_*', name: 'Whiteboard', kind: 'family', members: [] }
+    expect(rowPolicyState({ tools: { 'whiteboard_*': 'deny' } }, undefined, empty))
       .toMatchObject({ ownOverride: 'deny', effective: 'deny', provenance: 'legacy aggregate' })
     expect(rowPolicyState({}, undefined, empty))
       .toMatchObject({ ownOverride: undefined, provenance: 'inherit (default)' })
@@ -364,12 +358,12 @@ describe('derived aggregate rows', () => {
   it('persists a fan-out as atomic leaf writes and reports any failure', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ result: { ok: true } }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
-    await expect(persistRowPolicyOps(rowPolicyOps(master, ['tools'], 'allow'))).resolves.toBe(true)
+    await expect(persistRowPolicyOps(rowPolicyOps(familyRow, ['tools'], 'allow'))).resolves.toBe(true)
     const bodies = fetchMock.mock.calls.map(call => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)))
     expect(bodies.map((body: { payload: { args: { ops: Array<{ op: string; path: string[] }> } } }) => body.payload.args.ops[0]?.op))
       .toEqual(['set', 'set', 'unset'])
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ result: { ok: false } }), { status: 200 })))
-    await expect(persistRowPolicyOps(rowPolicyOps(master, ['tools'], 'deny'))).resolves.toBe(false)
+    await expect(persistRowPolicyOps(rowPolicyOps(familyRow, ['tools'], 'deny'))).resolves.toBe(false)
     vi.unstubAllGlobals()
   })
 })
@@ -403,15 +397,14 @@ describe("Adam's live fixture (2026-09-26)", () => {
     expect(Object.keys(perms.grants ?? {})).toHaveLength(4)
   })
 
-  it('shows ONE derived MCP model (server group + master), never a second persisted key', () => {
+  it('shows ONE clean MCP server row, never unzipped individual tools or redundant master', () => {
     const rows = buildPermissionToolRows({ plane: { serverName: 'plane' } }, [], liveTools)
     expect(rows.filter(row => row.id.startsWith('mcp__')).map(row => row.id))
-      .toEqual(['mcp__plane__*', 'mcp__plane__list_projects', 'mcp__*'])
-    // The master fans out to the concrete tool, not to its own key.
-    expect(rowPolicyOps(rows[rows.length - 1]!, ['tools'], 'allow'))
+      .toEqual(['mcp__plane__*'])
+    // The server row writes only its own wildcard key.
+    expect(rowPolicyOps(rows.find(row => row.id === 'mcp__plane__*')!, ['tools'], 'allow'))
       .toEqual([
-        { op: 'set', path: ['tools', 'mcp__plane__list_projects'], value: 'allow' },
-        { op: 'unset', path: ['tools', 'mcp__*'] },
+        { op: 'set', path: ['tools', 'mcp__plane__*'], value: 'allow' },
       ])
   })
 })
