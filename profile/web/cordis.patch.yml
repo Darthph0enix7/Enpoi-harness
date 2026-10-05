@@ -1313,3 +1313,8 @@
 # through llm-pi-ai, so the base entry stays disabled.
 - id: llm-deepseek
   disabled: true
+
+# Upstream 0.1.6-alpha.2 added right-Sidebar sandboxed Browser tabs (ui-sidebar-browser).
+# Web profiles opt in; Desktop retains it by default.
+- id: ui-sidebar-browser
+  disabled: false

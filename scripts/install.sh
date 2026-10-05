@@ -404,20 +404,20 @@ resolve_node() { # $1=1 allow fetch
   NODE=""; NODE_ORIGIN=""
   cand="$(command -v node 2>/dev/null || true)"
   if [ -n "$cand" ] && node_at_least "$cand" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
-    NODE="$cand"; NODE_ORIGIN="PATH"; return 0
+    NODE="$cand"; NODE_ORIGIN="PATH"
+  elif cand="$PREFIX/runtime/node/current/bin/node"; [ -x "$cand" ] && node_at_least "$cand" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
+    NODE="$cand"; NODE_ORIGIN="prefix runtime"
+  elif cand="$PREFIX/runtime/node/$DSH_NODE_VERSION/bin/node"; [ -x "$cand" ] && node_at_least "$cand" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
+    NODE="$cand"; NODE_ORIGIN="prefix runtime"
+  elif [ "$allow_fetch" = 1 ] && fetch_node; then
+    NODE="$PREFIX/runtime/node/$DSH_NODE_VERSION/bin/node"; NODE_ORIGIN="downloaded"
+  else
+    return 1
   fi
-  cand="$PREFIX/runtime/node/current/bin/node"
-  if [ -x "$cand" ] && node_at_least "$cand" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
-    NODE="$cand"; NODE_ORIGIN="prefix runtime"; return 0
+  if [ -n "$NODE" ] && [ -x "$NODE" ]; then
+    export PATH="$(dirname "$NODE"):$PREFIX/bin:$PATH"
   fi
-  cand="$PREFIX/runtime/node/$DSH_NODE_VERSION/bin/node"
-  if [ -x "$cand" ] && node_at_least "$cand" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
-    NODE="$cand"; NODE_ORIGIN="prefix runtime"; return 0
-  fi
-  if [ "$allow_fetch" = 1 ] && fetch_node; then
-    NODE="$PREFIX/runtime/node/$DSH_NODE_VERSION/bin/node"; NODE_ORIGIN="downloaded"; return 0
-  fi
-  return 1
+  return 0
 }
 
 setup_pnpm() {
@@ -1078,6 +1078,7 @@ SHIM
   printf '%s\n' "$body" > "$tmp" || return 1
   chmod +x "$tmp" || return 1
   mv "$tmp" "$BIN_DIR/dsh" || return 1
+  ln -sfn dsh "$BIN_DIR/ds" 2>/dev/null || true
   return 0
 }
 
@@ -1113,11 +1114,32 @@ write_state() {
 }
 
 write_rc() {
-  local profile_file="$HOME/.profile" fish="$HOME/.config/fish/config.fish" marker="# dsh installer"
-  if [ -f "$profile_file" ] && grep -qF "$marker" "$profile_file"; then :; else
-    printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$BIN_DIR" >> "$profile_file"
-    log "added $BIN_DIR to $profile_file"
+  local marker="# dsh installer" path_line="export PATH=\"$BIN_DIR:\$PATH\""
+  local fish="$HOME/.config/fish/config.fish"
+
+  append_rc_if_present() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    if grep -qF "$marker" "$f"; then return 0; fi
+    printf '\n%s\n%s\n' "$marker" "$path_line" >> "$f"
+    log "added $BIN_DIR to $f"
+  }
+
+  # Standard POSIX login shell profile
+  if [ -f "$HOME/.profile" ] && grep -qF "$marker" "$HOME/.profile"; then :; else
+    printf '\n%s\n%s\n' "$marker" "$path_line" >> "$HOME/.profile"
+    log "added $BIN_DIR to $HOME/.profile"
   fi
+
+  # Bash login and interactive (Linux and macOS)
+  append_rc_if_present "$HOME/.bashrc"
+  append_rc_if_present "$HOME/.bash_profile"
+
+  # Zsh (macOS default login shell since Catalina, also common on Linux)
+  append_rc_if_present "$HOME/.zshrc"
+  append_rc_if_present "$HOME/.zprofile"
+
+  # Fish shell
   if [ -f "$fish" ] && ! grep -qF "$marker" "$fish"; then
     printf '\n%s\nfish_add_path "%s"\n' "$marker" "$BIN_DIR" >> "$fish"
     log "added $BIN_DIR to $fish"
@@ -1410,7 +1432,15 @@ dry_run_plan() {
   say "  bin dir:   $BIN_DIR"
   say "  channel:   $CHANNEL (ref: $ref)"
   if [ -n "$SOURCE" ]; then say "  source:    $SOURCE"; else say "  source:    $DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"; fi
-  if [ -n "$PROFILE_SOURCE" ]; then say "  profile:   $PROFILE (source: $PROFILE_SOURCE${PROFILE_REF:+, ref: $PROFILE_REF})"; else say "  profile:   $PROFILE (shipped template)"; fi
+  local p_source="$PROFILE_SOURCE"
+  if [ -z "$p_source" ] || [ "$p_source" = "$DEFAULT_PROFILE_SOURCE" ]; then
+    if [ -n "$SOURCE" ] && [ -d "$SOURCE/profile/$PROFILE" ]; then
+      p_source="$SOURCE/profile/$PROFILE (bundled with harness)"
+    elif [ -d "$PREFIX/harness/current/profile/$PROFILE" ]; then
+      p_source="$PREFIX/harness/current/profile/$PROFILE (bundled with harness)"
+    fi
+  fi
+  if [ -n "$p_source" ]; then say "  profile:   $PROFILE (source: $p_source${PROFILE_REF:+, ref: $PROFILE_REF})"; else say "  profile:   $PROFILE (shipped template)"; fi
   if detect_os_arch >/dev/null 2>&1; then :; fi
   if resolve_node 0 >/dev/null 2>&1; then
     say "  node:      $NODE ($NODE_ORIGIN)"
@@ -2247,6 +2277,7 @@ do_uninstall() {
     uninstall_add "$PREFIX"
     [ "$DSH_HOME" != "$PREFIX" ] && uninstall_add "$DSH_HOME"
     uninstall_add "$BIN_DIR/dsh"
+    uninstall_add "$BIN_DIR/ds"
     uninstall_outside_add "shell rc PATH line (~/.profile or ~/.config/fish/config.fish, marker '# dsh installer')"
     uninstall_outside_add "fish function/completions (~/.config/fish/functions/ds.fish, ~/.config/fish/completions/ds.fish)"
     uninstall_outside_add "cloned harness repo (e.g. $HOME/deepseek-harness)"
@@ -2258,6 +2289,7 @@ do_uninstall() {
     uninstall_guard "$BIN_DIR/dsh" "shim"
     uninstall_add "$PREFIX/harness"
     uninstall_add "$BIN_DIR/dsh"
+    uninstall_add "$BIN_DIR/ds"
     uninstall_keep "$PREFIX/runtime (Node runtime cache)"
     uninstall_keep "$PREFIX/bin (pnpm)"
     uninstall_keep "$DSH_HOME (sessions, settings, credentials, overlay, profile)"
