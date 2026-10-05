@@ -160,6 +160,7 @@ export class SessionCommandController {
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
       this.commandIndexes.delete(agent.session.id)
+      this.iterationRestoreRequests.delete(agent.session.id)
     }, { global: true })
   }
 
@@ -271,13 +272,11 @@ export class SessionCommandController {
         }
         this.agents.selectForNextRequest(agent, selected)
         if (request.persistDefault !== false) {
-          try {
-            await this.ctx.agentDefaultModel.saveSelection(selected)
-          } catch (error) {
+          void this.ctx.agentDefaultModel.saveSelection(selected).catch((error) => {
             this.ctx.logger.warn(
               `session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`,
             )
-          }
+          })
         }
         return { selected: { ...selected } }
       } catch (error) {

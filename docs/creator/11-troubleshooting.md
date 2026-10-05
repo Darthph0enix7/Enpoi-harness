@@ -134,6 +134,16 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Fix: always `dsh restart --after-turn` from inside a session — default is whole-service idle, bounded by `--max-wait` (default 10 min); past the bound it falls back to the marked session alone and warns which sessions would be aborted. `--cancel` withdraws a scheduled restart; `--now` is detached and only for callers that are not the session host (`apps/cli/src/restart-after-turn.ts:1-22,42-43,271-287`). After the restart the browser reconnects to the same page/session/draft; an interrupted turn renders honestly, not a stuck spinner.
 - Gate: verification guide's restart-safety click-through (doc 84 §2).
 
+### `run_code` fails with bridge or syntax error
+- Symptom: `run_code` script throws `cannot serialize argument` or `unexpected token` on valid-looking TypeScript.
+- Cause: (1) passing `undefined` inside an object or array (bridge serializer requires strictly lossless JSON); (2) using runtime TypeScript constructs like `enum` or `namespace` (Node type-stripping only supports erasable syntax); (3) assuming state persists across calls (each execution runs in a fresh isolated process).
+- Fix: clean up object properties (`delete obj.key` instead of `obj.key = undefined`), replace `enum` with `const` objects / string unions, and ensure scripts are self-contained without writing state to `/tmp`.
+
+### Tool call rejected with `[CAPABILITY_DISABLED]` on MCP tool
+- Symptom: calling an `mcp__<server>__*` tool fails immediately with `[CAPABILITY_DISABLED] MCP Tool suite '<server>' is disabled by the operator`.
+- Cause: the MCP server's master capability switch is `false` (default-off / on-demand) and the calling session has not pulled it in via a skill `mcp: [...]` hint or explicit `mcp mount <server>`, or the agent explicitly unmounted it.
+- Fix: invoke the skill that declares the server, call `mcp mount <server>` to pull it into the active session, or turn on the server's toggle in the Capabilities Control Center.
+
 ## 5. Where the evidence lives
 
 `$EVIDENCE/` — one directory per workstream, each with raw logs and verdict JSONs: `tool-eval`, `coding-trial`, `context-eval`, `error-audit` (including `baseline/acknowledged.json`), `heavy-providers`, `skin-freeze`, `perf`, `permissions`, `permissions-mirror`, `agent-comms-e2e`, plus the recent fix lanes `tool-defaults`, `iterations`, `session-scale`, `phase3`, `phase4`, `fleet-fixes`, `verify-gate-fix`, `fs-search-fix`, `incident-fixes`, `live-sessions-ui`, `session-list`, `pool-media`, `keypool-fixes`, `skill-mcp-hint`, `mcp-on-demand`. The open backlog (`82-open-backlog.md`) lists every known open item; the porting playbook (`50-…`) holds the safeguards referenced by the gates. Cite a raw log path when reporting a failure; do not re-run a gate and call it fixed until it goes green on the changed tree.

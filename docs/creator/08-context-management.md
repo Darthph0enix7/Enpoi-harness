@@ -94,3 +94,24 @@ Every user message committed over an earlier one belongs to a **variant group**:
 | Whiteboard write refused | rendered board over 1500 tokens | Unpin/shorten entries; unpin is the only way to make one compactable |
 | Cross-session search errors | FTS index not ready | Retry after the background pass; error names `SESSION_QUERY_INDEXING` with progress |
 | Insights blank after update | stale projection cache generation | `ds backfill status`, then `ds backfill run` (check `withContextTimeline`) |
+
+## 10. Token usage, prompt prefix anatomy & KV cache economics
+
+- **Turn 1 input anatomy (~12.4k tokens)**:
+  - 38 tools with detailed JSON schemas: ~8,200 tokens (32,924 characters of parameter definitions and descriptions).
+  - System prompt (prefix + fleet doctrine + instructions): ~2,800 tokens (11,021 characters).
+  - Initial turn context & user prompt: ~1,400 tokens.
+- **KV prefix cache behavior**:
+  - On Turn 1 Step 2, `cacheReadTokens` hits ~12,416 (a 99.9% cache hit). The model only bills/processes the delta tokens (e.g. 342 tokens).
+  - Modern providers (DeepSeek, Claude, OpenAI) discount cached prompt tokens by 90–95% (e.g. DeepSeek bills prompt cache hits at $0.014 / 1M tokens).
+  - The shared prefix parity law across `orchestrator`, `sysadmin`, and `creator` ensures that switching presets reuses the exact same 12.4k cached prefix without flushing the KV cache.
+
+## 11. Session listing & query performance optimizations
+
+- **`session.list` single-flight coalescing & window memo**:
+  - Single-flight promise dedup (`listInFlight`) prevents redundant concurrent filesystem scans and is decoupled from caller abort signals (an aborting client never fails background readers).
+  - In-memory 2,000ms ordered window memo (`cachedOrdered`) serves rapid repeat calls in ~50ms (down from 1,000ms+), with zero-staleness event listeners (`session/created`, `session/disposed`, `session/event`).
+- **SQLite FTS5 PRAGMAs**:
+  - `schema.ts` sets `synchronous = NORMAL`, `temp_store = MEMORY`, `mmap_size = 64MB`, `cache_size = -16MB` for the session-query FTS5 database, eliminating disk spills during window sorts.
+- **ChatView virtual-window index memoization**:
+  - Lazy getter `getIndexByKey()` memoizes the Map lookups across streaming chunks until item count changes, eliminating Map allocations on streaming chunks.

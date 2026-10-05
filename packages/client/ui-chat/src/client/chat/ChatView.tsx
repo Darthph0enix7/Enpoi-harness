@@ -393,14 +393,19 @@ export function ChatView({
   // Unmounted rows answer navigation and restore by absolute offset instead of
   // DOM measurement; the delegate is released when the plain list returns.
   const virtualWindow = useMemo<ChatVirtualWindow>(() => {
-    const indexByKey = new Map<string, number>()
-    for (const [index, item] of items.entries()) {
-      indexByKey.set(chatVirtualItemKey(item), index)
-      if (item.kind === 'entry') indexByKey.set(chatAnchorKey(item.entry), index)
+    let indexByKey: Map<string, number> | undefined
+    const getIndexByKey = (): Map<string, number> => {
+      if (indexByKey !== undefined) return indexByKey
+      indexByKey = new Map<string, number>()
+      for (const [index, item] of items.entries()) {
+        indexByKey.set(chatVirtualItemKey(item), index)
+        if (item.kind === 'entry') indexByKey.set(chatAnchorKey(item.entry), index)
+      }
+      return indexByKey
     }
     return {
       landingForAnchor(key) {
-        const index = indexByKey.get(key)
+        const index = getIndexByKey().get(key)
         const item = index === undefined ? undefined : items[index]
         if (index === undefined || item === undefined) return null
         const offset = virtualizer.getOffsetForIndex(index)?.[0]

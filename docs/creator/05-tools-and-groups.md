@@ -96,3 +96,13 @@ The operator surface is the **Capabilities Control Center** right-sidebar tab (`
 | tool call fails with `UNKNOWN_TOOL` for a group tool | group never attached | call `tool_groups` attach first |
 | `tool_groups` missing entirely | the preset declaration does not mount `enpoi-tool-groups` | add the row to that `preset-<id>` declaration's `config.plugins` in `$PROFILE/cordis.patch.yml`, then restart |
 | attach refuses "failing open" | no `sessionProjections` service | restore the projection plugin; groups keep working only as a static base surface |
+
+## 10. Programmatic tool calling (run_code) & execution rules
+
+`run_code` provides Programmatic Tool Calling (PTC) via `packages/workflow/workflow-ptc`. It allows models to write and execute a TypeScript script that orchestrates tool calls in a single round-trip without multi-turn LLM latency or transcript bloating:
+- **Presentation mode**: Configured as `mode: both` across all main agents (`orchestrator`, `sysadmin`, `creator`) and subagents (`fixer`, `explorer`), giving agents both direct tools and `run_code`.
+- **Permission default**: Shipped as `allow` in `SHIPPED_TOOL_DEFAULTS`, so script execution runs silently without approval pauses. Inner tool calls (e.g. `tools.bash`, file writes) still pass through the `enpoi-capabilities` pre-execute danger evaluator.
+- **Three binding execution rules**:
+  1. **Fresh Node process**: Each invocation executes in a separate Node subprocess. No variables, modules, or memory carry across calls. Never park intermediate state in `/tmp`.
+  2. **Erasable TypeScript only**: Uses Node's type-stripping runtime. Do not use runtime TypeScript constructs like `enum` or `namespace`; use plain objects and types.
+  3. **Lossless JSON arguments**: Arguments passed to tools must be strictly JSON-serializable. Do not pass `undefined` inside objects or arrays; the bridge serializer rejects them outright.

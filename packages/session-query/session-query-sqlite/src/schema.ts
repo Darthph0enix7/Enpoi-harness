@@ -68,6 +68,10 @@ export async function openSearchDatabase(path: string, journalMode: JournalMode)
     // Apply mutating pragmas only after refusing foreign or canonical files.
     // journalMode is a validated closed union, not caller-controlled SQL.
     db.exec(`PRAGMA journal_mode = ${journalMode.toUpperCase()}`)
+    db.exec('PRAGMA synchronous = NORMAL')
+    db.exec('PRAGMA temp_store = MEMORY')
+    db.exec('PRAGMA mmap_size = 67108864')
+    db.exec('PRAGMA cache_size = -16000')
     ensurePersistentSchema(db)
     ensureTemporarySchema(db)
     return db

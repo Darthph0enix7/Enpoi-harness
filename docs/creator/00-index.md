@@ -19,6 +19,7 @@ This directory is the Creator's knowledge base: everything needed to diagnose, c
 | `10-defaults-on-install.md` | Default plugins, the Kilo Gateway keyless preset, the opt-in first-run system analysis, default tools, skin, seats; what is optional (keeper/compactor/whiteboard/heavy providers) and how to toggle. | Comparing a machine to a fresh install, or changing a default. |
 | `11-troubleshooting.md` | Diagnostics ledger + `ds doctor` and `dsh doctor` (checks and exit codes), the four gates with exact commands, common failures symptom→cause→fix (session listing, search partial results, verify-gate control plane, crash-recovery codes), the first-run system-analysis chip, evidence locations. | Something is broken; before/after any fix. |
 | `12-glossary.md` | Every harness term in one line (seat, fiber, profile, overlay, heavy provider, gate, group, grant, rail, preset, council, broker, vault, projection, …). | A word in another file is unclear. |
+| `13-upstream-merge-runbook-and-fork-deltas.md` | Authoritative merge runbook, core fork modifications vs upstream (session core, PTC, MCP lifecycle, web search, permissions), conflict resolution rules, and post-merge verification probes. | Merging a new upstream release (e.g. 0.2.0+) without breaking Enpoi features. |
 
 ## The rules (non-negotiable)
 

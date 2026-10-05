@@ -107,6 +107,9 @@ export function truncateUnicodeCodePoints(value: string, maximum: number): strin
 
 /** Owns list projection registration, bounded cold summaries, and authorized search. */
 export class ApiSessionList {
+  private cachedOrdered: { rows: ListOrderRow[]; expiresAt: number } | undefined
+  private listInFlight: Promise<ListOrderRow[]> | undefined
+
   /**
    * @param ctx - Host context carrying Session, query, persistence, and projection services.
    * @param pageSize - default rows per list page, from the deployment's `listPageSize`.
@@ -115,6 +118,16 @@ export class ApiSessionList {
     private readonly ctx: Context,
     private readonly pageSize: number,
   ) {
+    ctx.effect(() => {
+      const offCreated = ctx.on('session/created', () => { this.invalidateCache() })
+      const offDisposed = ctx.on('session/disposed', () => { this.invalidateCache() })
+      const offEvent = ctx.on('session/event', () => { this.invalidateCache() })
+      return () => {
+        offCreated()
+        offDisposed()
+        offEvent()
+      }
+    })
     ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
       stateSchema: sessionListMetadataSchema,
@@ -157,6 +170,11 @@ export class ApiSessionList {
     }
   }
 
+  /** Invalidate the cached ordering on any session lifecycle mutation. */
+  invalidateCache(): void {
+    this.cachedOrdered = undefined
+  }
+
   /**
    * Read one newest-first window of visible attached and persisted Sessions
    * without activating an Agent. Heavy per-Session projections are excluded
@@ -170,31 +188,68 @@ export class ApiSessionList {
     const offset = listOffset(request.cursor)
     const limit = listLimit(request.limit, this.pageSize)
     signal?.throwIfAborted()
-    const records = await this.ctx.sessionQuery.listSessions(signal)
-    signal?.throwIfAborted()
-    // Ordering reads only the list-metadata cut; full wire values are
-    // materialized for the page's rows alone (validating every cached value of
-    // every Session made cold listing CPU-bound, not wire-bound).
-    const ordered: ListOrderRow[] = []
-    for (const record of records) {
-      const live = this.ctx.sessions.get(record.header.id)
-      if (live !== undefined) {
+
+    const fetchOrdered = async (): Promise<ListOrderRow[]> => {
+      const records = await this.ctx.sessionQuery.listSessions()
+      // Ordering reads only the list-metadata cut; full wire values are
+      // materialized for the page's rows alone (validating every cached value of
+      // every Session made cold listing CPU-bound, not wire-bound).
+      const ordered: ListOrderRow[] = []
+      for (const record of records) {
+        const live = this.ctx.sessions.get(record.header.id)
+        if (live !== undefined) {
+          ordered.push({
+            header: live.header,
+            session: live,
+            updatedAt: updatedAt(live.header, this.liveListMetadata(live)),
+          })
+          continue
+        }
+        if (record.header.cwd === undefined) continue
         ordered.push({
-          header: live.header,
-          session: live,
-          updatedAt: updatedAt(live.header, this.liveListMetadata(live)),
+          header: record.header,
+          session: undefined,
+          updatedAt: updatedAt(record.header, this.coldListMetadata(record.header)),
         })
-        continue
       }
-      if (record.header.cwd === undefined) continue
-      ordered.push({
-        header: record.header,
-        session: undefined,
-        updatedAt: updatedAt(record.header, this.coldListMetadata(record.header)),
-      })
+      ordered.sort((left, right) => right.updatedAt - left.updatedAt)
+      return ordered
     }
-    ordered.sort((left, right) => right.updatedAt - left.updatedAt)
-    const window = ordered.slice(offset, offset + limit).map((row) => {
+
+    signal?.throwIfAborted()
+    let orderedRows: ListOrderRow[]
+    const now = Date.now()
+    if (this.cachedOrdered !== undefined && now < this.cachedOrdered.expiresAt) {
+      orderedRows = this.cachedOrdered.rows
+    } else if (this.listInFlight !== undefined) {
+      if (signal !== undefined) {
+        orderedRows = await Promise.race([
+          this.listInFlight,
+          new Promise<never>((_, reject) => {
+            if (signal.aborted) {
+              reject(signal.reason)
+            } else {
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+            }
+          }),
+        ])
+      } else {
+        orderedRows = await this.listInFlight
+      }
+    } else {
+      const execution = fetchOrdered()
+      this.listInFlight = execution
+      try {
+        orderedRows = await execution
+        this.cachedOrdered = { rows: orderedRows, expiresAt: Date.now() + 2000 }
+      } finally {
+        if (this.listInFlight === execution) {
+          this.listInFlight = undefined
+        }
+      }
+    }
+
+    const window = orderedRows.slice(offset, offset + limit).map((row) => {
       const summary = row.session === undefined
         ? this.summarizeCold(row.header)
         : this.summaryFor(row.session)
@@ -203,7 +258,7 @@ export class ApiSessionList {
     const nextOffset = offset + window.length
     return {
       items: window,
-      ...(nextOffset < ordered.length ? { nextCursor: String(nextOffset) } : {}),
+      ...(nextOffset < orderedRows.length ? { nextCursor: String(nextOffset) } : {}),
     }
   }
 

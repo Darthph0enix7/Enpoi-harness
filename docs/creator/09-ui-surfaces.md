@@ -38,6 +38,9 @@ Collapse is a slide+crossfade; the 56px rail keeps one icon per panel row. macOS
 - **The Mark** task cards shadow the upstream tool rows for `subagent`, `dispatch_task`, `task`, `oracle_review`, `roundtable`, `chorus` at priority -1 (`index.ts:483-502`; lower priority wins the key).
 - Plan cards: submitted plans appear in the turn's final artifact area and open in the right sidebar (`ui-plan/README.md`); the plan-review card answers `exit_plan_mode` (`ui-user-questions/README.md:34-36`). Pending plan reviews are the review queue: the card's View-full-plan link opens the sidebar preview and Approve/Request-changes answers the wait (`ui-plan/src/client/review-store.ts`, `ui-user-questions/README.md:34-40`).
 - **Chat virtualization**: above 80 committed render items the transcript renders through `@tanstack/react-virtual`; below it the plain list is unchanged. At a 10k-message session this mounts 17–26 rows instead of 20,000 and cuts transcript DOM from ~285k to ~1,000 nodes (≈5× faster load, 2.7× faster scroll; evidence `phase4/`). Key-anchored offsets keep the reader's row stable across prepends/appends/window changes; browser find still works inside rendered rows but cannot reach an unrendered one — session search and the turn rail cover those (`ui-chat/src/client/chat/chat-virtual-items.ts:21`; `ChatView.tsx:346`).
+- **Markdown rendering & copy-as-markdown**:
+  - Currency math guard: `singleDollarTextMath: false` + `mathTextGuard` in `packages/client/ui-primitives/src/markdown/parse.ts` rejects digit-adjacent, whitespace-padded, or multiline `$`. Ensures prices like `**$4** ... **$7**` render as formatted currency, not corrupted KaTeX math glyphs (`∗`, `⋅`).
+  - Copy-as-markdown serializer: `packages/client/ui-primitives/src/markdown/MarkdownText.tsx` and `copy.ts` intercept copy events, extract formula TeX from `<annotation>` rather than MathML per-glyph trees, and write clean Markdown to `text/plain` and clean HTML to `text/html` without newline-per-glyph breaks.
 - **Iteration navigator**: a user message in a multi-variant revert group carries `◀ x / y ▶`; arrows move a local preview only, `Restore` asks the host to switch the branch, and a failed restore renders on the row (08 §8).
 
 ## Input card (composer)
@@ -67,6 +70,9 @@ Declared seats (`ui-conversation/src/client/contract/slots.ts:195-233`):
 Terminal: one PTY registry backs both the sidebar page and the bottom dock; `shell.overlay` id `enpoi-bottom-terminal` (`index.ts:360-481`).
 
 - **Document editor** (`ui-enpoi-editor`): its own themed Find bar over CodeMirror (deliberately not the stock `@codemirror/search` panel) — every match is decorated, the revealed match is selected and centered in one transaction, an invalid regex is a quiet no-match instead of a throw, case and regex toggles are in the bar, and Go-to-line flashes the target line for 1.4 s (`EditorFindBar.tsx:1-40,58-120`; `CodeMirrorEditor.tsx:46-60,139-160`; `search.ts:1-15,110-160`).
+- **Document preview & navigation** (`ui-sidebar-documentpreview` + `ui-sidebar-right`):
+  - Interactive header path: `TextPreview.tsx` header is an inline editable input (click to edit, Enter navigates relative or absolute paths even outside the workspace, Escape/blur reverts).
+  - File-card / diff-card routing: opening file or diff deliverables from chat (`dsh-resource://file/...`) auto-focuses or mounts the Workspace Files tree tab in the dock pane so the previewer docks beside the project files instead of unrelated panels (`packages/client/ui-sidebar-right/src/client/service.ts`).
 
 ## Settings
 
