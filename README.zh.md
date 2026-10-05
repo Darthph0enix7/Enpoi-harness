@@ -1,98 +1,56 @@
-# DeepSeek Harness
+# Enpoi Harness
 
 [English](README.md) | 中文
 
-DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的开源 agent harness（智能体框架）。
+Enpoi Harness 是**上游 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) 加上我们的运维配置组合**：一个集成了模型服务商、多智能体编排、诊断系统、UI 界面与默认主题的定制分发版，将全插件架构的 `dsh` 运行时转变为开箱即用的多模型智能体集群。
 
-它构建于**一切皆插件**的架构之上，由 [Cordis](https://github.com/cordiverse/cordis) 驱动，其设计参见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)。
-
-文档：[https://deepseek-harness.github.io/deepseek-harness/](https://deepseek-harness.github.io/deepseek-harness/)
-
-## 开发者预览
-
-DeepSeek Harness 处于 _开发者预览_ 阶段，正在快速迭代。**未来将出现破坏兼容性的变更。**
-
-运行本项目前，请阅读[安全说明](SAFETY.zh.md)。
+- `packages/` 之前的基础运行时与包基于上游，并维护一组精简的 fork 补丁（`patches/`）。
+- `$DSH_HOME/profiles/<name>`（默认 profile：`web`）下的所有内容均为自研：包括 `dsh-enpoi-*` 系列插件包、默认主题、预设角色席位、校验门禁以及 Creator 文档。
+- 运维与开发文档：**[docs/creator/](docs/creator/00-index.md)** —— 从索引页面（架构图与操作规范）开始，按需阅读对应专题文件。
 
 <a id="run"></a>
 
-## 运行
-
-### 通过 `npm` 运行
-
-安装 `Node.js`，然后运行：
+## 安装（Linux 与 macOS，无需 sudo）
 
 ```sh
-npx @deepseek-ai/dsh web
+curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash
 ```
 
-该命令默认会在 `http://127.0.0.1:3080` 启动 Web UI，本机启动时还会用默认浏览器打开页面。通过 SSH 启动时只打印宿主机 URL，因为本地转发地址由 SSH 客户端或编辑器持有。传入 `--no-open` 可仅运行服务器而不打开浏览器。详见 [Web UI 指南](docs/user/guide/index.zh.md)。
+安装脚本会自动检测系统与架构，优先使用 `PATH` 中已有的 Node ≥ 22.19（缺失时下载隔离运行时至安装前缀目录），通过 corepack 启用 pnpm，拉取版本化构建并编译，初始化 `$DSH_HOME` 配置（设置、预设、技能），并将 `dsh` 启动脚本写入 `~/.local/bin`。整个过程无需 root/sudo 权限，不会覆盖已有的用户设置，且具备幂等性与自愈能力。
 
 <a id="run-from-source"></a>
 
-### 从源码运行
-
-如需从仓库源码运行：
+从本地检出源码运行（测试环境的安装方式）：
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
-pnpm install
-pnpm run build
-pnpm dsh web
+bash scripts/install.sh --source . --channel stable
 ```
 
-`pnpm run build` 会准备仓库产物。`pnpm dsh web` 会直接使用这些已构建产物，不会重新构建。
+## 更新通道
 
-## 社区与支持
+| 通道 | 说明 |
+|---|---|
+| `stable`（默认） | 已发布并完成全量验证的稳定构建。省略 `--channel` 时默认使用。 |
+| `beta` | 针对下一版本发布的预览测试通道。 |
 
-- 通过 [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions) 提交反馈或 bug 报告。
-- 为你的插件仓库添加 [`dsh-plugin`](https://github.com/topics/dsh-plugin) 话题，便于被发现。
-- 欢迎加入 DeepSeek Harness 企微群：扫码添加企微小助手并填写入群问卷，完成后小助手会邀请你入群。
-
-<table>
-  <thead>
-    <tr>
-      <th align="center">企微小助手</th>
-      <th align="center">入群问卷</th>
-      <th align="center">微信公众号</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center"><img src="https://cdn.deepseek.com/harness/readme/community-wecom-assistant.png" alt="DeepSeek Harness 企微小助手二维码" width="180" height="180"></td>
-      <td align="center"><a href="https://trtgsjkv6r.feishu.cn/share/base/form/shrcnIt5twSVdLGD52KJBckGCgg"><img src="https://cdn.deepseek.com/harness/readme/community-wecom-survey.png" alt="DeepSeek Harness 入群问卷二维码" width="180" height="180"></a></td>
-      <td align="center"><img src="https://cdn.deepseek.com/harness/readme/community-wechat-official-account.png" alt="DeepSeek Harness 团队微信公众号二维码" width="180" height="180"></td>
-    </tr>
-  </tbody>
-</table>
-
-## 参与贡献
-
-参见 [CONTRIBUTING.md](CONTRIBUTING.zh.md)。
-
-## 开发
-
-请先阅读[开发指南](docs/development.zh.md)与[架构文档](docs/architecture.zh.md)。
-
-`pnpm run dev:web` 会在一个终端里完成构建、启动，并在源码修改时重建 client bundle；`make help` 列出 Web 与 Desktop 对应的 Make target。完整表格见开发指南的「应用命令」一节。
-
-面向 agent：请遵循 [AGENTS.md](AGENTS.md)。
-
-## 引用
-
-```bibtex
-@misc{deepseek-harness2026,
-  title={DeepSeek Harness: Everything is a Plugin},
-  author={DeepSeek-AI},
-  year={2026},
-  publisher={GitHub},
-  howpublished={\url{https://github.com/deepseek-ai/deepseek-harness}},
-}
+```sh
+dsh update                    # update on the current channel
+dsh update --channel beta     # switch to beta (then back with --channel stable)
+dsh update --dry-run          # show the plan without touching anything
 ```
 
-## 许可证
+更新采用版本化目录切换，并在失败时自动回滚；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
 
-[MIT](LICENSE)
+## 自研组件与上游分工
 
-第三方依赖及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+| 自研部分（`dsh-enpoi-*` 插件与 profile） | 上游组件（`deepseek-harness`） |
+|---|---|
+| 服务商同步、重量级本地提供方集成、密钥池、目录规则、模型链 | 核心运行时、持久化会话日志、客户端框架、插件加载器、基础工具、上下文压缩 |
+| 编排系统：角色席位、多方评议（Councils）、Oracle、Keeper、Living Brief、白板、长期记忆 | Web UI 外壳、对话交互、设置框架与大部分内置页面 |
+| 诊断账本、验证门禁、Creator 开发者文档 | 桌面端/无头运行打包、SDK 与基准测试 |
+
+在修改上游代码时，请遵循上游的 `AGENTS.md`、`docs/` 及贡献指南。在维护实际运行的 harness 功能时，请以 `docs/creator/` 为准，并在任何改动后同步更新文档。
+
+## 安全与许可证
+
+在赋予智能体终端执行权限前，请务必阅读 [安全说明](SAFETY.zh.md) —— `creator` 与 `sysadmin` 会话具备宿主机的 shell 操作权限。上游代码基于 MIT 许可证分发；本仓库自研包维护于此仓库及配套 profile 中。第三方开源依赖声明参见 [第三方声明](THIRD_PARTY_NOTICES.md)。

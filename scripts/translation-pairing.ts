@@ -299,7 +299,7 @@ export function parseTranslationMarkdown(content: string): Nodes {
   return fromMarkdown(content, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
 }
 
-const PUBLIC_REPOSITORY_BLOB_ROOT = 'https://github.com/deepseek-ai/deepseek-harness/blob/master/'
+const PUBLIC_REPOSITORY_BLOB_ROOT = 'https://github.com/Darthph0enix7/deepseek-harness/blob/master/'
 
 /** Return the accepted relative and public-repository links to one counterpart. */
 export function languageSwitcherTargets(counterpart: string): string[] {

@@ -125,14 +125,14 @@ CLEAN_MODE=0
 
 # Terminal styling (disabled when piped, non-TTY, dumb terminal, or NO_COLOR set)
 if [ -t 1 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ "${NO_COLOR:-0}" = "0" ]; then
-  C_BOLD="\033[1m"
-  C_DIM="\033[2m"
-  C_RESET="\033[0m"
-  C_CYAN="\033[36m"
-  C_GREEN="\033[32m"
-  C_YELLOW="\033[33m"
-  C_RED="\033[31m"
-  C_BLUE="\033[34m"
+  C_BOLD=$(printf '\033[1m')
+  C_DIM=$(printf '\033[2m')
+  C_RESET=$(printf '\033[0m')
+  C_CYAN=$(printf '\033[36m')
+  C_GREEN=$(printf '\033[32m')
+  C_YELLOW=$(printf '\033[33m')
+  C_RED=$(printf '\033[31m')
+  C_BLUE=$(printf '\033[34m')
 else
   C_BOLD=""
   C_DIM=""
@@ -148,10 +148,11 @@ init_log_file() {
   local log_dir="$PREFIX/logs"
   mkdir -p "$log_dir" 2>/dev/null || log_dir="${TMPDIR:-/tmp}"
   LOG_FILE="$log_dir/install.log"
+  [ -n "${OS:-}" ] || detect_os_arch
   {
     printf '=================================================================\n'
     printf 'dsh-install session: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'channel: %s, os/arch: %s/%s\n' "${CHANNEL:-stable}" "${OS:-unknown}" "${ARCH:-unknown}"
+    printf 'channel: %s, os/arch: %s/%s (%s)\n' "${CHANNEL:-stable}" "${OS:-unknown}" "${ARCH:-unknown}" "${DISTRO_NAME:-unknown}"
     printf '=================================================================\n'
   } >> "$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
 }
@@ -750,7 +751,25 @@ stage_remote() { # url
   if [ "$use_cache" = 0 ]; then
     archive="$PREFIX/harness/.download-$$.tar.gz"
     log "fetching $url"
-    run_logged "Downloading release archive" 120 "$PREFIX" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$archive" || { warn "download failed: $url"; rm -f "$archive"; return 1; }
+    local dl_timeout="${DSH_DOWNLOAD_TIMEOUT:-600}"
+    if ! run_logged "Downloading release archive" "$dl_timeout" "$PREFIX" curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 "$url" -o "$archive"; then
+      rm -f "$archive"
+      # Fallback to git clone if curl download fails or times out
+      if command -v git >/dev/null 2>&1; then
+        log "direct archive download failed; falling back to shallow git clone ($ref)"
+        substep_ok "Direct download timed out; falling back to git clone (${ref})"
+        local git_url="${DSH_GITHUB_URL:-https://github.com/Darthph0enix7/deepseek-harness}"
+        case "$git_url" in *.git) :;; *) git_url="$git_url.git";; esac
+        rm -rf "$STAGED"
+        if run_logged "Cloning release repository" 300 "$PREFIX" git clone --depth 1 --branch "$ref" "$git_url" "$STAGED"; then
+          rm -rf "$STAGED/.git"
+          flatten_stage "$STAGED"
+          return 0
+        fi
+      fi
+      warn "download failed: $url"
+      return 1
+    fi
     cp "$archive" "$cache_file" 2>/dev/null || true
   else
     archive="$cache_file"
@@ -1592,12 +1611,26 @@ maybe_open_browser_when_up() { # url
   return 0
 }
 
+box_row() {
+  local content="$1" color="${2:-}"
+  local stripped
+  stripped="$(printf '%s' "$content" | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g')"
+  local len=${#stripped}
+  local pad=$(( 59 - len ))
+  [ "$pad" -ge 0 ] || pad=0
+  local spaces=""
+  if [ "$pad" -gt 0 ]; then
+    spaces="$(printf '%*s' "$pad" '')"
+  fi
+  say "${color}${C_BOLD}│${C_RESET} ${content}${spaces} ${color}${C_BOLD}│${C_RESET}"
+}
+
 print_banner() {
   [ "$QUIET" = 1 ] && return 0
   [ "$JSON_OUT" = 1 ] && return 0
   say "${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
-  say "${C_BOLD}│${C_RESET}   ${C_CYAN}${C_BOLD}DeepSeek Harness (Enpoi)${C_RESET} — System Installer               ${C_BOLD}│${C_RESET}"
-  say "${C_BOLD}│${C_RESET}   ${C_DIM}Channel: ${CHANNEL:-stable}${C_RESET}                                         ${C_BOLD}│${C_RESET}"
+  box_row "  ${C_CYAN}${C_BOLD}Enpoi Harness${C_RESET} — System Installer" "${C_BOLD}"
+  box_row "  ${C_DIM}Channel: ${CHANNEL:-stable}${C_RESET}" "${C_BOLD}"
   say "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
 }
 
@@ -1607,20 +1640,20 @@ print_summary() { # action
   overlay="$PROFILE_DIR/device-patches/$(hostname 2>/dev/null || printf 'this-host')"
   say ""
   say "${C_GREEN}${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}DeepSeek Harness successfully ${action}ed!${C_RESET}                  ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}                                                             ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Version:${C_RESET}   ${VERSION} (${CHANNEL:-stable})                           ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Location:${C_RESET}  ${PREFIX}                                       ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Commands:${C_RESET}  dsh, ds                                        ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Duration:${C_RESET}  $(elapsed_human)                                        ${C_GREEN}${C_BOLD}│${C_RESET}"
+  box_row "  ${C_BOLD}Enpoi Harness successfully ${action}ed!${C_RESET}" "${C_GREEN}"
+  box_row "" "${C_GREEN}"
+  box_row "  ${C_BOLD}Version:${C_RESET}   ${VERSION} (${CHANNEL:-stable})" "${C_GREEN}"
+  box_row "  ${C_BOLD}Location:${C_RESET}  ${PREFIX}" "${C_GREEN}"
+  box_row "  ${C_BOLD}Commands:${C_RESET}  dsh, ds" "${C_GREEN}"
+  box_row "  ${C_BOLD}Duration:${C_RESET}  $(elapsed_human)" "${C_GREEN}"
   if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Log:${C_RESET}       ${LOG_FILE}                    ${C_GREEN}${C_BOLD}│${C_RESET}"
+    box_row "  ${C_BOLD}Log:${C_RESET}       ${LOG_FILE}" "${C_GREEN}"
   fi
-  say "${C_GREEN}${C_BOLD}│${C_RESET}                                                             ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Quick Start:${C_RESET}                                              ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh web${C_RESET}      Start the local web UI                        ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh doctor${C_RESET}   Check system diagnostics                      ${C_GREEN}${C_BOLD}│${C_RESET}"
-  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh update${C_RESET}   Update harness to latest version              ${C_GREEN}${C_BOLD}│${C_RESET}"
+  box_row "" "${C_GREEN}"
+  box_row "  ${C_BOLD}Quick Start:${C_RESET}" "${C_GREEN}"
+  box_row "    ${C_CYAN}dsh web${C_RESET}      Start the local web UI" "${C_GREEN}"
+  box_row "    ${C_CYAN}dsh doctor${C_RESET}   Check system diagnostics" "${C_GREEN}"
+  box_row "    ${C_CYAN}dsh update${C_RESET}   Update harness to latest version" "${C_GREEN}"
   say "${C_GREEN}${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
   say ""
   case ":$PATH:" in
@@ -1670,11 +1703,11 @@ dry_run_plan() {
 # ── Install ─────────────────────────────────────────────────────────────────
 do_install() {
   STEP_TOTAL=6
+  detect_os_arch
   init_log_file
   print_banner
 
   step "Detecting platform & environment"
-  detect_os_arch
   sudo_trap
   substep_ok "Platform: $OS/$ARCH ($DISTRO_NAME)"
   substep_ok "Prefix: $PREFIX (zero sudo)"
@@ -1884,7 +1917,7 @@ do_clean() {
   init_log_file
   detect_os_arch
   resolve_home
-  say "${C_BOLD}DeepSeek Harness — System Cleanup${C_RESET}"
+  say "${C_BOLD}Enpoi Harness — System Cleanup${C_RESET}"
   say "Cleaning build artifacts, failed updates, and temporary files under ${PREFIX}..."
   say ""
 
