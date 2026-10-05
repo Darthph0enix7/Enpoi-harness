@@ -121,6 +121,7 @@ ROLLED_BACK=0
 VERBOSE="${DSH_VERBOSE:-0}"
 LOG_FILE=""
 DISTRO_NAME=""
+CLEAN_MODE=0
 
 # Terminal styling (disabled when piped, non-TTY, dumb terminal, or NO_COLOR set)
 if [ -t 1 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ "${NO_COLOR:-0}" = "0" ]; then
@@ -274,9 +275,12 @@ Usage:
   install.sh [options]                 install (or refresh) the channel build
   install.sh --update [options]        mechanical update of an existing install
   install.sh --repair [--check]        verify the install and fix the safe breaks
+  install.sh --clean                   clean failed builds, staging, and temp files
   install.sh --uninstall [--purge]     remove the install (default: keep data)
 
 Options:
+  --clean             remove failed builds, incomplete trees, and temporary
+                      staging files (keeps complete builds and all user data)
   --prefix DIR        install root (default: $HOME/.dsh)
   --bin-dir DIR       where the `dsh` shim goes (default: $HOME/.local/bin)
   --channel NAME      stable | beta (default: stable)
@@ -368,6 +372,7 @@ while [ "$#" -gt 0 ]; do
     --merge-baseline=*) MERGE_BASELINE="${arg#*=}"; shift;;
     --update) UPDATE_MODE=1; shift;;
     --repair) REPAIR_MODE=1; shift;;
+    --clean) CLEAN_MODE=1; shift;;
     --uninstall) UNINSTALL_MODE=1; shift;;
     --keep-data) PURGE=0; shift;;
     --purge) PURGE=1; shift;;
@@ -723,14 +728,36 @@ stage_tarball() { # local tarball
 }
 
 stage_remote() { # url
-  local url="$1" archive
+  local url="$1" archive cache_dir cache_file
+  cache_dir="$PREFIX/harness/.cache"
+  mkdir -p "$cache_dir" || return 1
+  local ref="${REF:-$CHANNEL}"
+  cache_file="$cache_dir/archive-${ref}.tar.gz"
   STAGED="$PREFIX/harness/.staging-$$"
-  archive="$PREFIX/harness/.download-$$.tar.gz"
   mkdir -p "$STAGED" || return 1
-  log "fetching $url"
-  run_logged "Downloading release archive" 120 "$PREFIX" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$archive" || { warn "download failed: $url"; rm -f "$archive"; return 1; }
-  run_logged "Extracting release archive" 60 "$PREFIX" tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract $url"; rm -f "$archive"; return 1; }
-  rm -f "$archive"
+
+  local use_cache=0
+  if [ "${FORCE:-0}" != 1 ] && [ -s "$cache_file" ]; then
+    if tar -tzf "$cache_file" >/dev/null 2>&1; then
+      use_cache=1
+      log "using cached release archive: $cache_file"
+      substep_ok "Using cached release archive (${ref})"
+    else
+      rm -f "$cache_file"
+    fi
+  fi
+
+  if [ "$use_cache" = 0 ]; then
+    archive="$PREFIX/harness/.download-$$.tar.gz"
+    log "fetching $url"
+    run_logged "Downloading release archive" 120 "$PREFIX" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$archive" || { warn "download failed: $url"; rm -f "$archive"; return 1; }
+    cp "$archive" "$cache_file" 2>/dev/null || true
+  else
+    archive="$cache_file"
+  fi
+
+  run_logged "Extracting release archive" 60 "$PREFIX" tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract release archive"; [ "$archive" != "$cache_file" ] && rm -f "$archive"; return 1; }
+  [ "$archive" != "$cache_file" ] && rm -f "$archive"
   flatten_stage "$STAGED"
   return 0
 }
@@ -738,6 +765,28 @@ stage_remote() { # url
 prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
+    resolve_target_for_source
+    # If the target commit is known and already built and complete, reuse it directly
+    if [ "${FORCE:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
+      local d name c
+      for d in "$PREFIX/harness"/*; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        case "$name" in .*|current|*.failed-*) continue;; esac
+        if [ -f "$d/.dsh-install-complete" ]; then
+          c="$(installed_tree_commit "$d")"
+          if [ -n "$c" ] && commit_same "$TARGET_COMMIT" "$c"; then
+            VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
+            if [ -n "$VERSION" ]; then
+              TREE_DIR_NAME="$name"
+              HARNESS="$d"
+              substep_ok "Target build already complete: $TREE_DIR_NAME (reusing)"
+              return 0
+            fi
+          fi
+        fi
+      done
+    fi
     SOURCE_URL="$DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"
     stage_remote "$SOURCE_URL" || die "could not fetch the $CHANNEL channel build from $SOURCE_URL"
   elif [ -d "$SOURCE" ]; then
@@ -1194,7 +1243,7 @@ if [ ! -d "$CURRENT" ]; then
   exit 1
 fi
 case "${1:-}" in
-  update|repair|uninstall|doctor)
+  update|repair|uninstall|doctor|clean)
     sub="$1"; shift
     exec "$CURRENT/scripts/update.sh" "$sub" --prefix "$PREFIX" "$@"
     ;;
@@ -1636,7 +1685,7 @@ do_install() {
   setup_pnpm || die "could not enable pnpm through corepack"
   substep_ok "Corepack pnpm: $("$PNPM" --version 2>/dev/null || printf '?')"
 
-  prune_failed_versions
+  cleanup_stale_artifacts
 
   step "Fetching release archive (${CHANNEL:-stable})"
   prepare_source
@@ -1767,6 +1816,153 @@ prune_failed_versions() {
     if rm -rf "$f"; then removed=$((removed + 1)); else warn "could not prune failed tree $name"; fi
   done < <(ls -1dt "$PREFIX/harness"/*.failed-* 2>/dev/null)
   [ "$removed" -gt 0 ] && log "pruned $removed failed tree(s); kept the newest $keep for diagnosis"
+  return 0
+}
+
+cleanup_stale_artifacts() {
+  local count=0 p d name pid
+  # 1. Clean orphaned staging directories (.staging-*) where process is dead
+  for p in "$PREFIX/harness"/.staging-*; do
+    [ -d "$p" ] || continue
+    pid="${p##*-}"
+    case "$pid" in ''|*[!0-9]*) pid="";; esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
+  done
+
+  # 2. Clean temporary downloads (.download-*) where process is dead
+  for p in "$PREFIX/harness"/.download-*; do
+    [ -e "$p" ] || continue
+    case "$(basename "$p")" in .download-cache*) continue;; esac
+    pid="${p##*-}"
+    case "$pid" in ''|*[!0-9]*) pid="";; esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
+  done
+
+  # 3. Clean profile staging
+  for p in "$PREFIX/harness"/.profile-staging-*; do
+    [ -d "$p" ] || continue
+    pid="${p##*-}"
+    case "$pid" in ''|*[!0-9]*) pid="";; esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
+  done
+
+  # 4. Clean incomplete harness version directories (missing .dsh-install-complete)
+  for d in "$PREFIX/harness"/*; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    case "$name" in .*|current|*.failed-*) continue;; esac
+    if [ ! -f "$d/.dsh-install-complete" ]; then
+      log "cleaning incomplete harness directory: $name"
+      rm -rf -- "$d" 2>/dev/null && count=$((count + 1))
+    fi
+  done
+
+  # 5. Clean temporary runtime node extractions
+  for p in "$PREFIX/runtime"/.node-tmp-*; do
+    [ -d "$p" ] || continue
+    pid="${p##*-}"
+    case "$pid" in ''|*[!0-9]*) pid="";; esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
+  done
+
+  # 6. Clean profile build temp directories
+  for p in "${TMPDIR:-/tmp}"/dsh-profile-build.*; do
+    [ -d "$p" ] || continue
+    rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
+  done
+
+  prune_failed_versions
+  [ "$count" -gt 0 ] && log "cleaned $count stale/incomplete build artifacts from prior runs"
+  return 0
+}
+
+do_clean() {
+  init_log_file
+  detect_os_arch
+  resolve_home
+  say "${C_BOLD}DeepSeek Harness — System Cleanup${C_RESET}"
+  say "Cleaning build artifacts, failed updates, and temporary files under ${PREFIX}..."
+  say ""
+
+  local freed=0 count=0 f d p sz name
+
+  # 1. Prune all .failed-* directories
+  for f in "$PREFIX/harness"/*.failed-*; do
+    [ -d "$f" ] || continue
+    sz="$(du -sk "$f" 2>/dev/null | awk '{print $1}')"
+    sz="${sz:-0}"
+    if rm -rf "$f" 2>/dev/null; then
+      count=$((count + 1))
+      freed=$((freed + sz))
+      say "  ${C_GREEN}✓${C_RESET} Removed failed tree: $(basename "$f")"
+    fi
+  done
+
+  # 2. Prune incomplete harness version trees (missing .dsh-install-complete)
+  for d in "$PREFIX/harness"/*; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    case "$name" in .*|current|*.failed-*) continue;; esac
+    if [ ! -f "$d/.dsh-install-complete" ]; then
+      sz="$(du -sk "$d" 2>/dev/null | awk '{print $1}')"
+      sz="${sz:-0}"
+      if rm -rf "$d" 2>/dev/null; then
+        count=$((count + 1))
+        freed=$((freed + sz))
+        say "  ${C_GREEN}✓${C_RESET} Removed incomplete version tree: $name"
+      fi
+    fi
+  done
+
+  # 3. Prune staging, download, and backup directories
+  for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-*; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
+    sz="${sz:-0}"
+    if rm -rf -- "$p" 2>/dev/null; then
+      count=$((count + 1))
+      freed=$((freed + sz))
+      say "  ${C_GREEN}✓${C_RESET} Removed staging artifact: $(basename "$p")"
+    fi
+  done
+
+  # 4. Prune download archive cache
+  if [ -d "$PREFIX/harness/.cache" ]; then
+    sz="$(du -sk "$PREFIX/harness/.cache" 2>/dev/null | awk '{print $1}')"
+    sz="${sz:-0}"
+    if rm -rf "$PREFIX/harness/.cache" 2>/dev/null; then
+      count=$((count + 1))
+      freed=$((freed + sz))
+      say "  ${C_GREEN}✓${C_RESET} Cleared release archive cache"
+    fi
+  fi
+
+  # 5. Prune temporary node runtime staging
+  for p in "$PREFIX/runtime"/.node-tmp-*; do
+    [ -e "$p" ] || continue
+    sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
+    sz="${sz:-0}"
+    if rm -rf -- "$p" 2>/dev/null; then
+      count=$((count + 1))
+      freed=$((freed + sz))
+      say "  ${C_GREEN}✓${C_RESET} Removed runtime staging: $(basename "$p")"
+    fi
+  done
+
+  # 6. Prune temp profile build directories
+  for p in "${TMPDIR:-/tmp}"/dsh-profile-build.* "${TMPDIR:-/tmp}"/dsh-install-*; do
+    [ -d "$p" ] || continue
+    rm -rf -- "$p" 2>/dev/null
+  done
+
+  local freed_mb=$(( freed / 1024 ))
+  say ""
+  say "${C_GREEN}${C_BOLD}Cleanup complete!${C_RESET} Removed ${count} item(s), freed ~${freed_mb}MB."
+  say "User data in ${DSH_HOME} (sessions, settings, credentials) was left completely intact."
   return 0
 }
 
@@ -2518,14 +2714,21 @@ EOF
 # ── Defaults + dispatch ─────────────────────────────────────────────────────
 if [ -z "$PREFIX" ]; then PREFIX="$HOME/.dsh"; fi
 if [ -z "$BIN_DIR" ]; then BIN_DIR="$HOME/.local/bin"; fi
-if [ "$UPDATE_MODE" = 1 ] && { [ "$REPAIR_MODE" = 1 ] || [ "$UNINSTALL_MODE" = 1 ]; }; then
-  die "choose one of --update, --repair, --uninstall"
+if [ "$UPDATE_MODE" = 1 ] && { [ "$REPAIR_MODE" = 1 ] || [ "$UNINSTALL_MODE" = 1 ] || [ "$CLEAN_MODE" = 1 ]; }; then
+  die "choose one of --update, --repair, --uninstall, --clean"
 fi
-if [ "$REPAIR_MODE" = 1 ] && [ "$UNINSTALL_MODE" = 1 ]; then
-  die "choose one of --repair, --uninstall"
+if [ "$REPAIR_MODE" = 1 ] && { [ "$UNINSTALL_MODE" = 1 ] || [ "$CLEAN_MODE" = 1 ]; }; then
+  die "choose one of --repair, --uninstall, --clean"
 fi
-if [ "$CHECK_ONLY" = 1 ] && [ "$UNINSTALL_MODE" = 1 ]; then
-  die "--check applies to --repair, not --uninstall"
+if [ "$UNINSTALL_MODE" = 1 ] && [ "$CLEAN_MODE" = 1 ]; then
+  die "choose one of --uninstall, --clean"
+fi
+if [ "$CHECK_ONLY" = 1 ] && { [ "$UNINSTALL_MODE" = 1 ] || [ "$CLEAN_MODE" = 1 ]; }; then
+  die "--check applies to --repair, not --clean or --uninstall"
+fi
+if [ "$CLEAN_MODE" = 1 ]; then
+  do_clean
+  exit $?
 fi
 if [ "$UPDATE_MODE" = 0 ] && [ "$REPAIR_MODE" = 0 ] && [ "$UNINSTALL_MODE" = 0 ]; then
   if [ -z "$CHANNEL" ]; then CHANNEL=stable; fi

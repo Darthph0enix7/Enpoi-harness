@@ -25,7 +25,7 @@ for arg in "$@"; do
     --prefix) expect_prefix=1; argv+=("$arg");;
     --prefix=*) prefix="${arg#--prefix=}"; argv+=("$arg");;
     --dsh-home|--dsh-home=*) explicit_home=1; argv+=("$arg");;
-    update|repair|uninstall|doctor) mode="$arg";;
+    update|repair|uninstall|doctor|clean) mode="$arg";;
     *) argv+=("$arg");;
   esac
 done
@@ -61,6 +61,7 @@ fi
 case "$mode" in
   repair) mode_flag="--repair";;
   uninstall) mode_flag="--uninstall";;
+  clean) mode_flag="--clean";;
   *) mode_flag="--update";;
 esac
 if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ]; then
