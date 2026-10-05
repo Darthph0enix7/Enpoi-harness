@@ -153,14 +153,29 @@ Cross-device agent communication allows an agent on one machine (e.g. laptop) to
   - `peer_cancel`: abort an in-flight cross-device task.
 - **Testing recipe between devices**:
   1. Ensure both devices have the harness running and reachable (e.g. over Tailscale).
-  2. On Device A, configure `$DSH_HOME/pairings.yaml` with Device B's endpoint and shared token:
+  2. On Device A (e.g. MacBook), configure `$DSH_HOME/pairings.yaml`:
      ```yaml
-     peers:
-       server:
-         url: "http://100.122.163.25:3080"
-         token: "shared-pairing-token"
-         exposure: "debug"
+     version: 1
+     device: macbook
+     pairings:
+       - alias: server
+         peer: serverlocal
+         endpoint: "http://100.122.163.25:3080"
+         exposure: debug
+         create:
+           agentPreset: orchestrator
      ```
-  3. In a session on Device A, attach the `peer` group (`tool_groups attach peer`) or execute `peer_status`.
-  4. Call `peer_ask(peer: "server", prompt: "Inspect serverlocal GPU and Docker status")`.
-  5. The remote instance receives the prompt, executes it under its own configured preset/permissions, and streams or returns the result back to Device A's session.
+  3. On Device B (e.g. serverlocal), configure `$DSH_HOME/pairings.yaml`:
+     ```yaml
+     version: 1
+     device: serverlocal
+     pairings:
+       - alias: macbook
+         peer: macbook
+         exposure: debug
+         create:
+           agentPreset: orchestrator
+     ```
+  4. In a session on Device A, attach the `peer` group (`tool_groups attach peer`) or execute `peer_status`.
+  5. Call `peer_ask(alias: "server", message: "Inspect serverlocal GPU and Docker status")`.
+  6. The remote instance receives the prompt, executes it under its own configured preset/permissions, and streams or returns the result back to Device A's session.
