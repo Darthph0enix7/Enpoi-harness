@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type {
   SessionListState, SessionReference, SessionSummary,
 } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -186,20 +186,6 @@ describe('ui-workspace apply', () => {
     expect(inject).toEqual([
       'slots', 'sessions', 'workspaces', 'locale', 'remote', 'remote.directoryPicker', 'layout', 'shortcuts',
     ])
-  })
-
-  it('reports a default Workspace creation failure through the shared notice overlay', async () => {
-    const b = await bench()
-    onTestFinished(() => b.ctx.fiber.dispose())
-    b.initializeDefault.mockRejectedValueOnce(new Error('denied'))
-    declare(b.slots, 'shell.overlay')
-    await b.ctx.plugin({ inject: [...inject], apply }).await()
-    const face = faceOf(entry(b.slots, 'shell.overlay', 'workspace.row-toast')) as RowToastInjected
-    await vi.waitFor(() => {
-      expect(face.hooks.toast.getSnapshot()).toMatchObject({ kind: 'defaultWorkspaceFailed' })
-    })
-    face.dismissToast()
-    expect(face.hooks.toast.getSnapshot()).toBeNull()
   })
 
   it('registers browser and pickers for declarations arriving before or after apply', async () => {

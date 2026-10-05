@@ -333,24 +333,10 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       && !workspaces.archivedSessionIds.includes(summary.id)) {
       sessionId = await this.reuseBlank(workspace.workspaceId, summary.id)
     }
-    let target = workspace?.workspaceId ?? recentWorkspace(workspaces.items, sessions.byId)
-    if (target === undefined && workspaces.items.length === 0 && sessions.ids.length === 0) {
-      const prepared = await this.initializeDefaultWorkspace(navigation)
-      if (navigation.aborted) return
-      target = prepared?.workspaceId
-    }
+    const target = workspace?.workspaceId ?? recentWorkspace(workspaces.items, sessions.byId)
     if (sessionId === undefined && target !== undefined) sessionId = await this.connectWorkspace(target)
     if (sessionId !== undefined && !navigation.aborted) {
       this.replaceMain(sessionId, navigation, 'preserve')
-    }
-  }
-
-  private async initializeDefaultWorkspace(signal: AbortSignal): Promise<WorkspaceView | undefined> {
-    try {
-      return await this.workspaces.initializeDefault(signal)
-    } catch (_error: unknown) {
-      if (!signal.aborted) this.notify({ kind: 'defaultWorkspaceFailed' })
-      return undefined
     }
   }
 

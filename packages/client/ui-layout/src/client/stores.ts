@@ -26,7 +26,7 @@ interface StoredWidths {
  * @returns the validated preferences, or the contract defaults.
  */
 function readStoredWidths(viewport: number): StoredWidths {
-  const defaults: StoredWidths = { sidebar: SIDEBAR_DEFAULT, rightbar: null }
+  const defaults: StoredWidths = { sidebar: 0, rightbar: null }
   if (typeof localStorage === 'undefined') return defaults
   try {
     const raw = localStorage.getItem(WIDTHS_KEY)
@@ -36,7 +36,7 @@ function readStoredWidths(viewport: number): StoredWidths {
     const stored = parsed as { sidebar?: unknown; rightbar?: unknown }
     const sidebar = typeof stored.sidebar === 'number' && Number.isFinite(stored.sidebar)
       ? stored.sidebar === 0 ? 0 : clampWidth(stored.sidebar, SIDEBAR_MIN, SIDEBAR_MAX)
-      : SIDEBAR_DEFAULT
+      : 0
     const rightbar = typeof stored.rightbar === 'number' && Number.isFinite(stored.rightbar)
       ? clampWidth(stored.rightbar, RIGHTBAR_MIN, Math.max(RIGHTBAR_MIN, viewport * RIGHTBAR_MAX_RATIO))
       : null

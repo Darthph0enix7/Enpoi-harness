@@ -13,7 +13,7 @@ describe('createLayoutStore', () => {
     expect(store.getSnapshot()).toEqual({
       panelInfo: { activePanelId: null },
       layoutInfo: {
-        sidebar: 280,
+        sidebar: 0,
         viewportWidth: 1920,
         narrowExpanded: false,
         rightbar: null,
@@ -30,7 +30,7 @@ describe('createLayoutStore', () => {
     const b = createLayoutStore().create()
     a.actions.setSidebar(400)
     a.actions.openRightbar(true, false)
-    expect(b.store.getSnapshot().layoutInfo.sidebar).toBe(280)
+    expect(b.store.getSnapshot().layoutInfo.sidebar).toBe(0)
     expect(b.store.getSnapshot().layoutInfo.rightbar).toBeNull()
   })
 
@@ -47,6 +47,7 @@ describe('createLayoutStore', () => {
     const first = createLayoutStore().create()
     first.actions.openRightbar(true, false)
     expect(first.store.getSnapshot().layoutInfo.rightbar).toBe(672)
+    first.actions.setSidebar(400)
     first.actions.toggleSidebar()
     const reopened = createLayoutStore().create()
     expect(reopened.store.getSnapshot().layoutInfo.sidebar).toBe(0)
@@ -70,7 +71,7 @@ describe('createLayoutStore', () => {
   })
 
   it('falls back to the contract defaults for absent or malformed entries', () => {
-    const defaults = { sidebar: 280, rightbar: null }
+    const defaults = { sidebar: 0, rightbar: null }
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
     localStorage.setItem('dsh.client.layout.widths', '{not json')
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
@@ -85,7 +86,7 @@ describe('createLayoutStore', () => {
   it('reads defaults and skips writes when the browser has no storage', () => {
     vi.stubGlobal('localStorage', undefined)
     const { store, actions } = createLayoutStore().create()
-    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 280, rightbar: null })
+    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 0, rightbar: null })
     actions.setSidebar(400)
     expect(store.getSnapshot().layoutInfo.sidebar).toBe(400)
   })

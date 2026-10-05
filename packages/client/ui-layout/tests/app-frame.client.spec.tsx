@@ -65,9 +65,10 @@ function resize(width: number): void {
   })
 }
 
-function mountFrame(windowWidth = frameWidth) {
+function mountFrame(windowWidth = frameWidth, sidebarWidth = 280) {
   vi.stubGlobal('innerWidth', windowWidth)
   const instance = createLayoutStore().create()
+  if (sidebarWidth !== 0) instance.actions.setSidebar(sidebarWidth)
   const slotCalls: { key: string; props: object; options: RenderOpts | undefined }[] = []
   const renderSlot: AppFrameProps['renderSlot'] = (key, owner, options) => {
     slotCalls.push({ key, props: owner, options })
@@ -206,7 +207,15 @@ describe('AppFrame', () => {
     expect(document.title).toBe('Product')
   })
 
-  it('renders owner props for the default sidebar and prospective right panel', () => {
+  it('renders owner props for the fresh-install default closed sidebar and prospective right panel', () => {
+    const { frame, rightOwner, sidebarOwner, slotCalls } = mountFrame(frameWidth, 0)
+    expect(tracks(frame)).toEqual([56, 0])
+    expect(sidebarOwner()).toEqual({ collapsed: true, width: 56 })
+    expect(rightOwner()).toEqual({ width: 672, viewportWidth: 1920, canShow: true, mobile: false })
+    expect(slotCalls.find(c => c.key === 'main')).toEqual({ key: 'main', props: {}, options: { entryKey: 'conversation' } })
+  })
+
+  it('renders owner props for the expanded sidebar and prospective right panel', () => {
     const { frame, rightOwner, sidebarOwner, slotCalls } = mountFrame()
     expect(tracks(frame)).toEqual([280, 0])
     expect(sidebarOwner()).toEqual({ collapsed: false, width: 280 })
