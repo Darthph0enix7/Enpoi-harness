@@ -13,6 +13,13 @@ fail=0
 for dir in enpoi-*/; do
   pkg="${dir%/}"
   [ -f "$pkg/src/index.ts" ] || { echo "SKIP (no src/index.ts): $pkg"; continue; }
+
+  # Skip rebuild if prebuilt bundle exists and source has not been modified
+  if [ "${FORCE_BUILD:-0}" != 1 ] && [ -f "$pkg/lib/index.js" ] && [ ! "$pkg/src/index.ts" -nt "$pkg/lib/index.js" ]; then
+    echo "OK   $pkg  ($(du -h "$pkg/lib/index.js" | cut -f1)) (prebuilt)"
+    continue
+  fi
+
   if pnpm --dir "$pkg" exec esbuild src/index.ts \
       --bundle --format=esm --platform=node --target=node22 \
       --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \

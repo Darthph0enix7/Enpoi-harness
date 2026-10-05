@@ -118,21 +118,141 @@ CHECK_HELP=0
 CHECK_SMOKE=0
 CHECK_AUDIT="skipped"
 ROLLED_BACK=0
+VERBOSE="${DSH_VERBOSE:-0}"
+LOG_FILE=""
+DISTRO_NAME=""
 
-log() { [ "$QUIET" = 1 ] && return 0; printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2; }
-warn() { printf '%s: WARNING: %s\n' "$SCRIPT_NAME" "$*" >&2; }
-die() { printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; exit 1; }
+# Terminal styling (disabled when piped, non-TTY, dumb terminal, or NO_COLOR set)
+if [ -t 1 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ "${NO_COLOR:-0}" = "0" ]; then
+  C_BOLD="\033[1m"
+  C_DIM="\033[2m"
+  C_RESET="\033[0m"
+  C_CYAN="\033[36m"
+  C_GREEN="\033[32m"
+  C_YELLOW="\033[33m"
+  C_RED="\033[31m"
+  C_BLUE="\033[34m"
+else
+  C_BOLD=""
+  C_DIM=""
+  C_RESET=""
+  C_CYAN=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_RED=""
+  C_BLUE=""
+fi
+
+init_log_file() {
+  local log_dir="$PREFIX/logs"
+  mkdir -p "$log_dir" 2>/dev/null || log_dir="${TMPDIR:-/tmp}"
+  LOG_FILE="$log_dir/install.log"
+  {
+    printf '=================================================================\n'
+    printf 'dsh-install session: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'channel: %s, os/arch: %s/%s\n' "${CHANNEL:-stable}" "${OS:-unknown}" "${ARCH:-unknown}"
+    printf '=================================================================\n'
+  } >> "$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
+}
+
+log() {
+  [ -n "${LOG_FILE:-}" ] && printf '%s: %s\n' "$SCRIPT_NAME" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  if [ "$VERBOSE" = 1 ]; then
+    printf "${C_DIM}%s:${C_RESET} %s\n" "$SCRIPT_NAME" "$*" >&2
+  fi
+}
+
+warn() {
+  [ -n "${LOG_FILE:-}" ] && printf '%s: WARNING: %s\n' "$SCRIPT_NAME" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  printf "${C_YELLOW}${C_BOLD}! WARNING:${C_RESET} %s\n" "$*" >&2
+}
+
+die() {
+  [ -n "${LOG_FILE:-}" ] && printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  printf "\n${C_RED}${C_BOLD}✗ ERROR:${C_RESET} %s\n" "$*" >&2
+  if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+    printf "${C_DIM}Full installation log available at: %s${C_RESET}\n\n" "$LOG_FILE" >&2
+  fi
+  exit 1
+}
+
 say() {
   if [ "$JSON_OUT" = 1 ]; then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi
 }
 
-step() { # label — numbered stage line on stderr; --quiet suppresses it
+step() { # label
   STEP_NO=$((STEP_NO + 1))
   [ "$QUIET" = 1 ] && return 0
   if [ "$STEP_TOTAL" -gt 0 ]; then
-    printf '%s: [%d/%d] %s\n' "$SCRIPT_NAME" "$STEP_NO" "$STEP_TOTAL" "$*" >&2
+    printf "\n${C_BOLD}${C_CYAN}[%d/%d]${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$STEP_NO" "$STEP_TOTAL" "$*" >&2
   else
-    printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2
+    printf "\n${C_BOLD}${C_CYAN}▸${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$*" >&2
+  fi
+}
+
+substep_ok() {
+  [ "$QUIET" = 1 ] && return 0
+  printf "  ${C_GREEN}✓${C_RESET} %s\n" "$*" >&2
+}
+
+substep_info() {
+  [ "$QUIET" = 1 ] && return 0
+  printf "  ${C_CYAN}ℹ${C_RESET} %s\n" "$*" >&2
+}
+
+run_logged() { # desc timeout workdir cmd...
+  local desc="$1" timeout="$2" workdir="$3"
+  shift 3
+  local start_t rc=0
+  start_t="$(date +%s)"
+
+  if [ "$VERBOSE" = 1 ]; then
+    printf "  ${C_CYAN}▸${C_RESET} %s...\n" "$desc" >&2
+    ( cd "$workdir" && run_limited "$timeout" "$@" ) 2>&1 | tee -a "$LOG_FILE" >&2
+    return "${PIPESTATUS[0]}"
+  fi
+
+  if [ "$QUIET" = 1 ]; then
+    ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1
+    return $?
+  fi
+
+  printf "  ${C_CYAN}⏳${C_RESET} %s..." "$desc" >&2
+  printf '\n--- START: %s (dir: %s) ---\n' "$desc" "$workdir" >> "$LOG_FILE" 2>/dev/null || true
+
+  ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1 &
+  local pid=$!
+
+  local spin='-\|/'
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ -t 2 ]; then
+      i=$(( (i + 1) % 4 ))
+      printf "\r  ${C_CYAN}%s${C_RESET} %s..." "${spin:$i:1}" "$desc" >&2
+    fi
+    sleep 0.25
+  done
+
+  wait "$pid" 2>/dev/null || rc=$?
+  printf '\n--- END: %s (exit: %d) ---\n' "$desc" "$rc" >> "$LOG_FILE" 2>/dev/null || true
+
+  local elapsed=$(( $(date +%s) - start_t ))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+
+  if [ "$rc" = 0 ]; then
+    if [ -t 2 ]; then printf "\r\033[K" >&2; fi
+    printf "  ${C_GREEN}✓${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\n" "$desc" "$elapsed" >&2
+    return 0
+  else
+    if [ -t 2 ]; then printf "\r\033[K" >&2; fi
+    printf "  ${C_RED}✗${C_RESET} ${C_BOLD}%s${C_RESET} ${C_RED}failed${C_RESET} ${C_DIM}(exit code %d, %ds)${C_RESET}\n" "$desc" "$rc" "$elapsed" >&2
+    if [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+      printf "\n${C_RED}Last 15 lines of log (${LOG_FILE}):${C_RESET}\n" >&2
+      printf "${C_DIM}─────────────────────────────────────────────────────────────────${C_RESET}\n" >&2
+      tail -n 15 "$LOG_FILE" >&2
+      printf "${C_DIM}─────────────────────────────────────────────────────────────────${C_RESET}\n\n" >&2
+    fi
+    return "$rc"
   fi
 }
 
@@ -192,6 +312,7 @@ Options:
   --force             rebuild/reinstall even when the version is already present
   --force-downgrade   allow a downgrade to an older version
   --write-rc          add the bin dir to the shell rc (~/.profile / fish config)
+  --verbose, -v       print full command and build output (do not redirect to log)
   --quiet, -q         suppress progress/detail lines (warnings, errors, and the
                       final summary still print)
   --no-open           do not try to open the Web UI URL after install
@@ -255,6 +376,7 @@ while [ "$#" -gt 0 ]; do
     --force) FORCE=1; shift;;
     --force-downgrade) FORCE_DOWNGRADE=1; shift;;
     --write-rc) WRITE_RC=1; shift;;
+    --verbose|-v) VERBOSE=1; shift;;
     --quiet|-q) QUIET=1; shift;;
     --no-open) NO_OPEN=1; shift;;
     --json) JSON_OUT=1; shift;;
@@ -358,17 +480,28 @@ detect_os_arch() {
     *) die "unsupported architecture: $(uname -m)";;
   esac
 
+  DISTRO_NAME=""
   if [ "$OS" = "darwin" ]; then
+    DISTRO_NAME="macOS $(sw_vers -productVersion 2>/dev/null || uname -r)"
     # Homebrew environment detection: Apple Silicon (/opt/homebrew) or Intel (/usr/local)
     if [ -x "/opt/homebrew/bin/brew" ]; then
       eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
       export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+      DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     elif [ -x "/usr/local/bin/brew" ]; then
       eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
       export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+      DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     elif command -v brew >/dev/null 2>&1; then
       eval "$(brew shellenv 2>/dev/null || true)"
+      DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     fi
+  elif [ "$OS" = "linux" ]; then
+    if [ -f "/etc/os-release" ]; then
+      DISTRO_NAME="$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release 2>/dev/null | head -n 1)"
+      [ -n "$DISTRO_NAME" ] || DISTRO_NAME="$(sed -n 's/^NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release 2>/dev/null | head -n 1)"
+    fi
+    [ -n "$DISTRO_NAME" ] || DISTRO_NAME="Linux"
   fi
 }
 
@@ -394,7 +527,7 @@ fetch_node() {
   tmp="$PREFIX/runtime/.node-tmp-$$"
   mkdir -p "$tmp" "$PREFIX/runtime/node" || return 1
   log "downloading Node.js v${DSH_NODE_VERSION} (${plat}-${arch})"
-  curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$tmp/$tarball" || { warn "Node download failed: $url"; rm -rf "$tmp"; return 1; }
+  run_logged "Downloading Node.js v${DSH_NODE_VERSION} (${plat}-${arch})" 120 "$tmp" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$tmp/$tarball" || { warn "Node download failed: $url"; rm -rf "$tmp"; return 1; }
   if curl -fsSL --retry 1 "$url.sha256" -o "$tmp/$tarball.sha256" 2>/dev/null; then
     expected="$(awk '{print $1}' "$tmp/$tarball.sha256")"
     if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
@@ -404,7 +537,7 @@ fetch_node() {
       warn "Node tarball checksum mismatch"; rm -rf "$tmp"; return 1
     fi
   fi
-  tar -xzf "$tmp/$tarball" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+  run_logged "Extracting Node.js" 60 "$tmp" tar -xzf "$tmp/$tarball" -C "$tmp" || { rm -rf "$tmp"; return 1; }
   rm -rf "$PREFIX/runtime/node/$DSH_NODE_VERSION"
   mv "$tmp/node-v${DSH_NODE_VERSION}-${plat}-${arch}" "$PREFIX/runtime/node/$DSH_NODE_VERSION" || { rm -rf "$tmp"; return 1; }
   ln -sfn "$DSH_NODE_VERSION" "$PREFIX/runtime/node/current"
@@ -445,11 +578,11 @@ setup_pnpm() {
   if [ ! -x "$corepack_bin" ] && [ -x "$nbin/npm" ]; then
     log "corepack not bundled with this Node; installing it with npm (user prefix)"
     cc_dir="$PREFIX/runtime/corepack-cli"
-    run_limited 300 "$nbin/npm" install --global --prefix "$cc_dir" corepack@latest >&2 || return 1
+    run_logged "Installing corepack CLI" 300 "$PREFIX" "$nbin/npm" install --global --prefix "$cc_dir" corepack@latest || return 1
     corepack_bin="$cc_dir/bin/corepack"
   fi
   [ -x "$corepack_bin" ] || { warn "no corepack available next to $NODE"; return 1; }
-  run_limited 120 "$corepack_bin" enable --install-directory "$PREFIX/bin" pnpm >&2 || return 1
+  run_logged "Enabling pnpm via corepack" 120 "$PREFIX" "$corepack_bin" enable --install-directory "$PREFIX/bin" pnpm || return 1
   [ -x "$PREFIX/bin/pnpm" ] || { warn "corepack did not produce $PREFIX/bin/pnpm"; return 1; }
   PNPM="$PREFIX/bin/pnpm"
   return 0
@@ -595,8 +728,8 @@ stage_remote() { # url
   archive="$PREFIX/harness/.download-$$.tar.gz"
   mkdir -p "$STAGED" || return 1
   log "fetching $url"
-  curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$archive" || { warn "download failed: $url"; rm -f "$archive"; return 1; }
-  tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract $url"; rm -f "$archive"; return 1; }
+  run_logged "Downloading release archive" 120 "$PREFIX" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$archive" || { warn "download failed: $url"; rm -f "$archive"; return 1; }
+  run_logged "Extracting release archive" 60 "$PREFIX" tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract $url"; rm -f "$archive"; return 1; }
   rm -f "$archive"
   flatten_stage "$STAGED"
   return 0
@@ -661,8 +794,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     return 1
   fi
   STAGED=""
-  log "pnpm install --frozen-lockfile in $HARNESS (minutes)"
-  if ! ( cd "$HARNESS" && run_limited "$INSTALL_TIMEOUT" "$PNPM" install --frozen-lockfile ) >&2; then
+  if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile; then
     warn "pnpm install failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
@@ -671,8 +803,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
   if [ -z "$BUILD_COMMIT" ] && [ -n "${TARGET_COMMIT:-}" ]; then BUILD_COMMIT="$TARGET_COMMIT"; fi
   if [ -n "$BUILD_COMMIT" ]; then export DSH_CLIENT_COMMIT_HASH="$BUILD_COMMIT"; fi
   if [ "$BUILD_DIRTY" = true ]; then export DSH_CLIENT_GIT_DIRTY=true; fi
-  log "pnpm run build in $HARNESS (this can take many minutes)"
-  if ! ( cd "$HARNESS" && run_limited "$BUILD_TIMEOUT" "$PNPM" run build ) >&2; then
+  if ! run_logged "Building core harness & web client" "$BUILD_TIMEOUT" "$HARNESS" "$PNPM" run build; then
     warn "build failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
@@ -692,8 +823,7 @@ resolve_home() {
 seed_home() {
   resolve_home
   mkdir -p "$DSH_HOME" || return 1
-  log "seeding $DSH_HOME from the shipped templates (profile: $PROFILE)"
-  run_limited 300 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --profile "$PROFILE" --dump-default-config >/dev/null 2>&1 \
+  run_logged "Seeding default configuration ($PROFILE)" 300 "$DSH_HOME" "$NODE" "$HARNESS/apps/cli/lib/bin.js" --profile "$PROFILE" --dump-default-config >/dev/null 2>&1 \
     || warn "profile seed for '$PROFILE' did not complete (continuing; existing files are never touched)"
   return 0
 }
@@ -701,8 +831,7 @@ seed_home() {
 run_profile_plugin_build() {
   local script="$PROFILE_DIR/build-plugins.sh"
   if [ -f "$script" ]; then
-    log "profile plugin build: $script"
-    ( cd "$PROFILE_DIR" && run_limited "$PROFILE_BUILD_TIMEOUT" bash "$script" "$PROFILE_DIR" ) >&2 || { warn "profile plugin build failed"; return 1; }
+    run_logged "Verifying Enpoi profile plugins" "$PROFILE_BUILD_TIMEOUT" "$PROFILE_DIR" bash "$script" "$PROFILE_DIR" || { warn "profile plugin build failed"; return 1; }
   else
     log "profile plugin build: no build-plugins.sh in $PROFILE_DIR (nothing to build)"
   fi
@@ -1039,8 +1168,7 @@ profile_install() {
   if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
   [ -n "$PNPM" ] || { warn "profile deps: no pnpm available"; return 1; }
   export HARNESS_ROOT="${HARNESS:-$PREFIX/harness/current}"
-  log "profile deps: pnpm install in $PROFILE_DIR (minutes)"
-  if ! ( cd "$PROFILE_DIR" && run_limited "$PROFILE_INSTALL_TIMEOUT" "$PNPM" install ) >&2; then
+  if ! run_logged "Installing Enpoi profile dependencies" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install; then
     warn "profile pnpm install failed"
     return 1
   fi
@@ -1415,22 +1543,40 @@ maybe_open_browser_when_up() { # url
   return 0
 }
 
+print_banner() {
+  [ "$QUIET" = 1 ] && return 0
+  [ "$JSON_OUT" = 1 ] && return 0
+  say "${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
+  say "${C_BOLD}│${C_RESET}   ${C_CYAN}${C_BOLD}DeepSeek Harness (Enpoi)${C_RESET} — System Installer               ${C_BOLD}│${C_RESET}"
+  say "${C_BOLD}│${C_RESET}   ${C_DIM}Channel: ${CHANNEL:-stable}${C_RESET}                                         ${C_BOLD}│${C_RESET}"
+  say "${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
+}
+
 print_summary() { # action
   local action="$1" url overlay
   url="$(web_url)"
   overlay="$PROFILE_DIR/device-patches/$(hostname 2>/dev/null || printf 'this-host')"
   say ""
-  say "dsh ${action} complete — ${VERSION} (${CHANNEL}) in $(elapsed_human)"
-  say "  start:    dsh web"
-  say "  url:      ${url}   (open it — the composer is your agent)"
-  say "  commands: ds update · ds doctor · dsh restart --after-turn · ds backfill"
-  say "  home:     ${DSH_HOME} (seeded once; your files are never overwritten)"
-  say "  profile:  ${PROFILE_DIR}"
-  say "  overlay:  ${overlay}"
-  say "  changes:  ask the Creator (docs/creator/) for any harness change"
+  say "${C_GREEN}${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}DeepSeek Harness successfully ${action}ed!${C_RESET}                  ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}                                                             ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Version:${C_RESET}   ${VERSION} (${CHANNEL:-stable})                           ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Location:${C_RESET}  ${PREFIX}                                       ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Commands:${C_RESET}  dsh, ds                                        ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Duration:${C_RESET}  $(elapsed_human)                                        ${C_GREEN}${C_BOLD}│${C_RESET}"
+  if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Log:${C_RESET}       ${LOG_FILE}                    ${C_GREEN}${C_BOLD}│${C_RESET}"
+  fi
+  say "${C_GREEN}${C_BOLD}│${C_RESET}                                                             ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}   ${C_BOLD}Quick Start:${C_RESET}                                              ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh web${C_RESET}      Start the local web UI                        ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh doctor${C_RESET}   Check system diagnostics                      ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}│${C_RESET}     ${C_CYAN}dsh update${C_RESET}   Update harness to latest version              ${C_GREEN}${C_BOLD}│${C_RESET}"
+  say "${C_GREEN}${C_BOLD}╰─────────────────────────────────────────────────────────────╯${C_RESET}"
+  say ""
   case ":$PATH:" in
     *":${BIN_DIR}:"*) :;;
-    *) say "  path:     add ${BIN_DIR} to PATH (re-run with --write-rc)";;
+    *) say "  ${C_YELLOW}!${C_RESET} ${C_BOLD}Note:${C_RESET} Add ${BIN_DIR} to your PATH (e.g. source ~/.bashrc or ~/.zshrc)";;
   esac
   say ""
 }
@@ -1474,68 +1620,76 @@ dry_run_plan() {
 
 # ── Install ─────────────────────────────────────────────────────────────────
 do_install() {
-  STEP_TOTAL=9
+  STEP_TOTAL=6
+  init_log_file
+  print_banner
+
+  step "Detecting platform & environment"
   detect_os_arch
   sudo_trap
-  step "environment: $OS/$ARCH, root $PREFIX (zero sudo)"
-  step "node: resolve (downloads v${DSH_NODE_VERSION} when PATH has none)"
+  substep_ok "Platform: $OS/$ARCH ($DISTRO_NAME)"
+  substep_ok "Prefix: $PREFIX (zero sudo)"
+
+  step "Preparing Node.js runtime & Corepack"
   resolve_node 1 || die "no usable Node.js >= ${DSH_MIN_NODE_MAJOR}.${DSH_MIN_NODE_MINOR} and the download failed"
-  log "node: $NODE ($NODE_ORIGIN)"
-  # Disk hygiene before staging: failed trees are never keep-eligible and
-  # would otherwise accumulate across repeated installs.
+  substep_ok "Node.js: $NODE ($NODE_ORIGIN)"
+  setup_pnpm || die "could not enable pnpm through corepack"
+  substep_ok "Corepack pnpm: $("$PNPM" --version 2>/dev/null || printf '?')"
+
   prune_failed_versions
-  step "source: ${SOURCE:-$CHANNEL channel archive}"
+
+  step "Fetching release archive (${CHANNEL:-stable})"
   prepare_source
   resolve_target_for_source
-  log "target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
+  substep_ok "Target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT:0:7})}"
+
   TREE_DIR_NAME="$VERSION"
   if [ -n "$TARGET_COMMIT" ]; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
     if [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
       && ! commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION")"; then
-      # The canonical dir holds another build of this semver: keep both.
       TREE_DIR_NAME="$VERSION-$short"
       log "rolling channel advanced: recorded $(installed_tree_commit "$PREFIX/harness/$VERSION") -> target $short; building into $TREE_DIR_NAME"
     elif [ ! -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
       && [ -f "$PREFIX/harness/$VERSION-$short/.dsh-install-complete" ] \
       && commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION-$short")"; then
-      # A previous rolling install already built this target.
       TREE_DIR_NAME="$VERSION-$short"
     fi
   fi
   HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
+
+  step "Building core harness & dependencies"
   if [ -f "$HARNESS/.dsh-install-complete" ] && [ "$FORCE" != 1 ]; then
-    log "already installed; refreshing seed/shim only"
+    substep_ok "Reusing existing build ($TREE_DIR_NAME)"
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
-    if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
-    step "pnpm: already available"
-    step "dependencies and build: reusing the installed $TREE_DIR_NAME tree"
   else
-    step "pnpm: corepack"
-    setup_pnpm || die "could not enable pnpm through corepack"
-    log "pnpm: $("$PNPM" --version 2>/dev/null || printf '?') (corepack)"
-    step "dependencies and build (this takes a few minutes)"
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
   fi
   ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $TREE_DIR_NAME"
-  step "profile: $PROFILE"
+
+  step "Configuring Enpoi profile & plugins"
   prepare_profile
-  step "home: seeding $DSH_HOME and profile dependencies"
   seed_home
   profile_install || die "profile dependency install failed"
   run_profile_plugin_build || die "profile plugin build failed"
-  step "shim: $BIN_DIR/dsh and install-state.json"
+
+  step "Configuring CLI shims & shell environment"
   write_shim || die "could not write the dsh shim into $BIN_DIR"
-  [ "$WRITE_RC" = 1 ] && write_rc
+  substep_ok "Installed launcher: $BIN_DIR/dsh, $BIN_DIR/ds"
+  if [ "$WRITE_RC" = 1 ]; then
+    write_rc
+  fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(detect_service_unit)"; fi
   write_state || warn "could not write $PREFIX/harness/install-state.json"
-  step "self-check"
+
   if ! selfcheck; then
     warn "self-check failed for the freshly installed tree"
     emit_json install 0
     exit 1
   fi
+  substep_ok "System self-check passed"
+
   print_summary install
   maybe_open_browser_when_up "$(web_url)"
   emit_json install 1

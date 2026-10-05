@@ -35,7 +35,8 @@
     "dsh-enpoi-verify-gate": "workspace:*",
     "dsh-enpoi-whiteboard": "workspace:*",
     "dsh-fast": "0.2.14",
-    "dsh-enpoi-commandcode-provider": "workspace:*"
+    "dsh-enpoi-commandcode-provider": "workspace:*",
+    "@earendil-works/pi-ai": "^0.85.1"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
