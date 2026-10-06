@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import { PoolEngine } from "@deepseek-ai/dsh-llm-pi-ai";
+import { deepEqualJson } from "@deepseek-ai/dsh-util-values";
 import Schema from "@deepseek-ai/schemastery";
 
 // src/catalog.ts
@@ -1421,28 +1422,40 @@ function routeFromConfig(route, raw) {
     ...parsePoolConfig(route, record.pool)
   };
 }
-function apply(ctx, config = {}) {
-  const plain = plainConfig(config);
-  const providers = plain.providers;
-  if (typeof providers !== "object" || providers === null || Array.isArray(providers)) return;
+function providersOf(source) {
+  if (typeof source !== "object" || source === null) return void 0;
+  return plainConfig(source).providers;
+}
+function parseProfiles(providers) {
   const profiles = /* @__PURE__ */ new Map();
-  for (const [route, raw] of Object.entries(providers)) {
-    const profile = routeFromConfig(route, raw);
-    profiles.set(route, profile);
+  if (typeof providers !== "object" || providers === null || Array.isArray(providers)) return profiles;
+  for (const [route, raw] of Object.entries(providers)) profiles.set(route, routeFromConfig(route, raw));
+  return profiles;
+}
+function apply(ctx, config = {}) {
+  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS;
+  const snapshot = loadSnapshot();
+  let lastRaw;
+  let memoized;
+  const profiles = () => {
+    const raw = providersOf(config);
+    if (memoized !== void 0 && raw === lastRaw) return memoized;
+    const next = parseProfiles(raw);
+    lastRaw = raw;
+    memoized = next;
+    return next;
+  };
+  for (const [route, profile] of profiles()) {
     const posture = profile.pool === void 0 ? profile.keyless ? "keyless/keypool" : "byok" : `native pool \xD7${String(profile.pool.identities.length)}`;
     ctx.logger.info(`commandcode-provider: route "${route}" \u2192 ${profile.baseURL} (${posture})`);
   }
-  if (profiles.size === 0) return;
-  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS;
-  const snapshot = loadSnapshot();
   const catalogs = /* @__PURE__ */ new Map();
   const catalogFor = (profile) => {
-    let store = catalogs.get(profile.route);
-    if (store === void 0) {
-      store = new CatalogStore({ baseURL: profile.baseURL, snapshot });
-      catalogs.set(profile.route, store);
-      store.start();
-    }
+    const cached = catalogs.get(profile.route);
+    if (cached !== void 0 && cached.baseURL === profile.baseURL) return cached.store;
+    const store = new CatalogStore({ baseURL: profile.baseURL, snapshot });
+    catalogs.set(profile.route, { baseURL: profile.baseURL, store });
+    store.start();
     return store;
   };
   const resolveApiKey = async (profile) => {
@@ -1464,7 +1477,7 @@ function apply(ctx, config = {}) {
   };
   const attachments = () => ctx.get("attachments");
   const adapter = new CommandCodeAdapter({
-    profiles: () => profiles,
+    profiles,
     catalogFor,
     resolveApiKey,
     pool: poolEngine,
@@ -1491,7 +1504,7 @@ function apply(ctx, config = {}) {
       }
     }
   });
-  const directory = [...profiles.values()].map((profile) => ({
+  const directoryEntries = () => [...profiles().values()].map((profile) => ({
     provider: profile.route,
     displayName: profile.displayName,
     settingsNs,
@@ -1500,10 +1513,43 @@ function apply(ctx, config = {}) {
     // ships no route catalog of its own.
     declared: true
   }));
-  ctx.llm.registerConfigurableProviders(directory);
+  let directory;
+  let directoryFacts;
+  const ensureDirectory = () => {
+    const entries = directoryEntries();
+    if (directoryFacts !== void 0 && deepEqualJson(entries, directoryFacts)) return;
+    if (directory === void 0) {
+      if (entries.length === 0) {
+        directoryFacts = entries;
+        return;
+      }
+      directory = ctx.llm.registerConfigurableProviders(entries);
+    } else {
+      directory.replace(entries);
+    }
+    directoryFacts = entries;
+  };
+  const registrationFacts = () => [...profiles().values()].map((profile) => ({ provider: profile.route, displayName: profile.displayName })).sort((left, right) => left.provider.localeCompare(right.provider));
+  let registration;
+  let registeredFacts;
+  const ensureRegistration = () => {
+    const facts = registrationFacts();
+    if (registeredFacts !== void 0 && deepEqualJson(facts, registeredFacts)) return;
+    const routes = [...profiles().keys()];
+    if (registration === void 0) {
+      if (routes.length === 0) {
+        registeredFacts = facts;
+        return;
+      }
+      registration = ctx.llm.registerAdapter(routes, adapter);
+    } else {
+      registration.replace(routes);
+    }
+    registeredFacts = facts;
+  };
   ctx.llm.registerPoolOperations(settingsNs, {
     async status(provider) {
-      const profile = profiles.get(provider);
+      const profile = profiles().get(provider);
       await poolEngine.hydrate(provider);
       return poolEngine.identitiesStatus(provider, profile?.pool?.identities ?? []);
     },
@@ -1515,7 +1561,23 @@ function apply(ctx, config = {}) {
       return { ok: false, error: "Command Code identity testing is not implemented; run scripts/live-gate.mjs" };
     }
   });
-  ctx.llm.registerAdapter([...profiles.keys()], adapter);
+  ctx.on("internal/config", function(_raw, next) {
+    const raw = next();
+    if (this !== ctx.fiber) return raw;
+    parseProfiles(providersOf(raw));
+    return raw;
+  });
+  ensureDirectory();
+  ensureRegistration();
+  ctx.on("loader/volatile-update", () => {
+    try {
+      ensureRegistration();
+      ensureDirectory();
+    } catch (error) {
+      ctx.logger.error("commandcode-provider: configuration conflicts with an existing provider route");
+      ctx.logger.error(error);
+    }
+  });
 }
 export {
   Config,

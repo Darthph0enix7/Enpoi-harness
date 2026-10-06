@@ -20,11 +20,14 @@
  * ```
  *
  * The route is dormant until the config names one — nothing is registered and
- * nothing is fetched. On mount, every route's catalog resolves once at
- * startup: the keypool's `{baseURL}/catalog.json` for a loopback route
- * (falling back to the bundled snapshot), the bundled snapshot alone for a
- * direct-vendor route. The adapter serves `commandcode` through the local
- * keypool on the default path.
+ * nothing is fetched. Route profiles resolve per operation from the live
+ * config, so a settings edit (a new pool identity, a credential reference, a
+ * changed baseURL) reaches the next request without a remount; a changed route
+ * set re-registers in place through the loader's volatile-update seam. Every
+ * route's catalog resolves on first use: the keypool's
+ * `{baseURL}/catalog.json` for a loopback route (falling back to the bundled
+ * snapshot), the bundled snapshot alone for a direct-vendor route. The adapter
+ * serves `commandcode` through the local keypool on the default path.
  * User-attached images are read at the route's request size
  * (`store.readImageRequest`); tool-result images keep their stored bytes before
  * the converter's own forwarder budget applies.
@@ -55,12 +58,18 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context, Fiber, Volatile } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import type { LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
+import type {
+  AdapterRegistrationHandle,
+  DirectoryRegistrationHandle,
+  LlmConfigurableProvider,
+} from '@deepseek-ai/dsh-llm'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { PoolEngine } from '@deepseek-ai/dsh-llm-pi-ai'
+import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
 import type { CatalogEntry } from './catalog.js'
 import { CatalogStore, parseCatalog } from './catalog.js'
@@ -256,38 +265,68 @@ function routeFromConfig(route: string, raw: unknown): CommandCodeRouteProfile {
   }
 }
 
+/** The raw `providers` dict of a resolved or candidate config; volatile references are unwrapped. */
+function providersOf(source: unknown): unknown {
+  if (typeof source !== 'object' || source === null) return undefined
+  return (plainConfig(source) as { providers?: unknown }).providers
+}
+
 /**
- * Mount the adapter for every configured route. A bare mount (no routes) is
- * the dormant posture: nothing registers, nothing fetches.
+ * Parse every route in a `providers` value. A malformed route throws — the
+ * same failure the mount-time read produced — so a settings write that could
+ * not serve is refused rather than committed.
+ * @param providers - the `providers` dict; any other value yields no routes.
+ * @returns the parsed routes by provider key.
+ */
+function parseProfiles(providers: unknown): Map<string, CommandCodeRouteProfile> {
+  const profiles = new Map<string, CommandCodeRouteProfile>()
+  if (typeof providers !== 'object' || providers === null || Array.isArray(providers)) return profiles
+  for (const [route, raw] of Object.entries(providers)) profiles.set(route, routeFromConfig(route, raw))
+  return profiles
+}
+
+/**
+ * Mount the adapter for the configured routes. A bare mount (no routes) is the
+ * dormant posture: nothing registers, nothing fetches, and a later settings
+ * edit can still supply the first route.
  * @param ctx - owning context.
  * @param config - validated plugin config (`providers` dict).
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const plain = plainConfig(config)
-  const providers = plain.providers
-  if (typeof providers !== 'object' || providers === null || Array.isArray(providers)) return
+  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS
+  const snapshot = loadSnapshot()
 
-  const profiles = new Map<string, CommandCodeRouteProfile>()
-  for (const [route, raw] of Object.entries(providers)) {
-    const profile = routeFromConfig(route, raw)
-    profiles.set(route, profile)
+  // Profiles resolve per operation from the live config, memoized by the raw
+  // snapshot's identity so an unchanged config costs one identity check. A
+  // settings edit commits a new volatile snapshot — the same seam llm-pi-ai
+  // resolves over — so the next request, not the next remount, observes it.
+  let lastRaw: unknown
+  let memoized: ReadonlyMap<string, CommandCodeRouteProfile> | undefined
+  const profiles = (): ReadonlyMap<string, CommandCodeRouteProfile> => {
+    const raw = providersOf(config)
+    if (memoized !== undefined && raw === lastRaw) return memoized
+    const next = parseProfiles(raw)
+    lastRaw = raw
+    memoized = next
+    return next
+  }
+
+  for (const [route, profile] of profiles()) {
     const posture = profile.pool === undefined
       ? (profile.keyless ? 'keyless/keypool' : 'byok')
       : `native pool ×${String(profile.pool.identities.length)}`
     ctx.logger.info(`commandcode-provider: route "${route}" → ${profile.baseURL} (${posture})`)
   }
-  if (profiles.size === 0) return
 
-  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS
-  const snapshot = loadSnapshot()
-  const catalogs = new Map<string, CatalogStore>()
+  const catalogs = new Map<string, { baseURL: string; store: CatalogStore }>()
   const catalogFor = (profile: CommandCodeRouteProfile): CatalogStore => {
-    let store = catalogs.get(profile.route)
-    if (store === undefined) {
-      store = new CatalogStore({ baseURL: profile.baseURL, snapshot })
-      catalogs.set(profile.route, store)
-      store.start()
-    }
+    const cached = catalogs.get(profile.route)
+    // A route's baseURL is editable: a changed one resolves a fresh store
+    // instead of serving the previous endpoint's catalog.
+    if (cached !== undefined && cached.baseURL === profile.baseURL) return cached.store
+    const store = new CatalogStore({ baseURL: profile.baseURL, snapshot })
+    catalogs.set(profile.route, { baseURL: profile.baseURL, store })
+    store.start()
     return store
   }
 
@@ -316,7 +355,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const attachments = (): AttachmentStore | undefined => ctx.get('attachments')
   const adapter = new CommandCodeAdapter({
-    profiles: () => profiles,
+    profiles,
     catalogFor,
     resolveApiKey,
     pool: poolEngine,
@@ -347,8 +386,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   // The Keys card reaches this plugin's routes through the configurable-
   // provider directory; without the registration `llm.poolStatus()` has no
   // namespace to answer from and the card cannot show cooldowns or offer
-  // identity checks.
-  const directory: LlmConfigurableProvider[] = [...profiles.values()].map(profile => ({
+  // identity checks. Both registrations track the current route set: the
+  // registry and the directory capture routes at registration, so a route
+  // added or removed by settings swaps them in place on the loader's
+  // volatile-update instead of remounting the plugin.
+  const directoryEntries = (): LlmConfigurableProvider[] => [...profiles().values()].map(profile => ({
     provider: profile.route,
     displayName: profile.displayName,
     settingsNs,
@@ -357,11 +399,51 @@ export function apply(ctx: Context, config: Config = {}): void {
     // ships no route catalog of its own.
     declared: true,
   }))
-  ctx.llm.registerConfigurableProviders(directory)
+  let directory: DirectoryRegistrationHandle | undefined
+  let directoryFacts: LlmConfigurableProvider[] | undefined
+  const ensureDirectory = (): void => {
+    const entries = directoryEntries()
+    if (directoryFacts !== undefined && deepEqualJson(entries, directoryFacts)) return
+    if (directory === undefined) {
+      if (entries.length === 0) {
+        directoryFacts = entries
+        return
+      }
+      directory = ctx.llm.registerConfigurableProviders(entries)
+    } else {
+      directory.replace(entries)
+    }
+    directoryFacts = entries
+  }
+
+  // The registry captures the route set and each route's display name, so a
+  // change to either re-registers the same adapter instance; every other
+  // profile fact is read per operation by the adapter itself.
+  const registrationFacts = (): { provider: string; displayName: string }[] =>
+    [...profiles().values()]
+      .map(profile => ({ provider: profile.route, displayName: profile.displayName }))
+      .sort((left, right) => left.provider.localeCompare(right.provider))
+  let registration: AdapterRegistrationHandle | undefined
+  let registeredFacts: { provider: string; displayName: string }[] | undefined
+  const ensureRegistration = (): void => {
+    const facts = registrationFacts()
+    if (registeredFacts !== undefined && deepEqualJson(facts, registeredFacts)) return
+    const routes = [...profiles().keys()]
+    if (registration === undefined) {
+      if (routes.length === 0) {
+        registeredFacts = facts
+        return
+      }
+      registration = ctx.llm.registerAdapter(routes, adapter)
+    } else {
+      registration.replace(routes)
+    }
+    registeredFacts = facts
+  }
 
   ctx.llm.registerPoolOperations(settingsNs, {
     async status(provider: string) {
-      const profile = profiles.get(provider)
+      const profile = profiles().get(provider)
       await poolEngine.hydrate(provider)
       return poolEngine.identitiesStatus(provider, profile?.pool?.identities ?? [])
     },
@@ -377,5 +459,25 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   })
 
-  ctx.llm.registerAdapter([...profiles.keys()], adapter)
+  // Refuse a settings write whose routes cannot be served, mirroring the
+  // mount-time failure it would otherwise become on the next request; the
+  // running references then keep serving the previous configuration.
+  ctx.on('internal/config', function (this: Fiber, _raw, next) {
+    const raw: unknown = next()
+    if (this !== ctx.fiber) return raw
+    parseProfiles(providersOf(raw))
+    return raw
+  })
+
+  ensureDirectory()
+  ensureRegistration()
+  ctx.on('loader/volatile-update', () => {
+    try {
+      ensureRegistration()
+      ensureDirectory()
+    } catch (error) {
+      ctx.logger.error('commandcode-provider: configuration conflicts with an existing provider route')
+      ctx.logger.error(error)
+    }
+  })
 }
