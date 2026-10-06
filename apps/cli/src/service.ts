@@ -51,6 +51,8 @@ export interface ServiceDeps {
   statePath?: string
   /** Runs one command, inheriting stdio; returns its exit code. */
   run?: (command: string, args: readonly string[]) => number
+  /** Answers whether launchd already knows a domain target; used silently. */
+  probeLoaded?: (domainTarget: string) => boolean
   stdout?: { write: (chunk: string) => unknown }
   stderr?: { write: (chunk: string) => unknown }
   /** Reads the tail of the launchd log file. */
@@ -304,7 +306,11 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0
   const domainTarget = `gui/${String(uid)}/${unit.unit}`
   /** Whether launchd already knows this label in the user's GUI domain. */
-  const launchctlLoaded = (): boolean => isLaunchd && run('launchctl', ['print', domainTarget]) === 0
+  const launchctlLoaded = (): boolean => {
+    if (!isLaunchd) return false
+    if (deps.probeLoaded !== undefined) return deps.probeLoaded(domainTarget)
+    return spawnSync('launchctl', ['print', domainTarget], { stdio: 'ignore' }).status === 0
+  }
   const tailLog = deps.tailLog ?? defaultTailLog
 
   switch (command) {
@@ -315,6 +321,9 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
       }
       try {
         mkdirSync(dirname(unit.path), { recursive: true })
+        // launchd does not create parents of StandardOutPath/StandardErrorPath;
+        // a missing log directory makes the agent fail with EX_CONFIG.
+        mkdirSync(dirname(unit.spec.logPath), { recursive: true })
         writeFileSync(unit.path, unit.content)
       } catch (error) {
         stderr.write(`dsh service: could not write ${unit.path}: ${(error as Error).message}\n`)
@@ -323,7 +332,7 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
       recordUnit(deps.statePath, unit.unit)
       stdout.write(`dsh service: wrote ${unit.path}\n`)
       if (isLaunchd) {
-        run('launchctl', ['bootout', domainTarget])
+        if (launchctlLoaded()) run('launchctl', ['bootout', domainTarget])
         if (!noStart) {
           const code = run('launchctl', ['bootstrap', `gui/${String(uid)}`, unit.path])
           if (code !== 0) return code

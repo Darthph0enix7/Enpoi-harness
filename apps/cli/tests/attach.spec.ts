@@ -58,6 +58,12 @@ describe('attach argument parsing', () => {
     expect(resolveAttachEndpoint(['--port', 'abc'])).toBe('serve')
   })
 
+  it('refuses attach for an option left without its value', () => {
+    expect(resolveAttachEndpoint(['--port'])).toBe('serve')
+    expect(resolveAttachEndpoint(['--port', '--no-open'])).toBe('serve')
+    expect(resolveAttachEndpoint(['--host'])).toBe('serve')
+  })
+
   it('resolves the default and explicit endpoints', () => {
     expect(resolveAttachEndpoint([])).toEqual({ host: '127.0.0.1', port: 3080 })
     expect(resolveAttachEndpoint(['--port', '8080'])).toEqual({ host: '127.0.0.1', port: 8080 })

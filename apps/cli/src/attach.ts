@@ -73,11 +73,15 @@ export function resolveAttachEndpoint(args: readonly string[]): AttachEndpoint {
   if (hasFlag(args, '--foreground')) return 'serve'
   if (hasFlag(args, '-h') || hasFlag(args, '--help')) return 'serve'
   const port = optionValue(args, '--port')
+  // A bare `--port` (no value) is an app usage error; attach would misread it
+  // as the default endpoint and silently open the wrong instance.
+  if (hasFlag(args, '--port') && port === undefined) return 'serve'
   if (port !== undefined && !/^\d+$/u.test(port)) return 'serve'
+  const host = optionValue(args, '--host')
+  if (hasFlag(args, '--host') && host === undefined) return 'serve'
   const portNumber = port === undefined ? 3080 : Number(port)
   if (portNumber === 0) return 'serve'
-  const host = optionValue(args, '--host') ?? '127.0.0.1'
-  return { host, port: portNumber }
+  return { host: host ?? '127.0.0.1', port: portNumber }
 }
 
 /** One shape check for the state record read from disk. */

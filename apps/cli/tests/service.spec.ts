@@ -189,12 +189,19 @@ describe('runService', () => {
     writeFileSync(statePath, JSON.stringify({ serviceUnit: 'com.example.dsh' }))
     let loaded = false
     const { calls, run } = recorder((command, args) => {
-      if (command === 'launchctl' && args[0] === 'print') return loaded ? 0 : 1
       if (command === 'launchctl' && args[0] === 'bootstrap') loaded = true
       if (command === 'launchctl' && args[0] === 'bootout') loaded = false
       return 0
     })
-    const deps = { platform: 'darwin' as const, home, statePath, run, stdout: sink(), tailLog: () => 'tail' }
+    const deps = {
+      platform: 'darwin' as const,
+      home,
+      statePath,
+      run,
+      stdout: sink(),
+      tailLog: () => 'tail',
+      probeLoaded: () => loaded,
+    }
     expect(await runService(['install'], deps)).toBe(0)
     const plist = join(home, 'Library', 'LaunchAgents', 'com.example.dsh.plist')
     expect(readFileSync(plist, 'utf8')).toContain('--foreground')
