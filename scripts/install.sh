@@ -855,7 +855,7 @@ stage_remote() { # url
     archive="$PREFIX/harness/.download-$$.tar.gz"
     log "fetching $url"
     local dl_timeout="${DSH_DOWNLOAD_TIMEOUT:-600}"
-    if ! run_logged "Downloading release archive" "$dl_timeout" "$PREFIX" curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 "$url" -o "$archive"; then
+    if ! run_logged "Downloading release archive" "$dl_timeout" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 "$url" -o "$archive"; then
       rm -f "$archive"
       # Fallback to git clone if curl download fails or times out
       if command -v git >/dev/null 2>&1; then
@@ -906,7 +906,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     TARGET_COMMIT="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
   fi
   [ -n "${TARGET_COMMIT:-}" ] || return 1
-  local ref="${REF:-$CHANNEL}" meta version asset url sha_url cache_dir asset_file expected actual staged_version
+  local ref="${REF:-$CHANNEL}" meta version asset url sha_url cache_dir asset_file expected actual staged_version probe_headers asset_bytes
   meta="$(curl -fsSL --connect-timeout 10 --max-time 20 "$DSH_GITHUB_URL/raw/$ref/package.json" 2>/dev/null || true)"
   [ -n "$meta" ] || return 1
   version="$(printf '%s\n' "$meta" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1)"
@@ -921,15 +921,20 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     rm -f "$asset_file" "$asset_file.sha256"
     # Probe before the logged download: assets for a just-pushed commit are
     # often still being built by release CI, and that must read as a normal
-    # fallback, not as a failed download.
-    if ! curl -fsSL --range 0-0 --connect-timeout 15 --max-time 30 "$url" -o /dev/null 2>/dev/null; then
+    # fallback, not as a failed download. The probe headers also carry the
+    # asset size for the progress line.
+    probe_headers="$(curl -fsSL --range 0-0 --connect-timeout 15 --max-time 30 -D - -o /dev/null "$url" 2>/dev/null || true)"
+    if [ -z "$probe_headers" ]; then
       log "prebuilt: no published asset for ${OS}-${ARCH} at commit ${TARGET_COMMIT:0:7} yet (release CI may still be building it)"
       return 1
     fi
-    log "prebuilt: fetching $asset"
-    if ! run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-900}" "$PREFIX" curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 30 "$url" -o "$asset_file.download"; then
-      rm -f "$asset_file.download"
-      log "prebuilt: download failed; building from source"
+    asset_bytes="$(printf '%s\n' "$probe_headers" | tr -d '\r' | sed -n 's/^content-range: *bytes [0-9]*-[0-9]*\/\([0-9]*\).*/\1/ip' | head -n 1)"
+    log "prebuilt: fetching $asset${asset_bytes:+ ($((asset_bytes / 1048576)) MB)}"
+    # Resumable + stall-aware: a killed or stalled transfer keeps its partial
+    # file so the next attempt continues it, and a dead link fails in ~60s
+    # instead of burning the whole timeout.
+    if ! run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 -C - "$url" -o "$asset_file.download"; then
+      log "prebuilt: download failed; keeping the partial for a resumable retry ($asset_file.download); building from source for now"
       return 1
     fi
     mv "$asset_file.download" "$asset_file" || return 1

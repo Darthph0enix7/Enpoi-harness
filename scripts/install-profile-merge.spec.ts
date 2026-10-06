@@ -568,3 +568,17 @@ describe('profile package.json dependency union', () => {
     expect(result.output).toContain('shipped-dep')
   })
 })
+
+describe('download resilience', () => {
+  it('resumes partial prebuilt downloads and aborts stalled transfers', () => {
+    const install = readFileSync(installSh, 'utf8')
+    const window = /Downloading prebuilt harness[\s\S]{0,700}/.exec(install)?.[0] ?? ''
+    expect(window).toContain('-C -')
+    expect(window).toContain('--speed-time 60')
+    expect(window).toContain('--retry-all-errors')
+    // A killed attempt keeps its partial so the next run resumes it.
+    expect(install).not.toContain('rm -f "$asset_file.download"')
+    // The stall-aware options also guard the source-archive fetch.
+    expect(install).toMatch(/Downloading release archive"[\s\S]{0,200}--speed-time 60/)
+  })
+})
