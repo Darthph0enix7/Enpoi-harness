@@ -45,6 +45,23 @@ describe('parseResetMs', () => {
     expect(parseResetMs('quota exhausted')).toBeUndefined()
     expect(parseResetMs('Resets in 0min.')).toBeUndefined()
   })
+
+  it('parses Command Code shorthand units and sums contiguous pairs', () => {
+    // Shorthand d/h/m/w/s beside the full words; contiguous pairs sum.
+    expect(parseResetMs('Resets in 3h 25m')).toBe((3 * 3600 + 25 * 60) * 1000)
+    expect(parseResetMs('resets in 45m')).toBe(45 * 60_000)
+    expect(parseResetMs('Resets in 2h 4m')).toBe((2 * 3600 + 4 * 60) * 1000)
+    // A pair above 24h clamps, and a lone week clamps like the full word.
+    expect(parseResetMs('Resets in 2d 4h')).toBe(24 * 3600_000)
+    expect(parseResetMs('Resets in 1w')).toBe(24 * 3600_000)
+    expect(parseResetMs('Resets in 90s')).toBe(90_000)
+    // Sub-minute shorthand floors to 30s like every other hint.
+    expect(parseResetMs('Resets in 5s')).toBe(30_000)
+    // A single letter must end at a word boundary: `m` in "meters" is no unit.
+    expect(parseResetMs('Resets in 5 meters')).toBeUndefined()
+    expect(parseResetMs('Weekly usage limit reached. Resets in 3h 25m. Try again later.'))
+      .toBe((3 * 3600 + 25 * 60) * 1000)
+  })
 })
 
 describe('classifyFailure', () => {

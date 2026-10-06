@@ -3,13 +3,24 @@
  *
  * Registered with `ctx.llm.registerAdapter()` like any other adapter — the
  * seam has no protocol table, so a bespoke wire protocol is a first-class
- * citizen. Requests go to `POST {baseURL}/alpha/generate`; the route's baseURL
- * points at the local keypool (`http://127.0.0.1:8899/commandcode`), which
- * injects the Command Code CLI headers and rotates the real keys. This
- * adapter therefore sends no CLI header and never touches a vendor key.
+ * citizen. Requests go to `POST {baseURL}/alpha/generate`.
  *
- * Capabilities come exclusively from the route's catalog
- * (`{baseURL}/catalog.json`, fetched at startup); user-attached images are
+ * Two credential postures share the envelope and the SSE parser:
+ * - default (no `pool` on the route): the baseURL points at the local keypool
+ *   (`http://127.0.0.1:8899/commandcode`), which injects the Command Code CLI
+ *   headers and rotates the real keys; the adapter sends no CLI header and
+ *   never touches a vendor key. This path is unchanged.
+ * - opt-in (`pool.identities` on the route): the route is self-contained.
+ *   The shared `PoolEngine` orders identities per model, the adapter injects
+ *   the CLI headers and the per-identity auth itself, has `convert.ts`
+ *   sanitize text at the conversion seam (embedded-base64 scrub, 200k cap;
+ *   images ride the converter's one forward budget), retries a 413 once on
+ *   the same identity with older images stripped, and rotates only before
+ *   the first content delta commits.
+ *
+ * Capabilities come exclusively from the route's catalog (the keypool's
+ * `{baseURL}/catalog.json` when the baseURL is loopback, otherwise the
+ * bundled snapshot); user-attached images are
  * resolved from the harness attachment service through the route's
  * request-sized reader (the `store.readImageRequest` pixel/byte target), and
  * tool-result images keep their stored bytes before the converter hoists them
@@ -30,25 +41,62 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import {
+  attributionHeaders,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  LlmAdapter,
+  LlmError,
+  QUOTA_EXCEEDED_CODE,
+} from '@deepseek-ai/dsh-llm'
+import type { PoolEngine, PoolFailureClass } from '@deepseek-ai/dsh-llm-pi-ai'
+import { parseQuotaHeaders, ROTATING_CLASSES } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { CatalogEntry } from './catalog.js'
 import { CatalogStore, contextWindowOf, effortsOf, entryFor, modalitiesOf, visionOf } from './catalog.js'
-import type { CcInputMessage, CcInputPart, CcTool } from './convert.js'
+import type { CcEnvelope, CcInputMessage, CcInputPart, CcTool } from './convert.js'
 import { buildRequest } from './convert.js'
 import { classifyCommandCodeError } from './errors.js'
+import { commandCodeHeaders } from './headers.js'
+import { stripOlderImagesKeepingNewest } from './sanitize.js'
 import { parseCommandCodeStream } from './stream.js'
+
+/** One credential identity inside a route's native pool (mirrors llm-pi-ai's identity record). */
+export interface CommandCodePoolIdentity {
+  /** Stable identity key (state file, logs, Keys card). */
+  id: string
+  /** Credential reference resolved per attempt through the plugin's resolver. */
+  credentialRef: string
+  /** Lower serves first under `priority-sticky`; omission ranks last. */
+  priority?: number
+  /** Disabled identities are skipped without losing their cooldown state. */
+  enabled?: boolean
+}
+
+/** Opt-in multi-credential routing for one Command Code route. */
+export interface CommandCodePoolConfig {
+  /** Selection strategy; defaults to `priority-sticky` (the keypool proxy's behavior). */
+  strategy?: 'priority-sticky' | 'balanced'
+  /** The route's credential identities (≥ 1, unique ids). */
+  identities: CommandCodePoolIdentity[]
+}
 
 /** One route this adapter serves, as written by the heavy-provider flow. */
 export interface CommandCodeRouteProfile {
   /** Provider route key (`commandcode`). */
   route: string
   displayName: string
-  /** Keypool base URL, e.g. `http://127.0.0.1:8899/commandcode`. */
+  /** Route base URL: the keypool proxy, or the vendor endpoint for a pooled route. */
   baseURL: string
   /** Credential reference when the route is BYOK; absent for the keypool. */
   apiKeyEnv?: string
   /** Keypool routes are keyless: the proxy supplies the Authorization header. */
   keyless: boolean
+  /**
+   * Opt-in native credential pool. Present with at least one identity, the
+   * route resolves and rotates keys itself (shared `PoolEngine`, per-identity
+   * CLI headers, request sanitizer) and `keyless`/`apiKeyEnv` no longer drive
+   * the wire auth; absent, the route keeps its single-key or keypool path.
+   */
+  pool?: CommandCodePoolConfig
   /** Models the route writer discovered; the catalog supersedes them. */
   models?: readonly { id: string; name?: string }[]
   /** Total-pixel budget for one user-attached request image. */
@@ -78,6 +126,16 @@ export interface CommandCodeAdapterOptions {
   catalogFor: (profile: CommandCodeRouteProfile) => CatalogStore
   /** Resolve the route credential; called once per stream call. */
   resolveApiKey: (profile: CommandCodeRouteProfile) => Promise<string | undefined>
+  /** Shared identity-pool engine; omission keeps every route on its single-key/keyless path. */
+  pool?: PoolEngine
+  /** Resolve one pool identity's credential reference; required by the pooled path. */
+  resolveCredential?: (reference: string) => Promise<string | undefined>
+  /** Pooled-attempt diagnostic sink (rotation decisions); defaults to silence. */
+  log?: (message: string) => void
+  /** Pooled-path identity-attempt cap; defaults to 5. */
+  poolMaxAttempts?: number
+  /** Pooled-path attempt deadline in milliseconds; defaults to 30 s. */
+  poolDeadlineMs?: number
   /** Read one durable image attachment's stored bytes for a tool-result inline data URI. */
   readImage?: (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   /** Read one durable user-attached image at the route's request size for an inline data URI. */
@@ -95,15 +153,28 @@ export interface CommandCodeAdapterOptions {
 /** Request timeout for one `/alpha/generate` call. */
 const REQUEST_TIMEOUT_MS = 300_000
 
-function toolNameOf(options: GenerateOptions): Map<string, string> {
-  const names = new Map<string, string>()
-  for (const message of options.messages) {
-    if (message.role !== 'assistant') continue
-    for (const block of message.content) {
-      if (block.type === 'tool-call') names.set(block.id, block.name)
-    }
-  }
-  return names
+/** Pooled-path identity-attempt cap and whole-pass deadline (mirrors the pi-ai adapter). */
+const DEFAULT_POOL_MAX_ATTEMPTS = 5
+const DEFAULT_POOL_DEADLINE_MS = 30_000
+
+/**
+ * Translate one Command Code failure into the shared pool's class vocabulary.
+ * `src/errors.ts` owns the Command Code-specific classification (status and
+ * body wording); this maps its codes onto the classes that decide rotation
+ * and cooldown, so the pool treats commandcode like every other route.
+ * @param code - the `classifyCommandCodeError` code, or an `LlmError` code from a stream failure.
+ * @param status - HTTP status when one exists; omitted for in-band stream errors.
+ * @returns the pool failure class driving rotation and cooldown.
+ */
+export function poolFailureClassOf(code: string, status?: number): PoolFailureClass {
+  if (code === CONTEXT_WINDOW_EXCEEDED_CODE || code === 'INVALID_REQUEST') return 'INVALID_REQUEST'
+  if (code === QUOTA_EXCEEDED_CODE || code === 'RATE_LIMIT') return 'QUOTA'
+  if (code === 'AUTH') return 'AUTH'
+  // The vendor's client gate ("Proxy use detected") is a property of the route,
+  // not of one credential: no key rotation or cooldown can satisfy it.
+  if (code === 'PROXY_USE_DETECTED') return 'POLICY'
+  if (code === 'SERVER') return status === 503 || status === 529 ? 'CAPACITY' : 'UPSTREAM'
+  return 'UPSTREAM'
 }
 
 /** The harness tool declarations mapped to the Command Code wire shape. */
@@ -303,8 +374,9 @@ export class CommandCodeAdapter extends LlmAdapter {
       }
     }
 
-    const key = profile.keyless ? undefined : await this.options.resolveApiKey(profile)
-    if (!profile.keyless && key === undefined) {
+    const pooled = profile.pool !== undefined && profile.pool.identities.length > 0
+    const key = pooled || profile.keyless ? undefined : await this.options.resolveApiKey(profile)
+    if (!pooled && !profile.keyless && key === undefined) {
       throw new LlmError(
         `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? 'no credential'}, which is not set`,
         'MISSING_CREDENTIAL',
@@ -318,6 +390,10 @@ export class CommandCodeAdapter extends LlmAdapter {
     const envelope = buildRequest({
       model: options.model,
       messages,
+      // The default keypool route is fronted by the standalone proxy, which
+      // owns text sanitization; a pooled route talks to the vendor directly,
+      // so the conversion seam sanitizes its text (scrub + 200k cap) once.
+      sanitizeText: pooled,
       tools: toCcTools(options.tools),
       ...options.system === undefined ? {} : { system: options.system },
       ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
@@ -326,6 +402,11 @@ export class CommandCodeAdapter extends LlmAdapter {
       visionEnabled: visionOf(entry),
       ...this.options.now === undefined ? {} : { now: this.options.now() },
     })
+
+    if (pooled) {
+      yield * this.#streamPooled(options, profile, envelope)
+      return
+    }
 
     const fetchImpl = this.options.fetchImpl ?? globalThis.fetch
     const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
@@ -363,5 +444,299 @@ export class CommandCodeAdapter extends LlmAdapter {
       throw new LlmError('Command Code API returned no response body', 'SERVER')
     }
     yield * parseCommandCodeStream(response.body)
+  }
+
+  /**
+   * The opt-in pooled path: resolve one credential per identity, order them
+   * through the shared pool engine, inject the Command Code CLI headers and
+   * that identity's auth (the converted envelope is already text-sanitized and
+   * image-budgeted), and rotate across identities until one commits. A 413 is
+   * retried once on the same identity with older images stripped; after the
+   * first content delta the request is committed and failures surface
+   * unchanged.
+   */
+  async *#streamPooled(
+    options: GenerateOptions,
+    profile: CommandCodeRouteProfile,
+    envelope: CcEnvelope,
+  ): AsyncGenerator<StreamChunk> {
+    const poolConfig = profile.pool
+    const engine = this.options.pool
+    if (poolConfig === undefined || poolConfig.identities.length === 0) {
+      throw new LlmError(`Command Code route "${options.provider}" declares no pool identities`, 'MISSING_CREDENTIAL')
+    }
+    if (engine === undefined) {
+      throw new LlmError(
+        `Command Code route "${options.provider}" declares a credential pool but this adapter has no pool engine`,
+        'MISSING_CREDENTIAL',
+      )
+    }
+    const resolveCredential = this.options.resolveCredential
+    if (resolveCredential === undefined) {
+      throw new LlmError(
+        `Command Code route "${options.provider}" declares a credential pool but this adapter has no credential resolver`,
+        'MISSING_CREDENTIAL',
+      )
+    }
+
+    await engine.hydrate(options.provider)
+    const order = engine.orderFor(options.provider, poolConfig.identities, options.model, poolConfig.strategy)
+    if (order.length === 0) {
+      throw new LlmError(
+        `Command Code route "${options.provider}" has no enabled key-pool identity; enable one on the Models`
+        + ' page (Keys card) and retry',
+        'MISSING_CREDENTIAL',
+      )
+    }
+    const identityById = new Map(poolConfig.identities.map(identity => [identity.id, identity]))
+    // Resolve every ordered identity once, before any attempt, so the attempt
+    // budget counts only identities that can actually authenticate.
+    const resolvedKeys = new Map<string, string>()
+    for (const candidate of order) {
+      const identity = identityById.get(candidate.id)
+      if (identity === undefined) continue
+      const credential = await resolveCredential(identity.credentialRef)
+      if (credential !== undefined && credential.length > 0) {
+        resolvedKeys.set(candidate.id, credential)
+      } else {
+        this.options.log?.(
+          `commandcode-provider: pool identity "${identity.id}" names ${identity.credentialRef},`
+          + ' which resolves to nothing; skipping it',
+        )
+      }
+    }
+    // `keyless` describes the keypool posture, where the proxy supplies auth;
+    // a route that declares its own pool is authenticated by definition, so a
+    // keyless flag must never turn its attempts anonymous. Only identities
+    // whose credential resolves are attempted.
+    const resolvableOrder = order.filter(candidate => resolvedKeys.has(candidate.id))
+    if (resolvableOrder.length === 0) {
+      const refs = poolConfig.identities.map(identity => identity.credentialRef).join(', ')
+      throw new LlmError(
+        `Command Code route "${options.provider}" needs a credential, but none of its key-pool references`
+        + ` (${refs}) resolve; store one on the Models page (Keys card) or export it, then retry`,
+        'MISSING_CREDENTIAL',
+      )
+    }
+
+    // The converted envelope is the request's single image budget (the
+    // converter's forward pass); only the 413 retry below rewrites it, and it
+    // never re-budgets images.
+    let body = JSON.stringify(envelope)
+    let strippedOlderImages = false
+
+    const fetchImpl = this.options.fetchImpl ?? globalThis.fetch
+    const maxAttempts = Math.min(resolvableOrder.length, this.options.poolMaxAttempts ?? DEFAULT_POOL_MAX_ATTEMPTS)
+    const deadline = Date.now() + (this.options.poolDeadlineMs ?? DEFAULT_POOL_DEADLINE_MS)
+    let attempts = 0
+    let lastFailure = 'no identity was attempted'
+
+    for (const candidate of resolvableOrder) {
+      if (attempts >= maxAttempts || Date.now() > deadline) break
+      if (options.signal?.aborted === true) {
+        throw new LlmError('Command Code request aborted by caller', 'ABORTED')
+      }
+      const identity = identityById.get(candidate.id)
+      if (identity === undefined) continue
+      attempts += 1
+      const apiKey = resolvedKeys.get(identity.id)
+      // Per-attempt teardown: a rotated-away request must not keep its upstream
+      // connection open beside the next attempt's.
+      const attemptController = new AbortController()
+      const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      const signal = options.signal === undefined
+        ? AbortSignal.any([attemptController.signal, timeout])
+        : AbortSignal.any([options.signal, attemptController.signal, timeout])
+      const send = (): Promise<Response> => fetchImpl(`${profile.baseURL.replace(/\/+$/, '')}/alpha/generate`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+          // Precedence contract: attribution carries only `user-agent`
+          // (DeepSeek-Harness/...), the vendor gate serves `user-agent: cli`.
+          // The CLI set is spread last so it always wins, including the
+          // user-agent override; reversing the spreads would silently trip
+          // the gate.
+          ...attributionHeaders(),
+          ...commandCodeHeaders(apiKey),
+        },
+        body,
+        signal,
+      })
+
+      let response: Response | undefined
+      let transportError: unknown
+      try {
+        response = await send()
+      } catch (error) {
+        transportError = error
+      }
+      // The one 413 retry: the request is too large for the upstream, not the
+      // key's fault. Strip every image but the newest and retry the SAME
+      // identity once before surfacing the gateway's explanation.
+      if (response !== undefined && response.status === 413 && !strippedOlderImages) {
+        const removed = stripOlderImagesKeepingNewest(envelope)
+        if (removed > 0) {
+          strippedOlderImages = true
+          body = JSON.stringify(envelope)
+          this.options.log?.(
+            `commandcode-provider: identity "${identity.id}" answered 413; stripped ${removed} older image(s)`
+            + ' and retrying the same identity',
+          )
+          try {
+            response = await send()
+          } catch (error) {
+            // The retry died on the wire; surface that transport failure, not
+            // the stale 413 response the retry replaced.
+            response = undefined
+            transportError = error
+          }
+        }
+      }
+
+      if (response === undefined) {
+        if (options.signal?.aborted) {
+          throw new LlmError('Command Code request aborted by caller', 'ABORTED', { cause: transportError })
+        }
+        const message = `Command Code transport failure: ${transportError instanceof Error ? transportError.message : String(transportError)}`
+        engine.recordFailure(options.provider, identity.id, options.model, 'UPSTREAM', message)
+        lastFailure = message
+        attemptController.abort('commandcode pool rotated to the next identity')
+        this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (UPSTREAM); rotating`)
+        continue
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '')
+        const failure = classifyCommandCodeError(response.status, errorBody)
+        // A 413 that survived the strip retry (or had no image to strip) is
+        // request-level: every identity rejects the same bytes, so the pass
+        // stops without cooling a healthy key.
+        if (response.status === 413 || failure.code === CONTEXT_WINDOW_EXCEEDED_CODE || failure.code === 'INVALID_REQUEST') {
+          throw new LlmError(`Command Code API error (${String(response.status)}): ${failure.message}`, failure.code)
+        }
+        const failureClass = poolFailureClassOf(failure.code, response.status)
+        engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure.message, response.status)
+        lastFailure = failure.message
+        if (!ROTATING_CLASSES.has(failureClass)) {
+          throw new LlmError(
+            `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${failure.message}`,
+            failure.code,
+          )
+        }
+        attemptController.abort('commandcode pool rotated to the next identity')
+        this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`)
+        continue
+      }
+
+      const quota = parseQuotaHeaders(response.headers)
+      if (quota !== undefined) engine.recordQuota(options.provider, identity.id, options.model, quota)
+      if (response.body === null) {
+        engine.recordFailure(options.provider, identity.id, options.model, 'UPSTREAM', 'the response carried no body')
+        lastFailure = 'the response carried no body'
+        attemptController.abort('commandcode pool rotated to the next identity')
+        continue
+      }
+
+      // Commit barrier: buffer until the first content chunk. Before it the
+      // caller has seen nothing, so a failure can rotate; once it is yielded
+      // the request is committed and an error propagates unchanged.
+      const iterator = parseCommandCodeStream(response.body)[Symbol.asyncIterator]()
+      const buffered: StreamChunk[] = []
+      let committed = false
+      let midFailure: { code: string; message: string; status?: number } | undefined
+      try {
+        for (;;) {
+          const result = await iterator.next()
+          if (result.done === true) break
+          const chunk = result.value
+          if (!committed) {
+            if (chunk.type === 'usage') {
+              buffered.push(chunk)
+              continue
+            }
+            if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
+              midFailure = {
+                code: chunk.reason.failure.code,
+                message: chunk.reason.failure.message,
+                ...chunk.reason.failure.status === undefined ? {} : { status: chunk.reason.failure.status },
+              }
+              break
+            }
+            committed = true
+            engine.recordSuccess(options.provider, identity.id, options.model)
+            for (const held of buffered) yield held
+            buffered.length = 0
+          }
+          if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
+            engine.recordFailure(
+              options.provider,
+              identity.id,
+              options.model,
+              poolFailureClassOf(chunk.reason.failure.code, chunk.reason.failure.status),
+              chunk.reason.failure.message,
+            )
+            yield chunk
+            break
+          }
+          yield chunk
+        }
+      } catch (error) {
+        if (options.signal?.aborted) {
+          throw new LlmError('Command Code request aborted by caller', 'ABORTED', { cause: error })
+        }
+        if (committed) {
+          // Never retry after commit; the state update only steers the next request.
+          if (error instanceof LlmError) {
+            engine.recordFailure(
+              options.provider,
+              identity.id,
+              options.model,
+              poolFailureClassOf(error.code),
+              error.message,
+            )
+          }
+          throw error
+        }
+        midFailure = error instanceof LlmError
+          ? { code: error.code, message: error.message }
+          : { code: 'STREAM_CLOSED', message: error instanceof Error ? error.message : String(error) }
+      } finally {
+        // Always close the attempt's SSE reader: a rotated-away try and a
+        // consumer that stopped after commit both release the connection here.
+        try {
+          await iterator.return(undefined)
+        } catch (_abortedStreamTeardown) {
+          // The attempt controller owns teardown; return-time abort cannot add an outcome.
+        }
+      }
+      if (committed) return
+      if (midFailure === undefined) {
+        midFailure = { code: 'STREAM_CLOSED', message: 'the attempt ended without content' }
+      }
+      const failureClass = poolFailureClassOf(midFailure.code, midFailure.status)
+      engine.recordFailure(
+        options.provider,
+        identity.id,
+        options.model,
+        failureClass,
+        midFailure.message,
+        midFailure.status,
+      )
+      lastFailure = midFailure.message
+      if (!ROTATING_CLASSES.has(failureClass)) {
+        throw new LlmError(
+          `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${midFailure.message}`,
+          midFailure.code,
+        )
+      }
+      attemptController.abort('commandcode pool rotated to the next identity')
+      this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`)
+    }
+
+    throw new LlmError(
+      `Command Code credential pool exhausted after ${attempts} attempt(s): ${lastFailure}`,
+      'PROVIDER_POOL_EXHAUSTED',
+    )
   }
 }

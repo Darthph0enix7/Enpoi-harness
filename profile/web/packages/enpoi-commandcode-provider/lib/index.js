@@ -1,6 +1,12 @@
 // src/index.ts
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { credentialRef } from "@deepseek-ai/dsh-credentials";
+import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
+import { PoolEngine } from "@deepseek-ai/dsh-llm-pi-ai";
+import Schema from "@deepseek-ai/schemastery";
 
 // src/catalog.ts
 function parseCatalog(raw) {
@@ -52,6 +58,18 @@ function contextWindowOf(entry) {
   const context = entry?.limit?.context;
   return typeof context === "number" && context > 0 ? context : void 0;
 }
+function isLoopbackBaseURL(baseURL) {
+  let host;
+  try {
+    host = new URL(baseURL).hostname;
+  } catch (_invalidBaseURL) {
+    return false;
+  }
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (bare === "localhost" || bare === "::1") return true;
+  const octets = bare.split(".");
+  return octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
 var CatalogStore = class {
   constructor(options) {
     this.options = options;
@@ -73,9 +91,9 @@ var CatalogStore = class {
   }
   load() {
     if (this.resolved !== void 0) return Promise.resolve(this.resolved);
-    this.pending ??= this.fetchLive().then((entries) => {
+    this.pending ??= (isLoopbackBaseURL(this.options.baseURL) ? this.fetchLive().then((entries) => ({ entries, source: "live" })) : Promise.resolve({ entries: [...this.options.snapshot], source: "snapshot" })).then(({ entries, source }) => {
       this.resolved = entries;
-      this.origin = "live";
+      this.origin = source;
       return entries;
     }).catch(() => {
       this.resolved = [...this.options.snapshot];
@@ -100,9 +118,66 @@ var CatalogStore = class {
 
 // src/adapter.ts
 import { requestImageDimensions } from "@deepseek-ai/dsh-attachment";
-import { attributionHeaders, LlmAdapter, LlmError as LlmError2 } from "@deepseek-ai/dsh-llm";
+import {
+  attributionHeaders,
+  CONTEXT_WINDOW_EXCEEDED_CODE as CONTEXT_WINDOW_EXCEEDED_CODE2,
+  LlmAdapter,
+  LlmError as LlmError2,
+  QUOTA_EXCEEDED_CODE as QUOTA_EXCEEDED_CODE2
+} from "@deepseek-ai/dsh-llm";
+import { parseQuotaHeaders, ROTATING_CLASSES } from "@deepseek-ai/dsh-llm-pi-ai";
+
+// src/sanitize.ts
+var MAX_INLINE_TOOL_TEXT_CHARS = 2e5;
+var EMBEDDED_B64_RE = /data:image\/[^;]{1,64};base64,[A-Za-z0-9+/=]{512,}/g;
+var IMAGE_STRIP_NOTE = "[older image omitted: request exceeded the upstream payload limit]";
+function sanitizeText(str) {
+  let s = str;
+  if (s.includes(";base64,")) {
+    s = s.replace(EMBEDDED_B64_RE, (match) => {
+      const kb = Math.max(1, Math.round(match.length * 0.75 / 1024));
+      return `[embedded base64 payload omitted: ~${kb} KB]`;
+    });
+  }
+  if (s.length > MAX_INLINE_TOOL_TEXT_CHARS) {
+    const orig = s.length;
+    s = s.slice(0, MAX_INLINE_TOOL_TEXT_CHARS) + `
+... [output truncated: ${orig} chars exceed ${MAX_INLINE_TOOL_TEXT_CHARS} limit]`;
+  }
+  return s;
+}
+function isImagePart(part) {
+  if (part === null || typeof part !== "object") return false;
+  const record = part;
+  if (record.type === "image" || record.type === "image_url") return true;
+  if (record.type === "file" && String(record.mediaType ?? record.mimeType ?? "").startsWith("image/")) return true;
+  return false;
+}
+function stripOlderImagesKeepingNewest(envelope) {
+  const rawMessages = envelope.params.messages;
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0) return 0;
+  const messages = rawMessages;
+  let kept = false;
+  let removed = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message === void 0 || message === null || message.role !== "user" || !Array.isArray(message.content)) continue;
+    const content = message.content;
+    for (let p = content.length - 1; p >= 0; p--) {
+      if (!isImagePart(content[p])) continue;
+      if (!kept) {
+        kept = true;
+        continue;
+      }
+      content[p] = { type: "text", text: IMAGE_STRIP_NOTE };
+      removed += 1;
+    }
+  }
+  return removed;
+}
 
 // src/convert.ts
+var KEEP_TEXT = (text) => text;
 var MAX_FORWARD_IMAGE_BYTES = 8 * 1024 * 1024;
 var MAX_FORWARD_IMAGES_TOTAL = 12;
 var MAX_FORWARD_IMAGE_BYTES_TOTAL = 16 * 1024 * 1024;
@@ -248,8 +323,8 @@ function convertBinaryPart(part, parts, forwarder, resolveImage, plan) {
   parts.push({ type: "text", text: describeBinaryPart(part) });
   return false;
 }
-function convertUserContent(content, forwarder, resolveImage, plan) {
-  if (typeof content === "string") return content;
+function convertUserContent(content, forwarder, resolveImage, plan, scrub) {
+  if (typeof content === "string") return scrub(content);
   const parts = [];
   let hasMultimodal = false;
   for (const part of content) {
@@ -264,8 +339,8 @@ function convertUserContent(content, forwarder, resolveImage, plan) {
     }
     if (isBinaryLikePart(part)) parts.push({ type: "text", text: describeBinaryPart(part) });
   }
-  if (!hasMultimodal) return parts.map((part) => part.type === "text" ? String(part.text) : "").join("\n");
-  return parts;
+  if (!hasMultimodal) return scrub(parts.map((part) => part.type === "text" ? String(part.text) : "").join("\n"));
+  return parts.map((part) => part.type === "text" && typeof part.text === "string" ? { ...part, text: scrub(part.text) } : part);
 }
 function imageFingerprint(dataUri) {
   return `${dataUri.length}:${dataUri.slice(0, 64)}:${dataUri.slice(-64)}`;
@@ -322,6 +397,7 @@ function toolNamesById(messages) {
   return names;
 }
 function buildRequest(input) {
+  const scrub = input.sanitizeText === true ? sanitizeText : KEEP_TEXT;
   const forwarder = createImageForwarder(input.visionEnabled !== false);
   const userImagePlan = forwarder.enabled ? planUserImages(input.messages, input.resolveImage) : /* @__PURE__ */ new Map();
   const names = toolNamesById(input.messages);
@@ -341,7 +417,7 @@ function buildRequest(input) {
     if (message.role === "user") {
       messages.push({
         role: "user",
-        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan)
+        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub)
       });
       continue;
     }
@@ -350,9 +426,9 @@ function buildRequest(input) {
       if (typeof message.content !== "string") {
         for (const part of message.content) {
           if (part.type === "text" && typeof part.text === "string") {
-            parts.push({ type: "text", text: part.text });
+            parts.push({ type: "text", text: scrub(part.text) });
           } else if (part.type === "reasoning" && typeof part.text === "string") {
-            parts.push({ type: "reasoning", text: part.text });
+            parts.push({ type: "reasoning", text: scrub(part.text) });
           } else if (part.type === "tool-call") {
             parts.push({
               type: "tool-call",
@@ -368,7 +444,7 @@ function buildRequest(input) {
     }
     const results = [];
     const callId = message.toolCallId ?? "";
-    const value = typeof message.content === "string" ? message.content : message.content.map((part) => toolResultText(part, forwarder)).join("\n");
+    const value = scrub(typeof message.content === "string" ? message.content : message.content.map((part) => toolResultText(part, forwarder)).join("\n"));
     results.push({
       type: "tool-result",
       toolCallId: callId,
@@ -463,6 +539,24 @@ function classifyCommandCodeError(status, body) {
   if (status >= 500) return { code: "SERVER", message };
   if (status === 0) return { code: "SERVER", message };
   return { code: "INVALID_REQUEST", message };
+}
+
+// src/headers.ts
+var COMMAND_CODE_CLI_VERSION = "1.54.0";
+var COMMAND_CODE_CLI_HEADERS = {
+  "x-command-code-version": COMMAND_CODE_CLI_VERSION,
+  "x-cli-environment": "production",
+  "x-project-slug": "opencode",
+  "user-agent": "cli"
+};
+function commandCodeHeaders(apiKey) {
+  return {
+    ...COMMAND_CODE_CLI_HEADERS,
+    ...apiKey === void 0 || apiKey === "" ? {} : {
+      authorization: `Bearer ${apiKey}`,
+      "x-api-key": apiKey
+    }
+  };
 }
 
 // src/stream.ts
@@ -707,6 +801,16 @@ async function* parseCommandCodeStream(source) {
 var DEFAULT_USER_IMAGE_MAX_PIXELS = 2048 * 2048;
 var DEFAULT_USER_IMAGE_MAX_BYTES = 1024 * 1024;
 var REQUEST_TIMEOUT_MS = 3e5;
+var DEFAULT_POOL_MAX_ATTEMPTS = 5;
+var DEFAULT_POOL_DEADLINE_MS = 3e4;
+function poolFailureClassOf(code, status) {
+  if (code === CONTEXT_WINDOW_EXCEEDED_CODE2 || code === "INVALID_REQUEST") return "INVALID_REQUEST";
+  if (code === QUOTA_EXCEEDED_CODE2 || code === "RATE_LIMIT") return "QUOTA";
+  if (code === "AUTH") return "AUTH";
+  if (code === "PROXY_USE_DETECTED") return "POLICY";
+  if (code === "SERVER") return status === 503 || status === 529 ? "CAPACITY" : "UPSTREAM";
+  return "UPSTREAM";
+}
 function toCcTools(tools) {
   return (tools ?? []).map((tool) => ({
     type: "function",
@@ -868,8 +972,9 @@ var CommandCodeAdapter = class extends LlmAdapter {
         );
       }
     }
-    const key = profile.keyless ? void 0 : await this.options.resolveApiKey(profile);
-    if (!profile.keyless && key === void 0) {
+    const pooled = profile.pool !== void 0 && profile.pool.identities.length > 0;
+    const key = pooled || profile.keyless ? void 0 : await this.options.resolveApiKey(profile);
+    if (!pooled && !profile.keyless && key === void 0) {
       throw new LlmError2(
         `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? "no credential"}, which is not set`,
         "MISSING_CREDENTIAL"
@@ -882,6 +987,10 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const envelope = buildRequest({
       model: options.model,
       messages,
+      // The default keypool route is fronted by the standalone proxy, which
+      // owns text sanitization; a pooled route talks to the vendor directly,
+      // so the conversion seam sanitizes its text (scrub + 200k cap) once.
+      sanitizeText: pooled,
       tools: toCcTools(options.tools),
       ...options.system === void 0 ? {} : { system: options.system },
       ...options.maxTokens === void 0 ? {} : { maxTokens: options.maxTokens },
@@ -890,6 +999,10 @@ var CommandCodeAdapter = class extends LlmAdapter {
       visionEnabled: visionOf(entry),
       ...this.options.now === void 0 ? {} : { now: this.options.now() }
     });
+    if (pooled) {
+      yield* this.#streamPooled(options, profile, envelope);
+      return;
+    }
     const fetchImpl = this.options.fetchImpl ?? globalThis.fetch;
     const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const signal = options.signal === void 0 ? timeout : AbortSignal.any([options.signal, timeout]);
@@ -926,11 +1039,294 @@ var CommandCodeAdapter = class extends LlmAdapter {
     }
     yield* parseCommandCodeStream(response.body);
   }
+  /**
+   * The opt-in pooled path: resolve one credential per identity, order them
+   * through the shared pool engine, inject the Command Code CLI headers and
+   * that identity's auth (the converted envelope is already text-sanitized and
+   * image-budgeted), and rotate across identities until one commits. A 413 is
+   * retried once on the same identity with older images stripped; after the
+   * first content delta the request is committed and failures surface
+   * unchanged.
+   */
+  async *#streamPooled(options, profile, envelope) {
+    const poolConfig = profile.pool;
+    const engine = this.options.pool;
+    if (poolConfig === void 0 || poolConfig.identities.length === 0) {
+      throw new LlmError2(`Command Code route "${options.provider}" declares no pool identities`, "MISSING_CREDENTIAL");
+    }
+    if (engine === void 0) {
+      throw new LlmError2(
+        `Command Code route "${options.provider}" declares a credential pool but this adapter has no pool engine`,
+        "MISSING_CREDENTIAL"
+      );
+    }
+    const resolveCredential = this.options.resolveCredential;
+    if (resolveCredential === void 0) {
+      throw new LlmError2(
+        `Command Code route "${options.provider}" declares a credential pool but this adapter has no credential resolver`,
+        "MISSING_CREDENTIAL"
+      );
+    }
+    await engine.hydrate(options.provider);
+    const order = engine.orderFor(options.provider, poolConfig.identities, options.model, poolConfig.strategy);
+    if (order.length === 0) {
+      throw new LlmError2(
+        `Command Code route "${options.provider}" has no enabled key-pool identity; enable one on the Models page (Keys card) and retry`,
+        "MISSING_CREDENTIAL"
+      );
+    }
+    const identityById = new Map(poolConfig.identities.map((identity) => [identity.id, identity]));
+    const resolvedKeys = /* @__PURE__ */ new Map();
+    for (const candidate of order) {
+      const identity = identityById.get(candidate.id);
+      if (identity === void 0) continue;
+      const credential = await resolveCredential(identity.credentialRef);
+      if (credential !== void 0 && credential.length > 0) {
+        resolvedKeys.set(candidate.id, credential);
+      } else {
+        this.options.log?.(
+          `commandcode-provider: pool identity "${identity.id}" names ${identity.credentialRef}, which resolves to nothing; skipping it`
+        );
+      }
+    }
+    const resolvableOrder = order.filter((candidate) => resolvedKeys.has(candidate.id));
+    if (resolvableOrder.length === 0) {
+      const refs = poolConfig.identities.map((identity) => identity.credentialRef).join(", ");
+      throw new LlmError2(
+        `Command Code route "${options.provider}" needs a credential, but none of its key-pool references (${refs}) resolve; store one on the Models page (Keys card) or export it, then retry`,
+        "MISSING_CREDENTIAL"
+      );
+    }
+    let body = JSON.stringify(envelope);
+    let strippedOlderImages = false;
+    const fetchImpl = this.options.fetchImpl ?? globalThis.fetch;
+    const maxAttempts = Math.min(resolvableOrder.length, this.options.poolMaxAttempts ?? DEFAULT_POOL_MAX_ATTEMPTS);
+    const deadline = Date.now() + (this.options.poolDeadlineMs ?? DEFAULT_POOL_DEADLINE_MS);
+    let attempts = 0;
+    let lastFailure = "no identity was attempted";
+    for (const candidate of resolvableOrder) {
+      if (attempts >= maxAttempts || Date.now() > deadline) break;
+      if (options.signal?.aborted === true) {
+        throw new LlmError2("Command Code request aborted by caller", "ABORTED");
+      }
+      const identity = identityById.get(candidate.id);
+      if (identity === void 0) continue;
+      attempts += 1;
+      const apiKey = resolvedKeys.get(identity.id);
+      const attemptController = new AbortController();
+      const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      const signal = options.signal === void 0 ? AbortSignal.any([attemptController.signal, timeout]) : AbortSignal.any([options.signal, attemptController.signal, timeout]);
+      const send = () => fetchImpl(`${profile.baseURL.replace(/\/+$/, "")}/alpha/generate`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          // Precedence contract: attribution carries only `user-agent`
+          // (DeepSeek-Harness/...), the vendor gate serves `user-agent: cli`.
+          // The CLI set is spread last so it always wins, including the
+          // user-agent override; reversing the spreads would silently trip
+          // the gate.
+          ...attributionHeaders(),
+          ...commandCodeHeaders(apiKey)
+        },
+        body,
+        signal
+      });
+      let response;
+      let transportError;
+      try {
+        response = await send();
+      } catch (error) {
+        transportError = error;
+      }
+      if (response !== void 0 && response.status === 413 && !strippedOlderImages) {
+        const removed = stripOlderImagesKeepingNewest(envelope);
+        if (removed > 0) {
+          strippedOlderImages = true;
+          body = JSON.stringify(envelope);
+          this.options.log?.(
+            `commandcode-provider: identity "${identity.id}" answered 413; stripped ${removed} older image(s) and retrying the same identity`
+          );
+          try {
+            response = await send();
+          } catch (error) {
+            response = void 0;
+            transportError = error;
+          }
+        }
+      }
+      if (response === void 0) {
+        if (options.signal?.aborted) {
+          throw new LlmError2("Command Code request aborted by caller", "ABORTED", { cause: transportError });
+        }
+        const message = `Command Code transport failure: ${transportError instanceof Error ? transportError.message : String(transportError)}`;
+        engine.recordFailure(options.provider, identity.id, options.model, "UPSTREAM", message);
+        lastFailure = message;
+        attemptController.abort("commandcode pool rotated to the next identity");
+        this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (UPSTREAM); rotating`);
+        continue;
+      }
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => "");
+        const failure = classifyCommandCodeError(response.status, errorBody);
+        if (response.status === 413 || failure.code === CONTEXT_WINDOW_EXCEEDED_CODE2 || failure.code === "INVALID_REQUEST") {
+          throw new LlmError2(`Command Code API error (${String(response.status)}): ${failure.message}`, failure.code);
+        }
+        const failureClass2 = poolFailureClassOf(failure.code, response.status);
+        engine.recordFailure(options.provider, identity.id, options.model, failureClass2, failure.message, response.status);
+        lastFailure = failure.message;
+        if (!ROTATING_CLASSES.has(failureClass2)) {
+          throw new LlmError2(
+            `Command Code route "${options.provider}" request failed without failover (${failureClass2}): ${failure.message}`,
+            failure.code
+          );
+        }
+        attemptController.abort("commandcode pool rotated to the next identity");
+        this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass2}); rotating`);
+        continue;
+      }
+      const quota = parseQuotaHeaders(response.headers);
+      if (quota !== void 0) engine.recordQuota(options.provider, identity.id, options.model, quota);
+      if (response.body === null) {
+        engine.recordFailure(options.provider, identity.id, options.model, "UPSTREAM", "the response carried no body");
+        lastFailure = "the response carried no body";
+        attemptController.abort("commandcode pool rotated to the next identity");
+        continue;
+      }
+      const iterator = parseCommandCodeStream(response.body)[Symbol.asyncIterator]();
+      const buffered = [];
+      let committed = false;
+      let midFailure;
+      try {
+        for (; ; ) {
+          const result = await iterator.next();
+          if (result.done === true) break;
+          const chunk = result.value;
+          if (!committed) {
+            if (chunk.type === "usage") {
+              buffered.push(chunk);
+              continue;
+            }
+            if (chunk.type === "finish" && chunk.reason.kind === "error") {
+              midFailure = {
+                code: chunk.reason.failure.code,
+                message: chunk.reason.failure.message,
+                ...chunk.reason.failure.status === void 0 ? {} : { status: chunk.reason.failure.status }
+              };
+              break;
+            }
+            committed = true;
+            engine.recordSuccess(options.provider, identity.id, options.model);
+            for (const held of buffered) yield held;
+            buffered.length = 0;
+          }
+          if (chunk.type === "finish" && chunk.reason.kind === "error") {
+            engine.recordFailure(
+              options.provider,
+              identity.id,
+              options.model,
+              poolFailureClassOf(chunk.reason.failure.code, chunk.reason.failure.status),
+              chunk.reason.failure.message
+            );
+            yield chunk;
+            break;
+          }
+          yield chunk;
+        }
+      } catch (error) {
+        if (options.signal?.aborted) {
+          throw new LlmError2("Command Code request aborted by caller", "ABORTED", { cause: error });
+        }
+        if (committed) {
+          if (error instanceof LlmError2) {
+            engine.recordFailure(
+              options.provider,
+              identity.id,
+              options.model,
+              poolFailureClassOf(error.code),
+              error.message
+            );
+          }
+          throw error;
+        }
+        midFailure = error instanceof LlmError2 ? { code: error.code, message: error.message } : { code: "STREAM_CLOSED", message: error instanceof Error ? error.message : String(error) };
+      } finally {
+        try {
+          await iterator.return(void 0);
+        } catch (_abortedStreamTeardown) {
+        }
+      }
+      if (committed) return;
+      if (midFailure === void 0) {
+        midFailure = { code: "STREAM_CLOSED", message: "the attempt ended without content" };
+      }
+      const failureClass = poolFailureClassOf(midFailure.code, midFailure.status);
+      engine.recordFailure(
+        options.provider,
+        identity.id,
+        options.model,
+        failureClass,
+        midFailure.message,
+        midFailure.status
+      );
+      lastFailure = midFailure.message;
+      if (!ROTATING_CLASSES.has(failureClass)) {
+        throw new LlmError2(
+          `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${midFailure.message}`,
+          midFailure.code
+        );
+      }
+      attemptController.abort("commandcode pool rotated to the next identity");
+      this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`);
+    }
+    throw new LlmError2(
+      `Command Code credential pool exhausted after ${attempts} attempt(s): ${lastFailure}`,
+      "PROVIDER_POOL_EXHAUSTED"
+    );
+  }
 };
 
 // src/index.ts
 var name = "commandcode-provider";
 var inject = ["llm"];
+var DEFAULT_SETTINGS_NS = "commandcode-provider";
+function live(schema) {
+  return schema.volatile?.() ?? schema;
+}
+function plainConfig(config) {
+  const out = {};
+  for (const [key, field] of Object.entries(config)) {
+    out[key] = typeof field?.get === "function" ? field.get() : field;
+  }
+  return out;
+}
+var poolIdentitySchema = Schema.object({
+  id: Schema.string().required(),
+  credentialRef: Schema.string().required(),
+  priority: Schema.natural(),
+  enabled: Schema.boolean().default(true)
+});
+var routeProfileSchema = Schema.object({
+  displayName: Schema.string(),
+  api: Schema.string(),
+  baseURL: Schema.string(),
+  apiKeyEnv: Schema.string(),
+  keyless: Schema.boolean(),
+  models: Schema.array(Schema.object({ id: Schema.string().required(), name: Schema.string() })),
+  userImageMaxPixels: Schema.natural(),
+  userImageMaxBytes: Schema.natural(),
+  // `.default(undefined)` is load-bearing: without it the nested object
+  // materializes as `{}` for a route that declares no pool, and schemastery
+  // then rejects the absent `identities` — failing every keypool route at
+  // load. An explicit `pool: {}` still fails loud, as it should.
+  pool: Schema.object({
+    strategy: Schema.union(["priority-sticky", "balanced"]),
+    identities: Schema.array(poolIdentitySchema).required()
+  }).default(void 0)
+});
+var Config = Schema.object({
+  providers: live(Schema.dict(routeProfileSchema).default({}))
+});
 function loadSnapshot() {
   try {
     const path = fileURLToPath(new URL("../catalog.snapshot.json", import.meta.url));
@@ -938,6 +1334,58 @@ function loadSnapshot() {
   } catch {
     return [];
   }
+}
+function parsePoolConfig(route, raw) {
+  if (raw === void 0) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`commandcode-provider: provider "${route}" pool must be an object`);
+  }
+  const record = raw;
+  const strategy = record.strategy;
+  if (strategy !== void 0 && strategy !== "priority-sticky" && strategy !== "balanced") {
+    throw new Error(`commandcode-provider: provider "${route}" pool.strategy must be "priority-sticky" or "balanced"`);
+  }
+  const identitiesRaw = record.identities;
+  if (!Array.isArray(identitiesRaw) || identitiesRaw.length === 0) {
+    throw new Error(`commandcode-provider: provider "${route}" pool.identities must be a non-empty array`);
+  }
+  const identities = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of identitiesRaw) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`commandcode-provider: provider "${route}" pool identity must be an object`);
+    }
+    const identity = entry;
+    if (typeof identity.id !== "string" || identity.id === "") {
+      throw new Error(`commandcode-provider: provider "${route}" pool identity needs a non-empty id`);
+    }
+    if (seen.has(identity.id)) {
+      throw new Error(`commandcode-provider: provider "${route}" pool identity id "${identity.id}" is duplicated`);
+    }
+    seen.add(identity.id);
+    if (typeof identity.credentialRef !== "string" || identity.credentialRef === "") {
+      throw new Error(
+        `commandcode-provider: provider "${route}" pool identity "${identity.id}" needs a non-empty credentialRef`
+      );
+    }
+    const priority = identity.priority;
+    if (priority !== void 0 && (typeof priority !== "number" || !Number.isSafeInteger(priority) || priority < 0)) {
+      throw new Error(
+        `commandcode-provider: provider "${route}" pool identity "${identity.id}" priority must be a non-negative integer`
+      );
+    }
+    const enabled = identity.enabled;
+    if (enabled !== void 0 && typeof enabled !== "boolean") {
+      throw new Error(`commandcode-provider: provider "${route}" pool identity "${identity.id}" enabled must be a boolean`);
+    }
+    identities.push({
+      id: identity.id,
+      credentialRef: identity.credentialRef,
+      ...typeof priority === "number" ? { priority } : {},
+      ...typeof enabled === "boolean" ? { enabled } : {}
+    });
+  }
+  return { pool: { ...strategy === void 0 ? {} : { strategy }, identities } };
 }
 function routeFromConfig(route, raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -969,19 +1417,23 @@ function routeFromConfig(route, raw) {
     keyless: record.keyless === true || record.apiKeyEnv === void 0 && record.key === void 0,
     models,
     userImageMaxPixels: positiveInteger(record.userImageMaxPixels, "userImageMaxPixels", DEFAULT_USER_IMAGE_MAX_PIXELS),
-    userImageMaxBytes: positiveInteger(record.userImageMaxBytes, "userImageMaxBytes", DEFAULT_USER_IMAGE_MAX_BYTES)
+    userImageMaxBytes: positiveInteger(record.userImageMaxBytes, "userImageMaxBytes", DEFAULT_USER_IMAGE_MAX_BYTES),
+    ...parsePoolConfig(route, record.pool)
   };
 }
-function apply(ctx, config) {
-  const providers = typeof config === "object" && config !== null ? config.providers : void 0;
+function apply(ctx, config = {}) {
+  const plain = plainConfig(config);
+  const providers = plain.providers;
   if (typeof providers !== "object" || providers === null || Array.isArray(providers)) return;
   const profiles = /* @__PURE__ */ new Map();
   for (const [route, raw] of Object.entries(providers)) {
     const profile = routeFromConfig(route, raw);
     profiles.set(route, profile);
-    ctx.logger.info(`commandcode-provider: route "${route}" \u2192 ${profile.baseURL} (${profile.keyless ? "keyless/keypool" : "byok"})`);
+    const posture = profile.pool === void 0 ? profile.keyless ? "keyless/keypool" : "byok" : `native pool \xD7${String(profile.pool.identities.length)}`;
+    ctx.logger.info(`commandcode-provider: route "${route}" \u2192 ${profile.baseURL} (${posture})`);
   }
   if (profiles.size === 0) return;
+  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS;
   const snapshot = loadSnapshot();
   const catalogs = /* @__PURE__ */ new Map();
   const catalogFor = (profile) => {
@@ -1000,11 +1452,24 @@ function apply(ctx, config) {
     const hit = await credentials.resolve(profile.apiKeyEnv);
     return hit?.value;
   };
+  const launchEnv = launchEnvironmentOf(ctx);
+  const poolEngine = new PoolEngine({
+    stateDir: join(launchEnv.get("DSH_HOME")?.value ?? join(homedir(), ".dsh"), "pools"),
+    log: (message) => ctx.logger.warn(message)
+  });
+  const resolveCredential = async (reference) => {
+    const credentials = ctx.get("credentials");
+    const hit = credentials !== void 0 ? (await credentials.resolve(credentialRef(reference)))?.value : launchEnv.get(reference)?.value;
+    return hit !== void 0 && hit.length > 0 ? hit : void 0;
+  };
   const attachments = () => ctx.get("attachments");
   const adapter = new CommandCodeAdapter({
     profiles: () => profiles,
     catalogFor,
     resolveApiKey,
+    pool: poolEngine,
+    resolveCredential,
+    log: (message) => ctx.logger.warn(message),
     readImage: async (ref, signal) => {
       const store = attachments();
       if (store === void 0) return void 0;
@@ -1026,9 +1491,34 @@ function apply(ctx, config) {
       }
     }
   });
+  const directory = [...profiles.values()].map((profile) => ({
+    provider: profile.route,
+    displayName: profile.displayName,
+    settingsNs,
+    settingsPath: ["providers", profile.route],
+    // Every route exists only because configuration named it; the adapter
+    // ships no route catalog of its own.
+    declared: true
+  }));
+  ctx.llm.registerConfigurableProviders(directory);
+  ctx.llm.registerPoolOperations(settingsNs, {
+    async status(provider) {
+      const profile = profiles.get(provider);
+      await poolEngine.hydrate(provider);
+      return poolEngine.identitiesStatus(provider, profile?.pool?.identities ?? []);
+    },
+    async resetCooldown(provider, identityId) {
+      await poolEngine.hydrate(provider);
+      poolEngine.resetCooldown(provider, identityId);
+    },
+    async testIdentity(_provider, _identityId, _apiKey) {
+      return { ok: false, error: "Command Code identity testing is not implemented; run scripts/live-gate.mjs" };
+    }
+  });
   ctx.llm.registerAdapter([...profiles.keys()], adapter);
 }
 export {
+  Config,
   apply,
   inject,
   name

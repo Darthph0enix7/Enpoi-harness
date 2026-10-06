@@ -1,10 +1,13 @@
 /**
  * Request conversion: full envelope, media-type detection order, image
- * hoisting out of tool results, and the no-base64-as-text invariant.
+ * hoisting out of tool results, the converter's single image budget, and the
+ * conversion-seam text sanitizer (scrub + 200k cap) the pooled route opts
+ * into.
  */
 import { expect, it } from 'vitest'
 import { buildRequest, detectMediaType } from '../src/convert.js'
 import type { CcInputMessage, CcInputPart } from '../src/convert.js'
+import { MAX_INLINE_TOOL_TEXT_CHARS } from '../src/sanitize.js'
 
 const PNG = 'A'.repeat(2048)
 
@@ -174,4 +177,71 @@ it('omits a lone user image over the per-image forward limit', () => {
   const content = envelope.params.messages[0]!.content as string
   expect(content).toContain('per-request image budget reached')
   expect(content).not.toContain('AAAAAAAA')
+})
+
+it('scrubs embedded base64 and caps oversized tool text at conversion when the route has no proxy', () => {
+  const uri = `data:image/png;base64,${'C'.repeat(600)}`
+  const long = 'x'.repeat(MAX_INLINE_TOOL_TEXT_CHARS + 5)
+  const envelope = buildRequest({
+    model: 'm',
+    sanitizeText: true,
+    messages: [
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read', arguments: '{}' }] },
+      { role: 'tool', content: [{ type: 'text', text: `see ${uri}` }], toolCallId: 'c1' },
+      { role: 'tool', content: long, toolCallId: 'c2' },
+    ],
+  })
+  const values = (envelope.params.messages.filter(message => message.role === 'tool') as Array<{
+    content: Array<{ output: { value: string } }>
+  }>).map(message => message.content[0]!.output.value)
+
+  expect(values[0]).toContain('[embedded base64 payload omitted: ~')
+  expect(values[0]).not.toContain('CCCC')
+  expect(values[1]).toContain(
+    `[output truncated: ${MAX_INLINE_TOOL_TEXT_CHARS + 5} chars exceed ${MAX_INLINE_TOOL_TEXT_CHARS} limit]`,
+  )
+})
+
+it('caps the joined tool output once, not each fragment in isolation', () => {
+  const half = 'z'.repeat(MAX_INLINE_TOOL_TEXT_CHARS - 10)
+  const envelope = buildRequest({
+    model: 'm',
+    sanitizeText: true,
+    messages: [{ role: 'tool', content: [{ type: 'text', text: half }, { type: 'text', text: half }], toolCallId: 'c1' }],
+  })
+  const value = (envelope.params.messages[0] as {
+    content: Array<{ output: { value: string } }>
+  }).content[0]!.output.value
+  const joined = `${half}\n${half}`
+  expect(value).toContain(`[output truncated: ${joined.length} chars exceed ${MAX_INLINE_TOOL_TEXT_CHARS} limit]`)
+})
+
+it('scrubs embedded base64 in string content at conversion when the route has no proxy', () => {
+  const uri = `data:image/png;base64,${'E'.repeat(700)}`
+  const envelope = buildRequest({
+    model: 'm',
+    sanitizeText: true,
+    messages: [
+      user([{ type: 'text', text: `look ${uri}` }]),
+      { role: 'tool', content: `tool saw ${uri}`, toolCallId: 'c1' },
+    ],
+  })
+  const userText = envelope.params.messages[0]!.content as string
+  expect(userText).toContain('[embedded base64 payload omitted: ~')
+  expect(userText).not.toContain('EEEE')
+  const tool = envelope.params.messages[1] as { content: Array<{ output: { value: string } }> }
+  expect(tool.content[0]!.output.value).toContain('[embedded base64 payload omitted: ~')
+  expect(tool.content[0]!.output.value).not.toContain('EEEE')
+})
+
+it('leaves text untouched on the default keypool path, where the proxy sanitizes downstream', () => {
+  const uri = `data:image/png;base64,${'F'.repeat(700)}`
+  const long = 'y'.repeat(MAX_INLINE_TOOL_TEXT_CHARS + 5)
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [user([{ type: 'text', text: uri }]), { role: 'tool', content: long, toolCallId: 'c1' }],
+  })
+  expect(envelope.params.messages[0]!.content as string).toBe(uri)
+  const tool = envelope.params.messages[1] as { content: Array<{ output: { value: string } }> }
+  expect(tool.content[0]!.output.value).toBe(long)
 })

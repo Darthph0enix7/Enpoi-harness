@@ -15,13 +15,16 @@
  *    synthetic user message immediately after the tool message (the API
  *    accepts images only in user content), and user-attached images ride a
  *    per-request size budget (12 images / 16 MiB, 8 MiB per image) that keeps
- *    the newest and omits the oldest;
- * 3. the keypool sanitizer (embedded-base64 scrub, 200k text cap, older-turn
- *    image stripping) is NOT duplicated here — it runs once, in the keypool,
- *    for every harness.
+ *    the newest and omits the oldest — the request's only image budget;
+ * 3. text sanitization (embedded-base64 scrub, 200k cap) happens here, at the
+ *    conversion seam, when the route has no keypool proxy in front of it
+ *    (`sanitizeText` input). The default keypool route leaves it to the proxy
+ *    so its forwarded bytes stay unchanged.
  *
  * @module dsh-enpoi-commandcode-provider/convert
  */
+
+import { sanitizeText } from './sanitize.js'
 
 /** One part-like object accepted from a caller (AI-SDK-shaped or harness-built). */
 export interface CcInputPart {
@@ -119,11 +122,24 @@ export interface BuildRequestInput {
   reasoningEffort?: string
   /** Whether the target model accepts image input; comes from the catalog. */
   visionEnabled?: boolean
+  /**
+   * Run the keypool text sanitizer over message text (embedded-base64 scrub,
+   * 200k cap). The pooled native route sets this because no keypool proxy
+   * sanitizes the body downstream; the default keypool route leaves it unset
+   * so the bytes it forwards are exactly what they have always been.
+   */
+  sanitizeText?: boolean
   /** Optional resolution hook for caller-shaped image parts (legacy callers). */
   resolveImage?: (part: CcInputPart) => string | undefined
   workingDir?: string
   now?: Date
 }
+
+/** Text transform applied at conversion: the sanitizer, or the identity for proxy-fronted routes. */
+type TextScrub = (text: string) => string
+
+/** No-op scrub for routes whose keypool proxy owns sanitization. */
+const KEEP_TEXT: TextScrub = text => text
 
 interface ForwardedImage {
   mediaType: string
@@ -364,8 +380,9 @@ function convertUserContent(
   forwarder: ImageForwarder,
   resolveImage: ((part: CcInputPart) => string | undefined) | undefined,
   plan: UserImagePlan,
+  scrub: TextScrub,
 ): CcUserContent {
-  if (typeof content === 'string') return content
+  if (typeof content === 'string') return scrub(content)
   const parts: Array<{ type: string; [key: string]: unknown }> = []
   let hasMultimodal = false
   for (const part of content) {
@@ -380,8 +397,13 @@ function convertUserContent(
     }
     if (isBinaryLikePart(part)) parts.push({ type: 'text', text: describeBinaryPart(part) })
   }
-  if (!hasMultimodal) return parts.map(part => part.type === 'text' ? String(part.text) : '').join('\n')
-  return parts
+  // The scrub applies to exactly the text the wire receives: once over the
+  // joined string a text-only message collapses to, or per part when the
+  // message stays multimodal and each text part keeps its own slot.
+  if (!hasMultimodal) return scrub(parts.map(part => part.type === 'text' ? String(part.text) : '').join('\n'))
+  return parts.map(part => part.type === 'text' && typeof part.text === 'string'
+    ? { ...part, text: scrub(part.text) }
+    : part)
 }
 
 function imageFingerprint(dataUri: string): string {
@@ -423,9 +445,9 @@ function handleBinaryPart(part: CcInputPart, forwarder: ImageForwarder): string 
 }
 
 /**
- * One tool-result content part as text. Text passes through unchanged: the
- * keypool sanitizer owns embedded-base64 scrubbing and the 200k text cap, and
- * duplicating it here would drift from every other harness.
+ * One tool-result content part as text. Parts are joined first and the scrub
+ * runs once on the joined output, so the 200k cap sees the value the wire
+ * receives rather than each fragment in isolation.
  */
 function toolResultText(part: CcInputPart, forwarder: ImageForwarder): string {
   if (part.type === 'text' && typeof part.text === 'string') return part.text
@@ -469,6 +491,7 @@ function toolNamesById(messages: readonly CcInputMessage[]): Map<string, string>
  * @returns the envelope to POST to `/alpha/generate`.
  */
 export function buildRequest(input: BuildRequestInput): CcEnvelope {
+  const scrub = input.sanitizeText === true ? sanitizeText : KEEP_TEXT
   const forwarder = createImageForwarder(input.visionEnabled !== false)
   const userImagePlan = forwarder.enabled
     ? planUserImages(input.messages, input.resolveImage)
@@ -495,7 +518,7 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     if (message.role === 'user') {
       messages.push({
         role: 'user',
-        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan),
+        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub),
       })
       continue
     }
@@ -505,9 +528,9 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
       if (typeof message.content !== 'string') {
         for (const part of message.content) {
           if (part.type === 'text' && typeof part.text === 'string') {
-            parts.push({ type: 'text', text: part.text })
+            parts.push({ type: 'text', text: scrub(part.text) })
           } else if (part.type === 'reasoning' && typeof part.text === 'string') {
-            parts.push({ type: 'reasoning', text: part.text })
+            parts.push({ type: 'reasoning', text: scrub(part.text) })
           } else if (part.type === 'tool-call') {
             parts.push({
               type: 'tool-call',
@@ -525,9 +548,9 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     // tool
     const results: CcToolResultContent[] = []
     const callId = message.toolCallId ?? ''
-    const value = typeof message.content === 'string'
+    const value = scrub(typeof message.content === 'string'
       ? message.content
-      : message.content.map(part => toolResultText(part, forwarder)).join('\n')
+      : message.content.map(part => toolResultText(part, forwarder)).join('\n'))
     results.push({
       type: 'tool-result',
       toolCallId: callId,

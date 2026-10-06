@@ -9,6 +9,7 @@ import {
   contextWindowOf,
   effortsOf,
   entryFor,
+  isLoopbackBaseURL,
   modalitiesOf,
   parseCatalog,
   planBadgeOf,
@@ -70,6 +71,30 @@ it('fetches the live catalog at startup and reports its source', async () => {
   expect(entries.map(entry => entry.id)).toEqual(['live/model'])
   expect(store.source()).toBe('live')
   expect(fetchImpl.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8899/commandcode/catalog.json')
+})
+
+it('recognizes only loopback base URLs as catalog-capable', () => {
+  expect(isLoopbackBaseURL('http://127.0.0.1:8899/commandcode')).toBe(true)
+  expect(isLoopbackBaseURL('http://127.0.0.2:8899')).toBe(true)
+  expect(isLoopbackBaseURL('http://localhost:8899/commandcode')).toBe(true)
+  expect(isLoopbackBaseURL('http://[::1]:8899')).toBe(true)
+  expect(isLoopbackBaseURL('https://api.commandcode.ai')).toBe(false)
+  expect(isLoopbackBaseURL('http://192.168.188.95:8899')).toBe(false)
+  expect(isLoopbackBaseURL('not a url')).toBe(false)
+})
+
+it('resolves the bundled snapshot without fetching when the baseURL is the vendor, not the keypool', async () => {
+  const fetchImpl = vi.fn(async () => { throw new Error('the vendor serves no catalog.json') })
+  const store = new CatalogStore({
+    baseURL: 'https://api.commandcode.ai',
+    snapshot: FIXTURE,
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+  })
+  store.start()
+  const entries = await store.entries()
+  expect(entries.map(entry => entry.id)).toEqual(['deepseek/deepseek-v4-pro', 'vision/model'])
+  expect(store.source()).toBe('snapshot')
+  expect(fetchImpl).not.toHaveBeenCalled()
 })
 
 it('falls back to the bundled snapshot when the keypool is unreachable', async () => {

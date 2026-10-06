@@ -99,6 +99,10 @@ export type {
 } from './config.ts'
 export { recordKeyFor } from './auth.ts'
 export { supportedProtocols } from './provider.ts'
+// The pool surface is published for adapters that speak a bespoke protocol but
+// reuse this engine for multi-credential routing (dsh-enpoi-commandcode-provider).
+export { parseQuotaHeaders, PoolEngine, ROTATING_CLASSES } from './pool.ts'
+export type { PoolEngineOptions, PoolFailureClass } from './pool.ts'
 
 export const name = 'llm-pi-ai'
 export const inject = ['llm']

@@ -5,7 +5,9 @@
  * `[Max]`), context windows, and variants are read from the keypool-served
  * `/catalog.json` — never hard-coded — so a model added upstream appears
  * without a package release. The live fetch at startup falls back to the
- * bundled snapshot (data, not code) when the keypool is unreachable.
+ * bundled snapshot (data, not code) when the keypool is unreachable; a
+ * baseURL that is not loopback (the post-flip direct-vendor route) has no
+ * catalog endpoint and resolves the snapshot without fetching.
  *
  * @module dsh-enpoi-commandcode-provider/catalog
  */
@@ -113,6 +115,28 @@ export function planBadgeOf(entry: CatalogEntry | undefined): string | undefined
 /** One catalog source: the live keypool endpoint or the bundled snapshot. */
 export type CatalogSource = 'live' | 'snapshot'
 
+/**
+ * Whether one base URL addresses the local machine. Only the keypool proxy
+ * serves `catalog.json`; a route pointed straight at the vendor (the post-flip
+ * direct path) has no catalog endpoint, so the store must not probe it.
+ * @param baseURL - the route base URL.
+ * @returns true for a loopback host (`localhost`, `127.0.0.0/8`, `::1`).
+ */
+export function isLoopbackBaseURL(baseURL: string): boolean {
+  let host: string
+  try {
+    host = new URL(baseURL).hostname
+  } catch (_invalidBaseURL) {
+    return false
+  }
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+  if (bare === 'localhost' || bare === '::1') return true
+  const octets = bare.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
 /** Options for {@link CatalogStore}. */
 export interface CatalogStoreOptions {
   /** Route base URL, e.g. `http://127.0.0.1:8899/commandcode`. */
@@ -154,9 +178,16 @@ export class CatalogStore {
 
   private load(): Promise<CatalogEntry[]> {
     if (this.resolved !== undefined) return Promise.resolve(this.resolved)
-    this.pending ??= this.fetchLive().then((entries) => {
+    // The catalog endpoint lives on the keypool. A direct-vendor baseURL has
+    // none, so resolve the bundled snapshot immediately rather than 404 on
+    // every startup and only then fall back. Built inside the assignment so a
+    // concurrent caller cannot start a second fetch.
+    this.pending ??= (isLoopbackBaseURL(this.options.baseURL)
+      ? this.fetchLive().then(entries => ({ entries, source: 'live' as const }))
+      : Promise.resolve({ entries: [...this.options.snapshot], source: 'snapshot' as const })
+    ).then(({ entries, source }) => {
       this.resolved = entries
-      this.origin = 'live'
+      this.origin = source
       return entries
     }).catch(() => {
       this.resolved = [...this.options.snapshot]

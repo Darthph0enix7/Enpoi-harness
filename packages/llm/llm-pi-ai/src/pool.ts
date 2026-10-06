@@ -97,11 +97,14 @@ const TRANSPORT_RE = /terminated|premature close|network|econn|socket|fetch fail
 
 /**
  * Parse an upstream reset hint ("Resets in 46min", "Resets in 4hr 53min",
- * "Resets in 14 days") into milliseconds. Only the first duration phrase
- * directly after "resets in" is taken — the longest contiguous run of
- * number+unit pairs immediately following the anchor (e.g. "4hr 53min" →
- * 4h+53m is one phrase, but "Resets in 46min. ... 5 per hour" → only
- * 46min). Never sums distant numbers. Clamped to [30s, 24h].
+ * "Resets in 14 days", Command Code's shorthand "Resets in 3h 25m") into
+ * milliseconds. Only the first duration phrase directly after "resets in" is
+ * taken — the longest contiguous run of number+unit pairs immediately
+ * following the anchor (e.g. "4hr 53min" → 4h+53m is one phrase, but
+ * "Resets in 46min. ... 5 per hour" → only 46min). Never sums distant
+ * numbers. Single-letter units (`d`/`h`/`m`/`w`/`s`) are accepted beside the
+ * full words; a bare `m` never matches a longer word because the unit must
+ * end at a word boundary. Clamped to [30s, 24h].
  * @param message - the flattened upstream error text.
  * @returns the parsed duration clamped to [30_000, 24h], or undefined when
  *   no hint follows the phrase.
@@ -111,16 +114,17 @@ export function parseResetMs(message: string): number | undefined {
   if (anchor === null || anchor.index === undefined) return undefined
   const tail = message.slice(anchor.index + anchor[0].length)
   const UNIT: Record<string, number> = {
-    days: 86_400_000, day: 86_400_000,
-    hours: 3_600_000, hour: 3_600_000, hr: 3_600_000,
-    minutes: 60_000, minute: 60_000, min: 60_000,
-    weeks: 604_800_000, week: 604_800_000,
+    days: 86_400_000, day: 86_400_000, d: 86_400_000,
+    hours: 3_600_000, hour: 3_600_000, hr: 3_600_000, h: 3_600_000,
+    minutes: 60_000, minute: 60_000, min: 60_000, m: 60_000,
+    weeks: 604_800_000, week: 604_800_000, w: 604_800_000,
     months: 2_592_000_000, month: 2_592_000_000,
-    seconds: 1000, second: 1000, sec: 1000,
+    seconds: 1000, second: 1000, sec: 1000, s: 1000,
   }
   const trimmed = tail.trimStart()
   if (trimmed.length === 0) return undefined
-  const re = /(\d+)\s*(days|day|hours|hour|hr|minutes|minute|min|weeks|week|months|month|seconds|second|sec)\b/gi
+  // Longest unit spelling first so `min` wins over `m` and `hr` over `h`.
+  const re = /(\d+)\s*(days|day|d|hours|hour|hr|h|minutes|minute|min|m|weeks|week|w|months|month|seconds|second|sec|s)\b/gi
   let total = 0
   let count = 0
   let pos = 0
