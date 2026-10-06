@@ -747,7 +747,21 @@ stage_remote() { # url
   cache_dir="$PREFIX/harness/.cache"
   mkdir -p "$cache_dir" || return 1
   local ref="${REF:-$CHANNEL}"
-  cache_file="$cache_dir/archive-${ref}.tar.gz"
+  # Key the cache by the resolved commit: a channel that moved must never reuse
+  # the previous commit's archive (a stale cache once staged the old version
+  # under the new commit's name). Without a resolved commit the ref key keeps
+  # the offline path working.
+  if [ -n "${TARGET_COMMIT:-}" ]; then
+    cache_file="$cache_dir/archive-${ref}-${TARGET_COMMIT}.tar.gz"
+    local stale
+    for stale in "$cache_dir"/archive-"${ref}"*.tar.gz; do
+      [ -e "$stale" ] || continue
+      [ "$stale" = "$cache_file" ] && continue
+      rm -f "$stale"
+    done
+  else
+    cache_file="$cache_dir/archive-${ref}.tar.gz"
+  fi
   STAGED="$PREFIX/harness/.staging-$$"
   mkdir -p "$STAGED" || return 1
 
@@ -831,10 +845,17 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   mkdir -p "$cache_dir" || return 1
   if [ ! -s "$asset_file" ] || [ ! -s "$asset_file.sha256" ]; then
     rm -f "$asset_file" "$asset_file.sha256"
+    # Probe before the logged download: assets for a just-pushed commit are
+    # often still being built by release CI, and that must read as a normal
+    # fallback, not as a failed download.
+    if ! curl -fsSL --range 0-0 --connect-timeout 15 --max-time 30 "$url" -o /dev/null 2>/dev/null; then
+      log "prebuilt: no published asset for commit ${TARGET_COMMIT:0:7} yet (release CI may still be building it); building from source"
+      return 1
+    fi
     log "prebuilt: fetching $asset"
     if ! run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-900}" "$PREFIX" curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 30 "$url" -o "$asset_file.download"; then
       rm -f "$asset_file.download"
-      log "prebuilt: no asset for this commit; building from source"
+      log "prebuilt: download failed; building from source"
       return 1
     fi
     mv "$asset_file.download" "$asset_file" || return 1
@@ -873,6 +894,10 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
+    SOURCE_URL="$DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"
+    # Resolve the exact target commit once, before anything stages: the
+    # already-built reuse check, the prebuilt fast path, and the source-archive
+    # cache all key on it.
     resolve_target_for_source
     # If the target commit is known and already built and complete, reuse it directly
     if [ "${FORCE:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
@@ -895,7 +920,6 @@ prepare_source() {
         fi
       done
     fi
-    SOURCE_URL="$DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"
     if stage_prebuilt; then
       substep_ok "Prebuilt harness reused for commit ${TARGET_COMMIT:0:7} ($OS-$ARCH)"
       return 0
@@ -1413,7 +1437,13 @@ write_state() {
     printf '  "node": "%s",\n' "$(json_escape "$NODE")"
     printf '  "nodeOrigin": "%s",\n' "$(json_escape "$NODE_ORIGIN")"
     printf '  "pnpm": "%s",\n' "$(json_escape "$PNPM")"
-    printf '  "serviceUnit": "%s",\n' "$(json_escape "$SERVICE_UNIT")"
+    # null, never "": a blank string is not a unit name, and consumers that
+    # fall back with ?? must see "absent".
+    if [ -n "$SERVICE_UNIT" ]; then
+      printf '  "serviceUnit": "%s",\n' "$(json_escape "$SERVICE_UNIT")"
+    else
+      printf '  "serviceUnit": null,\n'
+    fi
     printf '  "updatedAt": "%s"\n' "$now"
     printf '}\n'
   } > "$tmp" || return 1
