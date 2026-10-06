@@ -8,12 +8,9 @@
     - id: enpoi-context-keeper
       name: 'dsh-enpoi-context-keeper'
       config:
-        # Free-quota primary (operator: freellmapi for background/repetitive work)
-        # + one fallback (soft-degrading, never blocks).
-        provider: freellmapi
-        model: auto
-        fallbackProvider: antigravity
-        fallbackModel: gemini-3.7-flash-tiered
+        # Default route is keyless Kilo; fallback is explicit-only (no hardcoded secondary).
+        provider: kilo
+        model: kilo-auto/free
         leaseMs: 45000
         maxInputEvents: 80
         maxOutputTokens: 2048
