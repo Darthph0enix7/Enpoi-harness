@@ -812,6 +812,11 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   [ "${NO_PREBUILT:-0}" = 1 ] && return 1
   [ "${DSH_NO_PREBUILT:-0}" = 1 ] && return 1
   [ -n "$SOURCE" ] && return 1
+  # prepare_source resolves the target commit only after SOURCE_URL exists, so
+  # the fast path resolves it here when the caller has not.
+  if [ -z "${TARGET_COMMIT:-}" ]; then
+    TARGET_COMMIT="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
+  fi
   [ -n "${TARGET_COMMIT:-}" ] || return 1
   local ref="${REF:-$CHANNEL}" meta version asset url sha_url cache_dir asset_file expected actual staged_version
   meta="$(curl -fsSL --connect-timeout 10 --max-time 20 "$DSH_GITHUB_URL/raw/$ref/package.json" 2>/dev/null || true)"
@@ -2125,6 +2130,9 @@ do_update() {
   STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   detect_os_arch
+  # Without this, every run_logged call in update mode redirects to an empty
+  # path and fails; do_install and do_clean already initialize the log.
+  init_log_file
   step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
