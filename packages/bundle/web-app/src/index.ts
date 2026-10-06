@@ -26,6 +26,7 @@ import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-shell-env'
+import { removeWebStateSync, writeWebState } from './state.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'web-app'
@@ -152,6 +153,32 @@ function localWebUrl(ctx: Context): string {
   return `http://${LOOPBACK_HOST}:${String(port)}`
 }
 
+/** Set once per process: the exit hook that clears this process's attach state. */
+let exitCleanupInstalled = false
+
+/**
+ * Record this instance's authenticated loopback URL for a later `dsh web`
+ * attach, and install the exit hook that removes it again. A failed write is
+ * not fatal: it only disables attach for the next invocation.
+ * @param authenticatedUrl - the printed URL, token included.
+ * @param port - the bound port.
+ */
+function recordAttachState(authenticatedUrl: string, port: number): void {
+  void writeWebState({
+    url: authenticatedUrl,
+    host: LOOPBACK_HOST,
+    port,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  }).catch(() => {
+    // Attach state is an optimization for later invocations; never fail the boot on it.
+  })
+  if (!exitCleanupInstalled) {
+    exitCleanupInstalled = true
+    process.once('exit', () => { removeWebStateSync(process.pid) })
+  }
+}
+
 /**
  * Dist location is workspace knowledge of this bundle: anchored on the
  * frontend package manifest, not configured. Existence is a request-time
@@ -270,6 +297,7 @@ export function apply(ctx: Context, config: Config): void {
         if (config.printUrl) {
           console.log(`dsh web: ${authenticatedUrl}${lanUrl === undefined ? '' : ` (LAN: ${lanUrl})`}`)
         }
+        recordAttachState(authenticatedUrl, port)
         if (handoffBrowser) {
           console.log('dsh web: opening the default browser; pass --no-open to disable')
           void internals.openBrowser(authenticatedUrl).catch((error: unknown) => {

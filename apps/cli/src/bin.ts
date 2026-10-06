@@ -43,6 +43,16 @@ export async function runCli(): Promise<void> {
 
   switch (invocation.mode) {
     case 'profile': {
+      // Fork: `dsh web` attaches to an already-serving instance before any
+      // profile mounts. A non-interactive invocation, `--foreground`, an
+      // explicit `--port 0`, help, or a custom `--patch` layer keeps the
+      // historical boot path.
+      if (invocation.profile === 'web' && invocation.patches.length === 0) {
+        const { runAttach } = await import('./attach.ts')
+        const outcome = await runAttach(invocation.args)
+        if (outcome === 'attached') process.exit(0)
+        if (outcome === 'occupied') process.exit(1)
+      }
       const { runProfile } = await import('./profile-boot.ts')
       try {
         await runProfile({
@@ -67,6 +77,11 @@ export async function runCli(): Promise<void> {
     case 'restart': {
       const { runRestart } = await import('./restart-after-turn.ts')
       process.exit(runRestart(invocation.args))
+      break
+    }
+    case 'service': {
+      const { runService } = await import('./service.ts')
+      process.exit(await runService(invocation.args))
       break
     }
     case 'dump-config': {

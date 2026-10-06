@@ -76,6 +76,9 @@ DEFAULT_PROFILE_SOURCE="${DSH_DEFAULT_PROFILE_SOURCE:-https://github.com/Darthph
 BIN_DIR=""
 BIN_DIR_EXPLICIT=0
 SERVICE_UNIT=""
+SERVICE_INSTALL=1
+NO_PREBUILT=0
+PREBUILT=0
 MERGE_BASELINE=""
 WRITE_RC=0
 DRY_RUN=0
@@ -297,6 +300,10 @@ Options:
                       HEAD otherwise)
   --service-unit U    systemd user unit / launchd label to restart on update
                       (default: auto-detected only when it references --prefix)
+  --no-service        do not install or start a background service unit
+                      (updates still restart a unit already referencing --prefix)
+  --no-prebuilt       always build from the source archive; skip the verified
+                      GitHub Release prebuilt download (also DSH_NO_PREBUILT=1)
   --dsh-home DIR      harness home override (default: $DSH_HOME or $HOME/.dsh);
                       update fails loudly when it disagrees with install-state.json
   --merge-baseline F  run the profile's three-way merge engine against F
@@ -337,6 +344,8 @@ Environment:
   DSH_WEB_HOST / DSH_WEB_PORT        Web UI URL printed (and opened when a
                                      display exists); default 127.0.0.1:3080
   DSH_NO_OPEN                        same as --no-open
+  DSH_NO_SERVICE                     same as --no-service
+  DSH_NO_PREBUILT                    same as --no-prebuilt
 
 Exit codes: 0 success, 1 failure (update rolls back first), 42 sudo trap fired.
 USAGE
@@ -367,6 +376,8 @@ while [ "$#" -gt 0 ]; do
     --profile-ref=*) PROFILE_REF="${arg#*=}"; PROFILE_REF_EXPLICIT=1; shift;;
     --service-unit) need_value "$@"; SERVICE_UNIT="$2"; shift 2;;
     --service-unit=*) SERVICE_UNIT="${arg#*=}"; shift;;
+    --no-service) SERVICE_INSTALL=0; shift;;
+    --no-prebuilt) NO_PREBUILT=1; shift;;
     --dsh-home) need_value "$@"; DSH_HOME="$2"; shift 2;;
     --dsh-home=*) DSH_HOME="${arg#*=}"; shift;;
     --merge-baseline) need_value "$@"; MERGE_BASELINE="$2"; shift 2;;
@@ -646,7 +657,10 @@ resolve_target_commit() { # ref url -> target commit SHA, empty when unresolvabl
     case "$url" in
       https://github.com/*)
         raw="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$DSH_GITHUB_REPO/commits/$ref" 2>/dev/null || true)"
-        sha="$(printf '%s' "$raw" | head -n 5 | awk -F'"' '/"sha":/ {print $4; exit}')"
+        # Here-string, not a pipe: the API JSON is one very long line, and an
+        # early-exiting consumer would close the pipe mid-write and make the
+        # printf builtin report EPIPE ("write error: Broken pipe").
+        sha="$(awk -F'"' '/"sha":/ {print $4; exit}' <<<"$raw")"
         ;;
     esac
   fi
@@ -685,7 +699,7 @@ resolve_build_commit() {
     case "$DSH_GITHUB_URL" in
       https://github.com/*)
         raw="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$DSH_GITHUB_REPO/commits/${REF:-$CHANNEL}" 2>/dev/null || true)"
-        BUILD_COMMIT="$(printf '%s' "$raw" | head -n 5 | awk -F'"' '/"sha":/ {print $4; exit}')"
+        BUILD_COMMIT="$(awk -F'"' '/"sha":/ {print $4; exit}' <<<"$raw")"
         ;;
     esac
     case "$BUILD_COMMIT" in *[!0-9a-fA-F]*|'') BUILD_COMMIT="";; esac
@@ -781,6 +795,76 @@ stage_remote() { # url
   return 0
 }
 
+# ── Prebuilt release fast path ──────────────────────────────────────────────
+# The release workflow publishes a per-platform, fully built harness tree
+# (dsh-harness-<version>-<commit>-<os>-<arch>.tar.gz + .sha256) as GitHub
+# Release assets. When the asset for this exact commit exists, installing it
+# removes the pnpm install + full build (~5 minutes) and needs no build
+# toolchain. The checksum is mandatory; any failure falls back to the source
+# build with a warning, never to an unverified artifact.
+sha256_of() { # file
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else printf ''; fi
+}
+
+stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall back
+  [ "${NO_PREBUILT:-0}" = 1 ] && return 1
+  [ "${DSH_NO_PREBUILT:-0}" = 1 ] && return 1
+  [ -n "$SOURCE" ] && return 1
+  [ -n "${TARGET_COMMIT:-}" ] || return 1
+  local ref="${REF:-$CHANNEL}" meta version asset url sha_url cache_dir asset_file expected actual staged_version
+  meta="$(curl -fsSL --connect-timeout 10 --max-time 20 "$DSH_GITHUB_URL/raw/$ref/package.json" 2>/dev/null || true)"
+  [ -n "$meta" ] || return 1
+  version="$(printf '%s\n' "$meta" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$version" ] || return 1
+  asset="dsh-harness-$version-$TARGET_COMMIT-$OS-$ARCH.tar.gz"
+  url="$DSH_GITHUB_URL/releases/download/v$version/$asset"
+  sha_url="$url.sha256"
+  cache_dir="$PREFIX/harness/.cache"
+  asset_file="$cache_dir/$asset"
+  mkdir -p "$cache_dir" || return 1
+  if [ ! -s "$asset_file" ] || [ ! -s "$asset_file.sha256" ]; then
+    rm -f "$asset_file" "$asset_file.sha256"
+    log "prebuilt: fetching $asset"
+    if ! run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-900}" "$PREFIX" curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 30 "$url" -o "$asset_file.download"; then
+      rm -f "$asset_file.download"
+      log "prebuilt: no asset for this commit; building from source"
+      return 1
+    fi
+    mv "$asset_file.download" "$asset_file" || return 1
+    if ! curl -fsSL --retry 1 --connect-timeout 20 "$sha_url" -o "$asset_file.sha256" 2>/dev/null; then
+      rm -f "$asset_file" "$asset_file.sha256"
+      warn "prebuilt: checksum file unavailable; falling back to the source build"
+      return 1
+    fi
+  fi
+  expected="$(awk 'NR==1 {print $1}' "$asset_file.sha256")"
+  actual="$(sha256_of "$asset_file")"
+  if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+    warn "prebuilt: checksum mismatch; falling back to the source build"
+    rm -f "$asset_file" "$asset_file.sha256"
+    return 1
+  fi
+  STAGED="$PREFIX/harness/.staging-$$"
+  mkdir -p "$STAGED" || return 1
+  if ! tar -C "$STAGED" -xzf "$asset_file" 2>/dev/null; then
+    warn "prebuilt: extraction failed; falling back to the source build"
+    rm -rf "$STAGED"; STAGED=""
+    return 1
+  fi
+  flatten_stage "$STAGED"
+  staged_version="$(read_version "$STAGED/package.json" 2>/dev/null || true)"
+  if [ "$staged_version" != "$version" ]; then
+    warn "prebuilt: payload version '$staged_version' does not match '$version'; falling back to the source build"
+    rm -rf "$STAGED"; STAGED=""
+    return 1
+  fi
+  VERSION="$version"
+  PREBUILT=1
+  return 0
+}
+
 prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
@@ -807,6 +891,10 @@ prepare_source() {
       done
     fi
     SOURCE_URL="$DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"
+    if stage_prebuilt; then
+      substep_ok "Prebuilt harness reused for commit ${TARGET_COMMIT:0:7} ($OS-$ARCH)"
+      return 0
+    fi
     stage_remote "$SOURCE_URL" || die "could not fetch the $CHANNEL channel build from $SOURCE_URL"
   elif [ -d "$SOURCE" ]; then
     VERSION="$(read_version "$SOURCE/package.json")" || die "could not read version from $SOURCE/package.json"
@@ -862,6 +950,16 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     return 1
   fi
   STAGED=""
+  if [ "$PREBUILT" = 1 ]; then
+    # The tree arrived fully built and checksum-verified from the release
+    # workflow: no dependency install, no compilation, no toolchain required.
+    BUILD_COMMIT="${TARGET_COMMIT:-}"
+    [ -n "$BUILD_COMMIT" ] || resolve_build_commit
+    printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$VERSION" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+    if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
+    substep_ok "Prebuilt tree installed (no build required)"
+    return 0
+  fi
   if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile; then
     warn "pnpm install failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
@@ -1384,6 +1482,27 @@ restart_service() {
   return 0
 }
 
+ensure_service() {
+  if [ "${SERVICE_INSTALL:-1}" != 1 ] || [ "${DSH_NO_SERVICE:-0}" = 1 ]; then
+    log "service: install disabled; leaving any existing unit untouched"
+    return 0
+  fi
+  if [ -n "$SERVICE_UNIT" ]; then
+    log "service: unit $SERVICE_UNIT already references this install"
+    return 0
+  fi
+  local cli="$HARNESS/apps/cli/lib/bin.js" out
+  [ -f "$cli" ] || { warn "service: no CLI at $cli; skipping service install"; return 0; }
+  log "service: installing the background web service (login persistence)"
+  if out="$("$NODE" "$cli" service install 2>&1)"; then
+    SERVICE_UNIT="$(json_field "$PREFIX/harness/install-state.json" serviceUnit)"
+    substep_ok "Background service installed and started${SERVICE_UNIT:+ ($SERVICE_UNIT)}"
+  else
+    warn "service: install failed ($(printf '%s' "$out" | tail -n 1)); run 'dsh service install' manually"
+  fi
+  return 0
+}
+
 find_backfill() {
   local c
   for c in "$HARNESS/scripts/dsh-projections-backfill.mjs" "$PROFILE_DIR/scripts/dsh-projections-backfill.mjs" "$HOME/.local/bin/dsh-projections-backfill.mjs"; do
@@ -1772,6 +1891,8 @@ do_install() {
   fi
   substep_ok "System self-check passed"
 
+  ensure_service
+  write_state || warn "could not record the service unit in install-state.json"
   print_summary install
   maybe_open_browser_when_up "$(web_url)"
   emit_json install 1
@@ -2099,6 +2220,7 @@ do_update() {
     seed_home
     profile_install || warn "profile dependency refresh failed"
     run_profile_plugin_build || warn "profile plugin build failed"
+    ensure_service
     step "switch, service and backfill: $VERSION already active"
     step "self-check"
     if ! selfcheck; then
@@ -2150,6 +2272,7 @@ do_update() {
   ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
   log "switched current -> $TREE_DIR_NAME"
   restart_service
+  ensure_service
   run_backfill
 
   step "self-check"

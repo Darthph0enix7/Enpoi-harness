@@ -26,6 +26,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -36,6 +37,26 @@ export const RESTART_MARKER_VERSION = 1
 
 /** The unit `dsh restart` targets unless `--unit` overrides it. */
 export const DEFAULT_RESTART_UNIT = 'dsh-web.service'
+
+/** The harness tree this command runs from (source or built layout). */
+const HARNESS_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
+
+/**
+ * The unit recorded by the installer, when its state file is readable. A
+ * managed install records its own unit name (for example the launchd label on
+ * macOS), which the platform default would miss.
+ * @returns the recorded unit, or undefined for a source checkout.
+ */
+export function recordedServiceUnit(): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(HARNESS_ROOT, '..', 'install-state.json'), 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const unit = (parsed as { serviceUnit?: unknown }).serviceUnit
+    return typeof unit === 'string' && unit !== '' ? unit : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** The profile whose watcher acts on a marker unless `--profile` overrides it. */
 export const DEFAULT_RESTART_PROFILE = 'web'
@@ -334,7 +355,8 @@ Safe service restart: it never kills the turn that requested it.
   --cancel          cancel a scheduled after-turn restart
   --session <id>    session to wait for (default: $DSH_SESSION_ID); selects the
                     per-session scope immediately, skipping the wait-all default
-  --unit <name>     unit to restart (default: $DSH_RESTART_UNIT or ${DEFAULT_RESTART_UNIT})
+  --unit <name>     unit to restart (default: $DSH_RESTART_UNIT, the unit the
+                    installer recorded, or ${DEFAULT_RESTART_UNIT})
   --profile <name>  profile whose web service owns the marker (default: $DSH_PROFILE or ${DEFAULT_RESTART_PROFILE})
   --max-wait <sec>  bound on the whole-service wait; past it the restart waits
                     only for --session and warns which sessions it stops waiting
@@ -361,7 +383,7 @@ export function parseRestartArgs(
   let cancel = false
   let sessionId: string | undefined
   let sessionExplicit = false
-  let unit = env.DSH_RESTART_UNIT ?? DEFAULT_RESTART_UNIT
+  let unit = env.DSH_RESTART_UNIT ?? recordedServiceUnit() ?? DEFAULT_RESTART_UNIT
   let profile = env.DSH_PROFILE ?? DEFAULT_RESTART_PROFILE
   let maxWaitMs = DEFAULT_MAX_WAIT_MS
   let waitAll: boolean | undefined

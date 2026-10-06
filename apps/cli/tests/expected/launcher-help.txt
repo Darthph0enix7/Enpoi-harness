@@ -1,5 +1,7 @@
 Usage: dsh [--profile] <name> [options] [app-args...]
        dsh plugin --profile <name> <pnpm-args...>
+       dsh restart [--after-turn | --now | --cancel]
+       dsh service <install | uninstall | start | stop | restart | status | logs> [--force]
 
 dsh: boot a DeepSeek Harness profile — an ordered stack of plugin-bundle patch
 layers under your own overrides.
@@ -30,3 +32,7 @@ Examples:
   dsh tui --resume <session>                arguments after the launcher flags reach the app
   dsh web --help                            the web app's own flags and help
   dsh plugin --profile tui add <package>    install a plugin into the tui profile
+  dsh restart --after-turn                  restart the web service once all sessions go idle (bounded)
+  dsh restart --now                         restart the web service detached, right now
+  dsh service install                       install + start the background web service (login persistence)
+  dsh service status                        show the service state and the running URL

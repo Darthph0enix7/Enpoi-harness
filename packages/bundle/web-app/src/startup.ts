@@ -1,8 +1,10 @@
 /**
  * The web app's command-line provider: it parses the `dsh --profile web` flag
- * family (`--host`, `--port`, `--trusted-host`, `--no-open`) and its `--help`
- * text, then provides the immutable values as {@link WEB_STARTUP_SERVICE}.
- * Ordinary rows inject that service before reading it from lazy config.
+ * family (`--host`, `--port`, `--trusted-host`, `--no-open`, `--foreground`)
+ * and its `--help` text, then provides the immutable values as
+ * {@link WEB_STARTUP_SERVICE}. Ordinary rows inject that service before reading
+ * it from lazy config. `--foreground` is accepted here so a service unit can
+ * forbid the launcher's attach path; the app itself always serves when reached.
  * @module @deepseek-ai/dsh-web-app/startup
  */
 
@@ -37,6 +39,8 @@ interface WebOptions {
   open: boolean
   port?: string
   trustedHost?: string[]
+  /** Accepted so a supervising unit can force a serving process; the launcher's attach gate reads it. */
+  foreground?: boolean
 }
 
 /**
@@ -49,6 +53,7 @@ function webCommand(): Command {
     .description('Serve the DeepSeek Harness browser UI.')
     .helpOption('-h, --help', 'show this help')
     .option('--host <host>', 'bind host')
+    .option('--foreground', 'keep serving even when another dsh web instance already answers; service units pass this')
     .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable)')
@@ -57,6 +62,7 @@ Examples:
   dsh --profile web                          serve on the composed host and port
   dsh --profile web --no-open                serve without opening a browser
   dsh --profile web --port 8080              serve on another port
+  dsh --profile web --foreground             serve even when another instance is running
 `)
 }
 

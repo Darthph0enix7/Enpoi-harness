@@ -20,8 +20,10 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     function __ds_health_probe
+        # The Web UI answers 401 without a session cookie; any HTTP response
+        # proves the server is up, so accept anything but a connection failure.
         set -l code (curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3080/ 2>/dev/null)
-        if test "$code" = "200"
+        if test -n "$code"; and test "$code" != "000"
             return 0
         end
         return 1
@@ -61,7 +63,7 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
 
     switch "$cmd"
         case "start"
-            echo "Starting Enpoi Harness (dsh-web.service)..."
+            echo "Starting Enpoi Harness..."
             if test $g_is_linux -eq 1
                 systemctl --user start dsh-web.service dsh-tailnet.service 2>/dev/null; or systemctl --user start dsh-web.service
                 sleep 2
@@ -71,8 +73,7 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
                     echo "✖ Failed to start. Check: journalctl --user -u dsh-web.service -n 20 --no-pager"
                 end
             else
-                echo "macOS: launching dsh web in background..."
-                nohup $g_dsh_bin web --port 3080 >/tmp/dsh-web.log 2>&1 &
+                $g_dsh_bin service start; or echo "✖ Start failed. Install the service with: dsh service install"
             end
 
         case "stop"
@@ -81,41 +82,37 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
                 systemctl --user stop dsh-web.service
                 echo "✔ Service stopped."
             else
-                pkill -f "dsh.*web" 2>/dev/null; or true
-                echo "✔ Process stopped."
+                $g_dsh_bin service stop; or echo "✖ Stop failed. Check: dsh service status"
+                echo "✔ Service stopped."
             end
 
         case "restart"
-            echo "Restarting Enpoi Harness (dsh-web.service)..."
+            echo "Restarting Enpoi Harness..."
             if test $g_is_linux -eq 1
                 systemctl --user restart dsh-web.service
-                echo -n "Waiting for service to warm up..."
-                for i in (seq 1 15)
-                    sleep 1
-                    echo -n "."
-                    if __ds_health_probe
-                        echo " ✔ Ready!"
-                        return 0
-                    end
-                end
-                echo ""
-                echo "⚠️ Service restarted but health probe is pending. Check: ds doctor"
             else
-                pkill -f "dsh.*web" 2>/dev/null; or true
-                sleep 1
-                nohup $g_dsh_bin web --port 3080 >/tmp/dsh-web.log 2>&1 &
-                echo "✔ Restarted."
+                $g_dsh_bin service restart; or begin
+                    echo "✖ Restart failed. Install the service with: dsh service install"
+                    return 1
+                end
             end
+            echo -n "Waiting for service to warm up..."
+            for i in (seq 1 15)
+                sleep 1
+                echo -n "."
+                if __ds_health_probe
+                    echo " ✔ Ready!"
+                    return 0
+                end
+            end
+            echo ""
+            echo "⚠️ Service restarted but health probe is pending. Check: ds doctor"
 
         case "status"
             if test $g_is_linux -eq 1
                 systemctl --user status dsh-web.service --no-pager
             else
-                if pgrep -f "dsh.*web" >/dev/null 2>&1
-                    echo "✔ dsh web is running (macOS)"
-                else
-                    echo "✖ dsh web is stopped (macOS)"
-                end
+                $g_dsh_bin service status
             end
 
         case "web"

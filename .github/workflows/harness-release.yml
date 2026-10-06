@@ -1,0 +1,207 @@
+# Prebuilt harness release artifacts.
+#
+# Builds the official harness per platform on GitHub-hosted runners and
+# publishes a pruned tarball (single top-level directory) plus its SHA-256 to
+# the GitHub Release tagged `v<VERSION>`; VERSION comes from the root
+# package.json and the asset name carries the build commit. scripts/install.sh
+# consumes the tarball to skip `pnpm install` + the full build on user machines.
+#
+# Runner labels: `macos-13` (x86_64) was retired on 2025-12-08. The closest
+# documented GitHub-hosted x86_64 image is `macos-15-intel` (the last Intel
+# image, available until ~August 2027); `macos-14` is arm64.
+#
+# The artifact keeps the full built node_modules closure: `pnpm install --prod`
+# and `pnpm prune --prod` were both measured and are unusable for this
+# workspace (runtime-relevant peer packages are pinned in devDependencies in
+# pnpm-lock.yaml, so a prod-only tree fails the smoke boot). Packing therefore
+# only drops VCS/build leftovers and the non-runtime trees that passed the
+# pruned-tree smoke (docs, snapshots, benchmarks, python, website).
+
+name: Harness Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - stable
+      - beta
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harness-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x64
+          - runner: macos-14
+            os: darwin
+            arch: arm64
+          - runner: macos-15-intel
+            os: darwin
+            arch: x64
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      # The desktop shell's Electron binary is never used by the CLI/web
+      # runtime; skipping its download keeps CI fast and the artifact smaller.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+
+      - name: Enable corepack (pnpm from the packageManager pin)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `build:official` refuses to run without the public client environment:
+      # scripts/build.ts resolves the `official` profile through
+      # resolveClientBuildEnvironment, which requires both values. The commit is
+      # the canonical 7-character prefix (same shape the installer records).
+      - name: Resolve official build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version)")"
+          echo "DSH_CLIENT_COMMIT_HASH=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          echo "DSH_CLIENT_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build official harness (includes build:web)
+        run: pnpm run build:official
+
+      - name: Ensure profile plugin bundles
+        env:
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: bash profile/web/build-plugins.sh profile/web
+
+      - name: Smoke test (CLI + web surface)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          test -f "$ROOT/apps/cli/lib/bin.js"
+          test -f "$ROOT/apps/web/dist/index.html"
+          test -f "$ROOT/.dsh-build/client-build-environment.json"
+
+          SCRATCH="$RUNNER_TEMP/dsh-smoke"
+          rm -rf "$SCRATCH"
+          mkdir -p "$SCRATCH/home" "$SCRATCH/cwd"
+          cd "$SCRATCH/cwd"
+
+          export DSH_HOME="$SCRATCH/home"
+          export DSH_AGENTS_HOME="$SCRATCH/home/.agents"
+          export DSH_TELEMETRY_DISABLED=1
+          export NODE_NO_WARNINGS=1
+
+          echo "smoke: --version"
+          node "$ROOT/apps/cli/lib/bin.js" --version
+
+          echo "smoke: --profile web --dump-default-config"
+          node "$ROOT/apps/cli/lib/bin.js" --profile web --dump-default-config > "$SCRATCH/default-config.yml"
+          test -s "$SCRATCH/default-config.yml"
+
+          echo "smoke: web surface boots and serves the app"
+          # The fixture intercepts `open`, performs the token exchange and the
+          # authenticated page fetch, then prints `dsh browser-open: {...,"status":200,...}`.
+          # Its optional DSH_BROWSER_OPEN_TEST_EXIT_ON_READY hook exits on a
+          # 250 ms timer that races that fetch, so the smoke polls for the
+          # evidence line and terminates the (long-lived) server itself.
+          export DEEPSEEK_API_KEY=keyless-smoke-no-call
+          export SSH_CONNECTION= SSH_TTY=
+          node --import "$ROOT/apps/cli/tests/fixtures/web-browser-open/register.mjs" \
+            "$ROOT/apps/cli/lib/bin.js" web --port 0 > "$SCRATCH/web.log" 2>&1 &
+          web_pid=$!
+          deadline=$((SECONDS + 180))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if grep -q 'dsh browser-open: ' "$SCRATCH/web.log"; then break; fi
+            sleep 1
+          done
+          if kill -0 "$web_pid" 2>/dev/null; then
+            kill -TERM "$web_pid" 2>/dev/null || true
+          fi
+          wait "$web_pid" 2>/dev/null || true
+          cat "$SCRATCH/web.log"
+          grep -q 'dsh web: http://127.0.0.1:' "$SCRATCH/web.log"
+          grep -q '"status":200' "$SCRATCH/web.log"
+
+      - name: Pack artifact
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version)")"
+          COMMIT="$(git rev-parse HEAD)"
+          TOP="dsh-harness-$VERSION"
+          ASSET="dsh-harness-$VERSION-$COMMIT-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          STAGE="$RUNNER_TEMP/dsh-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          # Stage the built tree under one top-level directory (install.sh
+          # expects exactly one). Hardlinks keep the stage near-zero extra disk
+          # on the runner; fall back to a full copy when the filesystem cannot
+          # link ($RUNNER_TEMP and the workspace share one volume on
+          # GitHub-hosted runners).
+          if ! cp -al "$GITHUB_WORKSPACE" "$STAGE/$TOP"; then
+            rm -rf "$STAGE/$TOP"
+            cp -a "$GITHUB_WORKSPACE" "$STAGE/$TOP"
+          fi
+          # `.git` is never shipped; the rest is the smoke-tested prune list.
+          rm -rf "$STAGE/$TOP/.git"
+          rm -rf "$STAGE/$TOP/docs" "$STAGE/$TOP/snapshots" "$STAGE/$TOP/benchmarks" \
+                 "$STAGE/$TOP/python" "$STAGE/$TOP/website" "$STAGE/$TOP/dist" "$STAGE/$TOP/coverage"
+          find "$STAGE/$TOP" -type f -name '*.tsbuildinfo' -delete
+
+          tar -czf "$ASSET" -C "$STAGE" "$TOP"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          fi
+          ls -lh "$ASSET" "$ASSET.sha256"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET='${{ steps.pack.outputs.asset }}'
+          VERSION='${{ steps.pack.outputs.version }}'
+          TAG="v$VERSION"
+
+          # create-release is idempotent and tolerant of the matrix race: the
+          # other cells may create the same tag concurrently.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            latest=""
+            if [ "${GITHUB_REF_NAME:-}" = "beta" ]; then latest="--latest=false"; fi
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
+              --notes "Prebuilt DeepSeek Harness $VERSION ($GITHUB_SHA)." $latest \
+              || gh release view "$TAG" >/dev/null 2>&1 \
+              || { echo "could not create or find release $TAG"; exit 1; }
+          fi
+
+          attempt=1
+          until gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber; do
+            [ "$attempt" -ge 3 ] && { echo "upload failed after $attempt attempts"; exit 1; }
+            attempt=$((attempt + 1))
+            sleep 10
+          done

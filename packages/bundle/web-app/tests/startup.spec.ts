@@ -110,6 +110,13 @@ describe('web command-line provider', () => {
     expect(observed.exits).toEqual([])
   })
 
+  it('accepts --foreground as an explicit serve flag without changing published values', async () => {
+    const { values, observed } = await bootProvider(['--foreground', '--no-open'])
+    expect(values).toEqual({ openBrowser: false, trustedHosts: [] })
+    expect(observed.readerConfig).toEqual({ host: '127.0.0.1', openBrowser: false, port: 3080, trustedHosts: [] })
+    expect(observed.exits).toEqual([])
+  })
+
   it('leaves deployment values to each consumer when flags omit them', async () => {
     const { values, observed } = await bootProvider([])
     expect(values).toEqual({ openBrowser: true, trustedHosts: [] })
@@ -126,6 +133,7 @@ describe('web command-line provider', () => {
     expect(observed.out).toContain('dsh --profile web')
     expect(observed.out).toContain('--no-open')
     expect(observed.out).toContain('--trusted-host')
+    expect(observed.out).toContain('--foreground')
     expect(values).toBeUndefined()
     expect(observed.readerConfig).toBeUndefined()
     expect(observed.exits).toEqual([0])

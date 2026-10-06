@@ -64,8 +64,21 @@ interface RestartInvocation {
   args: string[]
 }
 
+/** Background web service management (fork): install, uninstall, start, stop, restart, status, logs. */
+interface ServiceInvocation {
+  mode: 'service'
+  /** Raw `dsh service` arguments, verbatim; parsed by the service command itself. */
+  args: string[]
+}
+
 /** The resolved `dsh` invocation. Help, version, and errors exit inside {@link parseDshArgs}. */
-export type DshInvocation = ProfileInvocation | DumpConfigInvocation | DumpConfigSchemaInvocation | PluginInvocation | RestartInvocation
+export type DshInvocation =
+  | ProfileInvocation
+  | DumpConfigInvocation
+  | DumpConfigSchemaInvocation
+  | PluginInvocation
+  | RestartInvocation
+  | ServiceInvocation
 
 /** Launcher flags for profile boot and configuration dumps. */
 interface BootOptions {
@@ -106,6 +119,8 @@ Examples:
   dsh plugin --profile tui add <package>    install a plugin into the tui profile
   dsh restart --after-turn                  restart the web service once all sessions go idle (bounded)
   dsh restart --now                         restart the web service detached, right now
+  dsh service install                       install + start the background web service (login persistence)
+  dsh service status                        show the service state and the running URL
 `
 
 /**
@@ -160,7 +175,7 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
   program
     .name('dsh')
     .version(version, '-V, --version', 'output the version number')
-    .usage('[--profile] <name> [options] [app-args...]\n       dsh plugin --profile <name> <pnpm-args...>\n       dsh restart [--after-turn | --now | --cancel]')
+    .usage('[--profile] <name> [options] [app-args...]\n       dsh plugin --profile <name> <pnpm-args...>\n       dsh restart [--after-turn | --now | --cancel]\n       dsh service <install | uninstall | start | stop | restart | status | logs> [--force]')
     .description('dsh: boot a DeepSeek Harness profile — an ordered stack of plugin-bundle patch layers under your own overrides.')
     .addHelpText('after', HELP_EXAMPLES)
     .exitOverride()
@@ -209,6 +224,10 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
   // Fork: the safe restart command never boots a profile and owns its own
   // parser (help, flag errors, and the marker lifecycle).
   if (first === 'restart') return { mode: 'restart', args: argv.slice(1) }
+
+  // Fork: service management never boots a profile either; the command owns
+  // its parser, its per-platform unit templates, and its exit code.
+  if (first === 'service') return { mode: 'service', args: argv.slice(1) }
 
   try {
     const expanded = first !== undefined && !first.startsWith('-') && first !== 'plugin'
