@@ -129,6 +129,34 @@ function checkRuntimeTitle() {
   else if (!js.includes('const productTitle = "Enpoi Harness";')) skips.push('ui-layout productTitle literal not found (rebuilt shape changed; verify manually)')
 }
 
+/**
+ * The web bundle must ship exactly one occupant per brand slot: two same-priority
+ * registrations make the single-slot collision retire the Enpoi chain, so the
+ * sidebar/hero silently fall back to the upstream fish.
+ */
+function checkBrandRoster() {
+  const roster = join(HARNESS, 'packages/bundle/web-app/cordis.patch.yml')
+  if (!existsSync(roster)) { skips.push('bundle roster not found; brand roster check skipped'); return }
+  const rows = []
+  let block
+  for (const line of readFileSync(roster, 'utf8').split('\n')) {
+    if (/^\s*- id:/u.test(line)) {
+      if (block !== undefined) rows.push(block)
+      block = [line]
+      continue
+    }
+    if (block !== undefined) block.push(line)
+  }
+  if (block !== undefined) rows.push(block)
+  const enabled = new Set(rows
+    .filter(lines => lines.some(line => /^\s*name:/u.test(line)) && !lines.some(line => /^\s*disabled:\s*true\b/u.test(line)))
+    .map(lines => /- id:\s*(\S+)/u.exec(lines[0])?.[1])
+    .filter(id => id !== undefined))
+  if (enabled.has('ui-brand-enpoi') && enabled.has('ui-brand-official')) {
+    drift.push('bundle roster enables BOTH ui-brand-enpoi and ui-brand-official; the single-slot collision retires the Enpoi brand — remove the official row')
+  }
+}
+
 /** Mint the auth cookie from the running service journal, like preset-tool-inventory.mjs. */
 function liveCookie() {
   try {
@@ -190,6 +218,7 @@ if (CHECK) {
   checkPages()
   checkAssets()
   checkRuntimeTitle()
+  checkBrandRoster()
   for (const item of contrastDrift()) drift.push(item)
   if (LIVE) await checkLive()
   for (const note of skips) console.warn(`[rebrand] warn ${note}`)
@@ -198,7 +227,7 @@ if (CHECK) {
     for (const item of drift) console.error(`  - ${item}`)
     process.exit(1)
   }
-  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title, overlay contrast`)
+  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title, brand roster, overlay contrast`)
 } else {
   apply()
   console.log('[rebrand] applied; run with --check to verify')

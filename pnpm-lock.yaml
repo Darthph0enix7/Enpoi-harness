@@ -2534,9 +2534,6 @@ importers:
       '@deepseek-ai/dsh-client-ui-brand-enpoi':
         specifier: workspace:*
         version: link:../../client/ui-brand-enpoi
-      '@deepseek-ai/dsh-client-ui-brand-official':
-        specifier: workspace:*
-        version: link:../../client/ui-brand-official
       '@deepseek-ai/dsh-client-ui-chat':
         specifier: workspace:*
         version: link:../../client/ui-chat
