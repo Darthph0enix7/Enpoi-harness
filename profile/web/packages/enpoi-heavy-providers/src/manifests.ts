@@ -48,6 +48,8 @@ export interface HeavyHealth {
   expectStatus?: readonly number[]
   /** Substring the response body must contain when set. */
   expectBody?: string
+  /** Request headers the probe must carry (a vendor gate may need a client identity). */
+  headers?: Readonly<Record<string, string>>
   timeoutMs?: number
 }
 
@@ -282,8 +284,22 @@ const RUNTIME_TOOL_RE: Readonly<Partial<Record<HeavyLocalRuntime, RegExp>>> = {
 /** launchd label for the antigravity user agent (macOS). */
 const ANTIGRAVITY_LAUNCHD_LABEL = 'dev.enpoi.antigravity-proxy'
 
-/** The npm install step every antigravity platform shares. */
-const ANTIGRAVITY_NPM_STEP: HeavyStep = { label: 'Install the proxy package', command: 'npm install -g antigravity-claude-proxy', weight: 2 }
+/**
+ * The npm install step every antigravity platform shares.
+ *
+ * The install target is the fixed `~/.local` prefix both user-service units
+ * name on their ExecStart line. A system-Node box (`/usr/lib/node_modules`) is
+ * not writable by the user, and on an nvm/fnm box the default global prefix is
+ * a version-manager directory the service never searches — either way a plain
+ * `npm install -g` lands the binary outside the service's path. The step keeps
+ * the version-manager prefixes untouched (never export NPM_CONFIG_PREFIX — it
+ * breaks them). No sudo.
+ */
+const ANTIGRAVITY_NPM_STEP: HeavyStep = {
+  label: 'Install the proxy package',
+  command: 'mkdir -p "{home}/.local/bin" && npm install -g --prefix "{home}/.local" antigravity-claude-proxy',
+  weight: 2,
+}
 
 /** The antigravity health wait, shared by every platform variant. */
 const ANTIGRAVITY_WAIT_STEP: HeavyStep = {
@@ -297,19 +313,35 @@ const ANTIGRAVITY_SYSTEMD_STEPS: readonly HeavyStep[] = [
   {
     label: 'Write the systemd user unit',
     // `start --log` is the package's foreground mode; a bare invocation only
-    // prints help. The unit's main process must stay the server.
-    command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc \'exec antigravity-claude-proxy start --log\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
+    // prints help. The unit's main process must stay the server. The explicit
+    // PATH resolves the npm shim's `node` when the version manager only
+    // extends an interactive shell; the wrapper prefers the absolute path the
+    // npm step guarantees and falls back to the PATH-resolved binary (a
+    // version-managed node shim may live outside `~/.local/bin`).
+    command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nEnvironment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin\nExecStart=/bin/bash -lc \'BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
   },
   { label: 'Enable and start the unit', command: 'systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service' },
+  {
+    label: 'Enable lingering (the unit starts without an open login session)',
+    command: 'loginctl enable-linger "$(id -un)"',
+    optional: true,
+  },
   ANTIGRAVITY_WAIT_STEP,
 ]
 
-/** macOS antigravity provisioning: the same npm package behind a LaunchAgent. */
+/**
+ * macOS antigravity provisioning: the same npm package behind a LaunchAgent.
+ *
+ * The agent prefers the absolute `~/.local/bin` path the npm step guarantees
+ * and falls back to the PATH-resolved binary (the login-shell wrapper and the
+ * PATH list Homebrew prefixes, `~/.local/bin`, and the common nvm/fnm alias
+ * directories, which resolve the npm shim's `node`).
+ */
 const ANTIGRAVITY_LAUNCHD_STEPS: readonly HeavyStep[] = [
   ANTIGRAVITY_NPM_STEP,
   {
     label: 'Write the launchd agent',
-    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${ANTIGRAVITY_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec antigravity-claude-proxy start --log</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PORT</key>\n    <string>8082</string>\n    <key>HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>\n</dict>\n</plist>\nEOF`,
+    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${ANTIGRAVITY_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PORT</key>\n    <string>8082</string>\n    <key>HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:{home}/.nvm/versions/node/current/bin:{home}/Library/Application Support/fnm/aliases/default/bin:{home}/.local/share/fnm/aliases/default/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>\n</dict>\n</plist>\nEOF`,
   },
   {
     label: 'Load and start the agent',
@@ -317,6 +349,25 @@ const ANTIGRAVITY_LAUNCHD_STEPS: readonly HeavyStep[] = [
   },
   ANTIGRAVITY_WAIT_STEP,
 ]
+
+/**
+ * The commandcode vendor health probe. The vendor gate serves CLI-shaped
+ * clients and may answer a generic client 4xx, so the probe carries the four
+ * CLI identity headers (owner: `enpoi-commandcode-provider/src/headers.ts`)
+ * and accepts the documented non-2xx statuses; a working route must never
+ * read as unreachable.
+ */
+const COMMANDCODE_HEALTH: HeavyHealth = {
+  url: 'https://api.commandcode.ai/',
+  timeoutMs: 5000,
+  expectStatus: [200, 401, 403, 404, 405],
+  headers: {
+    'x-command-code-version': '1.54.0',
+    'x-cli-environment': 'production',
+    'x-project-slug': 'opencode',
+    'user-agent': 'cli',
+  },
+}
 
 /** The commandcode setup step: link and build the provider package (idempotent). */
 const COMMANDCODE_INSTALL_STEP: HeavyStep = {
@@ -341,12 +392,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     // ordinary quirks, not an operator-blocking browser requirement.
     requiresBrowser: [],
     quirks: [
-      'Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path',
+      'Local install dependencies: Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app (no Docker needed there)',
       'First-run setup code and password-reset code appear only in `docker compose logs`; upstream provider keys are added on the web dashboard',
       'Unified key is the only client auth — never expose this port beyond the local machine',
       'Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable',
       'The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves',
       'A missing bind-mounted JSON file is created as a directory by Docker → boot loop',
+      'Windows: the desktop-app install steps run through Git Bash (the harness executes shell steps with bash) — install Git for Windows first',
     ],
     reuse: {
       label: 'Use a detected instance',
@@ -365,19 +417,26 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         // Unknown platforms fall back to the manual Docker Compose path.
         default: {
           steps: [
-            // Re-running the install must not fail on the existing clone.
-            { label: 'Clone FreeLLMAPI', command: 'test -d {home}/freellmapi/.git || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi', weight: 2 },
+            // Re-running the install must not fail on the existing clone. A
+            // stale non-git directory is replaced, but a `.env` inside it is
+            // never wiped: it holds ENCRYPTION_KEY, and deleting it makes
+            // every stored upstream key unrecoverable.
+            { label: 'Clone FreeLLMAPI', command: 'if [ -d "{home}/freellmapi" ] && [ ! -d "{home}/freellmapi/.git" ]; then if [ -f "{home}/freellmapi/.env" ]; then echo "Existing {home}/freellmapi/.env found without .git; refusing to wipe it — move the directory aside, then retry" >&2; exit 1; fi; rm -rf "{home}/freellmapi" 2>/dev/null || true; fi; test -d "{home}/freellmapi/.git" || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi "{home}/freellmapi"', weight: 2 },
             {
               label: 'Generate ENCRYPTION_KEY',
               // PORT is the HOST port (compose maps ${PORT}:3001); keep it at
-              // 3002 so the local route's baseURL resolves.
-              command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env',
+              // 3002 so the local route's baseURL resolves. An existing .env
+              // is kept only when its ENCRYPTION_KEY is non-empty: an empty
+              // key makes every stored upstream key unrecoverable.
+              command: 'if [ ! -f "{home}/freellmapi/.env" ] || ! grep -qE \'^ENCRYPTION_KEY=.+\' "{home}/freellmapi/.env"; then printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > "{home}/freellmapi/.env"; fi',
             },
             {
               label: 'Start the stack',
               // Docker or Podman: preflight offers Podman as the substitute,
-              // so the step must resolve whichever engine exists.
-              command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose up -d',
+              // so the step must resolve whichever engine exists. A Podman
+              // without its compose plugin has to fail here, not midway
+              // through `up`.
+              command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose version >/dev/null 2>&1 || { echo "podman compose plugin missing (need podman-compose)"; exit 1; }; "$ENGINE" compose up -d',
               cwd: '{home}/freellmapi',
             },
             {
@@ -399,17 +458,22 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
             {
               label: 'Download the latest .dmg',
               // Apple Silicon and Intel ship separate disk images; picking by
-              // `uname -m` keeps the install correct on both.
-              command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\'"$arch"\'[.]dmg"\' | head -1 | cut -d\'"\' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p {home}/Downloads && curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg "$url"',
+              // `uname -m` keeps the install correct on both. The asset name
+              // ends `-<arch>.dmg`, so the pattern must carry that hyphen (a
+              // `"arm64` pattern can never match). A re-run keeps the image
+              // already in ~/Downloads.
+              command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+-\'"$arch"\'\\.dmg"\' | head -1 | cut -d\'"\' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"',
               weight: 2,
             },
             {
               label: 'Install the app from the disk image',
-              command: 'mkdir -p /tmp/freellmapi-dmg && hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet',
+              // A per-run mount point is detached and removed even when the
+              // copy fails, so a hung volume never blocks the next attempt.
+              command: 'MOUNT="/tmp/freellmapi-dmg-$$"; mkdir -p "$MOUNT"; hdiutil attach "{home}/Downloads/FreeLLMAPI.dmg" -nobrowse -quiet -mountpoint "$MOUNT" && cp -R "$MOUNT"/*.app /Applications/; status=$?; hdiutil detach "$MOUNT" -quiet >/dev/null 2>&1 || true; rmdir "$MOUNT" 2>/dev/null || true; exit $status',
             },
             {
               label: 'Pin the desktop app to port 3002',
-              command: 'mkdir -p {home}/Library/Application\\ Support/FreeLLMAPI && printf \'{"port":3002}\\n\' > {home}/Library/Application\\ Support/FreeLLMAPI/config.json',
+              command: 'mkdir -p "{home}/Library/Application Support/FreeLLMAPI" && printf \'{"port":3002}\\n\' > "{home}/Library/Application Support/FreeLLMAPI/config.json"',
             },
             { label: 'Launch FreeLLMAPI', command: 'open -a FreeLLMAPI' },
             {
@@ -421,13 +485,15 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         // Windows only ships a desktop app (no Docker path in the vendor docs).
         win32: {
           label: 'Install locally (vendor desktop app, no Docker)',
-          deps: ['Windows 10+'],
+          deps: ['Windows 10+', 'Git Bash (the install steps run through bash)'],
           diskHint: '~250 MB app; data in %APPDATA%\\FreeLLMAPI',
           runtime: 'vendor-app',
           steps: [
             {
               label: 'Download the latest installer',
-              command: 'mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.exe"\' | head -1 | cut -d\'"\' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI-Setup.exe {}',
+              // The matched URL lands in a file first: an empty match has to
+              // fail the step instead of feeding xargs an empty string.
+              command: 'mkdir -p "{home}/Downloads" && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.exe"\' | head -1 | cut -d\'"\' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"',
               weight: 2,
             },
             { label: 'Install silently', command: 'cmd //c start //wait "" "$HOME/Downloads/FreeLLMAPI-Setup.exe" /S' },
@@ -451,7 +517,20 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         // fail-soft so a machine that moved to another engine still cleans up.
         { label: 'Stop the stack and drop its volume', command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" compose down -v', cwd: '{home}/freellmapi', optional: true },
         { label: 'Remove the container image', command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" image rm ghcr.io/tashfeenahmed/freellmapi:latest', optional: true },
-        { label: 'Remove the clone directory', command: 'rm -rf {home}/freellmapi' },
+        { label: 'Remove the clone directory', command: 'rm -rf "{home}/freellmapi"' },
+        // The vendor desktop-app leftovers are platform-guarded: each step
+        // exits cleanly on the platforms it does not own and never fails a
+        // teardown.
+        {
+          label: 'Remove the macOS desktop app and its data',
+          optional: true,
+          command: 'test "$(uname -s)" = Darwin || exit 0; pkill -f FreeLLMAPI 2>/dev/null || true; hdiutil detach "/tmp/freellmapi-dmg" >/dev/null 2>&1 || true; rm -rf /Applications/FreeLLMAPI.app "{home}/Library/Application Support/FreeLLMAPI" "{home}/Downloads/FreeLLMAPI.dmg" /tmp/freellmapi-dmg',
+        },
+        {
+          label: 'Remove the Windows desktop app and its data',
+          optional: true,
+          command: 'case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 0;; esac; taskkill //F //IM FreeLLMAPI.exe 2>/dev/null || true; rm -rf "$APPDATA/FreeLLMAPI" "$LOCALAPPDATA/Programs/FreeLLMAPI" "$HOME/Downloads/FreeLLMAPI-Setup.exe"',
+        },
       ],
       warnings: [
         '`docker compose down -v` deletes volume freellmapi_freellmapi-data — every upstream key and the unified key die with it',
@@ -477,7 +556,8 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     ],
     quirks: [
       'Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install — run the package manually or use a proxy running elsewhere',
-      'macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin — a global binary reachable only from a fish or zsh configuration is not found; keep it reachable from a login bash profile or one of those directories',
+      'Linux: the systemd user unit runs the proxy through /bin/bash -lc with PATH ~/.local/bin:/usr/local/bin:/usr/bin:/bin; the package installs under ~/.local/bin, and a Node.js reachable only from an nvm/fnm shell configuration is not found — keep it reachable from a login shell or one of those directories',
+      'macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin plus the common nvm/fnm node directories; the package installs under ~/.local/bin, and a Node.js reachable only from a fish/zsh/nvm/fnm shell configuration is not found — keep it reachable from a login bash profile or one of those directories',
       'The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route',
       'The console at :8082 has no auth (webuiPassword empty) — trusted networks only',
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED … resets after 46h" is normal',
@@ -492,7 +572,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     local: {
       label: 'Install locally (npm + user service)',
       baseURL: 'http://127.0.0.1:8082',
-      deps: ['Node.js >= 18'],
+      deps: ['Node.js >= 18', 'A reachable systemd user session (systemctl --user) on the default path'],
       diskHint: '~23 MB install, ~78–150 MB RAM, no GPU',
       dashboardUrl: 'http://127.0.0.1:8082',
       runtime: 'node',
@@ -530,7 +610,14 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
           optional: true,
           command: `rm -f {config}/systemd/user/antigravity-proxy.service {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi`,
         },
-        { label: 'Uninstall the package', command: 'npm uninstall -g antigravity-claude-proxy', optional: true },
+        // The package may live in `~/.local` (the install's prefix) or in a
+        // version-manager global prefix a previous setup used; both are
+        // uninstalled, fail-soft, so neither location keeps a stale binary.
+        {
+          label: 'Uninstall the package',
+          optional: true,
+          command: 'npm uninstall -g --prefix "{home}/.local" antigravity-claude-proxy 2>/dev/null || true; npm uninstall -g antigravity-claude-proxy 2>/dev/null || true',
+        },
         { label: 'Remove the config directory (OAuth tokens, presets, usage history)', command: 'rm -rf {config}/antigravity-proxy' },
       ],
       warnings: [
@@ -589,7 +676,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       label: 'Use the vendor endpoint now',
       baseURL: 'https://api.commandcode.ai',
       note: 'Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.',
-      health: { url: 'https://api.commandcode.ai/', timeoutMs: 5000 },
+      health: COMMANDCODE_HEALTH,
     },
     local: {
       label: 'Link the provider package, then use the vendor endpoint',
@@ -605,11 +692,11 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         darwin: { steps: [COMMANDCODE_INSTALL_STEP] },
         win32: {
           label: 'Not supported on Windows',
-          unsupported: 'The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually (node scripts/install.mjs <profile>) or run the harness on Linux/macOS.',
+          unsupported: 'The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually: from the profile root (normally ~/.dsh/profiles/web) run `node packages/enpoi-commandcode-provider/scripts/install.mjs .`, or run the harness on Linux/macOS.',
           steps: [],
         },
       },
-      health: { url: 'https://api.commandcode.ai/', timeoutMs: 5000 },
+      health: COMMANDCODE_HEALTH,
     },
     removal: {
       // No local service exists: the vendor endpoint needs no teardown and the

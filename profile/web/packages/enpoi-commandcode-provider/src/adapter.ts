@@ -81,6 +81,18 @@ export interface CommandCodePoolConfig {
   identities: CommandCodePoolIdentity[]
 }
 
+/** One route model entry as settings or model discovery writes it. */
+export interface CommandCodeRouteModel {
+  id: string
+  name?: string
+  /** Maximum combined request and response context the catalog disclosed. */
+  contextWindow?: number
+  /** Maximum output tokens the catalog disclosed. */
+  maxTokens?: number
+  /** Accepted input modalities the catalog disclosed. */
+  input?: readonly ('text' | 'image')[]
+}
+
 /** One route this adapter serves, as written by the heavy-provider flow. */
 export interface CommandCodeRouteProfile {
   /** Provider route key (`commandcode`). */
@@ -103,7 +115,7 @@ export interface CommandCodeRouteProfile {
    */
   pool?: CommandCodePoolConfig
   /** Models the route writer discovered; the catalog supersedes them. */
-  models?: readonly { id: string; name?: string }[]
+  models?: readonly CommandCodeRouteModel[]
   /** Total-pixel budget for one user-attached request image. */
   userImageMaxPixels: number
   /** Encoded-byte target for one user-attached request image. */
@@ -329,6 +341,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       provider,
       id: model.id,
       name: model.name ?? model.id,
+      ...model.input === undefined || model.input.length === 0 ? {} : { inputModalities: [...model.input] },
     }))
   }
 

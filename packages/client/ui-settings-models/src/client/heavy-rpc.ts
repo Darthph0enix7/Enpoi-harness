@@ -110,6 +110,8 @@ export interface HeavyRemoveView {
     cacheEntryRemoved: boolean
     chainLinksRemoved: number
     teardown: { ran: boolean; ok: boolean; failedStep?: string; output: string }
+    /** Non-fatal facts, e.g. a shared credential reference left in place. */
+    warnings: string[]
     errors: string[]
   }
 }
@@ -211,8 +213,18 @@ export const heavyApi = {
   },
   /** Configured/health/job state for one provider. */
   status: (id: string) => heavyRpc<HeavyStatusView>('enpoiHeavy.status', { request: { id } }),
-  /** Add by detected instance: probe localhost, write the route at what answered. */
-  reuse: (id: string, key?: string) => heavyRpc<HeavyReuseView>('enpoiHeavy.reuse', { request: { id, ...key === undefined || key === '' ? {} : { key } } }),
+  /**
+   * Add by detected instance: probe localhost, write the route at what
+   * answered. A non-empty `baseURL` is the operator's custom-instance
+   * fallback: the host skips detection and writes the route there.
+   */
+  reuse: (id: string, key?: string, baseURL?: string) => heavyRpc<HeavyReuseView>('enpoiHeavy.reuse', {
+    request: {
+      id,
+      ...key === undefined || key === '' ? {} : { key },
+      ...baseURL === undefined || baseURL.trim() === '' ? {} : { baseURL: baseURL.trim() },
+    },
+  }),
   /** Add by local install: start the polled job. */
   install: (id: string, key?: string) => heavyRpc<HeavyInstallView>('enpoiHeavy.install', { request: { id, ...key === undefined || key === '' ? {} : { key } } }),
   /** Poll one provider's current job. */

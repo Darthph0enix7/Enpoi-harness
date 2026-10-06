@@ -8,6 +8,7 @@ import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
+import styles from '../src/client/ModelsSection.module.css'
 
 afterEach(() => {
   cleanup()
@@ -161,4 +162,39 @@ it('resets the search only when the panel switches provider', () => {
   view.rerender(panel('anthropic'))
 
   expect(screen.getByPlaceholderText<HTMLInputElement>(`Search ${MODELS.length} models...`).value).toBe('')
+})
+
+it('renders a 501 identity-test answer as a disabled explanatory state, not a failure', async () => {
+  const hint = 'Command Code identity testing is not implemented; run scripts/live-gate.mjs'
+  const wireFace = wire()
+  wireFace.llm.poolTestIdentity = vi.fn(async () => ({
+    ok: true as const,
+    value: { ok: false, status: 501, error: hint },
+  })) as unknown as ModelsWire['llm']['poolTestIdentity']
+  render(
+    <ProviderDetailPanel
+      row={row('commandcode')}
+      namespace={namespace('commandcode', MODELS, pool('priority-sticky'))}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByTitle('Test this API key'))
+  // The host said "not implemented", not "credential failed": every identity's
+  // test button is disabled and carries the explanation as its tooltip, and
+  // the card shows the same explanation.
+  const disabled = await screen.findByTitle<HTMLButtonElement>(hint)
+  expect(disabled.disabled).toBe(true)
+})
+
+it('renders the detail panel root container with the detailPanel class contract', () => {
+  const { container } = render(panel('openai'))
+  const panelEl = container.querySelector(`.${styles.detailPanel}`)
+  expect(panelEl).not.toBeNull()
+  expect(panelEl?.className).toContain(styles.detailPanel)
 })

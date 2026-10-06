@@ -13,6 +13,7 @@ import {
 } from '../src/client/model-groups.ts'
 import type { ModelPickerFace } from '../src/client/picker-face.ts'
 import { en } from '../src/client/locales.ts'
+import css from '../src/client/ModelGroups.module.css'
 
 const t: ModelGroupsRowProps['t'] = (key, params) => {
   const template = en[key]
@@ -448,5 +449,27 @@ describe('Model groups row', () => {
         },
       }], 3)
     })
+  })
+
+  it('preserves header-only layout when collapsed and attaches scroll class to body when expanded', () => {
+    const { container } = render(<ModelGroupsRow
+      namespace={namespaceOf({ stable: STABLE })}
+      api={wire(vi.fn())}
+      readOnly={false}
+      picker={null}
+      t={t}
+      modelT={key => key}
+      onSaved={vi.fn()}
+    />)
+
+    // Collapsed: header is present, but body is omitted from DOM
+    expect(container.querySelector(`.${css.header}`)).not.toBeNull()
+    expect(container.querySelector(`.${css.body}`)).toBeNull()
+
+    // Expand: body mounts carrying the scrollable body class
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    const body = container.querySelector(`.${css.body}`)
+    expect(body).not.toBeNull()
+    expect(body?.className).toContain(css.body)
   })
 })

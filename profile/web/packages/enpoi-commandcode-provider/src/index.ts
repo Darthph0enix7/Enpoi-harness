@@ -45,7 +45,11 @@
  * loopback (a keypool that injects its own auth): an anonymous request cannot
  * pass the vendor gate. Mounted routes also register with the configurable-
  * provider directory under this plugin's settings namespace, which is how the
- * Keys card reaches pool status and identity checks.
+ * Keys card reaches pool status and identity checks, and register a model
+ * discovery for the namespace: the Models page's Refresh and Test Connection,
+ * and the Add Provider draft, answer from the bundled catalog snapshot on a
+ * direct route (the vendor exposes no model listing), so a freshly written
+ * route carries the catalog's models, context windows, and input modalities.
  *
  * @module dsh-enpoi-commandcode-provider
  */
@@ -69,8 +73,8 @@ import { PoolEngine } from '@deepseek-ai/dsh-llm-pi-ai'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
 import type { CatalogEntry } from './catalog.js'
-import { CatalogStore, parseCatalog } from './catalog.js'
-import type { CommandCodePoolConfig, CommandCodePoolIdentity, CommandCodeRouteProfile } from './adapter.js'
+import { CatalogStore, contextWindowOf, maxOutputTokensOf, modalitiesOf, parseCatalog } from './catalog.js'
+import type { CommandCodePoolConfig, CommandCodePoolIdentity, CommandCodeRouteModel, CommandCodeRouteProfile } from './adapter.js'
 import { CommandCodeAdapter, DEFAULT_USER_IMAGE_MAX_BYTES, DEFAULT_USER_IMAGE_MAX_PIXELS } from './adapter.js'
 
 /** Cordis plugin name. */
@@ -105,7 +109,7 @@ export interface CommandCodeRouteConfig {
   baseURL?: string
   apiKeyEnv?: string
   keyless?: boolean
-  models?: Array<{ id: string; name?: string }>
+  models?: CommandCodeRouteModel[]
   userImageMaxPixels?: number
   userImageMaxBytes?: number
   /** Opt-in native credential pool; see {@link CommandCodePoolConfig}. */
@@ -125,13 +129,30 @@ const poolIdentitySchema = Schema.object({
   enabled: Schema.boolean().default(true),
 })
 
+/**
+ * The only wire protocol this adapter serves. The schema declares it as a
+ * single-value union so the settings page's protocol picker (which reads union
+ * nodes out of the route schema) offers the route's actual protocol instead of
+ * an empty control; the value is the manifest's declared `protocol`.
+ */
+const ROUTE_PROTOCOLS = ['commandcode/alpha-generate'] as const
+
+/** One route model entry as the route writer and the models page persist it. */
+const routeModelSchema = Schema.object({
+  id: Schema.string().required(),
+  name: Schema.string(),
+  contextWindow: Schema.natural().min(1),
+  maxTokens: Schema.natural().min(1),
+  input: Schema.array(Schema.union(['text', 'image'] as const)),
+})
+
 const routeProfileSchema = Schema.object({
   displayName: Schema.string(),
-  api: Schema.string(),
+  api: Schema.union(ROUTE_PROTOCOLS),
   baseURL: Schema.string(),
   apiKeyEnv: Schema.string(),
   keyless: Schema.boolean(),
-  models: Schema.array(Schema.object({ id: Schema.string().required(), name: Schema.string() })),
+  models: Schema.array(routeModelSchema),
   userImageMaxPixels: Schema.natural(),
   userImageMaxBytes: Schema.natural(),
   // `.default(undefined)` is load-bearing: without it the nested object
@@ -235,6 +256,23 @@ function parsePoolConfig(route: string, raw: unknown): { pool?: CommandCodePoolC
   return { pool: { ...strategy === undefined ? {} : { strategy }, identities } }
 }
 
+/**
+ * Read one optional positive-integer model capacity. A malformed value is a
+ * configuration error, never silently dropped: the models page writes these
+ * from discovery, so a bad one means a bad write.
+ * @param value - the raw capacity as written.
+ * @param route - route key, for the error message.
+ * @param field - capacity field name, for the error message.
+ * @returns the capacity, or undefined when absent.
+ */
+function optionalCapacity(value: unknown, route: string, field: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`commandcode-provider: provider "${route}" model ${field} must be a positive integer`)
+  }
+  return value
+}
+
 /** One configured route read out of the raw plugin config. */
 function routeFromConfig(route: string, raw: unknown): CommandCodeRouteProfile {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -246,11 +284,22 @@ function routeFromConfig(route: string, raw: unknown): CommandCodeRouteProfile {
     throw new Error(`commandcode-provider: provider "${route}" needs a non-empty baseURL`)
   }
   const models = Array.isArray(record.models)
-    ? record.models.flatMap((model): { id: string; name?: string }[] => {
+    ? record.models.flatMap((model): CommandCodeRouteModel[] => {
         if (typeof model !== 'object' || model === null) return []
         const entry = model as Record<string, unknown>
         if (typeof entry.id !== 'string' || entry.id === '') return []
-        return [typeof entry.name === 'string' ? { id: entry.id, name: entry.name } : { id: entry.id }]
+        const contextWindow = optionalCapacity(entry.contextWindow, route, 'contextWindow')
+        const maxTokens = optionalCapacity(entry.maxTokens, route, 'maxTokens')
+        const input = Array.isArray(entry.input)
+          ? entry.input.filter((modality): modality is 'text' | 'image' => modality === 'text' || modality === 'image')
+          : []
+        return [{
+          id: entry.id,
+          ...typeof entry.name === 'string' ? { name: entry.name } : {},
+          ...contextWindow === undefined ? {} : { contextWindow },
+          ...maxTokens === undefined ? {} : { maxTokens },
+          ...input.length === 0 ? {} : { input },
+        }]
       })
     : []
   const positiveInteger = (value: unknown, field: string, fallback: number): number => {
@@ -337,6 +386,29 @@ export function apply(ctx: Context, config: Config = {}): void {
     store.start()
     return store
   }
+
+  // Configuration surfaces interrogate this namespace through the registered
+  // discovery: Refresh and Test Connection on a configured route, and the Add
+  // Provider flow before its first route exists. The bundled snapshot answers
+  // a draft or an unmounted route, and a configured loopback route keeps its
+  // live keypool catalog. The discovery never mutates settings or credentials
+  // — the caller owns the write.
+  ctx.llm.registerModelDiscovery(settingsNs, async (request) => {
+    const profile = request.provider === undefined ? undefined : profiles().get(request.provider)
+    const entries = profile === undefined ? snapshot : await catalogFor(profile).entries()
+    return entries.map((entry) => {
+      const contextWindow = contextWindowOf(entry)
+      const maxTokens = maxOutputTokensOf(entry)
+      const input = modalitiesOf(entry)
+      return {
+        id: entry.id,
+        name: entry.name,
+        ...contextWindow === undefined ? {} : { contextWindow },
+        ...maxTokens === undefined ? {} : { maxTokens },
+        ...input === undefined ? {} : { inputModalities: input },
+      }
+    })
+  })
 
   const resolveApiKey = async (profile: CommandCodeRouteProfile): Promise<string | undefined> => {
     if (profile.keyless || profile.apiKeyEnv === undefined) return undefined
@@ -462,8 +534,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     async testIdentity(_provider: string, _identityId: string, _apiKey?: string) {
       // The vendor exposes no credential-test endpoint: a real probe would be a
       // full /alpha/generate call and spend quota. The owner-run live gate
-      // (scripts/live-gate.mjs) is the supported proof instead.
-      return { ok: false, error: 'Command Code identity testing is not implemented; run scripts/live-gate.mjs' }
+      // (scripts/live-gate.mjs) is the supported proof instead. Status 501 is
+      // the structured "not implemented" signal the Keys card renders as a
+      // disabled, explanatory state rather than a failed credential.
+      return {
+        ok: false,
+        status: 501,
+        error: 'Command Code identity testing is not implemented; run scripts/live-gate.mjs',
+      }
     },
   })
 

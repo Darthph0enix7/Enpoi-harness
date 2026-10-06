@@ -16,11 +16,14 @@ import { HeavyJobManager } from './jobs.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
 import {
   chooseLocalPath,
+  commitRoute,
   configuredProfile,
   detectInstance,
   detectRuntimes,
   discoverModels,
+  discoverRouteModels,
   healthForBase,
+  instanceBaseURLFromInput,
   modeBaseURL,
   overlayManifest,
   pendingRestartForManifest,
@@ -29,9 +32,7 @@ import {
   removeProvider,
   routeSettingsNs,
   settingsNamespaceReady,
-  storeCredential,
   useDetectedInstance,
-  writeRoute,
   type HeavyDeps,
   type LocalPathChoice,
   type PendingRestart,
@@ -138,6 +139,28 @@ function optionalKey(value: unknown): string | undefined {
   return value
 }
 
+/** Longest accepted custom-instance base URL (a bounded address, not a payload). */
+const MAX_BASE_URL_CHARS = 2048
+
+/**
+ * Validate the operator-typed custom-instance address. An empty value means
+ * "no custom instance"; anything non-empty must be an absolute http(s) URL
+ * without embedded credentials and is normalized to its origin (the manifest
+ * owns the service's paths). A non-loopback host is accepted: typing it is
+ * the explicit operator action, and the manifest's exposure quirks still hold.
+ */
+function optionalBaseURL(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new RemoteError('gateway/bad-request', 'enpoiHeavy: baseURL must be a string', {})
+  if (value.trim() === '') return undefined
+  if (value.length > MAX_BASE_URL_CHARS) throw new RemoteError('gateway/bad-request', 'enpoiHeavy: baseURL is too long', {})
+  const normalized = instanceBaseURLFromInput(value)
+  if (normalized === undefined) {
+    throw new RemoteError('gateway/bad-request', 'enpoiHeavy: baseURL must be an absolute http(s) URL', {})
+  }
+  return normalized
+}
+
 /** The service behind the `enpoiHeavy` Remote namespace. */
 export class HeavyProvidersService extends TypertRemoteService {
   /** Nothing is injected into the service fiber; the plugin passes its deps. */
@@ -240,14 +263,25 @@ export class HeavyProvidersService extends TypertRemoteService {
 
   /**
    * Add by detected instance: probe localhost, discover models, write the
-   * route at the detected address.
-   * @param request - `{ id, key? }`.
+   * route at the detected address. A typed `baseURL` is the operator's
+   * custom-instance fallback: detection is skipped and the route is written
+   * at that address (a service manifest only — a direct vendor route has no
+   * on-device instance to retarget).
+   * @param request - `{ id, key?, baseURL? }`.
    * @returns the route written, the probe verdict, and whether a key was stored.
    */
   @Remote
-  async reuse(request: { id?: unknown; key?: unknown }): Promise<ReuseValue> {
+  async reuse(request: { id?: unknown; key?: unknown; baseURL?: unknown }): Promise<ReuseValue> {
     const manifest = this.effectiveManifest(requireManifest(request?.id))
     const key = optionalKey(request?.key)
+    const baseURL = optionalBaseURL(request?.baseURL)
+    if (baseURL !== undefined && manifest.delivery === 'direct') {
+      throw new RemoteError(
+        'gateway/bad-request',
+        `enpoiHeavy: "${manifest.id}" is a direct vendor route; a custom instance URL does not apply`,
+        {},
+      )
+    }
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
@@ -260,7 +294,7 @@ export class HeavyProvidersService extends TypertRemoteService {
       this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
       return { ok: false, pendingRestart }
     }
-    const outcome = await useDetectedInstance(deps, manifest, key)
+    const outcome = await useDetectedInstance(deps, manifest, key, baseURL === undefined ? {} : { baseURL })
     this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? 'ok' : 'down'} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`)
     return { ok: true, ...outcome }
   }
@@ -300,12 +334,15 @@ export class HeavyProvidersService extends TypertRemoteService {
       const late = pendingRestartForManifest(current, manifest)
       if (late !== undefined) throw new Error(late.message)
       // A direct route's catalog is the bundled snapshot: the vendor exposes no
-      // model listing, so discovery is skipped and the fallback model applies.
+      // model listing, so discovery answers from the route namespace's
+      // registered model discovery and the fallback model applies when none is
+      // mounted.
       const models = manifest.delivery === 'direct'
-        ? []
+        ? await discoverRouteModels(current, manifest, modeBaseURL(manifest, 'local'))
         : await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
-      await writeRoute(current, manifest, 'local', models)
-      await storeCredential(current, manifest, key)
+      // Route and credential commit atomically: a credential-store failure
+      // fails the job before any route exists.
+      await commitRoute(current, manifest, 'local', models, key)
     })
     return { ok: true, job }
   }

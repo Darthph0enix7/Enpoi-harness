@@ -1,0 +1,467 @@
+[
+  {
+    "id": "freellmapi",
+    "label": "FreeLLMAPI",
+    "summary": "Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.",
+    "protocol": "openai-completions",
+    "auth": {
+      "kind": "unified",
+      "apiKeyEnv": "FREELLMAPI_API_KEY",
+      "keyless": false
+    },
+    "dashboardUrl": "http://127.0.0.1:3002",
+    "docsUrl": "https://freellmapi.co",
+    "defaultPort": 3002,
+    "requiresBrowser": [],
+    "quirks": [
+      "Local install dependencies: Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app (no Docker needed there)",
+      "First-run setup code and password-reset code appear only in `docker compose logs`; upstream provider keys are added on the web dashboard",
+      "Unified key is the only client auth — never expose this port beyond the local machine",
+      "Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable",
+      "The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves",
+      "A missing bind-mounted JSON file is created as a directory by Docker → boot loop",
+      "Windows: the desktop-app install steps run through Git Bash (the harness executes shell steps with bash) — install Git for Windows first"
+    ],
+    "reuse": {
+      "label": "Use a detected instance",
+      "baseURL": "http://127.0.0.1:3002/v1",
+      "note": "Zero install: uses a FreeLLMAPI instance already running on this device.",
+      "health": {
+        "url": "http://127.0.0.1:3002/api/ping",
+        "timeoutMs": 5000
+      }
+    },
+    "local": {
+      "label": "Install locally (Docker or Podman)",
+      "baseURL": "http://127.0.0.1:3002/v1",
+      "deps": [
+        "Docker Engine or Podman, with Compose"
+      ],
+      "diskHint": "~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU",
+      "dashboardUrl": "http://127.0.0.1:3002",
+      "runtime": "docker",
+      "install": {
+        "default": {
+          "steps": [
+            {
+              "label": "Clone FreeLLMAPI",
+              "command": "if [ -d \"{home}/freellmapi\" ] && [ ! -d \"{home}/freellmapi/.git\" ]; then if [ -f \"{home}/freellmapi/.env\" ]; then echo \"Existing {home}/freellmapi/.env found without .git; refusing to wipe it — move the directory aside, then retry\" >&2; exit 1; fi; rm -rf \"{home}/freellmapi\" 2>/dev/null || true; fi; test -d \"{home}/freellmapi/.git\" || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi \"{home}/freellmapi\"",
+              "weight": 2
+            },
+            {
+              "label": "Generate ENCRYPTION_KEY",
+              "command": "if [ ! -f \"{home}/freellmapi/.env\" ] || ! grep -qE '^ENCRYPTION_KEY=.+' \"{home}/freellmapi/.env\"; then printf \"ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n\" \"$(openssl rand -hex 32)\" > \"{home}/freellmapi/.env\"; fi"
+            },
+            {
+              "label": "Start the stack",
+              "command": "ENGINE=\"$(command -v docker || command -v podman)\"; test -n \"$ENGINE\" || { echo \"neither docker nor podman is installed\"; exit 1; }; \"$ENGINE\" compose version >/dev/null 2>&1 || { echo \"podman compose plugin missing (need podman-compose)\"; exit 1; }; \"$ENGINE\" compose up -d",
+              "cwd": "{home}/freellmapi"
+            },
+            {
+              "label": "Wait for the gateway",
+              "command": "for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo \"gateway did not answer within 120s\"; exit 1"
+            }
+          ]
+        },
+        "darwin": {
+          "label": "Install locally (vendor desktop app, no Docker)",
+          "deps": [
+            "macOS 11+"
+          ],
+          "diskHint": "~250 MB app; data in ~/Library/Application Support/FreeLLMAPI",
+          "runtime": "vendor-app",
+          "steps": [
+            {
+              "label": "Download the latest .dmg",
+              "command": "arch=\"$(uname -m)\"; test \"$arch\" = arm64 || arch=x64; url=\"$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '\"browser_download_url\": *\"[^\"]+-'\"$arch\"'\\.dmg\"' | head -1 | cut -d'\"' -f4)\"; test -n \"$url\" || { echo \"no FreeLLMAPI $arch .dmg in the latest release\"; exit 1; }; mkdir -p \"{home}/Downloads\"; test -f \"{home}/Downloads/FreeLLMAPI.dmg\" || curl -fsSL -o \"{home}/Downloads/FreeLLMAPI.dmg\" \"$url\"",
+              "weight": 2
+            },
+            {
+              "label": "Install the app from the disk image",
+              "command": "MOUNT=\"/tmp/freellmapi-dmg-$$\"; mkdir -p \"$MOUNT\"; hdiutil attach \"{home}/Downloads/FreeLLMAPI.dmg\" -nobrowse -quiet -mountpoint \"$MOUNT\" && cp -R \"$MOUNT\"/*.app /Applications/; status=$?; hdiutil detach \"$MOUNT\" -quiet >/dev/null 2>&1 || true; rmdir \"$MOUNT\" 2>/dev/null || true; exit $status"
+            },
+            {
+              "label": "Pin the desktop app to port 3002",
+              "command": "mkdir -p \"{home}/Library/Application Support/FreeLLMAPI\" && printf '{\"port\":3002}\\n' > \"{home}/Library/Application Support/FreeLLMAPI/config.json\""
+            },
+            {
+              "label": "Launch FreeLLMAPI",
+              "command": "open -a FreeLLMAPI"
+            },
+            {
+              "label": "Wait for the gateway",
+              "command": "for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo \"gateway did not answer within 120s\"; exit 1"
+            }
+          ]
+        },
+        "win32": {
+          "label": "Install locally (vendor desktop app, no Docker)",
+          "deps": [
+            "Windows 10+",
+            "Git Bash (the install steps run through bash)"
+          ],
+          "diskHint": "~250 MB app; data in %APPDATA%\\FreeLLMAPI",
+          "runtime": "vendor-app",
+          "steps": [
+            {
+              "label": "Download the latest installer",
+              "command": "mkdir -p \"{home}/Downloads\" && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '\"browser_download_url\": *\"[^\"]+\\.exe\"' | head -1 | cut -d'\"' -f4 > \"{home}/Downloads/freellmapi-setup-url\"; test -s \"{home}/Downloads/freellmapi-setup-url\" || { echo \"no .exe in the latest release\"; exit 1; }; xargs -I{} curl -fsSL -o \"{home}/Downloads/FreeLLMAPI-Setup.exe\" {} < \"{home}/Downloads/freellmapi-setup-url\"",
+              "weight": 2
+            },
+            {
+              "label": "Install silently",
+              "command": "cmd //c start //wait \"\" \"$HOME/Downloads/FreeLLMAPI-Setup.exe\" /S"
+            },
+            {
+              "label": "Pin the desktop app to port 3002",
+              "command": "mkdir -p \"$APPDATA/FreeLLMAPI\" && printf '{\"port\":3002}\\n' > \"$APPDATA/FreeLLMAPI/config.json\""
+            },
+            {
+              "label": "Launch FreeLLMAPI",
+              "command": "cmd //c start \"\" \"$LOCALAPPDATA\\Programs\\FreeLLMAPI\\FreeLLMAPI.exe\""
+            },
+            {
+              "label": "Wait for the gateway",
+              "command": "for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo \"gateway did not answer within 120s\"; exit 1"
+            }
+          ]
+        }
+      },
+      "health": {
+        "url": "http://127.0.0.1:3002/api/ping",
+        "timeoutMs": 5000
+      }
+    },
+    "removal": {
+      "steps": [
+        {
+          "label": "Stop the stack and drop its volume",
+          "command": "ENGINE=\"$(command -v docker || command -v podman)\"; test -n \"$ENGINE\" && \"$ENGINE\" compose down -v",
+          "cwd": "{home}/freellmapi",
+          "optional": true
+        },
+        {
+          "label": "Remove the container image",
+          "command": "ENGINE=\"$(command -v docker || command -v podman)\"; test -n \"$ENGINE\" && \"$ENGINE\" image rm ghcr.io/tashfeenahmed/freellmapi:latest",
+          "optional": true
+        },
+        {
+          "label": "Remove the clone directory",
+          "command": "rm -rf \"{home}/freellmapi\""
+        },
+        {
+          "label": "Remove the macOS desktop app and its data",
+          "optional": true,
+          "command": "test \"$(uname -s)\" = Darwin || exit 0; pkill -f FreeLLMAPI 2>/dev/null || true; hdiutil detach \"/tmp/freellmapi-dmg\" >/dev/null 2>&1 || true; rm -rf /Applications/FreeLLMAPI.app \"{home}/Library/Application Support/FreeLLMAPI\" \"{home}/Downloads/FreeLLMAPI.dmg\" /tmp/freellmapi-dmg"
+        },
+        {
+          "label": "Remove the Windows desktop app and its data",
+          "optional": true,
+          "command": "case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 0;; esac; taskkill //F //IM FreeLLMAPI.exe 2>/dev/null || true; rm -rf \"$APPDATA/FreeLLMAPI\" \"$LOCALAPPDATA/Programs/FreeLLMAPI\" \"$HOME/Downloads/FreeLLMAPI-Setup.exe\""
+        }
+      ],
+      "warnings": [
+        "`docker compose down -v` deletes volume freellmapi_freellmapi-data — every upstream key and the unified key die with it",
+        "~/freellmapi/.env holds ENCRYPTION_KEY; back it up if the volume data is kept anywhere"
+      ]
+    },
+    "fallbackModel": "auto"
+  },
+  {
+    "id": "antigravity",
+    "label": "Antigravity Proxy",
+    "summary": "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
+    "protocol": "anthropic-messages",
+    "auth": {
+      "kind": "placeholder",
+      "apiKeyEnv": "ANTIGRAVITY_API_KEY",
+      "keyless": false
+    },
+    "dashboardUrl": "http://127.0.0.1:8082",
+    "docsUrl": "https://www.npmjs.com/package/antigravity-claude-proxy",
+    "defaultPort": 8082,
+    "requiresBrowser": [
+      "Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback — on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated"
+    ],
+    "quirks": [
+      "Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install — run the package manually or use a proxy running elsewhere",
+      "Linux: the systemd user unit runs the proxy through /bin/bash -lc with PATH ~/.local/bin:/usr/local/bin:/usr/bin:/bin; the package installs under ~/.local/bin, and a Node.js reachable only from an nvm/fnm shell configuration is not found — keep it reachable from a login shell or one of those directories",
+      "macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin plus the common nvm/fnm node directories; the package installs under ~/.local/bin, and a Node.js reachable only from a fish/zsh/nvm/fnm shell configuration is not found — keep it reachable from a login bash profile or one of those directories",
+      "The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route",
+      "The console at :8082 has no auth (webuiPassword empty) — trusted networks only",
+      "Quotas are per-account/per-model weekly windows; \"RESOURCE_EXHAUSTED … resets after 46h\" is normal",
+      "Other tools on this device may consume the same proxy — removing the service breaks them too"
+    ],
+    "reuse": {
+      "label": "Use a detected instance",
+      "baseURL": "http://127.0.0.1:8082",
+      "note": "Zero install: uses the proxy instance already running on this device and its configured account pool.",
+      "health": {
+        "url": "http://127.0.0.1:8082/health",
+        "timeoutMs": 5000
+      }
+    },
+    "local": {
+      "label": "Install locally (npm + user service)",
+      "baseURL": "http://127.0.0.1:8082",
+      "deps": [
+        "Node.js >= 18",
+        "A reachable systemd user session (systemctl --user) on the default path"
+      ],
+      "diskHint": "~23 MB install, ~78–150 MB RAM, no GPU",
+      "dashboardUrl": "http://127.0.0.1:8082",
+      "runtime": "node",
+      "install": {
+        "default": {
+          "label": "Install locally (npm + systemd user unit)",
+          "steps": [
+            {
+              "label": "Install the proxy package",
+              "command": "mkdir -p \"{home}/.local/bin\" && npm install -g --prefix \"{home}/.local\" antigravity-claude-proxy",
+              "weight": 2
+            },
+            {
+              "label": "Write the systemd user unit",
+              "command": "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nEnvironment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin\nExecStart=/bin/bash -lc 'BIN=\"{home}/.local/bin/antigravity-claude-proxy\"; test -x \"$BIN\" || BIN=\"$(command -v antigravity-claude-proxy)\"; exec \"$BIN\" start --log'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
+            },
+            {
+              "label": "Enable and start the unit",
+              "command": "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service"
+            },
+            {
+              "label": "Enable lingering (the unit starts without an open login session)",
+              "command": "loginctl enable-linger \"$(id -un)\"",
+              "optional": true
+            },
+            {
+              "label": "Wait for the proxy",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo \"proxy did not answer within 60s\"; exit 1"
+            }
+          ]
+        },
+        "linux": {
+          "label": "Install locally (npm + systemd user unit)",
+          "steps": [
+            {
+              "label": "Install the proxy package",
+              "command": "mkdir -p \"{home}/.local/bin\" && npm install -g --prefix \"{home}/.local\" antigravity-claude-proxy",
+              "weight": 2
+            },
+            {
+              "label": "Write the systemd user unit",
+              "command": "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nEnvironment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin\nExecStart=/bin/bash -lc 'BIN=\"{home}/.local/bin/antigravity-claude-proxy\"; test -x \"$BIN\" || BIN=\"$(command -v antigravity-claude-proxy)\"; exec \"$BIN\" start --log'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
+            },
+            {
+              "label": "Enable and start the unit",
+              "command": "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service"
+            },
+            {
+              "label": "Enable lingering (the unit starts without an open login session)",
+              "command": "loginctl enable-linger \"$(id -un)\"",
+              "optional": true
+            },
+            {
+              "label": "Wait for the proxy",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo \"proxy did not answer within 60s\"; exit 1"
+            }
+          ]
+        },
+        "darwin": {
+          "label": "Install locally (npm + launchd agent)",
+          "deps": [
+            "Node.js >= 18",
+            "macOS 11+ (launchd)"
+          ],
+          "diskHint": "~23 MB install, ~78–150 MB RAM, no GPU; logs in ~/Library/Logs",
+          "steps": [
+            {
+              "label": "Install the proxy package",
+              "command": "mkdir -p \"{home}/.local/bin\" && npm install -g --prefix \"{home}/.local\" antigravity-claude-proxy",
+              "weight": 2
+            },
+            {
+              "label": "Write the launchd agent",
+              "command": "mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/dev.enpoi.antigravity-proxy.plist <<'EOF'\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>dev.enpoi.antigravity-proxy</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>BIN=\"{home}/.local/bin/antigravity-claude-proxy\"; test -x \"$BIN\" || BIN=\"$(command -v antigravity-claude-proxy)\"; exec \"$BIN\" start --log</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PORT</key>\n    <string>8082</string>\n    <key>HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:{home}/.nvm/versions/node/current/bin:{home}/Library/Application Support/fnm/aliases/default/bin:{home}/.local/share/fnm/aliases/default/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>\n</dict>\n</plist>\nEOF"
+            },
+            {
+              "label": "Load and start the agent",
+              "command": "launchctl bootout gui/$(id -u)/dev.enpoi.antigravity-proxy 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/dev.enpoi.antigravity-proxy.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/dev.enpoi.antigravity-proxy.plist"
+            },
+            {
+              "label": "Wait for the proxy",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo \"proxy did not answer within 60s\"; exit 1"
+            }
+          ]
+        },
+        "win32": {
+          "label": "Not supported on Windows",
+          "unsupported": "The antigravity proxy local install needs a POSIX user service (systemd or launchd) to keep the proxy running; this profile has no supported Windows provisioning path. Install the npm package and run `antigravity-claude-proxy` yourself, or run the proxy on another machine and add it as a custom route.",
+          "steps": []
+        }
+      },
+      "health": {
+        "url": "http://127.0.0.1:8082/health",
+        "timeoutMs": 5000
+      }
+    },
+    "removal": {
+      "steps": [
+        {
+          "label": "Stop and disable the user service",
+          "optional": true,
+          "command": "if command -v systemctl >/dev/null 2>&1; then systemctl --user disable --now antigravity-proxy.service 2>/dev/null || true; fi; if command -v launchctl >/dev/null 2>&1; then launchctl bootout gui/$(id -u)/dev.enpoi.antigravity-proxy 2>/dev/null || true; fi; if command -v antigravity-claude-proxy >/dev/null 2>&1; then antigravity-claude-proxy stop >/dev/null 2>&1 || true; fi"
+        },
+        {
+          "label": "Remove the user service file",
+          "optional": true,
+          "command": "rm -f {config}/systemd/user/antigravity-proxy.service {home}/Library/LaunchAgents/dev.enpoi.antigravity-proxy.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi"
+        },
+        {
+          "label": "Uninstall the package",
+          "optional": true,
+          "command": "npm uninstall -g --prefix \"{home}/.local\" antigravity-claude-proxy 2>/dev/null || true; npm uninstall -g antigravity-claude-proxy 2>/dev/null || true"
+        },
+        {
+          "label": "Remove the config directory (OAuth tokens, presets, usage history)",
+          "command": "rm -rf {config}/antigravity-proxy"
+        }
+      ],
+      "warnings": [
+        "Any other tool configured against the same proxy stops working when the service is removed",
+        "If a dotfiles/config repository manages the service file (systemd unit or launchd plist), remove it there too or the next sync resurrects it",
+        "Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history",
+        "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
+      ]
+    },
+    "fallbackModel": "gemini-2.5-flash"
+  },
+  {
+    "id": "commandcode",
+    "label": "Command Code",
+    "summary": "Command Code's CLI-shaped API at api.commandcode.ai, served by the DSH provider package and its native multi-key pool — no proxy.",
+    "protocol": "commandcode/alpha-generate",
+    "auth": {
+      "kind": "unified",
+      "apiKeyEnv": "COMMANDCODE_KEY_1",
+      "keyless": false
+    },
+    "delivery": "direct",
+    "docsUrl": "https://commandcode.ai",
+    "defaultPort": 443,
+    "settingsNs": "commandcode-provider",
+    "pool": {
+      "strategy": "priority-sticky",
+      "identities": [
+        {
+          "id": "key-1",
+          "credentialRef": "COMMANDCODE_KEY_1",
+          "priority": 1
+        }
+      ]
+    },
+    "requiresBrowser": [],
+    "quirks": [
+      "Local install dependencies: Node.js 22 (the setup step links and builds the provider package); Docker is never required, and no proxy or user service runs — the route talks to the vendor directly",
+      "The vendor endpoint rejects generic HTTP clients (\"Proxy use detected\") — the provider package injects the four CLI headers itself; no proxy is required",
+      "Keys are managed as pool identities on the Settings → Models Keys card: the route ships one starter identity (COMMANDCODE_KEY_1) and rotates identities in priority order",
+      "The vendor account and quota dashboard live at commandcode.ai (browser)",
+      "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",
+      "Migration: scripts/import-keypool-keys.mjs turns the old keypool pools.json commandcode keys into a settings pool block; it reads the old file but never prints key material",
+      "An existing route still pointed at a loopback keypool keeps working until it is switched: set its baseURL to https://api.commandcode.ai, add the imported pool identities, then retire the proxy",
+      "The provider package owns the request sanitizer (embedded-base64 scrub, 200k text cap, 413 strip-oldest retry) — clients must not duplicate it",
+      "Quota is per key and real: the native pool rotates on exhaustion, and a QUOTA failure (\"weekly usage limit\" / \"insufficient credits\") appears only when every pooled identity is spent — a normal state, not a routing defect",
+      "A route whose identities resolve no credential fails with MISSING_CREDENTIAL naming the Keys card; there is no anonymous fallback"
+    ],
+    "reuse": {
+      "label": "Use the vendor endpoint now",
+      "baseURL": "https://api.commandcode.ai",
+      "note": "Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.",
+      "health": {
+        "url": "https://api.commandcode.ai/",
+        "timeoutMs": 5000,
+        "expectStatus": [
+          200,
+          401,
+          403,
+          404,
+          405
+        ],
+        "headers": {
+          "x-command-code-version": "1.54.0",
+          "x-cli-environment": "production",
+          "x-project-slug": "opencode",
+          "user-agent": "cli"
+        }
+      }
+    },
+    "local": {
+      "label": "Link the provider package, then use the vendor endpoint",
+      "baseURL": "https://api.commandcode.ai",
+      "deps": [
+        "Node.js 22"
+      ],
+      "diskHint": "~5 MB provider package; no local service, no GPU",
+      "runtime": "node",
+      "install": {
+        "default": {
+          "steps": [
+            {
+              "label": "Link and build the DSH provider package",
+              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "weight": 3
+            }
+          ]
+        },
+        "linux": {
+          "steps": [
+            {
+              "label": "Link and build the DSH provider package",
+              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "weight": 3
+            }
+          ]
+        },
+        "darwin": {
+          "steps": [
+            {
+              "label": "Link and build the DSH provider package",
+              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "weight": 3
+            }
+          ]
+        },
+        "win32": {
+          "label": "Not supported on Windows",
+          "unsupported": "The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually: from the profile root (normally ~/.dsh/profiles/web) run `node packages/enpoi-commandcode-provider/scripts/install.mjs .`, or run the harness on Linux/macOS.",
+          "steps": []
+        }
+      },
+      "health": {
+        "url": "https://api.commandcode.ai/",
+        "timeoutMs": 5000,
+        "expectStatus": [
+          200,
+          401,
+          403,
+          404,
+          405
+        ],
+        "headers": {
+          "x-command-code-version": "1.54.0",
+          "x-cli-environment": "production",
+          "x-project-slug": "opencode",
+          "user-agent": "cli"
+        }
+      }
+    },
+    "removal": {
+      "steps": [],
+      "warnings": [
+        "Removal drops only DSH state — the route, its COMMANDCODE_KEY_1 credential reference, its pool state, and its cache entry; no local service exists to stop",
+        "Vendor keys stored under other pool identities (for example COMMANDCODE_KEY_2) are not deleted by removal — delete them on the Keys card",
+        "Vendor account state and quota live at commandcode.ai and are never touched"
+      ]
+    },
+    "fallbackModel": "deepseek/deepseek-v4.1-flash"
+  }
+]

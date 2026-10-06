@@ -320,7 +320,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   }
 
   return (
-    <>
+    <div className={styles['modelsPage']}>
       <div className={styles['masterDetailLayout']}>
         {/* LEFT SIDEBAR: Provider List */}
         <aside className={styles['providersSidebar']}>
@@ -488,7 +488,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           column that compressed the provider list and detail into unusable
           widths. */}
       {renderSlot('settings.models.footer', {})}
-    </>
+    </div>
   )
 }
 

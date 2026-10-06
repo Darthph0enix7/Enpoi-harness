@@ -731,11 +731,19 @@ select.input {
 /* MODELS & PROVIDERS SECTION: Sleek, Adaptive, Minimalist Layout           */
 /* ========================================================================= */
 
+.modelsPage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
 .masterDetailLayout {
   display: flex;
   gap: 16px;
   width: 100%;
-  min-height: 520px;
+  min-height: 0;
   color: var(--dsw-alias-label-primary);
   box-sizing: border-box;
 }
@@ -753,7 +761,7 @@ select.input {
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
   overflow: hidden;
-  max-height: calc(100vh - 120px);
+  max-height: 100%;
 }
 
 .sidebarHeader {
@@ -2215,7 +2223,41 @@ select.input {
   .addKeyModal {
     max-width: none;
     border-radius: var(--card-radius);
-  }}
+  }
+}
+
+/* ========================================================================= */
+/* RESPONSIVE BREAKPOINTS (Desktop Containment)                             */
+/* ========================================================================= */
+
+@media (min-width: 821px) {
+  .modelsPage {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .masterDetailLayout {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .providersSidebar {
+    max-height: 100%;
+  }
+
+  .providerDetailMain {
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
+    /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+    --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+    --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  }
+
+  .modelsPage > :not(.masterDetailLayout) {
+    flex: none;
+  }
+}
 /* ========================================================================= */
 /* HEAVY PROVIDERS                                                          */
 /* ========================================================================= */

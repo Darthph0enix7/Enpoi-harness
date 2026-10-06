@@ -62,6 +62,10 @@ function contextWindowOf(entry) {
   const context = entry?.limit?.context;
   return typeof context === "number" && context > 0 ? context : void 0;
 }
+function maxOutputTokensOf(entry) {
+  const output = entry?.limit?.output;
+  return typeof output === "number" && output > 0 ? output : void 0;
+}
 function isLoopbackBaseURL(baseURL) {
   let host;
   try {
@@ -78,7 +82,6 @@ var CatalogStore = class {
   constructor(options) {
     this.options = options;
   }
-  options;
   pending;
   resolved;
   origin = "snapshot";
@@ -912,7 +915,6 @@ var CommandCodeAdapter = class extends LlmAdapter {
     super();
     this.options = options;
   }
-  options;
   profileOf(provider) {
     const profile = this.options.profiles().get(provider);
     if (profile === void 0) throw new LlmError2(`Command Code adapter does not own provider "${provider}"`, "NO_ADAPTER");
@@ -935,7 +937,8 @@ var CommandCodeAdapter = class extends LlmAdapter {
     return (profile.models ?? []).map((model) => ({
       provider,
       id: model.id,
-      name: model.name ?? model.id
+      name: model.name ?? model.id,
+      ...model.input === void 0 || model.input.length === 0 ? {} : { inputModalities: [...model.input] }
     }));
   }
   async resolveModel(provider, model, _signal) {
@@ -1321,13 +1324,21 @@ var poolIdentitySchema = Schema.object({
   priority: Schema.natural(),
   enabled: Schema.boolean().default(true)
 });
+var ROUTE_PROTOCOLS = ["commandcode/alpha-generate"];
+var routeModelSchema = Schema.object({
+  id: Schema.string().required(),
+  name: Schema.string(),
+  contextWindow: Schema.natural().min(1),
+  maxTokens: Schema.natural().min(1),
+  input: Schema.array(Schema.union(["text", "image"]))
+});
 var routeProfileSchema = Schema.object({
   displayName: Schema.string(),
-  api: Schema.string(),
+  api: Schema.union(ROUTE_PROTOCOLS),
   baseURL: Schema.string(),
   apiKeyEnv: Schema.string(),
   keyless: Schema.boolean(),
-  models: Schema.array(Schema.object({ id: Schema.string().required(), name: Schema.string() })),
+  models: Schema.array(routeModelSchema),
   userImageMaxPixels: Schema.natural(),
   userImageMaxBytes: Schema.natural(),
   // `.default(undefined)` is load-bearing: without it the nested object
@@ -1408,6 +1419,13 @@ function parsePoolConfig(route, raw) {
   }
   return { pool: { ...strategy === void 0 ? {} : { strategy }, identities } };
 }
+function optionalCapacity(value, route, field) {
+  if (value === void 0) return void 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`commandcode-provider: provider "${route}" model ${field} must be a positive integer`);
+  }
+  return value;
+}
 function routeFromConfig(route, raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`commandcode-provider: provider "${route}" must be an object`);
@@ -1421,7 +1439,16 @@ function routeFromConfig(route, raw) {
     if (typeof model !== "object" || model === null) return [];
     const entry = model;
     if (typeof entry.id !== "string" || entry.id === "") return [];
-    return [typeof entry.name === "string" ? { id: entry.id, name: entry.name } : { id: entry.id }];
+    const contextWindow = optionalCapacity(entry.contextWindow, route, "contextWindow");
+    const maxTokens = optionalCapacity(entry.maxTokens, route, "maxTokens");
+    const input = Array.isArray(entry.input) ? entry.input.filter((modality) => modality === "text" || modality === "image") : [];
+    return [{
+      id: entry.id,
+      ...typeof entry.name === "string" ? { name: entry.name } : {},
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxTokens === void 0 ? {} : { maxTokens },
+      ...input.length === 0 ? {} : { input }
+    }];
   }) : [];
   const positiveInteger = (value, field, fallback) => {
     if (value === void 0) return fallback;
@@ -1478,6 +1505,22 @@ function apply(ctx, config = {}) {
     store.start();
     return store;
   };
+  ctx.llm.registerModelDiscovery(settingsNs, async (request) => {
+    const profile = request.provider === void 0 ? void 0 : profiles().get(request.provider);
+    const entries = profile === void 0 ? snapshot : await catalogFor(profile).entries();
+    return entries.map((entry) => {
+      const contextWindow = contextWindowOf(entry);
+      const maxTokens = maxOutputTokensOf(entry);
+      const input = modalitiesOf(entry);
+      return {
+        id: entry.id,
+        name: entry.name,
+        ...contextWindow === void 0 ? {} : { contextWindow },
+        ...maxTokens === void 0 ? {} : { maxTokens },
+        ...input === void 0 ? {} : { inputModalities: input }
+      };
+    });
+  });
   const resolveApiKey = async (profile) => {
     if (profile.keyless || profile.apiKeyEnv === void 0) return void 0;
     const credentials = ctx.get("credentials");
@@ -1578,7 +1621,11 @@ function apply(ctx, config = {}) {
       poolEngine.resetCooldown(provider, identityId);
     },
     async testIdentity(_provider, _identityId, _apiKey) {
-      return { ok: false, error: "Command Code identity testing is not implemented; run scripts/live-gate.mjs" };
+      return {
+        ok: false,
+        status: 501,
+        error: "Command Code identity testing is not implemented; run scripts/live-gate.mjs"
+      };
     }
   });
   ctx.on("internal/config", function(_raw, next) {

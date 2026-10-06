@@ -10,7 +10,9 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { manifestById } from '../src/manifests.js'
 import {
+  commitRoute,
   discoverModels,
+  instanceBaseURLFromInput,
   routeProfile,
   useDetectedInstance,
   type CredentialsSeam,
@@ -141,6 +143,159 @@ it('detection fails soft when nothing answers: the declared endpoint is written 
   expect(value.models).toEqual([{ id: 'auto' }])
 })
 
+it('a typed custom instance URL skips detection and writes the route there, non-loopback accepted', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    if (url.endsWith('/api/ping')) return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }] }) }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!, 'sk-op', {
+    // An explicit non-loopback address: the operator typed it; only loopback
+    // stays private, and the route is written exactly where they pointed it.
+    baseURL: 'http://192.168.1.10:4000/v1',
+  })
+
+  // No loopback detection candidate was probed; model discovery and the
+  // health probe both follow the typed host (health uses the manifest's
+  // declared health path).
+  expect(calls).toEqual(['http://192.168.1.10:4000/v1/models', 'http://192.168.1.10:4000/api/ping'])
+  expect(outcome.health.status).toBe(200)
+  expect(outcome.endpoint).toBe('http://192.168.1.10:4000/v1')
+  expect(outcome.port).toBe(4000)
+  expect(outcome.health.ok).toBe(true)
+  const written = mutations[0]!.ops[0] as { value: { baseURL: string; displayName: string } }
+  expect(written.value.baseURL).toBe('http://192.168.1.10:4000/v1')
+  expect(written.value.displayName).toBe('FreeLLMAPI (detected)')
+})
+
+it('a custom instance URL reaches the antigravity health path on the typed host', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    return { ok: url.endsWith('/health'), status: url.endsWith('/health') ? 200 : 404, text: async () => '{}' }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!, undefined, {
+    baseURL: 'http://10.0.0.9:9090',
+  })
+  expect(calls).toEqual(['http://10.0.0.9:9090/models', 'http://10.0.0.9:9090/health'])
+  expect(outcome.health.ok).toBe(true)
+  const written = mutations[0]!.ops[0] as { value: { baseURL: string } }
+  expect(written.value.baseURL).toBe('http://10.0.0.9:9090')
+})
+
+it('validates a typed instance address: absolute http(s) origin only, no credentials', () => {
+  // The typed address is an origin: the manifest owns the service's paths, so
+  // any typed path is dropped instead of being silently half-honored by the
+  // health probe.
+  expect(instanceBaseURLFromInput('http://192.168.1.10:4000')).toBe('http://192.168.1.10:4000')
+  expect(instanceBaseURLFromInput('http://192.168.1.10:4000/v1/')).toBe('http://192.168.1.10:4000')
+  expect(instanceBaseURLFromInput('http://192.168.1.10:4000/some/path')).toBe('http://192.168.1.10:4000')
+  expect(instanceBaseURLFromInput('http://127.0.0.1:3002/v1')).toBe('http://127.0.0.1:3002')
+  expect(instanceBaseURLFromInput('https://gateway.example:8443')).toBe('https://gateway.example:8443')
+  // Invalid shapes never become a route endpoint.
+  expect(instanceBaseURLFromInput('')).toBeUndefined()
+  expect(instanceBaseURLFromInput('   ')).toBeUndefined()
+  expect(instanceBaseURLFromInput('192.168.1.10:4000')).toBeUndefined()
+  expect(instanceBaseURLFromInput('ftp://192.168.1.10:4000')).toBeUndefined()
+  expect(instanceBaseURLFromInput('http://user:secret@192.168.1.10:4000')).toBeUndefined()
+  expect(instanceBaseURLFromInput('http://192.168.1.10:0')).toBeUndefined()
+  // The route writer appends `/models` and health paths, so a query/fragment
+  // would corrupt both.
+  expect(instanceBaseURLFromInput('http://192.168.1.10:4000/v1?key=1')).toBeUndefined()
+  expect(instanceBaseURLFromInput('http://192.168.1.10:4000/v1#frag')).toBeUndefined()
+})
+
+it('a typed custom-instance path is normalized away; the manifest paths apply on the typed origin', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    if (url.endsWith('/api/ping')) return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }] }) }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!, undefined, {
+    baseURL: 'http://192.168.1.10:4000/gateway/prefix',
+  })
+
+  // Neither probe follows the typed path: the route is discovered at the
+  // manifest's declared /v1 and health-probed at its declared /api/ping, so
+  // the badge and the written route describe the same origin.
+  expect(calls).toEqual(['http://192.168.1.10:4000/v1/models', 'http://192.168.1.10:4000/api/ping'])
+  expect(outcome.endpoint).toBe('http://192.168.1.10:4000/v1')
+  expect(outcome.port).toBe(4000)
+  expect(outcome.health.ok).toBe(true)
+  const written = mutations[0]!.ops[0] as { value: { baseURL: string } }
+  expect(written.value.baseURL).toBe('http://192.168.1.10:4000/v1')
+})
+
+it('refuses an invalid custom-instance address instead of silently ignoring it', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, mutations } = depsWith({ fetch })
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, undefined, { baseURL: 'ftp://192.168.1.10:4000' }))
+    .rejects.toThrow('invalid custom instance base URL')
+  expect(mutations).toEqual([])
+})
+
+it('a credential-store failure rejects the add and leaves no route', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, mutations } = depsWith({ fetch })
+  deps.credentials = {
+    resolve: async () => undefined,
+    set: async () => { throw new Error('credential store refused') },
+    unset: async () => {},
+  }
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, 'sk-unified')).rejects.toThrow('credential store refused')
+  expect(mutations).toEqual([])
+})
+
+it('a route-write failure unsets the credential it had just stored (no dangling credential)', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  const unsets: string[] = []
+  deps.credentials = {
+    resolve: async () => undefined,
+    set: async (ref, value) => { credentialSets.push({ ref, value }) },
+    unset: async (ref) => { unsets.push(ref) },
+  }
+  deps.settings!.mutate = async () => { throw new Error('settings refused') }
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, 'sk-unified')).rejects.toThrow('settings refused')
+  expect(credentialSets).toEqual([{ ref: 'FREELLMAPI_API_KEY', value: 'sk-unified' }])
+  expect(unsets).toEqual(['FREELLMAPI_API_KEY'])
+})
+
+it('a route-write failure restores a pre-existing credential value', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  const unsets: string[] = []
+  deps.credentials = {
+    resolve: async () => ({ value: 'sk-previous' }),
+    set: async (ref, value) => { credentialSets.push({ ref, value }) },
+    unset: async (ref) => { unsets.push(ref) },
+  }
+  deps.settings!.mutate = async () => { throw new Error('settings refused') }
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, 'sk-unified')).rejects.toThrow('settings refused')
+  expect(credentialSets).toEqual([
+    { ref: 'FREELLMAPI_API_KEY', value: 'sk-unified' },
+    { ref: 'FREELLMAPI_API_KEY', value: 'sk-previous' },
+  ])
+  expect(unsets).toEqual([])
+})
+
+it('the install commit (local mode) stores the key before the route and leaves no route on a credential failure', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, mutations } = depsWith({ fetch })
+  deps.credentials = {
+    resolve: async () => undefined,
+    set: async () => { throw new Error('credential store refused') },
+    unset: async () => {},
+  }
+  await expect(commitRoute(deps, manifestById('antigravity')!, 'local', [], 'sk-ag')).rejects.toThrow('credential store refused')
+  expect(mutations).toEqual([])
+})
+
 it('antigravity detection writes a placeholder anthropic route with no pool and never keyless', () => {
   const profile = routeProfile(manifestById('antigravity')!, 'reuse', [])
   expect(profile.api).toBe('anthropic-messages')
@@ -152,7 +307,7 @@ it('antigravity detection writes a placeholder anthropic route with no pool and 
   expect(profile.models).toEqual([{ id: 'gemini-2.5-flash' }])
 })
 
-it('a direct-vendor route writes at the vendor endpoint without probing or discovering', async () => {
+it('a direct-vendor route writes at the vendor endpoint with the fallback model when no discovery is mounted', async () => {
   const calls: string[] = []
   const fetch: FetchLike = vi.fn(async (url) => {
     calls.push(url)
@@ -219,4 +374,68 @@ it('names a direct route (direct) even when the setup path provisioned it', () =
   // route runs no local service, so its name must never carry "(local)".
   expect(routeProfile(manifest, 'local', []).displayName).toBe('Command Code (direct)')
   expect(routeProfile(manifest, 'reuse', []).displayName).toBe('Command Code (direct)')
+})
+
+it('a direct route writes every model its route-namespace discovery answers, enriched', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const manifest = manifestById('commandcode')!
+  const discovered = [
+    {
+      id: 'deepseek/deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro [Go+]',
+      contextWindow: 1_000_000,
+      maxTokens: 384_000,
+      inputModalities: ['text'],
+    },
+    {
+      id: 'xai/grok-4.6',
+      name: 'Grok 4.6',
+      contextWindow: 2_000_000,
+      maxTokens: 128_000,
+      inputModalities: ['text', 'image'],
+    },
+  ] as const
+  const outcome = await useDetectedInstance(
+    { ...deps, llm: { discoverModels: async () => discovered } },
+    manifest,
+  )
+
+  // Still only the health probe: a direct vendor route never fetches /models.
+  expect(calls).toEqual(['https://api.commandcode.ai/'])
+  expect(outcome.models).toEqual([
+    {
+      id: 'deepseek/deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro [Go+]',
+      contextWindow: 1_000_000,
+      maxTokens: 384_000,
+      input: ['text'],
+    },
+    {
+      id: 'xai/grok-4.6',
+      name: 'Grok 4.6',
+      contextWindow: 2_000_000,
+      maxTokens: 128_000,
+      input: ['text', 'image'],
+    },
+  ])
+  const written = mutations[0]!.ops[0] as { value: { models: unknown[] } }
+  expect(written.value.models).toHaveLength(2)
+})
+
+it('a direct route keeps the fallback model when the discovery refuses', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(
+    { ...deps, llm: { discoverModels: async () => { throw new Error('no model discovery is registered') } } },
+    manifestById('commandcode')!,
+  )
+
+  expect(outcome.models).toEqual([])
+  const written = mutations[0]!.ops[0] as { value: { models: unknown[] } }
+  expect(written.value.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
 })

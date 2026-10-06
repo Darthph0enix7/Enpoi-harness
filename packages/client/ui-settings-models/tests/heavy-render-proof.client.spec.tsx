@@ -78,7 +78,7 @@ it('browser-badge proof: FreeLLMAPI renders none and its dependency line, Antigr
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
   expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
-  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
+  expect(screen.getByText(/Linux uses Docker\/Podman compose; macOS\/Windows use the vendor desktop app/)).toBeTruthy()
   console.info(`[heavy-render-proof] freellmapi (no badge): ${quote()}`)
 
   fireEvent.click(screen.getByRole('button', { name: 'Back' }))

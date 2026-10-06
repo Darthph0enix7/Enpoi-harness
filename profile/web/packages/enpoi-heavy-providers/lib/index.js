@@ -1,7 +1,7 @@
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -47,11 +47,11 @@ var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read fr
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
-// src/index.ts
+// profile/web/packages/enpoi-heavy-providers/src/index.ts
 import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 
-// src/jobs.ts
+// profile/web/packages/enpoi-heavy-providers/src/jobs.ts
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 var LOG_CAP_BYTES = 8192;
@@ -221,7 +221,7 @@ function failed(id, error) {
   };
 }
 
-// src/manifests.ts
+// profile/web/packages/enpoi-heavy-providers/src/manifests.ts
 function platformInstallVariant(local, platform) {
   return platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
 }
@@ -244,7 +244,11 @@ var RUNTIME_TOOL_RE = {
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/
 };
 var ANTIGRAVITY_LAUNCHD_LABEL = "dev.enpoi.antigravity-proxy";
-var ANTIGRAVITY_NPM_STEP = { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 };
+var ANTIGRAVITY_NPM_STEP = {
+  label: "Install the proxy package",
+  command: 'mkdir -p "{home}/.local/bin" && npm install -g --prefix "{home}/.local" antigravity-claude-proxy',
+  weight: 2
+};
 var ANTIGRAVITY_WAIT_STEP = {
   label: "Wait for the proxy",
   command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
@@ -254,10 +258,33 @@ var ANTIGRAVITY_SYSTEMD_STEPS = [
   {
     label: "Write the systemd user unit",
     // `start --log` is the package's foreground mode; a bare invocation only
-    // prints help. The unit's main process must stay the server.
-    command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc 'exec antigravity-claude-proxy start --log'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
+    // prints help. The unit's main process must stay the server. The explicit
+    // PATH resolves the npm shim's `node` when the version manager only
+    // extends an interactive shell; the wrapper prefers the absolute path the
+    // npm step guarantees and falls back to the PATH-resolved binary (a
+    // version-managed node shim may live outside `~/.local/bin`).
+    command: `mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'
+[Unit]
+Description=Antigravity Claude proxy (per-device)
+After=network-online.target
+
+[Service]
+Environment=PORT=8082
+Environment=HOST=127.0.0.1
+Environment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash -lc 'BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log'
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF`
   },
   { label: "Enable and start the unit", command: "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service" },
+  {
+    label: "Enable lingering (the unit starts without an open login session)",
+    command: 'loginctl enable-linger "$(id -un)"',
+    optional: true
+  },
   ANTIGRAVITY_WAIT_STEP
 ];
 var ANTIGRAVITY_LAUNCHD_STEPS = [
@@ -275,7 +302,7 @@ var ANTIGRAVITY_LAUNCHD_STEPS = [
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>exec antigravity-claude-proxy start --log</string>
+    <string>BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -284,7 +311,7 @@ var ANTIGRAVITY_LAUNCHD_STEPS = [
     <key>HOST</key>
     <string>127.0.0.1</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:{home}/.nvm/versions/node/current/bin:{home}/Library/Application Support/fnm/aliases/default/bin:{home}/.local/share/fnm/aliases/default/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -307,6 +334,17 @@ EOF`
   },
   ANTIGRAVITY_WAIT_STEP
 ];
+var COMMANDCODE_HEALTH = {
+  url: "https://api.commandcode.ai/",
+  timeoutMs: 5e3,
+  expectStatus: [200, 401, 403, 404, 405],
+  headers: {
+    "x-command-code-version": "1.54.0",
+    "x-cli-environment": "production",
+    "x-project-slug": "opencode",
+    "user-agent": "cli"
+  }
+};
 var COMMANDCODE_INSTALL_STEP = {
   label: "Link and build the DSH provider package",
   command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
@@ -327,12 +365,13 @@ var HEAVY_MANIFESTS = [
     // ordinary quirks, not an operator-blocking browser requirement.
     requiresBrowser: [],
     quirks: [
-      "Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path",
+      "Local install dependencies: Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app (no Docker needed there)",
       "First-run setup code and password-reset code appear only in `docker compose logs`; upstream provider keys are added on the web dashboard",
       "Unified key is the only client auth \u2014 never expose this port beyond the local machine",
       "Losing ENCRYPTION_KEY (in ~/freellmapi/.env) makes every stored upstream key unrecoverable",
       "The free-tier catalog is a monthly snapshot; /v1/models can list models no key serves",
-      "A missing bind-mounted JSON file is created as a directory by Docker \u2192 boot loop"
+      "A missing bind-mounted JSON file is created as a directory by Docker \u2192 boot loop",
+      "Windows: the desktop-app install steps run through Git Bash (the harness executes shell steps with bash) \u2014 install Git for Windows first"
     ],
     reuse: {
       label: "Use a detected instance",
@@ -351,19 +390,26 @@ var HEAVY_MANIFESTS = [
         // Unknown platforms fall back to the manual Docker Compose path.
         default: {
           steps: [
-            // Re-running the install must not fail on the existing clone.
-            { label: "Clone FreeLLMAPI", command: "test -d {home}/freellmapi/.git || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi", weight: 2 },
+            // Re-running the install must not fail on the existing clone. A
+            // stale non-git directory is replaced, but a `.env` inside it is
+            // never wiped: it holds ENCRYPTION_KEY, and deleting it makes
+            // every stored upstream key unrecoverable.
+            { label: "Clone FreeLLMAPI", command: 'if [ -d "{home}/freellmapi" ] && [ ! -d "{home}/freellmapi/.git" ]; then if [ -f "{home}/freellmapi/.env" ]; then echo "Existing {home}/freellmapi/.env found without .git; refusing to wipe it \u2014 move the directory aside, then retry" >&2; exit 1; fi; rm -rf "{home}/freellmapi" 2>/dev/null || true; fi; test -d "{home}/freellmapi/.git" || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi "{home}/freellmapi"', weight: 2 },
             {
               label: "Generate ENCRYPTION_KEY",
               // PORT is the HOST port (compose maps ${PORT}:3001); keep it at
-              // 3002 so the local route's baseURL resolves.
-              command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env'
+              // 3002 so the local route's baseURL resolves. An existing .env
+              // is kept only when its ENCRYPTION_KEY is non-empty: an empty
+              // key makes every stored upstream key unrecoverable.
+              command: `if [ ! -f "{home}/freellmapi/.env" ] || ! grep -qE '^ENCRYPTION_KEY=.+' "{home}/freellmapi/.env"; then printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > "{home}/freellmapi/.env"; fi`
             },
             {
               label: "Start the stack",
               // Docker or Podman: preflight offers Podman as the substitute,
-              // so the step must resolve whichever engine exists.
-              command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose up -d',
+              // so the step must resolve whichever engine exists. A Podman
+              // without its compose plugin has to fail here, not midway
+              // through `up`.
+              command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose version >/dev/null 2>&1 || { echo "podman compose plugin missing (need podman-compose)"; exit 1; }; "$ENGINE" compose up -d',
               cwd: "{home}/freellmapi"
             },
             {
@@ -385,17 +431,22 @@ var HEAVY_MANIFESTS = [
             {
               label: "Download the latest .dmg",
               // Apple Silicon and Intel ship separate disk images; picking by
-              // `uname -m` keeps the install correct on both.
-              command: `arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+'"$arch"'[.]dmg"' | head -1 | cut -d'"' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p {home}/Downloads && curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg "$url"`,
+              // `uname -m` keeps the install correct on both. The asset name
+              // ends `-<arch>.dmg`, so the pattern must carry that hyphen (a
+              // `"arm64` pattern can never match). A re-run keeps the image
+              // already in ~/Downloads.
+              command: `arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+-'"$arch"'\\.dmg"' | head -1 | cut -d'"' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"`,
               weight: 2
             },
             {
               label: "Install the app from the disk image",
-              command: "mkdir -p /tmp/freellmapi-dmg && hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet"
+              // A per-run mount point is detached and removed even when the
+              // copy fails, so a hung volume never blocks the next attempt.
+              command: 'MOUNT="/tmp/freellmapi-dmg-$$"; mkdir -p "$MOUNT"; hdiutil attach "{home}/Downloads/FreeLLMAPI.dmg" -nobrowse -quiet -mountpoint "$MOUNT" && cp -R "$MOUNT"/*.app /Applications/; status=$?; hdiutil detach "$MOUNT" -quiet >/dev/null 2>&1 || true; rmdir "$MOUNT" 2>/dev/null || true; exit $status'
             },
             {
               label: "Pin the desktop app to port 3002",
-              command: `mkdir -p {home}/Library/Application\\ Support/FreeLLMAPI && printf '{"port":3002}\\n' > {home}/Library/Application\\ Support/FreeLLMAPI/config.json`
+              command: `mkdir -p "{home}/Library/Application Support/FreeLLMAPI" && printf '{"port":3002}\\n' > "{home}/Library/Application Support/FreeLLMAPI/config.json"`
             },
             { label: "Launch FreeLLMAPI", command: "open -a FreeLLMAPI" },
             {
@@ -407,13 +458,15 @@ var HEAVY_MANIFESTS = [
         // Windows only ships a desktop app (no Docker path in the vendor docs).
         win32: {
           label: "Install locally (vendor desktop app, no Docker)",
-          deps: ["Windows 10+"],
+          deps: ["Windows 10+", "Git Bash (the install steps run through bash)"],
           diskHint: "~250 MB app; data in %APPDATA%\\FreeLLMAPI",
           runtime: "vendor-app",
           steps: [
             {
               label: "Download the latest installer",
-              command: `mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+\\.exe"' | head -1 | cut -d'"' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI-Setup.exe {}`,
+              // The matched URL lands in a file first: an empty match has to
+              // fail the step instead of feeding xargs an empty string.
+              command: `mkdir -p "{home}/Downloads" && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+\\.exe"' | head -1 | cut -d'"' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"`,
               weight: 2
             },
             { label: "Install silently", command: 'cmd //c start //wait "" "$HOME/Downloads/FreeLLMAPI-Setup.exe" /S' },
@@ -437,7 +490,20 @@ var HEAVY_MANIFESTS = [
         // fail-soft so a machine that moved to another engine still cleans up.
         { label: "Stop the stack and drop its volume", command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" compose down -v', cwd: "{home}/freellmapi", optional: true },
         { label: "Remove the container image", command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" image rm ghcr.io/tashfeenahmed/freellmapi:latest', optional: true },
-        { label: "Remove the clone directory", command: "rm -rf {home}/freellmapi" }
+        { label: "Remove the clone directory", command: 'rm -rf "{home}/freellmapi"' },
+        // The vendor desktop-app leftovers are platform-guarded: each step
+        // exits cleanly on the platforms it does not own and never fails a
+        // teardown.
+        {
+          label: "Remove the macOS desktop app and its data",
+          optional: true,
+          command: 'test "$(uname -s)" = Darwin || exit 0; pkill -f FreeLLMAPI 2>/dev/null || true; hdiutil detach "/tmp/freellmapi-dmg" >/dev/null 2>&1 || true; rm -rf /Applications/FreeLLMAPI.app "{home}/Library/Application Support/FreeLLMAPI" "{home}/Downloads/FreeLLMAPI.dmg" /tmp/freellmapi-dmg'
+        },
+        {
+          label: "Remove the Windows desktop app and its data",
+          optional: true,
+          command: 'case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 0;; esac; taskkill //F //IM FreeLLMAPI.exe 2>/dev/null || true; rm -rf "$APPDATA/FreeLLMAPI" "$LOCALAPPDATA/Programs/FreeLLMAPI" "$HOME/Downloads/FreeLLMAPI-Setup.exe"'
+        }
       ],
       warnings: [
         "`docker compose down -v` deletes volume freellmapi_freellmapi-data \u2014 every upstream key and the unified key die with it",
@@ -463,7 +529,8 @@ var HEAVY_MANIFESTS = [
     ],
     quirks: [
       "Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install \u2014 run the package manually or use a proxy running elsewhere",
-      "macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin \u2014 a global binary reachable only from a fish or zsh configuration is not found; keep it reachable from a login bash profile or one of those directories",
+      "Linux: the systemd user unit runs the proxy through /bin/bash -lc with PATH ~/.local/bin:/usr/local/bin:/usr/bin:/bin; the package installs under ~/.local/bin, and a Node.js reachable only from an nvm/fnm shell configuration is not found \u2014 keep it reachable from a login shell or one of those directories",
+      "macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin plus the common nvm/fnm node directories; the package installs under ~/.local/bin, and a Node.js reachable only from a fish/zsh/nvm/fnm shell configuration is not found \u2014 keep it reachable from a login bash profile or one of those directories",
       "The proxy runs its own sticky account pool with cooldowns \u2014 DSH key pooling MUST stay off for this route",
       "The console at :8082 has no auth (webuiPassword empty) \u2014 trusted networks only",
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED \u2026 resets after 46h" is normal',
@@ -478,7 +545,7 @@ var HEAVY_MANIFESTS = [
     local: {
       label: "Install locally (npm + user service)",
       baseURL: "http://127.0.0.1:8082",
-      deps: ["Node.js >= 18"],
+      deps: ["Node.js >= 18", "A reachable systemd user session (systemctl --user) on the default path"],
       diskHint: "~23 MB install, ~78\u2013150 MB RAM, no GPU",
       dashboardUrl: "http://127.0.0.1:8082",
       runtime: "node",
@@ -516,7 +583,14 @@ var HEAVY_MANIFESTS = [
           optional: true,
           command: `rm -f {config}/systemd/user/antigravity-proxy.service {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi`
         },
-        { label: "Uninstall the package", command: "npm uninstall -g antigravity-claude-proxy", optional: true },
+        // The package may live in `~/.local` (the install's prefix) or in a
+        // version-manager global prefix a previous setup used; both are
+        // uninstalled, fail-soft, so neither location keeps a stale binary.
+        {
+          label: "Uninstall the package",
+          optional: true,
+          command: 'npm uninstall -g --prefix "{home}/.local" antigravity-claude-proxy 2>/dev/null || true; npm uninstall -g antigravity-claude-proxy 2>/dev/null || true'
+        },
         { label: "Remove the config directory (OAuth tokens, presets, usage history)", command: "rm -rf {config}/antigravity-proxy" }
       ],
       warnings: [
@@ -575,7 +649,7 @@ var HEAVY_MANIFESTS = [
       label: "Use the vendor endpoint now",
       baseURL: "https://api.commandcode.ai",
       note: "Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.",
-      health: { url: "https://api.commandcode.ai/", timeoutMs: 5e3 }
+      health: COMMANDCODE_HEALTH
     },
     local: {
       label: "Link the provider package, then use the vendor endpoint",
@@ -591,11 +665,11 @@ var HEAVY_MANIFESTS = [
         darwin: { steps: [COMMANDCODE_INSTALL_STEP] },
         win32: {
           label: "Not supported on Windows",
-          unsupported: "The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually (node scripts/install.mjs <profile>) or run the harness on Linux/macOS.",
+          unsupported: "The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually: from the profile root (normally ~/.dsh/profiles/web) run `node packages/enpoi-commandcode-provider/scripts/install.mjs .`, or run the harness on Linux/macOS.",
           steps: []
         }
       },
-      health: { url: "https://api.commandcode.ai/", timeoutMs: 5e3 }
+      health: COMMANDCODE_HEALTH
     },
     removal: {
       // No local service exists: the vendor endpoint needs no teardown and the
@@ -707,7 +781,7 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
   return problems;
 }
 
-// src/planner.ts
+// profile/web/packages/enpoi-heavy-providers/src/planner.ts
 import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname, join as join2 } from "node:path";
 var LLM_NS = "llm-pi-ai";
@@ -748,6 +822,20 @@ function healthForBase(manifest, baseURL) {
     return { ...manifest.reuse.health, url: `${base.protocol}//${base.host}${declared.pathname}` };
   } catch {
     return manifest.reuse.health;
+  }
+}
+function instanceBaseURLFromInput(value) {
+  const trimmed = value.trim();
+  if (trimmed === "") return void 0;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return void 0;
+    if (parsed.username !== "" || parsed.password !== "") return void 0;
+    if (parsed.search !== "" || parsed.hash !== "") return void 0;
+    if (parsed.port !== "" && Number(parsed.port) < 1) return void 0;
+    return parsed.origin;
+  } catch {
+    return void 0;
   }
 }
 function instanceCandidates(manifest, configuredBaseURL) {
@@ -798,15 +886,18 @@ async function detectRuntimes(runStep2) {
   try {
     const outcome = await runStep2({
       label: "Detect local runtimes",
-      command: "command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; command -v node >/dev/null 2>&1 && echo available:node; exit 0"
+      command: "command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; command -v node >/dev/null 2>&1 && echo available:node; command -v node >/dev/null 2>&1 && node -v 2>/dev/null | cut -d. -f1 | tr -d v | sed 's/^/node-major:/'; systemctl --user show-environment >/dev/null 2>&1 && echo available:systemd-user; exit 0"
     });
+    const nodeMajor = /(^|\n)node-major:(\d+)(\n|$)/.exec(outcome.output)?.[2];
     return {
       docker: /(^|\n)available:docker(\n|$)/.test(outcome.output),
       podman: /(^|\n)available:podman(\n|$)/.test(outcome.output),
-      node: /(^|\n)available:node(\n|$)/.test(outcome.output)
+      node: /(^|\n)available:node(\n|$)/.test(outcome.output),
+      ...nodeMajor === void 0 ? {} : { nodeMajor: Number(nodeMajor) },
+      systemdUser: /(^|\n)available:systemd-user(\n|$)/.test(outcome.output)
     };
   } catch {
-    return { docker: false, podman: false, node: false };
+    return { docker: false, podman: false, node: false, systemdUser: false };
   }
 }
 function missingFileRequirement(requirements, context) {
@@ -820,6 +911,13 @@ function missingFileRequirement(requirements, context) {
 function declaredRuntime(manifest, platform) {
   const variant = platform === "linux" || platform === "darwin" || platform === "win32" ? manifest.local.install[platform] : void 0;
   return variant?.runtime ?? manifest.local.runtime ?? "node";
+}
+function declaredNodeMajor(deps) {
+  for (const dep of deps) {
+    const match = /^Node\.js\s*(?:>=\s*)?(\d+)/.exec(dep.trim());
+    if (match?.[1] !== void 0) return Number(match[1]);
+  }
+  return void 0;
 }
 function chooseLocalPath(manifest, platform, runtime, detectedPort, context) {
   const resolved = resolveHeavyInstall(manifest.local, platform);
@@ -844,8 +942,26 @@ function chooseLocalPath(manifest, platform, runtime, detectedPort, context) {
       return runtime.podman ? { path: "podman", label: resolved.label, ...base, requires: ["podman"], missing: [] } : { path: "unsupported", label: resolved.label, ...base, requires: ["podman"], missing: ["Podman"] };
     case "vendor-app":
       return { path: "vendor-app", label: resolved.label, ...base, requires: [], missing: [] };
-    case "node":
-      return runtime.node ? { path: "node", label: resolved.label, ...base, requires: [], missing: [] } : { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [resolved.deps[0] ?? "Node.js"] };
+    case "node": {
+      if (!runtime.node) {
+        return { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [resolved.deps[0] ?? "Node.js"] };
+      }
+      const requiredNodeMajor = declaredNodeMajor(resolved.deps);
+      if (requiredNodeMajor !== void 0 && runtime.nodeMajor !== void 0 && runtime.nodeMajor < requiredNodeMajor) {
+        return { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [`Node.js >= ${String(requiredNodeMajor)}`] };
+      }
+      const needsSystemdUser = resolved.steps.some((step) => step.command.includes("systemctl --user"));
+      if (needsSystemdUser && !runtime.systemdUser) {
+        return {
+          path: "unsupported",
+          label: resolved.label,
+          ...base,
+          requires: [],
+          missing: ["A reachable systemd user session (`systemctl --user`)"]
+        };
+      }
+      return { path: "node", label: resolved.label, ...base, requires: [], missing: [] };
+    }
   }
 }
 function readServerOverlay(dshHome) {
@@ -872,7 +988,13 @@ function overlayManifest(manifest, entry) {
   };
 }
 function routeProfile(manifest, mode, models, overrides = {}) {
-  const list = models.length > 0 ? models.map((model) => model.name === void 0 ? { id: model.id } : { id: model.id, name: model.name }) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
+  const list = models.length > 0 ? models.map((model) => ({
+    id: model.id,
+    ...model.name === void 0 ? {} : { name: model.name },
+    ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+    ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+    ...model.input === void 0 || model.input.length === 0 ? {} : { input: [...model.input] }
+  })) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
   const suffix = manifest.delivery === "direct" ? " (direct)" : mode === "local" ? " (local)" : " (detected)";
   return {
     displayName: `${manifest.label}${suffix}`,
@@ -892,7 +1014,10 @@ function routeProfile(manifest, mode, models, overrides = {}) {
 async function probeHealth(probe, fetchImpl = globalThis.fetch, now = Date.now) {
   const checkedAt = now();
   try {
-    const response = await fetchImpl(probe.url, { signal: AbortSignal.timeout(probe.timeoutMs ?? 5e3) });
+    const response = await fetchImpl(probe.url, {
+      ...probe.headers === void 0 ? {} : { headers: { ...probe.headers } },
+      signal: AbortSignal.timeout(probe.timeoutMs ?? 5e3)
+    });
     const accepted = probe.expectStatus ?? void 0;
     const statusOk = accepted === void 0 ? response.status >= 200 && response.status < 300 : accepted.includes(response.status);
     if (!statusOk) return { ok: false, status: response.status, error: `HTTP ${String(response.status)}`, checkedAt };
@@ -925,6 +1050,30 @@ async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch) {
       models.push(typeof name2 === "string" && name2 !== "" ? { id, name: name2 } : { id });
     }
     return models;
+  } catch {
+    return [];
+  }
+}
+async function discoverRouteModels(deps, manifest, baseURL) {
+  const llm = deps.llm;
+  if (llm === void 0) return [];
+  try {
+    const found = await llm.discoverModels(routeSettingsNs(manifest), {
+      provider: manifest.id,
+      baseURL,
+      api: manifest.protocol
+    });
+    return found.flatMap((model) => {
+      if (model.id === "") return [];
+      const input = (model.inputModalities ?? []).filter((modality) => typeof modality === "string" && modality !== "");
+      return [{
+        id: model.id,
+        ...model.name === void 0 || model.name === model.id ? {} : { name: model.name },
+        ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+        ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+        ...input.length === 0 ? {} : { input }
+      }];
+    });
   } catch {
     return [];
   }
@@ -970,30 +1119,59 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   await settings.mutate(settingsNs, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, settingsNs));
   return profile;
 }
-async function storeCredential(deps, manifest, key) {
-  const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
-  if (key === void 0 || key.trim() === "" || ref === void 0) return false;
+async function commitRoute(deps, manifest, mode, models, key, overrides = {}) {
+  if (deps.settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
+  const pending = pendingRestartForManifest(deps, manifest);
+  if (pending !== void 0) throw new Error(pending.message);
   const credentials = deps.credentials;
-  if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
-  await credentials.set(ref, key.trim());
-  return true;
+  const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
+  const value = key?.trim() ?? "";
+  const store = value !== "" && ref !== void 0;
+  let previous;
+  if (store) {
+    if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
+    previous = await credentials.resolve(ref);
+    await credentials.set(ref, value);
+  }
+  let route;
+  try {
+    route = await writeRoute(deps, manifest, mode, models, overrides);
+  } catch (error) {
+    if (store && credentials !== void 0) {
+      try {
+        if (previous?.value !== void 0) await credentials.set(ref, previous.value);
+        else await credentials.unset(ref);
+      } catch (rollbackError) {
+        const cause = error instanceof Error ? error.message : String(error);
+        const failed2 = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        throw new Error(`${cause} (credential rollback also failed: ${failed2})`);
+      }
+    }
+    throw error;
+  }
+  return { route, credentialStored: store };
 }
-async function useDetectedInstance(deps, manifest, key) {
+async function useDetectedInstance(deps, manifest, key, options = {}) {
   const direct = manifest.delivery === "direct";
+  const typedOrigin = options.baseURL === void 0 ? void 0 : instanceBaseURLFromInput(options.baseURL);
+  if (options.baseURL !== void 0 && typedOrigin === void 0) {
+    throw new Error("invalid custom instance base URL");
+  }
+  const customBase = typedOrigin === void 0 ? void 0 : `${typedOrigin}${urlPath(manifest.reuse.baseURL)}`;
   const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
   const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
-  const detection = direct ? void 0 : await detectInstance(deps, manifest, configuredBase);
-  const endpoint = direct ? manifest.reuse.baseURL : detection.ok ? detection.baseURL : manifest.reuse.baseURL;
-  const models = direct ? [] : await discoverModels(endpoint, key, deps.fetchImpl);
-  const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
-  const route = await writeRoute(deps, manifest, "reuse", models, { baseURL: endpoint });
-  const credentialStored = await storeCredential(deps, manifest, key);
+  const detection = direct || customBase !== void 0 ? void 0 : await detectInstance(deps, manifest, configuredBase);
+  const endpoint = direct ? manifest.reuse.baseURL : customBase ?? (detection.ok ? detection.baseURL : manifest.reuse.baseURL);
+  const models = direct ? await discoverRouteModels(deps, manifest, endpoint) : await discoverModels(endpoint, key, deps.fetchImpl);
+  const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : typedOrigin !== void 0 ? await probeHealth(healthForBase(manifest, typedOrigin), deps.fetchImpl) : detection.health;
+  const { route, credentialStored } = await commitRoute(deps, manifest, "reuse", models, key, { baseURL: endpoint });
+  const customPort = typedOrigin === void 0 ? void 0 : urlPort(typedOrigin);
   return {
     route,
     health,
     models,
     credentialStored,
-    ...detection?.ok === true && detection.port !== void 0 ? { port: detection.port } : {},
+    ...detection?.ok === true && detection.port !== void 0 ? { port: detection.port } : customPort === void 0 ? {} : { port: customPort },
     endpoint
   };
 }
@@ -1060,6 +1238,29 @@ async function removeChainReferences(deps, id) {
   await settings.mutate(ORCHESTRATION_NS, [{ op: "set", path: ["chains"], value: next }], revisionOf(settings, ORCHESTRATION_NS));
   return removed;
 }
+function credentialRefInUse(deps, manifest, ref) {
+  const entries = deps.settings?.describe?.();
+  if (entries === void 0) return false;
+  const removedNs = routeSettingsNs(manifest);
+  for (const entry of entries) {
+    const value = entry.value;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    const providers = value.providers;
+    if (providers === null || typeof providers !== "object" || Array.isArray(providers)) continue;
+    for (const [id, raw] of Object.entries(providers)) {
+      if (entry.ns === removedNs && id === manifest.id) continue;
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const route = raw;
+      if (route.apiKeyEnv === ref) return true;
+      const pool = route.pool;
+      if (pool === null || typeof pool !== "object" || Array.isArray(pool)) continue;
+      const identities = pool.identities;
+      if (!Array.isArray(identities)) continue;
+      if (identities.some((identity) => identity !== null && typeof identity === "object" && !Array.isArray(identity) && identity.credentialRef === ref)) return true;
+    }
+  }
+  return false;
+}
 async function removeProvider(deps, manifest, options = {}) {
   const errors = [];
   let teardown = { ran: false, ok: true, output: "" };
@@ -1103,13 +1304,19 @@ ${outcome.output}
       errors.push(`route: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  const warnings = [];
   let credentialRemoved = false;
-  if (deps.credentials !== void 0 && manifest.auth.apiKeyEnv !== void 0) {
-    try {
-      await deps.credentials.unset(manifest.auth.apiKeyEnv);
-      credentialRemoved = true;
-    } catch (error) {
-      errors.push(`credential: ${error instanceof Error ? error.message : String(error)}`);
+  const credentialRef = manifest.auth.apiKeyEnv;
+  if (deps.credentials !== void 0 && credentialRef !== void 0) {
+    if (credentialRefInUse(deps, manifest, credentialRef)) {
+      warnings.push(`credential ${credentialRef} kept: another configured route references it`);
+    } else {
+      try {
+        await deps.credentials.unset(credentialRef);
+        credentialRemoved = true;
+      } catch (error) {
+        errors.push(`credential: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
   const poolStateRemoved = removePoolState(deps, manifest.id);
@@ -1120,10 +1327,10 @@ ${outcome.output}
   } catch (error) {
     errors.push(`chains: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, errors };
+  return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, warnings, errors };
 }
 
-// src/remote.ts
+// profile/web/packages/enpoi-heavy-providers/src/remote.ts
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 var MAX_KEY_CHARS = 4096;
 var RUNTIME_TTL_MS = 6e4;
@@ -1142,6 +1349,18 @@ function optionalKey(value) {
   if (typeof value !== "string") throw new RemoteError("gateway/bad-request", "enpoiHeavy: key must be a string", {});
   if (value.length > MAX_KEY_CHARS) throw new RemoteError("gateway/bad-request", "enpoiHeavy: key is too long", {});
   return value;
+}
+var MAX_BASE_URL_CHARS = 2048;
+function optionalBaseURL(value) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "string") throw new RemoteError("gateway/bad-request", "enpoiHeavy: baseURL must be a string", {});
+  if (value.trim() === "") return void 0;
+  if (value.length > MAX_BASE_URL_CHARS) throw new RemoteError("gateway/bad-request", "enpoiHeavy: baseURL is too long", {});
+  const normalized = instanceBaseURLFromInput(value);
+  if (normalized === void 0) {
+    throw new RemoteError("gateway/bad-request", "enpoiHeavy: baseURL must be an absolute http(s) URL", {});
+  }
+  return normalized;
 }
 var _remove_dec, _job_dec, _install_dec, _reuse_dec, _status_dec, _manifests_dec, _a, _init;
 var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_dec = [Remote], _status_dec = [Remote], _reuse_dec = [Remote], _install_dec = [Remote], _job_dec = [Remote], _remove_dec = [Remote], _a) {
@@ -1219,6 +1438,14 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
   async reuse(request) {
     const manifest = this.effectiveManifest(requireManifest(request?.id));
     const key = optionalKey(request?.key);
+    const baseURL = optionalBaseURL(request?.baseURL);
+    if (baseURL !== void 0 && manifest.delivery === "direct") {
+      throw new RemoteError(
+        "gateway/bad-request",
+        `enpoiHeavy: "${manifest.id}" is a direct vendor route; a custom instance URL does not apply`,
+        {}
+      );
+    }
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
     }
@@ -1228,7 +1455,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`);
       return { ok: false, pendingRestart };
     }
-    const outcome = await useDetectedInstance(deps, manifest, key);
+    const outcome = await useDetectedInstance(deps, manifest, key, baseURL === void 0 ? {} : { baseURL });
     this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`);
     return { ok: true, ...outcome };
   }
@@ -1253,9 +1480,8 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       const current = this.options.deps();
       const late = pendingRestartForManifest(current, manifest);
       if (late !== void 0) throw new Error(late.message);
-      const models = manifest.delivery === "direct" ? [] : await discoverModels(modeBaseURL(manifest, "local"), key, current.fetchImpl);
-      await writeRoute(current, manifest, "local", models);
-      await storeCredential(current, manifest, key);
+      const models = manifest.delivery === "direct" ? await discoverRouteModels(current, manifest, modeBaseURL(manifest, "local")) : await discoverModels(modeBaseURL(manifest, "local"), key, current.fetchImpl);
+      await commitRoute(current, manifest, "local", models, key);
     });
     return { ok: true, job };
   }
@@ -1285,7 +1511,7 @@ __decoratorMetadata(_init, HeavyProvidersService);
 /** Nothing is injected into the service fiber; the plugin passes its deps. */
 __publicField(HeavyProvidersService, "inject", []);
 
-// src/index.ts
+// profile/web/packages/enpoi-heavy-providers/src/index.ts
 var name = "enpoi-heavy-providers";
 var inject = [];
 async function runStep(ctx, step, home, dshHome) {
@@ -1330,6 +1556,7 @@ function apply(ctx) {
       dshHome,
       settings: ctx.get("settings"),
       credentials: ctx.get("credentials"),
+      llm: ctx.get("llm"),
       fetchImpl: globalThis.fetch,
       runStep: (step) => runStep(ctx, step, home, dshHome)
     }),

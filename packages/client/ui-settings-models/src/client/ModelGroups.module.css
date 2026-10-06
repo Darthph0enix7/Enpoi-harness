@@ -10,6 +10,7 @@
   border-radius: 12px;
   background: var(--dsw-alias-bg-module-platform);
   color: var(--dsw-alias-label-primary);
+  flex: none;
 }
 
 .header {
@@ -394,5 +395,15 @@
   .body {
     padding-left: 10px;
     padding-right: 10px;
+  }
+}
+
+@media (min-width: 821px) {
+  .body {
+    max-height: min(320px, 40vh);
+    overflow-y: auto;
+    /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+    --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+    --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   }
 }

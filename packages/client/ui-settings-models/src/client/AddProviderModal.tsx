@@ -38,6 +38,19 @@ function uniqueId(base: string, taken: readonly string[]): string {
   return candidate
 }
 
+/**
+ * The origin of one manifest address. The custom-instance field takes an
+ * origin only — the host applies the manifest's declared endpoint and health
+ * paths to it — so its placeholder must not suggest a path suffix.
+ */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return url
+  }
+}
+
 /** Parse the manual model list: one id per line or comma, blanks dropped. */
 function parseModelIds(text: string): string[] {
   return text.split(/[\n,]/).map(entry => entry.trim()).filter(entry => entry !== '')
@@ -75,6 +88,10 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   // and a stale closure would keep suppressing (or applying) the default.
   const heavyModeTouched = useRef(false)
   const [heavyKey, setHeavyKey] = useState('')
+  // Custom-instance fallback (service manifests only): the operator types the
+  // address the route should use when detection finds nothing (or they pick
+  // it explicitly). Empty keeps detection / the declared endpoint.
+  const [heavyCustomBase, setHeavyCustomBase] = useState('')
   const [heavyStatus, setHeavyStatus] = useState<HeavyStatusView | null>(null)
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
@@ -146,6 +163,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setRecovery(null)
     setHeavyMode('reuse')
     setHeavyKey('')
+    setHeavyCustomBase('')
     setHeavyStatus(null)
     setHeavyChecking(false)
     setHeavyJob(null)
@@ -183,6 +201,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setHeavyStatus(null)
     setHeavyJob(null)
     setHeavyKey('')
+    setHeavyCustomBase('')
     setHeavyMode('reuse')
     heavyModeTouched.current = false
     if (tpl === 'empty') {
@@ -214,7 +233,10 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       return
     }
     if (heavyMode === 'reuse') {
-      const result = await heavyApi.reuse(manifest.id, heavyKey)
+      // The custom instance URL is a reuse-only, service-only fallback: a
+      // direct vendor route has no on-device instance to retarget.
+      const customBase = manifest.delivery === 'direct' ? undefined : heavyCustomBase.trim()
+      const result = await heavyApi.reuse(manifest.id, heavyKey, customBase)
       if (!result.ok) {
         setError(result.message)
         return
@@ -700,6 +722,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               onMode={(mode) => { heavyModeTouched.current = true; setHeavyMode(mode) }}
               keyValue={heavyKey}
               onKey={setHeavyKey}
+              customBase={heavyCustomBase}
+              onCustomBase={setHeavyCustomBase}
               status={heavyStatus}
               checking={heavyChecking}
               job={heavyJob}
@@ -738,6 +762,8 @@ function HeavyProviderForm(props: {
   onMode: (mode: 'reuse' | 'local') => void
   keyValue: string
   onKey: (value: string) => void
+  customBase: string
+  onCustomBase: (value: string) => void
   status: HeavyStatusView | null
   checking: boolean
   job: HeavyJobView | null
@@ -746,7 +772,7 @@ function HeavyProviderForm(props: {
   t: (key: keyof typeof en) => string
   onCheck: () => void
 }): ReactNode {
-  const { manifest, mode, onMode, keyValue, onKey, status, checking, job, readOnly, busy, t, onCheck } = props
+  const { manifest, mode, onMode, keyValue, onKey, customBase, onCustomBase, status, checking, job, readOnly, busy, t, onCheck } = props
   const disabled = busy || readOnly
   const platform = status?.platform
   const health = status?.health ?? null
@@ -840,6 +866,26 @@ function HeavyProviderForm(props: {
               </span>
             </label>
           </div>
+
+          {/* Custom-instance fallback: a service manifest the detection did
+              not find (or one the operator points elsewhere) can still be
+              reused by typing its address. A direct vendor route has no
+              on-device instance and never gets this field. */}
+          {mode === 'reuse' && manifest.delivery !== 'direct' && (
+            <div className={styles['field']}>
+              <label className={styles['fieldLabel']}>{t('heavyCustomLabel')}</label>
+              <input
+                className={styles['input']}
+                type="text"
+                value={customBase}
+                placeholder={originOf(manifest.reuse.baseURL)}
+                onChange={e => onCustomBase(e.target.value)}
+                disabled={disabled}
+                data-heavy-custom-url
+              />
+              <p className={styles['heavyModeNote']}>{t('heavyCustomHint')}</p>
+            </div>
+          )}
 
           {/* Ordering: the route namespace is mounted only after the profile
               build + restart, so say so before the click instead of letting

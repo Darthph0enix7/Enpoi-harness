@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { HeavyJobManager } from './jobs.js'
 import { manifestProblems } from './manifests.js'
-import { substitute, type CredentialsSeam, type FetchLike, type SettingsSeam, type StepOutcome } from './planner.js'
+import { substitute, type CredentialsSeam, type FetchLike, type ModelDiscoverySeam, type SettingsSeam, type StepOutcome } from './planner.js'
 import { HeavyProvidersService } from './remote.js'
 import type { HeavyStep } from './manifests.js'
 
@@ -93,6 +93,7 @@ export function apply(ctx: Context): void {
       dshHome,
       settings: ctx.get('settings') as SettingsSeam | undefined,
       credentials: ctx.get('credentials') as CredentialsSeam | undefined,
+      llm: ctx.get('llm') as ModelDiscoverySeam | undefined,
       fetchImpl: globalThis.fetch as unknown as FetchLike,
       runStep: step => runStep(ctx, step, home, dshHome),
     }),

@@ -106,6 +106,12 @@ export function contextWindowOf(entry: CatalogEntry | undefined): number | undef
   return typeof context === 'number' && context > 0 ? context : undefined
 }
 
+/** The maximum output tokens the catalog declares, when it does. */
+export function maxOutputTokensOf(entry: CatalogEntry | undefined): number | undefined {
+  const output = entry?.limit?.output
+  return typeof output === 'number' && output > 0 ? output : undefined
+}
+
 /** The plan badge embedded in a catalog display name (`[Go+]`, `[Pro+]`, `[Max]`). */
 export function planBadgeOf(entry: CatalogEntry | undefined): string | undefined {
   const match = /\[[^\]]+\]\s*$/.exec(entry?.name ?? '')

@@ -9,12 +9,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
+import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
+import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
 import type { ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  resetHeavyManifestSource()
 })
 
 function wire(): ModelsWire {
@@ -50,13 +53,18 @@ function errorEnvelope(message: string): Promise<Response> {
   } as unknown as Response)
 }
 
-/** Track every heavy method called and answer with canned values. */
-function stubHeavyFetch(answers: Record<string, unknown>): { methods: string[] } {
+/** Track every heavy method (and its args) called and answer with canned values. */
+function stubHeavyFetch(answers: Record<string, unknown>): {
+  methods: string[]
+  requests: Array<{ method: string; args: { request?: Record<string, unknown> } }>
+} {
   const methods: string[] = []
+  const requests: Array<{ method: string; args: { request?: Record<string, unknown> } }> = []
   vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { body?: string }) => {
-    const body = JSON.parse(init?.body ?? '{}') as { method: string }
+    const body = JSON.parse(init?.body ?? '{}') as { method: string; payload?: { args?: { request?: Record<string, unknown> } } }
     methods.push(body.method)
-    if (body.method === 'enpoiHeavy.manifests') return envelope({ items: [], problems: [] })
+    requests.push({ method: body.method, args: body.payload?.args ?? {} })
+    if (body.method === 'enpoiHeavy.manifests') return envelope(answers.manifests ?? { items: [], problems: [] })
     if (body.method === 'enpoiHeavy.status') {
       return envelope(answers.status ?? {
         id: 'x',
@@ -73,7 +81,7 @@ function stubHeavyFetch(answers: Record<string, unknown>): { methods: string[] }
     if (body.method === 'enpoiHeavy.job') return envelope(answers.job ?? { job: { id: 'x', kind: 'install', state: 'succeeded', stage: 'Done', stageIndex: 4, stageCount: 4, pct: 100, logTail: 'ok', startedAt: 1, finishedAt: 2 } })
     return envelope({})
   }))
-  return { methods }
+  return { methods, requests }
 }
 
 it('lists the heavy presets with a Heavy badge and surfaces quirks and mode choice', async () => {
@@ -89,7 +97,7 @@ it('lists the heavy presets with a Heavy badge and surfaces quirks and mode choi
   // FreeLLMAPI has no browser-bound account flow: no badge, but the local
   // dependency line is explicit.
   expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
-  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
+  expect(screen.getByText(/Linux uses Docker\/Podman compose; macOS\/Windows use the vendor desktop app/)).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) })).toBeTruthy()
   expect(screen.getByRole('radio', { name: new RegExp(en.heavyReuse) })).toHaveProperty('checked', true)
@@ -184,6 +192,40 @@ it('reuse mode writes the route through the host and closes', async () => {
   expect(methods).toContain('enpoiHeavy.reuse')
 })
 
+it('offers a custom-instance URL on a service reuse and sends the typed address', async () => {
+  const { requests } = stubHeavyFetch({})
+  const onClose = vi.fn()
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  expect(screen.getByText(en.heavyCustomLabel)).toBeTruthy()
+  // The field takes an origin only (the host applies the declared paths); a
+  // non-loopback address is accepted explicitly: the operator typed it.
+  const field = screen.getByPlaceholderText('http://127.0.0.1:3002')
+  fireEvent.change(field, { target: { value: 'http://192.168.1.10:4000/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  const reuse = requests.find(request => request.method === 'enpoiHeavy.reuse')
+  expect(reuse?.args.request).toEqual({ id: 'freellmapi', baseURL: 'http://192.168.1.10:4000/v1' })
+})
+
+it('a direct vendor route gets no custom-instance field and sends no baseURL', async () => {
+  const { requests } = stubHeavyFetch({})
+  const onClose = vi.fn()
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+
+  fireEvent.click(screen.getByText('Command Code'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  expect(screen.queryByText(en.heavyCustomLabel)).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  const reuse = requests.find(request => request.method === 'enpoiHeavy.reuse')
+  expect(reuse?.args.request).toEqual({ id: 'commandcode' })
+})
+
 it('local mode starts the install job and polls it to success', async () => {
   const { methods } = stubHeavyFetch({})
   const onClose = vi.fn()
@@ -255,4 +297,21 @@ it('a reuse click before the route namespace is mounted reports the restart orde
   await waitFor(() => { expect(screen.getByText(message)).toBeTruthy() })
   expect(onClose).not.toHaveBeenCalled()
   expect(methods).toContain('enpoiHeavy.reuse')
+})
+
+it('a malformed host manifest address falls back to its raw text in the origin placeholder', async () => {
+  const base = fallbackHeavyManifest('freellmapi')!
+  bindHostHeavyManifests({
+    items: [{ ...base, reuse: { ...base.reuse, baseURL: 'not-a-url' } }],
+    platform: 'linux',
+    problems: [],
+  })
+  stubHeavyFetch({})
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  // A host address that cannot parse renders as-is instead of crashing the
+  // modal; the shipped table's address yields its origin (test above).
+  expect(screen.getByPlaceholderText('not-a-url')).toBeTruthy()
 })

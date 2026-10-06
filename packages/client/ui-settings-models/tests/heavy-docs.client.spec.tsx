@@ -44,7 +44,7 @@ it('renders every manifest section for the host platform (linux)', () => {
   expect(screen.getByText(/never expose this port beyond the local machine/)).toBeTruthy()
   // No browser badge for FreeLLMAPI; its local dependency line is stated instead.
   expect(screen.queryByText(en.heavyBrowserBadge)).toBeNull()
-  expect(screen.getByText(/native installers for Linux\/macOS\/Windows; Docker required only for the fallback path/)).toBeTruthy()
+  expect(screen.getByText(/Linux uses Docker\/Podman compose; macOS\/Windows use the vendor desktop app/)).toBeTruthy()
   expect(screen.getByText(en.heavyInstalls)).toBeTruthy()
   expect(screen.getByText(en.heavyRemoves)).toBeTruthy()
   expect(screen.getAllByText('Remove the clone directory').length).toBeGreaterThan(0)
@@ -66,7 +66,7 @@ it('switches the install selection to darwin and win32 samples', () => {
   fireEvent.click(screen.getByRole('button', { name: en.heavyPlatformWindows }))
   expect(screen.getAllByText('Download the latest installer').length).toBeGreaterThan(0)
   expect(screen.getAllByText('Install silently').length).toBeGreaterThan(0)
-  expect(screen.getByText(`${en.heavyDeps}: Windows 10+`)).toBeTruthy()
+  expect(screen.getByText(`${en.heavyDeps}: Windows 10+, Git Bash (the install steps run through bash)`)).toBeTruthy()
   expect(screen.getAllByText(/FreeLLMAPI-Setup\.exe/).length).toBeGreaterThan(0)
 })
 

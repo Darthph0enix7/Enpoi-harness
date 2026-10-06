@@ -26,6 +26,7 @@ import type { ModelsOperations } from '../src/client/operations.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
+import styles from '../src/client/ModelsSection.module.css'
 
 afterEach(cleanup)
 
@@ -347,6 +348,15 @@ async function mountDeepSeekCard(overrides: Parameters<typeof scriptedFace>[0] =
 }
 
 describe('ModelsSection', () => {
+  it('wraps the loaded models page in modelsPage and houses provider detail in providerDetailMain', async () => {
+    const { view } = await mountSection()
+    expect(view.container.querySelector(`.${styles.modelsPage}`)).not.toBeNull()
+    expect(view.container.querySelector(`.${styles.masterDetailLayout}`)).not.toBeNull()
+    const detailMain = view.container.querySelector(`.${styles.providerDetailMain}`)
+    expect(detailMain).not.toBeNull()
+    expect(detailMain?.className).toContain(styles.providerDetailMain)
+  })
+
   it('renders nothing before the slot injects its dependencies', () => {
     const uninjected = {} as ModelsSectionProps
     render(<ModelsSection {...uninjected} />)

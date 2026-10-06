@@ -75,24 +75,39 @@ it('candidate order is recorded port, declared endpoint, then default port, dedu
 })
 
 it('runtime detection reads one combined probe and fails soft when the runner throws', async () => {
-  const probe = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\navailable:podman\navailable:node\n' }))
-  expect(await detectRuntimes(probe)).toEqual({ docker: true, podman: true, node: true })
+  const probe = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\navailable:podman\navailable:node\navailable:systemd-user\n' }))
+  expect(await detectRuntimes(probe)).toEqual({ docker: true, podman: true, node: true, systemdUser: true })
   const dockerOnly = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\n' }))
-  expect(await detectRuntimes(dockerOnly)).toEqual({ docker: true, podman: false, node: false })
+  expect(await detectRuntimes(dockerOnly)).toEqual({ docker: true, podman: false, node: false, systemdUser: false })
   const empty = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: '' }))
-  expect(await detectRuntimes(empty)).toEqual({ docker: false, podman: false, node: false })
+  expect(await detectRuntimes(empty)).toEqual({ docker: false, podman: false, node: false, systemdUser: false })
   const failing = vi.fn(async (_step: { command: string }): Promise<never> => { throw new Error('no subprocess seam') })
-  expect(await detectRuntimes(failing)).toEqual({ docker: false, podman: false, node: false })
+  expect(await detectRuntimes(failing)).toEqual({ docker: false, podman: false, node: false, systemdUser: false })
   expect(probe.mock.calls[0]?.[0].command).toContain('command -v docker')
   expect(probe.mock.calls[0]?.[0].command).toContain('command -v node')
+  expect(probe.mock.calls[0]?.[0].command).toContain('systemctl --user show-environment')
+  expect(probe.mock.calls[0]?.[0].command).toContain('node -v')
+})
+
+it('runtime detection captures the node major, fail-soft', async () => {
+  const versioned = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:node\nnode-major:22\n' }))
+  expect(await detectRuntimes(versioned)).toEqual({ docker: false, podman: false, node: true, nodeMajor: 22, systemdUser: false })
+  const old = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'node-major:18\n' }))
+  expect((await detectRuntimes(old)).nodeMajor).toBe(18)
+  // A version manager whose `node -v` answers nothing usable leaves the major
+  // absent instead of reporting a bogus one.
+  const silent = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:node\nnode-major:' }))
+  expect((await detectRuntimes(silent)).nodeMajor).toBeUndefined()
+  const garbage = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'node-major:vNext\n' }))
+  expect((await detectRuntimes(garbage)).nodeMajor).toBeUndefined()
 })
 
 it('preflight picks the per-platform best path and names what is missing', () => {
   const freellmapi = manifestById('freellmapi')!
-  const docker: RuntimeProbe = { docker: true, podman: false, node: true }
-  const podman: RuntimeProbe = { docker: false, podman: true, node: true }
-  const node: RuntimeProbe = { docker: false, podman: false, node: true }
-  const bare: RuntimeProbe = { docker: false, podman: false, node: false }
+  const docker: RuntimeProbe = { docker: true, podman: false, node: true, systemdUser: true }
+  const podman: RuntimeProbe = { docker: false, podman: true, node: true, systemdUser: true }
+  const node: RuntimeProbe = { docker: false, podman: false, node: true, systemdUser: true }
+  const bare: RuntimeProbe = { docker: false, podman: false, node: false, systemdUser: false }
 
   expect(chooseLocalPath(freellmapi, 'linux', docker).path).toBe('docker')
   expect(chooseLocalPath(freellmapi, 'linux', podman).path).toBe('podman')
@@ -111,12 +126,51 @@ it('preflight picks the per-platform best path and names what is missing', () =>
   expect(noNode.path).toBe('unsupported')
   expect(noNode.missing).toEqual(['Node.js >= 18'])
 
+  // A shell with node but no reachable systemd user manager cannot run the
+  // systemd unit: the preflight reports the real missing requirement instead
+  // of approving a path that dies at the unit step.
+  const noSystemd = chooseLocalPath(manifestById('antigravity')!, 'linux', { ...node, systemdUser: false })
+  expect(noSystemd.path).toBe('unsupported')
+  expect(noSystemd.missing).toEqual(['A reachable systemd user session (`systemctl --user`)'])
+  // macOS provisions launchd, not systemd: the same probe stays approved.
+  expect(chooseLocalPath(manifestById('antigravity')!, 'darwin', { ...node, systemdUser: false }).path).toBe('node')
+  // commandcode has no user unit; node alone keeps its setup path approved.
+  expect(chooseLocalPath(manifestById('commandcode')!, 'linux', { ...node, systemdUser: false }).path).toBe('node')
+
   // Windows local provisioning is refused with the manifest's own reason.
   const win = chooseLocalPath(manifestById('commandcode')!, 'win32', node)
   expect(win.path).toBe('unsupported')
   expect(win.missing.join(' ')).toContain('Windows')
 
-  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true, node: false }, 3210).path).toBe('detected')
+  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true, node: false, systemdUser: false }, 3210).path).toBe('detected')
+})
+
+it('a node path is refused when the reported major is below the declared requirement', () => {
+  const commandcode = manifestById('commandcode')!
+  const node22: RuntimeProbe = { docker: false, podman: false, node: true, nodeMajor: 22, systemdUser: false }
+  expect(chooseLocalPath(commandcode, 'linux', node22).path).toBe('node')
+
+  const node18: RuntimeProbe = { docker: false, podman: false, node: true, nodeMajor: 18, systemdUser: false }
+  const old = chooseLocalPath(commandcode, 'linux', node18)
+  expect(old.path).toBe('unsupported')
+  expect(old.missing).toEqual(['Node.js >= 22'])
+
+  // A probe that cannot report a version cannot prove the requirement unmet.
+  const unreported: RuntimeProbe = { docker: false, podman: false, node: true, systemdUser: false }
+  expect(chooseLocalPath(commandcode, 'linux', unreported).path).toBe('node')
+
+  // Other manifests keep their own declared floor: Node 18 still runs the
+  // antigravity proxy (>= 18), while an older node is refused with its line.
+  const antigravity = manifestById('antigravity')!
+  expect(chooseLocalPath(antigravity, 'linux', { ...node18, systemdUser: true }).path).toBe('node')
+  const node16: RuntimeProbe = { docker: false, podman: false, node: true, nodeMajor: 16, systemdUser: true }
+  const oldAntigravity = chooseLocalPath(antigravity, 'linux', node16)
+  expect(oldAntigravity.path).toBe('unsupported')
+  expect(oldAntigravity.missing).toEqual(['Node.js >= 18'])
+
+  // A Docker path is unaffected by the node probe.
+  const freellmapi = manifestById('freellmapi')!
+  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: false, node: false, systemdUser: false }).path).toBe('docker')
 })
 
 it('a direct-vendor manifest has no instance to detect; preflight gates on the setup runtime', async () => {
@@ -131,9 +185,9 @@ it('a direct-vendor manifest has no instance to detect; preflight gates on the s
 
   // The local setup runs install.mjs, so it still needs Node in the install
   // shell; the dependency line names the version that is missing.
-  const node: RuntimeProbe = { docker: false, podman: false, node: true }
+  const node: RuntimeProbe = { docker: false, podman: false, node: true, systemdUser: false }
   expect(chooseLocalPath(commandcode, 'linux', node).path).toBe('node')
-  const bare: RuntimeProbe = { docker: false, podman: false, node: false }
+  const bare: RuntimeProbe = { docker: false, podman: false, node: false, systemdUser: false }
   const missing = chooseLocalPath(commandcode, 'linux', bare)
   expect(missing.path).toBe('unsupported')
   expect(missing.missing).toEqual(['Node.js 22'])

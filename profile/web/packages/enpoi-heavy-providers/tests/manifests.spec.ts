@@ -4,7 +4,12 @@
  * must not — its fronting service owns the keys), and commandcode is a
  * direct-vendor route whose fresh-machine dependency is the provider package.
  */
+import { execFileSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { expect, it } from 'vitest'
+import { COMMAND_CODE_CLI_HEADERS, COMMAND_CODE_CLI_VERSION } from '../../enpoi-commandcode-provider/src/headers.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall } from '../src/manifests.js'
 import { substitute } from '../src/planner.js'
 
@@ -58,21 +63,46 @@ it('antigravity removal warns about other proxy consumers and a synced unit file
   expect(warnings).toContain('dotfiles')
 })
 
-it('freellmapi removal drops the volume, the image, and the clone directory', () => {
-  const steps = manifestById('freellmapi')?.removal.steps.map(step => step.command).join('\n') ?? ''
-  expect(steps).toContain('compose down -v')
-  expect(steps).toContain('image rm')
+it('freellmapi removal drops the volume, the image, the clone, and the desktop-app leftovers', () => {
+  const steps = manifestById('freellmapi')!.removal.steps
+  const commands = steps.map(step => step.command).join('\n')
+  expect(commands).toContain('compose down -v')
+  expect(commands).toContain('image rm')
   // The install offers Podman as the Docker substitute, so teardown resolves
   // whichever engine exists instead of hardcoding `docker`.
-  expect(steps).toContain('command -v docker || command -v podman')
-  expect(steps).toContain('rm -rf {home}/freellmapi')
+  expect(commands).toContain('command -v docker || command -v podman')
+  expect(commands).toContain('rm -rf "{home}/freellmapi"')
+  // Platform-guarded optional leftovers: the macOS app/data/dmg and the
+  // Windows app/data/installer. Each is fail-soft on the other platforms.
+  for (const label of ['Remove the macOS desktop app and its data', 'Remove the Windows desktop app and its data']) {
+    const step = steps.find(candidate => candidate.label === label)
+    expect(step, label).toBeDefined()
+    expect(step?.optional, label).toBe(true)
+  }
+  expect(commands).toContain('test "$(uname -s)" = Darwin || exit 0')
+  expect(commands).toContain('hdiutil detach "/tmp/freellmapi-dmg"')
+  expect(commands).toContain('"$APPDATA/FreeLLMAPI"')
+  expect(commands).toContain('"$LOCALAPPDATA/Programs/FreeLLMAPI"')
+  expect(commands).toContain('FreeLLMAPI-Setup.exe')
+  // A running desktop app must be stopped before its files are deleted; the
+  // Each platform step guards first (so the kill never runs on a foreign OS),
+  // then kills the running desktop app, then deletes.
+  const mac = steps.find(step => step.label === 'Remove the macOS desktop app and its data')
+  const win = steps.find(step => step.label === 'Remove the Windows desktop app and its data')
+  expect(mac?.command.startsWith('test "$(uname -s)" = Darwin || exit 0; pkill -f FreeLLMAPI 2>/dev/null || true;')).toBe(true)
+  expect(win?.command.startsWith('case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 0;; esac; taskkill //F //IM FreeLLMAPI.exe 2>/dev/null || true;')).toBe(true)
 })
 
-it('freellmapi surface quirks name the unified key, ENCRYPTION_KEY, and the local dependency statement', () => {
+it('freellmapi surface quirks name the unified key, ENCRYPTION_KEY, and the per-platform install fact', () => {
   const quirks = manifestById('freellmapi')?.quirks.join('\n') ?? ''
   expect(quirks).toContain('Unified key')
   expect(quirks).toContain('ENCRYPTION_KEY')
-  expect(quirks).toContain('native installers for Linux/macOS/Windows; Docker required only for the fallback path')
+  // The stale "native installers for Linux" wording is gone: the shipped
+  // Linux path is the Docker/Podman compose path.
+  expect(quirks).toContain('Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app')
+  expect(quirks).not.toContain('native installers for Linux/macOS/Windows')
+  // Windows runs the install steps through Git Bash; the dependency is named.
+  expect(quirks).toContain('Git Bash')
 })
 
 it('browser badges belong only to the browser-bound account flow (antigravity OAuth)', () => {
@@ -154,8 +184,12 @@ it('freellmapi installs are platform-keyed and fall back to the Docker path', ()
   expect(darwin.steps[0]!.command).toContain('.dmg')
   expect(darwin.steps.map(step => step.command).join('\n')).toContain('"port":3002')
   const win32 = resolveHeavyInstall(local, 'win32')
-  expect(win32.deps).toEqual(['Windows 10+'])
+  expect(win32.deps).toEqual(['Windows 10+', 'Git Bash (the install steps run through bash)'])
   expect(win32.steps[0]!.command).toContain('.exe')
+  // An empty asset match must fail the step before xargs ever runs.
+  expect(win32.steps[0]!.command).toContain('freellmapi-setup-url')
+  expect(win32.steps[0]!.command).toContain('test -s "{home}/Downloads/freellmapi-setup-url"')
+  expect(win32.steps[0]!.command).toContain('no .exe in the latest release')
   const unknown = resolveHeavyInstall(local, 'freebsd')
   expect(unknown.label).toBe(local.label)
   expect(unknown.steps[0]!.command).toContain('git clone')
@@ -164,8 +198,18 @@ it('freellmapi installs are platform-keyed and fall back to the Docker path', ()
 it('freellmapi install steps are idempotent and resolve the container engine at run time', () => {
   const freellmapi = manifestById('freellmapi')!
   const compose = freellmapi.local.install.default.steps.map(step => step.command).join('\n')
-  expect(compose).toContain('test -d {home}/freellmapi/.git || git clone')
+  // A stale non-git directory is replaced only when it holds no `.env`; the
+  // ENCRYPTION_KEY in `.env` is unrecoverable once wiped.
+  expect(compose).toContain('if [ -d "{home}/freellmapi" ] && [ ! -d "{home}/freellmapi/.git" ]')
+  expect(compose).toContain('if [ -f "{home}/freellmapi/.env" ]')
+  expect(compose).toContain('refusing to wipe it')
+  expect(compose).toContain('test -d "{home}/freellmapi/.git" || git clone')
+  expect(compose).toContain('grep -qE \'^ENCRYPTION_KEY=.+\'')
   expect(compose).toContain('command -v docker || command -v podman')
+  // Podman without its compose plugin must fail at the version check, not
+  // halfway through `up`.
+  expect(compose).toContain('compose version >/dev/null 2>&1')
+  expect(compose).toContain('podman compose plugin missing (need podman-compose)')
 
   // Linux resolves to the same engine-aware compose path, so a Podman-only
   // host that preflight approved can actually install.
@@ -176,6 +220,68 @@ it('freellmapi install steps are idempotent and resolve the container engine at 
   const darwin = resolveHeavyInstall(freellmapi.local, 'darwin').steps.map(step => step.command).join('\n')
   expect(darwin).toContain('uname -m')
   expect(darwin).toContain('no FreeLLMAPI $arch .dmg')
+  // The vendor asset name is `-<arch>.dmg`; the pattern must carry the
+  // hyphen and the dmg is only fetched when missing.
+  expect(darwin).toContain("+-'\"$arch\"'\\.dmg\"'")
+  expect(darwin).toContain('test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl')
+  // The mount point is unique per run and always detached.
+  expect(darwin).toContain('/tmp/freellmapi-dmg-$$')
+  expect(darwin).toContain('hdiutil detach "$MOUNT"')
+})
+
+/**
+ * Run the Clone FreeLLMAPI step for real against a scratch home and a stub
+ * `git` on PATH: the guard, not the clone, is what these cases prove.
+ */
+function runCloneStep(home: string, gitStub: string): { status: number; stdout: string; stderr: string } {
+  const bin = join(home, 'stub-bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'git'), gitStub, 'utf8')
+  chmodSync(join(bin, 'git'), 0o755)
+  const command = substitute(manifestById('freellmapi')!.local.install.default.steps[0]!.command, home, join(home, '.dsh'))
+  try {
+    return { status: 0, stdout: execFileSync('/bin/bash', ['-c', command], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), stderr: '' }
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string; stderr?: string }
+    return { status: failure.status ?? 1, stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' }
+  }
+}
+
+it('the freellmapi clone guard refuses to wipe a non-git directory holding .env', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-clone-guard-'))
+  try {
+    const home = join(scratch, 'home')
+    const clone = join(home, 'freellmapi')
+    mkdirSync(clone, { recursive: true })
+    writeFileSync(join(clone, '.env'), 'ENCRYPTION_KEY=deadbeef\n', 'utf8')
+    // A stub git that must never run: the guard has to refuse before it.
+    const result = runCloneStep(home, '#!/usr/bin/env bash\necho "git must not run" >&2\nexit 1\n')
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('refusing to wipe it')
+    // The .env survived untouched.
+    expect(readFileSync(join(clone, '.env'), 'utf8')).toBe('ENCRYPTION_KEY=deadbeef\n')
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+it('the freellmapi clone guard replaces a stale non-git directory without .env, then clones', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-clone-stale-'))
+  try {
+    const home = join(scratch, 'home')
+    const clone = join(home, 'freellmapi')
+    mkdirSync(clone, { recursive: true })
+    writeFileSync(join(clone, 'stale.txt'), 'old', 'utf8')
+    // The stub stands in for `git clone --depth 1 <url> <dest>`: it records the
+    // destination's `.git`, which the following `test -d` sees on a re-run.
+    const result = runCloneStep(home, '#!/usr/bin/env bash\nmkdir -p "$HOME/freellmapi/.git"\nprintf "cloned\\n" > "$HOME/git-stub-ran"\n')
+    expect(result.status).toBe(0)
+    expect(readFileSync(join(home, 'git-stub-ran'), 'utf8')).toBe('cloned\n')
+    expect(existsSync(join(clone, 'stale.txt'))).toBe(false)
+    expect(existsSync(join(clone, '.git'))).toBe(true)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 })
 
 it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
@@ -223,13 +329,59 @@ it('starts the antigravity proxy in its foreground mode, never a bare help invoc
   const manifest = manifestById('antigravity')!
   for (const platform of ['linux', 'darwin'] as const) {
     const commands = resolveHeavyInstall(manifest.local, platform).steps.map(step => step.command).join('\n')
-    expect(commands, platform).toContain('antigravity-claude-proxy start --log')
+    expect(commands, platform).toContain('exec "$BIN" start --log')
     // A bare `antigravity-claude-proxy` only prints help and exits; the
     // service wrapper must never be built from it.
     expect(commands, platform).not.toMatch(/exec antigravity-claude-proxy(?! start --log)/)
   }
   const teardown = manifest.removal.steps.map(step => step.command).join('\n')
   expect(teardown).toContain('antigravity-claude-proxy stop')
+})
+
+it('the antigravity install targets the fixed ~/.local prefix and both units fall back to the PATH binary', () => {
+  const manifest = manifestById('antigravity')!
+  const npmStep = manifest.local.install.default.steps[0]!
+  // Unconditional: a version-manager prefix is not on either service's path,
+  // so the binary must land where the units look for it.
+  expect(npmStep.command).toContain('mkdir -p "{home}/.local/bin" && npm install -g --prefix "{home}/.local" antigravity-claude-proxy')
+  expect(npmStep.command).not.toContain('npm config get prefix')
+  // Never sudo, and never an exported NPM_CONFIG_PREFIX (it breaks nvm/fnm).
+  expect(npmStep.command).not.toContain('sudo')
+  expect(npmStep.command).not.toContain('NPM_CONFIG_PREFIX=')
+
+  for (const platform of ['linux', 'default'] as const) {
+    const steps = resolveHeavyInstall(manifest.local, platform).steps
+    const commands = steps.map(step => step.command).join('\n')
+    expect(commands, platform).toContain('ExecStart=/bin/bash -lc \'BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log\'')
+    expect(commands, platform).toContain('Environment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin')
+    expect(steps.find(step => step.command.includes('loginctl enable-linger'))?.optional, platform).toBe(true)
+  }
+  const darwin = resolveHeavyInstall(manifest.local, 'darwin').steps.map(step => step.command).join('\n')
+  expect(darwin).toContain('<string>BIN="{home}/.local/bin/antigravity-claude-proxy"; test -x "$BIN" || BIN="$(command -v antigravity-claude-proxy)"; exec "$BIN" start --log</string>')
+  // nvm/fnm node directories are present as the shim's PATH fallback.
+  expect(darwin).toContain('{home}/.nvm/versions/node/current/bin')
+  expect(darwin).toContain('fnm/aliases/default/bin')
+  // The removal uninstalls both candidate locations, fail-soft.
+  const uninstall = manifest.removal.steps.find(step => step.label === 'Uninstall the package')
+  expect(uninstall?.optional).toBe(true)
+  expect(uninstall?.command).toContain('npm uninstall -g --prefix "{home}/.local" antigravity-claude-proxy 2>/dev/null || true')
+  expect(uninstall?.command).toContain('npm uninstall -g antigravity-claude-proxy 2>/dev/null || true')
+})
+
+it('the commandcode vendor health probe carries the adapter CLI identity and accepts the documented statuses', () => {
+  const manifest = manifestById('commandcode')!
+  expect(manifest.reuse.health.expectStatus).toContain(200)
+  expect(manifest.reuse.health.expectStatus?.length).toBeGreaterThan(1)
+  expect(manifest.reuse.health.headers).toEqual(COMMAND_CODE_CLI_HEADERS)
+  expect(manifest.reuse.health.headers?.['x-command-code-version']).toBe(COMMAND_CODE_CLI_VERSION)
+  // The local health probe mirrors the reuse one.
+  expect(manifest.local.health).toEqual(manifest.reuse.health)
+})
+
+it('the commandcode Windows hint names the script from the package root', () => {
+  const hint = manifestById('commandcode')!.local.install.win32!.unsupported ?? ''
+  expect(hint).toContain('packages/enpoi-commandcode-provider/scripts/install.mjs')
+  expect(hint).not.toContain('node scripts/install.mjs <profile>')
 })
 
 it('refuses Windows with a declared reason instead of a command that cannot work', () => {

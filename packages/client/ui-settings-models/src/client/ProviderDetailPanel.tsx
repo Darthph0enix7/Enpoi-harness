@@ -49,6 +49,15 @@ interface ModelItem {
   files?: boolean
 }
 
+/** One row of a route's discovered model list (the wire subset the panel merges). */
+interface DiscoveredModel {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+  inputModalities?: string[]
+}
+
 /** Detect capabilities based on model ID, name, modalities, or provider metadata.
  *
  * Data-first: when the model carries structured modality data (`input` /
@@ -327,7 +336,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   const [poolStatusList, setPoolStatusList] = useState<LlmPoolIdentityStatus[]>([])
   const [isPoolLoading, setIsPoolLoading] = useState(false)
-  const [identityTestResults, setIdentityTestResults] = useState<Record<string, { state: 'testing' | 'success' | 'error'; message?: string; latencyMs?: number }>>({})
+  const [identityTestResults, setIdentityTestResults] = useState<Record<string, { state: 'testing' | 'success' | 'error' | 'unavailable'; message?: string; latencyMs?: number }>>({})
   const [showAddKeyModal, setShowAddKeyModal] = useState(false)
   const [newKeyId, setNewKeyId] = useState('')
   const [newKeyRef, setNewKeyRef] = useState('')
@@ -511,9 +520,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         ...(keyInput.trim() ? { apiKey: keyInput.trim() } : {}),
       })
       if (res.ok) {
-        const discovered = (res.value as { id: string; name?: string; contextWindow?: number; maxTokens?: number }[]) || []
+        const discovered = (res.value as DiscoveredModel[]) || []
         const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
-        const merged = discovered.map((d: { id: string; name?: string; contextWindow?: number; maxTokens?: number }) => {
+        const merged = discovered.map((d: DiscoveredModel) => {
           const existing = currentModels.find(m => m.id === d.id) as ModelItem | undefined
           return {
             ...(existing || {}),
@@ -521,6 +530,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             name: d.name && d.name !== d.id ? d.name : existing?.name || d.id,
             contextWindow: d.contextWindow || existing?.contextWindow || 131072,
             maxTokens: d.maxTokens || existing?.maxTokens || 8192,
+            // Keep a stored structured modality claim; adopt the discovered
+            // one only where the row carries none.
+            ...(d.inputModalities === undefined || d.inputModalities.length === 0 || Array.isArray(existing?.input)
+              ? {}
+              : { input: d.inputModalities }),
           }
         })
 
@@ -598,6 +612,30 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }
   }
 
+  // Persist one host identity-test answer. Status 501 is the provider's
+  // structured "not implemented" signal: the capability is unavailable rather
+  // than the credential failing, so the row renders a disabled explanatory
+  // state instead of a red failure.
+  const submitIdentityTest = (
+    identityId: string,
+    answer: { ok: boolean; status?: number; latencyMs?: number; error?: string },
+  ): void => {
+    const unavailable = answer.status === 501
+    setIdentityTestResults(prev => ({
+      ...prev,
+      [identityId]: answer.ok
+        ? {
+          state: 'success',
+          ...answer.latencyMs === undefined ? {} : { latencyMs: answer.latencyMs },
+          message: answer.latencyMs === undefined ? 'OK' : `OK (${answer.latencyMs}ms)`,
+        }
+        : {
+          state: unavailable ? 'unavailable' : 'error',
+          message: answer.error ?? 'Test failed',
+        },
+    }))
+  }
+
   // Pool Handlers
   const handleTestIdentity = async (identityId: string, _credentialRef: string) => {
     setIdentityTestResults(prev => ({
@@ -614,89 +652,22 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       if (raw && typeof raw === 'object' && 'ok' in (raw as Record<string, unknown>)) {
         const outer = raw as { ok: boolean; value?: unknown; error?: { message: string } }
         if (outer.ok) {
-          const inner = outer.value as { ok: boolean; latencyMs?: number; error?: string } | undefined
-          if (inner && inner.ok) {
-            const lat = inner.latencyMs
-            setIdentityTestResults(prev => ({
-              ...prev,
-              [identityId]: {
-                state: 'success',
-                ...lat !== undefined ? { latencyMs: lat } : {},
-                message: lat !== undefined ? `OK (${lat}ms)` : 'OK',
-              },
-            }))
-          } else {
-            setIdentityTestResults(prev => ({
-              ...prev,
-              [identityId]: {
-                state: 'error',
-                message: (inner as { error?: string })?.error || 'Test failed',
-              },
-            }))
-          }
+          const inner = outer.value as { ok: boolean; status?: number; latencyMs?: number; error?: string } | undefined
+          submitIdentityTest(identityId, inner ?? { ok: false })
         } else {
-          setIdentityTestResults(prev => ({
-            ...prev,
-            [identityId]: {
-              state: 'error',
-              message: outer.error?.message ?? 'Test failed',
-            },
-          }))
+          submitIdentityTest(identityId, { ok: false, error: outer.error?.message ?? 'Test failed' })
         }
       } else if (raw && typeof raw === 'object' && 'result' in (raw as Record<string, unknown>)) {
         const rr = (raw as {
-          result: { ok: boolean; value?: { ok: boolean; latencyMs?: number; error?: string }; error?: { message: string } }
+          result: { ok: boolean; value?: { ok: boolean; status?: number; latencyMs?: number; error?: string }; error?: { message: string } }
         }).result
-        if (rr.ok) {
-          if (rr.value?.ok) {
-            const lat = rr.value.latencyMs
-            setIdentityTestResults(prev => ({
-              ...prev,
-              [identityId]: {
-                state: 'success',
-                ...lat !== undefined ? { latencyMs: lat } : {},
-                message: lat !== undefined ? `OK (${lat}ms)` : 'OK',
-              },
-            }))
-          } else {
-            setIdentityTestResults(prev => ({
-              ...prev,
-              [identityId]: {
-                state: 'error',
-                message: rr.value?.error || 'Test failed',
-              },
-            }))
-          }
-        } else {
-          setIdentityTestResults(prev => ({
-            ...prev,
-            [identityId]: {
-              state: 'error',
-              message: rr.error?.message ?? 'Test failed',
-            },
-          }))
-        }
+        if (rr.ok) submitIdentityTest(identityId, rr.value ?? { ok: false })
+        else submitIdentityTest(identityId, { ok: false, error: rr.error?.message ?? 'Test failed' })
       } else {
-        const direct = raw as { ok: boolean; latencyMs?: number; error?: string } | undefined
-        if (direct && direct.ok) {
-          const lat = direct.latencyMs
-          setIdentityTestResults(prev => ({
-            ...prev,
-            [identityId]: {
-              state: 'success',
-              ...lat !== undefined ? { latencyMs: lat } : {},
-              message: lat !== undefined ? `OK (${lat}ms)` : 'OK',
-            },
-          }))
-        } else {
-          setIdentityTestResults(prev => ({
-            ...prev,
-            [identityId]: {
-              state: 'error',
-              message: direct?.error || 'Test failed',
-            },
-          }))
-        }
+        submitIdentityTest(
+          identityId,
+          (raw as { ok: boolean; status?: number; latencyMs?: number; error?: string } | undefined) ?? { ok: false },
+        )
       }
     } catch (err) {
       setIdentityTestResults(prev => ({
@@ -709,6 +680,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     }
     void fetchPoolStatus()
   }
+
+  // The identity test is a namespace-wide operation: one 501 answer disables
+  // every identity's test button for this route and keeps the host's
+  // explanatory message as the tooltip and the card note.
+  const identityTestUnavailable = useMemo(
+    () => Object.values(identityTestResults).find(result => result.state === 'unavailable'),
+    [identityTestResults],
+  )
 
   const handleResetCooldown = async (identityId?: string) => {
     // 0ms instant optimistic status update: clear cooldown locally
@@ -1152,8 +1131,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         type="button"
                         className={styles['iconMiniBtn']}
                         onClick={() => handleTestIdentity(identity.id, identity.credentialRef)}
-                        disabled={testResult?.state === 'testing' || readOnly}
-                        title="Test this API key"
+                        disabled={testResult?.state === 'testing' || readOnly || identityTestUnavailable !== undefined}
+                        title={identityTestUnavailable?.message ?? 'Test this API key'}
                       >
                         <IconBolt size={12} />
                       </button>
@@ -1184,6 +1163,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 )
               })}
             </div>
+            {identityTestUnavailable && (
+              <p style={{ margin: '8px 0 0', fontSize: '11px', opacity: 0.75 }}>{identityTestUnavailable.message}</p>
+            )}
           </div>
         </div>
       ) : (

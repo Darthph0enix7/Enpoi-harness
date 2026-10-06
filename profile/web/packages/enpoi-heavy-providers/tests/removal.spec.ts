@@ -15,8 +15,13 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-/** A scratch world: dsh home with pool + cache, settings with route + chains. */
-function world(id: string): {
+/**
+ * A scratch world: dsh home with pool + cache, settings with route + chains.
+ * @param id - the provider being removed.
+ * @param extraRoutes - further routes merged into the same settings namespace,
+ *   for shared-credential cases.
+ */
+function world(id: string, extraRoutes: Record<string, unknown> = {}): {
   deps: HeavyDeps
   mutations: Array<{ ns: string; ops: readonly Record<string, unknown>[] }>
   credentialUnsets: string[]
@@ -37,7 +42,7 @@ function world(id: string): {
   const credentialUnsets: string[] = []
   const routeNs = routeSettingsNs(manifestById(id)!)
   const document = {
-    [routeNs]: { providers: { [id]: { baseURL: 'x', models: [] } } },
+    [routeNs]: { providers: { [id]: { baseURL: 'x', models: [] }, ...extraRoutes } },
     'enpoi-orchestration': {
       chains: {
         stable: { label: 'Stable', links: [{ provider: id, model: 'auto' }, { provider: 'deepseek', model: 'deepseek-v4-flash' }] },
@@ -74,12 +79,21 @@ it('removal runs the teardown and drops route, credential, pool, cache, and chai
 
   expect(summary.teardown.ran).toBe(true)
   expect(summary.teardown.ok).toBe(true)
-  expect(stepped).toEqual(['Stop the stack and drop its volume', 'Remove the container image', 'Remove the clone directory'])
+  // The platform-guarded desktop-app steps run too; the host platform's guard
+  // makes them no-ops where they do not apply.
+  expect(stepped).toEqual([
+    'Stop the stack and drop its volume',
+    'Remove the container image',
+    'Remove the clone directory',
+    'Remove the macOS desktop app and its data',
+    'Remove the Windows desktop app and its data',
+  ])
   expect(summary.routeRemoved).toBe(true)
   expect(summary.credentialRemoved).toBe(true)
   expect(summary.poolStateRemoved).toBe(true)
   expect(summary.cacheEntryRemoved).toBe(true)
   expect(summary.chainLinksRemoved).toBe(2)
+  expect(summary.warnings).toEqual([])
   expect(summary.errors).toEqual([])
 
   expect(credentialUnsets).toEqual(['FREELLMAPI_API_KEY'])
@@ -118,6 +132,36 @@ it('commandcode removal drops DSH state with no local teardown and no keypool sc
   expect(credentialUnsets).toEqual(['COMMANDCODE_KEY_1'])
   const routeOps = mutations.find(entry => entry.ns === 'commandcode-provider')?.ops ?? []
   expect(routeOps).toEqual([{ op: 'unset', path: ['providers', 'commandcode'] }])
+})
+
+it('removal keeps a credential reference another configured route still resolves', async () => {
+  const { deps, credentialUnsets } = world('freellmapi', {
+    'freellmapi-mirror': { baseURL: 'http://127.0.0.1:3002/v1', apiKeyEnv: 'FREELLMAPI_API_KEY' },
+  })
+  const summary = await removeProvider(deps, manifestById('freellmapi')!, {})
+
+  // The route is gone but the shared reference stays: unsetting it would break
+  // the mirror route.
+  expect(summary.routeRemoved).toBe(true)
+  expect(summary.credentialRemoved).toBe(false)
+  expect(credentialUnsets).toEqual([])
+  expect(summary.warnings.join('\n')).toContain('FREELLMAPI_API_KEY kept')
+  expect(summary.warnings.join('\n')).toContain('another configured route references it')
+  expect(summary.errors).toEqual([])
+})
+
+it('removal keeps a reference another route\'s pool identity resolves', async () => {
+  const { deps, credentialUnsets } = world('commandcode', {
+    'commandcode-mirror': {
+      baseURL: 'https://api.commandcode.ai',
+      pool: { strategy: 'priority-sticky', identities: [{ id: 'key-9', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }] },
+    },
+  })
+  const summary = await removeProvider(deps, manifestById('commandcode')!, {})
+
+  expect(summary.credentialRemoved).toBe(false)
+  expect(credentialUnsets).toEqual([])
+  expect(summary.warnings.join('\n')).toContain('COMMANDCODE_KEY_1 kept')
 })
 
 it('a failing required teardown step is reported without aborting state cleanup', async () => {
