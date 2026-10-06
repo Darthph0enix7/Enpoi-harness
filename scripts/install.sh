@@ -1546,6 +1546,17 @@ find_backfill() {
   return 0
 }
 
+wait_for_web() { # bounded wait for the local web instance; 0 = it answered
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -o /dev/null --connect-timeout 2 --max-time 3 "http://127.0.0.1:${DSH_WEB_PORT:-3080}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 run_backfill() {
   local b
   b="$(find_backfill)"
@@ -1553,6 +1564,12 @@ run_backfill() {
     BACKFILL="skipped (not present)"
     log "projection backfill: not present; skipping"
     return 0
+  fi
+  # The backfill reads through the web API. The service was just (re)started,
+  # so give it a bounded moment before reading; an immediate read reports a
+  # failure that is only startup latency.
+  if [ -n "$SERVICE_UNIT" ]; then
+    wait_for_web || log "projection backfill: web did not answer within 20s; trying anyway"
   fi
   BACKFILL="ran status"
   log "projection backfill: $b status"
