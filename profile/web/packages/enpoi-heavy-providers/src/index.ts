@@ -42,20 +42,30 @@ export const inject: string[] = []
 async function runStep(ctx: Context, step: HeavyStep, home: string, dshHome: string): Promise<StepOutcome> {
   const subprocess = ctx.get('subprocess') as SubprocessRuntime | undefined
   if (subprocess === undefined) throw new Error('subprocess seam absent — cannot run install steps')
-  const handle = subprocess.spawn({
-    argv: ['/bin/bash', '-lc', substitute(step.command, home, dshHome)],
-    cwd: step.cwd === undefined ? home : substitute(step.cwd, home, dshHome),
-    stdio: {
-      stdin: 'ignore',
-      stdout: { maxBytes: 65_536 },
-      stderr: { maxBytes: 65_536 },
-    },
-    graceMs: 10_000,
-  })
-  const outcome = await handle.done
-  const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
-  const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
-  return { exitCode: outcome.exitCode, output: `${stdout}${stderr}`.slice(-16_384) }
+  try {
+    const handle = subprocess.spawn({
+      argv: ['/bin/bash', '-lc', substitute(step.command, home, dshHome)],
+      cwd: step.cwd === undefined ? home : substitute(step.cwd, home, dshHome),
+      stdio: {
+        stdin: 'ignore',
+        stdout: { maxBytes: 65_536 },
+        stderr: { maxBytes: 65_536 },
+      },
+      graceMs: 10_000,
+    })
+    const outcome = await handle.done
+    const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
+    const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
+    return { exitCode: outcome.exitCode, output: `${stdout}${stderr}`.slice(-16_384) }
+  } catch (error) {
+    // The declared steps are POSIX shell; a host without /bin/bash (plain
+    // Windows) must report that fact instead of a raw spawn error.
+    throw new Error(
+      `could not start (${error instanceof Error ? error.message : String(error)}).`
+      + ' Heavy-provider install steps run as POSIX shell with /bin/bash — on Windows install Git Bash,'
+      + ' or run the service manually and add it with "Use a detected instance".',
+    )
+  }
 }
 
 /**

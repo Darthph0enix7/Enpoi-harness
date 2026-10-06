@@ -12,8 +12,8 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { resolveHeavyInstall } from './manifests.js'
-import type { HeavyHealth, HeavyLocalRuntime, HeavyProviderManifest, HeavyStep } from './manifests.js'
+import { platformInstallVariant, platformUnsupported, resolveHeavyInstall } from './manifests.js'
+import type { HeavyFileRequirement, HeavyHealth, HeavyLocalRuntime, HeavyProviderManifest, HeavyStep } from './manifests.js'
 
 /** The llm-pi-ai settings namespace every route write targets. */
 export const LLM_NS = 'llm-pi-ai'
@@ -214,27 +214,50 @@ export async function detectInstance(
 export interface RuntimeProbe {
   docker: boolean
   podman: boolean
+  /** `node` resolves in the same shell the install steps run in. */
+  node: boolean
 }
 
 /**
- * Detect Docker and Podman with one shell probe. Fail-soft: an absent runner
- * or a failed step reports nothing installed rather than blocking the page.
+ * Detect Docker, Podman, and Node with one shell probe. Fail-soft: an absent
+ * runner or a failed step reports nothing installed rather than blocking the
+ * page.
  * @param runStep - the host's step runner.
- * @returns availability of each container runtime.
+ * @returns availability of each runtime the local install paths use.
  */
 export async function detectRuntimes(runStep: (step: HeavyStep) => Promise<StepOutcome>): Promise<RuntimeProbe> {
   try {
     const outcome = await runStep({
-      label: 'Detect container runtimes',
-      command: 'command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; exit 0',
+      label: 'Detect local runtimes',
+      command: 'command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; command -v node >/dev/null 2>&1 && echo available:node; exit 0',
     })
     return {
       docker: /(^|\n)available:docker(\n|$)/.test(outcome.output),
       podman: /(^|\n)available:podman(\n|$)/.test(outcome.output),
+      node: /(^|\n)available:node(\n|$)/.test(outcome.output),
     }
   } catch {
-    return { docker: false, podman: false }
+    return { docker: false, podman: false, node: false }
   }
+}
+
+/**
+ * The first declared file requirement the machine does not satisfy. An absent
+ * `context` means the check cannot run, so nothing is reported as missing.
+ * @param requirements - the variant's file requirements, when any.
+ * @param context - home/dshHome placeholder bases for the candidate paths.
+ * @returns the unsatisfied requirement's hint, or undefined when satisfied.
+ */
+function missingFileRequirement(
+  requirements: readonly HeavyFileRequirement[] | undefined,
+  context: { home: string; dshHome: string } | undefined,
+): string | undefined {
+  if (context === undefined) return undefined
+  for (const requirement of requirements ?? []) {
+    if (requirement.paths.some(path => existsSync(substitute(path, context.home, context.dshHome)))) continue
+    return requirement.hint
+  }
+  return undefined
 }
 
 /** One local path's kind. */
@@ -264,12 +287,14 @@ function declaredRuntime(manifest: HeavyProviderManifest, platform: string): Hea
 
 /**
  * Choose the platform's best local path: a detected instance first, then the
- * declared variant when its runtime exists (vendor app, Docker, or Podman as
- * the Docker-compatible substitute), else the exact missing requirement.
+ * declared variant when it runs on this platform and its declared files and
+ * runtime exist (vendor app, Docker, Podman as the Docker-compatible
+ * substitute, or npm on Node), else the exact missing requirement.
  * @param manifest - heavy manifest.
  * @param platform - host platform key.
- * @param runtime - the container runtimes the machine has.
+ * @param runtime - the runtimes the machine has.
  * @param detectedPort - port an already-running instance was found on.
+ * @param context - home/dshHome placeholder bases for declared file requirements.
  * @returns the verdict the UI renders.
  */
 export function chooseLocalPath(
@@ -277,12 +302,21 @@ export function chooseLocalPath(
   platform: string,
   runtime: RuntimeProbe,
   detectedPort?: number,
+  context?: { home: string; dshHome: string },
 ): LocalPathChoice {
   const resolved = resolveHeavyInstall(manifest.local, platform)
   if (detectedPort !== undefined) {
     return { path: 'detected', label: 'Use the detected instance', deps: [], diskHint: '', steps: [], requires: [], missing: [] }
   }
   const base = { deps: resolved.deps, diskHint: resolved.diskHint, steps: resolved.steps }
+  const blocked = platformUnsupported(manifest, platform)
+  if (blocked !== undefined) {
+    return { path: 'unsupported', label: resolved.label, ...base, requires: [], missing: [blocked] }
+  }
+  const missingFile = missingFileRequirement(platformInstallVariant(manifest.local, platform).requiresFiles, context)
+  if (missingFile !== undefined) {
+    return { path: 'unsupported', label: resolved.label, ...base, requires: [], missing: [missingFile] }
+  }
   switch (declaredRuntime(manifest, platform)) {
     case 'docker':
       if (runtime.docker) return { path: 'docker', label: resolved.label, ...base, requires: ['docker'], missing: [] }
@@ -295,7 +329,11 @@ export function chooseLocalPath(
     case 'vendor-app':
       return { path: 'vendor-app', label: resolved.label, ...base, requires: [], missing: [] }
     case 'node':
-      return { path: 'node', label: resolved.label, ...base, requires: [], missing: [] }
+      // The dependency line names the version the path needs; it is the exact
+      // requirement to show when the shell cannot resolve node at all.
+      return runtime.node
+        ? { path: 'node', label: resolved.label, ...base, requires: [], missing: [] }
+        : { path: 'unsupported', label: resolved.label, ...base, requires: [], missing: [resolved.deps[0] ?? 'Node.js'] }
   }
 }
 

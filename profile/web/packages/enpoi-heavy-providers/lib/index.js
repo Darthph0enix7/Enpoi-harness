@@ -222,8 +222,14 @@ function failed(id, error) {
 }
 
 // src/manifests.ts
+function platformInstallVariant(local, platform) {
+  return platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
+}
+function platformUnsupported(manifest, platform) {
+  return platformInstallVariant(manifest.local, platform).unsupported;
+}
 function resolveHeavyInstall(local, platform) {
-  const variant = platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
+  const variant = platformInstallVariant(local, platform);
   return {
     label: variant.label ?? local.label,
     deps: variant.deps ?? local.deps,
@@ -237,6 +243,144 @@ var RUNTIME_TOOL_RE = {
   podman: /\bpodman\b/,
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/
 };
+var ANTIGRAVITY_LAUNCHD_LABEL = "dev.enpoi.antigravity-proxy";
+var KEYPOOL_LAUNCHD_LABEL = "dev.enpoi.keypool";
+var KEYPOOL_PROXY_PATHS = [
+  "{config}/opencode/keypool/proxy.js",
+  "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js",
+  "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"
+];
+var KEYPOOL_PROXY_HINT = "keypool proxy.js (install opencode-dotfiles, or place proxy.js at ~/.config/opencode/keypool/)";
+var ANTIGRAVITY_NPM_STEP = { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 };
+var ANTIGRAVITY_WAIT_STEP = {
+  label: "Wait for the proxy",
+  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
+};
+var ANTIGRAVITY_SYSTEMD_STEPS = [
+  ANTIGRAVITY_NPM_STEP,
+  {
+    label: "Write the systemd user unit",
+    // `start --log` is the package's foreground mode; a bare invocation only
+    // prints help. The unit's main process must stay the server.
+    command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc 'exec antigravity-claude-proxy start --log'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
+  },
+  { label: "Enable and start the unit", command: "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service" },
+  ANTIGRAVITY_WAIT_STEP
+];
+var ANTIGRAVITY_LAUNCHD_STEPS = [
+  ANTIGRAVITY_NPM_STEP,
+  {
+    label: "Write the launchd agent",
+    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${ANTIGRAVITY_LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>exec antigravity-claude-proxy start --log</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PORT</key>
+    <string>8082</string>
+    <key>HOST</key>
+    <string>127.0.0.1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{home}/Library/Logs/antigravity-proxy.log</string>
+  <key>StandardErrorPath</key>
+  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>
+</dict>
+</plist>
+EOF`
+  },
+  {
+    label: "Load and start the agent",
+    command: `launchctl bootout gui/$(id -u)/${ANTIGRAVITY_LAUNCHD_LABEL} 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist`
+  },
+  ANTIGRAVITY_WAIT_STEP
+];
+var KEYPOOL_DEPLOY_STEP = {
+  label: "Deploy the keypool proxy",
+  weight: 2,
+  // `{config}` and `{dshHome}` are resolved by the runner before bash sees the
+  // command; the here-doc-free shell keeps every path quoted.
+  command: `dest="{config}/opencode/keypool/proxy.js"; if test -f "$dest"; then echo "keypool proxy already present at $dest"; exit 0; fi; src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found \u2014 searched $dest, {dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js, and {home}/dotfiles/opencode-dotfiles/keypool/proxy.js" >&2; echo "Install opencode-dotfiles or place proxy.js at $dest, then run this install again." >&2; exit 1; fi; mkdir -p "$(dirname "$dest")" && cp "$src" "$dest" && chmod 644 "$dest"`
+};
+var KEYPOOL_WAIT_STEP = {
+  label: "Wait for the keypool",
+  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s \u2014 check the user-service status/logs and the pools.json config"; exit 1'
+};
+var KEYPOOL_SYSTEMD_STEPS = [
+  KEYPOOL_DEPLOY_STEP,
+  { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
+  { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
+  {
+    label: "Write the keypool systemd user unit",
+    command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<'EOF'\n[Unit]\nDescription=OpenCode KeyPool \u2014 multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc 'exec node %h/.config/opencode/keypool/proxy.js'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF"
+  },
+  { label: "Enable and start the keypool", command: "systemctl --user daemon-reload && systemctl --user enable --now keypool.service", optional: true },
+  KEYPOOL_WAIT_STEP
+];
+var KEYPOOL_LAUNCHD_STEPS = [
+  KEYPOOL_DEPLOY_STEP,
+  { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
+  { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
+  {
+    label: "Write the launchd agent",
+    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${KEYPOOL_LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>exec node {home}/.config/opencode/keypool/proxy.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KEYPOOL_PORT</key>
+    <string>8899</string>
+    <key>KEYPOOL_HOST</key>
+    <string>127.0.0.1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{home}/Library/Logs/keypool.log</string>
+  <key>StandardErrorPath</key>
+  <string>{home}/Library/Logs/keypool.err.log</string>
+</dict>
+</plist>
+EOF`
+  },
+  {
+    label: "Load and start the agent",
+    command: `launchctl bootout gui/$(id -u)/${KEYPOOL_LAUNCHD_LABEL} 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist`
+  },
+  KEYPOOL_WAIT_STEP
+];
 var HEAVY_MANIFESTS = [
   {
     id: "freellmapi",
@@ -276,14 +420,21 @@ var HEAVY_MANIFESTS = [
         // Unknown platforms fall back to the manual Docker Compose path.
         default: {
           steps: [
-            { label: "Clone FreeLLMAPI", command: "git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi", weight: 2 },
+            // Re-running the install must not fail on the existing clone.
+            { label: "Clone FreeLLMAPI", command: "test -d {home}/freellmapi/.git || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi", weight: 2 },
             {
               label: "Generate ENCRYPTION_KEY",
               // PORT is the HOST port (compose maps ${PORT}:3001); keep it at
               // 3002 so the local route's baseURL resolves.
               command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env'
             },
-            { label: "Start the stack", command: "docker compose up -d", cwd: "{home}/freellmapi" },
+            {
+              label: "Start the stack",
+              // Docker or Podman: preflight offers Podman as the substitute,
+              // so the step must resolve whichever engine exists.
+              command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose up -d',
+              cwd: "{home}/freellmapi"
+            },
             {
               label: "Wait for the gateway",
               command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
@@ -297,7 +448,9 @@ var HEAVY_MANIFESTS = [
           steps: [
             {
               label: "Run the FreeLLMAPI one-liner",
-              command: "curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash",
+              // The vendor script drives Docker; a Podman-only host must get
+              // the explicit message instead of the script's own failure.
+              command: 'command -v docker >/dev/null 2>&1 || { echo "the FreeLLMAPI vendor installer needs Docker Engine; install Docker, or clone https://github.com/tashfeenahmed/freellmapi and run podman compose up -d"; exit 1; }; curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash',
               weight: 3
             },
             {
@@ -315,12 +468,14 @@ var HEAVY_MANIFESTS = [
           steps: [
             {
               label: "Download the latest .dmg",
-              command: `mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+\\.dmg"' | head -1 | cut -d'"' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg {}`,
+              // Apple Silicon and Intel ship separate disk images; picking by
+              // `uname -m` keeps the install correct on both.
+              command: `arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+'"$arch"'[.]dmg"' | head -1 | cut -d'"' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p {home}/Downloads && curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg "$url"`,
               weight: 2
             },
             {
               label: "Install the app from the disk image",
-              command: "hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet"
+              command: "mkdir -p /tmp/freellmapi-dmg && hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet"
             },
             {
               label: "Pin the desktop app to port 3002",
@@ -362,8 +517,10 @@ var HEAVY_MANIFESTS = [
     },
     removal: {
       steps: [
-        { label: "Stop the stack and drop its volume", command: "docker compose down -v", cwd: "{home}/freellmapi", optional: true },
-        { label: "Remove the container image", command: "docker image rm ghcr.io/tashfeenahmed/freellmapi:latest", optional: true },
+        // Resolve the engine the same way the install did; every step is
+        // fail-soft so a machine that moved to another engine still cleans up.
+        { label: "Stop the stack and drop its volume", command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" compose down -v', cwd: "{home}/freellmapi", optional: true },
+        { label: "Remove the container image", command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" && "$ENGINE" image rm ghcr.io/tashfeenahmed/freellmapi:latest', optional: true },
         { label: "Remove the clone directory", command: "rm -rf {home}/freellmapi" }
       ],
       warnings: [
@@ -389,7 +546,7 @@ var HEAVY_MANIFESTS = [
       "Adding a Google account is an OAuth flow that opens a browser and waits on a localhost callback \u2014 on a headless host the printed URL must be opened from a machine that can reach the callback (e.g. over an SSH port-forward); it cannot be automated"
     ],
     quirks: [
-      "Local install dependencies: native npm package for Linux/macOS/Windows (Node.js >= 18); Docker is never required",
+      "Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install \u2014 run the package manually or use a proxy running elsewhere",
       "The proxy runs its own sticky account pool with cooldowns \u2014 DSH key pooling MUST stay off for this route",
       "The console at :8082 has no auth (webuiPassword empty) \u2014 trusted networks only",
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED \u2026 resets after 46h" is normal',
@@ -402,40 +559,52 @@ var HEAVY_MANIFESTS = [
       health: { url: "http://127.0.0.1:8082/health", timeoutMs: 5e3 }
     },
     local: {
-      label: "Install locally (npm + systemd user unit)",
+      label: "Install locally (npm + user service)",
       baseURL: "http://127.0.0.1:8082",
       deps: ["Node.js >= 18"],
       diskHint: "~23 MB install, ~78\u2013150 MB RAM, no GPU",
       dashboardUrl: "http://127.0.0.1:8082",
       runtime: "node",
       install: {
-        default: {
-          steps: [
-            { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 },
-            {
-              label: "Write the systemd user unit",
-              command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<'EOF'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc 'exec antigravity-claude-proxy'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF"
-            },
-            { label: "Enable and start the unit", command: "systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service" },
-            {
-              label: "Wait for the proxy",
-              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
-            }
-          ]
+        // The npm package is cross-platform; the user-service wrapper is not.
+        // Linux (and systemd-like hosts) keeps the systemd unit; macOS gets the
+        // launchd equivalent; Windows has no POSIX user service to install.
+        default: { label: "Install locally (npm + systemd user unit)", steps: ANTIGRAVITY_SYSTEMD_STEPS },
+        linux: { label: "Install locally (npm + systemd user unit)", steps: ANTIGRAVITY_SYSTEMD_STEPS },
+        darwin: {
+          label: "Install locally (npm + launchd agent)",
+          deps: ["Node.js >= 18", "macOS 11+ (launchd)"],
+          diskHint: "~23 MB install, ~78\u2013150 MB RAM, no GPU; logs in ~/Library/Logs",
+          steps: ANTIGRAVITY_LAUNCHD_STEPS
+        },
+        win32: {
+          label: "Not supported on Windows",
+          unsupported: "The antigravity proxy local install needs a POSIX user service (systemd or launchd) to keep the proxy running; this profile has no supported Windows provisioning path. Install the npm package and run `antigravity-claude-proxy` yourself, or run the proxy on another machine and add it as a custom route.",
+          steps: []
         }
       },
       health: { url: "http://127.0.0.1:8082/health", timeoutMs: 5e3 }
     },
     removal: {
+      // Platform-neutral on purpose: the same teardown runs on Linux and macOS
+      // and touches whichever user-service file the platform used.
       steps: [
-        { label: "Stop and disable the unit", command: "systemctl --user disable --now antigravity-proxy.service", optional: true },
-        { label: "Remove the unit file", command: "rm -f {config}/systemd/user/antigravity-proxy.service && systemctl --user daemon-reload", optional: true },
+        {
+          label: "Stop and disable the user service",
+          optional: true,
+          command: `if command -v systemctl >/dev/null 2>&1; then systemctl --user disable --now antigravity-proxy.service 2>/dev/null || true; fi; if command -v launchctl >/dev/null 2>&1; then launchctl bootout gui/$(id -u)/${ANTIGRAVITY_LAUNCHD_LABEL} 2>/dev/null || true; fi; if command -v antigravity-claude-proxy >/dev/null 2>&1; then antigravity-claude-proxy stop >/dev/null 2>&1 || true; fi`
+        },
+        {
+          label: "Remove the user service file",
+          optional: true,
+          command: `rm -f {config}/systemd/user/antigravity-proxy.service {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi`
+        },
         { label: "Uninstall the package", command: "npm uninstall -g antigravity-claude-proxy", optional: true },
         { label: "Remove the config directory (OAuth tokens, presets, usage history)", command: "rm -rf {config}/antigravity-proxy" }
       ],
       warnings: [
         "Any other tool configured against the same proxy stops working when the service is removed",
-        "If a dotfiles/config repository manages the systemd unit, remove it there too or the next sync resurrects it",
+        "If a dotfiles/config repository manages the service file (systemd unit or launchd plist), remove it there too or the next sync resurrects it",
         "Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history",
         "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
       ]
@@ -463,7 +632,7 @@ var HEAVY_MANIFESTS = [
     // ordinary quirk here, not an operator-blocking browser requirement.
     requiresBrowser: [],
     quirks: [
-      "Local install dependencies: native provider package + keypool for Linux/macOS/Windows (Node.js 22); Docker is never required",
+      "Local install dependencies: Node.js 22, the opencode-dotfiles keypool proxy (or a placed ~/.config/opencode/keypool/proxy.js), and a systemd/launchd user service; Docker is never required. Windows has no supported local install \u2014 use a keypool running elsewhere",
       "The vendor account and quota dashboard live at commandcode.ai (browser)",
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
       "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",
@@ -481,33 +650,28 @@ var HEAVY_MANIFESTS = [
     local: {
       label: "Install locally (provider package + keypool)",
       baseURL: "http://127.0.0.1:8899/commandcode",
-      deps: ["Node.js 22", "systemd user units"],
+      deps: ["Node.js 22", "opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)"],
       diskHint: "~5 MB provider package, ~150 MB RAM for the keypool, no GPU",
       dashboardUrl: "http://127.0.0.1:8899/status",
       runtime: "node",
       install: {
-        default: {
-          steps: [
-            { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
-            { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
-            {
-              label: "Deploy the keypool proxy from dotfiles (optional)",
-              // A dotfiles checkout is not required: the step looks in the
-              // DSH-home and home dotfiles layouts, and skips with guidance
-              // instead of failing the install when neither exists.
-              optional: true,
-              command: 'src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found (searched the dotfiles layouts under DSH_HOME and HOME) \u2014 skipping; place proxy.js at {config}/opencode/keypool/proxy.js or install opencode-dotfiles, then re-run this step"; exit 0; fi; install -Dm644 "$src" {config}/opencode/keypool/proxy.js'
-            },
-            {
-              label: "Write the keypool systemd user unit",
-              command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<'EOF'\n[Unit]\nDescription=OpenCode KeyPool \u2014 multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc 'exec node %h/.config/opencode/keypool/proxy.js'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF"
-            },
-            { label: "Enable and start the keypool", command: "systemctl --user daemon-reload && systemctl --user enable --now keypool.service", optional: true },
-            {
-              label: "Wait for the keypool",
-              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s"; exit 1'
-            }
-          ]
+        // The provider package and keypool proxy are shared across platforms;
+        // only the user-service wrapper differs. The proxy itself is external
+        // (opencode-dotfiles) and preflight refuses the path when neither it
+        // nor a placed proxy.js exists.
+        default: { label: "Install locally (provider package + systemd keypool unit)", requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
+        linux: { label: "Install locally (provider package + systemd keypool unit)", requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
+        darwin: {
+          label: "Install locally (provider package + launchd keypool agent)",
+          deps: ["Node.js 22", "macOS 11+ (launchd)", "opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)"],
+          diskHint: "~5 MB provider package, ~150 MB RAM for the keypool, no GPU; logs in ~/Library/Logs",
+          requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }],
+          steps: KEYPOOL_LAUNCHD_STEPS
+        },
+        win32: {
+          label: "Not supported on Windows",
+          unsupported: 'The keypool local install needs a POSIX user service (systemd or launchd) and the opencode-dotfiles keypool proxy; this profile has no supported Windows provisioning path. Run the keypool elsewhere and use "Use a detected instance", or run it manually and point the route at it.',
+          steps: []
         }
       },
       health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
@@ -555,9 +719,19 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
     }
     for (const [index, variant] of variants.entries()) {
       if (variant === void 0) continue;
-      if (variant.steps.length === 0 && manifest.unsupported === void 0) {
-        problems.push(`${where}: platform install variant ${String(index)} has no steps`);
+      const variantWhere = `${where}: platform install variant ${String(index)}`;
+      if (variant.unsupported !== void 0 && variant.unsupported.trim() === "") {
+        problems.push(`${variantWhere} declares an empty unsupported reason`);
       }
+      if (variant.steps.length === 0 && variant.unsupported === void 0 && manifest.unsupported === void 0) {
+        problems.push(`${variantWhere} has no steps`);
+      }
+      for (const requirement of variant.requiresFiles ?? []) {
+        if (requirement.paths.length === 0 || requirement.hint.trim() === "") {
+          problems.push(`${variantWhere} file requirement needs at least one path and a hint`);
+        }
+      }
+      if (variant.unsupported !== void 0) continue;
       const runtime = variant.runtime ?? manifest.local.runtime;
       const declared = runtime === void 0 ? void 0 : RUNTIME_TOOL_RE[runtime];
       if (declared === void 0 || variant.steps.length === 0) continue;
@@ -565,7 +739,7 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
       if (declared.test(commands)) continue;
       const conflicting = Object.keys(RUNTIME_TOOL_RE).filter((other) => other !== runtime && RUNTIME_TOOL_RE[other]?.test(commands) === true);
       if (conflicting.length > 0) {
-        problems.push(`${where}: platform install variant ${String(index)} declares runtime "${String(runtime)}" but its steps invoke ${conflicting.join("/")} tooling instead`);
+        problems.push(`${variantWhere} declares runtime "${String(runtime)}" but its steps invoke ${conflicting.join("/")} tooling instead`);
       }
     }
     if (manifest.settingsNs !== void 0 && !/^[a-z0-9][a-z0-9-]*$/.test(manifest.settingsNs)) {
@@ -672,27 +846,44 @@ async function detectInstance(deps, manifest, configuredBaseURL) {
 async function detectRuntimes(runStep2) {
   try {
     const outcome = await runStep2({
-      label: "Detect container runtimes",
-      command: "command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; exit 0"
+      label: "Detect local runtimes",
+      command: "command -v docker >/dev/null 2>&1 && echo available:docker; command -v podman >/dev/null 2>&1 && echo available:podman; command -v node >/dev/null 2>&1 && echo available:node; exit 0"
     });
     return {
       docker: /(^|\n)available:docker(\n|$)/.test(outcome.output),
-      podman: /(^|\n)available:podman(\n|$)/.test(outcome.output)
+      podman: /(^|\n)available:podman(\n|$)/.test(outcome.output),
+      node: /(^|\n)available:node(\n|$)/.test(outcome.output)
     };
   } catch {
-    return { docker: false, podman: false };
+    return { docker: false, podman: false, node: false };
   }
+}
+function missingFileRequirement(requirements, context) {
+  if (context === void 0) return void 0;
+  for (const requirement of requirements ?? []) {
+    if (requirement.paths.some((path) => existsSync(substitute(path, context.home, context.dshHome)))) continue;
+    return requirement.hint;
+  }
+  return void 0;
 }
 function declaredRuntime(manifest, platform) {
   const variant = platform === "linux" || platform === "darwin" || platform === "win32" ? manifest.local.install[platform] : void 0;
   return variant?.runtime ?? manifest.local.runtime ?? "node";
 }
-function chooseLocalPath(manifest, platform, runtime, detectedPort) {
+function chooseLocalPath(manifest, platform, runtime, detectedPort, context) {
   const resolved = resolveHeavyInstall(manifest.local, platform);
   if (detectedPort !== void 0) {
     return { path: "detected", label: "Use the detected instance", deps: [], diskHint: "", steps: [], requires: [], missing: [] };
   }
   const base = { deps: resolved.deps, diskHint: resolved.diskHint, steps: resolved.steps };
+  const blocked = platformUnsupported(manifest, platform);
+  if (blocked !== void 0) {
+    return { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [blocked] };
+  }
+  const missingFile = missingFileRequirement(platformInstallVariant(manifest.local, platform).requiresFiles, context);
+  if (missingFile !== void 0) {
+    return { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [missingFile] };
+  }
   switch (declaredRuntime(manifest, platform)) {
     case "docker":
       if (runtime.docker) return { path: "docker", label: resolved.label, ...base, requires: ["docker"], missing: [] };
@@ -703,7 +894,7 @@ function chooseLocalPath(manifest, platform, runtime, detectedPort) {
     case "vendor-app":
       return { path: "vendor-app", label: resolved.label, ...base, requires: [], missing: [] };
     case "node":
-      return { path: "node", label: resolved.label, ...base, requires: [], missing: [] };
+      return runtime.node ? { path: "node", label: resolved.label, ...base, requires: [], missing: [] } : { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [resolved.deps[0] ?? "Node.js"] };
   }
 }
 function readServerOverlay(dshHome) {
@@ -1037,7 +1228,13 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
     const detection = await detectInstance(deps, manifest, configuredBase);
     const runtime = await this.runtime();
-    const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : void 0);
+    const preflight = chooseLocalPath(
+      manifest,
+      process.platform,
+      runtime,
+      detection.ok ? detection.port : void 0,
+      { home: deps.home, dshHome: deps.dshHome }
+    );
     const health = configuredBase === void 0 ? detection.health : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl);
     const settingsReady = settingsNamespaceReady(deps, settingsNs);
     const job = this.options.jobs.snapshot(manifest.id);
@@ -1079,6 +1276,11 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const key = optionalKey(request?.key);
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
+    }
+    const platformBlocked = platformUnsupported(manifest, process.platform);
+    if (platformBlocked !== void 0) {
+      this.options.log?.(`install ${manifest.id}: refused on ${process.platform} (${platformBlocked})`);
+      return { ok: false, blocked: { reason: platformBlocked, plannedWith: 'run the service manually and add it with "Use a detected instance"' } };
     }
     const deps = this.options.deps();
     const pendingRestart = pendingRestartForManifest(deps, manifest);
@@ -1128,20 +1330,26 @@ var inject = [];
 async function runStep(ctx, step, home, dshHome) {
   const subprocess = ctx.get("subprocess");
   if (subprocess === void 0) throw new Error("subprocess seam absent \u2014 cannot run install steps");
-  const handle = subprocess.spawn({
-    argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome)],
-    cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome),
-    stdio: {
-      stdin: "ignore",
-      stdout: { maxBytes: 65536 },
-      stderr: { maxBytes: 65536 }
-    },
-    graceMs: 1e4
-  });
-  const outcome = await handle.done;
-  const stdout = handle.collected.stdout?.readFrom(0).text ?? "";
-  const stderr = handle.collected.stderr?.readFrom(0).text ?? "";
-  return { exitCode: outcome.exitCode, output: `${stdout}${stderr}`.slice(-16384) };
+  try {
+    const handle = subprocess.spawn({
+      argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome)],
+      cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome),
+      stdio: {
+        stdin: "ignore",
+        stdout: { maxBytes: 65536 },
+        stderr: { maxBytes: 65536 }
+      },
+      graceMs: 1e4
+    });
+    const outcome = await handle.done;
+    const stdout = handle.collected.stdout?.readFrom(0).text ?? "";
+    const stderr = handle.collected.stderr?.readFrom(0).text ?? "";
+    return { exitCode: outcome.exitCode, output: `${stdout}${stderr}`.slice(-16384) };
+  } catch (error) {
+    throw new Error(
+      `could not start (${error instanceof Error ? error.message : String(error)}). Heavy-provider install steps run as POSIX shell with /bin/bash \u2014 on Windows install Git Bash, or run the service manually and add it with "Use a detected instance".`
+    );
+  }
 }
 function apply(ctx) {
   const logger = ctx.logger("enpoi-heavy-providers");

@@ -4,7 +4,7 @@
  * shell probe, and chooseLocalPath picks the platform's best path — vendor
  * desktop app, Docker, or Podman — or names the exact missing requirement.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -75,20 +75,24 @@ it('candidate order is recorded port, declared endpoint, then default port, dedu
 })
 
 it('runtime detection reads one combined probe and fails soft when the runner throws', async () => {
-  const probe = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\navailable:podman\n' }))
-  expect(await detectRuntimes(probe)).toEqual({ docker: true, podman: true })
+  const probe = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\navailable:podman\navailable:node\n' }))
+  expect(await detectRuntimes(probe)).toEqual({ docker: true, podman: true, node: true })
+  const dockerOnly = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: 'available:docker\n' }))
+  expect(await detectRuntimes(dockerOnly)).toEqual({ docker: true, podman: false, node: false })
   const empty = vi.fn(async (_step: { command: string }) => ({ exitCode: 0, output: '' }))
-  expect(await detectRuntimes(empty)).toEqual({ docker: false, podman: false })
+  expect(await detectRuntimes(empty)).toEqual({ docker: false, podman: false, node: false })
   const failing = vi.fn(async (_step: { command: string }): Promise<never> => { throw new Error('no subprocess seam') })
-  expect(await detectRuntimes(failing)).toEqual({ docker: false, podman: false })
+  expect(await detectRuntimes(failing)).toEqual({ docker: false, podman: false, node: false })
   expect(probe.mock.calls[0]?.[0].command).toContain('command -v docker')
+  expect(probe.mock.calls[0]?.[0].command).toContain('command -v node')
 })
 
 it('preflight picks the per-platform best path and names what is missing', () => {
   const freellmapi = manifestById('freellmapi')!
-  const docker: RuntimeProbe = { docker: true, podman: false }
-  const podman: RuntimeProbe = { docker: false, podman: true }
-  const bare: RuntimeProbe = { docker: false, podman: false }
+  const docker: RuntimeProbe = { docker: true, podman: false, node: true }
+  const podman: RuntimeProbe = { docker: false, podman: true, node: true }
+  const node: RuntimeProbe = { docker: false, podman: false, node: true }
+  const bare: RuntimeProbe = { docker: false, podman: false, node: false }
 
   expect(chooseLocalPath(freellmapi, 'linux', docker).path).toBe('docker')
   expect(chooseLocalPath(freellmapi, 'linux', podman).path).toBe('podman')
@@ -99,8 +103,39 @@ it('preflight picks the per-platform best path and names what is missing', () =>
 
   expect(chooseLocalPath(freellmapi, 'darwin', bare).path).toBe('vendor-app')
   expect(chooseLocalPath(freellmapi, 'win32', bare).path).toBe('vendor-app')
-  expect(chooseLocalPath(manifestById('antigravity')!, 'linux', bare).path).toBe('node')
-  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true }, 3210).path).toBe('detected')
+  expect(chooseLocalPath(manifestById('antigravity')!, 'linux', node).path).toBe('node')
+
+  // No node in the install shell: the exact dependency is the missing item,
+  // not a step that dies with `npm: command not found`.
+  const noNode = chooseLocalPath(manifestById('antigravity')!, 'linux', bare)
+  expect(noNode.path).toBe('unsupported')
+  expect(noNode.missing).toEqual(['Node.js >= 18'])
+
+  // Windows local provisioning is refused with the manifest's own reason.
+  const win = chooseLocalPath(manifestById('commandcode')!, 'win32', node)
+  expect(win.path).toBe('unsupported')
+  expect(win.missing.join(' ')).toContain('Windows')
+
+  expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true, node: false }, 3210).path).toBe('detected')
+})
+
+it('a declared file requirement blocks preflight until one candidate path exists', () => {
+  const dir = scratchDir()
+  const context = { home: dir, dshHome: join(dir, '.dsh') }
+  const node: RuntimeProbe = { docker: false, podman: false, node: true }
+  const commandcode = manifestById('commandcode')!
+
+  const absent = chooseLocalPath(commandcode, 'darwin', node, undefined, context)
+  expect(absent.path).toBe('unsupported')
+  expect(absent.missing.join(' ')).toContain('keypool proxy.js')
+
+  mkdirSync(join(dir, 'dotfiles', 'opencode-dotfiles', 'keypool'), { recursive: true })
+  writeFileSync(join(dir, 'dotfiles', 'opencode-dotfiles', 'keypool', 'proxy.js'), '// proxy', 'utf8')
+  expect(chooseLocalPath(commandcode, 'darwin', node, undefined, context).path).toBe('node')
+
+  // Without a home/dshHome context the check cannot run, so nothing is
+  // reported as missing (the pre-connection fallback still renders).
+  expect(chooseLocalPath(commandcode, 'darwin', node).path).toBe('node')
 })
 
 it('the private overlay retargets reuse endpoints and dashboards; absent or malformed files mean no override', () => {

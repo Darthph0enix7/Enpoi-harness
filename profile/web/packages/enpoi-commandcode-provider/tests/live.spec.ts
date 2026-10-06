@@ -3,9 +3,9 @@
  *
  *   COMMANDCODE_LIVE=1 pnpm --dir ~/.dsh/profiles/web exec vitest run packages/enpoi-commandcode-provider/tests/live.spec.ts
  *
- * COMMANDCODE_BASE_URL overrides the route (default: the Tailscale keypool
- * address on serverlocal, because the unit binds KEYPOOL_HOST=100.122.163.25);
- * COMMANDCODE_MODEL overrides the model.
+ * COMMANDCODE_BASE_URL overrides the route (default: the shipped loopback
+ * keypool address); COMMANDCODE_MODEL overrides the model. An operator whose
+ * keypool runs elsewhere sets COMMANDCODE_BASE_URL in the shell.
  */
 import { expect, it } from 'vitest'
 import { CommandCodeAdapter, DEFAULT_USER_IMAGE_MAX_BYTES, DEFAULT_USER_IMAGE_MAX_PIXELS } from '../src/adapter.js'
@@ -13,7 +13,7 @@ import { CatalogStore } from '../src/catalog.js'
 import type { CommandCodeRouteProfile } from '../src/adapter.js'
 
 const live = process.env.COMMANDCODE_LIVE === '1'
-const baseURL = process.env.COMMANDCODE_BASE_URL ?? 'http://100.122.163.25:8899/commandcode'
+const baseURL = process.env.COMMANDCODE_BASE_URL ?? 'http://127.0.0.1:8899/commandcode'
 const model = process.env.COMMANDCODE_MODEL ?? 'deepseek/deepseek-v4.1-flash'
 
 const profile: CommandCodeRouteProfile = {

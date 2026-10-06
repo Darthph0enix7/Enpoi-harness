@@ -4,7 +4,7 @@
  * an explicit unsupported-but-documented reuse path.
  */
 import { expect, it } from 'vitest'
-import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall } from '../src/manifests.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall } from '../src/manifests.js'
 import { substitute } from '../src/planner.js'
 
 it('declares the three heavy providers with no structural problems', () => {
@@ -35,8 +35,11 @@ it('antigravity removal warns about other proxy consumers and a synced unit file
 
 it('freellmapi removal drops the volume, the image, and the clone directory', () => {
   const steps = manifestById('freellmapi')?.removal.steps.map(step => step.command).join('\n') ?? ''
-  expect(steps).toContain('docker compose down -v')
-  expect(steps).toContain('docker image rm')
+  expect(steps).toContain('compose down -v')
+  expect(steps).toContain('image rm')
+  // The install offers Podman as the Docker substitute, so teardown resolves
+  // whichever engine exists instead of hardcoding `docker`.
+  expect(steps).toContain('command -v docker || command -v podman')
   expect(steps).toContain('rm -rf {home}/freellmapi')
 })
 
@@ -122,6 +125,20 @@ it('freellmapi installs are platform-keyed and fall back to the Docker path', ()
   expect(unknown.steps[0]!.command).toContain('git clone')
 })
 
+it('freellmapi install steps are idempotent and resolve the container engine at run time', () => {
+  const freellmapi = manifestById('freellmapi')!
+  const compose = freellmapi.local.install.default.steps.map(step => step.command).join('\n')
+  expect(compose).toContain('test -d {home}/freellmapi/.git || git clone')
+  expect(compose).toContain('command -v docker || command -v podman')
+
+  const linux = resolveHeavyInstall(freellmapi.local, 'linux').steps.map(step => step.command).join('\n')
+  expect(linux).toContain('needs Docker Engine')
+
+  const darwin = resolveHeavyInstall(freellmapi.local, 'darwin').steps.map(step => step.command).join('\n')
+  expect(darwin).toContain('uname -m')
+  expect(darwin).toContain('no FreeLLMAPI $arch .dmg')
+})
+
 it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
   expect(substitute('node {dshHome}/profiles/web/x.mjs {config}/y', '/users/jo', '/srv/dsh'))
     .toBe('node /srv/dsh/profiles/web/x.mjs /users/jo/.config/y')
@@ -135,12 +152,76 @@ it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
   expect(removal).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs')
 })
 
-it('never hard-requires the dotfiles repo: the keypool proxy step is optional and self-skipping', () => {
+it('fails the keypool-proxy step fast with every searched location instead of skipping silently', () => {
   const proxy = manifestById('commandcode')!.local.install.default.steps
     .find(step => step.command.includes('keypool/proxy.js'))
-  expect(proxy?.optional).toBe(true)
-  expect(proxy?.command).toContain('exit 0')
-  expect(proxy?.command).toContain('skipping')
+  expect(proxy?.optional).toBeUndefined()
+  expect(proxy?.command).toContain('exit 1')
+  expect(proxy?.command).toContain('not found')
+  expect(proxy?.command).toContain('{config}/opencode/keypool/proxy.js')
+  expect(proxy?.command).toContain('{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js')
+  expect(proxy?.command).toContain('{home}/dotfiles/opencode-dotfiles/keypool/proxy.js')
+  // Re-running with a placed proxy is a no-op.
+  expect(proxy?.command).toContain('already present')
+})
+
+it('provisions Linux with systemd and macOS with launchd for both user-service providers', () => {
+  for (const id of ['antigravity', 'commandcode']) {
+    const manifest = manifestById(id)!
+    const linux = resolveHeavyInstall(manifest.local, 'linux').steps.map(step => step.command).join('\n')
+    expect(linux, id).toContain('systemctl --user')
+    expect(linux, id).not.toContain('launchctl')
+
+    const darwin = resolveHeavyInstall(manifest.local, 'darwin').steps.map(step => step.command).join('\n')
+    expect(darwin, id).toContain('{home}/Library/LaunchAgents/')
+    expect(darwin, id).toContain('launchctl bootout')
+    expect(darwin, id).toContain('launchctl bootstrap')
+    expect(darwin, id).toContain('{home}/Library/Logs/')
+    expect(darwin, id).not.toContain('systemctl')
+
+    // The default variant is the systemd path, so an unknown POSIX platform
+    // never receives launchd steps.
+    expect(resolveHeavyInstall(manifest.local, 'freebsd').steps).toEqual(
+      resolveHeavyInstall(manifest.local, 'linux').steps,
+    )
+  }
+})
+
+it('starts the antigravity proxy in its foreground mode, never a bare help invocation', () => {
+  const manifest = manifestById('antigravity')!
+  for (const platform of ['linux', 'darwin'] as const) {
+    const commands = resolveHeavyInstall(manifest.local, platform).steps.map(step => step.command).join('\n')
+    expect(commands, platform).toContain('antigravity-claude-proxy start --log')
+    // A bare `antigravity-claude-proxy` only prints help and exits; the
+    // service wrapper must never be built from it.
+    expect(commands, platform).not.toMatch(/exec antigravity-claude-proxy(?! start --log)/)
+  }
+  const teardown = manifest.removal.steps.map(step => step.command).join('\n')
+  expect(teardown).toContain('antigravity-claude-proxy stop')
+})
+
+it('refuses Windows with a declared reason instead of a command that cannot work', () => {
+  for (const id of ['antigravity', 'commandcode']) {
+    const manifest = manifestById(id)!
+    const reason = platformUnsupported(manifest, 'win32')
+    expect(reason, id).toBeDefined()
+    expect(reason, id).toContain('Windows')
+    expect(resolveHeavyInstall(manifest.local, 'win32').steps, id).toEqual([])
+    expect(platformUnsupported(manifest, 'linux'), id).toBeUndefined()
+    expect(platformUnsupported(manifest, 'darwin'), id).toBeUndefined()
+  }
+  // FreeLLMAPI keeps its vendor desktop-app path on Windows.
+  const freellmapi = resolveHeavyInstall(manifestById('freellmapi')!.local, 'win32')
+  expect(platformUnsupported(manifestById('freellmapi')!, 'win32')).toBeUndefined()
+  expect(freellmapi.steps[0]!.command).toContain('.exe')
+})
+
+it('the antigravity teardown removes whichever user-service file the platform wrote', () => {
+  const commands = manifestById('antigravity')!.removal.steps.map(step => step.command).join('\n')
+  expect(commands).toContain('systemctl --user disable --now antigravity-proxy.service')
+  expect(commands).toContain('launchctl bootout')
+  expect(commands).toContain('{config}/systemd/user/antigravity-proxy.service')
+  expect(commands).toContain('{home}/Library/LaunchAgents/dev.enpoi.antigravity-proxy.plist')
 })
 
 it('flags an install variant whose declared runtime contradicts its steps', () => {
@@ -155,7 +236,7 @@ it('flags an install variant whose declared runtime contradicts its steps', () =
     ...freellmapi,
     local: { ...freellmapi.local, runtime: 'node' as const },
   }
-  expect(manifestProblems([nodeDeclared]).join('\n')).toContain('declares runtime "node" but its steps invoke docker tooling instead')
+  expect(manifestProblems([nodeDeclared]).join('\n')).toContain('declares runtime "node" but its steps invoke docker/podman tooling instead')
   // ...and the shipped table stays clean.
   expect(manifestProblems()).toEqual([])
 })

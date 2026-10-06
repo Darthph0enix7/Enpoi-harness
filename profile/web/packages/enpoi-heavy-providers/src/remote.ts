@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { HeavyJobView } from './jobs.js'
 import { HeavyJobManager } from './jobs.js'
-import { HEAVY_MANIFESTS, manifestById, manifestProblems, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
 import {
   chooseLocalPath,
   configuredProfile,
@@ -200,7 +200,13 @@ export class HeavyProvidersService extends TypertRemoteService {
     const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
     const detection = await detectInstance(deps, manifest, configuredBase)
     const runtime = await this.runtime()
-    const preflight = chooseLocalPath(manifest, process.platform, runtime, detection.ok ? detection.port : undefined)
+    const preflight = chooseLocalPath(
+      manifest,
+      process.platform,
+      runtime,
+      detection.ok ? detection.port : undefined,
+      { home: deps.home, dshHome: deps.dshHome },
+    )
     const health = configuredBase === undefined
       ? detection.health
       : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
@@ -265,6 +271,13 @@ export class HeavyProvidersService extends TypertRemoteService {
     const key = optionalKey(request?.key)
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
+    }
+    // A platform with no supported provisioning path is refused with its
+    // declared reason instead of running steps that cannot work.
+    const platformBlocked = platformUnsupported(manifest, process.platform)
+    if (platformBlocked !== undefined) {
+      this.options.log?.(`install ${manifest.id}: refused on ${process.platform} (${platformBlocked})`)
+      return { ok: false, blocked: { reason: platformBlocked, plannedWith: 'run the service manually and add it with "Use a detected instance"' } }
     }
     const deps = this.options.deps()
     const pendingRestart = pendingRestartForManifest(deps, manifest)
