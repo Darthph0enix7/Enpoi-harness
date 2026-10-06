@@ -47,7 +47,7 @@ set -o pipefail
 umask 022
 
 SCRIPT_NAME="dsh-install"
-SCRIPT_REVISION="1"
+SCRIPT_REVISION="2"
 
 # ── Distribution parameters (the public repo fills these) ───────────────────
 DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/enpoi-harness}"
@@ -81,6 +81,7 @@ SERVICE_INSTALL_EXPLICIT=0
 NO_PREBUILT=0
 PREBUILT=0
 MERGE_BASELINE=""
+NO_PROFILE_MERGE="${DSH_NO_PROFILE_MERGE:-0}"
 WRITE_RC=0
 DRY_RUN=0
 FORCE=0
@@ -114,8 +115,13 @@ BUILD_DIRTY=""
 TARGET_COMMIT=""
 INSTALLED_COMMIT=""
 TREE_DIR_NAME=""
+REUSED_TREE_DIR=""
+PRE_SWITCH_RESTORE=""
+UPDATE_LOCK_DIR=""
 PROFILE_REF_EXPLICIT=0
 PROFILE_REF_DERIVED=0
+PROFILE_SHIPPED_DIR=""
+MIGRATION_FAILURES=""
 PREV_VERSION=""
 CHECK_VERSION=0
 CHECK_HELP=0
@@ -309,6 +315,8 @@ Options:
                       update fails loudly when it disagrees with install-state.json
   --merge-baseline F  run the profile's three-way merge engine against F
                       (timestamped backups; never fail closed)
+  --no-profile-merge  skip the additive shipped-profile patch merge (new shipped
+                      rows/sections are not added; the live patch stays untouched)
   --update            mechanical update: install, migrate, switch, self-check,
                       roll back to the previous versioned dir on failure
   --repair            verify the install's invariants (version dirs, current,
@@ -349,12 +357,17 @@ Environment:
   DSH_NO_OPEN                        same as --no-open
   DSH_NO_SERVICE                     same as --no-service
   DSH_NO_PREBUILT                    same as --no-prebuilt
+  DSH_NO_PROFILE_MERGE               same as --no-profile-merge
 
 Exit codes: 0 success, 1 failure (update rolls back first), 42 sudo trap fired.
 USAGE
 }
 
-trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi' EXIT
+# One EXIT trap owns all cleanup: staging dirs, a pre-switch user-file restore
+# that an early die did not reach explicitly, and the portable mkdir lock
+# directory. A single chained trap keeps the existing cleanup from being
+# clobbered by a later trap registration.
+trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -385,6 +398,7 @@ while [ "$#" -gt 0 ]; do
     --dsh-home=*) DSH_HOME="${arg#*=}"; shift;;
     --merge-baseline) need_value "$@"; MERGE_BASELINE="$2"; shift 2;;
     --merge-baseline=*) MERGE_BASELINE="${arg#*=}"; shift;;
+    --no-profile-merge) NO_PROFILE_MERGE=1; shift;;
     --update) UPDATE_MODE=1; shift;;
     --repair) REPAIR_MODE=1; shift;;
     --clean) CLEAN_MODE=1; shift;;
@@ -426,6 +440,24 @@ host_short_name() {
   [ -n "$h" ] || h="$(uname -n 2>/dev/null || true)"
   [ -n "$h" ] || h="this-host"
   printf '%s' "$h"
+}
+
+# Atomically repoint harness/current: build the new symlink beside the old one,
+# then rename it over. mv -T is GNU-only; mv -h is the BSD/macOS spelling (plain
+# mv would follow a directory symlink and move the temporary link inside the old
+# tree), and Node's rename(2) is the atomic fallback. The link is never removed
+# before the move: that would open a window where harness/current does not exist.
+switch_current() { # target -> 0
+  local target="$1" link="$PREFIX/harness/current" tmp="$PREFIX/harness/.current.tmp.$$"
+  rm -f "$tmp" 2>/dev/null || true
+  ln -sfn "$target" "$tmp" || return 1
+  if mv -Tf "$tmp" "$link" 2>/dev/null; then return 0; fi
+  if mv -hf "$tmp" "$link" 2>/dev/null; then return 0; fi
+  if [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
+    "$NODE" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$tmp" "$link" 2>/dev/null && return 0
+  fi
+  warn "could not atomically replace $link"
+  return 1
 }
 
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
@@ -891,7 +923,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     # often still being built by release CI, and that must read as a normal
     # fallback, not as a failed download.
     if ! curl -fsSL --range 0-0 --connect-timeout 15 --max-time 30 "$url" -o /dev/null 2>/dev/null; then
-      log "prebuilt: no published asset for commit ${TARGET_COMMIT:0:7} yet (release CI may still be building it); building from source"
+      log "prebuilt: no published asset for ${OS}-${ARCH} at commit ${TARGET_COMMIT:0:7} yet (release CI may still be building it)"
       return 1
     fi
     log "prebuilt: fetching $asset"
@@ -936,13 +968,17 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
-    # `/archive/<ref>.tar.gz` resolves branches, tags, and commit SHAs alike;
-    # the `refs/heads/` form 404s for a tag or a pinned commit (--ref).
+    # The channel ref names the tree; resolve its commit before choosing the
+    # archive URL. Fetching by the resolved commit closes the window where a
+    # branch advances between resolution and download: the staged tree is then
+    # exactly the commit the cache key, the prebuilt asset, and the recorded
+    # build identity name. `/archive/<ref>.tar.gz` resolves branches, tags, and
+    # commit SHAs alike; the `refs/heads/` form 404s for a tag or pinned commit.
     SOURCE_URL="$DSH_GITHUB_URL/archive/$ref.tar.gz"
-    # Resolve the exact target commit once, before anything stages: the
-    # already-built reuse check, the prebuilt fast path, and the source-archive
-    # cache all key on it.
     resolve_target_for_source
+    if [ -n "$TARGET_COMMIT" ]; then
+      SOURCE_URL="$DSH_GITHUB_URL/archive/$TARGET_COMMIT.tar.gz"
+    fi
     # If the target commit is known and already built and complete, reuse it directly
     if [ "${FORCE:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
       local d name c
@@ -956,6 +992,7 @@ prepare_source() {
             VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
             if [ -n "$VERSION" ]; then
               TREE_DIR_NAME="$name"
+              REUSED_TREE_DIR="$name"
               HARNESS="$d"
               substep_ok "Target build already complete: $TREE_DIR_NAME (reusing)"
               return 0
@@ -967,6 +1004,11 @@ prepare_source() {
     if stage_prebuilt; then
       substep_ok "Prebuilt harness reused for commit ${TARGET_COMMIT:0:7} ($OS-$ARCH)"
       return 0
+    fi
+    if [ "$NO_PREBUILT" = 1 ] || [ "${DSH_NO_PREBUILT:-0}" = 1 ]; then
+      log "prebuilt: disabled; building from source"
+    else
+      log "no prebuilt for $OS-$ARCH; building from source (~5 min)"
     fi
     stage_remote "$SOURCE_URL" || die "could not fetch the $CHANNEL channel build from $SOURCE_URL"
   elif [ -d "$SOURCE" ]; then
@@ -1259,7 +1301,18 @@ copy_profile_tree() { # src dst mode(seed|refresh)
       fresh-settings.yaml|presets|presets/*) continue;;
     esac
     if [ "$mode" = refresh ]; then
-      case "$rel" in cordis.patch.yml) continue;; esac
+      case "$rel" in
+        cordis.patch.yml) continue;;
+        # Operator-owned manifests: the dependency union in refresh_profile_merges
+        # merges the shipped dependency keys into the live file, so a shipped
+        # copy must never clobber user-added dependencies. The lock and
+        # workspace files are operator-resolved state; seed them only when the
+        # live profile has none.
+        package.json) continue;;
+        pnpm-lock.yaml|pnpm-workspace.yaml)
+          [ -f "$dst/$rel" ] && continue
+          ;;
+      esac
       case "$rel" in
         fish|fish/*|systemd|systemd/*)
           d="$dst/$rel"
@@ -1340,6 +1393,288 @@ seed_profile_home() { # stage
   return 0
 }
 
+# ── Additive profile refresh (update) ───────────────────────────────────────
+# Operator-state rows/sections pinned by profile/web/scripts/verify-profile-template.mjs
+# and profile/web/packages/enpoi-capabilities/tests/profile-patch.spec.ts. The
+# merge below never introduces them into a live document, even when a
+# compromised shipped template carries them.
+PROFILE_PATCH_OPERATOR_ROWS="agent-default-model llm-pi-ai ui-settings-general ui-settings-models ui-theme"
+PROFILE_PATCH_OPERATOR_SECTIONS="capabilities mcpServers mcpStatus personas roles councils chains catalogRules uiPreferences permissions whiteboard toolGroups"
+
+# Additive-only merge of the shipped profile patch into the live document.
+# Shipped top-level rows and shipped sections of the orchestration row that the
+# live file lacks are appended; existing live rows are never modified or
+# removed. A top-of-file `# dsh-ignore: id1, id2` comment opts those shipped ids
+# out, like a live `disabled: true` row. Any parse doubt leaves the live file
+# byte-identical and warns. The function returns 0 in every outcome — a failed
+# merge never fails an update — and a successful merge keeps a timestamped
+# backup next to the live file.
+merge_profile_patch() { # shipped live
+  local shipped="$1" live="$2" tmp="$2.merge-$$" summary="$2.merge-$$.summary" rc added_n=0 backup ts
+  if [ ! -s "$shipped" ]; then
+    warn "profile patch merge: shipped template is missing ($shipped); live patch left untouched"
+    return 0
+  fi
+  if [ ! -s "$live" ]; then
+    warn "profile patch merge: live patch is missing ($live); left untouched"
+    return 0
+  fi
+  awk -v o_rows="$PROFILE_PATCH_OPERATOR_ROWS" -v o_sections="$PROFILE_PATCH_OPERATOR_SECTIONS" '
+function trimid(s) { sub(/^[[:space:]]*- id:[[:space:]]*/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+function blockend(from, to,   e) {
+  # Trailing blank lines and comments belong to the next entry preamble; keep
+  # them out of an appended copy.
+  e = to
+  while (e > from && (s[e] ~ /^[[:space:]]*$/ || s[e] ~ /^[[:space:]]*#/)) e--
+  return e
+}
+NR == FNR {
+  sn++; s[sn] = $0
+  if ($0 ~ /^- /) { snb++; sb[snb] = sn }
+  next
+}
+{ ln++; l[ln] = $0 }
+END {
+  if (snb == 0) { print "shipped template carries no top-level entries" > "/dev/stderr"; exit 1 }
+  n = split(o_rows, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") operator_row[a[i]] = 1
+  n = split(o_sections, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") operator_section[a[i]] = 1
+  sb[snb + 1] = sn + 1
+  lnb = 0
+  for (i = 1; i <= ln; i++) if (l[i] ~ /^- /) { lnb++; lb[lnb] = i }
+  lb[lnb + 1] = ln + 1
+  firstblock = (lnb > 0) ? lb[1] : ln + 1
+  for (i = 1; i < firstblock; i++) {
+    if (l[i] !~ /^[[:space:]]*$/ && l[i] !~ /^[[:space:]]*#/) { print "live patch has unrecognized content before the first entry" > "/dev/stderr"; exit 1 }
+  }
+  if (lnb == 0) {
+    content = 0
+    for (i = 1; i <= ln; i++) if (l[i] !~ /^[[:space:]]*$/ && l[i] !~ /^[[:space:]]*#/) content = 1
+    if (content) { print "live patch is not a top-level array of entries" > "/dev/stderr"; exit 1 }
+  }
+  for (i = 1; i <= ln; i++) {
+    # Only root-level rows and direct children of a top-level insert count as
+    # live ids: an id nested deep in a row config (customTools and friends)
+    # must not mask a shipped top-level row with the same id.
+    if (l[i] ~ /^- id:[[:space:]]*[^[:space:]]+/ || l[i] ~ /^    - id:[[:space:]]*[^[:space:]]+/) live_id[trimid(l[i])] = 1
+    if (l[i] ~ /^    [A-Za-z0-9_@.\/-]+:/) { k = l[i]; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k); live_section[k] = 1 }
+  }
+  # Operator opt-out: a top-of-file `# dsh-ignore: id1, id2` comment pins those
+  # shipped row ids out of the merge, like a live `disabled: true` row.
+  for (i = 1; i <= ln; i++) {
+    if (l[i] ~ /^[[:space:]]*$/) continue
+    if (l[i] !~ /^[[:space:]]*#/) break
+    if (l[i] ~ /^[[:space:]]*#[[:space:]]*dsh-ignore:/) {
+      ig = l[i]
+      sub(/^[[:space:]]*#[[:space:]]*dsh-ignore:[[:space:]]*/, "", ig)
+      n = split(ig, igv, ",")
+      for (j = 1; j <= n; j++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", igv[j]); if (igv[j] != "") ignore[igv[j]] = 1 }
+    }
+  }
+  orch_start = 0; orch_end = 0
+  for (b = 1; b <= lnb; b++) if (l[lb[b]] ~ /^- id:[[:space:]]*enpoi-orchestration[[:space:]]*$/) { orch_start = lb[b]; orch_end = lb[b + 1] - 1 }
+  for (b = 1; b <= snb; b++) {
+    first = s[sb[b]]
+    if (first ~ /^- id:[[:space:]]*[^[:space:]]+/) {
+      id = trimid(first)
+      if (id in operator_row) { print "skipped operator-state row: " id > "/dev/stderr"; continue }
+      if (id in ignore) { print "skipped operator opt-out row: " id > "/dev/stderr"; continue }
+      if (id in live_id) continue
+      if (id in shipped_seen) { print "duplicate shipped row id: " id > "/dev/stderr"; exit 1 }
+      shipped_seen[id] = 1
+      top_n++; top[++top_c] = ""
+      e = blockend(sb[b], sb[b + 1] - 1)
+      for (i = sb[b]; i <= e; i++) top[++top_c] = s[i]
+      print "added row: " id > "/dev/stderr"
+    } else if (first ~ /^- insert:[[:space:]]*$/) {
+      nested_n = 0; any_present = 0; missing = 0
+      delete nested
+      for (i = sb[b] + 1; i < sb[b + 1]; i++) {
+        if (s[i] ~ /^    - id:[[:space:]]*[^[:space:]]+/) {
+          y = trimid(s[i]); nested_n++
+          if (y in ignore) any_present = 1
+          else if (y in live_id) any_present = 1
+          else { missing = 1; nested[y] = 1 }
+        }
+      }
+      if (nested_n == 0) { print "unrecognized shipped insert block (no nested row ids)" > "/dev/stderr"; exit 1 }
+      for (y in nested) if (y in operator_row) { print "shipped insert carries operator-state row: " y > "/dev/stderr"; exit 1 }
+      if (any_present && missing) { print "shipped insert block is only partially present in the live patch" > "/dev/stderr"; exit 1 }
+      if (any_present) continue
+      top_n++; top[++top_c] = ""
+      e = blockend(sb[b], sb[b + 1] - 1)
+      for (i = sb[b]; i <= e; i++) top[++top_c] = s[i]
+      for (y in nested) print "added row: " y > "/dev/stderr"
+    } else {
+      print "unrecognized shipped top-level entry" > "/dev/stderr"; exit 1
+    }
+  }
+  if (orch_start > 0 && ("enpoi-orchestration" in live_id)) {
+    s_orch_start = 0; s_orch_end = 0
+    for (b = 1; b <= snb; b++) if (s[sb[b]] ~ /^- id:[[:space:]]*enpoi-orchestration[[:space:]]*$/) { s_orch_start = sb[b]; s_orch_end = sb[b + 1] - 1 }
+    if (s_orch_start > 0) {
+      for (i = s_orch_start + 1; i < s_orch_end; i++) {
+        if (s[i] ~ /^    [A-Za-z0-9_@.\/-]+:/) {
+          k = s[i]; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+          if (k in operator_section) continue
+          if (k in live_section) continue
+          if (k in section_seen) continue
+          section_seen[k] = 1
+          j = i + 1
+          while (j < s_orch_end && s[j] !~ /^    [A-Za-z0-9_@.\/-]+:/ && s[j] !~ /^  [A-Za-z0-9_@.\/-]+:/) j++
+          while (j > i + 1 && (s[j - 1] ~ /^[[:space:]]*$/ || s[j - 1] ~ /^[[:space:]]*#/)) j--
+          sec_n++; sec[++sec_c] = ""
+          for (m = i; m < j; m++) sec[++sec_c] = s[m]
+          print "added section: " k > "/dev/stderr"
+          i = j - 1
+        }
+      }
+    }
+  }
+  if (top_n == 0 && sec_n == 0) exit 2
+  for (i = 1; i <= ln; i++) {
+    print l[i]
+    if (orch_start > 0 && i == orch_end) for (m = 1; m <= sec_c; m++) print sec[m]
+  }
+  for (m = 1; m <= top_c; m++) print top[m]
+  exit 0
+}
+' "$shipped" "$live" > "$tmp" 2> "$summary"
+  rc=$?
+  case "$rc" in
+    0) :;;
+    2)
+      rm -f "$tmp"
+      while IFS= read -r line; do log "profile patch merge: $line"; done < "$summary"
+      rm -f "$summary"
+      log "profile patch merge: live patch already carries every shipped row/section"
+      return 0
+      ;;
+    *)
+      rm -f "$tmp"
+      warn "profile patch merge: $(head -n 1 "$summary" 2>/dev/null || printf 'cannot parse the documents'); live patch left untouched"
+      rm -f "$summary"
+      return 0
+      ;;
+  esac
+  added_n="$(grep -c '^added ' "$summary" 2>/dev/null || true)"
+  case "$added_n" in ''|*[!0-9]*) added_n=0;; esac
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup="$live.backup-$ts"
+  [ -e "$backup" ] && backup="$backup-$$"
+  if ! cp -p "$live" "$backup" 2>/dev/null; then
+    rm -f "$tmp" "$summary"
+    warn "profile patch merge: could not back up $live; live patch left untouched"
+    return 0
+  fi
+  if ! mv "$tmp" "$live" 2>/dev/null; then
+    rm -f "$tmp" "$summary"
+    warn "profile patch merge: could not write $live; live patch left untouched (backup: $backup)"
+    return 0
+  fi
+  while IFS= read -r line; do log "profile patch merge: $line"; done < "$summary"
+  rm -f "$summary"
+  substep_ok "Profile patch merge: $added_n shipped entr(y/ies) added to $(basename "$live") (backup: $backup)"
+  return 0
+}
+
+# Union the shipped dependency keys into the live profile package.json.
+# Shipped wins on a version conflict; user-only dependencies are kept; every
+# other field of the live manifest is preserved. An unparseable live manifest
+# aborts the update with the shipped keys listed instead of clobbering it.
+merge_profile_package_json() { # shipped live
+  local shipped="$1" live="$2" tmp="$2.merge-$$" out rc
+  [ -f "$shipped" ] || { log "profile package.json merge: no shipped manifest at $shipped; skipping"; return 0; }
+  [ -f "$live" ] || { log "profile package.json merge: no live manifest at $live; skipping"; return 0; }
+  out="$("$NODE" -e '
+const fs = require("fs")
+const [shippedPath, livePath, outPath] = process.argv.slice(1)
+const maps = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+let shipped
+try { shipped = JSON.parse(fs.readFileSync(shippedPath, "utf8")) } catch (error) {
+  console.error(`cannot parse shipped manifest ${shippedPath}: ${error.message}`)
+  process.exit(3)
+}
+let live
+try { live = JSON.parse(fs.readFileSync(livePath, "utf8")) } catch (error) {
+  const keys = []
+  for (const map of maps) for (const key of Object.keys(shipped[map] ?? {})) keys.push(`${map}:${key}`)
+  console.error(`cannot parse live manifest ${livePath}: ${error.message}; shipped dependency keys that would apply: ${keys.sort().join(" ") || "none"}`)
+  process.exit(4)
+}
+const merged = { ...live }
+const added = [], updated = [], kept = []
+for (const map of maps) {
+  const shippedMap = shipped[map] ?? {}
+  const liveMap = live[map] ?? {}
+  const mergedMap = { ...liveMap }
+  for (const [key, value] of Object.entries(shippedMap)) {
+    if (!(key in liveMap)) added.push(`${map}:${key}`)
+    else if (liveMap[key] !== value) updated.push(`${map}:${key}`)
+    mergedMap[key] = value
+  }
+  for (const key of Object.keys(liveMap)) if (!(key in shippedMap)) kept.push(`${map}:${key}`)
+  merged[map] = mergedMap
+}
+const text = `${JSON.stringify(merged, null, 2)}\n`
+if (text === fs.readFileSync(livePath, "utf8")) process.exit(2)
+fs.writeFileSync(outPath, text)
+const detail = [
+  added.length > 0 ? `added ${added.join(", ")}` : "",
+  updated.length > 0 ? `updated ${updated.join(", ")}` : "",
+  kept.length > 0 ? `kept user-only ${kept.join(", ")}` : "",
+].filter(Boolean).join("; ")
+console.log(`${added.length} added, ${updated.length} updated, ${kept.length} user-only kept${detail ? ` (${detail})` : ""}`)
+' "$shipped" "$live" "$tmp" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0)
+      if mv "$tmp" "$live" 2>/dev/null; then
+        log "profile package.json merge: $out"
+      else
+        rm -f "$tmp"
+        warn "profile package.json merge: could not write $live; manifest left untouched"
+      fi
+      ;;
+    2)
+      rm -f "$tmp"
+      log "profile package.json merge: live manifest already carries every shipped dependency"
+      ;;
+    3)
+      rm -f "$tmp"
+      die "profile package.json merge: $out"
+      ;;
+    4)
+      rm -f "$tmp"
+      die "profile package.json merge: refusing to overwrite $live — $out. Fix the JSON (or move the file aside) and re-run the update."
+      ;;
+    *)
+      rm -f "$tmp"
+      warn "profile package.json merge skipped (exit $rc): $out"
+      ;;
+  esac
+  return 0
+}
+
+# Profile refresh merges: additive patch rows + dependency union. The staged
+# shipped tree is the source when present (set by prepare_profile), otherwise
+# the bundled profile of the tree being installed. Never runs on a fresh seed.
+refresh_profile_merges() {
+  [ -n "${PROFILE_DIR:-}" ] && [ -d "$PROFILE_DIR" ] || return 0
+  local shipped="${PROFILE_SHIPPED_DIR:-}"
+  if [ -z "$shipped" ] || [ ! -d "$shipped" ]; then shipped="${HARNESS:-}/profile/$PROFILE"; fi
+  if [ -z "$shipped" ] || [ ! -d "$shipped" ]; then
+    log "profile merge: no shipped profile tree resolved; nothing to merge"
+    return 0
+  fi
+  if [ "$NO_PROFILE_MERGE" = 1 ]; then
+    log "profile merge: skipped (--no-profile-merge)"
+  else
+    merge_profile_patch "$shipped/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml"
+  fi
+  merge_profile_package_json "$shipped/package.json" "$PROFILE_DIR/package.json"
+  return 0
+}
+
 # The canonical companion profile repo is branch-per-channel like the harness:
 # a channel install must clone the profile's channel branch, not the repo's
 # default HEAD (which tracks the newest template). An explicit --profile-ref /
@@ -1360,6 +1695,15 @@ apply_profile_ref_default() { # from_state(0|1) -> sets PROFILE_REF from $CHANNE
 }
 
 prepare_profile() {
+  # An installer-recorded bundled source names the previous versioned tree.
+  # The tree actually being installed/seeded ($HARNESS) carries the current
+  # bundle, and the old tree is pruned after the next update, so rebase only
+  # paths under $PREFIX/harness; a local or external source still wins.
+  if [ -n "$PROFILE_SOURCE" ] && [ -n "${HARNESS:-}" ] && [ -d "$HARNESS/profile/$PROFILE" ]; then
+    case "$PROFILE_SOURCE" in
+      "$PREFIX"/harness/*) PROFILE_SOURCE="$HARNESS/profile/$PROFILE";;
+    esac
+  fi
   if [ -z "$PROFILE_SOURCE" ] || [ "$PROFILE_SOURCE" = "$DEFAULT_PROFILE_SOURCE" ]; then
     if [ -n "${HARNESS:-}" ] && [ -d "$HARNESS/profile/$PROFILE" ]; then
       PROFILE_SOURCE="$HARNESS/profile/$PROFILE"
@@ -1398,6 +1742,13 @@ prepare_profile() {
     warn "profile seed did not complete for $PROFILE_DIR"
   fi
   seed_profile_home "$PROFILE_STAGE"
+  if [ "$mode" = refresh ]; then
+    # The just-staged shipped tree is the merge source: additive patch rows and
+    # the dependency union run before profile deps install and plugin build.
+    PROFILE_SHIPPED_DIR="$PROFILE_STAGE"
+    refresh_profile_merges
+    PROFILE_SHIPPED_DIR=""
+  fi
   rm -rf "$PROFILE_STAGE"; PROFILE_STAGE=""
   return 0
 }
@@ -1687,37 +2038,73 @@ run_backfill() {
 }
 
 backup_user_files() { # dir
-  local b="$1" f rel
-  for f in "$DSH_HOME/settings.yaml" "$DSH_HOME/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/package.json" "$DSH_HOME/sync-local.yaml"; do
+  local b="$1" f rel d
+  for f in "$DSH_HOME/settings.yaml" "$DSH_HOME/cordis.patch.yml" "$DSH_HOME/sync-local.yaml" \
+           "$DSH_HOME/heavy-server-overlay.json" \
+           "$PROFILE_DIR/settings.yaml" "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/package.json" \
+           "$PROFILE_DIR/pnpm-lock.yaml"; do
     [ -f "$f" ] || continue
     rel="${f#/}"
     mkdir -p "$b/root/$(dirname "$rel")" 2>/dev/null || continue
     cp -p "$f" "$b/root/$rel" 2>/dev/null || true
   done
+  # Whole directories of operator state: per-device patch files and the
+  # harness-owned key-pool state written under $DSH_HOME/pools.
+  for d in "$PROFILE_DIR/device-patches" "$DSH_HOME/pools"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      rel="${f#/}"
+      mkdir -p "$b/root/$(dirname "$rel")" 2>/dev/null || continue
+      cp -p "$f" "$b/root/$rel" 2>/dev/null || true
+    done < <(find "$d" -type f 2>/dev/null)
+  done
   return 0
 }
 
+# Restore from the pristine pre-update snapshot taken before any profile merge
+# or migration ran. Files the update pipeline rewrites (the patch merge, the
+# dependency union, pnpm's lock, migrations) have mtimes newer than the snapshot
+# and would trip an mtime guard, so they are always restored; for every other
+# file a live copy whose content differs from the snapshot is an operator edit
+# made during the update and is kept. A missing or byte-identical copy is
+# restored (recreated) from the snapshot.
 restore_user_files() { # dir
-  local b="$1" f rel failed=0 total=0
+  local b="$1" f rel live failed=0 total=0 skipped=0
   [ -d "$b/root" ] || return 0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     total=$((total + 1))
     rel="${f#"$b"/root/}"
-    if ! mkdir -p "$(dirname "/$rel")"; then
-      printf '%s: ERROR: cannot create %s while restoring /%s\n' "$SCRIPT_NAME" "$(dirname "/$rel")" "$rel" >&2
+    live="/$rel"
+    case "$live" in
+      "${DSH_HOME:-}/settings.yaml"|"${PROFILE_DIR:-}/settings.yaml"|"${PROFILE_DIR:-}/cordis.patch.yml"|"${PROFILE_DIR:-}/package.json"|"${PROFILE_DIR:-}/pnpm-lock.yaml") : ;;
+      *)
+        if [ -f "$live" ]; then
+          if cmp -s "$f" "$live"; then continue; fi
+          log "rollback: keeping $live (content differs from the backup; treating it as an operator edit)"
+          skipped=$((skipped + 1))
+          continue
+        fi
+        ;;
+    esac
+    if ! mkdir -p "$(dirname "$live")"; then
+      printf '%s: ERROR: cannot create %s while restoring %s\n' "$SCRIPT_NAME" "$(dirname "$live")" "$live" >&2
       failed=$((failed + 1))
       continue
     fi
-    if cp -p "$f" "/$rel"; then
-      log "restored /$rel"
+    if cp -p "$f" "$live"; then
+      log "restored $live"
     else
-      printf '%s: ERROR: could not restore /%s from %s\n' "$SCRIPT_NAME" "$rel" "$f" >&2
+      printf '%s: ERROR: could not restore %s from %s\n' "$SCRIPT_NAME" "$live" "$f" >&2
       failed=$((failed + 1))
     fi
   done <<EOF
 $(find "$b/root" -type f 2>/dev/null)
 EOF
+  if [ "$skipped" -gt 0 ]; then
+    warn "rollback: kept $skipped file(s) whose content differs from the backup (see the log for paths)"
+  fi
   if [ "$failed" -gt 0 ]; then
     printf '%s: ERROR: rollback restore is INCOMPLETE: %s of %s backed-up file(s) were not restored; the active config may mix old and new files. Restore them manually from %s/root/ (paths there mirror /).\n' \
       "$SCRIPT_NAME" "$failed" "$total" "$b" >&2
@@ -1726,12 +2113,31 @@ EOF
   return 0
 }
 
-write_diagnostics() { # status
-  local dir="$DSH_HOME/diagnostics" status="$1"
+# A failure before the `current` switch must not leave the live profile mutated
+# by the profile merge, the dependency union, pnpm, or migrations: restore the
+# pristine early backup before exiting. Clearing the marker disarms the EXIT
+# trap's catch-all so a die() path restores exactly once.
+restore_pre_switch() { # backup [label]
+  local b="$1" label="${2:-the update}"
+  [ -n "$b" ] && [ -d "$b/root" ] || return 0
+  log "$label failed before the switch; restoring user files from $b"
+  restore_user_files "$b" || warn "pre-switch restore from $b did not complete; restore the remaining files from $b/root/ manually"
+  PRE_SWITCH_RESTORE=""
+  return 0
+}
+
+write_diagnostics() { # status [detail]
+  local dir="$DSH_HOME/diagnostics" status="$1" detail="${2:-}"
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '{"ts":"%s","action":"update","from":"%s","to":"%s","status":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$PREV_VERSION")" "$(json_escape "$VERSION")" "$(json_escape "$status")" \
-    >> "$dir/update.jsonl" 2>/dev/null || true
+  if [ -n "$detail" ]; then
+    printf '{"ts":"%s","action":"update","from":"%s","to":"%s","status":"%s","detail":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$PREV_VERSION")" "$(json_escape "$VERSION")" "$(json_escape "$status")" "$(json_escape "$detail")" \
+      >> "$dir/update.jsonl" 2>/dev/null || true
+  else
+    printf '{"ts":"%s","action":"update","from":"%s","to":"%s","status":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$PREV_VERSION")" "$(json_escape "$VERSION")" "$(json_escape "$status")" \
+      >> "$dir/update.jsonl" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -1774,9 +2180,17 @@ run_migrations() {
   for m in "$HARNESS"/scripts/migrations/*.mjs; do
     [ -f "$m" ] || continue
     log "migration: $m"
-    DSH_HOME="$DSH_HOME" run_limited 300 "$NODE" "$m" >&2 || warn "migration $m failed (never fail closed; continuing)"
+    if ! DSH_HOME="$DSH_HOME" run_limited 300 "$NODE" "$m" >&2; then
+      warn "migration $m failed (never fail closed; continuing)"
+      MIGRATION_FAILURES="${MIGRATION_FAILURES:+$MIGRATION_FAILURES, }$(basename "$m")"
+    fi
   done
-  write_diagnostics migrated
+  if [ -n "$MIGRATION_FAILURES" ]; then
+    warn "migrations completed with failure(s): $MIGRATION_FAILURES (fail-open; the update continues)"
+    write_diagnostics migrated-partial "$MIGRATION_FAILURES"
+  else
+    write_diagnostics migrated
+  fi
   return 0
 }
 
@@ -1928,6 +2342,9 @@ print_summary() { # action
   box_row "  ${C_BOLD}Location:${C_RESET}  ${PREFIX}" "${C_GREEN}"
   box_row "  ${C_BOLD}Commands:${C_RESET}  dsh, ds" "${C_GREEN}"
   box_row "  ${C_BOLD}Duration:${C_RESET}  $(elapsed_human)" "${C_GREEN}"
+  if [ -n "$MIGRATION_FAILURES" ]; then
+    box_row "  ${C_YELLOW}Migrations:${C_RESET} $MIGRATION_FAILURES (failed-open; see log)" "${C_YELLOW}"
+  fi
   if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
     box_row "  ${C_BOLD}Log:${C_RESET}       ${LOG_FILE}" "${C_GREEN}"
   fi
@@ -2007,8 +2424,14 @@ do_install() {
   resolve_target_for_source
   substep_ok "Target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT:0:7})}"
 
-  TREE_DIR_NAME="$VERSION"
-  if [ -n "$TARGET_COMMIT" ]; then
+  # A complete tree found by prepare_source is already the target build; keep
+  # its directory name instead of re-deriving one that may not exist.
+  if [ -n "${REUSED_TREE_DIR:-}" ]; then
+    TREE_DIR_NAME="$REUSED_TREE_DIR"
+  else
+    TREE_DIR_NAME="$VERSION"
+  fi
+  if [ -z "${REUSED_TREE_DIR:-}" ] && [ -n "$TARGET_COMMIT" ]; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
     if [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
@@ -2034,7 +2457,7 @@ do_install() {
   else
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
   fi
-  ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not point $PREFIX/harness/current at $TREE_DIR_NAME"
+  switch_current "$TREE_DIR_NAME" || die "could not point $PREFIX/harness/current at $TREE_DIR_NAME"
 
   step "Configuring Enpoi profile & plugins"
   prepare_profile
@@ -2067,17 +2490,25 @@ do_install() {
 }
 
 # ── Update ──────────────────────────────────────────────────────────────────
+# Restore from the pristine pre-update backup (the early snapshot taken before
+# the profile merge and migrations ran); the late pre-switch backup is never
+# passed here. Called only after the switch.
 rollback() { # prev backup failed_version
   local prev="$1" backup="$2" failed="$3" restore_rc=0
   warn "rolling back to $prev"
-  ln -sfn "$prev" "$PREFIX/harness/current" 2>/dev/null || warn "could not repoint $PREFIX/harness/current"
+  switch_current "$prev" || warn "could not repoint $PREFIX/harness/current"
   # The update restarted the unit onto the failed tree before the self-check;
   # restart it back so the live service runs the restored tree too.
   restart_service
   restore_user_files "$backup" || restore_rc=1
-  if [ -d "$PREFIX/harness/$failed" ]; then
+  # Never archive the tree being restored, and never rename a pre-existing
+  # reused tree away: a failed pin-back to a known-good build must leave it
+  # reusable.
+  if [ -n "$failed" ] && [ "$failed" != "$prev" ] && [ -z "${REUSED_TREE_DIR:-}" ] && [ -d "$PREFIX/harness/$failed" ]; then
     mv "$PREFIX/harness/$failed" "$PREFIX/harness/$failed.failed-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
       || warn "could not archive the failed tree $PREFIX/harness/$failed"
+  elif [ -n "${REUSED_TREE_DIR:-}" ] && [ "$failed" = "$REUSED_TREE_DIR" ]; then
+    log "rollback: keeping $failed (pre-existing reused tree)"
   fi
   HARNESS="$PREFIX/harness/$prev"
   local prev_ok=1
@@ -2140,6 +2571,39 @@ prune_failed_versions() {
     if rm -rf "$f"; then removed=$((removed + 1)); else warn "could not prune failed tree $name"; fi
   done < <(ls -1dt "$PREFIX/harness"/*.failed-* 2>/dev/null)
   [ "$removed" -gt 0 ] && log "pruned $removed failed tree(s); kept the newest $keep for diagnosis"
+  return 0
+}
+
+# Successful-update disk hygiene: bounded release-archive cache (newest 2) and
+# bounded backup sets (newest 5) under the harness and the live profile.
+prune_update_artifacts() {
+  local removed=0 i f d group
+  i=0
+  while IFS= read -r f; do
+    [ -e "$f" ] || continue
+    i=$((i + 1))
+    [ "$i" -le 2 ] && continue
+    if rm -f "$f" "$f.sha256" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune cached archive $f"; fi
+  done < <(ls -1t "$PREFIX/harness/.cache"/dsh-harness-*.tar.gz 2>/dev/null)
+  for group in "$PREFIX/harness" "$PROFILE_DIR"; do
+    [ -d "$group" ] || continue
+    i=0
+    while IFS= read -r d; do
+      [ -e "$d" ] || continue
+      i=$((i + 1))
+      [ "$i" -le 5 ] && continue
+      if rm -rf "$d" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune backup $d"; fi
+    done < <(ls -1dt "$group"/.backup-* 2>/dev/null)
+    # Patch-file backups live beside the live document (cordis.patch.yml.backup-*).
+    i=0
+    while IFS= read -r d; do
+      [ -e "$d" ] || continue
+      i=$((i + 1))
+      [ "$i" -le 5 ] && continue
+      if rm -f "$d" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune backup $d"; fi
+    done < <(ls -1t "$group"/*.backup-* 2>/dev/null)
+  done
+  [ "$removed" -gt 0 ] && log "pruned $removed stale update artifact(s)"
   return 0
 }
 
@@ -2226,7 +2690,9 @@ CLEAN_FAILED=0
 clean_remove() { # path label
   local p="$1" label="$2" sz
   [ -e "$p" ] || [ -L "$p" ] || return 0
-  sz="$(du -sk -- "$p" 2>/dev/null | awk '{print $1}')"
+  # BSD/macOS du rejects the GNU `--` end-of-options marker; every caller
+  # passes an absolute path, so it is not needed.
+  sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
   sz="${sz:-0}"
   if [ "$DRY_RUN" = 1 ]; then
     say "  ${C_DIM}would remove${C_RESET} ${label}: $(basename "$p")"
@@ -2314,10 +2780,43 @@ do_clean() {
   return 0
 }
 
+# One update per install root: a concurrent update would race the version tree,
+# the current symlink, and the user-file backups. flock(1) releases the lock
+# when this process exits; macOS ships no flock, so the fallback is an atomic
+# mkdir plus the holder's PID, which also reclaims a lock left by a dead
+# process. --dry-run is read-only and skips the lock. The EXIT trap removes the
+# fallback lock directory.
+acquire_update_lock() {
+  [ "${DRY_RUN:-0}" != 1 ] || return 0
+  mkdir -p "$PREFIX/harness" 2>/dev/null || true
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$PREFIX/harness/.update.lock" && flock -n 9 || die "another update is already running (lock: $PREFIX/harness/.update.lock); wait for it to finish, or remove the lock file if it is stale"
+    log "update lock acquired: $PREFIX/harness/.update.lock"
+    return 0
+  fi
+  local lock_dir="$PREFIX/harness/.update.lock.d" pid
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null || die "another update is already running (lock: $lock_dir)"
+    else
+      die "another update is already running (lock: $lock_dir)"
+    fi
+  fi
+  echo "$$" > "$lock_dir/pid"
+  UPDATE_LOCK_DIR="$lock_dir"
+  # A signal must run the EXIT trap (lock removal, restore safety net).
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  log "update lock acquired (mkdir fallback): $lock_dir"
+  return 0
+}
+
 do_update() {
-  local state="$PREFIX/harness/install-state.json" current backup rc recorded_home installed_version
+  local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version
   STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
+  acquire_update_lock
   detect_os_arch
   step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
@@ -2329,7 +2828,13 @@ do_update() {
   if [ -z "$PROFILE_REF" ] && [ "$PROFILE_REF_EXPLICIT" != 1 ]; then PROFILE_REF="$(json_field "$state" profileRef)"; fi
   if [ "$(json_field "$state" profileRefDerived)" = "true" ]; then PROFILE_REF_DERIVED=1; fi
   apply_profile_ref_default 1
-  if [ -z "$BIN_DIR" ]; then BIN_DIR="$(json_field "$state" binDir)"; [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"; fi
+  # The recorded bin dir is authoritative for an update; this invocation's
+  # --bin-dir is the only override. BIN_DIR already holds the default here, so
+  # the explicit flag is what distinguishes an override.
+  if [ "$BIN_DIR_EXPLICIT" = 0 ]; then
+    recorded_bin="$(json_field "$state" binDir)"
+    [ -n "$recorded_bin" ] && BIN_DIR="$recorded_bin"
+  fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(json_field "$state" serviceUnit)"; fi
   # --no-service is sticky: an install that declined the service must not gain
   # one on a later update. An explicit --no-service on this run always wins.
@@ -2400,7 +2905,15 @@ do_update() {
   prepare_source
   resolve_target_for_source
   log "update target: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
-  TREE_DIR_NAME="$VERSION"
+  # A complete tree found by prepare_source for this exact commit is reused
+  # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
+  # point install_tree at a directory that does not exist while $STAGED is empty
+  # (nothing to extract), failing the update with a tar open error.
+  if [ -n "${REUSED_TREE_DIR:-}" ]; then
+    TREE_DIR_NAME="$REUSED_TREE_DIR"
+  else
+    TREE_DIR_NAME="$VERSION"
+  fi
 
   # Same semver on a rolling channel: the version is identical but the branch
   # may have advanced. Only a matching recorded commit is "up to date"; a moved
@@ -2418,6 +2931,13 @@ do_update() {
     step "pnpm: present (nothing to rebuild)"
     step "dependencies and build: already up to date at $VERSION"
     step "profile: $PROFILE (refresh)"
+    # The refresh merges the profile patch and package.json; arm the same
+    # pre-switch restore the full path uses so a failed self-check cannot
+    # leave mutated user files behind.
+    backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup" 2>/dev/null || warn "could not create backup dir $backup"
+    backup_user_files "$backup"
+    PRE_SWITCH_RESTORE="$backup"
     prepare_profile
     step "home: seeding $DSH_HOME and profile dependencies"
     seed_home
@@ -2428,15 +2948,21 @@ do_update() {
     step "self-check"
     if ! selfcheck; then
       warn "self-check of the active tree failed"
+      restore_pre_switch "$backup" "already up to date self-check"
       emit_json noop 0
       exit 1
     fi
+    PRE_SWITCH_RESTORE=""
+    # Regenerate the shim even when no new tree was built: a shim fix in the
+    # installer must reach an already-current install through `dsh update`.
+    write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
     if [ "$WRITE_RC" = 1 ]; then write_rc; fi
+    prune_update_artifacts
     say "dsh is already up to date: $VERSION ($CHANNEL channel)"
     emit_json noop 1
     return 0
   fi
-  if [ "$VERSION" = "$installed_version" ] && [ -n "$TARGET_COMMIT" ] \
+  if [ -z "${REUSED_TREE_DIR:-}" ] && [ "$VERSION" = "$installed_version" ] && [ -n "$TARGET_COMMIT" ] \
     && ! commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
@@ -2453,27 +2979,52 @@ do_update() {
   backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup" 2>/dev/null || warn "could not create backup dir $backup"
   backup_user_files "$backup"
+  # Arming this makes the EXIT trap restore the pristine snapshot if a die()
+  # path exits before the switch; the explicit calls below disarm it.
+  PRE_SWITCH_RESTORE="$backup"
   log "user-file backups: $backup"
 
   step "dependencies and build (this takes a few minutes)"
   if ! install_tree; then
     warn "update failed before switching; $current remains active"
+    restore_pre_switch "$backup" "the build"
     write_diagnostics install-failed
     emit_json update 0
     exit 1
   fi
   step "profile: $PROFILE"
-  prepare_profile
+  if ! prepare_profile; then
+    warn "profile refresh failed before switching; $current remains active"
+    restore_pre_switch "$backup" "the profile refresh"
+    write_diagnostics profile-failed
+    emit_json update 0
+    exit 1
+  fi
   step "home, dependencies and migrations"
   if ! run_migrations; then
     warn "migrations failed before switching; $current remains active"
+    restore_pre_switch "$backup" "migrations"
     write_diagnostics migrations-failed
     emit_json update 0
     exit 1
   fi
 
   step "switch, service and backfill"
-  ln -sfn "$TREE_DIR_NAME" "$PREFIX/harness/current" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
+  # A second snapshot immediately before the switch is forensic evidence only:
+  # the profile merge and migrations have already rewritten the files it holds.
+  # Rollback always restores the pristine early $backup, never this one.
+  late_backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-pre-switch"
+  [ -e "$late_backup" ] && late_backup="$late_backup-$$"
+  if mkdir -p "$late_backup" 2>/dev/null; then
+    backup_user_files "$late_backup"
+    log "pre-switch user-file backups (forensic): $late_backup"
+  else
+    warn "could not create the pre-switch backup dir; the early backup remains the restore source"
+    late_backup=""
+  fi
+  switch_current "$TREE_DIR_NAME" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
+  # Past the switch, rollback owns restoration from the pristine snapshot.
+  PRE_SWITCH_RESTORE=""
   log "switched current -> $TREE_DIR_NAME"
   restart_service
   ensure_service
@@ -2481,12 +3032,17 @@ do_update() {
 
   step "self-check"
   if ! selfcheck; then
+    # Restore the pristine pre-update snapshot: the late pre-switch snapshot
+    # holds migrated new-format files and would put them onto the old binary.
+    # It stays on disk as forensic evidence.
     rollback "$current" "$backup" "$TREE_DIR_NAME"
     exit 1
   fi
+  write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
   write_state || warn "could not write $state"
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
+  prune_update_artifacts
   print_summary update
   emit_json update 1
   return 0

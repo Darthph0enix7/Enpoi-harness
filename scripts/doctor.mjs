@@ -3,10 +3,11 @@
  * doctor.mjs — standalone host diagnostics for an Enpoi Harness install
  * (`ds doctor`, `dsh doctor`).
  *
- * Runs with plain Node and standard libraries only: systemd/HTTP service
- * health, host and disk state, credentials and launch-env permissions,
- * configured LLM providers and API keys, the recurring-error store owned by
- * `enpoi-diagnostics`, journal error lines, and session/index inventory.
+ * Runs with plain Node and standard libraries only: systemd (Linux) and
+ * launchd (macOS) service health plus HTTP checks, host and disk state,
+ * credentials and launch-env permissions, configured LLM providers and API
+ * keys, the recurring-error store owned by `enpoi-diagnostics`, journal error
+ * lines, and session/index inventory.
  *
  * Output is a human-readable aligned report on a terminal and machine-readable
  * JSON with `--json`. Exit status is 0 for a healthy host, 1 when any check
@@ -101,7 +102,7 @@ function printHelp() {
       '  --no-color          disable ANSI color even on a terminal',
       '  --home <path>       DSH_HOME (default: $DSH_HOME or ~/.dsh)',
       '  --port <port>       local web port (default: $DSH_PORT or 3080)',
-      '  --service <unit>    systemd user unit (default: $DSH_SERVICE_UNIT or dsh-web.service)',
+      '  --service <unit>    systemd user unit / launchd label (default: $DSH_SERVICE_UNIT or dsh-web.service)',
       '  --profile <name>    profile whose settings/cordis files are inspected (default: web)',
       '  -h, --help          print this help',
       '  --version           print the doctor version',
@@ -406,9 +407,40 @@ async function main() {
 
   // ── Service & HTTP ────────────────────────────────────────────────────────
   let serviceStartMs = NaN
-  await guard('Service & HTTP', 'systemd service', () => {
+  await guard('Service & HTTP', 'service health', () => {
+    if (platform() === 'darwin') {
+      const label = options.service
+      const plist = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`)
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+      const plistPresent = existsSync(plist)
+      const show = run('launchctl', ['print', `gui/${uid}/${label}`], { timeout: 8000 })
+      if (!show.ok && !plistPresent) {
+        add('Service & HTTP', label, 'error', `launchd label ${label} is not loaded and ${plist} is missing`, {
+          suggestion: 'install the service: dsh service install',
+        })
+        return
+      }
+      if (!show.ok) {
+        add('Service & HTTP', label, 'warn', `LaunchAgent ${plist} exists but launchd does not report it loaded: ${oneLine(show.stderr || show.error?.message || 'unknown error')}`, {
+          suggestion: `load it now: launchctl bootstrap gui/${uid} ${plist} (a headless Mac loads it at the next desktop login)`,
+        })
+        return
+      }
+      const state = /state = ([^\n]+)/.exec(show.stdout)?.[1]?.trim() ?? 'unknown'
+      const pidMatch = /pid = (\d+)/.exec(show.stdout)
+      const pid = pidMatch === null ? null : Number(pidMatch[1])
+      data.service = { unit: label, platform: 'launchd', plist, activeState: state, pid }
+      if (state === 'running') {
+        add('Service & HTTP', label, 'ok', `launchd running${pid === null ? '' : `, PID ${pid}`} (${plist})`)
+      } else {
+        add('Service & HTTP', label, 'error', `launchd state ${state}`, {
+          suggestion: `restart the service: launchctl kickstart -k gui/${uid}/${label} (or: ds restart)`,
+        })
+      }
+      return
+    }
     if (platform() !== 'linux') {
-      add('Service & HTTP', 'systemd service', 'skip', `systemctl checks are Linux-only (running ${platform()})`)
+      add('Service & HTTP', 'service', 'skip', `service checks support systemd (Linux) and launchd (macOS) only (running ${platform()})`)
       return
     }
     const show = run('systemctl', [
@@ -784,8 +816,12 @@ async function main() {
   })
 
   await guard('Diagnostics', 'journal errors', () => {
+    if (platform() === 'darwin') {
+      add('Diagnostics', 'journal errors', 'skip', 'journalctl is Linux-only; on macOS inspect the LaunchAgent StandardErrorPath/StandardOutPath files or Console.app')
+      return
+    }
     if (platform() !== 'linux') {
-      add('Diagnostics', 'journal errors', 'skip', 'journalctl checks are Linux-only')
+      add('Diagnostics', 'journal errors', 'skip', `journalctl checks are Linux-only (running ${platform()})`)
       return
     }
     const result = run('journalctl', ['--user', '-u', options.service, '--priority', 'err', '-n', '10', '--no-pager', '-o', 'short-iso'], { timeout: 8000 })

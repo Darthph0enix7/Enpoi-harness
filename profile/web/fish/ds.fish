@@ -705,24 +705,16 @@ case "pull"
             end
 
         case "update"
-            echo "=== Updating Enpoi Harness from source ==="
-            if test -d "$g_dsh_repo"
-                echo "  Pulling latest changes..."
-                git -C "$g_dsh_repo" pull --ff-only
-                echo "  Building libraries & web assets..."
-                pnpm --dir "$g_dsh_repo" run build:lib
-                pnpm --dir "$g_dsh_repo" run build:web
-                echo "  Restarting service..."
-                if test $g_is_linux -eq 1
-                    systemctl --user restart dsh-web.service 2>/dev/null; or $g_dsh_bin service restart
-                else
-                    $g_dsh_bin service restart
-                end
-                sleep 2
-                __ds_health_probe; and echo "✔ Update complete and service active!"
+            # Delegate to the built-in updater: it verifies the release,
+            # refreshes the profile additively, switches versions, and rolls
+            # back on failure. `ds pull`/`ds sync` remain for dotfiles.
+            # No shell `exec`: this function runs in the operator's interactive
+            # shell, and exec would replace that shell process.
+            echo "=== Updating Enpoi Harness (built-in updater) ==="
+            if test -x "$g_dsh_bin"
+                $g_dsh_bin update $subargs
             else
-                echo "Error: repository not found at $g_dsh_repo"
-                echo "Clone the harness there first or edit g_dsh_repo in the ds function."
+                echo "Error: dsh CLI binary not found at $g_dsh_bin"
             end
 
         case "help" or "--help" or "-h"
@@ -749,7 +741,7 @@ case "pull"
             echo "  ds presets          List available agent presets"
             echo "  ds pool [provider]  Show live multi-key pool status"
             echo "  ds reset-cooldown   Reset rate-limit cooldown for a key"
-            echo "  ds update           Rebuild & update harness from source"
+            echo "  ds update           Update the harness through the built-in updater (dsh update)"
             echo "  ds backfill         Reindex derived per-session projection caches (context insights)"
             echo "                      status | run [--keys k1,k2] [--limit N] [--plugin-fallback]"
             echo "  ds repair           Verify the install and fix the safe breaks (--check reports only)"

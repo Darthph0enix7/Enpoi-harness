@@ -53,6 +53,7 @@ if [ "$mode" = "doctor" ]; then
   doctor_argv=()
   skip_next=0
   expect_home=0
+  service_explicit=0
   for arg in ${argv[@]+"${argv[@]}"}; do
     if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
     if [ "$expect_home" = 1 ]; then dsh_home="$arg"; expect_home=0; continue; fi
@@ -61,9 +62,16 @@ if [ "$mode" = "doctor" ]; then
       --prefix=*) ;;
       --dsh-home) expect_home=1;;
       --dsh-home=*) dsh_home="${arg#--dsh-home=}";;
+      --service|--service=*) service_explicit=1; doctor_argv+=("$arg");;
       *) doctor_argv+=("$arg");;
     esac
   done
+  # Forward the unit recorded by install-state.json so doctor inspects this
+  # install's service (a systemd unit or a launchd label), not the default.
+  if [ "$service_explicit" = 0 ] && [ -f "$state" ]; then
+    recorded_unit="$(sed -n 's/.*"serviceUnit": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
+    if [ -n "$recorded_unit" ]; then doctor_argv+=(--service "$recorded_unit"); fi
+  fi
   if [ -n "$dsh_home" ]; then doctor_argv+=(--home "$dsh_home"); fi
   exec "$node_bin" "$HERE/doctor.mjs" ${doctor_argv[@]+"${doctor_argv[@]}"}
 fi
@@ -93,9 +101,16 @@ if [ "$mode" = "update" ]; then
     rm -f -- "$stale"
   done
   remote_installer="${TMPDIR:-/tmp}/dsh-remote-installer-$$.sh"
-  if curl -fsSL --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/$update_channel/scripts/install.sh" -o "$remote_installer" 2>/dev/null && bash -n "$remote_installer" 2>/dev/null; then
+  remote_url="https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/$update_channel/scripts/install.sh"
+  if curl -fsSL --connect-timeout 5 --max-time 15 "$remote_url" -o "$remote_installer" 2>/dev/null && bash -n "$remote_installer" 2>/dev/null; then
     chmod +x "$remote_installer"
     installer="$remote_installer"
+  else
+    # A silent fallback hides a stale installed updater; name the revision in
+    # use and the channel that could not be reached.
+    installed_revision="$(sed -n 's/^SCRIPT_REVISION=//p' "$installer" 2>/dev/null | head -n 1 | tr -d '"' || true)"
+    printf 'dsh update: WARNING: could not fetch the %s installer from %s; using the installed updater%s — it may be older than the %s channel\n' \
+      "$update_channel" "$remote_url" "${installed_revision:+ (script revision $installed_revision)}" "$update_channel" >&2
   fi
 fi
 if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ]; then
