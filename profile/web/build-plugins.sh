@@ -9,6 +9,22 @@ PROFILE_ROOT="${1:-$HOME/.dsh/profiles/web}"
 cd "$PROFILE_ROOT/packages" || exit 1
 ERRDIR="$(mktemp -d "${TMPDIR:-/tmp}/dsh-profile-build.XXXXXX")" || exit 1
 
+# Locate esbuild binary directly to avoid pnpm exec dependency check / install recursion
+ESBUILD_BIN=""
+if [ -x "$PROFILE_ROOT/node_modules/.bin/esbuild" ]; then
+  ESBUILD_BIN="$PROFILE_ROOT/node_modules/.bin/esbuild"
+elif [ -n "${HARNESS_ROOT:-}" ] && [ -x "$HARNESS_ROOT/node_modules/.bin/esbuild" ]; then
+  ESBUILD_BIN="$HARNESS_ROOT/node_modules/.bin/esbuild"
+elif [ -x "$PROFILE_ROOT/../../harness/current/node_modules/.bin/esbuild" ]; then
+  ESBUILD_BIN="$PROFILE_ROOT/../../harness/current/node_modules/.bin/esbuild"
+elif [ -f "$PROFILE_ROOT/node_modules/esbuild/bin/esbuild" ]; then
+  ESBUILD_BIN="node $PROFILE_ROOT/node_modules/esbuild/bin/esbuild"
+elif [ -n "${HARNESS_ROOT:-}" ] && [ -f "$HARNESS_ROOT/node_modules/esbuild/bin/esbuild" ]; then
+  ESBUILD_BIN="node $HARNESS_ROOT/node_modules/esbuild/bin/esbuild"
+elif command -v esbuild >/dev/null 2>&1; then
+  ESBUILD_BIN="$(command -v esbuild)"
+fi
+
 fail=0
 for dir in enpoi-*/; do
   pkg="${dir%/}"
@@ -20,10 +36,25 @@ for dir in enpoi-*/; do
     continue
   fi
 
-  if pnpm --dir "$pkg" exec esbuild src/index.ts \
-      --bundle --format=esm --platform=node --target=node22 \
-      --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \
-      --outfile=lib/index.js --log-level=warning 2>"$ERRDIR/build-$pkg.err"; then
+  mkdir -p "$pkg/lib"
+  build_ok=0
+  if [ -n "$ESBUILD_BIN" ]; then
+    if (cd "$pkg" && $ESBUILD_BIN src/index.ts \
+        --bundle --format=esm --platform=node --target=node22 \
+        --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \
+        --outfile=lib/index.js --log-level=warning 2>"$ERRDIR/build-$pkg.err"); then
+      build_ok=1
+    fi
+  else
+    if (cd "$pkg" && pnpm exec esbuild src/index.ts \
+        --bundle --format=esm --platform=node --target=node22 \
+        --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* \
+        --outfile=lib/index.js --log-level=warning 2>"$ERRDIR/build-$pkg.err"); then
+      build_ok=1
+    fi
+  fi
+
+  if [ "$build_ok" = 1 ]; then
     echo "OK   $pkg  ($(du -h "$pkg/lib/index.js" | cut -f1))"
   else
     echo "FAIL $pkg  — see $ERRDIR/build-$pkg.err"

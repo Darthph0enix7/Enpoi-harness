@@ -8,6 +8,7 @@
 
 *.pdf binary
 *.patch -whitespace
+profile/web/packages/**/lib/* -whitespace
 
 # The persistence catalog is the readable projection of these generated schemas.
 docs/persistence-schema.json linguist-generated=true

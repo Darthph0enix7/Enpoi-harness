@@ -5,6 +5,8 @@ apps/desktop/.env.macos
 apps/desktop/*.p12
 node_modules/
 lib/
+!profile/web/packages/**/lib/
+!profile/web/packages/**/lib/**
 *.tsbuildinfo
 pnpm-debug.log
 .pnpm-store/
