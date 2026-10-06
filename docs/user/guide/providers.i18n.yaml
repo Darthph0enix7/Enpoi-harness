@@ -17,6 +17,21 @@
 /configure-models/add-a-custom-model-api/discover-models:
   en: 97318c5a115199ff
   zh: 0c455e4232cf0265
+/configure-models/add-a-self-hosted-heavy-provider:
+  en: b3ce1cb53b91cad1
+  zh: 23e4d48575f63bb8
+/configure-models/add-a-self-hosted-heavy-provider/point-a-service-provider-at-a-custom-instance:
+  en: 8593de172eea8097
+  zh: b659fbaa4553f18c
+/configure-models/add-a-self-hosted-heavy-provider/antigravity-proxy:
+  en: c92da0816f746724
+  zh: adf53d473867b5d4
+/configure-models/add-a-self-hosted-heavy-provider/freellmapi:
+  en: 2f5f40b1c413ab59
+  zh: 4e2e250a9130c47d
+/configure-models/add-a-self-hosted-heavy-provider/command-code:
+  en: 8bcdd3b3c60a648a
+  zh: 63ff1f3f7e90fbad
 /configure-models/select-a-model:
   en: 6a94264c99535caf
   zh: f97bb0dc6a40c0d3
@@ -33,5 +48,5 @@
   en: 6f52195d1502783e
   zh: 34dbbeacb541afd4
 /configure-models/troubleshooting:
-  en: 0477cd6fa2772d6b
-  zh: 780619fe998bdef7
+  en: e5bb9c6292991f2f
+  zh: 803507883c3ced34

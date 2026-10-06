@@ -246,12 +246,13 @@
                   </div>
                   <div class="ph-label">Quirks</div>
                   <ul class="ph-list">
-                    <li>Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path</li>
+                    <li>Local install dependencies: Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app (no Docker needed there)</li>
                     <li>First-run setup code and password-reset code appear only in <code>docker compose logs</code>; upstream provider keys are added on the web dashboard</li>
                     <li>Unified key is the only client auth: never expose this port beyond the local machine</li>
                     <li>Losing <code>ENCRYPTION_KEY</code> (in <code>~/freellmapi/.env</code>) makes every stored upstream key unrecoverable</li>
                     <li>The free-tier catalog is a monthly snapshot; <code>/v1/models</code> can list models no key serves</li>
                     <li>A missing bind-mounted JSON file is created as a directory by Docker → boot loop</li>
+                    <li>Windows: the desktop-app install steps run through Git Bash (the harness executes shell steps with bash): install Git for Windows first</li>
                   </ul>
                   <div class="ph-label">How to add</div>
                   <p class="ph-preflight" data-state="detected">Running at http://127.0.0.1:3002. Use it.</p>
@@ -266,7 +267,7 @@
                     <div class="ph-mode">
                       <span class="ph-radio" aria-hidden="true"></span>
                       <span><strong>Install locally</strong>
-                        <span class="ph-note">Dependencies: Docker Engine + Compose · Footprint: ~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU</span>
+                        <span class="ph-note">Dependencies: Docker Engine or Podman, with Compose · Footprint: ~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU</span>
                         <span class="ph-note code">http://127.0.0.1:3002/v1</span>
                       </span>
                     </div>
@@ -295,8 +296,8 @@
                       <span class="ph-note">Nothing new is installed on this device: zero added disk, RAM, and GPU.</span>
                     </div>
                     <div class="ph-compare-col">
-                      <strong id="phLocalLabel">Install locally (vendor one-liner, Docker)</strong>
-                      <span class="ph-note" id="phLocalDeps">Dependencies: Docker Engine + Compose</span>
+                      <strong id="phLocalLabel">Install locally (Docker or Podman)</strong>
+                      <span class="ph-note" id="phLocalDeps">Dependencies: Docker Engine or Podman, with Compose</span>
                       <span class="ph-note" id="phLocalDisk">Footprint: ~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU</span>
                       <code>http://127.0.0.1:3002/v1</code>
                       <span class="ph-note">Health URL: http://127.0.0.1:3002/api/ping</span>
@@ -310,21 +311,26 @@
                     <span class="ph-note">Runs on: linux</span>
                   </div>
                   <ol class="ph-steps" id="phSteps">
-                    <li><strong>Run the FreeLLMAPI one-liner</strong><pre>curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash</pre></li>
-                    <li><strong>Wait for the gateway</strong><pre>for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping &gt;/dev/null &amp;&amp; exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1</pre></li>
+                    <li><strong>Clone FreeLLMAPI</strong><pre>if [ -d "{home}/freellmapi" ] &amp;&amp; [ ! -d "{home}/freellmapi/.git" ]; then if [ -f "{home}/freellmapi/.env" ]; then echo "Existing {home}/freellmapi/.env found without .git; refusing to wipe it — move the directory aside, then retry" &gt;&amp;2; exit 1; fi; rm -rf "{home}/freellmapi" 2&gt;/dev/null || true; fi; test -d "{home}/freellmapi/.git" || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi "{home}/freellmapi"</pre></li>
+                    <li><strong>Generate ENCRYPTION_KEY</strong><pre>if [ ! -f "{home}/freellmapi/.env" ] || ! grep -qE '^ENCRYPTION_KEY=.+' "{home}/freellmapi/.env"; then printf "ENCRYPTION_KEY=%s\nPORT=3002\nHOST_BIND=127.0.0.1\n" "$(openssl rand -hex 32)" &gt; "{home}/freellmapi/.env"; fi</pre></li>
+                    <li><strong>Start the stack</strong><pre>ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose version &gt;/dev/null 2&gt;&amp;1 || { echo "podman compose plugin missing (need podman-compose)"; exit 1; }; "$ENGINE" compose up -d</pre></li>
+                    <li><strong>Wait for the gateway</strong><pre>for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping &gt;/dev/null &amp;&amp; exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1</pre></li>
                   </ol>
                   <div class="ph-label">Quirks</div>
                   <ul class="ph-list">
-                    <li>Local install dependencies: native installers for Linux/macOS/Windows; Docker required only for the fallback path</li>
+                    <li>Local install dependencies: Linux uses Docker/Podman compose; macOS/Windows use the vendor desktop app (no Docker needed there)</li>
                     <li>First-run setup code and password-reset code appear only in <code>docker compose logs</code>; upstream provider keys are added on the web dashboard</li>
                     <li>Unified key is the only client auth: never expose this port beyond the local machine</li>
                     <li>Losing <code>ENCRYPTION_KEY</code> (in <code>~/freellmapi/.env</code>) makes every stored upstream key unrecoverable</li>
                     <li>The free-tier catalog is a monthly snapshot; <code>/v1/models</code> can list models no key serves</li>
                     <li>A missing bind-mounted JSON file is created as a directory by Docker → boot loop</li>
+                    <li>Windows: the desktop-app install steps run through Git Bash (the harness executes shell steps with bash): install Git for Windows first</li>
                   </ul>
                   <div class="ph-label">What gets installed</div>
                   <ul class="ph-list" id="phInstallList">
-                    <li>Run the FreeLLMAPI one-liner</li>
+                    <li>Clone FreeLLMAPI</li>
+                    <li>Generate ENCRYPTION_KEY</li>
+                    <li>Start the stack</li>
                     <li>Wait for the gateway</li>
                   </ul>
                   <div class="ph-label">What gets removed</div>
@@ -332,6 +338,8 @@
                     <li>Stop the stack and drop its volume</li>
                     <li>Remove the container image</li>
                     <li>Remove the clone directory</li>
+                    <li>Remove the macOS desktop app and its data</li>
+                    <li>Remove the Windows desktop app and its data</li>
                   </ul>
                   <div class="ph-label">Removal will do all of this:</div>
                   <ul class="ph-list">
