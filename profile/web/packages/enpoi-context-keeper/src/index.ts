@@ -115,7 +115,9 @@ function keeperEnabled(ctx: Context): boolean {
 /** Keeper primary/fallback route plus its per-wake budgets (doc 38; live-editable).
  * The primary defaults to the keyless kilo seed (`kilo/kilo-auto/free`) a fresh
  * install can reach; a configured machine overrides it through the plugin row or
- * `enpoi-orchestration.personas.keeper`. */
+ * `enpoi-orchestration.personas.keeper`. There is no default fallback: a second
+ * link exists only when the operator sets `fallbackProvider` and `fallbackModel`
+ * or assigns a chain via `personas.keeper.chain`. */
 export interface Config {
   provider?: Volatile<string>
   model?: Volatile<string>
@@ -143,8 +145,8 @@ export interface Config {
 export const Config = Schema.object({
   provider: live(Schema.string().default('kilo')),
   model: live(Schema.string().default('kilo-auto/free')),
-  fallbackProvider: live(Schema.string().default('antigravity')),
-  fallbackModel: live(Schema.string().default('gemini-3.7-flash-tiered')),
+  fallbackProvider: live(Schema.string()),
+  fallbackModel: live(Schema.string()),
   leaseMs: live(Schema.number().default(45_000)),
   maxInputEvents: live(Schema.number().default(80)),
   maxOutputTokens: live(Schema.number().default(2048)),
@@ -261,8 +263,10 @@ export interface RouteChainLink {
 interface ResolvedRoute {
   provider: string
   model: string
-  fallbackProvider: string
-  fallbackModel: string
+  /** Second link, present only when the operator configured one. */
+  fallbackProvider?: string
+  /** Second link model, present only when the operator configured one. */
+  fallbackModel?: string
   reasoningEffort?: string
   /** Chain id when the keeper persona assigned a model chain (doc 60). */
   chainId?: string
@@ -357,14 +361,16 @@ export function resolveKeeperParams(ctx: Context, config: Config): Config {
  * Resolve the keeper's model route for this wake.
  *
  * Precedence (Oracle amendment): `enpoi-orchestration.personas.keeper` (operator
- * assignment) > plugin Config primary/fallback. The fallback route is constant
- * in both branches. Partial entries (missing provider or model) are ignored. The
- * Config primary defaults to the keyless kilo seed a fresh install routes.
+ * assignment) > plugin Config primary/fallback. A fallback link exists only when
+ * the operator configured `fallbackProvider` and `fallbackModel`, or assigned a
+ * chain. Partial entries (missing provider or model) are ignored. The Config
+ * primary defaults to the keyless kilo seed a fresh install routes.
  */
 export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute {
   config = plainConfig(config)
-  const fallbackProvider = config.fallbackProvider ?? 'antigravity'
-  const fallbackModel = config.fallbackModel ?? 'gemini-3.7-flash-tiered'
+  const fallback = config.fallbackProvider !== undefined && config.fallbackModel !== undefined
+    ? { fallbackProvider: config.fallbackProvider, fallbackModel: config.fallbackModel }
+    : {}
   try {
     const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
     const entry = (doc?.personas as Record<string, { provider?: string; model?: string; reasoningEffort?: string; chain?: string } | null> | undefined)?.['keeper']
@@ -389,8 +395,7 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
       return {
         provider: active.provider,
         model: active.model,
-        fallbackProvider,
-        fallbackModel,
+        ...fallback,
         ...(active.effort ? { reasoningEffort: active.effort } : {}),
         chainId: chain.id,
         chainLinks: links,
@@ -400,8 +405,7 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
       return {
         provider: entry.provider,
         model: entry.model,
-        fallbackProvider,
-        fallbackModel,
+        ...fallback,
         ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
       }
     }
@@ -411,17 +415,17 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
   return {
     provider: config.provider ?? 'kilo',
     model: config.model ?? 'kilo-auto/free',
-    fallbackProvider,
-    fallbackModel,
+    ...fallback,
   }
 }
 
 /**
  * The ordered attempts for one summarize call: the run's frozen chain link
- * snapshot when the keeper persona assigned a chain, else the legacy
- * primary → fallback pair. Attempts are one-per-link (the fork's adapter loop
- * owns the per-link `attempts` budget); the consumer's validator is the cut
- * detector, so a cut/error advances to the next link.
+ * snapshot when the keeper persona assigned a chain, else the primary followed
+ * by the explicitly configured fallback link when the operator set one.
+ * Attempts are one-per-link (the fork's adapter loop owns the per-link
+ * `attempts` budget); the consumer's validator is the cut detector, so a
+ * cut/error advances to the next link.
  * @param route - the route resolved once per keeper run.
  * @returns the ordered provider/model attempts.
  */
@@ -433,18 +437,21 @@ export function keeperAttempts(route: ResolvedRoute): Array<{ provider: string; 
       ...(link.effort !== undefined ? { reasoningEffort: link.effort } : {}),
     }))
   }
-  return [
+  const attempts = [
     {
       provider: route.provider,
       model: route.model,
       ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
     },
-    {
+  ]
+  if (route.fallbackProvider !== undefined && route.fallbackModel !== undefined) {
+    attempts.push({
       provider: route.fallbackProvider,
       model: route.fallbackModel,
       ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
-    },
-  ]
+    })
+  }
+  return attempts
 }
 
 /** Result of an ensureFreshBrief call. */
@@ -2026,7 +2033,7 @@ export function keeperRouteRequestLevelFailure(error: unknown): boolean {
   return typeof message === 'string' && (isContextWindowExceededError(message) || FREE_TIER_GATED_RE.test(message))
 }
 
-/** One LLM completion with resolved primary route + fixed fallback (soft-degrading + cutoff shield). */
+/** One LLM completion over the resolved route (primary plus any explicit fallback link; soft-degrading + cutoff shield). */
 export async function summarize(
   ctx: Context,
   config: Config,

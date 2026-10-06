@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   resolveKeeperRoute,
+  keeperAttempts,
   cleanKeeperProse,
   resetKeeperRouteHealth,
   splitClaims,
@@ -96,13 +97,14 @@ describe('enpoi-context-keeper route resolution', () => {
     expect(route.reasoningEffort).toBeUndefined()
   })
 
-  it('defaults to the keyless kilo seed when no Config route is supplied', () => {
+  it('defaults to the keyless kilo seed with no fallback link when no Config route is supplied', () => {
     const ctx = makeCtx({ personas: {} })
     const route = resolveKeeperRoute(ctx as never, {} as Config)
     expect(route.provider).toBe('kilo')
     expect(route.model).toBe('kilo-auto/free')
-    expect(route.fallbackProvider).toBe('antigravity')
-    expect(route.fallbackModel).toBe('gemini-3.7-flash-tiered')
+    expect(route.fallbackProvider).toBeUndefined()
+    expect(route.fallbackModel).toBeUndefined()
+    expect(keeperAttempts(route)).toEqual([{ provider: 'kilo', model: 'kilo-auto/free' }])
   })
 
   it('uses the assigned keeper persona as primary, keeping the config fallback', () => {

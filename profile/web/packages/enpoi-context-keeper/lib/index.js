@@ -90,8 +90,8 @@ function keeperEnabled(ctx) {
 var Config = Schema.object({
   provider: live(Schema.string().default("kilo")),
   model: live(Schema.string().default("kilo-auto/free")),
-  fallbackProvider: live(Schema.string().default("antigravity")),
-  fallbackModel: live(Schema.string().default("gemini-3.7-flash-tiered")),
+  fallbackProvider: live(Schema.string()),
+  fallbackModel: live(Schema.string()),
   leaseMs: live(Schema.number().default(45e3)),
   maxInputEvents: live(Schema.number().default(80)),
   maxOutputTokens: live(Schema.number().default(2048)),
@@ -224,8 +224,7 @@ function resolveKeeperParams(ctx, config) {
 }
 function resolveKeeperRoute(ctx, config) {
   config = plainConfig(config);
-  const fallbackProvider = config.fallbackProvider ?? "antigravity";
-  const fallbackModel = config.fallbackModel ?? "gemini-3.7-flash-tiered";
+  const fallback = config.fallbackProvider !== void 0 && config.fallbackModel !== void 0 ? { fallbackProvider: config.fallbackProvider, fallbackModel: config.fallbackModel } : {};
   try {
     const doc = readOrchestrationDocument(ctx.get("settings"));
     const entry = doc?.personas?.["keeper"];
@@ -243,8 +242,7 @@ function resolveKeeperRoute(ctx, config) {
       return {
         provider: active.provider,
         model: active.model,
-        fallbackProvider,
-        fallbackModel,
+        ...fallback,
         ...active.effort ? { reasoningEffort: active.effort } : {},
         chainId: chain.id,
         chainLinks: links
@@ -254,8 +252,7 @@ function resolveKeeperRoute(ctx, config) {
       return {
         provider: entry.provider,
         model: entry.model,
-        fallbackProvider,
-        fallbackModel,
+        ...fallback,
         ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
       };
     }
@@ -264,8 +261,7 @@ function resolveKeeperRoute(ctx, config) {
   return {
     provider: config.provider ?? "kilo",
     model: config.model ?? "kilo-auto/free",
-    fallbackProvider,
-    fallbackModel
+    ...fallback
   };
 }
 function keeperAttempts(route) {
@@ -276,18 +272,21 @@ function keeperAttempts(route) {
       ...link.effort !== void 0 ? { reasoningEffort: link.effort } : {}
     }));
   }
-  return [
+  const attempts = [
     {
       provider: route.provider,
       model: route.model,
       ...route.reasoningEffort !== void 0 ? { reasoningEffort: route.reasoningEffort } : {}
-    },
-    {
+    }
+  ];
+  if (route.fallbackProvider !== void 0 && route.fallbackModel !== void 0) {
+    attempts.push({
       provider: route.fallbackProvider,
       model: route.fallbackModel,
       ...route.reasoningEffort !== void 0 ? { reasoningEffort: route.reasoningEffort } : {}
-    }
-  ];
+    });
+  }
+  return attempts;
 }
 var KEEPER_CACHE_CAP = 128;
 var BoundedSessionCache = class extends Map {
