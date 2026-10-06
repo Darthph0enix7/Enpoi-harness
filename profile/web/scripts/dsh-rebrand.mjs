@@ -33,9 +33,21 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { contrastDrift } from './dsh-token-contrast.mjs'
 
-const HARNESS = process.env.HARNESS_ROOT ?? '/home/adam/deepseek-harness'
+/** Harness checkout: explicit override, the documented clone, or the installer layout. */
+function resolveHarness() {
+  const candidates = [
+    process.env.HARNESS_ROOT,
+    process.env.DSH_REPO,
+    join(homedir(), 'deepseek-harness'),
+    join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'harness', 'current'),
+  ]
+  return candidates.filter(Boolean).find(candidate => existsSync(candidate)) ?? join(homedir(), 'deepseek-harness')
+}
+
+const HARNESS = resolveHarness()
 const DIST = join(HARNESS, 'apps/web/dist')
 const PUBLIC = join(HARNESS, 'apps/web/public')
 const UI_LAYOUT = join(HARNESS, 'packages/client/ui-layout/lib/client.js')

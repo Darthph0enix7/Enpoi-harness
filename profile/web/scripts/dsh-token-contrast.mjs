@@ -61,7 +61,18 @@ import { join, dirname, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const HARNESS = process.env.HARNESS_ROOT ?? '/home/adam/deepseek-harness'
+/** Harness checkout: explicit override, the documented clone, or the installer layout. */
+function resolveHarness() {
+  const candidates = [
+    process.env.HARNESS_ROOT,
+    process.env.DSH_REPO,
+    join(homedir(), 'deepseek-harness'),
+    join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'harness', 'current'),
+  ]
+  return candidates.filter(Boolean).find(candidate => existsSync(candidate)) ?? join(homedir(), 'deepseek-harness')
+}
+
+const HARNESS = resolveHarness()
 // The skin the server actually serves is the user-directory skin under
 // $DSH_HOME/skins (skin-center precedence: DSH_SKINS_HOME → DSH_SKINS_DIR →
 // $DSH_HOME/skins). The profile-local copy is a development snapshot; prefer

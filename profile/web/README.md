@@ -9,12 +9,12 @@ device. Companion to the fork repo `Darthph0enix7/enpoi-harness`
 
 | Path | Purpose |
 |---|---|
-| `package.json` | Profile manifest: `dsh.profile.bundles` = dsh-base, dsh-web-app, dsh-better-sidebar@0.14.0, skin-center |
+| `package.json` | Profile manifest: `dsh.profile.bundles` = dsh-base, dsh-web-app, skin-center + the `dsh-enpoi-*` plugins (see the file) |
 | `cordis.patch.yml` | User patch layer: pins `- id: better-sidebar / disabled: false` (the npm bundle's `!!js` double-mount guard silently disables the plugin on this setup) |
 | `cordis.yml` | Loader root (empty entry list; patches compose on top) |
 | `pnpm-lock.yaml`, `pnpm-workspace.yaml` | Install reproducibility (hoisted linker, build allow-list: node-pty, cpu-features, ssh2) |
-| `rebuild-sidebar.sh` | Restores the patched sidebar sources + rebuilds the client bundle + restarts dsh-web. **Run after ANY `dsh plugin`/pnpm reinstall of this profile.** Restores only when the installed src lacks the `MIN_CENTER_COLUMN` marker (never clobbers newer local edits). |
-| `sidebar-patch/` | Our patch overlay for dsh-better-sidebar: `src/client/{Sidebar.tsx,split-pane.tsx,layout.css}` + `build-client.{mjs,cjs}` |
+| `rebuild-sidebar.sh` | **Legacy (dsh-better-sidebar was retired in the 0.1.5 sync).** Restores the patched sidebar sources + rebuilds that plugin's bundle + restarts dsh-web. Not run by the fresh-install flow; it fails fast with "dsh-better-sidebar not installed" when the plugin is absent. |
+| `sidebar-patch/` | **Legacy.** Patch overlay for dsh-better-sidebar: `src/client/{Sidebar.tsx,split-pane.tsx,layout.css}` + `build-client.{mjs,cjs}` (import paths are rewritten to the local esbuild by `rebuild-sidebar.sh`; the shipped files keep serverlocal paths only as placeholders) |
 | `scripts/dsh-rebrand.mjs` | Re-applies the fork branding to the served web artifact after any client rebuild or pnpm reinstall (Enpoi title in `apps/web/dist/{index.html,preview.html}`, the preview's dark boot marker, the branded favicon/manifest set, and the baked `productTitle` in `ui-layout`'s built client). Wired as this profile's `postinstall`; guard mode `node scripts/dsh-rebrand.mjs --check --live` also probes the running origin for the served title, the skin binding and the dark theme default, and folds in the skin's overlay-contrast verdict (safeguards 19–20 in `~/dsh-migration/50-…md`). |
 | `scripts/dsh-token-contrast.mjs` | Resolves the active skin's tokens through the upstream light/dark base plus the skin's overrides and checks every overlay pair (toast, tooltip, dialog/Modal, menu) against 4.5:1 in both base themes, plus a scan of every client-CSS rule that paints ink over its own overlay surface. Run `node scripts/dsh-token-contrast.mjs` (or via `dsh-rebrand.mjs --check`); exits 1 on any dark-on-dark pair — safeguard 20. |
 | `patches/@deepseek-ai__dsh-web-frontend@0.1.7-enpoi.1.patch` | Registry-install half of the same branding fix, referenced by `pnpm.patchedDependencies` in `package.json` (workspace links are not patchable, so on this checkout the script above is the operative route; `pnpm.allowNonAppliedPatches` keeps installs quiet). |
@@ -69,7 +69,15 @@ the entry of the same id (sections with no entry stay only in the renamed file,
 reported as `settings: section ... was not imported`). Keep the `.imported` file
 until every section is confirmed.
 
-## dsh-better-sidebar modification ledger
+## dsh-better-sidebar modification ledger (legacy — retired in the 0.1.5 sync)
+
+`dsh-better-sidebar` is no longer a bundle in this profile; the first-party
+right sidebar (`ui-sidebar-right` + `ui-sidebar-files` +
+`ui-sidebar-documentpreview` + `ui-dockkit`) now owns docking, previews,
+resize, splits, and chat→preview opens. The ledger below and the
+`sidebar-patch/` + `rebuild-sidebar.sh` pair are kept only for profiles still
+running the 0.1.x engine with that plugin installed. Do not run
+`rebuild-sidebar.sh` on a fresh profile.
 
 The npm-published 0.14.0 is broken against dsh rc.2 in three ways; all are
 fixed in `sidebar-patch/` + `cordis.patch.yml`:
@@ -126,17 +134,19 @@ Customizations on top:
 
 ```bash
 # after any reinstall of the profile (dsh plugin / pnpm install):
-~/.dsh/profiles/web/rebuild-sidebar.sh
+~/.dsh/profiles/web/build-plugins.sh
+# (legacy, only for a profile that still has dsh-better-sidebar installed:)
+# ~/.dsh/profiles/web/rebuild-sidebar.sh
 # after rebasing the fork: rebuild the brand package too
 cd ~/deepseek-harness && pnpm --filter @deepseek-ai/dsh-client-ui-brand-enpoi run bundle
-# restart
+# restart (serverlocal uses its own systemd unit; other installs: dsh service restart)
 systemctl --user restart dsh-web.service
 ```
 
 ## Verification probes
 
-Headless Playwright probes (chromium binary at
-`/home/adam/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`):
+Headless Playwright probes (serverlocal scratch scripts; point them at your own
+Chromium binary, e.g. `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`):
 `/tmp/opencode/pwprobe/` — `probe-resize.mjs` (freeze stress),
 `probe-cancel.mjs` (capture-loss sim), `probe-nospike2.mjs` (12ms-sampled
 post-release monotonic check), `probe-behavior.mjs` (activity rail +
@@ -145,31 +155,53 @@ toggle/squeeze/drag with right panel open/closed).
 
 ## Fresh install on a new device
 
+**Supported path:** the canonical installer stages this whole profile (plugins,
+patches, scripts, skills, skins, fish function, fresh settings) and seeds
+`$DSH_HOME`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash
+```
+
+It strips operator state (`device-patches/`, `settings.yaml`, `fresh-settings`
+is seeded instead) and never installs the serverlocal `systemd/` units. The
+manual checkout flow below is for development installs; keep the copy list in
+sync with the installer's `copy_profile_tree`.
+
 1. **Harness fork** (our engine + UI + orchestration core):
    ```bash
-   git clone -b local/serverlocal https://github.com/Darthph0enix7/enpoi-harness ~/deepseek-harness
+   git clone -b stable https://github.com/Darthph0enix7/enpoi-harness ~/deepseek-harness
    cd ~/deepseek-harness && pnpm install && pnpm run build:lib && pnpm run build:web
    ```
 2. **Profile** (our plugins + sidebar patches — this repo):
    ```bash
    git clone https://github.com/Darthph0enix7/dsh-enpoi-web-profile ~/dotfiles/dsh-dotfiles
    mkdir -p ~/.dsh/profiles/web
-   cp -r ~/dotfiles/dsh-dotfiles/{packages,sidebar-patch,cordis.patch.yml,cordis.yml,package.json,pnpm-workspace.yaml,pnpm-lock.yaml,vitest.config.ts,rebuild-sidebar.sh} ~/.dsh/profiles/web/
-   cd ~/.dsh/profiles/web && pnpm install && bash rebuild-sidebar.sh
+   cp -r ~/dotfiles/dsh-dotfiles/{build-plugins.sh,cordis.patch.yml,cordis.yml,package.json,packages,patches,pnpm-lock.yaml,pnpm-workspace.yaml,rebuild-sidebar.sh,scripts,sidebar-patch,skills,skin-center-active.json,skins,vitest.config.ts} ~/.dsh/profiles/web/
+   cd ~/.dsh/profiles/web && pnpm install && bash build-plugins.sh
    ```
+   `systemd/` is intentionally absent: those are serverlocal's units (see
+   `systemd/README.md`); use `dsh service install` on a new machine.
 3. **Fresh settings** (no providers, no personal config):
    ```bash
    cp ~/dotfiles/dsh-dotfiles/fresh-settings.yaml ~/.dsh/settings.yaml
    ```
-4. **Presets + skills** (our agent personas + skills):
+4. **Presets + skills**: the active agent presets are declared in
+   `cordis.patch.yml` (already copied above), and the shipped skills live in the
+   profile's `skills/` dir (also copied above), which every preset mounts.
+   `~/.dsh/.agent-presets` is the legacy directory format an older engine read;
+   the installer still seeds it for those engines:
    ```bash
-   cp -r ~/dotfiles/dsh-dotfiles/presets ~/.dsh/.agent-presets
-   cp -r ~/dotfiles/dsh-dotfiles/skills ~/.dsh/skills
+   cp -r ~/dotfiles/dsh-dotfiles/presets ~/.dsh/.agent-presets   # legacy engines only
    ```
-5. **ds CLI**: `cp ~/dotfiles/dsh-dotfiles/fish/ds.fish ~/.config/fish/functions/`
+5. **ds CLI** (fish users only): `cp ~/dotfiles/dsh-dotfiles/fish/ds.fish ~/.config/fish/functions/`
+   and `cp ~/dotfiles/dsh-dotfiles/fish/completions/ds.fish ~/.config/fish/completions/`.
 6. Configure your own providers in Settings → Models, then `ds sync` to create your device patch.
 
-**Personal bits never shared**: `settings.yaml` (providers/personas), `device-patches/`, `fresh-settings.yaml` is the only settings file meant for public use.
+**Personal bits never shared**: `settings.yaml` (providers/personas),
+`device-patches/` (per-host overlays such as `serverlocal.yaml`),
+`~/.dsh/sync-local.yaml`. `fresh-settings.yaml` is the only settings file meant
+for public use.
 
 ## Fallback links after `pnpm`
 

@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 
 const DEFAULT_MAX_CHARS = 400000
 const TIMEOUT_MS = 30000
@@ -62,9 +63,18 @@ function assertPublicUrl(raw) {
 
 /** Turndown + GFM via the harness's own conversion stack (the web_fetch converter). */
 function loadTurndown() {
+  // The harness checkout holds the dependency; an explicit HARNESS_ROOT/DSH_REPO
+  // wins, then the documented clone, then the installer layout. Without a
+  // checkout the crude stripper below handles the page.
+  const harness = [
+    process.env.HARNESS_ROOT,
+    process.env.DSH_REPO,
+    join(homedir(), 'deepseek-harness'),
+    join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'harness', 'current'),
+  ].filter(Boolean).find(candidate => existsSync(join(candidate, 'packages')))
   const anchors = [
-    '/home/adam/deepseek-harness/packages/web/tool-web/package.json',
-  ]
+    harness === undefined ? undefined : join(harness, 'packages/web/tool-web/package.json'),
+  ].filter(Boolean)
   for (const anchor of anchors) {
     try {
       const require = createRequire(anchor)

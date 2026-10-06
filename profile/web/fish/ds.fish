@@ -1,9 +1,23 @@
 function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Controller"
     set -g g_dsh_home "$HOME/.dsh"
     set -g g_local_url "http://127.0.0.1:3080"
-    set -g g_tailnet_url "https://serverlocal.pike-acrux.ts.net:8443"
     set -g g_dsh_bin "$HOME/.local/bin/dsh"
     set -g g_dsh_repo "$HOME/deepseek-harness"
+
+    # Tailnet endpoints are per-device: DSH_TAILNET_URL wins, otherwise derive
+    # this node's MagicDNS name and IPv4 from Tailscale. No Tailscale on this
+    # machine → both stay empty and the CLI falls back to the local URL.
+    set -g g_tailnet_url "$DSH_TAILNET_URL"
+    set -g g_tailnet_ip ""
+    if command -v tailscale >/dev/null 2>&1
+        set g_tailnet_ip (tailscale ip -4 2>/dev/null | head -1)
+        if test -z "$g_tailnet_url"
+            set -l ts_dns (string match -r '"DNSName"\s*:\s*"([^"]+)"' (tailscale status --json 2>/dev/null))
+            if test (count $ts_dns) -ge 2
+                set g_tailnet_url "https://"(string replace -r '\.$' '' -- $ts_dns[2])":8443"
+            end
+        end
+    end
 
     set -l os (uname)
     set -g g_is_darwin 0
@@ -117,12 +131,16 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
 
         case "web"
             echo "Opening Enpoi Harness Web UI..."
+            set -l open_url "$g_local_url"
+            if test -n "$g_tailnet_url"
+                set open_url "$g_tailnet_url"
+            end
             if command -v xdg-open >/dev/null 2>&1
-                xdg-open "$g_tailnet_url" 2>/dev/null; or xdg-open "$g_local_url" 2>/dev/null
+                xdg-open "$open_url" 2>/dev/null; or xdg-open "$g_local_url" 2>/dev/null
             else if command -v open >/dev/null 2>&1
-                open "$g_tailnet_url" 2>/dev/null; or open "$g_local_url" 2>/dev/null
+                open "$open_url" 2>/dev/null; or open "$g_local_url" 2>/dev/null
             else
-                echo "Open in browser: $g_tailnet_url"
+                echo "Open in browser: $open_url"
             end
 
         case "urls"
@@ -130,8 +148,15 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             echo " Enpoi Harness (DSH) Endpoints"
             echo "═══════════════════════════════════════════════════════════════"
             echo "  Local Web UI:    $g_local_url"
-            echo "  Tailscale HTTPS: $g_tailnet_url"
-            echo "  Tailscale IP:    http://100.122.163.25:3080"
+            if test -n "$g_tailnet_url"
+                echo "  Tailscale HTTPS: $g_tailnet_url"
+            end
+            if test -n "$g_tailnet_ip"
+                echo "  Tailscale IP:    http://$g_tailnet_ip:3080"
+            end
+            if test -z "$g_tailnet_url" -a -z "$g_tailnet_ip"
+                echo "  Tailscale:       not detected (install tailscale or set DSH_TAILNET_URL)"
+            end
             echo "  Config Root:     $g_dsh_home"
             echo "═══════════════════════════════════════════════════════════════"
 
@@ -221,13 +246,17 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             echo " Available Agent Presets"
             echo "═══════════════════════════════════════════════════════════════"
             set -l res (__ds_rpc "agentPreset.list")
-            echo "$res" | python3 -c "
-import json,sys
-d = json.load(sys.stdin)
-for p in d.get('result',{}).get('value',{}).get('presets',[]):
-    trust = p.get('trust','')
-    print(f\"  • \033[1;36m{p.get('id','').ljust(16)}\033[0m {p.get('name','')} [{trust}]\")
-" 2>/dev/null
+            echo "$res" | node -e '
+const chunks = []
+process.stdin.on("data", c => chunks.push(c))
+process.stdin.on("end", () => {
+  let d = {}
+  try { d = JSON.parse(chunks.join("")) } catch {}
+  for (const p of d?.result?.value?.presets ?? []) {
+    console.log(`  • \x1b[1;36m${String(p.id ?? "").padEnd(16)}\x1b[0m ${p.name ?? ""} [${p.trust ?? ""}]`)
+  }
+})
+' 2>/dev/null
             echo "═══════════════════════════════════════════════════════════════"
 
         case "pool"
@@ -239,29 +268,26 @@ for p in d.get('result',{}).get('value',{}).get('presets',[]):
             echo " Provider Pool Status: $provider"
             echo "═══════════════════════════════════════════════════════════════"
             set -l res (__ds_rpc "llm.poolStatus" "{\"settingsNs\":\"llm-pi-ai\",\"provider\":\"$provider\"}")
-            echo "$res" | python3 -c "
-import json,sys,time
-d = json.load(sys.stdin)
-idents = d.get('result',{}).get('value',{}).get('identities',[])
-now = int(time.time()*1000)
-if not idents:
-    print('  No pool identities configured for this provider.')
-for i in idents:
-    id_name = i.get('id','')
-    priority = f\"P{i.get('priority',1)}\"
-    enabled = 'enabled' if i.get('enabled',True) else 'disabled'
-    cd = i.get('cooldownUntil',0)
-    rem = max(0, cd - now)
-    status = '🟢 Ready'
-    if not i.get('enabled',True):
-        status = '⚪ Disabled'
-    elif rem > 0:
-        mins = math = rem // 60000
-        status = f'🟡 Cooling ({mins}m left)'
-    elif i.get('lastStatus',0) in (401, 403):
-        status = '🔴 Auth Error'
-    print(f\"  • {priority.ljust(4)} \033[1;36m{id_name.ljust(18)}\033[0m {status.ljust(22)} {i.get('credentialRef','')}\")
-" 2>/dev/null
+            echo "$res" | node -e '
+const chunks = []
+process.stdin.on("data", c => chunks.push(c))
+process.stdin.on("end", () => {
+  let d = {}
+  try { d = JSON.parse(chunks.join("")) } catch {}
+  const idents = d?.result?.value?.identities ?? []
+  const now = Date.now()
+  if (idents.length === 0) console.log("  No pool identities configured for this provider.")
+  for (const i of idents) {
+    const rem = Math.max(0, (i.cooldownUntil ?? 0) - now)
+    const enabled = i.enabled ?? true
+    let status = "🟢 Ready"
+    if (!enabled) status = "⚪ Disabled"
+    else if (rem > 0) status = `🟡 Cooling (${Math.floor(rem / 60000)}m left)`
+    else if ([401, 403].includes(i.lastStatus ?? 0)) status = "🔴 Auth Error"
+    console.log(`  • ${`P${i.priority ?? 1}`.padEnd(4)} \x1b[1;36m${String(i.id ?? "").padEnd(18)}\x1b[0m ${status.padEnd(22)} ${i.credentialRef ?? ""}`)
+  }
+})
+' 2>/dev/null
             echo "═══════════════════════════════════════════════════════════════"
 
         case "reset-cooldown"
@@ -447,8 +473,13 @@ case "pull"
                 cp "$g_dotfiles/scripts/dsh-skin-guard.mjs" "$HOME/.local/bin/dsh-skin-guard.mjs"
                 chmod +x "$HOME/.local/bin/dsh-skin-guard.mjs"
                 for unit in dsh-skin-guard.service dsh-skin-guard.path
-                    if test -f "$g_dotfiles/systemd/$unit"
-                        cp "$g_dotfiles/systemd/$unit" "$HOME/.config/systemd/user/$unit"
+                    set -l unit_src "$g_dotfiles/systemd/$unit"
+                    if test -f "$unit_src"
+                        if grep -qE '/home/[A-Za-z0-9._-]+' "$unit_src"; and not grep -qE "/home/$(whoami)/" "$unit_src"
+                            echo "  ⚠ systemd/$unit references another user's home — skipped (device-specific template)"
+                            continue
+                        end
+                        cp "$unit_src" "$HOME/.config/systemd/user/$unit"
                     end
                 end
                 systemctl --user daemon-reload 2>/dev/null
@@ -626,10 +657,20 @@ case "pull"
             __ds_apply_file "fish/ds.fish" ~/.config/fish/functions/ds.fish
             __ds_apply_file "fish/completions/ds.fish" ~/.config/fish/completions/ds.fish
 
-            # Systemd units (Linux only)
+            # Systemd units (Linux only). A unit that hardcodes another
+            # operator's home is a device template from someone else's
+            # machine: skip it instead of installing a broken service.
             if test $g_is_linux -eq 1
-                __ds_apply_file "systemd/dsh-web.service" ~/.config/systemd/user/dsh-web.service
-                __ds_apply_file "systemd/dsh-tailnet.service" ~/.config/systemd/user/dsh-tailnet.service
+                for unit in dsh-web.service dsh-tailnet.service
+                    set -l unit_src "$g_dotfiles/systemd/$unit"
+                    if test -f "$unit_src"
+                        if grep -qE '/home/[A-Za-z0-9._-]+' "$unit_src"; and not grep -qE "/home/$(whoami)/" "$unit_src"
+                            echo "  ⚠ systemd/$unit references another user's home — skipped (device-specific template)"
+                            continue
+                        end
+                        __ds_apply_file "systemd/$unit" ~/.config/systemd/user/$unit
+                    end
+                end
                 systemctl --user daemon-reload
                 echo "  ✔ Systemd units updated and daemon reloaded"
             end
@@ -667,16 +708,21 @@ case "pull"
             echo "=== Updating Enpoi Harness from source ==="
             if test -d "$g_dsh_repo"
                 echo "  Pulling latest changes..."
-                git -C "$g_dsh_repo" pull enpoi local/serverlocal
+                git -C "$g_dsh_repo" pull --ff-only
                 echo "  Building libraries & web assets..."
                 pnpm --dir "$g_dsh_repo" run build:lib
                 pnpm --dir "$g_dsh_repo" run build:web
                 echo "  Restarting service..."
-                systemctl --user restart dsh-web.service
+                if test $g_is_linux -eq 1
+                    systemctl --user restart dsh-web.service 2>/dev/null; or $g_dsh_bin service restart
+                else
+                    $g_dsh_bin service restart
+                end
                 sleep 2
                 __ds_health_probe; and echo "✔ Update complete and service active!"
             else
                 echo "Error: repository not found at $g_dsh_repo"
+                echo "Clone the harness there first or edit g_dsh_repo in the ds function."
             end
 
         case "help" or "--help" or "-h"

@@ -13,13 +13,15 @@
  * stripped on sync, never committed.
  *
  * Commands:
- *   merge   <baseline> <patch> <sync-local> <out>   — pull: baseline + patch + local overrides
- *   strip   <local> <baseline> <sync-local> <out>   — sync: local minus patch minus local overrides
- *   extract <local> <baseline> <sync-local> <out>   — sync: compute device-patches/<hostname>.yaml
+ *   merge          <baseline> <patch> <sync-local> <out>   — pull: baseline + patch + local overrides
+ *   strip          <local> <baseline> <sync-local> <out>   — sync: local minus patch minus local overrides
+ *   extract        <local> <baseline> <sync-local> <out>   — sync: compute device-patches/<hostname>.yaml
+ *   device-presets <sync-local>                            — print this device's devicePresets list
  *
  * js-yaml is resolved from the harness install (guaranteed on every device
  * that runs the harness). Falls back to PyYAML via a python3 subprocess if
- * js-yaml cannot be located.
+ * js-yaml cannot be located; a machine with neither fails with a clear
+ * message.
  */
 
 import { createRequire } from 'node:module'
@@ -27,8 +29,10 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 const HOME = homedir()
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 /** Sections that are device-specific and never live in the baseline. */
 const DEVICE_SECTIONS = ['enpoi-orchestration.mcpServers', 'enpoi-orchestration.capabilities']
@@ -40,7 +44,10 @@ const RUNTIME_KEYS = ['enpoi-orchestration.mcpStatus']
 function resolveJsYaml() {
   const candidates = [
     process.env.DSH_REPO ? join(process.env.DSH_REPO, 'node_modules/js-yaml') : null,
+    process.env.HARNESS_ROOT ? join(process.env.HARNESS_ROOT, 'node_modules/js-yaml') : null,
+    join(HERE, '..', 'node_modules/js-yaml'),
     join(HOME, 'deepseek-harness/node_modules/js-yaml'),
+    join(HOME, '.dsh/harness/current/node_modules/js-yaml'),
     join(HOME, '.dsh/profiles/web/node_modules/js-yaml'),
   ].filter(Boolean)
   for (const p of candidates) {
@@ -70,10 +77,17 @@ if (jsYamlPath !== null) {
   const require = createRequire(import.meta.url)
   yaml = require(jsYamlPath)
 } else {
-  // Fallback: PyYAML via python3 (serverlocal has it; other devices may not).
+  // Fallback: PyYAML via python3. Probe once so a machine without it fails
+  // with a clear message instead of throwing on the first read.
+  try {
+    execFileSync('python3', ['-c', 'import yaml'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] })
+  } catch {
+    console.error('dsh-sync-merge: neither js-yaml nor python3+PyYAML is available; cannot read or write YAML')
+    process.exit(2)
+  }
   yaml = {
-    parse: (text) => JSON.parse(execFileSync('python3', ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'], { input: text, encoding: 'utf8' }) || 'null'),
-    stringify: (obj) => execFileSync('python3', ['-c', 'import sys,yaml,json; print(yaml.safe_dump(json.load(sys.stdin.read()), sort_keys=False, default_flow_style=False))'], { input: JSON.stringify(obj), encoding: 'utf8' }),
+    load: (text) => JSON.parse(execFileSync('python3', ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'], { input: text, encoding: 'utf8' }) || 'null'),
+    dump: (obj) => execFileSync('python3', ['-c', 'import sys,yaml,json; sys.stdout.write(yaml.safe_dump(json.loads(sys.stdin.read()), sort_keys=False, default_flow_style=False))'], { input: JSON.stringify(obj), encoding: 'utf8' }),
   }
 }
 
@@ -369,6 +383,13 @@ switch (cmd) {
     if (args.length !== 4) { console.error('usage: extract <local> <baseline> <sync-local> <out>'); process.exit(1) }
     cmdExtract(...args)
     break
+  case 'device-presets': {
+    if (args.length !== 1) { console.error('usage: device-presets <sync-local>'); process.exit(1) }
+    const doc = readYaml(args[0])
+    const names = Array.isArray(doc.devicePresets) ? doc.devicePresets.filter(name => typeof name === 'string' && name !== '') : []
+    for (const name of names) console.log(name)
+    break
+  }
   default:
     console.error('unknown command: ' + cmd)
     process.exit(1)

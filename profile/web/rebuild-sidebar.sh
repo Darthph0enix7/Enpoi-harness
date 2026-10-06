@@ -10,9 +10,23 @@
 # Run this after any `dsh plugin`/pnpm reinstall of the profile, which wipes
 # node_modules back to the published (broken) build.
 set -e
+
+# Harness checkout: HARNESS_ROOT wins, then the documented clone, then the
+# installer layout ($DSH_HOME/harness/current). The MCP-client link and the
+# local esbuild used below both come from it.
+DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+HARNESS_ROOT="${HARNESS_ROOT:-$HOME/deepseek-harness}"
+if [ ! -d "$HARNESS_ROOT" ] && [ -d "$DSH_HOME/harness/current" ]; then
+  HARNESS_ROOT="$DSH_HOME/harness/current"
+fi
+
 # Ensure the MCP client package is resolvable from the profile (dynamic MCP mounting)
 mkdir -p node_modules/@deepseek-ai
-ln -sfn /home/adam/deepseek-harness/packages/mcp/mcp-client node_modules/@deepseek-ai/dsh-mcp-client
+if [ -d "$HARNESS_ROOT/packages/mcp/mcp-client" ]; then
+  ln -sfn "$HARNESS_ROOT/packages/mcp/mcp-client" node_modules/@deepseek-ai/dsh-mcp-client
+else
+  echo "warn: no harness checkout at $HARNESS_ROOT; skipping the dsh-mcp-client link" >&2
+fi
 
 PKG_DIR="$HOME/.dsh/profiles/web/node_modules/dsh-better-sidebar"
 if [ ! -d "$PKG_DIR" ]; then
@@ -34,37 +48,40 @@ if [ -d "$PATCH_DIR" ]; then
 fi
 
 # Point the builder at a local esbuild that exists on this machine.
-ESBUILD="$HOME/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild"
-LIGHTNING="$HOME/deepseek-harness/node_modules/.pnpm/lightningcss@1.32.0/node_modules/lightningcss"
+ESBUILD="$HARNESS_ROOT/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild"
+LIGHTNING="$HARNESS_ROOT/node_modules/.pnpm/lightningcss@1.32.0/node_modules/lightningcss"
 if [ ! -d "$ESBUILD" ]; then
-  ESBUILD="$(find "$HOME/deepseek-harness/node_modules/.pnpm" -maxdepth 2 -type d -name 'esbuild@*' | sort | tail -1)/node_modules/esbuild"
+  ESBUILD="$(find "$HARNESS_ROOT/node_modules/.pnpm" -maxdepth 2 -type d -name 'esbuild@*' 2>/dev/null | sort | tail -1)/node_modules/esbuild"
 fi
 if [ ! -d "$LIGHTNING" ]; then
-  LIGHTNING="$(find "$HOME/deepseek-harness/node_modules/.pnpm" -maxdepth 2 -type d -name 'lightningcss@*' | sort | tail -1)/node_modules/lightningcss"
+  LIGHTNING="$(find "$HARNESS_ROOT/node_modules/.pnpm" -maxdepth 2 -type d -name 'lightningcss@*' 2>/dev/null | sort | tail -1)/node_modules/lightningcss"
+fi
+if [ ! -d "$ESBUILD" ] || [ ! -d "$LIGHTNING" ]; then
+  echo "error: esbuild/lightningcss not found under $HARNESS_ROOT/node_modules/.pnpm" >&2
+  echo "       point HARNESS_ROOT at a harness checkout with its dependencies installed" >&2
+  exit 1
 fi
 ESBUILD_BIN="$ESBUILD/bin/esbuild"
 if [ ! -x "$ESBUILD_BIN" ]; then
-  ESBUILD_BIN="$HOME/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/bin/esbuild"
+  ESBUILD_BIN="$HARNESS_ROOT/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/bin/esbuild"
 fi
 
 # Rewrite the builder's absolute import paths (they may point at a version
-# pnpm no longer has after repo updates).
-python3 - "$ESBUILD" "$LIGHTNING" <<'PY'
-import re, sys
-esbuild, lightning = sys.argv[1], sys.argv[2]
-for f in ('build-client.mjs',):
-    s = open(f).read()
-    s = re.sub(r"import \{ build \} from '[^']*esbuild[^']*'",
-               f"import {{ build }} from '{esbuild}/lib/main.js'", s)
-    s = re.sub(r"import \{ transform \} from '[^']*lightningcss[^']*'",
-               f"import {{ transform }} from '{lightning}/node/index.js'", s)
-    open(f, 'w').write(s)
-s = open('build-client.cjs').read()
-s = re.sub(r"require\('[^']*esbuild[^']*'\)", f"require('{esbuild}')", s)
-s = re.sub(r"require\('[^']*lightningcss[^']*'\)", f"require('{lightning}')", s)
-open('build-client.cjs', 'w').write(s)
-print('builder import paths updated')
-PY
+# pnpm no longer has after repo updates). Node is guaranteed here; python3 is
+# not on a fresh macOS, so the rewrite uses node.
+node - "$ESBUILD" "$LIGHTNING" <<'JS'
+const { readFileSync, writeFileSync } = require('node:fs')
+const [esbuild, lightning] = process.argv.slice(2)
+const rewrite = (source) => source
+  .replace(/(import \{ build \} from )['"][^'"]*esbuild[^'"]*['"]/g, `$1'${esbuild}/lib/main.js'`)
+  .replace(/(import \{ transform \} from )['"][^'"]*lightningcss[^'"]*['"]/g, `$1'${lightning}/node/index.js'`)
+  .replace(/require\((['"])[^'"]*esbuild[^'"]*\1\)/g, `require('${esbuild}')`)
+  .replace(/require\((['"])[^'"]*lightningcss[^'"]*\1\)/g, `require('${lightning}')`)
+for (const file of ['build-client.mjs', 'build-client.cjs', 'build-chunks.cjs']) {
+  writeFileSync(file, rewrite(readFileSync(file, 'utf8')))
+}
+console.log('builder import paths updated')
+JS
 
 cd "$PKG_DIR"
 node build-client.mjs
@@ -81,5 +98,10 @@ node --check lib/client-editor.js
   "--external:@deepseek-ai/*" >/dev/null
 node --check lib/index.js
 
-systemctl --user restart dsh-web.service
-echo "dsh-better-sidebar rebuilt (client+host) and dsh-web restarted."
+if command -v systemctl >/dev/null 2>&1 && systemctl --user cat dsh-web.service >/dev/null 2>&1; then
+  systemctl --user restart dsh-web.service
+  echo "dsh-better-sidebar rebuilt (client+host) and dsh-web restarted."
+else
+  echo "dsh-better-sidebar rebuilt (client+host)."
+  echo "Restart the web service to apply: dsh service restart (or systemctl --user restart dsh-web.service)"
+fi

@@ -12,6 +12,17 @@ Per-device settings deltas for the Enpoi Harness dotfiles sync.
   local settings (device-specific sections only: `mcpServers`,
   `capabilities`).
 
+**Which patch applies on an unknown machine:** the host is resolved with
+`hostname` (falling back to `uname -n`, then the literal `this-host`). The
+merge uses `device-patches/<host>.yaml`; when that file does not exist the
+patch input is empty (`/dev/null` in the `ds` CLI, a missing-file read in the
+installer engine) and the result is the baseline plus `~/.dsh/sync-local.yaml`
+only. `serverlocal.yaml` therefore applies on exactly one machine; a friend's
+machine never reads it. The canonical installer
+(`scripts/install.sh copy_profile_tree`) additionally excludes
+`device-patches/` from what it stages, so a fresh install does not even
+contain another device's patch file.
+
 **Patch format:**
 ```yaml
 merge:    # deep-merged into the baseline
@@ -64,7 +75,14 @@ devicePresets:
   `~/.dsh/local-patches/presets/` (additive, never synced, highest
   precedence).
 
-Example: the sysadmin persona is generic globally ("operational
-system-administration agent for this device") while serverlocal's patch
-carries the fleet-specific persona (systemd, Docker, Cloudflare, CLAIX,
-P40).
+Example: the sysadmin persona ships generic globally ("operational
+system-administration agent for this device"); a device's overlay directory
+can carry a fleet-specific version (hostnames, service names, hardware) that
+only that machine loads. The tracked `serverlocal/presets/sysadmin/` copy is
+one such device snapshot.
+
+**Engine note:** directory presets are only read by pre-0.1.7 engines. The
+0.1.7 host mounts the preset declarations inside `cordis.patch.yml`
+("declarations, not directories"); the `presets/` directory and this overlay
+path stay for older engines and for the settings-import flow, and changing
+them does not change what a 0.1.7 host mounts.
