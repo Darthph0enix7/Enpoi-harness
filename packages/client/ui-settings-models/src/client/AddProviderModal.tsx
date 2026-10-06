@@ -850,7 +850,7 @@ function HeavyProviderForm(props: {
             </p>
           )}
 
-          {mode === 'local' && install.steps.length > 0 && (
+          {mode === 'local' && (install.steps.length > 0 || install.unsupported !== undefined) && (
             <>
               <div className={styles['heavySectionLabel']}>{t('heavyInstallSteps')}</div>
               <p className={styles['heavyModeNote']}>
@@ -859,9 +859,12 @@ function HeavyProviderForm(props: {
                   ? ` · ${t('heavyPlatformHost').replace('{platform}', platform)}`
                   : ''}
               </p>
-              <ol className={styles['heavyList']}>
-                {install.steps.map(step => <li key={step.label}>{step.label}</li>)}
-              </ol>
+              {install.unsupported !== undefined && <p className={styles['heavyModeNote']}>{install.unsupported}</p>}
+              {install.steps.length > 0 && (
+                <ol className={styles['heavyList']}>
+                  {install.steps.map(step => <li key={step.label}>{step.label}</li>)}
+                </ol>
+              )}
             </>
           )}
 

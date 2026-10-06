@@ -298,17 +298,20 @@
   const HEAVY_ROWS = [
     { id: 'freellmapi', name: 'FreeLLMAPI' },
     { id: 'antigravity', name: 'Antigravity Proxy' },
-    { id: 'commandcode', name: 'Command Code (keypool)' },
+    { id: 'commandcode', name: 'Command Code' },
   ]
 
   // FreeLLMAPI's platform variants (HeavyProviderDocs' install table, verbatim).
+  // Linux has no override: it resolves the shared engine-aware compose path.
   const FREELLMAPI_PLATFORMS = {
     linux: {
-      label: 'Install locally (vendor one-liner, Docker)',
-      deps: 'Docker Engine + Compose',
+      label: 'Install locally (Docker or Podman)',
+      deps: 'Docker Engine or Podman, with Compose',
       disk: '~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU',
       steps: [
-        { label: 'Run the FreeLLMAPI one-liner', command: 'curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash' },
+        { label: 'Clone FreeLLMAPI', command: 'test -d {home}/freellmapi/.git || git clone --depth 1 https://github.com/tashfeenahmed/freellmapi {home}/freellmapi' },
+        { label: 'Generate ENCRYPTION_KEY', command: 'test -f {home}/freellmapi/.env || printf "ENCRYPTION_KEY=%s\\nPORT=3002\\nHOST_BIND=127.0.0.1\\n" "$(openssl rand -hex 32)" > {home}/freellmapi/.env' },
+        { label: 'Start the stack', command: 'ENGINE="$(command -v docker || command -v podman)"; test -n "$ENGINE" || { echo "neither docker nor podman is installed"; exit 1; }; "$ENGINE" compose up -d' },
         { label: 'Wait for the gateway', command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1' },
       ],
     },
@@ -317,8 +320,8 @@
       deps: 'macOS 11+',
       disk: '~250 MB app; data in ~/Library/Application Support/FreeLLMAPI',
       steps: [
-        { label: 'Download the latest .dmg', command: 'mkdir -p {home}/Downloads && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.dmg"\' | head -1 | cut -d\'"\' -f4 | xargs -I{} curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg {}' },
-        { label: 'Install the app from the disk image', command: 'hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet' },
+        { label: 'Download the latest .dmg', command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\'"$arch"\'[.]dmg"\' | head -1 | cut -d\'"\' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p {home}/Downloads && curl -fsSL -o {home}/Downloads/FreeLLMAPI.dmg "$url"' },
+        { label: 'Install the app from the disk image', command: 'mkdir -p /tmp/freellmapi-dmg && hdiutil attach {home}/Downloads/FreeLLMAPI.dmg -nobrowse -quiet -mountpoint /tmp/freellmapi-dmg && cp -R /tmp/freellmapi-dmg/*.app /Applications/ && hdiutil detach /tmp/freellmapi-dmg -quiet' },
         { label: 'Pin the desktop app to port 3002', command: 'mkdir -p {home}/Library/Application\\ Support/FreeLLMAPI && printf \'{"port":3002}\\n\' > {home}/Library/Application\\ Support/FreeLLMAPI/config.json' },
         { label: 'Launch FreeLLMAPI', command: 'open -a FreeLLMAPI' },
         { label: 'Wait for the gateway', command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1' },

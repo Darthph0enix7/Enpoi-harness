@@ -118,16 +118,19 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
         </span>
       </div>
       {exact === undefined && <p className={styles['heavyModeNote']}>{t('heavyPlatformFallback')}</p>}
+      {resolved.unsupported !== undefined && <p className={styles['heavyModeNote']}>{resolved.unsupported}</p>}
 
-      <ol className={styles['heavyList']}>
-        {resolved.steps.map(step => (
-          <li key={step.label}>
-            <strong>{step.label}</strong>
-            {step.optional === true ? ` (${t('heavyOptional')})` : ''}
-            <pre className={styles['heavyLog']}>{step.command}</pre>
-          </li>
-        ))}
-      </ol>
+      {resolved.unsupported === undefined && (
+        <ol className={styles['heavyList']}>
+          {resolved.steps.map(step => (
+            <li key={step.label}>
+              <strong>{step.label}</strong>
+              {step.optional === true ? ` (${t('heavyOptional')})` : ''}
+              <pre className={styles['heavyLog']}>{step.command}</pre>
+            </li>
+          ))}
+        </ol>
+      )}
 
       <div className={styles['heavySectionLabel']}>{t('heavyQuirks')}</div>
       <ul className={styles['heavyList']}>
@@ -136,7 +139,9 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
 
       <div className={styles['heavySectionLabel']}>{t('heavyInstalls')}</div>
       <ul className={styles['heavyList']}>
-        {resolved.steps.map(step => <li key={step.label}>{step.label}</li>)}
+        {resolved.steps.length === 0
+          ? <li>{t('heavyNone')}</li>
+          : resolved.steps.map(step => <li key={step.label}>{step.label}</li>)}
       </ul>
 
       <div className={styles['heavySectionLabel']}>{t('heavyRemoves')}</div>

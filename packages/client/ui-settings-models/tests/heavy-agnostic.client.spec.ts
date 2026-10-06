@@ -1,8 +1,10 @@
 /**
  * SHIPPED-DEFAULT CORRECTNESS: the end user has no server. The heavy manifest
  * table, the heavy templates, and the client sources that ship may name no
- * operator address, hostname, or path; every manifest URL is loopback. An
- * operator's own endpoints belong in the host's private
+ * operator address, hostname, private range, or path. A `service` manifest's
+ * URLs stay loopback; a `delivery: 'direct'` manifest names only the
+ * documented public vendor host, which by definition is not an operator
+ * address. An operator's own endpoints belong in the host's private
  * `$DSH_HOME/heavy-server-overlay.json`, never in this package.
  */
 import { readdirSync, readFileSync } from 'node:fs'
@@ -32,7 +34,18 @@ it('the shipped manifests and heavy templates name no operator address, hostname
   }
 })
 
-it('every manifest URL is loopback', () => {
+/** The one public vendor host a `delivery: 'direct'` route may name, by route id. */
+const PUBLIC_VENDOR_HOSTS: Readonly<Record<string, string>> = { commandcode: 'api.commandcode.ai' }
+
+/** Loopback, link-local, and RFC 1918 hosts no shipped manifest may name. */
+const PRIVATE_HOST = new RegExp(
+  '^(?:localhost|127(?:\\.\\d{1,3}){3}|10(?:\\.\\d{1,3}){3}|192\\.168(?:\\.\\d{1,3}){2}'
+  + '|172\\.(?:1[6-9]|2\\d|3[01])(?:\\.\\d{1,3}){2}|169\\.254(?:\\.\\d{1,3}){2}'
+  + '|0\\.0\\.0\\.0|\\[?::1\\]?)$',
+  'i',
+)
+
+it('every manifest URL names loopback or the documented vendor host, never a private address', () => {
   for (const manifest of FALLBACK_HEAVY_PROVIDER_MANIFESTS) {
     const urls = [
       manifest.reuse.baseURL,
@@ -43,8 +56,23 @@ it('every manifest URL is loopback', () => {
       ...manifest.unsupported === undefined ? [] : [manifest.unsupported.reuseUrl],
     ].filter(url => url !== '')
     expect(urls.length, `${manifest.id} must declare URLs`).toBeGreaterThan(0)
+    const vendorHost = manifest.delivery === 'direct' ? PUBLIC_VENDOR_HOSTS[manifest.id] : undefined
+    if (manifest.delivery === 'direct') {
+      expect(vendorHost, `${manifest.id} declares direct delivery but no public vendor host`).toBeDefined()
+    }
     for (const url of urls) {
-      expect(new URL(url).hostname, `${manifest.id}: ${url}`).toBe('127.0.0.1')
+      const hostname = new URL(url).hostname
+      if (vendorHost !== undefined) {
+        // The direct vendor endpoint is the one non-loopback address allowed:
+        // it must still never be a private/operator host, and it is pinned to
+        // the documented public vendor so no other host can slip in. This
+        // check stays narrow on purpose — a `service` route keeps the old
+        // loopback pin below.
+        expect(hostname, `${manifest.id}: ${url}`).not.toMatch(PRIVATE_HOST)
+        expect(hostname, `${manifest.id}: ${url}`).toBe(vendorHost)
+      } else {
+        expect(hostname, `${manifest.id}: ${url}`).toBe('127.0.0.1')
+      }
     }
   }
 })

@@ -107,7 +107,7 @@ it('preselects the install path and names missing requirements when nothing answ
     runtime: { docker: false, podman: false },
     preflight: {
       path: 'unsupported',
-      label: 'Install locally (vendor one-liner, Docker)',
+      label: 'Install locally (Docker or Podman)',
       missing: ['Docker Engine + Compose (or Podman)'],
       requires: ['docker'],
     },
@@ -124,6 +124,29 @@ it('preselects the install path and names missing requirements when nothing answ
   )).toBeTruthy()
   // The local mode lists the platform's install steps.
   expect(screen.getByText(en.heavyInstallSteps)).toBeTruthy()
+})
+
+it('shows the refused platform reason in the heavy form instead of install steps', async () => {
+  stubHeavyFetch({ status: {
+    id: 'antigravity',
+    configured: false,
+    platform: 'win32',
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
+    runtime: { docker: false, podman: false },
+    preflight: { path: 'unsupported', label: 'Not supported on Windows', missing: [], requires: [] },
+  } })
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('Antigravity Proxy'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  fireEvent.click(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) }))
+  await waitFor(() => {
+    expect(screen.getByText(/POSIX user service \(systemd or launchd\)/)).toBeTruthy()
+  })
+  expect(screen.getAllByText(/Not supported on Windows/).length).toBeGreaterThan(0)
+  expect(screen.getByText(en.heavyInstallSteps)).toBeTruthy()
+  // The refused variant renders its reason, never a step list.
+  expect(screen.queryByText('Install the proxy package')).toBeNull()
 })
 
 it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and search still finds it', () => {
@@ -186,7 +209,7 @@ it('a preset-only heavy provider reads as listed — add to configure, health un
   render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
 
   expect(screen.getAllByText(en.heavyListedBadge).length).toBeGreaterThan(0)
-  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
   // Never the blocked/planned wording, and the add stays available.
   expect(screen.queryByText(en.heavyBlockedTitle)).toBeNull()
@@ -206,11 +229,11 @@ it('shows the ordering note when the host reports the route namespace unmounted'
     settingsNs: 'commandcode-provider',
     settingsReady: false,
     runtime: { docker: true, podman: false },
-    preflight: { path: 'node', label: 'Install locally (provider package + keypool)', missing: [], requires: [] },
+    preflight: { path: 'node', label: 'Link the provider package, then use the vendor endpoint', missing: [], requires: [] },
   } })
   render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
 
-  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => {
     expect(screen.getByText(en.heavyPendingRestart.replace('{ns}', 'commandcode-provider'))).toBeTruthy()
   })
@@ -225,7 +248,7 @@ it('a reuse click before the route namespace is mounted reports the restart orde
   const onClose = vi.fn()
   render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
 
-  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
   fireEvent.click(screen.getByRole('button', { name: en.create }))
 

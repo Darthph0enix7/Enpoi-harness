@@ -61,7 +61,7 @@ it('pre-connection proof: the commandcode row is listed and addable, never block
   )
 
   expect(screen.getAllByText(en.heavyListedBadge).length).toBeGreaterThan(0)
-  fireEvent.click(screen.getByText('Command Code (keypool)'))
+  fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByRole('button', { name: en.heavyCheckNow })).toBeTruthy() })
   expect(screen.getByText(en.heavyHealthUnknown)).toBeTruthy()
   expect(screen.queryByText(en.heavyBlockedTitle)).toBeNull()
@@ -84,14 +84,14 @@ it('browser-badge proof: FreeLLMAPI renders none and its dependency line, Antigr
   fireEvent.click(screen.getByRole('button', { name: 'Back' }))
   fireEvent.click(screen.getByText('Antigravity Proxy'))
   await waitFor(() => { expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0) })
-  expect(screen.getByText(/native npm package for Linux\/macOS\/Windows/)).toBeTruthy()
+  expect(screen.getByText(/native npm package \(Node\.js >= 18\) behind a systemd or launchd user service/)).toBeTruthy()
   console.info(`[heavy-render-proof] antigravity (badge): ${quote()}`)
 })
 
 it('host-connected proof: the same row renders the host manifest summary', async () => {
   stubStatusFailure()
   bindHostHeavyManifests({
-    items: [{ ...fallbackHeavyManifest('commandcode')!, label: 'Command Code (host)', summary: 'HOST-TRUTH summary — keypool reuse + provider package.' }],
+    items: [{ ...fallbackHeavyManifest('commandcode')!, label: 'Command Code (host)', summary: 'HOST-TRUTH summary — direct vendor endpoint + native pool.' }],
     platform: 'linux',
   })
   render(
@@ -99,7 +99,7 @@ it('host-connected proof: the same row renders the host manifest summary', async
   )
 
   fireEvent.click(screen.getByText('Command Code (host)'))
-  await waitFor(() => { expect(screen.getByText('HOST-TRUTH summary — keypool reuse + provider package.')).toBeTruthy() })
+  await waitFor(() => { expect(screen.getByText('HOST-TRUTH summary — direct vendor endpoint + native pool.')).toBeTruthy() })
   expect(screen.getByRole('button', { name: en.heavyCheckNow })).toBeTruthy()
   console.info(`[heavy-render-proof] host-connected commandcode: ${quote()}`)
 })

@@ -97,12 +97,12 @@ it('surfaces the local path and its Docker requirement when Docker exists but no
     platform: 'linux',
     health: { ok: false, error: 'ECONNREFUSED', checkedAt: 1 },
     runtime: { docker: true, podman: false },
-    preflight: { path: 'docker', label: 'Install locally (vendor one-liner, Docker)', missing: [], requires: ['docker'] },
+    preflight: { path: 'docker', label: 'Install locally (Docker or Podman)', missing: [], requires: ['docker'] },
   } })
   render(<HeavyProviderCard providerId="freellmapi" t={t} />)
   await waitFor(() => {
     expect(screen.getByText(
-      `${en.heavyPreflightBest.replace('{label}', 'Install locally (vendor one-liner, Docker)')} · ${en.heavyRequiresDocker}`,
+      `${en.heavyPreflightBest.replace('{label}', 'Install locally (Docker or Podman)')} · ${en.heavyRequiresDocker}`,
     )).toBeTruthy()
   })
 })
@@ -116,7 +116,7 @@ it('names exactly what is missing when no local runtime is available', async () 
     runtime: { docker: false, podman: false },
     preflight: {
       path: 'unsupported',
-      label: 'Install locally (vendor one-liner, Docker)',
+      label: 'Install locally (Docker or Podman)',
       missing: ['Docker Engine + Compose (or Podman)'],
       requires: ['docker'],
     },
