@@ -50,7 +50,7 @@ SCRIPT_NAME="dsh-install"
 SCRIPT_REVISION="1"
 
 # ── Distribution parameters (the public repo fills these) ───────────────────
-DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/deepseek-harness}"
+DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/enpoi-harness}"
 DSH_GITHUB_URL="${DSH_GITHUB_URL:-https://github.com/${DSH_GITHUB_REPO}}"
 DSH_NODE_VERSION="${DSH_NODE_VERSION:-22.22.2}"
 DSH_MIN_NODE_MAJOR=22
@@ -772,7 +772,7 @@ stage_remote() { # url
       if command -v git >/dev/null 2>&1; then
         log "direct archive download failed; falling back to shallow git clone ($ref)"
         substep_ok "Direct download timed out; falling back to git clone (${ref})"
-        local git_url="${DSH_GITHUB_URL:-https://github.com/Darthph0enix7/deepseek-harness}"
+        local git_url="${DSH_GITHUB_URL:-https://github.com/Darthph0enix7/enpoi-harness}"
         case "$git_url" in *.git) :;; *) git_url="$git_url.git";; esac
         rm -rf "$STAGED"
         if run_logged "Cloning release repository" 300 "$PREFIX" git clone --depth 1 --branch "$ref" "$git_url" "$STAGED"; then
@@ -2806,7 +2806,7 @@ do_uninstall() {
     uninstall_add "$BIN_DIR/ds"
     uninstall_outside_add "shell rc PATH line (~/.profile or ~/.config/fish/config.fish, marker '# dsh installer')"
     uninstall_outside_add "fish function/completions (~/.config/fish/functions/ds.fish, ~/.config/fish/completions/ds.fish)"
-    uninstall_outside_add "cloned harness repo (e.g. $HOME/deepseek-harness)"
+    uninstall_outside_add "cloned harness repo (e.g. $HOME/enpoi-harness)"
     uninstall_outside_add "profile/dotfiles clone (e.g. $HOME/dotfiles/dsh-dotfiles)"
     uninstall_outside_add "browser localStorage for the Web UI origin (http://127.0.0.1:${DSH_WEB_PORT:-3080})"
     uninstall_outside_add "user systemd journal entries for the removed unit"

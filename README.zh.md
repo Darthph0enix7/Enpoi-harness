@@ -13,7 +13,7 @@ Enpoi Harness 是**上游 [DeepSeek Harness](https://github.com/deepseek-ai/deep
 ## 安装（Linux 与 macOS，无需 sudo）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash
 ```
 
 安装脚本会自动检测系统与架构，优先使用 `PATH` 中已有的 Node ≥ 22.19（缺失时下载隔离运行时至安装前缀目录），通过 corepack 启用 pnpm，拉取版本化构建并编译，初始化 `$DSH_HOME` 配置（设置、预设、技能），并将 `dsh` 启动脚本写入 `~/.local/bin`。整个过程无需 root/sudo 权限，不会覆盖已有的用户设置，且具备幂等性与自愈能力。

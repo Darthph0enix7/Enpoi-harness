@@ -1,5 +1,5 @@
 [Unit]
-Description=DeepSeek Harness web UI (source checkout, serverlocal)
+Description=Enpoi Harness web UI (source checkout, serverlocal)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

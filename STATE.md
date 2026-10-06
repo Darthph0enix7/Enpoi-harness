@@ -2,7 +2,7 @@
 
 Fork of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
 (rc line `v0.1.1-rc.2`) running as **Enpoi Harness** on serverlocal.
-Fork repo: `Darthph0enix7/deepseek-harness` (private). This file is the
+Fork repo: `Darthph0enix7/enpoi-harness` (public). This file is the
 authoritative record of everything changed on top of upstream.
 
 > Update this file whenever the stand changes. Profile-side customizations

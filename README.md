@@ -13,7 +13,7 @@ The Enpoi Harness is **upstream [DeepSeek Harness](https://github.com/deepseek-a
 ## Install (Linux + macOS, no sudo)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash
 ```
 
 The installer detects OS/arch, uses Node ≥ 22.19 from `PATH` (or downloads one into the prefix), enables pnpm through corepack, fetches a versioned harness build, builds it, seeds `$DSH_HOME` (settings, presets, skills), and installs the `dsh` shim into `~/.local/bin`. It never uses sudo, never overwrites seeded settings, and is idempotent.

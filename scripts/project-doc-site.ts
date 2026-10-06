@@ -23,7 +23,7 @@ import {
   splitMarkdownUrlTarget,
 } from './markdown.ts'
 
-const REPOSITORY_URL = 'https://github.com/Darthph0enix7/deepseek-harness'
+const REPOSITORY_URL = 'https://github.com/Darthph0enix7/enpoi-harness'
 const root = resolve(import.meta.dirname, '..')
 const generatedRoot = resolve(root, 'website/.generated')
 

@@ -74,7 +74,7 @@ if [ "$mode" = "update" ]; then
   fi
   [ -n "$update_channel" ] || update_channel="stable"
   remote_installer="${TMPDIR:-/tmp}/dsh-remote-installer-$$.sh"
-  if curl -fsSL --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/$update_channel/scripts/install.sh" -o "$remote_installer" 2>/dev/null && bash -n "$remote_installer" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/$update_channel/scripts/install.sh" -o "$remote_installer" 2>/dev/null && bash -n "$remote_installer" 2>/dev/null; then
     chmod +x "$remote_installer"
     installer="$remote_installer"
   fi

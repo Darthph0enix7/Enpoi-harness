@@ -3,7 +3,7 @@ Usage: dsh [--profile] <name> [options] [app-args...]
        dsh restart [--after-turn | --now | --cancel]
        dsh service <install | uninstall | start | stop | restart | status | logs> [--force]
 
-dsh: boot a DeepSeek Harness profile — an ordered stack of plugin-bundle patch
+dsh: boot an Enpoi Harness profile — an ordered stack of plugin-bundle patch
 layers under your own overrides.
 
 Arguments:

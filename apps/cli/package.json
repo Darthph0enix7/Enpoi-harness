@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Darthph0enix7/deepseek-harness.git",
+    "url": "git+https://github.com/Darthph0enix7/enpoi-harness.git",
     "directory": "apps/cli"
   },
   "type": "module",

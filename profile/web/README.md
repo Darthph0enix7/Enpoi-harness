@@ -2,7 +2,7 @@
 
 The Enpoi Harness web profile (`~/.dsh/profiles/web`) — versioned so the
 whole customization layer survives reinstalls and can be reproduced on any
-device. Companion to the fork repo `Darthph0enix7/deepseek-harness`
+device. Companion to the fork repo `Darthph0enix7/enpoi-harness`
 (see its `STATE.md` for the repo-side modifications).
 
 ## Layout
@@ -147,7 +147,7 @@ toggle/squeeze/drag with right panel open/closed).
 
 1. **Harness fork** (our engine + UI + orchestration core):
    ```bash
-   git clone -b local/serverlocal https://github.com/Darthph0enix7/deepseek-harness ~/deepseek-harness
+   git clone -b local/serverlocal https://github.com/Darthph0enix7/enpoi-harness ~/deepseek-harness
    cd ~/deepseek-harness && pnpm install && pnpm run build:lib && pnpm run build:web
    ```
 2. **Profile** (our plugins + sidebar patches — this repo):

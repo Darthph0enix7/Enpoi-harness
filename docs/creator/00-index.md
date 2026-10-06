@@ -45,7 +45,7 @@ These files ship with the code and must work on any OS and any machine. Write `$
 
 ## Distribution model (locked)
 
-- **Git-bootstrap, one line.** `curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/deepseek-harness/stable/scripts/install.sh | bash` clones the harness at the channel ref, installs and builds it, seeds `$DSH_HOME`, and writes the `dsh` shim (02 §1). The repo is pull-only and disposable; everything the user owns lives in `$DSH_HOME`.
+- **Git-bootstrap, one line.** `curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash` clones the harness at the channel ref, installs and builds it, seeds `$DSH_HOME`, and writes the `dsh` shim (02 §1). The repo is pull-only and disposable; everything the user owns lives in `$DSH_HOME`.
 - **The profile is offline-bundled.** The Enpoi profile (plugins, skills, research scripts, shipped composition) lives in `$REPO/profile/<name>`; the installer seeds `$DSH_HOME/profiles/<name>` from that tree, with no profile-repo fetch on the default path (`scripts/install.sh:979-1005`; 02 §0).
 - **Updates ride the same tree.** `dsh update` re-fetches the channel ref, rebuilds, refreshes the profile, runs migrations, restarts safely, and rolls back on failure (02 §4).
 - **npm publication is deferred / not used.** The fork is not published to any registry and the package family keeps its upstream names; there is no rename, no `@enpoi/*` scope, and no npm install path. Decision A7 (`~/dsh-migration/81-packaging-distribution-and-channels.md`); do not wire npm installs meanwhile.
