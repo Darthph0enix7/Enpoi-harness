@@ -1,7 +1,7 @@
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : /* @__PURE__ */ Symbol.for("Symbol." + name2);
 var __typeError = (msg) => {
   throw TypeError(msg);
 };
@@ -254,7 +254,7 @@ var KEYPOOL_PROXY_HINT = "keypool proxy.js (install opencode-dotfiles, or place 
 var ANTIGRAVITY_NPM_STEP = { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 };
 var ANTIGRAVITY_WAIT_STEP = {
   label: "Wait for the proxy",
-  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
+  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1'
 };
 var ANTIGRAVITY_SYSTEMD_STEPS = [
   ANTIGRAVITY_NPM_STEP,
@@ -290,6 +290,8 @@ var ANTIGRAVITY_LAUNCHD_STEPS = [
     <string>8082</string>
     <key>HOST</key>
     <string>127.0.0.1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -321,7 +323,7 @@ var KEYPOOL_DEPLOY_STEP = {
 };
 var KEYPOOL_WAIT_STEP = {
   label: "Wait for the keypool",
-  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s \u2014 check the user-service status/logs and the pools.json config"; exit 1'
+  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s \u2014 check the user-service status/logs and the pools.json config"; exit 1'
 };
 var KEYPOOL_SYSTEMD_STEPS = [
   KEYPOOL_DEPLOY_STEP,
@@ -359,6 +361,8 @@ var KEYPOOL_LAUNCHD_STEPS = [
     <string>8899</string>
     <key>KEYPOOL_HOST</key>
     <string>127.0.0.1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -410,9 +414,9 @@ var HEAVY_MANIFESTS = [
       health: { url: "http://127.0.0.1:3002/api/ping", timeoutMs: 5e3 }
     },
     local: {
-      label: "Install locally (Docker)",
+      label: "Install locally (Docker or Podman)",
       baseURL: "http://127.0.0.1:3002/v1",
-      deps: ["Docker Engine + Compose"],
+      deps: ["Docker Engine or Podman, with Compose"],
       diskHint: "~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU",
       dashboardUrl: "http://127.0.0.1:3002",
       runtime: "docker",
@@ -437,28 +441,13 @@ var HEAVY_MANIFESTS = [
             },
             {
               label: "Wait for the gateway",
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
             }
           ]
         },
-        // The vendor one-liner is the documented Linux/macOS server install;
-        // PORT=3002 keeps the route baseURL valid.
-        linux: {
-          label: "Install locally (vendor one-liner, Docker)",
-          steps: [
-            {
-              label: "Run the FreeLLMAPI one-liner",
-              // The vendor script drives Docker; a Podman-only host must get
-              // the explicit message instead of the script's own failure.
-              command: 'command -v docker >/dev/null 2>&1 || { echo "the FreeLLMAPI vendor installer needs Docker Engine; install Docker, or clone https://github.com/tashfeenahmed/freellmapi and run podman compose up -d"; exit 1; }; curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash',
-              weight: 3
-            },
-            {
-              label: "Wait for the gateway",
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
-            }
-          ]
-        },
+        // No linux override: the vendor one-liner is Docker-only, while
+        // preflight accepts Podman as the substitute runtime, so Linux uses
+        // the same engine-aware compose path as every other platform.
         // macOS prefers the vendor desktop app: no Docker Desktop overhead.
         darwin: {
           label: "Install locally (vendor desktop app, no Docker)",
@@ -484,7 +473,7 @@ var HEAVY_MANIFESTS = [
             { label: "Launch FreeLLMAPI", command: "open -a FreeLLMAPI" },
             {
               label: "Wait for the gateway",
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
             }
           ]
         },
@@ -508,7 +497,7 @@ var HEAVY_MANIFESTS = [
             { label: "Launch FreeLLMAPI", command: 'cmd //c start "" "$LOCALAPPDATA\\Programs\\FreeLLMAPI\\FreeLLMAPI.exe"' },
             {
               label: "Wait for the gateway",
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1'
             }
           ]
         }
@@ -547,6 +536,7 @@ var HEAVY_MANIFESTS = [
     ],
     quirks: [
       "Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install \u2014 run the package manually or use a proxy running elsewhere",
+      "macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin \u2014 a global binary reachable only from a fish or zsh configuration is not found; keep it reachable from a login bash profile or one of those directories",
       "The proxy runs its own sticky account pool with cooldowns \u2014 DSH key pooling MUST stay off for this route",
       "The console at :8082 has no auth (webuiPassword empty) \u2014 trusted networks only",
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED \u2026 resets after 46h" is normal',
@@ -633,6 +623,7 @@ var HEAVY_MANIFESTS = [
     requiresBrowser: [],
     quirks: [
       "Local install dependencies: Node.js 22, the opencode-dotfiles keypool proxy (or a placed ~/.config/opencode/keypool/proxy.js), and a systemd/launchd user service; Docker is never required. Windows has no supported local install \u2014 use a keypool running elsewhere",
+      "macOS: the launchd agent runs node through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin \u2014 a node reachable only from a fish or zsh configuration (for example an nvm setup) is not found; make node reachable from a login bash profile or one of those directories",
       "The vendor account and quota dashboard live at commandcode.ai (browser)",
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
       "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",

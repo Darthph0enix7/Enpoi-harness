@@ -257,7 +257,7 @@ const ANTIGRAVITY_NPM_STEP: HeavyStep = { label: 'Install the proxy package', co
 /** The antigravity health wait, shared by every platform variant. */
 const ANTIGRAVITY_WAIT_STEP: HeavyStep = {
   label: 'Wait for the proxy',
-  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
+  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
 }
 
 /** Linux (and systemd-like) antigravity provisioning. */
@@ -278,7 +278,7 @@ const ANTIGRAVITY_LAUNCHD_STEPS: readonly HeavyStep[] = [
   ANTIGRAVITY_NPM_STEP,
   {
     label: 'Write the launchd agent',
-    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${ANTIGRAVITY_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec antigravity-claude-proxy start --log</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PORT</key>\n    <string>8082</string>\n    <key>HOST</key>\n    <string>127.0.0.1</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>\n</dict>\n</plist>\nEOF`,
+    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${ANTIGRAVITY_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec antigravity-claude-proxy start --log</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PORT</key>\n    <string>8082</string>\n    <key>HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/antigravity-proxy.err.log</string>\n</dict>\n</plist>\nEOF`,
   },
   {
     label: 'Load and start the agent',
@@ -299,7 +299,7 @@ const KEYPOOL_DEPLOY_STEP: HeavyStep = {
 /** The keypool health wait, shared by every POSIX platform variant. */
 const KEYPOOL_WAIT_STEP: HeavyStep = {
   label: 'Wait for the keypool',
-  command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s — check the user-service status/logs and the pools.json config"; exit 1',
+  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s — check the user-service status/logs and the pools.json config"; exit 1',
 }
 
 /** Linux keypool provisioning (shared keypool proxy + systemd user unit). */
@@ -322,7 +322,7 @@ const KEYPOOL_LAUNCHD_STEPS: readonly HeavyStep[] = [
   { label: 'Seed the commandcode pool in pools.json', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
   {
     label: 'Write the launchd agent',
-    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${KEYPOOL_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec node {home}/.config/opencode/keypool/proxy.js</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>KEYPOOL_PORT</key>\n    <string>8899</string>\n    <key>KEYPOOL_HOST</key>\n    <string>127.0.0.1</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/keypool.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/keypool.err.log</string>\n</dict>\n</plist>\nEOF`,
+    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${KEYPOOL_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec node {home}/.config/opencode/keypool/proxy.js</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>KEYPOOL_PORT</key>\n    <string>8899</string>\n    <key>KEYPOOL_HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/keypool.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/keypool.err.log</string>\n</dict>\n</plist>\nEOF`,
   },
   {
     label: 'Load and start the agent',
@@ -361,9 +361,9 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       health: { url: 'http://127.0.0.1:3002/api/ping', timeoutMs: 5000 },
     },
     local: {
-      label: 'Install locally (Docker)',
+      label: 'Install locally (Docker or Podman)',
       baseURL: 'http://127.0.0.1:3002/v1',
-      deps: ['Docker Engine + Compose'],
+      deps: ['Docker Engine or Podman, with Compose'],
       diskHint: '~700 MB disk (536 MB image), ~84 MB RAM idle, no GPU',
       dashboardUrl: 'http://127.0.0.1:3002',
       runtime: 'docker',
@@ -388,28 +388,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
             },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
-        // The vendor one-liner is the documented Linux/macOS server install;
-        // PORT=3002 keeps the route baseURL valid.
-        linux: {
-          label: 'Install locally (vendor one-liner, Docker)',
-          steps: [
-            {
-              label: 'Run the FreeLLMAPI one-liner',
-              // The vendor script drives Docker; a Podman-only host must get
-              // the explicit message instead of the script's own failure.
-              command: 'command -v docker >/dev/null 2>&1 || { echo "the FreeLLMAPI vendor installer needs Docker Engine; install Docker, or clone https://github.com/tashfeenahmed/freellmapi and run podman compose up -d"; exit 1; }; curl -fsSL https://freellmapi.co/install.sh | PORT=3002 HOST_BIND=127.0.0.1 bash',
-              weight: 3,
-            },
-            {
-              label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
-            },
-          ],
-        },
+        // No linux override: the vendor one-liner is Docker-only, while
+        // preflight accepts Podman as the substitute runtime, so Linux uses
+        // the same engine-aware compose path as every other platform.
         // macOS prefers the vendor desktop app: no Docker Desktop overhead.
         darwin: {
           label: 'Install locally (vendor desktop app, no Docker)',
@@ -435,7 +420,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
             { label: 'Launch FreeLLMAPI', command: 'open -a FreeLLMAPI' },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -459,7 +444,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
             { label: 'Launch FreeLLMAPI', command: 'cmd //c start "" "$LOCALAPPDATA\\Programs\\FreeLLMAPI\\FreeLLMAPI.exe"' },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -498,6 +483,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     ],
     quirks: [
       'Local install dependencies: native npm package (Node.js >= 18) behind a systemd or launchd user service on Linux/macOS; Docker is never required. Windows has no supported local install — run the package manually or use a proxy running elsewhere',
+      'macOS: the launchd agent runs the proxy through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin — a global binary reachable only from a fish or zsh configuration is not found; keep it reachable from a login bash profile or one of those directories',
       'The proxy runs its own sticky account pool with cooldowns — DSH key pooling MUST stay off for this route',
       'The console at :8082 has no auth (webuiPassword empty) — trusted networks only',
       'Quotas are per-account/per-model weekly windows; "RESOURCE_EXHAUSTED … resets after 46h" is normal',
@@ -584,6 +570,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     requiresBrowser: [],
     quirks: [
       'Local install dependencies: Node.js 22, the opencode-dotfiles keypool proxy (or a placed ~/.config/opencode/keypool/proxy.js), and a systemd/launchd user service; Docker is never required. Windows has no supported local install — use a keypool running elsewhere',
+      'macOS: the launchd agent runs node through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin — a node reachable only from a fish or zsh configuration (for example an nvm setup) is not found; make node reachable from a login bash profile or one of those directories',
       'The vendor account and quota dashboard live at commandcode.ai (browser)',
       'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
       'DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it',

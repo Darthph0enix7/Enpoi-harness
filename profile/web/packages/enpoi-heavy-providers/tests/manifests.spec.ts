@@ -111,8 +111,10 @@ it('commandcode descriptions keep the keypool, package, removal, and quota facts
 it('freellmapi installs are platform-keyed and fall back to the Docker path', () => {
   const local = manifestById('freellmapi')!.local
   const linux = resolveHeavyInstall(local, 'linux')
-  expect(linux.steps[0]!.command).toContain('freellmapi.co/install.sh')
-  expect(linux.steps[0]!.command).toContain('PORT=3002')
+  // Linux uses the engine-aware compose path: the vendor one-liner is
+  // Docker-only, while preflight accepts Podman as the substitute runtime.
+  expect(linux.steps[0]!.command).toContain('git clone')
+  expect(linux.steps.map(step => step.command).join('\n')).toContain('command -v docker || command -v podman')
   const darwin = resolveHeavyInstall(local, 'darwin')
   expect(darwin.deps).toEqual(['macOS 11+'])
   expect(darwin.steps[0]!.command).toContain('.dmg')
@@ -131,8 +133,11 @@ it('freellmapi install steps are idempotent and resolve the container engine at 
   expect(compose).toContain('test -d {home}/freellmapi/.git || git clone')
   expect(compose).toContain('command -v docker || command -v podman')
 
+  // Linux resolves to the same engine-aware compose path, so a Podman-only
+  // host that preflight approved can actually install.
   const linux = resolveHeavyInstall(freellmapi.local, 'linux').steps.map(step => step.command).join('\n')
-  expect(linux).toContain('needs Docker Engine')
+  expect(linux).toContain('command -v docker || command -v podman')
+  expect(linux).not.toContain('needs Docker Engine')
 
   const darwin = resolveHeavyInstall(freellmapi.local, 'darwin').steps.map(step => step.command).join('\n')
   expect(darwin).toContain('uname -m')

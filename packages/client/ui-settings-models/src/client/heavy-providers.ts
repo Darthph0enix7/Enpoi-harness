@@ -239,7 +239,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             { label: 'Start the stack', command: 'docker compose up -d', cwd: '{home}/freellmapi' },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -255,7 +255,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -282,7 +282,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             { label: 'Launch FreeLLMAPI', command: 'open -a FreeLLMAPI' },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -306,7 +306,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             { label: 'Launch FreeLLMAPI', command: 'cmd //c start "" "$LOCALAPPDATA\\Programs\\FreeLLMAPI\\FreeLLMAPI.exe"' },
             {
               label: 'Wait for the gateway',
-              command: 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
+              command: 'for i in {1..60}; do curl -fsS http://127.0.0.1:3002/api/ping >/dev/null && exit 0; sleep 2; done; echo "gateway did not answer within 120s"; exit 1',
             },
           ],
         },
@@ -367,12 +367,12 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             { label: 'Install the proxy package', command: 'npm install -g antigravity-claude-proxy', weight: 2 },
             {
               label: 'Write the systemd user unit',
-              command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc \'exec antigravity-claude-proxy\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
+              command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/antigravity-proxy.service <<\'EOF\'\n[Unit]\nDescription=Antigravity Claude proxy (per-device)\nAfter=network-online.target\n\n[Service]\nEnvironment=PORT=8082\nEnvironment=HOST=127.0.0.1\nExecStart=/bin/bash -lc \'exec antigravity-claude-proxy start --log\'\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\nEOF',
             },
             { label: 'Enable and start the unit', command: 'systemctl --user daemon-reload && systemctl --user enable --now antigravity-proxy.service' },
             {
               label: 'Wait for the proxy',
-              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
+              command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8082/health >/dev/null && exit 0; sleep 2; done; echo "proxy did not answer within 60s"; exit 1',
             },
           ],
         },
@@ -443,7 +443,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
           steps: [
             { label: 'Build and link the DSH provider package', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs {home}/.dsh/profiles/web', weight: 3 },
             { label: 'Seed the commandcode pool in pools.json', command: 'node {home}/.dsh/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs' },
-            { label: 'Deploy the keypool proxy from dotfiles', command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found — sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; install -Dm644 {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js' },
+            { label: 'Deploy the keypool proxy from dotfiles', command: 'test -f {home}/dotfiles/opencode-dotfiles/keypool/proxy.js || { echo "keypool proxy.js not found — sync dotfiles (opencode-dotfiles/keypool) first"; exit 1; }; mkdir -p {config}/opencode/keypool && cp {home}/dotfiles/opencode-dotfiles/keypool/proxy.js {config}/opencode/keypool/proxy.js && chmod 644 {config}/opencode/keypool/proxy.js' },
             {
               label: 'Write the keypool systemd user unit',
               command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<\'EOF\'\n[Unit]\nDescription=OpenCode KeyPool — multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc \'exec node %h/.config/opencode/keypool/proxy.js\'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF',
@@ -451,7 +451,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
             { label: 'Enable and start the keypool', command: 'systemctl --user daemon-reload && systemctl --user enable --now keypool.service', optional: true },
             {
               label: 'Wait for the keypool',
-              command: 'for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s"; exit 1',
+              command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s"; exit 1',
             },
           ],
         },
