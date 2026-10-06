@@ -172,13 +172,18 @@ The unit runs \`dsh web --foreground\`; interactive \`dsh web\` attaches to it.
 An existing unit without a generated marker is never overwritten without --force.
 `
 
+/** The installer state file path this command reads and updates. */
+function installStatePath(override?: string): string {
+  return override ?? process.env.DSH_INSTALL_STATE ?? join(HARNESS_ROOT, '..', 'install-state.json')
+}
+
 /**
  * Read the installer state file; `DSH_INSTALL_STATE` overrides its location.
  * @param override - explicit state path for tests.
  * @returns the parsed state, or undefined when absent or unreadable.
  */
 export function readInstallState(override?: string): InstallState | undefined {
-  const path = override ?? process.env.DSH_INSTALL_STATE ?? join(HARNESS_ROOT, '..', 'install-state.json')
+  const path = installStatePath(override)
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
     if (typeof parsed !== 'object' || parsed === null) return undefined
@@ -259,15 +264,23 @@ function unitReplaceable(path: string, kind: 'systemd' | 'launchd', force: boole
   return unitGenerated(path, kind)
 }
 
-/** Record (or clear) the managed unit in the installer state file. */
-function recordUnit(statePath: string | undefined, unit: string | null): void {
-  const path = statePath ?? process.env.DSH_INSTALL_STATE ?? join(HARNESS_ROOT, '..', 'install-state.json')
+/**
+ * Record (or clear) the managed unit in the installer state file.
+ * @param statePath - explicit state path override (tests).
+ * @param unit - the unit name to record, or null to clear it.
+ * @returns `recorded` when written, `absent` when there is no state file
+ * (source checkout), `failed` when a present state file could not be updated.
+ */
+function recordUnit(statePath: string | undefined, unit: string | null): 'recorded' | 'absent' | 'failed' {
+  const path = installStatePath(statePath)
+  if (!existsSync(path)) return 'absent'
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as InstallState
     parsed.serviceUnit = unit
     writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`)
+    return 'recorded'
   } catch {
-    // No managed install (source checkout): nothing to record.
+    return 'failed'
   }
 }
 
@@ -368,6 +381,16 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
       // --force replaces a foreign unit, but never destroys it: the previous
       // file stays recoverable at <path>.backup.
       const foreignUnit = existsSync(unit.path) && !unitGenerated(unit.path, unit.kind)
+      // Captured before the write so a failed launchd reload can restore the
+      // definition that was running.
+      let previousContent: string | undefined
+      if (existsSync(unit.path)) {
+        try {
+          previousContent = readFileSync(unit.path, 'utf8')
+        } catch {
+          previousContent = undefined
+        }
+      }
       if (foreignUnit) {
         try {
           copyFileSync(unit.path, `${unit.path}.backup`)
@@ -386,21 +409,44 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
         stderr.write(`dsh service: could not write ${unit.path}: ${(error as Error).message}\n`)
         return 1
       }
-      recordUnit(deps.statePath, unit.unit)
+      if (recordUnit(deps.statePath, unit.unit) === 'failed') {
+        stderr.write(`dsh service: could not record ${unit.unit} in ${installStatePath(deps.statePath)}; updates will not restart it automatically\n`)
+      }
       stdout.write(`dsh service: wrote ${unit.path}\n`)
       if (foreignUnit) stdout.write(`dsh service: previous unit backed up to ${unit.path}.backup\n`)
       if (isLaunchd) {
-        if (launchctlLoaded()) run('launchctl', ['bootout', domainTarget])
         if (!noStart) {
-          const code = run('launchctl', ['bootstrap', guiDomain, unit.path])
-          if (code !== 0) {
-            explainBootstrapFailure(code)
-            return code
+          const wasLoaded = launchctlLoaded()
+          const alreadyCurrent = wasLoaded && previousContent === unit.content
+          if (!alreadyCurrent) {
+            if (wasLoaded) run('launchctl', ['bootout', domainTarget])
+            const code = run('launchctl', ['bootstrap', guiDomain, unit.path])
+            if (code !== 0) {
+              explainBootstrapFailure(code)
+              // The bootout already stopped the old definition. Restore and
+              // reload it so a failed reinstall never leaves the machine with
+              // a stopped service and no working unit.
+              if (wasLoaded && previousContent !== undefined) {
+                try {
+                  writeFileSync(unit.path, previousContent)
+                  if (run('launchctl', ['bootstrap', guiDomain, unit.path]) === 0) {
+                    stderr.write(`dsh service: restored and reloaded the previous unit at ${unit.path}\n`)
+                  }
+                } catch (error) {
+                  stderr.write(`dsh service: could not restore ${unit.path}: ${(error as Error).message}; the retry command above still applies\n`)
+                }
+              }
+              return code
+            }
           }
         }
       } else {
-        run('systemctl', ['--user', 'daemon-reload'])
-        run('systemctl', ['--user', 'enable', unit.unit])
+        if (run('systemctl', ['--user', 'daemon-reload']) !== 0) {
+          stderr.write('dsh service: systemctl --user daemon-reload failed\n')
+        }
+        if (run('systemctl', ['--user', 'enable', unit.unit]) !== 0) {
+          stderr.write(`dsh service: systemctl --user enable failed; ${unit.unit} will not start at login\n`)
+        }
         // Best-effort: keep the user manager alive without an interactive session.
         if (process.env.USER !== undefined) run('loginctl', ['enable-linger', process.env.USER])
         if (!noStart) {
@@ -433,7 +479,9 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
         return 1
       }
       if (!isLaunchd) run('systemctl', ['--user', 'daemon-reload'])
-      recordUnit(deps.statePath, null)
+      if (recordUnit(deps.statePath, null) === 'failed') {
+        stderr.write(`dsh service: could not clear ${unit.unit} in ${installStatePath(deps.statePath)}; it may still be recorded there\n`)
+      }
       stdout.write(`dsh service: ${unit.unit} removed\n`)
       return 0
     }

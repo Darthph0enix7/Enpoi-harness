@@ -30,13 +30,11 @@ for arg in "$@"; do
   esac
 done
 if [ "$mode" = "doctor" ]; then
+  [ -n "$prefix" ] || prefix="$HOME/.dsh"
+  state="$prefix/harness/install-state.json"
   node_bin="${DSH_NODE:-}"
-  if [ -z "$node_bin" ]; then
-    [ -n "$prefix" ] || prefix="$HOME/.dsh"
-    state="$prefix/harness/install-state.json"
-    if [ -f "$state" ]; then
-      node_bin="$(sed -n 's/.*"node": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
-    fi
+  if [ -z "$node_bin" ] && [ -f "$state" ]; then
+    node_bin="$(sed -n 's/.*"node": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
   fi
   if [ -z "$node_bin" ] || [ ! -x "$node_bin" ]; then
     node_bin="$(command -v node || true)"
@@ -45,17 +43,28 @@ if [ "$mode" = "doctor" ]; then
     echo "dsh doctor: no usable Node.js found (set DSH_NODE or put node on PATH)" >&2
     exit 1
   fi
+  # doctor.mjs names the home --home, while this script (and the other modes)
+  # accept --dsh-home; translate, and derive the recorded home from state so
+  # `dsh doctor` inspects the install's home rather than the process default.
+  if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ] && [ -f "$state" ]; then
+    dsh_home="$(sed -n 's/.*"dshHome": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
+  fi
   # --prefix is this script's own flag; doctor.mjs does not accept it.
   doctor_argv=()
   skip_next=0
+  expect_home=0
   for arg in ${argv[@]+"${argv[@]}"}; do
     if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+    if [ "$expect_home" = 1 ]; then dsh_home="$arg"; expect_home=0; continue; fi
     case "$arg" in
       --prefix) skip_next=1;;
       --prefix=*) ;;
+      --dsh-home) expect_home=1;;
+      --dsh-home=*) dsh_home="${arg#--dsh-home=}";;
       *) doctor_argv+=("$arg");;
     esac
   done
+  if [ -n "$dsh_home" ]; then doctor_argv+=(--home "$dsh_home"); fi
   exec "$node_bin" "$HERE/doctor.mjs" ${doctor_argv[@]+"${doctor_argv[@]}"}
 fi
 case "$mode" in
@@ -73,6 +82,16 @@ if [ "$mode" = "update" ]; then
     update_channel="$(sed -n 's/.*"channel": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
   fi
   [ -n "$update_channel" ] || update_channel="stable"
+  # The update runs the fetched installer via exec, so its EXIT trap cannot
+  # remove the script; reap scripts from earlier runs whose PID is gone.
+  for stale in "${TMPDIR:-/tmp}"/dsh-remote-installer-*.sh; do
+    [ -e "$stale" ] || continue
+    stale_pid="${stale##*-}"
+    stale_pid="${stale_pid%.sh}"
+    case "$stale_pid" in ''|*[!0-9]*) stale_pid="";; esac
+    if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then continue; fi
+    rm -f -- "$stale"
+  done
   remote_installer="${TMPDIR:-/tmp}/dsh-remote-installer-$$.sh"
   if curl -fsSL --connect-timeout 5 --max-time 15 "https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/$update_channel/scripts/install.sh" -o "$remote_installer" 2>/dev/null && bash -n "$remote_installer" 2>/dev/null; then
     chmod +x "$remote_installer"

@@ -77,6 +77,7 @@ BIN_DIR=""
 BIN_DIR_EXPLICIT=0
 SERVICE_UNIT=""
 SERVICE_INSTALL=1
+SERVICE_INSTALL_EXPLICIT=0
 NO_PREBUILT=0
 PREBUILT=0
 MERGE_BASELINE=""
@@ -378,7 +379,7 @@ while [ "$#" -gt 0 ]; do
     --profile-ref=*) PROFILE_REF="${arg#*=}"; PROFILE_REF_EXPLICIT=1; shift;;
     --service-unit) need_value "$@"; SERVICE_UNIT="$2"; shift 2;;
     --service-unit=*) SERVICE_UNIT="${arg#*=}"; shift;;
-    --no-service) SERVICE_INSTALL=0; shift;;
+    --no-service) SERVICE_INSTALL=0; SERVICE_INSTALL_EXPLICIT=1; shift;;
     --no-prebuilt) NO_PREBUILT=1; shift;;
     --dsh-home) need_value "$@"; DSH_HOME="$2"; shift 2;;
     --dsh-home=*) DSH_HOME="${arg#*=}"; shift;;
@@ -755,31 +756,54 @@ stage_tarball() { # local tarball
   mkdir -p "$STAGED" || return 1
   log "staging source tarball $SOURCE"
   tar -xzf "$SOURCE" -C "$STAGED" --strip-components=1 2>/dev/null \
-    || tar -xzf "$SOURCE" -C "$STAGED" \
+    || tar -xf "$SOURCE" -C "$STAGED" --strip-components=1 2>/dev/null \
+    || tar -xzf "$SOURCE" -C "$STAGED" 2>/dev/null \
+    || tar -xf "$SOURCE" -C "$STAGED" \
     || { warn "could not extract $SOURCE"; return 1; }
   flatten_stage "$STAGED"
   return 0
 }
 
+clone_repo_at_ref() { # ref git_url dest -> 0 when dest holds a checkout of ref
+  local r="$1" u="$2" d="$3"
+  rm -rf "$d"
+  if run_logged "Cloning release repository ($r)" 300 "$PREFIX" git clone --depth 1 --branch "$r" "$u" "$d"; then
+    return 0
+  fi
+  # --branch accepts only a branch or tag name; a pinned commit SHA (or a
+  # branch the depth-1 clone did not fetch) needs a shallow fetch plus detach.
+  rm -rf "$d"
+  run_logged "Cloning release repository" 300 "$PREFIX" git clone --depth 1 "$u" "$d" || return 1
+  if ( cd "$d" && run_limited 120 git fetch --depth 1 origin "$r" >/dev/null 2>&1 ); then
+    ( cd "$d" && run_limited 60 git checkout --detach FETCH_HEAD >/dev/null 2>&1 ) || return 1
+  else
+    ( cd "$d" && run_limited 60 git checkout --detach "$r" >/dev/null 2>&1 ) || return 1
+  fi
+  return 0
+}
+
 stage_remote() { # url
-  local url="$1" archive cache_dir cache_file
+  local url="$1" archive cache_dir cache_file ref_slug
   cache_dir="$PREFIX/harness/.cache"
   mkdir -p "$cache_dir" || return 1
   local ref="${REF:-$CHANNEL}"
+  # A ref may contain `/` (feature branches); the cache file name must not
+  # grow a directory component.
+  ref_slug="$(printf '%s' "$ref" | tr '/ ' '__')"
   # Key the cache by the resolved commit: a channel that moved must never reuse
   # the previous commit's archive (a stale cache once staged the old version
   # under the new commit's name). Without a resolved commit the ref key keeps
   # the offline path working.
   if [ -n "${TARGET_COMMIT:-}" ]; then
-    cache_file="$cache_dir/archive-${ref}-${TARGET_COMMIT}.tar.gz"
+    cache_file="$cache_dir/archive-${ref_slug}-${TARGET_COMMIT}.tar.gz"
     local stale
-    for stale in "$cache_dir"/archive-"${ref}"*.tar.gz; do
+    for stale in "$cache_dir"/archive-"${ref_slug}"*.tar.gz; do
       [ -e "$stale" ] || continue
       [ "$stale" = "$cache_file" ] && continue
       rm -f "$stale"
     done
   else
-    cache_file="$cache_dir/archive-${ref}.tar.gz"
+    cache_file="$cache_dir/archive-${ref_slug}.tar.gz"
   fi
   STAGED="$PREFIX/harness/.staging-$$"
   mkdir -p "$STAGED" || return 1
@@ -807,8 +831,7 @@ stage_remote() { # url
         substep_ok "Direct download timed out; falling back to git clone (${ref})"
         local git_url="${DSH_GITHUB_URL:-https://github.com/Darthph0enix7/enpoi-harness}"
         case "$git_url" in *.git) :;; *) git_url="$git_url.git";; esac
-        rm -rf "$STAGED"
-        if run_logged "Cloning release repository" 300 "$PREFIX" git clone --depth 1 --branch "$ref" "$git_url" "$STAGED"; then
+        if clone_repo_at_ref "$ref" "$git_url" "$STAGED"; then
           rm -rf "$STAGED/.git"
           flatten_stage "$STAGED"
           return 0
@@ -913,7 +936,9 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
-    SOURCE_URL="$DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"
+    # `/archive/<ref>.tar.gz` resolves branches, tags, and commit SHAs alike;
+    # the `refs/heads/` form 404s for a tag or a pinned commit (--ref).
+    SOURCE_URL="$DSH_GITHUB_URL/archive/$ref.tar.gz"
     # Resolve the exact target commit once, before anything stages: the
     # already-built reuse check, the prebuilt fast path, and the source-archive
     # cache all key on it.
@@ -1301,7 +1326,9 @@ seed_dir_once() { # src-dir dst-dir
 seed_profile_home() { # stage
   local stage="$1" fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
   seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
-  seed_dir_once "$stage/presets" "$DSH_HOME/.agent-presets"
+  # The legacy directory presets ($DSH_HOME/.agent-presets) are retired: agent
+  # presets are declarative bundles now and the shipped profile's presets/ tree
+  # is not read at runtime, so nothing is seeded there.
   # Shipped skills stay in the profile skills/ dir, which every preset mounts;
   # $DSH_HOME/skills holds only operator-created skills.
   seed_dir_once "$stage/skins" "$DSH_HOME/skins"
@@ -1463,6 +1490,9 @@ write_state() {
     else
       printf '  "serviceUnit": null,\n'
     fi
+    # Sticky --no-service: a later update must not install a background unit
+    # the operator declined at install time.
+    printf '  "serviceInstall": %s,\n' "$([ "$SERVICE_INSTALL" = 1 ] && printf 'true' || printf 'false')"
     printf '  "updatedAt": "%s"\n' "$now"
     printf '}\n'
   } > "$tmp" || return 1
@@ -1487,6 +1517,12 @@ write_rc() {
 
   # Append the marker block once per file. Creates a file (and its directory)
   # the shell reads but that does not exist yet; never rewrites content.
+  #
+  # The marker check and append are not atomic: two installers running against
+  # one HOME can both miss the marker and append the block twice. The duplicate
+  # is benign (the PATH line is idempotent and the marker stops every later
+  # run), and a lock file would risk a stale lock the installer never clears,
+  # so single-operator concurrent runs are accepted rather than serialized.
   append_block() { # file line
     local file="$1" line="$2"
     if [ -f "$file" ] && grep -qF "$marker" "$file"; then return 0; fi
@@ -1566,13 +1602,27 @@ restart_service() {
   return 0
 }
 
+service_unit_present() { # unit -> 0 when the service manager knows the unit
+  local u="$1"
+  [ -n "$u" ] || return 1
+  case "$OS" in
+    linux)
+      command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$u" >/dev/null 2>&1
+      ;;
+    darwin)
+      [ -f "$HOME/Library/LaunchAgents/$u.plist" ]
+      ;;
+    *) return 1;;
+  esac
+}
+
 ensure_service() {
   if [ "${SERVICE_INSTALL:-1}" != 1 ] || [ "${DSH_NO_SERVICE:-0}" = 1 ]; then
     log "service: install disabled; leaving any existing unit untouched"
     return 0
   fi
-  if [ -n "$SERVICE_UNIT" ]; then
-    log "service: unit $SERVICE_UNIT already references this install"
+  if [ -n "$SERVICE_UNIT" ] && service_unit_present "$SERVICE_UNIT"; then
+    log "service: unit $SERVICE_UNIT already installed"
     return 0
   fi
   local cli="$HARNESS/apps/cli/lib/bin.js" out
@@ -1580,7 +1630,13 @@ ensure_service() {
   log "service: installing the background web service (login persistence)"
   if out="$("$NODE" "$cli" service install 2>&1)"; then
     SERVICE_UNIT="$(json_field "$PREFIX/harness/install-state.json" serviceUnit)"
-    substep_ok "Background service installed and started${SERVICE_UNIT:+ ($SERVICE_UNIT)}"
+    # The CLI reports its own start outcome ("installed and started" vs
+    # "installed" for --no-start); repeat "and started" only when the CLI did,
+    # so an exit 0 that did not start the unit is never reported as started.
+    case "$out" in
+      *"installed and started"*) substep_ok "Background service installed and started${SERVICE_UNIT:+ ($SERVICE_UNIT)}";;
+      *) substep_ok "Background service installed${SERVICE_UNIT:+ ($SERVICE_UNIT)} (not started; run 'dsh service start')";;
+    esac
   else
     warn "service: install failed ($(printf '%s' "$out" | tail -n 1)); run 'dsh service install' manually"
   fi
@@ -1897,7 +1953,7 @@ dry_run_plan() {
   say "  prefix:    $PREFIX"
   say "  bin dir:   $BIN_DIR"
   say "  channel:   $CHANNEL (ref: $ref)"
-  if [ -n "$SOURCE" ]; then say "  source:    $SOURCE"; else say "  source:    $DSH_GITHUB_URL/archive/refs/heads/$ref.tar.gz"; fi
+  if [ -n "$SOURCE" ]; then say "  source:    $SOURCE"; else say "  source:    $DSH_GITHUB_URL/archive/$ref.tar.gz"; fi
   local p_source="$PROFILE_SOURCE"
   if [ -z "$p_source" ] || [ "$p_source" = "$DEFAULT_PROFILE_SOURCE" ]; then
     if [ -n "$SOURCE" ] && [ -d "$SOURCE/profile/$PROFILE" ]; then
@@ -1970,6 +2026,10 @@ do_install() {
   step "Building core harness & dependencies"
   if [ -f "$HARNESS/.dsh-install-complete" ] && [ "$FORCE" != 1 ]; then
     substep_ok "Reusing existing build ($TREE_DIR_NAME)"
+    # Keep the recorded build commit: a reused tree records no new one, and a
+    # blank commit in install-state.json would lose the rolling no-op identity.
+    BUILD_COMMIT="$(installed_tree_commit "$HARNESS")"
+    [ -n "$BUILD_COMMIT" ] || resolve_build_commit
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
   else
     install_tree || die "install/build failed; no changes were made to \$DSH_HOME (tree: $HARNESS)"
@@ -2011,6 +2071,9 @@ rollback() { # prev backup failed_version
   local prev="$1" backup="$2" failed="$3" restore_rc=0
   warn "rolling back to $prev"
   ln -sfn "$prev" "$PREFIX/harness/current" 2>/dev/null || warn "could not repoint $PREFIX/harness/current"
+  # The update restarted the unit onto the failed tree before the self-check;
+  # restart it back so the live service runs the restored tree too.
+  restart_service
   restore_user_files "$backup" || restore_rc=1
   if [ -d "$PREFIX/harness/$failed" ]; then
     mv "$PREFIX/harness/$failed" "$PREFIX/harness/$failed.failed-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
@@ -2080,6 +2143,15 @@ prune_failed_versions() {
   return 0
 }
 
+dir_recently_touched() { # dir minutes -> 0 when modified within the window
+  local d="$1" mins="${2:-120}"
+  [ -d "$d" ] || return 1
+  # -mmin is available on GNU find and macOS find; a find that rejects it
+  # prints nothing, which reads as "not recent" and preserves the old
+  # removal behavior. find exits 0 with no match, so test the output.
+  [ -n "$(find "$d" -maxdepth 0 -mmin "-$mins" 2>/dev/null)" ]
+}
+
 cleanup_stale_artifacts() {
   local count=0 p d name pid
   # 1. Clean orphaned staging directories (.staging-*) where process is dead
@@ -2110,12 +2182,18 @@ cleanup_stale_artifacts() {
     rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
   done
 
-  # 4. Clean incomplete harness version directories (missing .dsh-install-complete)
+  # 4. Clean incomplete harness version directories (missing .dsh-install-complete).
+  # The marker lands only after a build finishes, so a directory without it may
+  # be a concurrent installer's live tree; a recent mtime leaves it alone.
   for d in "$PREFIX/harness"/*; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
     case "$name" in .*|current|*.failed-*) continue;; esac
     if [ ! -f "$d/.dsh-install-complete" ]; then
+      if dir_recently_touched "$d" 120; then
+        log "keeping recently touched incomplete harness directory: $name (a concurrent install may be building it)"
+        continue
+      fi
       log "cleaning incomplete harness directory: $name"
       rm -rf -- "$d" 2>/dev/null && count=$((count + 1))
     fi
@@ -2141,88 +2219,97 @@ cleanup_stale_artifacts() {
   return 0
 }
 
+CLEAN_COUNT=0
+CLEAN_FREED=0
+CLEAN_FAILED=0
+
+clean_remove() { # path label
+  local p="$1" label="$2" sz
+  [ -e "$p" ] || [ -L "$p" ] || return 0
+  sz="$(du -sk -- "$p" 2>/dev/null | awk '{print $1}')"
+  sz="${sz:-0}"
+  if [ "$DRY_RUN" = 1 ]; then
+    say "  ${C_DIM}would remove${C_RESET} ${label}: $(basename "$p")"
+    return 0
+  fi
+  if rm -rf -- "$p" 2>/dev/null; then
+    CLEAN_COUNT=$((CLEAN_COUNT + 1))
+    CLEAN_FREED=$((CLEAN_FREED + sz))
+    say "  ${C_GREEN}✓${C_RESET} Removed ${label}: $(basename "$p")"
+  else
+    CLEAN_FAILED=$((CLEAN_FAILED + 1))
+    warn "could not remove $p"
+  fi
+  return 0
+}
+
 do_clean() {
-  init_log_file
+  # --dry-run must not even open the log file.
+  [ "$DRY_RUN" = 1 ] || init_log_file
   detect_os_arch
   resolve_home
   say "${C_BOLD}Enpoi Harness — System Cleanup${C_RESET}"
-  say "Cleaning build artifacts, failed updates, and temporary files under ${PREFIX}..."
+  if [ "$DRY_RUN" = 1 ]; then
+    say "Dry run (no writes): listing what a clean would remove under ${PREFIX}..."
+  else
+    say "Cleaning build artifacts, failed updates, and temporary files under ${PREFIX}..."
+  fi
   say ""
 
-  local freed=0 count=0 f d p sz name
+  local f d p name
 
   # 1. Prune all .failed-* directories
   for f in "$PREFIX/harness"/*.failed-*; do
     [ -d "$f" ] || continue
-    sz="$(du -sk "$f" 2>/dev/null | awk '{print $1}')"
-    sz="${sz:-0}"
-    if rm -rf "$f" 2>/dev/null; then
-      count=$((count + 1))
-      freed=$((freed + sz))
-      say "  ${C_GREEN}✓${C_RESET} Removed failed tree: $(basename "$f")"
-    fi
+    clean_remove "$f" "failed tree"
   done
 
-  # 2. Prune incomplete harness version trees (missing .dsh-install-complete)
+  # 2. Prune incomplete harness version trees (missing .dsh-install-complete).
+  # The marker lands only after a build finishes, so a directory without it may
+  # be a concurrent installer's live tree; a recent mtime leaves it alone.
   for d in "$PREFIX/harness"/*; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
     case "$name" in .*|current|*.failed-*) continue;; esac
     if [ ! -f "$d/.dsh-install-complete" ]; then
-      sz="$(du -sk "$d" 2>/dev/null | awk '{print $1}')"
-      sz="${sz:-0}"
-      if rm -rf "$d" 2>/dev/null; then
-        count=$((count + 1))
-        freed=$((freed + sz))
-        say "  ${C_GREEN}✓${C_RESET} Removed incomplete version tree: $name"
+      if dir_recently_touched "$d" 120; then
+        say "  ${C_DIM}skipped${C_RESET} incomplete tree $(basename "$d") (touched within 2h; a concurrent install may be building it)"
+        continue
       fi
+      clean_remove "$d" "incomplete version tree"
     fi
   done
 
   # 3. Prune staging, download, and backup directories
   for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-*; do
-    [ -e "$p" ] || [ -L "$p" ] || continue
-    sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
-    sz="${sz:-0}"
-    if rm -rf -- "$p" 2>/dev/null; then
-      count=$((count + 1))
-      freed=$((freed + sz))
-      say "  ${C_GREEN}✓${C_RESET} Removed staging artifact: $(basename "$p")"
-    fi
+    clean_remove "$p" "staging artifact"
   done
 
   # 4. Prune download archive cache
-  if [ -d "$PREFIX/harness/.cache" ]; then
-    sz="$(du -sk "$PREFIX/harness/.cache" 2>/dev/null | awk '{print $1}')"
-    sz="${sz:-0}"
-    if rm -rf "$PREFIX/harness/.cache" 2>/dev/null; then
-      count=$((count + 1))
-      freed=$((freed + sz))
-      say "  ${C_GREEN}✓${C_RESET} Cleared release archive cache"
-    fi
-  fi
+  clean_remove "$PREFIX/harness/.cache" "release archive cache"
 
   # 5. Prune temporary node runtime staging
   for p in "$PREFIX/runtime"/.node-tmp-*; do
-    [ -e "$p" ] || continue
-    sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
-    sz="${sz:-0}"
-    if rm -rf -- "$p" 2>/dev/null; then
-      count=$((count + 1))
-      freed=$((freed + sz))
-      say "  ${C_GREEN}✓${C_RESET} Removed runtime staging: $(basename "$p")"
-    fi
+    clean_remove "$p" "runtime staging"
   done
 
-  # 6. Prune temp profile build directories
-  for p in "${TMPDIR:-/tmp}"/dsh-profile-build.* "${TMPDIR:-/tmp}"/dsh-install-*; do
-    [ -d "$p" ] || continue
-    rm -rf -- "$p" 2>/dev/null
+  # 6. Prune temp profile build directories and stale remote-installer scripts
+  for p in "${TMPDIR:-/tmp}"/dsh-profile-build.* "${TMPDIR:-/tmp}"/dsh-install-* "${TMPDIR:-/tmp}"/dsh-remote-installer-*.sh; do
+    clean_remove "$p" "temp profile build"
   done
 
-  local freed_mb=$(( freed / 1024 ))
+  local freed_mb=$(( CLEAN_FREED / 1024 ))
   say ""
-  say "${C_GREEN}${C_BOLD}Cleanup complete!${C_RESET} Removed ${count} item(s), freed ~${freed_mb}MB."
+  if [ "$DRY_RUN" = 1 ]; then
+    say "${C_BOLD}Dry run complete.${C_RESET} No files were removed."
+    return 0
+  fi
+  if [ "$CLEAN_FAILED" -gt 0 ]; then
+    say "${C_RED}${C_BOLD}Cleanup incomplete!${C_RESET} Removed ${CLEAN_COUNT} item(s), freed ~${freed_mb}MB; ${CLEAN_FAILED} path(s) could not be removed."
+    say "User data in ${DSH_HOME} (sessions, settings, credentials) was left completely intact."
+    return 1
+  fi
+  say "${C_GREEN}${C_BOLD}Cleanup complete!${C_RESET} Removed ${CLEAN_COUNT} item(s), freed ~${freed_mb}MB."
   say "User data in ${DSH_HOME} (sessions, settings, credentials) was left completely intact."
   return 0
 }
@@ -2232,9 +2319,6 @@ do_update() {
   STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   detect_os_arch
-  # Without this, every run_logged call in update mode redirects to an empty
-  # path and fails; do_install and do_clean already initialize the log.
-  init_log_file
   step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
@@ -2247,6 +2331,12 @@ do_update() {
   apply_profile_ref_default 1
   if [ -z "$BIN_DIR" ]; then BIN_DIR="$(json_field "$state" binDir)"; [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"; fi
   if [ -z "$SERVICE_UNIT" ]; then SERVICE_UNIT="$(json_field "$state" serviceUnit)"; fi
+  # --no-service is sticky: an install that declined the service must not gain
+  # one on a later update. An explicit --no-service on this run always wins.
+  if [ "$SERVICE_INSTALL_EXPLICIT" = 0 ] && [ "$(json_field "$state" serviceInstall)" = "false" ]; then
+    SERVICE_INSTALL=0
+    log "service: install disabled by the recorded --no-service setting"
+  fi
   resolve_home
   # The state file records the home this install was seeded with; updating a
   # different home would migrate/seed the wrong tree. Any mismatch is fatal
@@ -2267,7 +2357,7 @@ do_update() {
   if [ "$DRY_RUN" = 1 ]; then
     local target_value="" dry_target_commit=""
     if [ -z "$SOURCE" ]; then
-      say "  source:   $DSH_GITHUB_URL/archive/refs/heads/${REF:-$CHANNEL}.tar.gz (version resolved at fetch time)"
+      say "  source:   $DSH_GITHUB_URL/archive/${REF:-$CHANNEL}.tar.gz (version resolved at fetch time)"
     elif [ -d "$SOURCE" ]; then
       target_value="$("$NODE" -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1]+"/package.json","utf8"));process.stdout.write(String(p.version||""))' "$SOURCE" 2>/dev/null || true)"
       say "  source:   $SOURCE (version ${target_value:-unknown})"
@@ -2298,6 +2388,9 @@ do_update() {
     emit_json update 1
     return 0
   fi
+  # Without this, every run_logged call in update mode redirects to an empty
+  # path and fails. After the dry-run return, so --dry-run opens no log file.
+  init_log_file
   sudo_trap
   # Disk hygiene before fetching: failed trees are never keep-eligible, so
   # reclaim them before the new tree needs the space.
@@ -2338,6 +2431,7 @@ do_update() {
       emit_json noop 0
       exit 1
     fi
+    if [ "$WRITE_RC" = 1 ]; then write_rc; fi
     say "dsh is already up to date: $VERSION ($CHANNEL channel)"
     emit_json noop 1
     return 0
@@ -2391,6 +2485,7 @@ do_update() {
     exit 1
   fi
   write_state || warn "could not write $state"
+  if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
   print_summary update
   emit_json update 1
@@ -2918,6 +3013,11 @@ do_uninstall() {
     uninstall_add "$PREFIX/harness"
     uninstall_add "$BIN_DIR/dsh"
     uninstall_add "$BIN_DIR/ds"
+    # The failing sudo stub is installer scaffolding, not user data; remove it
+    # only while it is still the exact file sudo_trap wrote.
+    if grep -qF "sudo is never used by this installer" "$PREFIX/bin/sudo" 2>/dev/null; then
+      uninstall_add "$PREFIX/bin/sudo"
+    fi
     uninstall_keep "$PREFIX/runtime (Node runtime cache)"
     uninstall_keep "$PREFIX/bin (pnpm)"
     uninstall_keep "$DSH_HOME (sessions, settings, credentials, overlay, profile)"
@@ -2970,7 +3070,7 @@ EOF
     uninstall_outside_lines
   else
     say "  kept:      $DSH_HOME (sessions, settings, credentials, overlay, profile)"
-    say "  kept:      $PREFIX/runtime and $PREFIX/bin"
+    say "  kept:      $PREFIX/runtime, $PREFIX/bin, and $PREFIX/logs"
     say "  reinstall: re-run the installer — a re-install resumes this home"
   fi
   emit_uninstall_json 1 "$mode"
@@ -2996,8 +3096,14 @@ fi
 if [ "$UNINSTALL_MODE" = 1 ] && [ "$CLEAN_MODE" = 1 ]; then
   die "choose one of --uninstall, --clean"
 fi
-if [ "$CHECK_ONLY" = 1 ] && { [ "$UNINSTALL_MODE" = 1 ] || [ "$CLEAN_MODE" = 1 ]; }; then
-  die "--check applies to --repair, not --clean or --uninstall"
+if [ "$CHECK_ONLY" = 1 ] && [ "$REPAIR_MODE" != 1 ]; then
+  die "--check applies to --repair only"
+fi
+if [ "$PURGE" = 1 ] && [ "$UNINSTALL_MODE" != 1 ]; then
+  die "--purge applies to --uninstall only (run: --uninstall --purge)"
+fi
+if [ -n "$MERGE_BASELINE" ] && [ "$UPDATE_MODE" != 1 ]; then
+  die "--merge-baseline applies to --update only"
 fi
 if [ "$CLEAN_MODE" = 1 ]; then
   do_clean
@@ -3021,7 +3127,9 @@ if [ -n "$CHANNEL" ]; then
   case "$CHANNEL" in stable|beta) :;; *) die "unknown channel: $CHANNEL (stable|beta)";; esac
 fi
 case "$PREFIX" in /*) :;; *) die "--prefix must be an absolute path: $PREFIX";; esac
+case "$BIN_DIR" in /*) :;; *) die "--bin-dir must be an absolute path: $BIN_DIR";; esac
 if [ -z "$DSH_HOME" ]; then DSH_HOME="$HOME/.dsh"; fi
+case "$DSH_HOME" in /*) :;; *) die "\$DSH_HOME/--dsh-home must be an absolute path: $DSH_HOME";; esac
 export DSH_HOME
 
 if [ "$DRY_RUN" = 1 ] && [ "$UPDATE_MODE" = 0 ] && [ "$REPAIR_MODE" = 0 ] && [ "$UNINSTALL_MODE" = 0 ]; then
