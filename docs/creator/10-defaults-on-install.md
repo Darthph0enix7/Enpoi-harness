@@ -82,7 +82,7 @@ Two layers:
 | Memory (`enpoi-memory`) | on; `memory` tools | capability/config `enpoi-orchestration` memory group; tool group switch |
 | Council/Oracle | on; `councils` group | `capabilities.tools.roundtable` / `.oracle_review` |
 | Peer interconnect | tool group `peer` on-demand | attach per session, or `toolGroups.groups.peer.enabled: false` |
-| Heavy providers (FreeLLMAPI / Antigravity / Command Code) | nothing installed | Add Provider → heavy group → detect/install; Remove cleans route, credential, pool, cache, chains (doc 03) |
+| Heavy providers (FreeLLMAPI / Antigravity / Command Code) | nothing installed | Add Provider → heavy group → detect/install (Command Code links the provider package, then talks to the vendor directly); Remove cleans route, credential, pool, cache, chains (doc 03) |
 
 Settings-document toggles apply hot on the next spawn/render; bundle list changes (`$PROFILE/package.json` → `dsh.profile.bundles`) need a profile rebuild and `dsh restart --after-turn` (never restart from inside a turn).
 

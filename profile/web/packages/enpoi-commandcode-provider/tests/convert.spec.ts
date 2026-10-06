@@ -234,7 +234,7 @@ it('scrubs embedded base64 in string content at conversion when the route has no
   expect(tool.content[0]!.output.value).not.toContain('EEEE')
 })
 
-it('leaves text untouched on the default keypool path, where the proxy sanitizes downstream', () => {
+it('leaves text untouched on the single-key legacy path, where a loopback proxy sanitizes downstream', () => {
   const uri = `data:image/png;base64,${'F'.repeat(700)}`
   const long = 'y'.repeat(MAX_INLINE_TOOL_TEXT_CHARS + 5)
   const envelope = buildRequest({

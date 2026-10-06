@@ -25,13 +25,15 @@ it('prints the served commandcode row and its settings readiness', () => {
     label: manifest.label,
     summary: manifest.summary,
     protocol: manifest.protocol,
+    delivery: manifest.delivery,
     settingsNs: manifest.settingsNs,
     settingsReady: settingsNamespaceReady(deps, manifest.settingsNs ?? ''),
     reuseBaseURL: manifest.reuse.baseURL,
     reuseNote: manifest.reuse.note,
     localBaseURL: manifest.local.baseURL,
     installSteps: manifest.local.install.default.steps.length,
-    removalStep: manifest.removal.steps[0]?.command.replaceAll('"', '').split('/').at(-1),
+    removalSteps: manifest.removal.steps.length,
+    pool: manifest.pool,
     auth: manifest.auth,
     unsupported: manifest.unsupported,
     problems: manifestProblems(),
@@ -39,11 +41,15 @@ it('prints the served commandcode row and its settings readiness', () => {
   }
   console.info(`[host-probe] ${JSON.stringify(row)}`)
 
+  expect(row.delivery).toBe('direct')
   expect(row.settingsNs).toBe('commandcode-provider')
   expect(row.settingsReady).toBe(false)
   expect(row.unsupported).toBeUndefined()
-  expect(row.installSteps).toBeGreaterThan(0)
-  expect(row.removalStep).toBe('keypool-remove.mjs')
+  expect(row.reuseBaseURL).toBe('https://api.commandcode.ai')
+  expect(row.localBaseURL).toBe('https://api.commandcode.ai')
+  expect(row.installSteps).toBe(1)
+  expect(row.removalSteps).toBe(0)
+  expect(row.pool?.identities).toEqual([{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }])
   expect(row.pendingRestart?.message).toContain('Available after the next restart')
   expect(row.problems).toEqual([])
   expect(HEAVY_MANIFESTS.map(value => value.id)).toContain('commandcode')

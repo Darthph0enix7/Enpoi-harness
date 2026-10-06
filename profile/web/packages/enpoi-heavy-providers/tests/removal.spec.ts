@@ -1,7 +1,7 @@
 /**
  * Removal: the manifest teardown plus every named piece of DSH state — route,
- * credential, pool file, discovered-cache entry, chain links. commandcode
- * removal never touches the shared keypool service.
+ * credential, pool file, discovered-cache entry, chain links. commandcode has
+ * no local service to stop.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -105,18 +105,17 @@ it('removal without uninstall keeps the local install but still clears DSH state
   expect(summary.poolStateRemoved).toBe(true)
 })
 
-it('commandcode removal drops only the commandcode pool and never touches the keypool service', async () => {
-  const { deps, mutations, stepped } = world('commandcode')
+it('commandcode removal drops DSH state with no local teardown and no keypool script', async () => {
+  const { deps, mutations, credentialUnsets, stepped } = world('commandcode')
   const summary = await removeProvider(deps, manifestById('commandcode')!, { uninstall: true })
-  expect(summary.teardown.ran).toBe(true)
-  expect(summary.teardown.ok).toBe(true)
-  expect(stepped).toEqual(['Drop only pools.commandcode (keypool and other pools stay)'])
-  const script = manifestById('commandcode')!.removal.steps[0]!.command
-  expect(script).toContain('keypool-remove.mjs')
-  expect(script).not.toContain('systemctl')
+  // A direct vendor route has nothing local to tear down.
+  expect(summary.teardown.ran).toBe(false)
+  expect(stepped).toEqual([])
+  expect(manifestById('commandcode')!.removal.steps.map(step => step.command).join('\n')).not.toContain('keypool-remove.mjs')
   expect(summary.routeRemoved).toBe(true)
   expect(summary.poolStateRemoved).toBe(true)
   expect(summary.credentialRemoved).toBe(true)
+  expect(credentialUnsets).toEqual(['COMMANDCODE_KEY_1'])
   const routeOps = mutations.find(entry => entry.ns === 'commandcode-provider')?.ops ?? []
   expect(routeOps).toEqual([{ op: 'unset', path: ['providers', 'commandcode'] }])
 })

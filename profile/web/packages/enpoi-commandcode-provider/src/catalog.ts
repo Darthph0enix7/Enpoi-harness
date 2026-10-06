@@ -139,7 +139,7 @@ export function isLoopbackBaseURL(baseURL: string): boolean {
 
 /** Options for {@link CatalogStore}. */
 export interface CatalogStoreOptions {
-  /** Route base URL, e.g. `http://127.0.0.1:8899/commandcode`. */
+  /** Route base URL, e.g. `https://api.commandcode.ai` or a legacy loopback keypool. */
   baseURL: string
   /** Bundled snapshot entries used when the live fetch fails. */
   snapshot: readonly CatalogEntry[]

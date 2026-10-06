@@ -198,18 +198,26 @@ export class HeavyProvidersService extends TypertRemoteService {
     const configured = profile !== undefined
     const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
     const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
-    const detection = await detectInstance(deps, manifest, configuredBase)
+    // A direct manifest has no on-device instance: detection is not applicable,
+    // and the health badge comes from the declared vendor endpoint instead.
+    const direct = manifest.delivery === 'direct'
+    const detection = direct ? undefined : await detectInstance(deps, manifest, configuredBase)
     const runtime = await this.runtime()
     const preflight = chooseLocalPath(
       manifest,
       process.platform,
       runtime,
-      detection.ok ? detection.port : undefined,
+      detection?.ok === true ? detection.port : undefined,
       { home: deps.home, dshHome: deps.dshHome },
     )
-    const health = configuredBase === undefined
-      ? detection.health
-      : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
+    // A configured endpoint wins over the manifest default: an operator
+    // migrating from the legacy keypool keeps a loopback baseURL, and its
+    // health must reflect that endpoint, not the vendor root.
+    const health = configuredBase !== undefined
+      ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
+      : direct
+        ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
+        : detection!.health
     const settingsReady = settingsNamespaceReady(deps, settingsNs)
     const job = this.options.jobs.snapshot(manifest.id)
     return {
@@ -223,8 +231,8 @@ export class HeavyProvidersService extends TypertRemoteService {
       platform: process.platform,
       runtime,
       preflight,
-      ...detection.ok && detection.port !== undefined ? { detectedPort: detection.port } : {},
-      ...detection.ok ? { detectedEndpoint: detection.baseURL } : {},
+      ...detection?.ok === true && detection.port !== undefined ? { detectedPort: detection.port } : {},
+      ...detection?.ok === true ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === undefined ? {} : { unsupported: manifest.unsupported },
       ...job === undefined ? {} : { job },
     }
@@ -291,7 +299,11 @@ export class HeavyProvidersService extends TypertRemoteService {
       // install may have been started through another surface) since the guard.
       const late = pendingRestartForManifest(current, manifest)
       if (late !== undefined) throw new Error(late.message)
-      const models = await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
+      // A direct route's catalog is the bundled snapshot: the vendor exposes no
+      // model listing, so discovery is skipped and the fallback model applies.
+      const models = manifest.delivery === 'direct'
+        ? []
+        : await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
       await writeRoute(current, manifest, 'local', models)
       await storeCredential(current, manifest, key)
     })

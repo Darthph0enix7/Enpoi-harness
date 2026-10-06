@@ -2,13 +2,17 @@
  * enpoi-heavy-providers — the HEAVY provider manifest table.
  *
  * A heavy provider is LISTED in Add Provider but installs nothing by default;
- * adding one either uses a local instance the detection already found (the
- * manifest's loopback endpoint) or runs the manifest's local install, and
- * removing it runs the teardown. Everything here is declarative data: the
- * install/removal runner executes steps generically and contains no
- * per-provider branches. Every default address is loopback: an operator's own
- * server lives in a private overlay ($DSH_HOME/heavy-server-overlay.json),
- * never in this shipped table.
+ * adding one either uses an instance the detection already found (the
+ * manifest's loopback endpoint), runs the manifest's local install, or — for
+ * a `delivery: 'direct'` manifest — points the route at the vendor endpoint
+ * and runs only the package setup. Removing one runs the teardown. Everything
+ * here is declarative data: the install/removal runner executes steps
+ * generically and contains no per-provider branches. Every service default
+ * address is loopback: an operator's own server lives in a private overlay
+ * ($DSH_HOME/heavy-server-overlay.json), never in this shipped table. A
+ * `delivery: 'direct'` manifest is the exception by definition — it names the
+ * vendor's public endpoint, and the server-agnostic test pins that host to
+ * the manifest's own declared URL.
  *
  * Hand-maintained (beside the harness-side display copy in
  * `ui-settings-models/src/client/provider-templates.ts` — keep the ids and
@@ -159,6 +163,26 @@ export function resolveHeavyInstall(local: HeavyLocalInstall, platform: string):
   }
 }
 
+/** One credential identity a manifest's native pool declares. */
+export interface HeavyManifestPoolIdentity {
+  /** Stable identity key (pool state file, logs, Keys card). */
+  id: string
+  /** Credential reference resolved through the credentials service or the launch environment. */
+  credentialRef: string
+  /** Lower serves first under `priority-sticky`; omission ranks last. */
+  priority?: number
+  /** Disabled identities are skipped without losing their cooldown state. */
+  enabled?: boolean
+}
+
+/** A provider-native credential pool a route profile declares. */
+export interface HeavyManifestPool {
+  /** Selection strategy; defaults to `priority-sticky`. */
+  strategy?: 'priority-sticky' | 'balanced'
+  /** The route's credential identities (≥ 1, unique ids); secrets never appear here. */
+  identities: readonly HeavyManifestPoolIdentity[]
+}
+
 /** One heavy provider's complete declaration. */
 export interface HeavyProviderManifest {
   id: string
@@ -167,12 +191,29 @@ export interface HeavyProviderManifest {
   /** llm-pi-ai wire protocol the route declares. */
   protocol: string
   /**
+   * How an added route reaches its endpoint.
+   * - `service` (default): a service instance this device can detect and
+   *   health-probe; the manifest's addresses are loopback.
+   * - `direct`: the vendor's public endpoint. There is no on-device instance
+   *   to detect; status probes the declared vendor health URL directly, reuse
+   *   writes the vendor baseURL without model discovery, and the route is
+   *   expected to carry its own credential pool.
+   */
+  delivery?: 'service' | 'direct'
+  /**
    * Settings namespace the route profile is written to, addressed by plugin
    * entry id. Defaults to `llm-pi-ai`; a custom-protocol provider (served by
    * its own adapter plugin) names its own namespace so the profile never
    * lands in a section whose schema cannot parse it.
    */
   settingsNs?: string
+  /**
+   * Provider-native credential pool written into the route profile. Required
+   * to declare one's own `settingsNs`: the pool is that adapter's schema, and
+   * an llm-pi-ai route must never declare one (its fronting service owns the
+   * keys, or it uses a single unified key).
+   */
+  pool?: HeavyManifestPool
   /**
    * Route auth. `none` writes `keyless: true` (openai only); `placeholder`
    * stores an apiKeyEnv reference with no key (anthropic requires one);
@@ -240,16 +281,6 @@ const RUNTIME_TOOL_RE: Readonly<Partial<Record<HeavyLocalRuntime, RegExp>>> = {
 
 /** launchd label for the antigravity user agent (macOS). */
 const ANTIGRAVITY_LAUNCHD_LABEL = 'dev.enpoi.antigravity-proxy'
-/** launchd label for the shared keypool user agent (macOS). */
-const KEYPOOL_LAUNCHD_LABEL = 'dev.enpoi.keypool'
-/** Files that satisfy the keypool-proxy prerequisite, in check order. */
-const KEYPOOL_PROXY_PATHS: readonly string[] = [
-  '{config}/opencode/keypool/proxy.js',
-  '{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js',
-  '{home}/dotfiles/opencode-dotfiles/keypool/proxy.js',
-]
-/** Operator line for the keypool-proxy prerequisite. */
-const KEYPOOL_PROXY_HINT = 'keypool proxy.js (install opencode-dotfiles, or place proxy.js at ~/.config/opencode/keypool/)'
 
 /** The npm install step every antigravity platform shares. */
 const ANTIGRAVITY_NPM_STEP: HeavyStep = { label: 'Install the proxy package', command: 'npm install -g antigravity-claude-proxy', weight: 2 }
@@ -287,49 +318,12 @@ const ANTIGRAVITY_LAUNCHD_STEPS: readonly HeavyStep[] = [
   ANTIGRAVITY_WAIT_STEP,
 ]
 
-/** Deploy the shared keypool proxy, failing fast with every searched location. */
-const KEYPOOL_DEPLOY_STEP: HeavyStep = {
-  label: 'Deploy the keypool proxy',
-  weight: 2,
-  // `{config}` and `{dshHome}` are resolved by the runner before bash sees the
-  // command; the here-doc-free shell keeps every path quoted.
-  command: `dest="{config}/opencode/keypool/proxy.js"; if test -f "$dest"; then echo "keypool proxy already present at $dest"; exit 0; fi; src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found — searched $dest, {dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js, and {home}/dotfiles/opencode-dotfiles/keypool/proxy.js" >&2; echo "Install opencode-dotfiles or place proxy.js at $dest, then run this install again." >&2; exit 1; fi; mkdir -p "$(dirname "$dest")" && cp "$src" "$dest" && chmod 644 "$dest"`,
+/** The commandcode setup step: link and build the provider package (idempotent). */
+const COMMANDCODE_INSTALL_STEP: HeavyStep = {
+  label: 'Link and build the DSH provider package',
+  command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
+  weight: 3,
 }
-
-/** The keypool health wait, shared by every POSIX platform variant. */
-const KEYPOOL_WAIT_STEP: HeavyStep = {
-  label: 'Wait for the keypool',
-  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s — check the user-service status/logs and the pools.json config"; exit 1',
-}
-
-/** Linux keypool provisioning (shared keypool proxy + systemd user unit). */
-const KEYPOOL_SYSTEMD_STEPS: readonly HeavyStep[] = [
-  KEYPOOL_DEPLOY_STEP,
-  { label: 'Build and link the DSH provider package', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
-  { label: 'Seed the commandcode pool in pools.json', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
-  {
-    label: 'Write the keypool systemd user unit',
-    command: 'mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<\'EOF\'\n[Unit]\nDescription=OpenCode KeyPool — multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc \'exec node %h/.config/opencode/keypool/proxy.js\'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF',
-  },
-  { label: 'Enable and start the keypool', command: 'systemctl --user daemon-reload && systemctl --user enable --now keypool.service', optional: true },
-  KEYPOOL_WAIT_STEP,
-]
-
-/** macOS keypool provisioning: the same proxy behind a LaunchAgent. */
-const KEYPOOL_LAUNCHD_STEPS: readonly HeavyStep[] = [
-  KEYPOOL_DEPLOY_STEP,
-  { label: 'Build and link the DSH provider package', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
-  { label: 'Seed the commandcode pool in pools.json', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
-  {
-    label: 'Write the launchd agent',
-    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist <<'EOF'\n<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${KEYPOOL_LAUNCHD_LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/bash</string>\n    <string>-lc</string>\n    <string>exec node {home}/.config/opencode/keypool/proxy.js</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>KEYPOOL_PORT</key>\n    <string>8899</string>\n    <key>KEYPOOL_HOST</key>\n    <string>127.0.0.1</string>\n    <key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/keypool.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/keypool.err.log</string>\n</dict>\n</plist>\nEOF`,
-  },
-  {
-    label: 'Load and start the agent',
-    command: `launchctl bootout gui/$(id -u)/${KEYPOOL_LAUNCHD_LABEL} 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist`,
-  },
-  KEYPOOL_WAIT_STEP,
-]
 
 /** The three heavy providers v1 ships. */
 export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
@@ -550,81 +544,81 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
   },
   {
     id: 'commandcode',
-    label: 'Command Code (keypool)',
-    summary: 'Command Code\'s CLI-shaped API behind the shared multi-key keypool proxy, served by the DSH provider package.',
+    label: 'Command Code',
+    summary: 'Command Code\'s CLI-shaped API at api.commandcode.ai, served by the DSH provider package and its native multi-key pool — no proxy.',
     protocol: 'commandcode/alpha-generate',
-    // The keypool owns the real keys and replaces the Authorization header per
-    // request, so the DSH route is keyless; COMMANDCODE_API_KEY remains the
-    // reference a direct (non-keypool) route would name.
-    auth: { kind: 'none', apiKeyEnv: 'COMMANDCODE_API_KEY', keyless: true },
-    dashboardUrl: 'http://127.0.0.1:8899/status',
+    // The vendor is reached directly. The route profile carries its own key
+    // pool: identities and priorities live in this route's settings namespace
+    // (commandcode-provider) and the secrets live in the credentials store
+    // (Settings → Models Keys card) or the environment. The provider package
+    // injects the four CLI headers and rotates identities itself; the
+    // standalone keypool proxy is not involved.
+    auth: { kind: 'unified', apiKeyEnv: 'COMMANDCODE_KEY_1', keyless: false },
+    delivery: 'direct',
     docsUrl: 'https://commandcode.ai',
-    defaultPort: 8899,
+    defaultPort: 443,
     // Served by `dsh-enpoi-commandcode-provider` (ctx.llm.registerAdapter), not
     // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
     // profile must never be written into the llm-pi-ai schema.
     settingsNs: 'commandcode-provider',
+    // The route is pooled from its first request: an anonymous request cannot
+    // pass the vendor gate, so the shipped starter identity gives the Keys
+    // card its first key slot and a credential-less request fails with the
+    // MISSING_CREDENTIAL action instead of falling back to keyless.
+    pool: {
+      strategy: 'priority-sticky',
+      identities: [{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }],
+    },
     // Browser badges belong only to account flows that cannot complete without
     // a browser (antigravity's Google OAuth); the vendor dashboard is an
     // ordinary quirk here, not an operator-blocking browser requirement.
     requiresBrowser: [],
     quirks: [
-      'Local install dependencies: Node.js 22, the opencode-dotfiles keypool proxy (or a placed ~/.config/opencode/keypool/proxy.js), and a systemd/launchd user service; Docker is never required. Windows has no supported local install — use a keypool running elsewhere',
-      'macOS: the launchd agent runs node through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin — a node reachable only from a fish or zsh configuration (for example an nvm setup) is not found; make node reachable from a login bash profile or one of those directories',
+      'Local install dependencies: Node.js 22 (the setup step links and builds the provider package); Docker is never required, and no proxy or user service runs — the route talks to the vendor directly',
+      'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — the provider package injects the four CLI headers itself; no proxy is required',
+      'Keys are managed as pool identities on the Settings → Models Keys card: the route ships one starter identity (COMMANDCODE_KEY_1) and rotates identities in priority order',
       'The vendor account and quota dashboard live at commandcode.ai (browser)',
-      'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") — traffic must go through the keypool with CLI headers',
       'DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it',
-      'The keypool may be shared with other tools — never stop or remove the shared keypool service when removing this provider',
-      'The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI',
-      'The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer — clients must not duplicate it',
-      'Quota is per key and real: the keypool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled key is spent — a normal state, not a routing defect',
+      'Migration: scripts/import-keypool-keys.mjs turns the old keypool pools.json commandcode keys into a settings pool block; it reads the old file but never prints key material',
+      'An existing route still pointed at a loopback keypool keeps working until it is switched: set its baseURL to https://api.commandcode.ai, add the imported pool identities, then retire the proxy',
+      'The provider package owns the request sanitizer (embedded-base64 scrub, 200k text cap, 413 strip-oldest retry) — clients must not duplicate it',
+      'Quota is per key and real: the native pool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled identity is spent — a normal state, not a routing defect',
+      'A route whose identities resolve no credential fails with MISSING_CREDENTIAL naming the Keys card; there is no anonymous fallback',
     ],
     reuse: {
-      label: 'Use a detected instance',
-      baseURL: 'http://127.0.0.1:8899/commandcode',
-      note: 'Uses the keypool already running on this device; the provider package speaks the CLI protocol and fetches the 83-model catalog from /commandcode/catalog.json.',
-      health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
+      label: 'Use the vendor endpoint now',
+      baseURL: 'https://api.commandcode.ai',
+      note: 'Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.',
+      health: { url: 'https://api.commandcode.ai/', timeoutMs: 5000 },
     },
     local: {
-      label: 'Install locally (provider package + keypool)',
-      baseURL: 'http://127.0.0.1:8899/commandcode',
-      deps: ['Node.js 22', 'opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)'],
-      diskHint: '~5 MB provider package, ~150 MB RAM for the keypool, no GPU',
-      dashboardUrl: 'http://127.0.0.1:8899/status',
+      label: 'Link the provider package, then use the vendor endpoint',
+      baseURL: 'https://api.commandcode.ai',
+      deps: ['Node.js 22'],
+      diskHint: '~5 MB provider package; no local service, no GPU',
       runtime: 'node',
       install: {
-        // The provider package and keypool proxy are shared across platforms;
-        // only the user-service wrapper differs. The proxy itself is external
-        // (opencode-dotfiles) and preflight refuses the path when neither it
-        // nor a placed proxy.js exists.
-        default: { label: 'Install locally (provider package + systemd keypool unit)', requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
-        linux: { label: 'Install locally (provider package + systemd keypool unit)', requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
-        darwin: {
-          label: 'Install locally (provider package + launchd keypool agent)',
-          deps: ['Node.js 22', 'macOS 11+ (launchd)', 'opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)'],
-          diskHint: '~5 MB provider package, ~150 MB RAM for the keypool, no GPU; logs in ~/Library/Logs',
-          requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }],
-          steps: KEYPOOL_LAUNCHD_STEPS,
-        },
+        // The setup is one shared, idempotent step; there is no service to
+        // wrap and no proxy to deploy on any platform.
+        default: { steps: [COMMANDCODE_INSTALL_STEP] },
+        linux: { steps: [COMMANDCODE_INSTALL_STEP] },
+        darwin: { steps: [COMMANDCODE_INSTALL_STEP] },
         win32: {
           label: 'Not supported on Windows',
-          unsupported: 'The keypool local install needs a POSIX user service (systemd or launchd) and the opencode-dotfiles keypool proxy; this profile has no supported Windows provisioning path. Run the keypool elsewhere and use "Use a detected instance", or run it manually and point the route at it.',
+          unsupported: 'The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually (node scripts/install.mjs <profile>) or run the harness on Linux/macOS.',
           steps: [],
         },
       },
-      health: { url: 'http://127.0.0.1:8899/healthz', timeoutMs: 5000 },
+      health: { url: 'https://api.commandcode.ai/', timeoutMs: 5000 },
     },
     removal: {
-      steps: [
-        // Drops only the commandcode pool entry; the keypool rereads pools.json
-        // per request, so the shared service (and the `go` pool) is never
-        // stopped, restarted, or otherwise touched.
-        { label: 'Drop only pools.commandcode (keypool and other pools stay)', command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs"', optional: true },
-      ],
+      // No local service exists: the vendor endpoint needs no teardown and the
+      // provider package is part of the shipped profile.
+      steps: [],
       warnings: [
-        'Removal drops only DSH state and the commandcode pool keys — it never stops or removes the shared keypool service (other tools may need it)',
-        'usage.jsonl is keypool-wide and is not touched',
-        'The provider package and its profile entry stay installed; delete the entry only when no route declares it',
+        'Removal drops only DSH state — the route, its COMMANDCODE_KEY_1 credential reference, its pool state, and its cache entry; no local service exists to stop',
+        'Vendor keys stored under other pool identities (for example COMMANDCODE_KEY_2) are not deleted by removal — delete them on the Keys card',
+        'Vendor account state and quota live at commandcode.ai and are never touched',
       ],
     },
     fallbackModel: 'deepseek/deepseek-v4.1-flash',
@@ -699,6 +693,38 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
     }
     if (manifest.unsupported === undefined && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === undefined) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`)
+    }
+    // A direct vendor route has no gatekeeper in front of it: without a pool
+    // or a key reference it can only send the anonymous request the vendor
+    // rejects, so the declaration itself is broken.
+    if (manifest.delivery === 'direct' && manifest.unsupported === undefined
+      && manifest.pool === undefined && manifest.auth.kind === 'none') {
+      problems.push(`${where}: a direct route must declare a key pool or a non-keyless auth kind`)
+    }
+    if (manifest.pool !== undefined) {
+      // An llm-pi-ai route must never declare a DSH pool: its fronting
+      // service owns the keys (antigravity) or it uses one unified key
+      // (freellmapi). A provider served by its own adapter owns its own pool
+      // schema, and that namespace is exactly what settingsNs names.
+      if (manifest.settingsNs === undefined) {
+        problems.push(`${where}: a key pool needs its own settingsNs; llm-pi-ai routes must not declare one`)
+      }
+      if (manifest.pool.identities.length === 0) problems.push(`${where}: the key pool declares no identities`)
+      const identityIds = new Set<string>()
+      for (const identity of manifest.pool.identities) {
+        if (identity.id === '') problems.push(`${where}: a key-pool identity has an empty id`)
+        if (identityIds.has(identity.id)) problems.push(`${where}: key-pool identity id "${identity.id}" is duplicated`)
+        identityIds.add(identity.id)
+        if (!/^[A-Z_][A-Z0-9_]*$/.test(identity.credentialRef)) {
+          problems.push(`${where}: key-pool identity "${identity.id}" credentialRef must be an uppercase credential reference`)
+        }
+        if (identity.priority !== undefined && (!Number.isSafeInteger(identity.priority) || identity.priority < 0)) {
+          problems.push(`${where}: key-pool identity "${identity.id}" priority must be a non-negative integer`)
+        }
+        if (identity.enabled !== undefined && typeof identity.enabled !== 'boolean') {
+          problems.push(`${where}: key-pool identity "${identity.id}" enabled must be a boolean`)
+        }
+      }
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
     if (manifest.auth.kind === 'none' && manifest.protocol === 'anthropic-messages') {

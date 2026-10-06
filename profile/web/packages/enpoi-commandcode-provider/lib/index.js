@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { credentialRef } from "@deepseek-ai/dsh-credentials";
+import { credentialRef, isCredentialRefName } from "@deepseek-ai/dsh-credentials";
+import {
+  LlmError as LlmError3
+} from "@deepseek-ai/dsh-llm";
 import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import { PoolEngine } from "@deepseek-ai/dsh-llm-pi-ai";
 import { deepEqualJson } from "@deepseek-ai/dsh-util-values";
@@ -75,6 +78,7 @@ var CatalogStore = class {
   constructor(options) {
     this.options = options;
   }
+  options;
   pending;
   resolved;
   origin = "snapshot";
@@ -532,7 +536,7 @@ function classifyCommandCodeError(status, body) {
   if (/Proxy use detected/i.test(detail)) {
     return {
       code: "PROXY_USE_DETECTED",
-      message: `${message} \u2014 the CLI-shaped endpoint was reached without the keypool (or its CLI headers) in front of it`
+      message: `${message} \u2014 the request reached the CLI-shaped endpoint without the provider's CLI headers; check that the adapter injected x-command-code-version / x-cli-environment / x-project-slug / user-agent: cli`
     };
   }
   if (status === 401 || status === 402 || status === 403) return { code: "AUTH", message };
@@ -908,6 +912,7 @@ var CommandCodeAdapter = class extends LlmAdapter {
     super();
     this.options = options;
   }
+  options;
   profileOf(provider) {
     const profile = this.options.profiles().get(provider);
     if (profile === void 0) throw new LlmError2(`Command Code adapter does not own provider "${provider}"`, "NO_ADAPTER");
@@ -974,10 +979,16 @@ var CommandCodeAdapter = class extends LlmAdapter {
       }
     }
     const pooled = profile.pool !== void 0 && profile.pool.identities.length > 0;
+    if (!pooled && profile.keyless && !isLoopbackBaseURL(profile.baseURL)) {
+      throw new LlmError2(
+        `Command Code route "${options.provider}" is keyless but points at the non-loopback endpoint ${profile.baseURL}; add a key on the Models page (Keys card) or declare pool.identities, then retry`,
+        "MISSING_CREDENTIAL"
+      );
+    }
     const key = pooled || profile.keyless ? void 0 : await this.options.resolveApiKey(profile);
     if (!pooled && !profile.keyless && key === void 0) {
       throw new LlmError2(
-        `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? "no credential"}, which is not set`,
+        `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? "no credential"}, which is not set; add a key on the Models page (Keys card) or export it, then retry`,
         "MISSING_CREDENTIAL"
       );
     }
@@ -988,10 +999,10 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const envelope = buildRequest({
       model: options.model,
       messages,
-      // The default keypool route is fronted by the standalone proxy, which
-      // owns text sanitization; a pooled route talks to the vendor directly,
-      // so the conversion seam sanitizes its text (scrub + 200k cap) once.
-      sanitizeText: pooled,
+      // A direct route (pooled or single-key) talks to the vendor, so the
+      // conversion seam sanitizes its text (scrub + 200k cap) once; a legacy
+      // loopback keypool route leaves the body to the proxy downstream.
+      sanitizeText: pooled || !isLoopbackBaseURL(profile.baseURL),
       tools: toCcTools(options.tools),
       ...options.system === void 0 ? {} : { system: options.system },
       ...options.maxTokens === void 0 ? {} : { maxTokens: options.maxTokens },
@@ -1015,7 +1026,10 @@ var CommandCodeAdapter = class extends LlmAdapter {
           "content-type": "application/json",
           accept: "text/event-stream",
           ...attributionHeaders(),
-          ...key === void 0 ? {} : { authorization: `Bearer ${key}` }
+          // A direct vendor request must carry the CLI identity headers (the
+          // vendor gate rejects generic clients); a legacy loopback keypool
+          // route leaves them to the proxy and carries only the bearer token.
+          ...isLoopbackBaseURL(profile.baseURL) ? key === void 0 ? {} : { authorization: `Bearer ${key}` } : commandCodeHeaders(key)
         },
         body: JSON.stringify(envelope),
         signal
@@ -1367,6 +1381,12 @@ function parsePoolConfig(route, raw) {
     if (typeof identity.credentialRef !== "string" || identity.credentialRef === "") {
       throw new Error(
         `commandcode-provider: provider "${route}" pool identity "${identity.id}" needs a non-empty credentialRef`
+      );
+    }
+    if (!isCredentialRefName(identity.credentialRef)) {
+      throw new LlmError3(
+        `Command Code route "${route}" pool identity "${identity.id}" names "${identity.credentialRef}", which is not a credential reference; name one (for example COMMANDCODE_KEY_1) and store its key on the Models page (Keys card) or export it, then retry`,
+        "MISSING_CREDENTIAL"
       );
     }
     const priority = identity.priority;

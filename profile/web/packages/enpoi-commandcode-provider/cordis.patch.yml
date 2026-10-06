@@ -2,7 +2,8 @@
 #
 # The route stays dormant until the heavy-provider flow (or an operator) writes
 # `providers.commandcode` into this entry's settings section. The adapter then
-# serves the CLI-shaped /alpha/generate protocol through the local keypool.
+# serves the CLI-shaped /alpha/generate protocol against the vendor endpoint,
+# authenticating and rotating the route's native key-pool identities itself.
 - insert:
     - id: commandcode-provider
       name: 'dsh-enpoi-commandcode-provider'

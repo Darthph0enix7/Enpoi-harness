@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { platformInstallVariant, platformUnsupported, resolveHeavyInstall } from './manifests.js'
-import type { HeavyFileRequirement, HeavyHealth, HeavyLocalRuntime, HeavyProviderManifest, HeavyStep } from './manifests.js'
+import type { HeavyFileRequirement, HeavyHealth, HeavyLocalRuntime, HeavyManifestPool, HeavyProviderManifest, HeavyStep } from './manifests.js'
 
 /** The llm-pi-ai settings namespace every route write targets. */
 export const LLM_NS = 'llm-pi-ai'
@@ -66,6 +66,8 @@ export interface HeavyRouteProfile {
   baseURL: string
   apiKeyEnv?: string
   keyless?: boolean
+  /** Provider-native credential pool declared by a custom-protocol manifest. */
+  pool?: HeavyManifestPool
   models: Array<{ id: string; name?: string }>
 }
 
@@ -149,6 +151,10 @@ export interface InstanceCandidate {
  * @returns candidates in probe order.
  */
 export function instanceCandidates(manifest: HeavyProviderManifest, configuredBaseURL?: string): InstanceCandidate[] {
+  // A direct manifest addresses the vendor's public endpoint; there is no
+  // on-device instance to probe, and probing the vendor from detection would
+  // report it as a local instance.
+  if (manifest.delivery === 'direct') return []
   const candidates: InstanceCandidate[] = []
   const add = (baseURL: string, url: string): void => {
     if (candidates.some(candidate => candidate.url === url)) return
@@ -178,7 +184,8 @@ export interface InstanceDetection {
  * Probe localhost for an already-running instance: the configured port (when
  * one is recorded), the manifest's endpoint, and the default port. Fail-soft:
  * every failure is reported, never thrown, and the declared endpoint is the
- * fallback address when nothing answers.
+ * fallback address when nothing answers. A `delivery: 'direct'` manifest has
+ * no on-device instance and answers the same fail-soft not-applicable result.
  * @param deps - host seams (fetch).
  * @param manifest - heavy manifest.
  * @param configuredBaseURL - the route address already in settings, when any.
@@ -189,6 +196,14 @@ export async function detectInstance(
   manifest: HeavyProviderManifest,
   configuredBaseURL?: string,
 ): Promise<InstanceDetection> {
+  if (manifest.delivery === 'direct') {
+    return {
+      ok: false,
+      baseURL: manifest.reuse.baseURL,
+      url: manifest.reuse.health.url,
+      health: { ok: false, error: 'direct vendor endpoint — no local instance to detect', checkedAt: Date.now() },
+    }
+  }
   let firstFailure: InstanceDetection | undefined
   for (const candidate of instanceCandidates(manifest, configuredBaseURL)) {
     const health = await probeHealth({ ...manifest.reuse.health, url: candidate.url }, deps.fetchImpl)
@@ -382,8 +397,10 @@ export function overlayManifest(
 /**
  * Build the route profile for one mode. Auth follows the manifest: `none`
  * writes `keyless`, `placeholder` writes only the reference (llm-pi-ai refuses
- * keyless anthropic routes), and the DSH key pool is NEVER declared — the
- * heavy providers either have their own pool (antigravity) or a single key.
+ * keyless anthropic routes), and a manifest-declared `pool` is written as the
+ * route's provider-native pool (identities only — secrets stay in the
+ * credentials store). An llm-pi-ai route never declares a pool: the heavy
+ * providers either have their own pool (antigravity) or a single key.
  * @param manifest - heavy manifest.
  * @param mode - detected instance or local install.
  * @param models - discovered models; the fallback model fills an empty list.
@@ -399,12 +416,23 @@ export function routeProfile(
   const list = models.length > 0
     ? models.map(model => model.name === undefined ? { id: model.id } : { id: model.id, name: model.name })
     : manifest.fallbackModel === undefined ? [] : [{ id: manifest.fallbackModel }]
+  // A direct route never runs a local service, so its name must not carry the
+  // setup path's "(local)" suffix even though the setup flow provisioned it.
+  const suffix = manifest.delivery === 'direct' ? ' (direct)' : mode === 'local' ? ' (local)' : ' (detected)'
   return {
-    displayName: `${manifest.label}${mode === 'reuse' ? ' (detected)' : ' (local)'}`,
+    displayName: `${manifest.label}${suffix}`,
     api: manifest.protocol,
     baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === undefined ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === 'none' ? { keyless: true } : {},
+    ...manifest.pool === undefined
+      ? {}
+      : {
+          pool: {
+            ...manifest.pool.strategy === undefined ? {} : { strategy: manifest.pool.strategy },
+            identities: manifest.pool.identities.map(identity => ({ ...identity })),
+          },
+        },
     models: list,
   }
 }
@@ -577,9 +605,14 @@ export async function writeRoute(
   return profile
 }
 
-/** Store the unified key when the user supplied one; no key means no credential. */
+/**
+ * Store the key the operator supplied with an add. A pooled manifest stores it
+ * under its first identity's reference (the Keys card slot a fresh route
+ * shows); otherwise the unified/placeholder auth reference is the target. No
+ * key means no credential.
+ */
 export async function storeCredential(deps: HeavyDeps, manifest: HeavyProviderManifest, key: string | undefined): Promise<boolean> {
-  const ref = manifest.auth.apiKeyEnv
+  const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv
   if (key === undefined || key.trim() === '' || ref === undefined) return false
   const credentials = deps.credentials
   if (credentials === undefined) throw new Error('credentials seam absent — cannot store the key')
@@ -604,6 +637,9 @@ export interface ReuseOutcome {
  * endpoint, then the default port), discover its models, write the route at
  * the detected address, then store the key when one was supplied. The probe
  * never blocks the add — its verdict is reported for the UI's health badge.
+ * A `delivery: 'direct'` manifest skips detection and model discovery: it
+ * probes the declared vendor endpoint for the health badge and writes the
+ * route at the vendor baseURL (the bundled catalog is the model source).
  * @param deps - host seams.
  * @param manifest - heavy manifest.
  * @param key - optional unified gateway key.
@@ -614,19 +650,25 @@ export async function useDetectedInstance(
   manifest: HeavyProviderManifest,
   key?: string,
 ): Promise<ReuseOutcome> {
+  const direct = manifest.delivery === 'direct'
   const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest))
   const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
-  const detection = await detectInstance(deps, manifest, configuredBase)
-  const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL
-  const models = await discoverModels(endpoint, key, deps.fetchImpl)
+  const detection = direct ? undefined : await detectInstance(deps, manifest, configuredBase)
+  const endpoint = direct
+    ? manifest.reuse.baseURL
+    : detection!.ok ? detection!.baseURL : manifest.reuse.baseURL
+  const models = direct ? [] : await discoverModels(endpoint, key, deps.fetchImpl)
+  const health = direct
+    ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
+    : detection!.health
   const route = await writeRoute(deps, manifest, 'reuse', models, { baseURL: endpoint })
   const credentialStored = await storeCredential(deps, manifest, key)
   return {
     route,
-    health: detection.health,
+    health,
     models,
     credentialStored,
-    ...detection.ok && detection.port !== undefined ? { port: detection.port } : {},
+    ...detection?.ok === true && detection.port !== undefined ? { port: detection.port } : {},
     endpoint,
   }
 }

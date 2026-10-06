@@ -134,3 +134,27 @@ it('refuses a settings write whose routes cannot be served and keeps the stored 
   expect(ctx.llm.listProviders()).toEqual([{ id: 'commandcode', name: 'commandcode' }])
   expect((await ctx.llm.listModels('commandcode')).length).toBeGreaterThan(0)
 })
+
+it('refuses a settings write whose pool identity names a malformed credential reference', async () => {
+  const ctx = new Context()
+  cleanups.push(async () => {
+    await ctx.fiber.dispose()
+  })
+  await ctx.plugin(LlmRuntime)
+  const live = await liveConfig(ctx, CommandCode, {
+    providers: { commandcode: { baseURL: 'https://vendor.test/v1', keyless: true } },
+  })
+
+  const failure = await live.update({
+    providers: { commandcode: { pool: { identities: [{ id: 'key-1', credentialRef: 'commandcode-key-1' }] } } },
+  }).catch((error: unknown) => error)
+
+  // A ref outside the credentials grammar can never resolve; the parse fails
+  // with the Keys-card action instead of a raw TypeError on the next request.
+  expect((failure as { code?: string }).code).toBe('MISSING_CREDENTIAL')
+  expect((failure as Error).message).toContain('commandcode-key-1')
+  expect((failure as Error).message).toContain('credential reference')
+  expect((failure as Error).message).toContain('Keys card')
+  // The refused write did not displace the working route.
+  expect(ctx.llm.listProviders()).toEqual([{ id: 'commandcode', name: 'commandcode' }])
+})

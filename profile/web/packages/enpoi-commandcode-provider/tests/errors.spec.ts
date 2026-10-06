@@ -1,6 +1,6 @@
 /**
  * Failure classes: request-level errors are never retryable; quota/auth/rate
- * classes are distinct; "Proxy use detected" names the bypassed keypool.
+ * classes are distinct; "Proxy use detected" names the missing CLI header set.
  */
 import { expect, it } from 'vitest'
 import { classifyCommandCodeError, errorMessageFromBody } from '../src/errors.js'
@@ -20,7 +20,7 @@ it('classifies context-length 400s as CONTEXT_WINDOW_EXCEEDED (never rotated)', 
 it('classifies "Proxy use detected" as PROXY_USE_DETECTED', () => {
   const failure = classifyCommandCodeError(400, '{"error":{"message":"Proxy use detected. This endpoint only serves CLI. Use Command Code provider API instead."}}')
   expect(failure.code).toBe('PROXY_USE_DETECTED')
-  expect(failure.message).toContain('keypool')
+  expect(failure.message).toContain('CLI headers')
 })
 
 it('classifies quota, rate, auth, server and transport classes', () => {

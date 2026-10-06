@@ -1,7 +1,43 @@
 # Commandcode route: native key pool instead of the standalone proxy
 
-Status: decided (2026-10-06) — implementing, staged behind an opt-in setting.
+Status: FLIPPED (2026-10-06) — live gate PASSED; the shipped route is the direct
+vendor endpoint with the native pool. The standalone `~/.config/opencode/keypool`
+proxy (`:8899`) is no longer a dependency of this route.
 Recon: exp-5 decision memo (session archive); this doc is the durable summary.
+
+## Live-gate result (2026-10-06)
+
+Owner-run, owner's key, no proxy (`scripts/live-gate.mjs`):
+
+- With the four CLI headers: HTTP 200 (SSE started).
+- Without them: HTTP 403 `upgrade_required` ("Your Command Code CLI is out of
+  date", minVersion 0.18.10). The four CLI headers are the gate.
+- The pooled adapter driven directly against `https://api.commandcode.ai`
+  streamed a real completion (usage input 50 / cacheRead 7552); with a bad
+  identity at priority 1 and the good one at priority 2 it logged
+  `identity "bad" failed (AUTH); rotating` and completed on the good identity
+  with text `DIRECT-POOL-OK`.
+
+## Flip record (2026-10-06)
+
+The manifest entry is reshaped to a direct-vendor, pool-native route:
+
+- `delivery: 'direct'`, baseURL `https://api.commandcode.ai` (reuse and local),
+  `defaultPort: 443`, health probe `https://api.commandcode.ai/` (the vendor
+  root answers 200 unauthenticated; it exposes no health or catalog endpoint).
+- `auth: { kind: 'unified', apiKeyEnv: 'COMMANDCODE_KEY_1' }` plus a starter
+  `pool` identity (`{ id: key-1, credentialRef: COMMANDCODE_KEY_1, priority: 1 }`)
+  written into the `commandcode-provider` settings namespace. A fresh route is
+  pooled from its first request: a credential-less request fails with
+  `MISSING_CREDENTIAL` naming the Keys card, never an anonymous fallback.
+- Install is the one shared, idempotent step: link and build the provider
+  package (`scripts/install.mjs`). No `requiresFiles`, no proxy deploy, no
+  seed, no health-wait, no systemd/launchd unit, and no `keypool-remove.mjs`
+  teardown; removal drops DSH state only.
+- Migration helper: `scripts/import-keypool-keys.mjs` reads the old
+  `pools.json` and prints the settings `pool` identities block
+  (`COMMANDCODE_KEY_<n>`, ids and priorities preserved) plus the Keys-card/env
+  steps. It writes nothing and prints no key material.
 
 ## Decision
 
@@ -13,7 +49,8 @@ a hard dependency.
 
 Fallback if live vendor testing disproves the direct path: vendor `proxy.js`
 (+ its test) into the profile and deploy it on demand. Keep the keypool
-manifest paths until the direct path is proven.
+manifest paths until the direct path is proven. (Retired: the live gate passed
+and the flip landed; the vendored-proxy branch is not shipped.)
 
 ## What each side owns
 
@@ -49,34 +86,38 @@ proxy is not a translator.
 
 ## Plan (staged)
 
-- (i) This doc + Oracle design review.
-- (ii) Land reset-parser extension (`llm-pi-ai`, benefits all routes) with tests.
+- (i) This doc + Oracle design review. — done.
+- (ii) Land reset-parser extension (`llm-pi-ai`, benefits all routes) with tests. — done.
 - (iii) Land sanitizer + headers + pool loop in `enpoi-commandcode-provider`
-  behind an opt-in `pool` setting; default stays single-key/keyless, so no
-  behavior change.
+  behind an opt-in `pool` setting. — done.
 - (iv) Owner-run live gate: direct vendor request with CLI headers, rotation on
-  429, 413 strip, cooldown persistence.
+  429, 413 strip, cooldown persistence. — done (gate PASSED; see above).
 - (v) Flip the manifest: drop the `:8899` dependency and the deploy/seed steps
-  for the pooled path; keep the vendored-proxy fallback branch until it soaks.
-- (vi) Docs + migration note (`pools.json` keys → credentials store identities).
+  for the pooled path. — done; the vendored-proxy fallback branch was not
+  needed and the external proxy is no longer part of the route.
+- (vi) Docs + migration note (`pools.json` keys → credentials store identities). — done;
+  `scripts/import-keypool-keys.mjs` and the manifest quirks carry the migration.
 
 ## What the owner provides
 
-Commandcode account keys: one identity per key in settings
-(`providers.commandcode.pool.identities[] {id, credentialRef, priority}`) with
-the secret stored via the Models-page Keys card (credentials store) or an env
-var — never in settings YAML. The old `pools.json` keys map 1:1 by id if
-continuity is wanted.
+Commandcode account keys: one identity per key in the route profile
+(`providers.commandcode.pool.identities[] {id, credentialRef, priority}` under
+the `commandcode-provider` settings namespace) with the secret stored via the
+Models-page Keys card (credentials store) or an environment variable — never in
+settings YAML. `scripts/import-keypool-keys.mjs` maps the old `pools.json` keys
+1:1 by id to `COMMANDCODE_KEY_<n>` references for continuity.
 
 ## Risks
 
 - Vendor gate wording is undocumented; live test is the only proof.
 - Live catalog refresh is lost unless the vendor exposes a catalog endpoint
-  (snapshot fallback stays).
+  (the bundled 83-model snapshot is the catalog for a direct route; a legacy
+  loopback keypool route still serves `/commandcode/catalog.json`).
 - Operators sharing `:8899` across tools lose that sharing by design
   (self-containment wins); document it.
-- `usage.jsonl` forensics need a replacement story (Keys card + attempt
-  records); decide before flipping the manifest.
+- `usage.jsonl` forensics are not replaced; the Keys card + attempt records and
+  the provider logs are the native-pool equivalents. Decide whether a
+  per-attempt usage log is worth adding.
 
 ## Oracle amendments (ora-2, 2026-10-06) — required before the manifest flip
 
@@ -117,3 +158,8 @@ identity, a toggled key, a baseURL change) are not observed until a remount.
 Make the profiles dynamic — re-evaluate on volatile settings updates, as
 `llm-pi-ai` does — so the Keys card and Settings take effect on the next
 request without a daemon restart. Until then the pooled path is test-only.
+
+**Landed** (commit `fix(commandcode): route profiles are live, not mount-frozen`):
+per-operation profile resolution, the `loader/volatile-update` re-registration
+seam, and the `internal/config` refusal of unserviceable writes — the flip no
+longer depends on a restart to observe settings edits.

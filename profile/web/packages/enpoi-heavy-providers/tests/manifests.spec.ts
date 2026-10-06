@@ -1,7 +1,8 @@
 /**
- * Manifest-table invariants: every heavy provider is fully declared, the
- * antigravity route never opts into DSH key pooling, and commandcode ships as
- * an explicit unsupported-but-documented reuse path.
+ * Manifest-table invariants: every heavy provider is fully declared, only a
+ * route served by its own adapter declares a key pool (an llm-pi-ai route
+ * must not — its fronting service owns the keys), and commandcode is a
+ * direct-vendor route whose fresh-machine dependency is the provider package.
  */
 import { expect, it } from 'vitest'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall } from '../src/manifests.js'
@@ -12,10 +13,34 @@ it('declares the three heavy providers with no structural problems', () => {
   expect(HEAVY_MANIFESTS.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode'])
 })
 
-it('keeps every manifest free of DSH key-pool declarations', () => {
-  const serialized = JSON.stringify(HEAVY_MANIFESTS)
-  expect(serialized).not.toContain('"pool"')
-  expect(serialized).not.toContain('identities')
+it('declares a key pool only on routes served by their own settings namespace', () => {
+  // The shipped llm-pi-ai heavy routes must never declare a DSH pool: the
+  // antigravity proxy runs its own account pool and freellmapi uses one
+  // unified key, so a pool there would double-manage the same credentials.
+  for (const manifest of HEAVY_MANIFESTS) {
+    if (manifest.settingsNs === undefined) {
+      expect(JSON.stringify(manifest), manifest.id).not.toContain('"pool"')
+      expect(JSON.stringify(manifest), manifest.id).not.toContain('identities')
+    }
+  }
+  // commandcode is served by its own adapter, so `pool` is that adapter's own
+  // schema and never reaches the llm-pi-ai section.
+  const commandcode = manifestById('commandcode')
+  expect(commandcode?.pool).toEqual({
+    strategy: 'priority-sticky',
+    identities: [{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }],
+  })
+})
+
+it('rejects a key pool on a manifest that writes to llm-pi-ai', () => {
+  const broken = { ...manifestById('freellmapi')!, pool: manifestById('commandcode')!.pool }
+  expect(manifestProblems([broken]).join('\n')).toContain('a key pool needs its own settingsNs')
+})
+
+it('rejects a direct manifest that could only send anonymous requests', () => {
+  const direct = manifestById('commandcode')!
+  const broken = { ...direct, pool: undefined, auth: { kind: 'none' as const, apiKeyEnv: 'COMMANDCODE_KEY_1', keyless: true } }
+  expect(manifestProblems([broken]).join('\n')).toContain('a direct route must declare a key pool or a non-keyless auth kind')
 })
 
 it('antigravity is a loopback anthropic route with a placeholder ref, never keyless', () => {
@@ -65,22 +90,31 @@ it('every heavy provider states its local install dependencies (Docker never req
   expect(manifestById('commandcode')?.quirks.join('\n')).toContain('Docker is never required')
 })
 
-it('commandcode is a served custom-protocol route on its own settings namespace', () => {
+it('commandcode is a direct-vendor custom-protocol route with its own pool', () => {
   const manifest = manifestById('commandcode')
   expect(manifest?.unsupported).toBeUndefined()
-  expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.delivery).toBe('direct')
+  expect(manifest?.reuse.baseURL).toBe('https://api.commandcode.ai')
+  expect(manifest?.local.baseURL).toBe('https://api.commandcode.ai')
   expect(manifest?.protocol).toBe('commandcode/alpha-generate')
   // llm-pi-ai cannot parse this protocol; the profile must go elsewhere.
   expect(manifest?.settingsNs).toBe('commandcode-provider')
-  expect(manifest?.local.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(manifest?.auth).toEqual({ kind: 'unified', apiKeyEnv: 'COMMANDCODE_KEY_1', keyless: false })
   expect(manifest?.local.install.default.steps.length).toBeGreaterThan(0)
 })
 
-it('commandcode local install wires the provider package and the keypool', () => {
-  const commands = manifestById('commandcode')!.local.install.default.steps.map(step => step.command).join('\n')
+it('commandcode local install only links/builds the provider package, never a keypool', () => {
+  const manifest = manifestById('commandcode')!
+  const commands = manifest.local.install.default.steps.map(step => step.command).join('\n')
   expect(commands).toContain('enpoi-commandcode-provider/scripts/install.mjs')
-  expect(commands).toContain('keypool-seed.mjs')
-  expect(commands).toContain('keypool.service')
+  expect(commands).not.toContain('keypool')
+  expect(commands).not.toContain('systemctl')
+  expect(commands).not.toContain('launchctl')
+  expect(commands).not.toContain('curl')
+  // Every POSIX platform resolves the one shared setup step.
+  for (const platform of ['linux', 'darwin'] as const) {
+    expect(resolveHeavyInstall(manifest.local, platform).steps).toEqual(manifest.local.install.default.steps)
+  }
 })
 
 it('a served non-llm-pi-ai protocol without settingsNs is a manifest problem', () => {
@@ -88,23 +122,23 @@ it('a served non-llm-pi-ai protocol without settingsNs is a manifest problem', (
   expect(manifestProblems([broken]).some(problem => problem.includes('settingsNs'))).toBe(true)
 })
 
-it('commandcode removal drops only the commandcode pool, never the shared keypool service', () => {
+it('commandcode removal has no local teardown and never mentions a shared keypool', () => {
   const manifest = manifestById('commandcode')
-  const commands = manifest?.removal.steps.map(step => step.command).join('\n') ?? ''
-  expect(commands).toContain('keypool-remove.mjs')
-  expect(commands).not.toContain('systemctl')
-  expect(commands).not.toContain('rm -rf')
+  expect(manifest?.removal.steps).toEqual([])
   const text = JSON.stringify(manifest?.removal)
-  expect(text).toContain('never stops or removes the shared keypool service')
-  expect(text).toContain('usage.jsonl')
+  expect(text).toContain('Keys card')
+  expect(text).not.toContain('keypool service')
+  expect(text).not.toContain('usage.jsonl')
 })
 
-it('commandcode descriptions keep the keypool, package, removal, and quota facts', () => {
+it('commandcode descriptions keep the vendor gate, adapter, migration, and quota facts', () => {
   const quirks = manifestById('commandcode')?.quirks.join('\n') ?? ''
   expect(quirks).toContain('Proxy use detected')
   expect(quirks).toContain('dsh-enpoi-commandcode-provider')
-  expect(quirks).toContain('never stop or remove the shared keypool service')
+  expect(quirks).toContain('Keys card')
+  expect(quirks).toContain('import-keypool-keys.mjs')
   expect(quirks).toContain('QUOTA failure')
+  expect(quirks).not.toContain('the shared keypool service')
   expect(manifestById('commandcode')?.reuse.note).toContain('provider package')
 })
 
@@ -152,43 +186,36 @@ it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
   const commands = manifestById('commandcode')!.local.install.default.steps.map(step => step.command).join('\n')
   expect(commands).not.toContain('{home}/.dsh')
   expect(commands).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs')
-  const removal = manifestById('commandcode')!.removal.steps.map(step => step.command).join('\n')
-  expect(removal).not.toContain('{home}/.dsh')
-  expect(removal).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs')
+  // A direct route has no local teardown step to substitute.
+  expect(manifestById('commandcode')!.removal.steps).toEqual([])
 })
 
-it('fails the keypool-proxy step fast with every searched location instead of skipping silently', () => {
-  const proxy = manifestById('commandcode')!.local.install.default.steps
-    .find(step => step.command.includes('keypool/proxy.js'))
-  expect(proxy?.optional).toBeUndefined()
-  expect(proxy?.command).toContain('exit 1')
-  expect(proxy?.command).toContain('not found')
-  expect(proxy?.command).toContain('{config}/opencode/keypool/proxy.js')
-  expect(proxy?.command).toContain('{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js')
-  expect(proxy?.command).toContain('{home}/dotfiles/opencode-dotfiles/keypool/proxy.js')
-  // Re-running with a placed proxy is a no-op.
-  expect(proxy?.command).toContain('already present')
-})
+it('runs a user service only where the manifest declares one (antigravity)', () => {
+  const antigravity = manifestById('antigravity')!
+  const linux = resolveHeavyInstall(antigravity.local, 'linux').steps.map(step => step.command).join('\n')
+  expect(linux).toContain('systemctl --user')
+  expect(linux).not.toContain('launchctl')
 
-it('provisions Linux with systemd and macOS with launchd for both user-service providers', () => {
-  for (const id of ['antigravity', 'commandcode']) {
-    const manifest = manifestById(id)!
-    const linux = resolveHeavyInstall(manifest.local, 'linux').steps.map(step => step.command).join('\n')
-    expect(linux, id).toContain('systemctl --user')
-    expect(linux, id).not.toContain('launchctl')
+  const darwin = resolveHeavyInstall(antigravity.local, 'darwin').steps.map(step => step.command).join('\n')
+  expect(darwin).toContain('{home}/Library/LaunchAgents/')
+  expect(darwin).toContain('launchctl bootout')
+  expect(darwin).toContain('launchctl bootstrap')
+  expect(darwin).toContain('{home}/Library/Logs/')
+  expect(darwin).not.toContain('systemctl')
 
-    const darwin = resolveHeavyInstall(manifest.local, 'darwin').steps.map(step => step.command).join('\n')
-    expect(darwin, id).toContain('{home}/Library/LaunchAgents/')
-    expect(darwin, id).toContain('launchctl bootout')
-    expect(darwin, id).toContain('launchctl bootstrap')
-    expect(darwin, id).toContain('{home}/Library/Logs/')
-    expect(darwin, id).not.toContain('systemctl')
+  // The default variant is the systemd path, so an unknown POSIX platform
+  // never receives launchd steps.
+  expect(resolveHeavyInstall(antigravity.local, 'freebsd').steps).toEqual(
+    resolveHeavyInstall(antigravity.local, 'linux').steps,
+  )
 
-    // The default variant is the systemd path, so an unknown POSIX platform
-    // never receives launchd steps.
-    expect(resolveHeavyInstall(manifest.local, 'freebsd').steps).toEqual(
-      resolveHeavyInstall(manifest.local, 'linux').steps,
-    )
+  // commandcode is a direct vendor route: no user service on any platform.
+  const commandcode = manifestById('commandcode')!
+  for (const platform of ['linux', 'darwin'] as const) {
+    const steps = resolveHeavyInstall(commandcode.local, platform).steps.map(step => step.command).join('\n')
+    expect(steps, platform).not.toContain('systemctl')
+    expect(steps, platform).not.toContain('launchctl')
+    expect(steps, platform).not.toContain('curl')
   }
 })
 

@@ -4,7 +4,7 @@
  * shell probe, and chooseLocalPath picks the platform's best path — vendor
  * desktop app, Docker, or Podman — or names the exact missing requirement.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -119,23 +119,26 @@ it('preflight picks the per-platform best path and names what is missing', () =>
   expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true, node: false }, 3210).path).toBe('detected')
 })
 
-it('a declared file requirement blocks preflight until one candidate path exists', () => {
-  const dir = scratchDir()
-  const context = { home: dir, dshHome: join(dir, '.dsh') }
-  const node: RuntimeProbe = { docker: false, podman: false, node: true }
+it('a direct-vendor manifest has no instance to detect; preflight gates on the setup runtime', async () => {
   const commandcode = manifestById('commandcode')!
+  // Detection has no candidates: the vendor endpoint is not an on-device
+  // instance, and probing it from detection would misreport it as one.
+  expect(instanceCandidates(commandcode)).toEqual([])
+  const detection = await detectInstance(depsWith(async url => ({ ok: true, status: 200, text: async () => url })), commandcode)
+  expect(detection.ok).toBe(false)
+  expect(detection.health.error).toContain('no local instance')
+  expect(detection.baseURL).toBe('https://api.commandcode.ai')
 
-  const absent = chooseLocalPath(commandcode, 'darwin', node, undefined, context)
-  expect(absent.path).toBe('unsupported')
-  expect(absent.missing.join(' ')).toContain('keypool proxy.js')
-
-  mkdirSync(join(dir, 'dotfiles', 'opencode-dotfiles', 'keypool'), { recursive: true })
-  writeFileSync(join(dir, 'dotfiles', 'opencode-dotfiles', 'keypool', 'proxy.js'), '// proxy', 'utf8')
-  expect(chooseLocalPath(commandcode, 'darwin', node, undefined, context).path).toBe('node')
-
-  // Without a home/dshHome context the check cannot run, so nothing is
-  // reported as missing (the pre-connection fallback still renders).
-  expect(chooseLocalPath(commandcode, 'darwin', node).path).toBe('node')
+  // The local setup runs install.mjs, so it still needs Node in the install
+  // shell; the dependency line names the version that is missing.
+  const node: RuntimeProbe = { docker: false, podman: false, node: true }
+  expect(chooseLocalPath(commandcode, 'linux', node).path).toBe('node')
+  const bare: RuntimeProbe = { docker: false, podman: false, node: false }
+  const missing = chooseLocalPath(commandcode, 'linux', bare)
+  expect(missing.path).toBe('unsupported')
+  expect(missing.missing).toEqual(['Node.js 22'])
+  // Windows has no /bin/bash for the setup step and stays refused.
+  expect(chooseLocalPath(commandcode, 'win32', node).path).toBe('unsupported')
 })
 
 it('the private overlay retargets reuse endpoints and dashboards; absent or malformed files mean no override', () => {

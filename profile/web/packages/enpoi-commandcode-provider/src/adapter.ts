@@ -6,17 +6,19 @@
  * citizen. Requests go to `POST {baseURL}/alpha/generate`.
  *
  * Two credential postures share the envelope and the SSE parser:
- * - default (no `pool` on the route): the baseURL points at the local keypool
- *   (`http://127.0.0.1:8899/commandcode`), which injects the Command Code CLI
- *   headers and rotates the real keys; the adapter sends no CLI header and
- *   never touches a vendor key. This path is unchanged.
- * - opt-in (`pool.identities` on the route): the route is self-contained.
- *   The shared `PoolEngine` orders identities per model, the adapter injects
- *   the CLI headers and the per-identity auth itself, has `convert.ts`
- *   sanitize text at the conversion seam (embedded-base64 scrub, 200k cap;
- *   images ride the converter's one forward budget), retries a 413 once on
- *   the same identity with older images stripped, and rotates only before
- *   the first content delta commits.
+ * - pooled (the shipped route: `pool.identities` on the route): the route is
+ *   self-contained. The shared `PoolEngine` orders identities per model, the
+ *   adapter injects the CLI headers and the per-identity auth itself, has
+ *   `convert.ts` sanitize text at the conversion seam (embedded-base64 scrub,
+ *   200k cap; images ride the converter's one forward budget), retries a 413
+ *   once on the same identity with older images stripped, and rotates only
+ *   before the first content delta commits.
+ * - single-key: a route without pool identities resolves its `apiKeyEnv` once
+ *   per request. A keyless route is refused unless the baseURL is loopback —
+ *   a keypool deployment there injects the vendor auth (and CLI headers)
+ *   itself, while an anonymous request to the public vendor cannot pass its
+ *   gate, so the adapter fails with the Keys-card action instead of sending
+ *   it. A pooled route ignores `keyless` entirely.
  *
  * Capabilities come exclusively from the route's catalog (the keypool's
  * `{baseURL}/catalog.json` when the baseURL is loopback, otherwise the
@@ -51,7 +53,7 @@ import {
 import type { PoolEngine, PoolFailureClass } from '@deepseek-ai/dsh-llm-pi-ai'
 import { parseQuotaHeaders, ROTATING_CLASSES } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { CatalogEntry } from './catalog.js'
-import { CatalogStore, contextWindowOf, effortsOf, entryFor, modalitiesOf, visionOf } from './catalog.js'
+import { CatalogStore, contextWindowOf, effortsOf, entryFor, isLoopbackBaseURL, modalitiesOf, visionOf } from './catalog.js'
 import type { CcEnvelope, CcInputMessage, CcInputPart, CcTool } from './convert.js'
 import { buildRequest } from './convert.js'
 import { classifyCommandCodeError } from './errors.js'
@@ -84,11 +86,14 @@ export interface CommandCodeRouteProfile {
   /** Provider route key (`commandcode`). */
   route: string
   displayName: string
-  /** Route base URL: the keypool proxy, or the vendor endpoint for a pooled route. */
+  /** Route base URL: the vendor endpoint, or a loopback keypool that fronts it. */
   baseURL: string
-  /** Credential reference when the route is BYOK; absent for the keypool. */
+  /** Credential reference when the route is BYOK; absent for a keypool route. */
   apiKeyEnv?: string
-  /** Keypool routes are keyless: the proxy supplies the Authorization header. */
+  /**
+   * Keyless routes need a loopback baseURL whose keypool injects the auth
+   * (and CLI) headers; a pooled route ignores this flag entirely.
+   */
   keyless: boolean
   /**
    * Opt-in native credential pool. Present with at least one identity, the
@@ -375,10 +380,23 @@ export class CommandCodeAdapter extends LlmAdapter {
     }
 
     const pooled = profile.pool !== undefined && profile.pool.identities.length > 0
+    // A keyless route only makes sense in front of a keypool on this machine,
+    // which injects the vendor auth (and CLI headers) itself. Pointed at a
+    // public endpoint it could only send the anonymous request the vendor
+    // rejects, so refuse it with the actionable credential step instead of a
+    // broken round-trip. A route with its own pool never reaches this branch.
+    if (!pooled && profile.keyless && !isLoopbackBaseURL(profile.baseURL)) {
+      throw new LlmError(
+        `Command Code route "${options.provider}" is keyless but points at the non-loopback endpoint ${profile.baseURL};`
+        + ' add a key on the Models page (Keys card) or declare pool.identities, then retry',
+        'MISSING_CREDENTIAL',
+      )
+    }
     const key = pooled || profile.keyless ? undefined : await this.options.resolveApiKey(profile)
     if (!pooled && !profile.keyless && key === undefined) {
       throw new LlmError(
-        `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? 'no credential'}, which is not set`,
+        `Command Code route "${options.provider}" resolves ${profile.apiKeyEnv ?? 'no credential'}, which is not set;`
+        + ' add a key on the Models page (Keys card) or export it, then retry',
         'MISSING_CREDENTIAL',
       )
     }
@@ -390,10 +408,10 @@ export class CommandCodeAdapter extends LlmAdapter {
     const envelope = buildRequest({
       model: options.model,
       messages,
-      // The default keypool route is fronted by the standalone proxy, which
-      // owns text sanitization; a pooled route talks to the vendor directly,
-      // so the conversion seam sanitizes its text (scrub + 200k cap) once.
-      sanitizeText: pooled,
+      // A direct route (pooled or single-key) talks to the vendor, so the
+      // conversion seam sanitizes its text (scrub + 200k cap) once; a legacy
+      // loopback keypool route leaves the body to the proxy downstream.
+      sanitizeText: pooled || !isLoopbackBaseURL(profile.baseURL),
       tools: toCcTools(options.tools),
       ...options.system === undefined ? {} : { system: options.system },
       ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
@@ -419,7 +437,12 @@ export class CommandCodeAdapter extends LlmAdapter {
           'content-type': 'application/json',
           accept: 'text/event-stream',
           ...attributionHeaders(),
-          ...key === undefined ? {} : { authorization: `Bearer ${key}` },
+          // A direct vendor request must carry the CLI identity headers (the
+          // vendor gate rejects generic clients); a legacy loopback keypool
+          // route leaves them to the proxy and carries only the bearer token.
+          ...isLoopbackBaseURL(profile.baseURL)
+            ? (key === undefined ? {} : { authorization: `Bearer ${key}` })
+            : commandCodeHeaders(key),
         },
         body: JSON.stringify(envelope),
         signal,

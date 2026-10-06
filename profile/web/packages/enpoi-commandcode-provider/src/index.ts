@@ -10,10 +10,14 @@
  *   config:
  *     providers:
  *       commandcode:
- *         displayName: Command Code (keypool)
+ *         displayName: Command Code
  *         api: commandcode/alpha-generate
- *         baseURL: http://127.0.0.1:8899/commandcode
- *         keyless: true
+ *         baseURL: https://api.commandcode.ai
+ *         apiKeyEnv: COMMANDCODE_KEY_1
+ *         pool:
+ *           strategy: priority-sticky
+ *           identities:
+ *             - { id: key-1, credentialRef: COMMANDCODE_KEY_1, priority: 1 }
  *         # Optional user-image request budget; defaults shown.
  *         userImageMaxPixels: 4194304
  *         userImageMaxBytes: 1048576
@@ -24,32 +28,24 @@
  * config, so a settings edit (a new pool identity, a credential reference, a
  * changed baseURL) reaches the next request without a remount; a changed route
  * set re-registers in place through the loader's volatile-update seam. Every
- * route's catalog resolves on first use: the keypool's
- * `{baseURL}/catalog.json` for a loopback route (falling back to the bundled
- * snapshot), the bundled snapshot alone for a direct-vendor route. The adapter
- * serves `commandcode` through the local keypool on the default path.
- * User-attached images are read at the route's request size
- * (`store.readImageRequest`); tool-result images keep their stored bytes before
- * the converter's own forwarder budget applies.
+ * route's catalog resolves on first use: a loopback baseURL (a legacy keypool
+ * deployment) may serve `{baseURL}/catalog.json` and falls back to the bundled
+ * snapshot; a non-loopback (direct-vendor) route resolves the bundled snapshot
+ * without fetching, because the vendor exposes no catalog endpoint.
  *
- * A route may opt into the native credential pool instead of the keypool:
- *
- * ```yaml
- *         pool:
- *           strategy: priority-sticky
- *           identities:
- *             - { id: sub-a, credentialRef: COMMANDCODE_SUB_A, priority: 1 }
- *             - { id: sub-b, credentialRef: COMMANDCODE_SUB_B }
- * ```
- *
- * The pooled path resolves each identity's credential per attempt, injects the
- * Command Code CLI headers itself, and has the conversion seam text-sanitize
- * the request (`src/sanitize.ts` through `src/convert.ts`); rotation state
- * persists in `$DSH_HOME/pools/commandcode.json`. Mounted routes also register
- * with the configurable-provider directory under this plugin's settings
- * namespace, which is how the Keys card reaches pool status and identity
- * checks. Without `pool`, the route is byte-for-byte the single-key/keyless
- * path it has always been.
+ * The shipped route is the direct vendor endpoint with a native credential
+ * pool: the route profile carries the identities ({ id, credentialRef,
+ * priority }), the adapter resolves each secret from the credentials store
+ * (Settings → Models Keys card) or the environment, injects the Command Code
+ * CLI headers itself, rotates identities on quota/auth failures, and has the
+ * conversion seam text-sanitize the request (`src/sanitize.ts` through
+ * `src/convert.ts`); rotation state persists in
+ * `$DSH_HOME/pools/commandcode.json`. A route without pool identities keeps
+ * the single-key path, and a keyless route is refused unless it points at
+ * loopback (a keypool that injects its own auth): an anonymous request cannot
+ * pass the vendor gate. Mounted routes also register with the configurable-
+ * provider directory under this plugin's settings namespace, which is how the
+ * Keys card reaches pool status and identity checks.
  *
  * @module dsh-enpoi-commandcode-provider
  */
@@ -61,11 +57,12 @@ import { fileURLToPath } from 'node:url'
 import type { Context, Fiber, Volatile } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import type {
-  AdapterRegistrationHandle,
-  DirectoryRegistrationHandle,
-  LlmConfigurableProvider,
+import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
+import {
+  LlmError,
+  type AdapterRegistrationHandle,
+  type DirectoryRegistrationHandle,
+  type LlmConfigurableProvider,
 } from '@deepseek-ai/dsh-llm'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { PoolEngine } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -205,6 +202,17 @@ function parsePoolConfig(route: string, raw: unknown): { pool?: CommandCodePoolC
     if (typeof identity.credentialRef !== 'string' || identity.credentialRef === '') {
       throw new Error(
         `commandcode-provider: provider "${route}" pool identity "${identity.id}" needs a non-empty credentialRef`,
+      )
+    }
+    // A ref outside the credentials grammar can never resolve: the resolver
+    // rejects it with a raw TypeError at request time, so the pool is refused
+    // at parse time with the same Keys-card action the adapter raises.
+    if (!isCredentialRefName(identity.credentialRef)) {
+      throw new LlmError(
+        `Command Code route "${route}" pool identity "${identity.id}" names "${identity.credentialRef}", which is not`
+        + ' a credential reference; name one (for example COMMANDCODE_KEY_1) and store its key on the'
+        + ' Models page (Keys card) or export it, then retry',
+        'MISSING_CREDENTIAL',
       )
     }
     const priority = identity.priority

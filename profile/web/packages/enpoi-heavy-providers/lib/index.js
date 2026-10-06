@@ -244,13 +244,6 @@ var RUNTIME_TOOL_RE = {
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/
 };
 var ANTIGRAVITY_LAUNCHD_LABEL = "dev.enpoi.antigravity-proxy";
-var KEYPOOL_LAUNCHD_LABEL = "dev.enpoi.keypool";
-var KEYPOOL_PROXY_PATHS = [
-  "{config}/opencode/keypool/proxy.js",
-  "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js",
-  "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"
-];
-var KEYPOOL_PROXY_HINT = "keypool proxy.js (install opencode-dotfiles, or place proxy.js at ~/.config/opencode/keypool/)";
 var ANTIGRAVITY_NPM_STEP = { label: "Install the proxy package", command: "npm install -g antigravity-claude-proxy", weight: 2 };
 var ANTIGRAVITY_WAIT_STEP = {
   label: "Wait for the proxy",
@@ -314,77 +307,11 @@ EOF`
   },
   ANTIGRAVITY_WAIT_STEP
 ];
-var KEYPOOL_DEPLOY_STEP = {
-  label: "Deploy the keypool proxy",
-  weight: 2,
-  // `{config}` and `{dshHome}` are resolved by the runner before bash sees the
-  // command; the here-doc-free shell keeps every path quoted.
-  command: `dest="{config}/opencode/keypool/proxy.js"; if test -f "$dest"; then echo "keypool proxy already present at $dest"; exit 0; fi; src=""; for candidate in "{dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js" "{home}/dotfiles/opencode-dotfiles/keypool/proxy.js"; do if test -f "$candidate"; then src="$candidate"; break; fi; done; if test -z "$src"; then echo "keypool proxy.js not found \u2014 searched $dest, {dshHome}/dotfiles/opencode-dotfiles/keypool/proxy.js, and {home}/dotfiles/opencode-dotfiles/keypool/proxy.js" >&2; echo "Install opencode-dotfiles or place proxy.js at $dest, then run this install again." >&2; exit 1; fi; mkdir -p "$(dirname "$dest")" && cp "$src" "$dest" && chmod 644 "$dest"`
+var COMMANDCODE_INSTALL_STEP = {
+  label: "Link and build the DSH provider package",
+  command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
+  weight: 3
 };
-var KEYPOOL_WAIT_STEP = {
-  label: "Wait for the keypool",
-  command: 'for i in {1..30}; do curl -fsS http://127.0.0.1:8899/healthz >/dev/null && exit 0; sleep 2; done; echo "keypool did not answer within 60s \u2014 check the user-service status/logs and the pools.json config"; exit 1'
-};
-var KEYPOOL_SYSTEMD_STEPS = [
-  KEYPOOL_DEPLOY_STEP,
-  { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
-  { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
-  {
-    label: "Write the keypool systemd user unit",
-    command: "mkdir -p {config}/systemd/user && cat > {config}/systemd/user/keypool.service <<'EOF'\n[Unit]\nDescription=OpenCode KeyPool \u2014 multi-key rotation proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/bin/bash -lc 'exec node %h/.config/opencode/keypool/proxy.js'\nRestart=on-failure\nRestartSec=10s\nEnvironment=KEYPOOL_PORT=8899\nEnvironment=KEYPOOL_HOST=127.0.0.1\nEnvironment=HOME=%h\n\n[Install]\nWantedBy=default.target\nEOF"
-  },
-  { label: "Enable and start the keypool", command: "systemctl --user daemon-reload && systemctl --user enable --now keypool.service", optional: true },
-  KEYPOOL_WAIT_STEP
-];
-var KEYPOOL_LAUNCHD_STEPS = [
-  KEYPOOL_DEPLOY_STEP,
-  { label: "Build and link the DSH provider package", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"', weight: 3 },
-  { label: "Seed the commandcode pool in pools.json", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-seed.mjs"' },
-  {
-    label: "Write the launchd agent",
-    command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && cat > {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${KEYPOOL_LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>exec node {home}/.config/opencode/keypool/proxy.js</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>KEYPOOL_PORT</key>
-    <string>8899</string>
-    <key>KEYPOOL_HOST</key>
-    <string>127.0.0.1</string>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-  <key>StandardOutPath</key>
-  <string>{home}/Library/Logs/keypool.log</string>
-  <key>StandardErrorPath</key>
-  <string>{home}/Library/Logs/keypool.err.log</string>
-</dict>
-</plist>
-EOF`
-  },
-  {
-    label: "Load and start the agent",
-    command: `launchctl bootout gui/$(id -u)/${KEYPOOL_LAUNCHD_LABEL} 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/${KEYPOOL_LAUNCHD_LABEL}.plist`
-  },
-  KEYPOOL_WAIT_STEP
-];
 var HEAVY_MANIFESTS = [
   {
     id: "freellmapi",
@@ -603,81 +530,81 @@ var HEAVY_MANIFESTS = [
   },
   {
     id: "commandcode",
-    label: "Command Code (keypool)",
-    summary: "Command Code's CLI-shaped API behind the shared multi-key keypool proxy, served by the DSH provider package.",
+    label: "Command Code",
+    summary: "Command Code's CLI-shaped API at api.commandcode.ai, served by the DSH provider package and its native multi-key pool \u2014 no proxy.",
     protocol: "commandcode/alpha-generate",
-    // The keypool owns the real keys and replaces the Authorization header per
-    // request, so the DSH route is keyless; COMMANDCODE_API_KEY remains the
-    // reference a direct (non-keypool) route would name.
-    auth: { kind: "none", apiKeyEnv: "COMMANDCODE_API_KEY", keyless: true },
-    dashboardUrl: "http://127.0.0.1:8899/status",
+    // The vendor is reached directly. The route profile carries its own key
+    // pool: identities and priorities live in this route's settings namespace
+    // (commandcode-provider) and the secrets live in the credentials store
+    // (Settings → Models Keys card) or the environment. The provider package
+    // injects the four CLI headers and rotates identities itself; the
+    // standalone keypool proxy is not involved.
+    auth: { kind: "unified", apiKeyEnv: "COMMANDCODE_KEY_1", keyless: false },
+    delivery: "direct",
     docsUrl: "https://commandcode.ai",
-    defaultPort: 8899,
+    defaultPort: 443,
     // Served by `dsh-enpoi-commandcode-provider` (ctx.llm.registerAdapter), not
     // llm-pi-ai: the CLI-shaped protocol has no llm-pi-ai entry, so the route
     // profile must never be written into the llm-pi-ai schema.
     settingsNs: "commandcode-provider",
+    // The route is pooled from its first request: an anonymous request cannot
+    // pass the vendor gate, so the shipped starter identity gives the Keys
+    // card its first key slot and a credential-less request fails with the
+    // MISSING_CREDENTIAL action instead of falling back to keyless.
+    pool: {
+      strategy: "priority-sticky",
+      identities: [{ id: "key-1", credentialRef: "COMMANDCODE_KEY_1", priority: 1 }]
+    },
     // Browser badges belong only to account flows that cannot complete without
     // a browser (antigravity's Google OAuth); the vendor dashboard is an
     // ordinary quirk here, not an operator-blocking browser requirement.
     requiresBrowser: [],
     quirks: [
-      "Local install dependencies: Node.js 22, the opencode-dotfiles keypool proxy (or a placed ~/.config/opencode/keypool/proxy.js), and a systemd/launchd user service; Docker is never required. Windows has no supported local install \u2014 use a keypool running elsewhere",
-      "macOS: the launchd agent runs node through /bin/bash -lc with PATH /opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin \u2014 a node reachable only from a fish or zsh configuration (for example an nvm setup) is not found; make node reachable from a login bash profile or one of those directories",
+      "Local install dependencies: Node.js 22 (the setup step links and builds the provider package); Docker is never required, and no proxy or user service runs \u2014 the route talks to the vendor directly",
+      'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 the provider package injects the four CLI headers itself; no proxy is required',
+      "Keys are managed as pool identities on the Settings \u2192 Models Keys card: the route ships one starter identity (COMMANDCODE_KEY_1) and rotates identities in priority order",
       "The vendor account and quota dashboard live at commandcode.ai (browser)",
-      'The vendor endpoint rejects generic HTTP clients ("Proxy use detected") \u2014 traffic must go through the keypool with CLI headers',
       "DSH speaks this protocol through the dsh-enpoi-commandcode-provider adapter; llm-pi-ai cannot declare it",
-      "The keypool may be shared with other tools \u2014 never stop or remove the shared keypool service when removing this provider",
-      "The local dashboards are keypool :8899/keys and /status; there is no provider-owned UI",
-      "The keypool sanitizer (older-image stripping, embedded-base64 scrub, 200k text cap) is the only sanitizer \u2014 clients must not duplicate it",
-      'Quota is per key and real: the keypool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled key is spent \u2014 a normal state, not a routing defect'
+      "Migration: scripts/import-keypool-keys.mjs turns the old keypool pools.json commandcode keys into a settings pool block; it reads the old file but never prints key material",
+      "An existing route still pointed at a loopback keypool keeps working until it is switched: set its baseURL to https://api.commandcode.ai, add the imported pool identities, then retire the proxy",
+      "The provider package owns the request sanitizer (embedded-base64 scrub, 200k text cap, 413 strip-oldest retry) \u2014 clients must not duplicate it",
+      'Quota is per key and real: the native pool rotates on exhaustion, and a QUOTA failure ("weekly usage limit" / "insufficient credits") appears only when every pooled identity is spent \u2014 a normal state, not a routing defect',
+      "A route whose identities resolve no credential fails with MISSING_CREDENTIAL naming the Keys card; there is no anonymous fallback"
     ],
     reuse: {
-      label: "Use a detected instance",
-      baseURL: "http://127.0.0.1:8899/commandcode",
-      note: "Uses the keypool already running on this device; the provider package speaks the CLI protocol and fetches the 83-model catalog from /commandcode/catalog.json.",
-      health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
+      label: "Use the vendor endpoint now",
+      baseURL: "https://api.commandcode.ai",
+      note: "Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.",
+      health: { url: "https://api.commandcode.ai/", timeoutMs: 5e3 }
     },
     local: {
-      label: "Install locally (provider package + keypool)",
-      baseURL: "http://127.0.0.1:8899/commandcode",
-      deps: ["Node.js 22", "opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)"],
-      diskHint: "~5 MB provider package, ~150 MB RAM for the keypool, no GPU",
-      dashboardUrl: "http://127.0.0.1:8899/status",
+      label: "Link the provider package, then use the vendor endpoint",
+      baseURL: "https://api.commandcode.ai",
+      deps: ["Node.js 22"],
+      diskHint: "~5 MB provider package; no local service, no GPU",
       runtime: "node",
       install: {
-        // The provider package and keypool proxy are shared across platforms;
-        // only the user-service wrapper differs. The proxy itself is external
-        // (opencode-dotfiles) and preflight refuses the path when neither it
-        // nor a placed proxy.js exists.
-        default: { label: "Install locally (provider package + systemd keypool unit)", requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
-        linux: { label: "Install locally (provider package + systemd keypool unit)", requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }], steps: KEYPOOL_SYSTEMD_STEPS },
-        darwin: {
-          label: "Install locally (provider package + launchd keypool agent)",
-          deps: ["Node.js 22", "macOS 11+ (launchd)", "opencode-dotfiles keypool proxy (or proxy.js in ~/.config/opencode/keypool/)"],
-          diskHint: "~5 MB provider package, ~150 MB RAM for the keypool, no GPU; logs in ~/Library/Logs",
-          requiresFiles: [{ paths: KEYPOOL_PROXY_PATHS, hint: KEYPOOL_PROXY_HINT }],
-          steps: KEYPOOL_LAUNCHD_STEPS
-        },
+        // The setup is one shared, idempotent step; there is no service to
+        // wrap and no proxy to deploy on any platform.
+        default: { steps: [COMMANDCODE_INSTALL_STEP] },
+        linux: { steps: [COMMANDCODE_INSTALL_STEP] },
+        darwin: { steps: [COMMANDCODE_INSTALL_STEP] },
         win32: {
           label: "Not supported on Windows",
-          unsupported: 'The keypool local install needs a POSIX user service (systemd or launchd) and the opencode-dotfiles keypool proxy; this profile has no supported Windows provisioning path. Run the keypool elsewhere and use "Use a detected instance", or run it manually and point the route at it.',
+          unsupported: "The provider-package setup step runs through /bin/bash, which this profile does not provide on Windows. Link the package manually (node scripts/install.mjs <profile>) or run the harness on Linux/macOS.",
           steps: []
         }
       },
-      health: { url: "http://127.0.0.1:8899/healthz", timeoutMs: 5e3 }
+      health: { url: "https://api.commandcode.ai/", timeoutMs: 5e3 }
     },
     removal: {
-      steps: [
-        // Drops only the commandcode pool entry; the keypool rereads pools.json
-        // per request, so the shared service (and the `go` pool) is never
-        // stopped, restarted, or otherwise touched.
-        { label: "Drop only pools.commandcode (keypool and other pools stay)", command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/keypool-remove.mjs"', optional: true }
-      ],
+      // No local service exists: the vendor endpoint needs no teardown and the
+      // provider package is part of the shipped profile.
+      steps: [],
       warnings: [
-        "Removal drops only DSH state and the commandcode pool keys \u2014 it never stops or removes the shared keypool service (other tools may need it)",
-        "usage.jsonl is keypool-wide and is not touched",
-        "The provider package and its profile entry stay installed; delete the entry only when no route declares it"
+        "Removal drops only DSH state \u2014 the route, its COMMANDCODE_KEY_1 credential reference, its pool state, and its cache entry; no local service exists to stop",
+        "Vendor keys stored under other pool identities (for example COMMANDCODE_KEY_2) are not deleted by removal \u2014 delete them on the Keys card",
+        "Vendor account state and quota live at commandcode.ai and are never touched"
       ]
     },
     fallbackModel: "deepseek/deepseek-v4.1-flash"
@@ -738,6 +665,30 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
     }
     if (manifest.unsupported === void 0 && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === void 0) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`);
+    }
+    if (manifest.delivery === "direct" && manifest.unsupported === void 0 && manifest.pool === void 0 && manifest.auth.kind === "none") {
+      problems.push(`${where}: a direct route must declare a key pool or a non-keyless auth kind`);
+    }
+    if (manifest.pool !== void 0) {
+      if (manifest.settingsNs === void 0) {
+        problems.push(`${where}: a key pool needs its own settingsNs; llm-pi-ai routes must not declare one`);
+      }
+      if (manifest.pool.identities.length === 0) problems.push(`${where}: the key pool declares no identities`);
+      const identityIds = /* @__PURE__ */ new Set();
+      for (const identity of manifest.pool.identities) {
+        if (identity.id === "") problems.push(`${where}: a key-pool identity has an empty id`);
+        if (identityIds.has(identity.id)) problems.push(`${where}: key-pool identity id "${identity.id}" is duplicated`);
+        identityIds.add(identity.id);
+        if (!/^[A-Z_][A-Z0-9_]*$/.test(identity.credentialRef)) {
+          problems.push(`${where}: key-pool identity "${identity.id}" credentialRef must be an uppercase credential reference`);
+        }
+        if (identity.priority !== void 0 && (!Number.isSafeInteger(identity.priority) || identity.priority < 0)) {
+          problems.push(`${where}: key-pool identity "${identity.id}" priority must be a non-negative integer`);
+        }
+        if (identity.enabled !== void 0 && typeof identity.enabled !== "boolean") {
+          problems.push(`${where}: key-pool identity "${identity.id}" enabled must be a boolean`);
+        }
+      }
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`);
     if (manifest.auth.kind === "none" && manifest.protocol === "anthropic-messages") {
@@ -800,6 +751,7 @@ function healthForBase(manifest, baseURL) {
   }
 }
 function instanceCandidates(manifest, configuredBaseURL) {
+  if (manifest.delivery === "direct") return [];
   const candidates = [];
   const add = (baseURL, url) => {
     if (candidates.some((candidate) => candidate.url === url)) return;
@@ -814,6 +766,14 @@ function instanceCandidates(manifest, configuredBaseURL) {
   return candidates;
 }
 async function detectInstance(deps, manifest, configuredBaseURL) {
+  if (manifest.delivery === "direct") {
+    return {
+      ok: false,
+      baseURL: manifest.reuse.baseURL,
+      url: manifest.reuse.health.url,
+      health: { ok: false, error: "direct vendor endpoint \u2014 no local instance to detect", checkedAt: Date.now() }
+    };
+  }
   let firstFailure;
   for (const candidate of instanceCandidates(manifest, configuredBaseURL)) {
     const health = await probeHealth({ ...manifest.reuse.health, url: candidate.url }, deps.fetchImpl);
@@ -913,12 +873,19 @@ function overlayManifest(manifest, entry) {
 }
 function routeProfile(manifest, mode, models, overrides = {}) {
   const list = models.length > 0 ? models.map((model) => model.name === void 0 ? { id: model.id } : { id: model.id, name: model.name }) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
+  const suffix = manifest.delivery === "direct" ? " (direct)" : mode === "local" ? " (local)" : " (detected)";
   return {
-    displayName: `${manifest.label}${mode === "reuse" ? " (detected)" : " (local)"}`,
+    displayName: `${manifest.label}${suffix}`,
     api: manifest.protocol,
     baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === void 0 ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === "none" ? { keyless: true } : {},
+    ...manifest.pool === void 0 ? {} : {
+      pool: {
+        ...manifest.pool.strategy === void 0 ? {} : { strategy: manifest.pool.strategy },
+        identities: manifest.pool.identities.map((identity) => ({ ...identity }))
+      }
+    },
     models: list
   };
 }
@@ -1004,7 +971,7 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   return profile;
 }
 async function storeCredential(deps, manifest, key) {
-  const ref = manifest.auth.apiKeyEnv;
+  const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
   if (key === void 0 || key.trim() === "" || ref === void 0) return false;
   const credentials = deps.credentials;
   if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
@@ -1012,19 +979,21 @@ async function storeCredential(deps, manifest, key) {
   return true;
 }
 async function useDetectedInstance(deps, manifest, key) {
+  const direct = manifest.delivery === "direct";
   const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
   const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
-  const detection = await detectInstance(deps, manifest, configuredBase);
-  const endpoint = detection.ok ? detection.baseURL : manifest.reuse.baseURL;
-  const models = await discoverModels(endpoint, key, deps.fetchImpl);
+  const detection = direct ? void 0 : await detectInstance(deps, manifest, configuredBase);
+  const endpoint = direct ? manifest.reuse.baseURL : detection.ok ? detection.baseURL : manifest.reuse.baseURL;
+  const models = direct ? [] : await discoverModels(endpoint, key, deps.fetchImpl);
+  const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
   const route = await writeRoute(deps, manifest, "reuse", models, { baseURL: endpoint });
   const credentialStored = await storeCredential(deps, manifest, key);
   return {
     route,
-    health: detection.health,
+    health,
     models,
     credentialStored,
-    ...detection.ok && detection.port !== void 0 ? { port: detection.port } : {},
+    ...detection?.ok === true && detection.port !== void 0 ? { port: detection.port } : {},
     endpoint
   };
 }
@@ -1217,16 +1186,17 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const configured = profile !== void 0;
     const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
     const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
-    const detection = await detectInstance(deps, manifest, configuredBase);
+    const direct = manifest.delivery === "direct";
+    const detection = direct ? void 0 : await detectInstance(deps, manifest, configuredBase);
     const runtime = await this.runtime();
     const preflight = chooseLocalPath(
       manifest,
       process.platform,
       runtime,
-      detection.ok ? detection.port : void 0,
+      detection?.ok === true ? detection.port : void 0,
       { home: deps.home, dshHome: deps.dshHome }
     );
-    const health = configuredBase === void 0 ? detection.health : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl);
+    const health = configuredBase !== void 0 ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl) : direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
     const settingsReady = settingsNamespaceReady(deps, settingsNs);
     const job = this.options.jobs.snapshot(manifest.id);
     return {
@@ -1240,8 +1210,8 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       platform: process.platform,
       runtime,
       preflight,
-      ...detection.ok && detection.port !== void 0 ? { detectedPort: detection.port } : {},
-      ...detection.ok ? { detectedEndpoint: detection.baseURL } : {},
+      ...detection?.ok === true && detection.port !== void 0 ? { detectedPort: detection.port } : {},
+      ...detection?.ok === true ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === void 0 ? {} : { unsupported: manifest.unsupported },
       ...job === void 0 ? {} : { job }
     };
@@ -1283,7 +1253,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       const current = this.options.deps();
       const late = pendingRestartForManifest(current, manifest);
       if (late !== void 0) throw new Error(late.message);
-      const models = await discoverModels(modeBaseURL(manifest, "local"), key, current.fetchImpl);
+      const models = manifest.delivery === "direct" ? [] : await discoverModels(modeBaseURL(manifest, "local"), key, current.fetchImpl);
       await writeRoute(current, manifest, "local", models);
       await storeCredential(current, manifest, key);
     });

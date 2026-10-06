@@ -69,6 +69,7 @@ it('a mounted namespace lets the local route write proceed', async () => {
   const mutations: string[] = []
   const deps = depsListing(['llm-pi-ai', 'commandcode-provider'], true, mutations)
   const route = await writeRoute(deps, manifestById('commandcode')!, 'local', [{ id: 'deepseek/deepseek-v4.1-flash' }])
-  expect(route.baseURL).toBe('http://127.0.0.1:8899/commandcode')
+  expect(route.baseURL).toBe('https://api.commandcode.ai')
+  expect(route.pool?.identities[0]?.credentialRef).toBe('COMMANDCODE_KEY_1')
   expect(mutations).toEqual(['commandcode-provider'])
 })

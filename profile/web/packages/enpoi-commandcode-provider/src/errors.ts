@@ -1,11 +1,12 @@
 /**
  * Command Code failure classification.
  *
- * The keypool already rotates keys on real exhaustion (401/402/403/429/quota
- * wording) and stops on request-level rejections, so the client's job is only
- * to classify what reaches it: request-level errors must NOT be retried or
- * rotated, transient gateway failures may be. Codes reuse the harness's
- * canonical classes where one exists so retry policy and model chains behave.
+ * The native pool already rotates identities on real exhaustion
+ * (401/402/403/429/quota wording) and stops on request-level rejections, so
+ * the client's job is only to classify what reaches it: request-level errors
+ * must NOT be retried or rotated, transient gateway failures may be. Codes
+ * reuse the harness's canonical classes where one exists so retry policy and
+ * model chains behave.
  *
  * @module dsh-enpoi-commandcode-provider/errors
  */
@@ -56,7 +57,7 @@ export function classifyCommandCodeError(status: number, body: string): CommandC
   const message = errorMessageFromBody(body)
   const detail = `${status} ${message}`
   // The harness predicate covers structured overflow wording; the extra
-  // pattern is the keypool's own request-level matcher ("... longer than the
+  // pattern is the vendor's own request-level matcher ("... longer than the
   // model's context length"), which the gateway uses verbatim.
   if (isContextWindowExceededError(detail) || /longer than the model.*context|context length/i.test(detail)) {
     return { code: CONTEXT_WINDOW_EXCEEDED_CODE, message }
@@ -67,7 +68,7 @@ export function classifyCommandCodeError(status: number, body: string): CommandC
   if (/Proxy use detected/i.test(detail)) {
     return {
       code: 'PROXY_USE_DETECTED',
-      message: `${message} — the CLI-shaped endpoint was reached without the keypool (or its CLI headers) in front of it`,
+      message: `${message} — the request reached the CLI-shaped endpoint without the provider's CLI headers; check that the adapter injected x-command-code-version / x-cli-environment / x-project-slug / user-agent: cli`,
     }
   }
   if (status === 401 || status === 402 || status === 403) return { code: 'AUTH', message }

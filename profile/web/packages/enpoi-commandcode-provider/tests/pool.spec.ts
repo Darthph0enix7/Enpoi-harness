@@ -341,7 +341,71 @@ it('fails loud when no identity credential resolves', async () => {
 
   const { error } = await run(adapter, optionsFor('m'))
   expect(errorCode(error)).toBe('MISSING_CREDENTIAL')
+  // The failure names the Keys-card action; there is no anonymous fallback.
+  expect((error as Error).message).toContain('Keys card')
   expect(scripted.calls).toHaveLength(0)
+})
+
+it('refuses a keyless route aimed at the non-loopback vendor with the Keys-card action', async () => {
+  const scripted = scriptedFetch([])
+  const adapter = makeAdapter({
+    fetchImpl: scripted.fetchImpl,
+    // A hand-written route that kept the legacy keyless flag but points at the
+    // public vendor: it could only send the anonymous request the gate rejects.
+    profiles: () => new Map([['commandcode', {
+      ...routeProfile(),
+      baseURL: 'https://api.commandcode.ai',
+      pool: undefined,
+      keyless: true,
+    }]]),
+  })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(errorCode(error)).toBe('MISSING_CREDENTIAL')
+  expect((error as Error).message).toContain('keyless')
+  expect((error as Error).message).toContain('Keys card')
+  expect(scripted.calls).toHaveLength(0)
+})
+
+it('fails a single-key route with the credential reference and the Keys-card action', async () => {
+  const scripted = scriptedFetch([])
+  const adapter = makeAdapter({
+    fetchImpl: scripted.fetchImpl,
+    profiles: () => new Map([['commandcode', {
+      ...routeProfile(),
+      pool: undefined,
+      keyless: false,
+      apiKeyEnv: 'COMMANDCODE_KEY_1',
+    }]]),
+    resolveApiKey: async () => undefined,
+  })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(errorCode(error)).toBe('MISSING_CREDENTIAL')
+  expect((error as Error).message).toContain('COMMANDCODE_KEY_1')
+  expect((error as Error).message).toContain('Keys card')
+  expect(scripted.calls).toHaveLength(0)
+})
+
+it('keeps keyless loopback routes working (the legacy keypool posture)', async () => {
+  const scripted = scriptedFetch([() => sseResponse(SSE_OK)])
+  const adapter = makeAdapter({
+    fetchImpl: scripted.fetchImpl,
+    profiles: () => new Map([['commandcode', {
+      ...routeProfile(),
+      baseURL: 'http://127.0.0.1:8899/commandcode',
+      pool: undefined,
+      keyless: true,
+    }]]),
+  })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(error).toBeUndefined()
+  expect(scripted.calls).toHaveLength(1)
+  // A legacy keypool route sends no CLI headers of its own: the proxy owns
+  // them downstream.
+  expect(scripted.calls[0]?.headers['x-command-code-version']).toBeUndefined()
+  expect(scripted.calls[0]?.headers.authorization).toBeUndefined()
 })
 
 it('requires resolved credentials even when the route still carries keyless', async () => {
@@ -368,4 +432,35 @@ it('fails without failover on a route-wide proxy gate', async () => {
   // POLICY is route-wide: no second identity is burned and no key cools.
   expect(scripted.calls).toHaveLength(1)
   expect(engine.cooldownRemaining('commandcode', 'a', 'm')).toBe(0)
+})
+
+it('a single-key direct route sends the CLI headers and dual auth (no pool)', async () => {
+  const scripted = scriptedFetch([() => sseResponse(SSE_OK)])
+  const big = `data:image/png;base64,${'A'.repeat(600)}`
+  const adapter = makeAdapter({
+    fetchImpl: scripted.fetchImpl,
+    pool: undefined,
+    resolveApiKey: async () => 'key-single',
+    profiles: () => new Map([['commandcode', {
+      ...routeProfile(),
+      baseURL: 'https://api.commandcode.ai',
+      pool: undefined,
+      keyless: false,
+      apiKeyEnv: 'COMMANDCODE_KEY_1',
+    }]]),
+  })
+
+  const { error } = await run(adapter, optionsFor('m', [
+    { role: 'user', content: [{ type: 'text', text: `look ${big}` }] } as never,
+  ]))
+  expect(error).toBeUndefined()
+  const headers = scripted.calls[0]?.headers ?? {}
+  expect(headers['x-command-code-version']).toBe('1.54.0')
+  expect(headers['x-cli-environment']).toBe('production')
+  expect(headers['x-project-slug']).toBe('opencode')
+  expect(headers['user-agent']).toBe('cli')
+  expect(headers.authorization).toBe('Bearer key-single')
+  expect(headers['x-api-key']).toBe('key-single')
+  // A direct request is sanitized at the conversion seam even without a pool.
+  expect(scripted.calls[0]?.body.includes(big)).toBe(false)
 })

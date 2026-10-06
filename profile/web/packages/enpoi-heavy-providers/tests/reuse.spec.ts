@@ -35,7 +35,12 @@ function depsWith(options: { fetch: FetchLike; withSettings?: boolean; withCrede
   const scratchDir = mkdtempSync(join(tmpdir(), 'heavy-reuse-'))
   scratch.push(scratchDir)
   const settings: SettingsSeam = {
-    describe: () => [{ ns: 'llm-pi-ai', revision: 7, value: { providers: {} } }],
+    describe: () => [
+      { ns: 'llm-pi-ai', revision: 7, value: { providers: {} } },
+      // The commandcode route namespace is mounted in the running profile, so
+      // a direct-route write passes the pending-restart guard.
+      { ns: 'commandcode-provider', revision: 3, value: { providers: {} } },
+    ],
     mutate: async (ns, ops) => { mutations.push({ ns, ops }) },
   }
   const credentials: CredentialsSeam = {
@@ -147,6 +152,55 @@ it('antigravity detection writes a placeholder anthropic route with no pool and 
   expect(profile.models).toEqual([{ id: 'gemini-2.5-flash' }])
 })
 
+it('a direct-vendor route writes at the vendor endpoint without probing or discovering', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const manifest = manifestById('commandcode')!
+  const outcome = await useDetectedInstance(deps, manifest)
+
+  // Only the declared vendor health probe; no loopback detection and no
+  // `GET /models` (the bundled catalog is the model source).
+  expect(calls).toEqual(['https://api.commandcode.ai/'])
+  expect(outcome.endpoint).toBe('https://api.commandcode.ai')
+  expect(outcome.health.ok).toBe(true)
+  expect(outcome.models).toEqual([])
+
+  const written = mutations[0]!.ops[0] as { op: string; path: string[]; value: Record<string, unknown> }
+  expect(written.path).toEqual(['providers', 'commandcode'])
+  expect(written.value.displayName).toBe('Command Code (direct)')
+  expect(written.value.baseURL).toBe('https://api.commandcode.ai')
+  expect(written.value.api).toBe('commandcode/alpha-generate')
+  expect(written.value.apiKeyEnv).toBe('COMMANDCODE_KEY_1')
+  expect(written.value.keyless).toBeUndefined()
+  expect(written.value.pool).toEqual({
+    strategy: 'priority-sticky',
+    identities: [{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }],
+  })
+  expect(written.value.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
+})
+
+it('a direct-vendor route stores a supplied key under its first pool identity', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => 'ok' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('commandcode')!, 'sk-cc')
+  expect(outcome.credentialStored).toBe(true)
+  expect(credentialSets).toEqual([{ ref: 'COMMANDCODE_KEY_1', value: 'sk-cc' }])
+})
+
+it('the commandcode route profile carries the manifest pool, auth ref, and fallback model', () => {
+  const profile = routeProfile(manifestById('commandcode')!, 'local', [])
+  expect(profile.api).toBe('commandcode/alpha-generate')
+  expect(profile.baseURL).toBe('https://api.commandcode.ai')
+  expect(profile.apiKeyEnv).toBe('COMMANDCODE_KEY_1')
+  expect(profile.keyless).toBeUndefined()
+  expect(profile.pool?.identities).toEqual([{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }])
+  expect(profile.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
+})
+
 it('writes nothing (and rejects) when the settings seam is absent', async () => {
   const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
   const { deps, mutations } = depsWith({ fetch, withSettings: false })
@@ -157,4 +211,12 @@ it('writes nothing (and rejects) when the settings seam is absent', async () => 
 it('discovery returns [] for an unreachable endpoint instead of throwing', async () => {
   const fetch: FetchLike = vi.fn(async () => { throw new Error('boom') })
   await expect(discoverModels('http://127.0.0.1:1/v1', undefined, fetch)).resolves.toEqual([])
+})
+
+it('names a direct route (direct) even when the setup path provisioned it', () => {
+  const manifest = manifestById('commandcode')!
+  // The Add modal's setup path calls routeProfile(..., 'local', ...): a direct
+  // route runs no local service, so its name must never carry "(local)".
+  expect(routeProfile(manifest, 'local', []).displayName).toBe('Command Code (direct)')
+  expect(routeProfile(manifest, 'reuse', []).displayName).toBe('Command Code (direct)')
 })

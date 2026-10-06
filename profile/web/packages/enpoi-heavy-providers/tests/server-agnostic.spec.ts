@@ -1,7 +1,8 @@
 /**
  * SHIPPED-DEFAULT CORRECTNESS: the end user has no server, so the shipped
  * manifest table may name no operator address, hostname, or path — every
- * manifest URL is loopback, and every enpoi plugin's shipped `src/` tree
+ * service manifest URL is loopback (a `delivery: 'direct'` manifest names
+ * only its own vendor host), and every enpoi plugin's shipped `src/` tree
  * carries none of our addresses and no absolute `/home/<user>` literal
  * (cache paths are derived per OS at runtime). An operator's own endpoints
  * belong in the private `$DSH_HOME/heavy-server-overlay.json`, never in a
@@ -59,7 +60,7 @@ it('the shipped manifest table names no operator address, hostname, or path', ()
   }
 })
 
-it('every manifest URL is loopback', () => {
+it('every manifest URL stays on-device unless the manifest declares a direct vendor endpoint', () => {
   for (const manifest of HEAVY_MANIFESTS) {
     const urls = [
       manifest.reuse.baseURL,
@@ -69,8 +70,18 @@ it('every manifest URL is loopback', () => {
       ...manifest.local.dashboardUrl === undefined ? [] : [manifest.local.dashboardUrl],
       ...manifest.unsupported === undefined ? [] : [manifest.unsupported.reuseUrl],
     ].filter(url => url !== '')
+    // A service manifest may name only loopback: an operator's own server
+    // belongs in the private overlay. A direct manifest names the vendor's
+    // public host, and every URL it declares must be that same host — no
+    // operator address can hide behind the direct posture.
+    const vendorHost = manifest.delivery === 'direct' ? new URL(manifest.reuse.baseURL).hostname : undefined
     for (const url of urls) {
-      expect(new URL(url).hostname, `${manifest.id}: ${url}`).toBe('127.0.0.1')
+      const host = new URL(url).hostname
+      if (vendorHost === undefined) {
+        expect(host, `${manifest.id}: ${url}`).toBe('127.0.0.1')
+      } else {
+        expect(host, `${manifest.id}: ${url}`).toBe(vendorHost)
+      }
     }
   }
 })
