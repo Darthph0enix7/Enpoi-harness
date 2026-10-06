@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-web-setup",
   "description": "Host controller for wizard-driven web search and fetch setup: credential writes through the vault, profile row surgery with hot remount, live provider canaries, and the webSetup Remote namespace",
-  "version": "0.1.7-enpoi.1",
+  "version": "0.1.7-enpoi.2",
   "publishConfig": {
     "access": "public"
   },

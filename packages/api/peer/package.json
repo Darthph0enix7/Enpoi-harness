@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-api-peer",
   "description": "Device-to-device peer API: narrow session share/ask/answer/observe surface and caller bridge",
-  "version": "0.1.7-enpoi.1",
+  "version": "0.1.7-enpoi.2",
   "publishConfig": {
     "access": "public"
   },

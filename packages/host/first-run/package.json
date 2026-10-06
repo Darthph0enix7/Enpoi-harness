@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-host-first-run",
   "description": "First-run product defaults (keyless Kilo Gateway route) and the opt-in read-only sysadmin investigation that feeds the system profile",
-  "version": "0.1.7-enpoi.1",
+  "version": "0.1.7-enpoi.2",
   "publishConfig": {
     "access": "public"
   },

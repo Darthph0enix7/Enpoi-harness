@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-web-fetch-jina",
   "description": "Jina Reader-backed fetch provider for the DeepSeek Harness web capability seam (ctx.web)",
-  "version": "0.1.7-enpoi.1",
+  "version": "0.1.7-enpoi.2",
   "publishConfig": {
     "access": "public"
   },

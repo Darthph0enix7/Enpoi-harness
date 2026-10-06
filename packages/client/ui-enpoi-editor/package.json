@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-client-ui-enpoi-editor",
   "description": "Enpoi editable file workbench for right-Sidebar session files: CodeMirror editing over the fenced /sidebar/fsops routes with optimistic saves and external-change protection",
-  "version": "0.1.7-enpoi.1",
+  "version": "0.1.7-enpoi.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
