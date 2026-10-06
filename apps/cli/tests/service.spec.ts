@@ -141,8 +141,17 @@ describe('runService', () => {
   it('rejects unsupported platforms and missing installs', async () => {
     const err = sink()
     expect(await runService(['status'], { platform: 'win32', stderr: err })).toBe(1)
-    expect(await runService(['status'], { platform: 'linux', stderr: err, statePath: join(tempDir(), 'absent.json') })).toBe(1)
-    expect(err.text()).toContain('no managed install')
+    expect(err.text()).toContain('WSL 2')
+    const missing = sink()
+    expect(await runService(['status'], { platform: 'linux', stderr: missing, statePath: join(tempDir(), 'absent.json') })).toBe(1)
+    expect(missing.text()).toContain('no managed install')
+  })
+
+  it('refuses every service command on Windows, including help', async () => {
+    const err = sink()
+    expect(await runService(['help'], { platform: 'win32', stderr: err, stdout: sink() })).toBe(1)
+    expect(err.text()).toContain('Windows is not supported')
+    expect(err.text()).toContain('wsl --install')
   })
 
   it('installs, enables, starts, and records the unit on Linux', async () => {
@@ -269,6 +278,73 @@ describe('runService', () => {
     expect(executed).toContain(`launchctl bootstrap gui/${uid} ${plist}`)
     expect(executed.filter(line => line.startsWith('launchctl bootstrap'))).toHaveLength(2)
     expect(executed).toContain(`launchctl kickstart -k gui/${uid}/com.example.dsh`)
+  })
+
+  it('degrades gracefully when launchd has no GUI domain (headless/SSH Mac)', async () => {
+    const home = tempDir()
+    const statePath = join(home, 'install-state.json')
+    writeFileSync(statePath, JSON.stringify({ serviceUnit: 'com.example.dsh' }))
+    const { run } = recorder((command, args) => (command === 'launchctl' && args[0] === 'bootstrap' ? 2 : 0))
+    const err = sink()
+    const code = await runService(['install'], {
+      platform: 'darwin',
+      home,
+      statePath,
+      run,
+      stdout: sink(),
+      stderr: err,
+      probeLoaded: () => false,
+      probeGuiDomain: () => false,
+    })
+    expect(code).toBe(2)
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+    const plist = join(home, 'Library', 'LaunchAgents', 'com.example.dsh.plist')
+    expect(err.text()).toContain('headless or SSH-only Mac')
+    expect(err.text()).toContain(`launchctl bootstrap gui/${uid} ${plist}`)
+    // The unit and its record stay behind: the agent loads at the next desktop login.
+    expect(readFileSync(plist, 'utf8')).toContain('--foreground')
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).serviceUnit).toBe('com.example.dsh')
+  })
+
+  it('reports a launchctl bootstrap failure and the retry command', async () => {
+    const home = tempDir()
+    const statePath = join(home, 'install-state.json')
+    writeFileSync(statePath, '{}')
+    const { run } = recorder((command, args) => (command === 'launchctl' && args[0] === 'bootstrap' ? 5 : 0))
+    const err = sink()
+    const code = await runService(['install'], {
+      platform: 'darwin',
+      home,
+      statePath,
+      run,
+      stdout: sink(),
+      stderr: err,
+      probeLoaded: () => false,
+      probeGuiDomain: () => true,
+    })
+    expect(code).toBe(5)
+    expect(err.text()).toContain('launchctl bootstrap failed (exit 5)')
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+    expect(err.text()).toContain(`launchctl bootstrap gui/${uid} `)
+  })
+
+  it('explains a headless start attempt instead of failing silently', async () => {
+    const home = tempDir()
+    const statePath = join(home, 'install-state.json')
+    writeFileSync(statePath, '{}')
+    const { run } = recorder((command, args) => (command === 'launchctl' && args[0] === 'bootstrap' ? 3 : 0))
+    const err = sink()
+    const code = await runService(['start'], {
+      platform: 'darwin',
+      home,
+      statePath,
+      run,
+      stderr: err,
+      probeLoaded: () => false,
+      probeGuiDomain: () => false,
+    })
+    expect(code).toBe(3)
+    expect(err.text()).toContain('headless or SSH-only Mac')
   })
 
   it('removes the unit and clears the record on uninstall', async () => {

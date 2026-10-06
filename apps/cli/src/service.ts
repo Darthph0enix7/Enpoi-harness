@@ -53,6 +53,11 @@ export interface ServiceDeps {
   run?: (command: string, args: readonly string[]) => number
   /** Answers whether launchd already knows a domain target; used silently. */
   probeLoaded?: (domainTarget: string) => boolean
+  /**
+   * Answers whether a launchd GUI domain exists for the uid. Used only after a
+   * failed bootstrap to distinguish a headless/SSH-only Mac from a real error.
+   */
+  probeGuiDomain?: (domain: string) => boolean
   stdout?: { write: (chunk: string) => unknown }
   stderr?: { write: (chunk: string) => unknown }
   /** Reads the tail of the launchd log file. */
@@ -307,13 +312,15 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
   const run = deps.run ?? defaultRun
   const platform = deps.platform ?? process.platform
   const command = args[0]
+  // Refuse before help or state lookup: Node on Git Bash/MSYS2/Cygwin reports
+  // win32, and no Windows service manager is supported.
+  if (platform === 'win32') {
+    stderr.write('dsh service: Windows is not supported (no systemd or launchd). Use WSL 2: run `wsl --install` in PowerShell, then run this command inside the WSL Linux shell.\n')
+    return 1
+  }
   if (command === undefined || command === 'help' || command === '-h' || command === '--help') {
     stdout.write(SERVICE_USAGE)
     return 0
-  }
-  if (platform === 'win32') {
-    stderr.write('dsh service: Windows is not supported yet\n')
-    return 1
   }
   const state = readInstallState(deps.statePath)
   if (state === undefined) {
@@ -325,7 +332,25 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
   const noStart = args.includes('--no-start')
   const isLaunchd = unit.kind === 'launchd'
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0
-  const domainTarget = `gui/${String(uid)}/${unit.unit}`
+  const guiDomain = `gui/${String(uid)}`
+  const domainTarget = `${guiDomain}/${unit.unit}`
+  /**
+   * Explain a failed `launchctl bootstrap` with the exact next command. A
+   * headless/SSH-only Mac has no GUI domain: the unit is still written and
+   * loads at the next desktop login, so the failure is a deferral, not a dead
+   * end. The probe is silent and only runs on failure.
+   */
+  const explainBootstrapFailure = (code: number): void => {
+    const guiAvailable = deps.probeGuiDomain !== undefined
+      ? deps.probeGuiDomain(guiDomain)
+      : spawnSync('launchctl', ['print', guiDomain], { stdio: 'ignore' }).status === 0
+    if (guiAvailable) {
+      stderr.write(`dsh service: launchctl bootstrap failed (exit ${String(code)})\n`)
+    } else {
+      stderr.write(`dsh service: no GUI login session for ${guiDomain} (headless or SSH-only Mac); the unit is written and starts at the next desktop login\n`)
+    }
+    stderr.write(`dsh service: start it from a desktop session with: launchctl bootstrap ${guiDomain} ${unit.path}\n`)
+  }
   /** Whether launchd already knows this label in the user's GUI domain. */
   const launchctlLoaded = (): boolean => {
     if (!isLaunchd) return false
@@ -367,8 +392,11 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
       if (isLaunchd) {
         if (launchctlLoaded()) run('launchctl', ['bootout', domainTarget])
         if (!noStart) {
-          const code = run('launchctl', ['bootstrap', `gui/${String(uid)}`, unit.path])
-          if (code !== 0) return code
+          const code = run('launchctl', ['bootstrap', guiDomain, unit.path])
+          if (code !== 0) {
+            explainBootstrapFailure(code)
+            return code
+          }
         }
       } else {
         run('systemctl', ['--user', 'daemon-reload'])
@@ -412,7 +440,9 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
     case 'start': {
       if (isLaunchd) {
         if (launchctlLoaded()) return run('launchctl', ['kickstart', '-k', domainTarget])
-        return run('launchctl', ['bootstrap', `gui/${String(uid)}`, unit.path])
+        const code = run('launchctl', ['bootstrap', guiDomain, unit.path])
+        if (code !== 0) explainBootstrapFailure(code)
+        return code
       }
       return run('systemctl', ['--user', 'start', unit.unit])
     }
@@ -426,7 +456,9 @@ export async function runService(args: readonly string[], deps: ServiceDeps = {}
     case 'restart': {
       if (isLaunchd) {
         if (launchctlLoaded()) return run('launchctl', ['kickstart', '-k', domainTarget])
-        return run('launchctl', ['bootstrap', `gui/${String(uid)}`, unit.path])
+        const code = run('launchctl', ['bootstrap', guiDomain, unit.path])
+        if (code !== 0) explainBootstrapFailure(code)
+        return code
       }
       return run('systemctl', ['--user', 'restart', unit.unit])
     }

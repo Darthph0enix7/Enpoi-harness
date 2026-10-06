@@ -12,16 +12,18 @@ Read this file to install a machine, move it between channels, update it, or res
 ## 1. The installer (`scripts/install.sh`)
 
 - Entry: `curl -fsSL <install.sh-url> | bash`, `./scripts/install.sh [options]`, or `install.sh --update` (`scripts/install.sh:5-7,105-150`).
-- Supported platforms: Linux and macOS only, `x64`/`arm64`; anything else dies with "Linux and macOS only" (`scripts/install.sh:258-269`). This tree ships no PowerShell installer.
+- Supported platforms: Linux and macOS only, `x64`/`arm64`. Windows shells (Git Bash/MSYS2/Cygwin) are refused up front with WSL 2 guidance, before any staging; there is no native Windows or PowerShell installer.
 - **No sudo, ever.** A failing `sudo` stub is prepended to `PATH`, every call is appended to `<prefix>/.sudo-calls`, and the stub exits 42; exit code 42 from the installer means something tried to escalate (`scripts/install.sh:148,271-281`).
 - Node: uses an existing `node >= 22.19` from `PATH`, else `<prefix>/runtime/node/current`, else downloads the official tarball into `<prefix>/runtime/node/<version>` and verifies its SHA-256 when published (`DSH_NODE_MIRROR` default `https://nodejs.org/dist`) (`scripts/install.sh:210-330`).
 - pnpm: `corepack enable --install-directory <prefix>/bin` — no system packages (`scripts/install.sh:332-352`).
 - Source: `--source` names a local directory, local tarball, or archive URL; otherwise the GitHub archive of the channel ref is fetched (`<repo>/archive/refs/heads/<ref>.tar.gz`) (`scripts/install.sh:442-461`). Version is read from the source `package.json`.
 - Build: `pnpm install --frozen-lockfile` then `pnpm run build` inside `<prefix>/harness/<tree>` (`<version>`, or `<version>-<short-sha>` after a rolling rebuild); the build commit is resolved from the target ref (`git ls-remote`, then the GitHub API), a local checkout's HEAD, or a version digest, and stamped into `.dsh-install-complete` (`scripts/install.sh:517-560,613-670`). A completed tree is reused unless `--force`, and the recorded commit decides a rolling no-op (`scripts/install.sh:1564-1690`).
 - Seed `$DSH_HOME`: `dsh --profile <name> --dump-default-config` runs `initProfile` and never touches existing files (`scripts/install.sh:528-535`). When a companion profile source is set, it is fetched into `$DSH_HOME/profiles/<name>` — at the selected channel's ref for the canonical Enpoi repo, where an explicit `--profile-ref` wins — its dependencies installed, and `build-plugins.sh` run when present (`scripts/install.sh:731-800,961-1055`).
-- Seed-once home files: `fresh-settings.yaml` → `$DSH_HOME/settings.yaml`, profile `presets/` → `.agent-presets`, `skills/` → `skills/`, and `fish/ds.fish` + completions when `~/.config/fish` exists (`scripts/install.sh:643-671`).
+- Seed-once home files: `fresh-settings.yaml` → `$DSH_HOME/settings.yaml`, profile `presets/` → `.agent-presets`, `skills/` → `skills/`, and `fish/ds.fish` + completions when the fish config dir (`${XDG_CONFIG_HOME:-~/.config}/fish`) exists (`scripts/install.sh:643-671`).
 - Shim and state: `<bin-dir>/dsh` (default `~/.local/bin`) resolves prefix node → embedded node → `PATH`, and forwards `dsh update` to `scripts/update.sh`; `<prefix>/harness/install-state.json` records version, channel, ref, source, profile, profile source/ref, bin dir, `DSH_HOME`, node/pnpm paths, and service unit (`scripts/install.sh:721-789`).
+- Shell startup files (`--write-rc`, off by default): one marker block (`# dsh installer`) per file, in the file the detected login shell actually reads — bash `~/.bash_profile`/`~/.bash_login` when present else `~/.profile`, plus `~/.bashrc`; zsh `~/.zshrc` (created when zsh is the login shell or on macOS) and `~/.zprofile` when present; fish `${XDG_CONFIG_HOME:-~/.config}/fish/config.fish` when fish is the login shell, or when an installed fish already has a config dir. A file carrying the marker is skipped, so reruns are no-ops; files are appended, never rewritten.
 - Self-check before success: `--version`, `--help`, a `--dump-default-config` smoke run, and an error audit of `$DSH_HOME/sessions` when that corpus exists (exit 2 = skip); any hard failure exits 1 (`scripts/install.sh:938-967`).
+- Background service: install finishes with `dsh service install` — a systemd user unit on Linux, a LaunchAgent on macOS. On a headless/SSH-only Mac there is no GUI login domain, so the unit is written and recorded anyway, the command exits nonzero with the exact `launchctl bootstrap gui/<uid> <plist>` retry line, and launchd loads the agent at the next desktop login.
 
 | Knob | Default | Meaning |
 |---|---|---|
@@ -38,7 +40,7 @@ Read this file to install a machine, move it between channels, update it, or res
 | `--update` | off | mechanical update mode (same engine) |
 | `--dry-run` | off | print the plan, write nothing |
 | `--force` / `--force-downgrade` | off | reinstall same version / allow version decrease |
-| `--write-rc` | off | append the bin dir to `~/.profile` and fish config |
+| `--write-rc` | off | append the PATH line to the detected shell's startup files (see §1) |
 | `--json` | off | one machine-readable status object on stdout |
 
 Env: `DSH_GITHUB_REPO`/`DSH_GITHUB_URL` (repo slug/URL), `DSH_NODE_VERSION` (22.22.2), `DSH_INSTALL_TIMEOUT` (1800 s), `DSH_BUILD_TIMEOUT` (3600 s), `DSH_PROFILE_INSTALL_TIMEOUT` (900 s), `DSH_PROFILE_BUILD_TIMEOUT` (1200 s), `DSH_PROFILE_TOKEN` (falls back to `GH_TOKEN`/`GITHUB_TOKEN`/`gh auth token`) (`scripts/install.sh:43-62,137-147`).

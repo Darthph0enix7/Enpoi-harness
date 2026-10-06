@@ -323,7 +323,9 @@ Options:
   --dry-run           print the plan and exit; writes nothing
   --force             rebuild/reinstall even when the version is already present
   --force-downgrade   allow a downgrade to an older version
-  --write-rc          add the bin dir to the shell rc (~/.profile / fish config)
+  --write-rc          add the bin dir to the detected shell's startup files
+                      (bash ~/.bash_profile|.bash_login|.profile + ~/.bashrc,
+                      zsh ~/.zshrc / ~/.zprofile, fish config.fish)
   --verbose, -v       print full command and build output (do not redirect to log)
   --quiet, -q         suppress progress/detail lines (warnings, errors, and the
                       final summary still print)
@@ -414,6 +416,17 @@ run_limited() {
   else "$@"; fi
 }
 
+host_short_name() {
+  # `hostname` is not POSIX; fall back to uname -n and a literal so the
+  # device-patch path and the summary never contain an empty segment. A
+  # successful-but-empty hostname must not win over the fallbacks.
+  local h
+  h="$(hostname 2>/dev/null || true)"
+  [ -n "$h" ] || h="$(uname -n 2>/dev/null || true)"
+  [ -n "$h" ] || h="this-host"
+  printf '%s' "$h"
+}
+
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 json_lines() { # stdin lines -> ["a", "b"]
@@ -486,10 +499,16 @@ EOF
 }
 
 detect_os_arch() {
-  case "$(uname -s)" in
+  local uname_s
+  uname_s="$(uname -s)"
+  case "$uname_s" in
     Linux) OS=linux;;
     Darwin) OS=darwin;;
-    *) die "unsupported OS: $(uname -s) — Linux and macOS only";;
+    # Git Bash/MSYS2/Cygwin report a Windows kernel here. Stop before any
+    # staging: the harness ships Linux/macOS binaries and cannot run natively.
+    MINGW*|MSYS*|CYGWIN*|Windows_NT|UWIN*)
+      die "unsupported OS: $uname_s — this is a Windows shell (Git Bash/MSYS2/Cygwin); the harness runs on Linux and macOS only. Use WSL 2 instead: run 'wsl --install' in PowerShell, then run this installer inside the WSL Linux shell.";;
+    *) die "unsupported OS: $uname_s — Linux and macOS only";;
   esac
   case "$(uname -m)" in
     x86_64|amd64) ARCH=x64;;
@@ -1280,7 +1299,7 @@ seed_dir_once() { # src-dir dst-dir
 }
 
 seed_profile_home() { # stage
-  local stage="$1" fish_dir="$HOME/.config/fish"
+  local stage="$1" fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
   seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
   seed_dir_once "$stage/presets" "$DSH_HOME/.agent-presets"
   # Shipped skills stay in the profile skills/ dir, which every preset mounts;
@@ -1453,37 +1472,67 @@ write_state() {
 
 write_rc() {
   local marker="# dsh installer" path_line="export PATH=\"$BIN_DIR:\$PATH\""
-  local fish="$HOME/.config/fish/config.fish"
+  local login_shell bash_login zsh_dir fish_dir fish_line f
 
-  append_rc_if_present() {
-    local f="$1"
-    [ -f "$f" ] || return 0
-    if grep -qF "$marker" "$f"; then return 0; fi
-    printf '\n%s\n%s\n' "$marker" "$path_line" >> "$f"
-    log "added $BIN_DIR to $f"
+  # The login shell decides which startup file the shell actually reads.
+  # $SHELL comes from the account database and may be a full path; a case
+  # pattern (not a literal comparison) maps it to a bare name. When it is unset
+  # only the POSIX login profile can be targeted.
+  case "${SHELL:-}" in
+    */bash|bash) login_shell=bash;;
+    */zsh|zsh) login_shell=zsh;;
+    */fish|fish) login_shell=fish;;
+    *) login_shell="${SHELL:-}"; login_shell="${login_shell##*/}";;
+  esac
+
+  # Append the marker block once per file. Creates a file (and its directory)
+  # the shell reads but that does not exist yet; never rewrites content.
+  append_block() { # file line
+    local file="$1" line="$2"
+    if [ -f "$file" ] && grep -qF "$marker" "$file"; then return 0; fi
+    mkdir -p "$(dirname "$file")" 2>/dev/null || { warn "could not create $(dirname "$file")"; return 0; }
+    printf '\n%s\n%s\n' "$marker" "$line" >> "$file" || { warn "could not update $file"; return 0; }
+    log "added $BIN_DIR to $file"
+  }
+  append_block_if_present() { # file line
+    [ -f "$1" ] || return 0
+    append_block "$1" "$2"
   }
 
-  # Standard POSIX login shell profile
-  if [ -f "$HOME/.profile" ] && grep -qF "$marker" "$HOME/.profile"; then :; else
-    printf '\n%s\n%s\n' "$marker" "$path_line" >> "$HOME/.profile"
-    log "added $BIN_DIR to $HOME/.profile"
+  # bash login order: ~/.bash_profile, ~/.bash_login, ~/.profile. With no
+  # bash-specific file, ~/.profile also serves sh/dash/ksh logins.
+  bash_login=""
+  for f in "$HOME/.bash_profile" "$HOME/.bash_login"; do
+    if [ -f "$f" ]; then bash_login="$f"; break; fi
+  done
+  if [ -n "$bash_login" ] && [ "$login_shell" = bash ]; then
+    append_block "$bash_login" "$path_line"
+  else
+    append_block "$HOME/.profile" "$path_line"
   fi
 
-  # Bash login and interactive (Linux and macOS)
-  append_rc_if_present "$HOME/.bashrc"
-  append_rc_if_present "$HOME/.bash_profile"
-
-  # Zsh (macOS default login shell since Catalina, also common on Linux)
-  if [ "$OS" = darwin ] || [ -f "$HOME/.zshrc" ] || [ "${SHELL:-}" = "*/zsh" ]; then
-    touch "$HOME/.zshrc" 2>/dev/null || true
-    append_rc_if_present "$HOME/.zshrc"
+  # bash interactive non-login reads ~/.bashrc; create it only for a bash
+  # login shell so other shells do not grow an rc they never read.
+  if [ -f "$HOME/.bashrc" ] || [ "$login_shell" = bash ]; then
+    append_block "$HOME/.bashrc" "$path_line"
   fi
-  append_rc_if_present "$HOME/.zprofile"
 
-  # Fish shell
-  if [ -f "$fish" ] && ! grep -qF "$marker" "$fish"; then
-    printf '\n%s\nfish_add_path "%s"\n' "$marker" "$BIN_DIR" >> "$fish"
-    log "added $BIN_DIR to $fish"
+  # zsh interactive reads ~/.zshrc, login reads ~/.zprofile. macOS defaults to
+  # zsh since Catalina; an existing rc means the user runs zsh even when the
+  # login shell is something else. ZDOTDIR overrides the rc directory.
+  zsh_dir="${ZDOTDIR:-$HOME}"
+  if [ "$OS" = darwin ] || [ "$login_shell" = zsh ] || [ -f "$zsh_dir/.zshrc" ] || [ -f "$zsh_dir/.zprofile" ]; then
+    append_block "$zsh_dir/.zshrc" "$path_line"
+  fi
+  append_block_if_present "$zsh_dir/.zprofile" "$path_line"
+
+  # fish reads $XDG_CONFIG_HOME/fish/config.fish (default ~/.config/fish).
+  # Write it when fish is the login shell, or when fish is installed and a
+  # config directory exists; an installed-but-unused fish grows no rc.
+  fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+  fish_line="fish_add_path \"$BIN_DIR\""
+  if [ "$login_shell" = fish ] || { command -v fish >/dev/null 2>&1 && [ -d "$fish_dir" ]; }; then
+    append_block "$fish_dir/config.fish" "$fish_line"
   fi
 }
 
@@ -1641,7 +1690,7 @@ run_migrations() {
     ts="$(date +%Y%m%d-%H%M%S)"
     backup_dir="$PROFILE_DIR/.backup-$ts"
     mkdir -p "$backup_dir" 2>/dev/null || true
-    patch="$PROFILE_DIR/device-patches/$(hostname).yaml"
+    patch="$PROFILE_DIR/device-patches/$(host_short_name).yaml"
     [ -f "$patch" ] || patch="$DSH_HOME/sync-local.yaml"
     out="$PROFILE_DIR/settings.yaml"
     if [ -f "$out" ]; then cp -p "$out" "$backup_dir/settings.yaml" 2>/dev/null || true; fi
@@ -1738,6 +1787,12 @@ maybe_open_browser() { # url — best-effort handoff; detached and never fatal
     log "browser: not opening the URL (non-interactive session)"
     return 0
   fi
+  # An SSH session has no local display even when X11 forwarding sets DISPLAY;
+  # opening remotely either fails or hangs, so never try.
+  if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+    log "browser: SSH session; open $url yourself"
+    return 0
+  fi
   case "$OS" in
     linux)
       if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
@@ -1808,7 +1863,7 @@ print_banner() {
 print_summary() { # action
   local action="$1" url overlay
   url="$(web_url)"
-  overlay="$PROFILE_DIR/device-patches/$(hostname 2>/dev/null || printf 'this-host')"
+  overlay="$PROFILE_DIR/device-patches/$(host_short_name)"
   say ""
   say "${C_GREEN}${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
   box_row "  ${C_BOLD}Enpoi Harness successfully ${action}ed!${C_RESET}" "${C_GREEN}"
@@ -1829,7 +1884,7 @@ print_summary() { # action
   say ""
   case ":$PATH:" in
     *":${BIN_DIR}:"*) :;;
-    *) say "  ${C_YELLOW}!${C_RESET} ${C_BOLD}Note:${C_RESET} Add ${BIN_DIR} to your PATH (e.g. source ~/.bashrc or ~/.zshrc)";;
+    *) say "  ${C_YELLOW}!${C_RESET} ${C_BOLD}Note:${C_RESET} Add ${BIN_DIR} to your PATH (restart your shell, or source its startup file: ~/.profile, ~/.bashrc, ~/.zshrc, or fish config)";;
   esac
   say ""
 }
@@ -1867,7 +1922,7 @@ dry_run_plan() {
   say "             -> fetch+seed profile (if a source is set) -> seed \$DSH_HOME (initProfile)"
   say "             -> profile deps (pnpm install) -> profile plugin build (if present)"
   say "             -> shim $BIN_DIR/dsh -> install-state.json"
-  [ "$WRITE_RC" = 1 ] && say "  rc:        would add the PATH line to ~/.profile / fish config"
+  [ "$WRITE_RC" = 1 ] && say "  rc:        would add the PATH line to the detected shell's startup files (bash/zsh/fish)"
   [ "$UPDATE_MODE" = 1 ] && say "  update:    migrations -> switch current -> service (if unit) -> backfill (if present) -> self-check -> rollback on failure"
 }
 
@@ -2562,7 +2617,7 @@ EOF
   # ── fish function/completions (re-seed only when missing) ──
   # The profile ships fish/ds.fish and fish/completions/ds.fish; the first one
   # is seeded into ~/.config/fish/functions/ds.fish (see seed_profile_home).
-  fish_dir="$HOME/.config/fish"
+  fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
   if [ -d "$fish_dir" ] && [ -f "$PROFILE_DIR/fish/ds.fish" ]; then
     for pair in "ds.fish:functions/ds.fish" "completions/ds.fish:completions/ds.fish"; do
       fsrc="$PROFILE_DIR/fish/${pair%%:*}"
@@ -2851,8 +2906,8 @@ do_uninstall() {
     [ "$DSH_HOME" != "$PREFIX" ] && uninstall_add "$DSH_HOME"
     uninstall_add "$BIN_DIR/dsh"
     uninstall_add "$BIN_DIR/ds"
-    uninstall_outside_add "shell rc PATH line (~/.profile or ~/.config/fish/config.fish, marker '# dsh installer')"
-    uninstall_outside_add "fish function/completions (~/.config/fish/functions/ds.fish, ~/.config/fish/completions/ds.fish)"
+    uninstall_outside_add "shell rc PATH line (bash ~/.bash_profile|.bash_login|.profile + ~/.bashrc, zsh ~/.zshrc/.zprofile, fish config.fish; marker '# dsh installer')"
+    uninstall_outside_add "fish function/completions (ds.fish under the fish config dir)"
     uninstall_outside_add "cloned harness repo (e.g. $HOME/enpoi-harness)"
     uninstall_outside_add "profile/dotfiles clone (e.g. $HOME/dotfiles/dsh-dotfiles)"
     uninstall_outside_add "browser localStorage for the Web UI origin (http://127.0.0.1:${DSH_WEB_PORT:-3080})"
@@ -2923,6 +2978,13 @@ EOF
 }
 
 # ── Defaults + dispatch ─────────────────────────────────────────────────────
+# Sourcing with DSH_INSTALL_LIB_ONLY=1 defines the helpers and runs no mode;
+# scratch-HOME tests of write_rc use it instead of re-implementing the logic.
+# Never silent: an exported value must not masquerade as a successful install.
+if [ "${DSH_INSTALL_LIB_ONLY:-0}" = 1 ]; then
+  printf 'dsh-install: sourced as a library (DSH_INSTALL_LIB_ONLY=1); no install performed\n' >&2
+  return 0 2>/dev/null || exit 0
+fi
 if [ -z "$PREFIX" ]; then PREFIX="$HOME/.dsh"; fi
 if [ -z "$BIN_DIR" ]; then BIN_DIR="$HOME/.local/bin"; fi
 if [ "$UPDATE_MODE" = 1 ] && { [ "$REPAIR_MODE" = 1 ] || [ "$UNINSTALL_MODE" = 1 ] || [ "$CLEAN_MODE" = 1 ]; }; then
