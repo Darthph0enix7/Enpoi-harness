@@ -13,16 +13,23 @@
  *   handshake <endpoint>             Handshake only (no pairing needed)
  *   status [alias]                   Host summary; with alias: latch + model + asks
  *   list [alias]                     Discover peer sessions (alias, remoteSessionId, latch summary)
- *   ask <alias> <message>            Create/adopt, prompt, follow to terminal
- *   follow <alias>                   Stream frames (asks are printed loudly)
+ *   ask <alias> <message>            Create/adopt, prompt, follow until the session settles
+ *   follow <alias>                   Stream frames until the session settles (asks are printed loudly)
  *   asks <alias>                     List pending remote asks (questions show ids + options)
  *   answer <alias> <askId> <once|reject>
  *   answer <alias> <askId> --select <label> [--select <label> …]
  *   cancel <alias>
  *
+ * `ask`/`follow` return the FINAL assistant text: after the first `turn/end`
+ * they keep following while the remote session is not settled — a live
+ * descendant (a fan-out child), a pending ask, or a new turn that starts
+ * within the quiet window — and only then return the newest turn's text.
+ * `--once` restores the historical behavior (return at the first turn/end).
+ *
  * Flags: --pairings <path> · --json · --header "k: v" (repeatable) ·
  *        --name <participant> · --wait <seconds> · --session <id> · --no-create ·
- *        --select <label> (repeatable; `questionId=label` for multi-question asks)
+ *        --once · --settle-ms <ms> · --select <label> (repeatable;
+ *        `questionId=label` for multi-question asks)
  */
 
 import { readFileSync } from 'node:fs'
@@ -51,6 +58,12 @@ function isPeerError(error) {
 
 const DEFAULT_BACKOFF = { initialMs: 250, maxMs: 4000, factor: 2 }
 const REPAIR_PAGE_LIMIT = 20
+/**
+ * Default quiet window after a terminal turn/end before `ask`/`follow` accept
+ * the session as settled. A settlement notice can start a follow-up turn
+ * within this window; `--settle-ms` overrides it.
+ */
+export const DEFAULT_SETTLE_QUIET_MS = 2000
 
 class LocalPeerClient {
   constructor(options) {
@@ -422,18 +435,18 @@ function usage() {
     '  handshake <endpoint>            Handshake only (no pairing needed)',
     '  status [alias]                  Host summary; with alias: latch + model + asks',
     '  list [alias]                    Discover peer sessions: alias, remoteSessionId, latch summary',
-    '  ask <alias> <message>           Create/adopt, prompt, follow to a terminal state',
-    '  follow <alias>                  Stream frames (asks printed loudly)',
+    '  ask <alias> <message>           Create/adopt, prompt, follow until the session settles',
+    '  follow <alias>                  Stream frames until the session settles (asks printed loudly)',
     '  asks <alias>                    List pending remote asks (question options included)',
     '  answer <alias> <askId> <once|reject>',
     '  answer <alias> <askId> --select <label> [--select …]',
     '  cancel <alias>',
-    'flags: --wait <seconds>  --session <id>  --no-create  --select <label|questionId=label>',
+    'flags: --wait <seconds>  --session <id>  --no-create  --once  --settle-ms <ms>  --select <label|questionId=label>',
   ].join('\n')
 }
 
-function parseArgs(argv) {
-  const flags = { header: [], select: [], wait: undefined, session: undefined, create: true, json: false, pairings: undefined, name: undefined }
+export function parseArgs(argv) {
+  const flags = { header: [], select: [], wait: undefined, session: undefined, create: true, json: false, pairings: undefined, name: undefined, once: false, settleMs: undefined }
   const positional = []
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -446,6 +459,8 @@ function parseArgs(argv) {
       case '--wait': flags.wait = Number(argv[++index]); break
       case '--session': flags.session = argv[++index]; break
       case '--no-create': flags.create = false; break
+      case '--once': flags.once = true; break
+      case '--settle-ms': flags.settleMs = Number(argv[++index]); break
       case '--help': case '-h': flags.help = true; break
       default:
         if (arg.startsWith('--')) throw new Error(`unknown flag ${arg}`)
@@ -512,50 +527,131 @@ function askSummary(ask) {
   return `question ${ask.askId} (${String(questions.length)} item(s))${rendered === '' ? '' : `: ${rendered}`}`
 }
 
-async function runFollow(options) {
-  const { client, target, pairing, flags, requestId, baselineTurn, log, onAsk } = options
+export async function followToSettled(options) {
+  const { client, target, flags, requestId, baselineTurn, baselineState, log, onAsk } = options
   const controller = new AbortController()
   const deadline = flags.wait !== undefined && Number.isFinite(flags.wait) && flags.wait > 0 ? Date.now() + flags.wait * 1000 : undefined
   const timer = deadline === undefined ? undefined : setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()))
   const onSignal = () => controller.abort()
   process.on('SIGINT', onSignal)
+  const once = flags.once === true
+  const quietMs = Number.isFinite(flags.settleMs) && flags.settleMs >= 0 ? flags.settleMs : DEFAULT_SETTLE_QUIET_MS
   const seenAsks = new Set()
+  const seenSeqs = new Set()
   const answerParts = []
+  let currentTurn
   let terminal
   let admitted = false
-  let latch = 'unknown'
+  let latch = baselineState?.latch ?? 'unknown'
+  let activeDescendants = baselineState?.activeDescendants ?? 0
+  let descendantsExact = baselineState?.descendantsExact
+  let pendingAskCount = Array.isArray(baselineState?.pendingAsks) ? baselineState.pendingAsks.length : 0
   let cursor = 0
+  let quietExpired = false
+  let quietTimer
+
+  const settledNow = () => isPeerSessionSettled({ terminal, latch, activeDescendants, descendantsExact, pendingAskCount })
+  const clearQuiet = () => { if (quietTimer !== undefined) { clearTimeout(quietTimer); quietTimer = undefined } }
+  const armQuiet = () => {
+    clearQuiet()
+    quietTimer = setTimeout(() => { quietExpired = true; controller.abort() }, quietMs)
+  }
+  const absorb = (record) => absorbRecord(record, {
+    requestId,
+    baselineTurn,
+    seen: seenSeqs,
+    addAnswer: (turn, text) => {
+      if (currentTurn === undefined || turn > currentTurn) { currentTurn = turn; answerParts.length = 0 }
+      if (turn === currentTurn) answerParts.push(text)
+    },
+    markAdmitted: () => { admitted = true },
+    setTerminal: (value) => { terminal = value },
+  })
+  const absorbState = (state) => {
+    latch = state.latch
+    activeDescendants = state.activeDescendants
+    descendantsExact = state.descendantsExact
+    pendingAskCount = state.pendingAsks.length
+  }
+  const surfaceAsks = (state) => {
+    for (const ask of state.pendingAsks) {
+      if (seenAsks.has(ask.askId)) continue
+      seenAsks.add(ask.askId)
+      log(`ASK: ${askSummary(ask)}`)
+      onAsk?.(ask)
+    }
+  }
   try {
     for await (const frame of client.follow({ target }, controller.signal)) {
       if (frame.type === 'snapshot') {
         cursor = frame.cursor
-        latch = frame.state.latch
-        for (const record of frame.records) absorbRecord(record, { requestId, baselineTurn, answerParts, admitted: () => admitted, markAdmitted: () => { admitted = true }, terminal: () => terminal, setTerminal: (value) => { terminal = value } })
-        for (const ask of frame.state.pendingAsks) if (!seenAsks.has(ask.askId)) { seenAsks.add(ask.askId); log(`ASK: ${askSummary(ask)}`); onAsk?.(ask) }
+        absorbState(frame.state)
+        for (const record of frame.records) absorb(record)
+        surfaceAsks(frame.state)
       } else if (frame.type === 'state') {
         cursor = frame.cursor
-        latch = frame.state.latch
-        for (const ask of frame.state.pendingAsks) if (!seenAsks.has(ask.askId)) { seenAsks.add(ask.askId); log(`ASK: ${askSummary(ask)}`); onAsk?.(ask) }
+        absorbState(frame.state)
+        surfaceAsks(frame.state)
       } else if (frame.type === 'event') {
         cursor = Math.max(cursor, frame.record.seq)
-        absorbRecord(frame.record, { requestId, baselineTurn, answerParts, admitted: () => admitted, markAdmitted: () => { admitted = true }, terminal: () => terminal, setTerminal: (value) => { terminal = value } })
+        absorb(frame.record)
         if (flags.json !== true) logFrame(frame.record)
       } else if (frame.type === 'end' && frame.reason === 'target-detached') {
         return { ok: false, pending: true, admitted, latch, cursor, asks: [...seenAsks], answer: answerParts.join('\n').trim(), note: 'remote target-detached (pairing/session binding gone)' }
       }
-      if (terminal !== undefined && terminal.turn > baselineTurn) break
+      if (terminal !== undefined) {
+        if (once) break
+        // Keep following while a child, an ask, or a follow-up turn can still
+        // move the session; only a settled state starts the quiet clock.
+        if (settledNow()) armQuiet()
+        else clearQuiet()
+      }
     }
   } catch (error) {
-    if (deadline !== undefined && Date.now() >= deadline) {
-      return { ok: false, pending: true, admitted, latch, cursor, asks: [...seenAsks], answer: answerParts.join('\n').trim(), note: `no terminal within ${String(flags.wait)}s — remote turn still live` }
+    if (quietExpired) {
+      // The quiet window elapsed after the session had settled: fall through.
+    } else if (deadline !== undefined && Date.now() >= deadline) {
+      return pendingResult({
+        terminal, answerParts, admitted, latch, cursor, seenAsks,
+        activeDescendants, pendingAskCount, wait: flags.wait,
+      })
+    } else {
+      throw error
     }
-    throw error
   } finally {
+    clearQuiet()
     if (timer !== undefined) clearTimeout(timer)
     process.removeListener('SIGINT', onSignal)
   }
   if (terminal === undefined) {
-    return { ok: false, pending: true, admitted, latch, cursor, asks: [...seenAsks], answer: answerParts.join('\n').trim(), note: deadline === undefined ? 'follow ended without a terminal' : 'wait elapsed without a terminal' }
+    return {
+      ok: false,
+      pending: true,
+      admitted,
+      latch,
+      cursor,
+      asks: [...seenAsks],
+      answer: answerParts.join('\n').trim(),
+      note: deadline === undefined ? 'follow ended without a terminal' : 'wait elapsed without a terminal',
+    }
+  }
+  const settled = once || settledNow()
+  const context = { terminal, activeDescendants, pendingAskCount, latch }
+  if (!settled) {
+    return {
+      ok: false,
+      pending: true,
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...(terminal.error === undefined ? {} : { remoteError: terminal.error }),
+      answer: answerParts.join('\n').trim(),
+      asks: [...seenAsks],
+      cursor,
+      latch,
+      settled: false,
+      note: `remote turn ${String(terminal.turn)} ended: ${terminal.reason}; the session was not settled when following stopped (${unsettledSummary(context)}) — follow again to collect the remainder`,
+    }
   }
   return {
     ok: terminal.reason === 'completed',
@@ -567,17 +663,85 @@ async function runFollow(options) {
     asks: [...seenAsks],
     cursor,
     latch,
+    settled: true,
     note: terminal.reason === 'completed' ? '' : `remote turn ${String(terminal.turn)} ended: ${terminal.reason}`,
   }
 }
 
+/**
+ * The pending result the wait deadline (or an ended stream) produces. A
+ * terminal that arrived while children or asks were still live is reported
+ * with its turn and the busy reason, not as a missing terminal.
+ */
+function pendingResult(context) {
+  const base = {
+    ok: false,
+    pending: true,
+    admitted: context.admitted,
+    latch: context.latch,
+    cursor: context.cursor,
+    asks: [...context.seenAsks],
+    answer: context.answerParts.join('\n').trim(),
+  }
+  if (context.terminal === undefined) {
+    return {
+      ...base,
+      note: context.wait === undefined ? 'follow ended without a terminal' : `no terminal within ${String(context.wait)}s — remote turn still live`,
+    }
+  }
+  return {
+    ...base,
+    turn: context.terminal.turn,
+    terminal: context.terminal.reason,
+    ...(context.terminal.error === undefined ? {} : { remoteError: context.terminal.error }),
+    note: `remote turn ${String(context.terminal.turn)} ended: ${context.terminal.reason} but the session was still busy at the wait limit (${unsettledSummary(context)}) — follow again to collect the remainder`,
+  }
+}
+
+/** Human summary of why the latest terminal did not settle the session. */
+function unsettledSummary(context) {
+  if ((context.activeDescendants ?? 0) > 0) return `${String(context.activeDescendants)} live descendant(s)`
+  if ((context.pendingAskCount ?? 0) > 0) return `${String(context.pendingAskCount)} pending ask(s)`
+  if (context.latch === 'running') return 'a turn is still running'
+  if (context.latch === 'waiting_subagents') return 'descendants are still settling'
+  if (context.latch === 'waiting_approval') return 'an ask is pending'
+  return 'the quiet window had not elapsed'
+}
+
+/**
+ * Whether the remote session is settled given the latest observed signals: a
+ * terminal turn/end has been seen, no ask is pending, no descendant is live,
+ * and the latch is not running/waiting. Absent signals (older hosts, no state
+ * frame yet) count as unknown and leave settling to the quiet window.
+ * @param state - the latest signals; `pendingAskCount` is the pending-ask count.
+ * @returns true only when the session is provably quiet.
+ */
+export function isPeerSessionSettled(state) {
+  if (state === undefined || state.terminal === undefined) return false
+  if ((state.pendingAskCount ?? 0) > 0) return false
+  if ((state.activeDescendants ?? 0) > 0) return false
+  if (state.descendantsExact === false) return false
+  const latch = state.latch
+  return latch === undefined || latch === 'unknown' || latch === 'idle'
+}
+
+/**
+ * Fold one durable record into the follow sink. The answer text is kept per
+ * turn — a later turn REPLACES the previous turn's text, so a fan-out
+ * dispatch announcement is superseded by the settled summary. Records are
+ * deduplicated by seq, so a reconnect snapshot never doubles the text.
+ */
 function absorbRecord(record, sink) {
-  if (recordRpcId(record) === sink.requestId) sink.markAdmitted()
-  if (sink.terminal() !== undefined) return
+  if (sink.requestId !== undefined && recordRpcId(record) === sink.requestId) sink.markAdmitted()
+  const seq = typeof record.seq === 'number' ? record.seq : undefined
+  if (seq !== undefined) {
+    if (sink.seen.has(seq)) return
+    sink.seen.add(seq)
+  }
   const turn = recordTurn(record)
   if (record.type === 'assistant/message' && turn !== undefined && turn > sink.baselineTurn) {
     const text = recordAssistantText(record)
-    if (text !== '') sink.answerParts.push(text)
+    if (text !== '') sink.addAnswer(turn, text)
     return
   }
   const end = recordTerminal(record)
@@ -766,13 +930,14 @@ async function commandAsk(flags, positional) {
   }
   const requestId = `peer-cli-${globalThis.crypto.randomUUID()}`
   await client.prompt({ target, participant, requestId, content: [{ type: 'text', text: message }], hopCount: 0 })
-  const result = await runFollow({
+  const result = await followToSettled({
     client,
     target,
     pairing,
     flags: { ...flags, wait: flags.wait ?? 300 },
     requestId,
     baselineTurn: baseline.state.lastTurnEnd?.turn ?? 0,
+    baselineState: baseline.state,
     log: (line) => console.error(line),
   })
   return { alias, endpoint: pairing.endpoint, sessionId: baseline.target.sessionId, created, requestId, client: source, ...result }
@@ -788,7 +953,7 @@ async function commandFollow(flags, positional) {
   const client = new PeerClient({ endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: undefined })
   await client.handshake()
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
-  const result = await runFollow({ client, target, pairing, flags, requestId: undefined, baselineTurn: -1, log: (line) => console.error(line) })
+  const result = await followToSettled({ client, target, pairing, flags, requestId: undefined, baselineTurn: -1, log: (line) => console.error(line) })
   return { alias, endpoint: pairing.endpoint, client: source, ...result }
 }
 
@@ -1012,9 +1177,14 @@ async function main() {
   if (result !== undefined && result.ok === false && result.pending !== true) process.exit(1)
 }
 
-main().catch((error) => {
-  const code = isPeerError(error) ? `[${error.code}] ` : ''
-  console.error(`dsh-peer: ${code}${error instanceof Error ? error.message : String(error)}`)
-  if (isPeerError(error) && error.endpoint !== undefined && error.endpoint !== '') console.error(`  endpoint: ${error.endpoint}`)
-  process.exit(1)
-})
+// Run only when executed as a program: specs import the settled-follow logic
+// (followToSettled/isPeerSessionSettled) without spawning a run.
+const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(process.argv[1]).href
+if (invokedPath !== undefined && import.meta.url === invokedPath) {
+  main().catch((error) => {
+    const code = isPeerError(error) ? `[${error.code}] ` : ''
+    console.error(`dsh-peer: ${code}${error instanceof Error ? error.message : String(error)}`)
+    if (isPeerError(error) && error.endpoint !== undefined && error.endpoint !== '') console.error(`  endpoint: ${error.endpoint}`)
+    process.exit(1)
+  })
+}

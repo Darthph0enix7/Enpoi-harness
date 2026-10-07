@@ -4,7 +4,7 @@ import {
   mcpLadder, mcpServerNameOf, agentRoleOf, reviewerSeatOf, grantProposalFor, grantProposalForOutcome, standingGrantRecord,
   dangerVerbOfPattern, SHIPPED_TOOL_DEFAULTS, advertisedToolNames,
   isFullAccessMode, FULL_ACCESS_ASK_REASON,
-  REVIEW_RUN_TOOL, REVIEW_ROLES, SHIPPED_SEAT_TOOL_DENY, seatToolDenyFor, type PermissionPolicyConfig,
+  REVIEW_RUN_TOOL, REVIEW_ROLES, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, seatToolDenyFor, type PermissionPolicyConfig,
 } from '../src/policy'
 import { buildReviewRunCommand, reviewRunTimeoutMs, shellQuote, validateReviewTarget } from '../src/review-run'
 
@@ -880,5 +880,69 @@ describe('per-seat execution restrictions (backstop behind the creator tool grou
     // An unnamed seat keeps the shipped default; a malformed entry is ignored.
     expect(seatToolDenyFor('sysadmin', document)).toContain('plugin_manager')
     expect(seatToolDenyFor('creator', { creator: 'nope' })).toEqual([])
+  })
+})
+
+describe('shipped seat tool policy (peer family, battery fix-36)', () => {
+  const PEER_TOOLS = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'] as const
+
+  it('allows the whole peer family on the orchestrator seat without an approval card', () => {
+    const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
+    for (const toolName of PEER_TOOLS) {
+      expect(SHIPPED_TOOL_DEFAULTS[toolName], `${toolName} stays on the peer_ exemption`).toBeUndefined()
+      const decision = resolvePolicy({ toolName, agent: 'orchestrator', config })
+      expect(decision, `${toolName} on the orchestrator seat`).toMatchObject({ kind: 'allow', source: 'seat:orchestrator' })
+    }
+    // The seat table only names the peer family; a genuinely unknown tool still asks.
+    expect(SHIPPED_SEAT_TOOL_POLICY.orchestrator).toEqual(
+      Object.fromEntries(PEER_TOOLS.map(tool => [tool, 'allow'])),
+    )
+  })
+
+  it('keeps the ask on every other seat (no peer context) and on an unidentified agent', () => {
+    const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
+    for (const toolName of PEER_TOOLS) {
+      for (const agent of ['sysadmin', 'creator', 'librarian', undefined]) {
+        const decision = resolvePolicy({ toolName, agent, config })
+        expect(decision.kind, `${toolName} on ${String(agent)}`).toBe('ask')
+        expect(decision.source, `${toolName} on ${String(agent)}`).toBe('defaults')
+      }
+    }
+  })
+
+  it('never extends the seat default to a delegated child (the ask forwards to the parent)', () => {
+    const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }
+    const decision = resolvePolicy({ toolName: 'peer_ask', agent: 'orchestrator', delegated: true, config })
+    expect(decision.kind).toBe('ask')
+    expect(decision.source).toBe('defaults')
+  })
+
+  it('lets an operator global row and an operator agent row outrank the shipped seat default', () => {
+    expect(resolvePolicy({ toolName: 'peer_status', agent: 'orchestrator', config: { tools: { peer_status: 'ask' } } }).kind).toBe('ask')
+    expect(resolvePolicy({ toolName: 'peer_status', agent: 'orchestrator', config: { tools: { peer_status: 'deny' } } }).kind).toBe('deny')
+    const agentRow = resolvePolicy({
+      toolName: 'peer_status',
+      agent: 'orchestrator',
+      config: { agents: { orchestrator: { tools: { peer_status: 'deny' } } } },
+    })
+    expect(agentRow).toMatchObject({ kind: 'deny', source: 'agent:orchestrator' })
+  })
+
+  it('still absorbs a seat-default ask with a same-granularity standing grant (mechanism check)', () => {
+    // No ask ships for the orchestrator seat today; this pins the shared
+    // grant short-circuit on the seat tier should a future seat row ask.
+    expect(resolvePolicy({
+      toolName: 'peer_status',
+      agent: 'orchestrator',
+      config: { tools: { peer_status: 'ask' } },
+    }).kind).toBe('ask')
+    expect(resolvePolicy({
+      toolName: 'peer_status',
+      agent: 'orchestrator',
+      config: {
+        tools: { peer_status: 'ask' },
+        grants: { g: { id: 'g', tool: 'peer_status', global: true } },
+      },
+    })).toMatchObject({ kind: 'allow', source: 'grant:tool' })
   })
 })

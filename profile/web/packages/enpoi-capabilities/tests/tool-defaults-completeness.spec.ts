@@ -140,15 +140,19 @@ describe('tool-defaults completeness guard', () => {
     }
   })
 
-  it('accounts for the first-party on-demand peer tools through the documented family exemption', () => {
-    const peerTools = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'] as const
+  it('accounts for the first-party on-demand peer tools: orchestrator seat allows, every other seat asks', () => {
+    const peerTools = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status', 'peer_sessions'] as const
     const config = { defaults: { unknownTools: 'ask' as const } }
     for (const tool of peerTools) {
       expect(SHIPPED_TOOL_DEFAULTS[tool], `${tool} must stay on the documented exemption, not a hand row`).toBeUndefined()
       expect(exemptionFor(tool)?.prefix, `${tool} matches no documented exemption`).toBe('peer_')
-      const decision = resolvePolicy({ toolName: tool, agent: 'orchestrator', config })
-      expect(decision.kind, `${tool} must ask until the operator sets a row`).toBe('ask')
-      expect(decision.source, `${tool} must fall through to the unknown-tools ask`).toBe('defaults')
+      const orchestrator = resolvePolicy({ toolName: tool, agent: 'orchestrator', config })
+      expect(orchestrator, `${tool} must be allowed on the orchestrator seat`).toMatchObject({ kind: 'allow', source: 'seat:orchestrator' })
+      for (const seat of ['sysadmin', 'creator'] as const) {
+        const decision = resolvePolicy({ toolName: tool, agent: seat, config })
+        expect(decision.kind, `${tool} must ask on ${seat} until the operator sets a row`).toBe('ask')
+        expect(decision.source, `${tool} must fall through to the unknown-tools ask on ${seat}`).toBe('defaults')
+      }
     }
   })
 

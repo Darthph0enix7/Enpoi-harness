@@ -163,6 +163,36 @@ export function seatToolDenyFor(seat: string | undefined, document: unknown): re
   return SHIPPED_SEAT_TOOL_DENY[seat] ?? []
 }
 
+/**
+ * Shipped per-seat tool policy: a seat's own default for one tool, consulted
+ * after the operator's global `tools` rows and before the shipped global
+ * table. Seat ids are role ids ({@link agentRoleOf}), the same key
+ * {@link SHIPPED_SEAT_TOOL_DENY} uses.
+ *
+ * The orchestrator seat drives the device-to-device peer interconnect. The
+ * peer family is the operator's own agent-to-agent surface: the pairing
+ * document is human-authored, the tool group is on-demand, and the remote
+ * host independently policies everything the request asks it to execute. An
+ * unattended orchestrator turn must therefore not park on an approval card
+ * for its own peer calls (operator principle: shipped defaults are fully
+ * configured; observed live — `peer_status` carded the orchestrator on every
+ * call). Every other seat keeps the family on the documented `peer_`
+ * exemption, i.e. the unknown-tools ask: a seat with no pairing context has
+ * no peer call to make, and an explicit operator row or grant still settles
+ * the ask. A delegated child never inherits a seat default — its ask must
+ * reach the parent-forwarding path like any other policy ask.
+ */
+export const SHIPPED_SEAT_TOOL_POLICY: Readonly<Record<string, Readonly<Record<string, PermissionPolicy>>>> = Object.freeze({
+  orchestrator: Object.freeze({
+    peer_status: 'allow',
+    peer_sessions: 'allow',
+    peer_ask: 'allow',
+    peer_asks: 'allow',
+    peer_answer: 'allow',
+    peer_cancel: 'allow',
+  }),
+})
+
 /** Shipped global defaults (user-editable via settings; absent keys fall here). */
 export const SHIPPED_TOOL_DEFAULTS: Record<string, PermissionPolicy> = {
   read: 'allow', glob: 'allow', grep: 'allow', read_image: 'allow',
@@ -1208,16 +1238,25 @@ export function resolveToolPolicy(toolName: string, input: PolicyResolutionInput
     const agentLadder = mcpLadder(toolName, agentCfg.tools, input.mcpServerNames)
     if (agentLadder !== null) return agentLadder
   }
-  const globalPolicy = input.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName]
+  const operatorPolicy = input.config.tools?.[toolName]
+  // A shipped seat default applies only to a main (non-delegated) seat the
+  // operator has not overridden: operator rows outrank it, and a delegated
+  // child's ask keeps its parent-forwarding path.
+  const seatPolicy = input.delegated === true || input.agent === undefined
+    ? undefined
+    : SHIPPED_SEAT_TOOL_POLICY[input.agent]?.[toolName]
+  const globalPolicy = operatorPolicy ?? seatPolicy ?? SHIPPED_TOOL_DEFAULTS[toolName]
   if (globalPolicy !== undefined) {
-    if (globalPolicy === 'deny') return { kind: 'deny', reason: `operator policy denies ${toolName}`, source: 'matrix:global' }
+    const shippedSeat = seatPolicy !== undefined
+    const source = shippedSeat ? `seat:${String(input.agent)}` : 'matrix:global'
+    if (globalPolicy === 'deny') return { kind: 'deny', reason: shippedSeat ? `shipped seat policy denies ${toolName}` : `operator policy denies ${toolName}`, source }
     if (globalPolicy === 'ask') {
       if (input.delegated !== true && grantsShortCircuit(toolName, input.agent, input.config.grants, 'tool', undefined)) {
         return { kind: 'allow', source: 'grant:tool' }
       }
-      return { kind: 'ask', reason: `operator policy asks for ${toolName}`, source: 'matrix:global', grantTier: 'tool' }
+      return { kind: 'ask', reason: shippedSeat ? `shipped seat policy asks for ${toolName}` : `operator policy asks for ${toolName}`, source, grantTier: 'tool' }
     }
-    return { kind: 'allow', source: 'matrix:global' }
+    return { kind: 'allow', source }
   }
   // MCP wildcard ladder at the global tier. When unconfigured, mounted MCP tools default to allow!
   if (isMcpToolName(toolName)) {
