@@ -3,7 +3,7 @@ import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ShortcutCatalogEntry, ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FISH_LOGO_PATH, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import type { ReactNode } from 'react'
 import type {
@@ -134,56 +134,41 @@ describe('SidebarRoot shell', () => {
     expect(b.toggleSidebar).toHaveBeenCalledOnce()
   })
 
-  it('renders generic brand fallbacks when no package fills the slots', () => {
+  /** Render the shell with every brand slot leaving its fallback in place. */
+  function renderFallbackShell() {
+    return render(<SidebarRoot
+      collapsed={false} width={300}
+      useSessions={neverHook} useSessionStatus={useSessionStatus} useSessionRetainInfo={neverHook}
+      usePanelInfo={usePanelInfo} selectPanel={() => {}} usePanels={selector => selector([])} useShortcuts={selector => selector([])}
+      useResource={useResource} useWorkspaces={neverHook}
+      startSession={vi.fn()} toggleSidebar={vi.fn()} t={t}
+      renderSlot={((_key: string, _owner: unknown, options?: { fallback?: ReactNode }) =>
+        options?.fallback ?? null) as SidebarRootComponentProps['renderSlot']}
+    />)
+  }
+
+  it('renders the Enpoi mark and wordmark when no package fills the brand slots', () => {
+    const { container } = renderFallbackShell()
+
+    // The no-occupant fallback is fork art: gradient defs present, upstream
+    // whale absent, and the words rendered by the mark instead of the
+    // localized product title.
+    expect(container.querySelector('#enpoi-grad-fill')).not.toBeNull()
+    expect(container.querySelector('#enpoi-grad-border')).not.toBeNull()
+    expect([...container.querySelectorAll('path')].some(path => path.getAttribute('d') === FISH_LOGO_PATH)).toBe(false)
+    expect(screen.getByText('Enpoi')).toBeTruthy()
+    expect(screen.getByText('Harness')).toBeTruthy()
+    expect(screen.queryByText('Enpoi Harness')).toBeNull()
+  })
+
+  it('never paints a local-build version badge in the brand slot', () => {
     vi.stubEnv('DSH_CLIENT_COMMIT_HASH', '0123456')
     vi.stubEnv('DSH_CLIENT_GIT_DIRTY', 'true')
     vi.stubEnv('DSH_CLIENT_VERSION', '1.2.3-rc.4')
-    const { container } = render(<SidebarRoot
-      collapsed={false} width={300}
-      useSessions={neverHook} useSessionStatus={useSessionStatus} useSessionRetainInfo={neverHook}
-      usePanelInfo={usePanelInfo} selectPanel={() => {}} usePanels={selector => selector([])} useShortcuts={selector => selector([])}
-      useResource={useResource} useWorkspaces={neverHook}
-      startSession={vi.fn()} toggleSidebar={vi.fn()} t={t}
-      renderSlot={((_key: string, _owner: unknown, options?: { fallback?: ReactNode }) =>
-        options?.fallback ?? null) as SidebarRootComponentProps['renderSlot']}
-    />)
+    renderFallbackShell()
 
-    expect(screen.getByText('Enpoi Harness')).toBeTruthy()
-    expect(screen.getByText('1.2.3-rc.4-0123456-dirty')).toBeTruthy()
-    expect(container.querySelector('svg')).not.toBeNull()
-  })
-
-  it.each([
-    [{ DSH_CLIENT_VERSION: '1.2.3' }, '1.2.3'],
-    [{ DSH_CLIENT_COMMIT_HASH: 'abcdef0', DSH_CLIENT_VERSION: '1.2.3' }, '1.2.3-abcdef0'],
-  ])('omits unavailable build-version suffixes from %j', (environment, expected) => {
-    for (const [name, value] of Object.entries(environment)) vi.stubEnv(name, value)
-    render(<SidebarRoot
-      collapsed={false} width={300}
-      useSessions={neverHook} useSessionStatus={useSessionStatus} useSessionRetainInfo={neverHook}
-      usePanelInfo={usePanelInfo} selectPanel={() => {}} usePanels={selector => selector([])} useShortcuts={selector => selector([])}
-      useResource={useResource} useWorkspaces={neverHook}
-      startSession={vi.fn()} toggleSidebar={vi.fn()} t={t}
-      renderSlot={((_key: string, _owner: unknown, options?: { fallback?: ReactNode }) =>
-        options?.fallback ?? null) as SidebarRootComponentProps['renderSlot']}
-    />)
-
-    expect(screen.getByText('Enpoi Harness')).toBeTruthy()
-    expect(screen.getByText(expected)).toBeTruthy()
-  })
-
-  it('retains the local-build fallback without complete build metadata', () => {
-    render(<SidebarRoot
-      collapsed={false} width={300}
-      useSessions={neverHook} useSessionStatus={useSessionStatus} useSessionRetainInfo={neverHook}
-      usePanelInfo={usePanelInfo} selectPanel={() => {}} usePanels={selector => selector([])} useShortcuts={selector => selector([])}
-      useResource={useResource} useWorkspaces={neverHook}
-      startSession={vi.fn()} toggleSidebar={vi.fn()} t={t}
-      renderSlot={((_key: string, _owner: unknown, options?: { fallback?: ReactNode }) =>
-        options?.fallback ?? null) as SidebarRootComponentProps['renderSlot']}
-    />)
-
-    expect(screen.getByText('Enpoi Harness')).toBeTruthy()
+    expect(screen.queryByText(/1\.2\.3/)).toBeNull()
+    expect(screen.queryByText(/0123456/)).toBeNull()
   })
 
   it('hands the region its wide flag and clamps expandSidebar to the collapsed state', () => {

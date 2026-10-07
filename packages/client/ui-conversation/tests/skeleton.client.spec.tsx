@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionListState, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceSnapshot, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { FISH_LOGO_PATH } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot as sessionFixture,
 } from '@deepseek-ai/dsh-client-test-runtime'
@@ -396,6 +397,17 @@ describe('Hero chrome', () => {
     expect(brandMarkOwner.size).toBe(34)
     expect(brandMarkOwner.className).toBeTypeOf('string')
     expect(renderSlot.mock.calls[0]?.[2]?.fallback).toBeTruthy()
+  })
+
+  it('renders the Enpoi mark as the no-occupant hero fallback', () => {
+    const renderSlot = vi.fn<HeroShellProps['renderSlot']>((_key, _owner, options) => options?.fallback ?? null)
+    const view = render(<HeroShell t={makeTranslate(en, commonEn)} renderSlot={renderSlot} />)
+
+    // Fork art, not the upstream whale: the gradient mark paints and the fish
+    // silhouette is absent.
+    expect(view.container.querySelector('#enpoi-grad-fill')).not.toBeNull()
+    expect(view.container.querySelector('#enpoi-grad-border')).not.toBeNull()
+    expect([...view.container.querySelectorAll('path')].some(path => path.getAttribute('d') === FISH_LOGO_PATH)).toBe(false)
   })
 })
 

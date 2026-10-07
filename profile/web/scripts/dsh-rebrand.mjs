@@ -157,6 +157,38 @@ function checkBrandRoster() {
   }
 }
 
+/**
+ * The shells' no-occupant brand fallbacks must be Enpoi art. A stale module
+ * graph, a cold-load race, or a collision-retire can paint a fallback even
+ * while ui-brand-enpoi is enabled, so a fallback that still references the
+ * upstream whale repaints upstream branding on an Enpoi tab.
+ */
+function checkShellFallbackBrand() {
+  const checks = [
+    {
+      relative: 'packages/client/ui-sidebar/src/client/SidebarRoot.tsx',
+      forbidden: ['FishLogo', 'brand.localBuild'],
+      required: ['EnpoiMark', 'EnpoiWordmark'],
+    },
+    {
+      relative: 'packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx',
+      forbidden: ['HeroFish', 'FISH_LOGO_PATH'],
+      required: ['EnpoiMark'],
+    },
+  ]
+  for (const { relative, forbidden, required } of checks) {
+    const file = join(HARNESS, relative)
+    if (!existsSync(file)) { drift.push(`shell fallback source missing: ${file}`); continue }
+    const source = readFileSync(file, 'utf8')
+    for (const needle of forbidden) {
+      if (source.includes(needle)) drift.push(`shell fallback still references ${needle}: ${file}`)
+    }
+    for (const needle of required) {
+      if (!source.includes(needle)) drift.push(`shell fallback lost its Enpoi art (${needle}): ${file}`)
+    }
+  }
+}
+
 /** Mint the auth cookie from the running service journal, like preset-tool-inventory.mjs. */
 function liveCookie() {
   try {
@@ -219,6 +251,7 @@ if (CHECK) {
   checkAssets()
   checkRuntimeTitle()
   checkBrandRoster()
+  checkShellFallbackBrand()
   for (const item of contrastDrift()) drift.push(item)
   if (LIVE) await checkLive()
   for (const note of skips) console.warn(`[rebrand] warn ${note}`)
@@ -227,7 +260,7 @@ if (CHECK) {
     for (const item of drift) console.error(`  - ${item}`)
     process.exit(1)
   }
-  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title, brand roster, overlay contrast`)
+  console.log(`[rebrand] PASS${LIVE ? ' (live)' : ''}: Enpoi title, dark preview boot, brand assets, runtime title, brand roster, shell fallbacks, overlay contrast`)
 } else {
   apply()
   console.log('[rebrand] applied; run with --check to verify')

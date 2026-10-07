@@ -122,11 +122,13 @@ exports[`sidebar shell snapshots > renders Windows caption controls in expanded 
             >
               <svg
                 aria-hidden="true"
-                data-content="965fe321"
+                data-content="1eb4d70d"
                 fill="none"
-                height="17.6580310880829"
-                viewBox="0 0 23.16 17.04"
+                height="24"
+                style="display: inline-block; vertical-align: middle;"
+                viewBox="0 0 32 32"
                 width="24"
+                xmlns="http://www.w3.org/2000/svg"
               />
             </div>
           </span>
@@ -137,20 +139,20 @@ exports[`sidebar shell snapshots > renders Windows caption controls in expanded 
               data-slot="sidebar.brand.name"
               style="display: contents;"
             >
-              <span
-                class="localBuildBrand"
+              <div
+                style="display: inline-flex; align-items: baseline; gap: 6px; user-select: none; line-height: 1;"
               >
                 <span
-                  class="localBuildTitle"
+                  style="font-size: 15px; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, rgb(103, 220, 231) 0%, rgb(167, 139, 250) 55%, rgb(248, 243, 245) 100%); -webkit-text-fill-color: transparent; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  Enpoi Harness
+                  Enpoi
                 </span>
                 <span
-                  class="buildVersion"
+                  style="font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary, #97ADCA); letter-spacing: -0.01em; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  1.2.3-rc.4-abc1234-dirty
+                  Harness
                 </span>
-              </span>
+              </div>
             </div>
           </span>
         </span>
@@ -262,11 +264,13 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
           >
             <svg
               aria-hidden="true"
-              data-content="965fe321"
+              data-content="1eb4d70d"
               fill="none"
-              height="17.6580310880829"
-              viewBox="0 0 23.16 17.04"
+              height="24"
+              style="display: inline-block; vertical-align: middle;"
+              viewBox="0 0 32 32"
               width="24"
+              xmlns="http://www.w3.org/2000/svg"
             />
           </div>
         </span>
@@ -374,11 +378,13 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
             >
               <svg
                 aria-hidden="true"
-                data-content="965fe321"
+                data-content="1eb4d70d"
                 fill="none"
-                height="17.6580310880829"
-                viewBox="0 0 23.16 17.04"
+                height="24"
+                style="display: inline-block; vertical-align: middle;"
+                viewBox="0 0 32 32"
                 width="24"
+                xmlns="http://www.w3.org/2000/svg"
               />
             </div>
           </span>
@@ -389,20 +395,20 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
               data-slot="sidebar.brand.name"
               style="display: contents;"
             >
-              <span
-                class="localBuildBrand"
+              <div
+                style="display: inline-flex; align-items: baseline; gap: 6px; user-select: none; line-height: 1;"
               >
                 <span
-                  class="localBuildTitle"
+                  style="font-size: 15px; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, rgb(103, 220, 231) 0%, rgb(167, 139, 250) 55%, rgb(248, 243, 245) 100%); -webkit-text-fill-color: transparent; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  Enpoi Harness
+                  Enpoi
                 </span>
                 <span
-                  class="buildVersion"
+                  style="font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary, #97ADCA); letter-spacing: -0.01em; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  1.2.3-rc.4-abc1234-dirty
+                  Harness
                 </span>
-              </span>
+              </div>
             </div>
           </span>
         </span>
@@ -517,11 +523,13 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
             >
               <svg
                 aria-hidden="true"
-                data-content="965fe321"
+                data-content="1eb4d70d"
                 fill="none"
-                height="17.6580310880829"
-                viewBox="0 0 23.16 17.04"
+                height="24"
+                style="display: inline-block; vertical-align: middle;"
+                viewBox="0 0 32 32"
                 width="24"
+                xmlns="http://www.w3.org/2000/svg"
               />
             </div>
           </span>
@@ -532,20 +540,20 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
               data-slot="sidebar.brand.name"
               style="display: contents;"
             >
-              <span
-                class="localBuildBrand"
+              <div
+                style="display: inline-flex; align-items: baseline; gap: 6px; user-select: none; line-height: 1;"
               >
                 <span
-                  class="localBuildTitle"
+                  style="font-size: 15px; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, rgb(103, 220, 231) 0%, rgb(167, 139, 250) 55%, rgb(248, 243, 245) 100%); -webkit-text-fill-color: transparent; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  Enpoi Harness
+                  Enpoi
                 </span>
                 <span
-                  class="buildVersion"
+                  style="font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary, #97ADCA); letter-spacing: -0.01em; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;"
                 >
-                  1.2.3-rc.4-abc1234-dirty
+                  Harness
                 </span>
-              </span>
+              </div>
             </div>
           </span>
         </span>

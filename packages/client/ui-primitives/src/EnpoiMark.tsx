@@ -1,15 +1,15 @@
-export interface EnpoiLogoProps {
-  size?: number | undefined
-  className?: string | undefined
-}
+import type { IconProps } from './icons/props.ts'
 
 /**
- * Modern geometric "E" monogram + orbital spark for Enpoi Harness.
- * Sharp, crisp vector rendering across all sizes (16px to 64px).
+ * Render the Enpoi monogram mark: the geometric "E" in a rounded glass tile
+ * with the gradient border and orbital spark. Decorative (aria-hidden), so the
+ * render site owns the accessible name; pair with {@link EnpoiWordmark} for
+ * the full identity.
+ * @param props.size - square edge in px (default 24).
+ * @param props.className - extra class for layout placement.
+ * @returns the mark svg element.
  */
-export function EnpoiLogo(props?: EnpoiLogoProps) {
-  const size = props?.size ?? 24
-  const className = props?.className
+export function EnpoiMark({ size = 24, className }: IconProps) {
   return (
     <svg
       width={size}
@@ -19,6 +19,7 @@ export function EnpoiLogo(props?: EnpoiLogoProps) {
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       style={{ display: 'inline-block', verticalAlign: 'middle' }}
+      aria-hidden="true"
     >
       <defs>
         <linearGradient id="enpoi-grad-border" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
@@ -56,5 +57,50 @@ export function EnpoiLogo(props?: EnpoiLogoProps) {
       <circle cx="23.5" cy="8.5" r="2.2" fill="#67DCE7" />
       <circle cx="23.5" cy="8.5" r="1.1" fill="#FFFFFF" />
     </svg>
+  )
+}
+
+/**
+ * Render the Enpoi Harness wordmark: the "Enpoi" gradient over the secondary
+ * "Harness". Decorative brand art, so render it inside an aria-hidden identity
+ * wrapper.
+ * @returns the wordmark element.
+ */
+export function EnpoiWordmark() {
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        alignItems: 'baseline',
+        gap: '6px',
+        userSelect: 'none',
+        lineHeight: 1,
+      }}
+    >
+      <span
+        style={{
+          fontSize: '15px',
+          fontWeight: 700,
+          letterSpacing: '-0.02em',
+          background: 'linear-gradient(135deg, #67DCE7 0%, #A78BFA 55%, #F8F3F5 100%)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        }}
+      >
+        Enpoi
+      </span>
+      <span
+        style={{
+          fontSize: '12px',
+          fontWeight: 500,
+          color: 'var(--dsw-alias-label-secondary, #97ADCA)',
+          letterSpacing: '-0.01em',
+          fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        }}
+      >
+        Harness
+      </span>
+    </div>
   )
 }

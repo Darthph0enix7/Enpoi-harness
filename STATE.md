@@ -25,7 +25,7 @@ Commits on `local/serverlocal` (beyond upstream):
 
 | File | Change |
 |---|---|
-| `packages/client/ui-brand-enpoi/` | NEW package — Enpoi branding plugin: `EnpoiLogo.tsx` (gradient glass "E" monogram), `Brand.tsx` (Enpoi Harness wordmark), slot injection (`sidebar.brand.mark`, `conversation.hero.brand.mark`). Built with tsdown like the official `ui-brand-official`. |
+| `packages/client/ui-brand-enpoi/` | NEW package — Enpoi branding plugin: `Brand.tsx` (delegates the mark and wordmark to the shared `ui-primitives` `EnpoiMark`/`EnpoiWordmark`), slot injection (`sidebar.brand.mark`, `conversation.hero.brand.mark`). Built with tsdown like the official `ui-brand-official`. |
 | `packages/bundle/web-app/package.json` | Dependency swap: `dsh-client-ui-brand-official` → `dsh-client-ui-brand-enpoi`. |
 | `packages/bundle/web-app/cordis.patch.yml` | Entry swap: `ui-brand-official` → `ui-brand-enpoi`. |
 | `apps/web/index.html` | `<title>Enpoi Harness</title>` (was DSH title). |
