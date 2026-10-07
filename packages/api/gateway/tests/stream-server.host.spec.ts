@@ -9,6 +9,7 @@ import {
   type RemoteStreamFailureMapper,
   type RemoteStreamOpener,
 } from '../src/stream-server.ts'
+import { REMOTE_STREAM_HEARTBEAT_TEXT } from '../src/stream-protocol.ts'
 
 interface RunningMux {
   readonly http: Server
@@ -27,18 +28,22 @@ afterEach(async () => {
 })
 
 describe('Remote stream mux server carrier lifecycle', () => {
-  it('sends WebSocket Ping control frames without application messages', async () => {
+  it('sends Ping control frames and application heartbeats without another message', async () => {
     const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
     const client = await connect(entry.url)
     const serverSocket = acceptedSocket(entry.mux)
-    const messages = vi.fn()
-    client.on('message', messages)
+    const messages: string[] = []
+    client.on('message', (data) => {
+      if (!Buffer.isBuffer(data)) throw new TypeError('fixture expected a Buffer frame')
+      messages.push(data.toString('utf8'))
+    })
 
     const ping = once(client, 'ping')
     const pong = once(serverSocket, 'pong')
     expect((await ping)[0]).toEqual(Buffer.alloc(0))
     expect((await pong)[0]).toEqual(Buffer.alloc(0))
-    expect(messages).not.toHaveBeenCalled()
+    await vi.waitFor(() => { expect(messages.length).toBeGreaterThan(0) })
+    expect(messages.every(message => message === REMOTE_STREAM_HEARTBEAT_TEXT)).toBe(true)
 
     const closingPing = vi.spyOn(serverSocket, 'ping')
     client.pause()
@@ -50,6 +55,57 @@ describe('Remote stream mux server carrier lifecycle', () => {
     const closed = once(client, 'close')
     client.resume()
     await closed
+  })
+
+  it('emits an application heartbeat at the configured interval while the socket stays open', async () => {
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      2_000,
+    )
+    vi.useFakeTimers()
+    try {
+      await connect(entry.url)
+      const serverSocket = acceptedSocket(entry.mux)
+      const sent = vi.spyOn(serverSocket, 'send')
+      const ping = vi.spyOn(serverSocket, 'ping')
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(sent).toHaveBeenCalledTimes(1)
+      expect(sent).toHaveBeenCalledWith(REMOTE_STREAM_HEARTBEAT_TEXT, expect.any(Function))
+      expect(ping).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(sent).toHaveBeenCalledTimes(2)
+      expect(ping).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops emitting heartbeats once the socket closes', async () => {
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      2_000,
+    )
+    vi.useFakeTimers()
+    try {
+      const client = await connect(entry.url)
+      const serverSocket = acceptedSocket(entry.mux)
+      const sent = vi.spyOn(serverSocket, 'send')
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(sent).toHaveBeenCalledTimes(1)
+
+      const clientClosed = once(client, 'close')
+      const serverClosed = once(serverSocket, 'close')
+      client.close()
+      await Promise.all([clientClosed, serverClosed])
+      const atClose = sent.mock.calls.length
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(sent.mock.calls.length).toBe(atClose)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('requires two missed heartbeats before terminating an unresponsive socket', async () => {

@@ -12,6 +12,11 @@ import {
   type ConnectionGenerationSource,
   type ConnectionHandle,
 } from '@deepseek-ai/dsh-client-connection/client'
+import {
+  WAKE_RECONNECT_DEBOUNCE_MS,
+  WAKE_STALE_THRESHOLD_MS,
+  watchBrowserNetwork,
+} from '@deepseek-ai/dsh-client-connection/src/client/network-watch.ts'
 import type {
   InvocationDescriptor,
   RemoteResult,
@@ -31,7 +36,7 @@ import {
   RemoteStreamCarrierError,
   RemoteStreamMuxClient,
 } from '../src/client/stream-client.ts'
-import { parseRemoteStreamClientMessage } from '../src/stream-protocol.ts'
+import { parseRemoteStreamClientMessage, REMOTE_STREAM_HEARTBEAT_TEXT } from '../src/stream-protocol.ts'
 
 type FixtureApprovalOutcome = 'allowed' | 'unavailable'
 const fixtureContextTag = Symbol('fixture-context-tag')
@@ -2874,6 +2879,111 @@ describe('Remote stream client carrier lifecycle', () => {
         expect(onFrame).toHaveBeenCalledTimes(3)
       } finally {
         await client.close()
+      }
+    })
+  })
+
+  it('counts a carrier heartbeat as activity without delivering it to a logical stream', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const onFrame = vi.fn<() => void>()
+      const client = new RemoteStreamMuxClient(onFrame)
+      client.start()
+      const socket = FakeWebSocket.sockets[0]!
+      await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.OPEN) })
+      const abort = new AbortController()
+      const source = client.open('probe/watch', {}, abort.signal)[Symbol.asyncIterator]()
+      try {
+        const pending = source.next()
+        await vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+        const opened = parseRemoteStreamClientMessage(socket.sent[0]!)
+        if (opened.type !== 'open') throw new Error('fixture expected an open frame')
+
+        socket.receiveRaw(REMOTE_STREAM_HEARTBEAT_TEXT)
+        expect(onFrame).toHaveBeenCalledTimes(1)
+        expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+
+        socket.receive({ type: 'item', streamId: opened.streamId, value: 'alpha' })
+        await expect(pending).resolves.toEqual({ done: false, value: 'alpha' })
+      } finally {
+        abort.abort()
+        await source.return?.(undefined)
+        await client.close()
+      }
+    })
+  })
+
+  it('keeps an idle connected carrier fresh across a wake while only host heartbeats arrive', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      vi.useFakeTimers()
+      const win = Object.assign(new EventTarget(), { navigator: { onLine: true } })
+      const page = Object.assign(new EventTarget(), { visibilityState: 'visible', baseURI: 'https://harness.example' })
+      vi.stubGlobal('window', win)
+      vi.stubGlobal('document', page)
+      let lastFrameAt: number | undefined
+      const client = new RemoteStreamMuxClient(() => { lastFrameAt = Date.now() })
+      const reconnect = vi.fn<() => void>(() => { client.reconnect() })
+      const stopWatch = watchBrowserNetwork({
+        setNetworkAvailable: vi.fn<(available: boolean) => void>(),
+        reconnect,
+        isProbablyStale: thresholdMs => lastFrameAt === undefined || Date.now() - lastFrameAt > thresholdMs,
+      }, () => 'connected')
+      try {
+        client.start()
+        await vi.advanceTimersByTimeAsync(1)
+        const socket = FakeWebSocket.sockets[0]!
+        expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+        lastFrameAt = Date.now()
+
+        // Host heartbeats every 2 s; the last one is 100 ms old when the wake fires.
+        for (let elapsed = 0; elapsed < 4 * WAKE_STALE_THRESHOLD_MS; elapsed += 2_000) {
+          await vi.advanceTimersByTimeAsync(2_000)
+          socket.receiveRaw(REMOTE_STREAM_HEARTBEAT_TEXT)
+        }
+        page.dispatchEvent(new Event('visibilitychange'))
+        win.dispatchEvent(new Event('pageshow'))
+        await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+        expect(reconnect).not.toHaveBeenCalled()
+      } finally {
+        stopWatch()
+        await client.close()
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
+      }
+    })
+  })
+
+  it('reconnects once on wake when a connected carrier received no frame past the stale window', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      vi.useFakeTimers()
+      const win = Object.assign(new EventTarget(), { navigator: { onLine: true } })
+      const page = Object.assign(new EventTarget(), { visibilityState: 'visible', baseURI: 'https://harness.example' })
+      vi.stubGlobal('window', win)
+      vi.stubGlobal('document', page)
+      let lastFrameAt: number | undefined
+      const client = new RemoteStreamMuxClient(() => { lastFrameAt = Date.now() })
+      const reconnect = vi.fn<() => void>(() => { client.reconnect() })
+      const stopWatch = watchBrowserNetwork({
+        setNetworkAvailable: vi.fn<(available: boolean) => void>(),
+        reconnect,
+        isProbablyStale: thresholdMs => lastFrameAt === undefined || Date.now() - lastFrameAt > thresholdMs,
+      }, () => 'connected')
+      try {
+        client.start()
+        await vi.advanceTimersByTimeAsync(1)
+        const socket = FakeWebSocket.sockets[0]!
+        expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+        lastFrameAt = Date.now()
+
+        await vi.advanceTimersByTimeAsync(WAKE_STALE_THRESHOLD_MS + 1)
+        page.dispatchEvent(new Event('visibilitychange'))
+        win.dispatchEvent(new Event('pageshow'))
+        await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+        expect(reconnect).toHaveBeenCalledTimes(1)
+      } finally {
+        stopWatch()
+        await client.close()
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
       }
     })
   })

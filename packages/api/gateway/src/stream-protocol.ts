@@ -250,11 +250,20 @@ export interface RemoteStreamFailure {
   readonly details: object
 }
 
+/**
+ * Wire text of the Host's periodic carrier heartbeat. No logical stream owns
+ * the frame: a Client counts it as physical-carrier activity and delivers it
+ * to no consumer, and an idle browser tab is not mistaken for a dead socket.
+ * Serialized once because the Host sends it verbatim on every interval.
+ */
+export const REMOTE_STREAM_HEARTBEAT_TEXT = '{"type":"heartbeat"}'
+
 /** One logical stream frame sent from the Host. */
 export type RemoteStreamServerMessage =
   | { readonly type: 'item'; readonly streamId: string; readonly value?: unknown }
   | { readonly type: 'error'; readonly streamId: string; readonly error: RemoteStreamFailure }
   | { readonly type: 'end'; readonly streamId: string }
+  | { readonly type: 'heartbeat' }
 
 /**
  * Parse and validate one browser-to-Host text message.
@@ -292,6 +301,9 @@ export function parseRemoteStreamClientMessage(text: string): RemoteStreamClient
  */
 export function parseRemoteStreamServerMessage(text: string): RemoteStreamServerMessage {
   return parseMessage(text, (value) => {
+    if (value.type === 'heartbeat' && exactKeys(value, ['type'])) {
+      return { type: 'heartbeat' }
+    }
     if (value.type === 'item'
       && (exactKeys(value, ['type', 'streamId']) || exactKeys(value, ['type', 'streamId', 'value']))
       && validId(value.streamId)) {

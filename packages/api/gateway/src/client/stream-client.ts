@@ -316,6 +316,8 @@ export class RemoteStreamMuxClient {
     try {
       if (typeof data !== 'string') throw new Error('api gateway: Remote stream WebSocket requires text messages')
       const frame = parseRemoteStreamServerMessage(data)
+      // A carrier heartbeat belongs to no logical stream; the frame report above is its only effect.
+      if (frame.type === 'heartbeat') return
       const stream = this.streams.get(frame.streamId)
       if (stream === undefined) return
       stream.inbox.push(frame)

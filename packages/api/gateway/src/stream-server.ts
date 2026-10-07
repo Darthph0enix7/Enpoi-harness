@@ -7,6 +7,7 @@ import { RemoteError, remoteErrorOf, type PeerScope } from '@deepseek-ai/dsh-typ
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import {
   parseRemoteStreamClientMessage,
+  REMOTE_STREAM_HEARTBEAT_TEXT,
   type RemoteStreamClientMessage,
   type RemoteStreamFailure,
   type RemoteStreamServerMessage,
@@ -49,7 +50,7 @@ export class RemoteStreamMuxServer {
   /**
    * @param open - Gateway stream dispatcher.
    * @param failure - Gateway error-to-wire mapper.
-   * @param heartbeatIntervalMs - interval between WebSocket Ping control frames.
+   * @param heartbeatIntervalMs - interval between WebSocket Ping control frames and application heartbeat frames.
    * @param streamInboxBytes - buffered uplink frame bytes one logical stream may hold before it fails.
    */
   constructor(
@@ -117,6 +118,10 @@ export class RemoteStreamMuxServer {
           continue
         }
         this.missedHeartbeats.set(socket, missed + 1)
+        // Browser script cannot observe the Ping control frame; the application
+        // heartbeat keeps an idle Client's liveness window fresh. Its write
+        // result only mirrors the socket error/close events that end the connection.
+        socket.send(REMOTE_STREAM_HEARTBEAT_TEXT, () => {})
         socket.ping()
       }
     }, this.heartbeatIntervalMs)

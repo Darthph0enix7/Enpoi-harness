@@ -65,6 +65,9 @@ describe('Remote stream wire protocol', () => {
     expect(parseRemoteStreamServerMessage(JSON.stringify({
       type: 'end', streamId: 'stream-1',
     }))).toEqual({ type: 'end', streamId: 'stream-1' })
+    expect(parseRemoteStreamServerMessage(JSON.stringify({
+      type: 'heartbeat',
+    }))).toEqual({ type: 'heartbeat' })
   })
 
   it.each([
@@ -75,6 +78,7 @@ describe('Remote stream wire protocol', () => {
     { type: 'error', streamId: 'stream-1', error: { code: 1, message: 'failure', details: {} } },
     { type: 'error', streamId: 'stream-1', error: { code: 'failed', message: 1, details: {} } },
     { type: 'error', streamId: 'stream-1', error: { code: 'failed', message: 'failure', details: [] } },
+    { type: 'heartbeat', streamId: 'stream-1' },
     { type: 'unknown', streamId: 'stream-1' },
   ])('rejects an invalid server message: %j', (message) => {
     expect(() => parseRemoteStreamServerMessage(JSON.stringify(message)))

@@ -14,12 +14,14 @@ const HOST_TERMINATION_MISSED_HEARTBEATS = 2
  * A connected generation that has received no inbound frame for this long is
  * treated as probably dead on wake. Derived from the Host's heartbeat policy:
  * {@link HOST_TERMINATION_MISSED_HEARTBEATS} × {@link HOST_HEARTBEAT_INTERVAL_MS}.
- * The window counts every frame the Client receives on any Remote stream. The
- * Host heartbeat itself is a WebSocket protocol Ping, which browser script
- * cannot observe, so a browser generation carrying no application traffic
- * reaches this window while still healthy; the wake path then errs toward one
- * reconnect. A Host-configured `websocketHeartbeatIntervalMs` override is not
- * visible to the Client, so this default-derived window always applies.
+ * The window counts every frame the Client receives on any Remote stream,
+ * including the Host's application-level heartbeat frame (`{ type: 'heartbeat' }`,
+ * written by the mux to every open socket on the same interval as the control
+ * Ping), so at the default interval a healthy idle generation stays fresh and
+ * the wake path is a no-op. The control Ping itself remains invisible to
+ * browser script, and a Host-configured `websocketHeartbeatIntervalMs` above
+ * this default-derived window can still let an idle generation reach it; the
+ * wake path then errs toward one reconnect.
  */
 export const WAKE_STALE_THRESHOLD_MS = HOST_HEARTBEAT_INTERVAL_MS * HOST_TERMINATION_MISSED_HEARTBEATS
 
