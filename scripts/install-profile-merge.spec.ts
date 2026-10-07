@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -566,6 +566,86 @@ describe('profile package.json dependency union', () => {
     expect(readFileSync(live, 'utf8')).toBe(before)
     expect(result.output).toContain('refusing to overwrite')
     expect(result.output).toContain('shipped-dep')
+  })
+})
+
+describe('peer CLI distribution', () => {
+  const peerScript = join(repoRoot, 'scripts', 'dsh-peer.mjs')
+
+  it('ships a self-contained caller-side script with every command', () => {
+    const peer = readFileSync(peerScript, 'utf8')
+    expect(peer.startsWith('#!/usr/bin/env node\n')).toBe(true)
+    const imports = [...peer.matchAll(/^import .* from '([^']+)'/gmu)].map(match => match[1] ?? '')
+    expect(imports.length).toBeGreaterThan(0)
+    expect(imports.every(specifier => specifier.startsWith('node:'))).toBe(true)
+    for (const command of ['handshake', 'status', 'list', 'ask', 'follow', 'asks', 'answer', 'cancel']) {
+      expect(peer).toContain(`${command}: command`)
+    }
+  })
+
+  it('install seeds dsh-peer and update refreshes it, honoring the recorded bin dir', () => {
+    const install = readFileSync(installSh, 'utf8')
+    const doInstall = /do_install\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
+    const doUpdate = /do_update\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
+    expect(doInstall).toBeDefined()
+    expect(doUpdate).toBeDefined()
+    // Install seeds it; both update paths (full and already-current) refresh it.
+    expect(doInstall!.match(/write_peer_cli/g) ?? []).toHaveLength(1)
+    expect(doInstall).toMatch(/write_peer_cli \|\| warn/)
+    expect(doUpdate!.match(/write_peer_cli/g) ?? []).toHaveLength(2)
+    // The recorded binDir resolution comes first, exactly like the shim.
+    const binResolve = doUpdate!.indexOf('recorded_bin="$(json_field "$state" binDir)"')
+    expect(doUpdate).toContain('"$BIN_DIR_EXPLICIT" = 0')
+    expect(binResolve).toBeGreaterThanOrEqual(0)
+    expect(doUpdate!.indexOf('write_peer_cli')).toBeGreaterThan(binResolve)
+    // The seeder writes into the resolved BIN_DIR from the harness tree and is fail-soft.
+    const fn = /write_peer_cli\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
+    expect(fn).toBeDefined()
+    expect(fn).toContain('scripts/dsh-peer.mjs')
+    expect(fn).toContain('"$BIN_DIR/dsh-peer"')
+    expect(fn).toContain('chmod 755')
+    expect(fn).not.toMatch(/\bdie\b/)
+  })
+
+  it('seeds the script with mode 755 and fails soft when the source is absent', () => {
+    const harness = join(root, 'peer-harness')
+    const bin = join(root, 'peer-bin')
+    mkdirSync(join(harness, 'scripts'), { recursive: true })
+    writeFileSync(join(harness, 'scripts', 'dsh-peer.mjs'), '#!/usr/bin/env node\nconsole.log("peer")\n')
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'HARNESS="$HARNESS_VALUE"',
+      'BIN_DIR="$BIN_VALUE"',
+      'write_peer_cli',
+      'printf "RC=%s\\n" "$?"',
+    ].join('\n')
+    const seeded = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh, HARNESS_VALUE: harness, BIN_VALUE: bin },
+      encoding: 'utf8',
+    })
+    expect(seeded.status).toBe(0)
+    const target = join(bin, 'dsh-peer')
+    expect(readFileSync(target, 'utf8')).toBe('#!/usr/bin/env node\nconsole.log("peer")\n')
+    expect(statSync(target).mode & 0o777).toBe(0o755)
+    // A harness tree without the script is a warning at the call site, not a failure.
+    const missing = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh, HARNESS_VALUE: join(root, 'peer-harness-empty'), BIN_VALUE: join(root, 'peer-bin-empty') },
+      encoding: 'utf8',
+    })
+    expect(missing.status).toBe(0)
+    expect(`${missing.stdout}${missing.stderr}`).toContain('RC=1')
+    expect(existsSync(join(root, 'peer-bin-empty', 'dsh-peer'))).toBe(false)
+  })
+
+  it('fish ds.fish carries a peer function delegating to the installed CLI', () => {
+    const fish = readFileSync(join(repoRoot, 'profile/web/fish/ds.fish'), 'utf8')
+    const block = /case "peer"[\s\S]*?case "/.exec(fish)?.[0] ?? ''
+    expect(block).toContain('command -v dsh-peer')
+    expect(block).toContain('$bin_dir/dsh-peer')
+    expect(block).toContain('$HOME/.local/bin/dsh-peer')
+    expect(block).toMatch(/command \$peer_bin \$subargs/)
+    expect(block).toContain('re-run the installer')
   })
 })
 

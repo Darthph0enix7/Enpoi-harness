@@ -1816,6 +1816,22 @@ SHIM
   return 0
 }
 
+# Seed the caller-side peer CLI (`ds peer`) beside the shim. The script ships
+# inside the harness tree (scripts/dsh-peer.mjs); re-seeding it on every install
+# and update lets CLI fixes reach an existing install through `dsh update`.
+# Fail-soft: a missing source or a write error warns at the call site and never
+# aborts the install/update.
+write_peer_cli() {
+  local src="${HARNESS:-$PREFIX/harness/current}/scripts/dsh-peer.mjs" tmp
+  [ -f "$src" ] || { log "peer CLI: no script at $src"; return 1; }
+  mkdir -p "$BIN_DIR" || return 1
+  tmp="$BIN_DIR/.dsh-peer.tmp.$$"
+  cp "$src" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  chmod 755 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$BIN_DIR/dsh-peer" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
 write_state() {
   local file="$PREFIX/harness/install-state.json" tmp now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -2473,6 +2489,7 @@ do_install() {
   step "Configuring CLI shims & shell environment"
   write_shim || die "could not write the dsh shim into $BIN_DIR"
   substep_ok "Installed launcher: $BIN_DIR/dsh, $BIN_DIR/ds"
+  write_peer_cli || warn "could not seed the peer CLI into $BIN_DIR ('ds peer' unavailable until the next successful install/update)"
   if [ "$WRITE_RC" = 1 ]; then
     write_rc
   fi
@@ -2961,6 +2978,7 @@ do_update() {
     # Regenerate the shim even when no new tree was built: a shim fix in the
     # installer must reach an already-current install through `dsh update`.
     write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
+    write_peer_cli || warn "could not refresh the peer CLI in $BIN_DIR"
     if [ "$WRITE_RC" = 1 ]; then write_rc; fi
     prune_update_artifacts
     say "dsh is already up to date: $VERSION ($CHANNEL channel)"
@@ -3044,6 +3062,7 @@ do_update() {
     exit 1
   fi
   write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
+  write_peer_cli || warn "could not refresh the peer CLI in $BIN_DIR"
   write_state || warn "could not write $state"
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
@@ -3117,7 +3136,7 @@ EOF
 
 do_repair() {
   local state="$PREFIX/harness/install-state.json" recorded_home recorded_version active
-  local target cand d name v shim unit en st code port url p pid b l rc
+  local target cand d name v shim unit en st code port url p pid b l rc peer_cli
   local perm complete_any=0 fish_dir fsrc fdst rel
 
   if [ "$DRY_RUN" = 1 ]; then CHECK_ONLY=1; fi
@@ -3240,6 +3259,16 @@ do_repair() {
   elif ! grep -qF -- "$PREFIX" "$shim" 2>/dev/null; then
     if repair_fixable "shim $shim does not reference $PREFIX"; then
       if [ -n "$NODE" ] && write_shim; then repair_fixed "regenerated $shim"; else repair_fail "could not regenerate $shim" "re-run the installer with --bin-dir '$BIN_DIR'"; fi
+    fi
+  fi
+  peer_cli="$BIN_DIR/dsh-peer"
+  if [ ! -e "$peer_cli" ]; then
+    if repair_fixable "peer CLI $peer_cli is missing"; then
+      if write_peer_cli; then repair_fixed "seeded $peer_cli"; else repair_note "could not seed $peer_cli (the active tree may predate it; a real update brings it)"; fi
+    fi
+  elif [ ! -x "$peer_cli" ]; then
+    if repair_fixable "peer CLI $peer_cli is not executable"; then
+      if chmod +x "$peer_cli"; then repair_fixed "chmod +x $peer_cli"; else repair_fail "could not chmod $peer_cli" "chmod +x '$peer_cli'"; fi
     fi
   fi
   case ":$PATH:" in
@@ -3562,6 +3591,7 @@ do_uninstall() {
     [ "$DSH_HOME" != "$PREFIX" ] && uninstall_add "$DSH_HOME"
     uninstall_add "$BIN_DIR/dsh"
     uninstall_add "$BIN_DIR/ds"
+    uninstall_add "$BIN_DIR/dsh-peer"
     uninstall_outside_add "shell rc PATH line (bash ~/.bash_profile|.bash_login|.profile + ~/.bashrc, zsh ~/.zshrc/.zprofile, fish config.fish; marker '# dsh installer')"
     uninstall_outside_add "fish function/completions (ds.fish under the fish config dir)"
     uninstall_outside_add "cloned harness repo (e.g. $HOME/enpoi-harness)"
@@ -3574,6 +3604,7 @@ do_uninstall() {
     uninstall_add "$PREFIX/harness"
     uninstall_add "$BIN_DIR/dsh"
     uninstall_add "$BIN_DIR/ds"
+    uninstall_add "$BIN_DIR/dsh-peer"
     # The failing sudo stub is installer scaffolding, not user data; remove it
     # only while it is still the exact file sudo_trap wrote.
     if grep -qF "sudo is never used by this installer" "$PREFIX/bin/sudo" 2>/dev/null; then

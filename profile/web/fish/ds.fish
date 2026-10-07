@@ -747,6 +747,9 @@ case "pull"
             echo "  ds repair           Verify the install and fix the safe breaks (--check reports only)"
             echo "  ds uninstall        Remove the install (default keeps \$HOME/.dsh; --purge removes all)"
             echo ""
+            echo "Device-to-Device Peer (caller side):"
+            echo "  ds peer [args]      Caller-side peer CLI (status/list/ask/asks/answer/follow/cancel)"
+            echo ""
             echo "Cross-Device Sync:"
             echo "  ds sync             Push global configs (settings/presets/skills/packages/patches) to dotfiles repo"
             echo "  ds pull             Pull + apply global configs, merge device patch + sync-local overrides"
@@ -808,6 +811,28 @@ case "pull"
             else
                 echo "Error: dsh-projections-backfill.mjs not found"
             end
+
+        case "peer"
+            # Caller-side peer CLI (device-to-device): the installer seeds
+            # `dsh-peer` beside the dsh shim. Prefer PATH, then the shim's
+            # directory, then the default bin dir; pass every argument through.
+            set -l bin_dir (dirname "$g_dsh_bin")
+            set -l peer_bin ""
+            if command -v dsh-peer >/dev/null 2>&1
+                set peer_bin (command -v dsh-peer)
+            else
+                for candidate in "$bin_dir/dsh-peer" "$HOME/.local/bin/dsh-peer"
+                    if test -x "$candidate"
+                        set peer_bin "$candidate"
+                        break
+                    end
+                end
+            end
+            if test -z "$peer_bin"
+                echo "✖ dsh-peer not found (checked PATH, $bin_dir, and $HOME/.local/bin); re-run the installer to seed it"
+                return 1
+            end
+            command $peer_bin $subargs
 
         case "*"
             # Direct passthrough to dsh CLI binary
