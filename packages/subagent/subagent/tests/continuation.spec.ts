@@ -31,6 +31,7 @@ import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 import { loadStoredSession } from './persistence-helpers.ts'
 import { withChildBudgetGuidance } from '../src/continuation-messages.ts'
+import type { SettlementNoticeOutbox } from '../src/settlement-outbox.ts'
 import {
   continuationActivations,
   continuationManager,
@@ -3173,6 +3174,15 @@ describe('continuable settlement delivery', () => {
     expect(parent.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced')).toBe(true)
     expect(parent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(false)
     expect(parent.status).toBe('idle')
+
+    // A later wake trigger while the teardown still owns the parent leaves the
+    // queued copy in place instead of enqueueing a second one.
+    const notices = (continuationActivations(ctx) as unknown as {
+      notices: SettlementNoticeOutbox
+    }).notices
+    notices.flush(parent.id)
+    expect(settlementNotices(parent)).toHaveLength(1)
+    expect(parent.status).toBe('idle')
   })
 
   it('does not wake a parent below a scoped teardown root', async () => {
@@ -3190,9 +3200,12 @@ describe('continuable settlement delivery', () => {
     expect(parent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(false)
   })
 
-  it('records but cannot deliver a teardown notice once the parent is disposed too', async () => {
+  it('wakes a resumed parent over the teardown notice it queued before disposal', async () => {
     const hold = Promise.withResolvers<undefined>()
-    const adapter = new GatedAdapter([{ chunks: textResponse('interrupted'), gate: hold.promise }])
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('interrupted'), gate: hold.promise },
+      { chunks: textResponse('parent ack') },
+    ])
     const { ctx } = await setupWith(adapter)
     const parentId = SessionId('closing-parent')
     const host = await ctx.agents.create({
@@ -3205,27 +3218,37 @@ describe('continuable settlement delivery', () => {
     const drained = ctx.subagents.drainContinuableDescendants([host.agent])
     hold.resolve(undefined)
     await drained
+    // Queued durably without a wake: waking a parent whose teardown is in
+    // flight would spend a turn on a message the host is about to drop.
     expect(settlementNotices(host.agent)).toHaveLength(1)
+    expect(host.agent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(false)
 
-    // Disposal is a `keepInbox: false` cancel, so it durably cancels the notice
-    // it never claimed. Teardown delivery therefore reaches a parent that is
-    // still resident — a resumed one reads the log, not a pending message — and
-    // no wording anywhere may promise otherwise.
+    // The notice survives `keepInbox: false` disposal (it is a system
+    // observation, not operator input), so the held record wakes the resumed
+    // parent over it instead of leaving it pending in a restored inbox.
     await host.dispose()
     const resumed = await ctx.agents.resume({
       resumeSessionId: parentId,
       agentOptions: { provider: 'mock', model: 'mock' },
     })
-    expect(settlementNotices(resumed.agent)).toEqual([])
+    await vi.waitFor(() => {
+      expect(resumed.agent.session.snapshotEvents().some(event => event.type === 'user/message'
+        && event.data.source.kind === 'subagent-settled')).toBe(true)
+    })
     await resumed.dispose()
-    // The account is still in the durable log: delivered, then cancelled unread.
+    // The account is in the durable log: queued, replaced by the wake, claimed.
     const persisted = await loadStoredSession(ctx.sessionPersistence, parentId)
     expect(persisted.events.flatMap(event => event.type === 'agent/inbox/spliced'
       ? [{ inserted: event.data.inserted.length, removed: event.data.removedCount ?? 0 }]
-      : [])).toEqual([{ inserted: 1, removed: 0 }, { inserted: 0, removed: 1 }])
+      : [])).toEqual([
+      { inserted: 1, removed: 0 },
+      { inserted: 0, removed: 1 },
+      { inserted: 1, removed: 0 },
+      { inserted: 0, removed: 1 },
+    ])
   })
 
-  it('drops the notice without disturbing teardown when the parent is gone', async () => {
+  it('holds the notice without disturbing teardown when the parent is gone', async () => {
     const releaseChild = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('answer'), gate: releaseChild.promise }])
     const { ctx } = await setupWith(adapter)
@@ -3246,6 +3269,98 @@ describe('continuable settlement delivery', () => {
     expect(warnings).toEqual([])
   })
 
+  it('holds a settlement for a gone parent and delivers it on the next activation', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('answer'), gate: releaseChild.promise },
+      { chunks: textResponse('parent ack') },
+    ])
+    const { ctx } = await setupWith(adapter)
+    const parentId = SessionId('gone-parent')
+    const host = await ctx.agents.create({
+      sessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(started.childId)).toBeDefined() })
+
+    // The parent leaves before the child settles: nothing accepts the notice,
+    // so the outbox holds the record instead of dropping the settlement.
+    await host.dispose()
+    releaseChild.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    const before = await loadStoredSession(ctx.sessionPersistence, parentId)
+    expect(before.events.some(event => event.type === 'agent/inbox/spliced')).toBe(false)
+    // Repeated wake triggers while the parent is still gone report the hold
+    // once and leave the same record in place.
+    const notices = (continuationActivations(ctx) as unknown as {
+      notices: SettlementNoticeOutbox
+    }).notices
+    notices.flush(parentId)
+    notices.flush(parentId)
+
+    // The parent's next activation drains the held record with a real wake.
+    const resumed = await ctx.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    await vi.waitFor(() => {
+      expect(resumed.agent.session.snapshotEvents().some(event => event.type === 'user/message'
+        && event.data.source.kind === 'subagent-settled')).toBe(true)
+    })
+    await resumed.dispose()
+  })
+
+  it('retries one failed wake and delivers the settlement', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
+    const followup = parent.followup.bind(parent)
+    let calls = 0
+    const spy = vi.spyOn(parent, 'followup').mockImplementation((notice, options) => {
+      calls += 1
+      if (calls === 1) throw new Error('transient wake failure')
+      followup(notice, options)
+    })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    // The first wake threw before accepting anything; the bounded retry
+    // delivered the same notice instead of dropping it.
+    expect(calls).toBe(2)
+    spy.mockRestore()
+  })
+
+  it('collapses duplicate settlement events into one notice', async () => {
+    const { ctx, parent } = await setup([
+      textResponse('the answer'),
+      textResponse('parent ack'),
+      textResponse('duplicate ack'),
+    ])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    // A replayed settlement for the same residency epoch reuses its key; only
+    // the first reaches the parent.
+    const notices = (continuationActivations(ctx) as unknown as {
+      notices: SettlementNoticeOutbox
+    }).notices
+    const duplicate = createUserMessage({
+      content: message('duplicate notice'),
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'duplicate notice',
+        senderSessionId: started.childId,
+      },
+    })
+    notices.notify(parent.id, started.childId, 'epoch-1', duplicate, 'completed')
+    notices.notify(parent.id, started.childId, 'epoch-1', duplicate, 'completed')
+    await vi.waitFor(() => {
+      expect(settlementNotices(parent).filter(notice => notice.summary === 'duplicate notice')).toHaveLength(1)
+    })
+  })
+
   it('logs a rejected notice instead of failing the child\'s teardown', async () => {
     const { ctx, parent } = await setup([textResponse('the answer')])
     const warnings: string[] = []
@@ -3261,6 +3376,74 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     expect(ends[0]!.stopReason).toBe('completed')
     expect(warnings.some(warning => warning.includes('settlement notice was not delivered'))).toBe(true)
+  })
+
+  it('retries a failed wake immediately when the parent activates', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
+    const followup = parent.followup.bind(parent)
+    let blocked = true
+    let calls = 0
+    vi.spyOn(parent, 'followup').mockImplementation((notice, options) => {
+      calls += 1
+      if (blocked) throw new Error('transient wake failure')
+      followup(notice, options)
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    // The first wake failed and a backoff timer is pending.
+    await vi.waitFor(() => { expect(calls).toBeGreaterThanOrEqual(1) })
+
+    // The activation trigger retries immediately instead of waiting for the
+    // timer, and the same notice is delivered exactly once.
+    const notices = (continuationActivations(ctx) as unknown as {
+      notices: SettlementNoticeOutbox
+    }).notices
+    blocked = false
+    notices.flush(parent.id)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(calls).toBeGreaterThanOrEqual(2)
+  })
+
+  it('cancels a pending retry when the owner unloads and reports the record', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer')])
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+    vi.spyOn(parent, 'followup').mockImplementation(() => {
+      throw new Error('parent closed during delivery')
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => {
+      expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_RETRY]'))).toBe(true)
+    })
+
+    // Unloading before the backoff fires drops the timer and reports the
+    // record rather than letting it vanish with the process.
+    await ctx.fiber.dispose()
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_UNRESOLVED]'))).toBe(true)
+  })
+
+  it('reports a wake that exhausts its retries and a notice still held at unload', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer')])
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+    vi.spyOn(parent, 'followup').mockImplementation(() => {
+      throw new Error('parent closed during delivery')
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    // The bounded retry budget is spent loudly, and the record stays held.
+    await vi.waitFor(() => {
+      expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_HELD]'))).toBe(true)
+    })
+    // Unloading the owner reports the still-undelivered record instead of
+    // letting it vanish with the process.
+    const notices = (continuationActivations(ctx) as unknown as {
+      notices: SettlementNoticeOutbox
+    }).notices
+    await ctx.fiber.dispose()
+    notices.flush(parent.id)
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_UNRESOLVED]'))).toBe(true)
   })
 
   it('stays silent about a child the caller was told does not exist', async () => {

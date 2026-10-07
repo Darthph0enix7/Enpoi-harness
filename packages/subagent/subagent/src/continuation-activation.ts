@@ -36,6 +36,9 @@ import { SubagentError } from './error.ts'
 import { SubagentInbox } from './inbox.ts'
 import type { SubagentDelivery } from './inbox.ts'
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
+import { SettlementNoticeOutbox } from './settlement-outbox.ts'
+import type { NoticePlacement } from './settlement-outbox.ts'
+import type { SubagentResult } from './types.ts'
 
 /** Process-local slots shared through uninterrupted continuable parent links. */
 class ActivationPool {
@@ -77,6 +80,13 @@ export interface Activation {
   readonly parentSession: SessionId
   /** The provider name recorded in the durable descriptor. */
   readonly provider: string
+  /**
+   * Process-local identity of this residency epoch's one settlement notice.
+   * A duplicate settlement event for the same Activation reuses it, while a
+   * cold-resumed epoch mints a new one, so notice delivery is idempotent
+   * within an epoch and independent across epochs.
+   */
+  readonly noticeId: string
   /** The retained live Agent handle, disposed exactly once at settlement. */
   readonly handle: AgentHandle
   /** The Activation-local admission and close wrapper around the handle's Agent inbox. */
@@ -189,7 +199,6 @@ export class ChildLock {
  */
 function revertBoundaryOf(agent: Agent): number | undefined {
   let boundary: number | undefined
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   for (const event of agent.session.snapshotEvents()) {
     if (event.type !== 'revert/state') continue
     const { fromSeq } = event.data
@@ -219,6 +228,10 @@ export class ContinuableActivationRegistry {
    */
   private readonly closingScopes = new Map<Agent, Set<Agent>>()
   private draining = false
+  /** Retained settlement notices that still owe a parent a wake. */
+  private readonly notices: SettlementNoticeOutbox
+  /** Monotonic source of per-epoch settlement identities. */
+  private noticeSeq = 0
 
   /**
    * Build one registry inside the service's Agent-injected context.
@@ -245,9 +258,22 @@ export class ContinuableActivationRegistry {
     ctx.on('agent/disposed', ({ agent }) => {
       this.closingScopes.delete(agent)
     })
+    this.notices = new SettlementNoticeOutbox(
+      ctx,
+      (parent, message, stopReason, alreadyQueued) =>
+        this.placeNotice(parent, message, stopReason, alreadyQueued),
+    )
+    // A held notice is retried on the parent's activation and on each return
+    // to idle, and retired once its message is claimed by a turn.
+    ctx.on('agent/created', ({ agent }) => { this.notices.flush(agent.id) })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle') this.notices.flush(agent.id)
+    })
+    ctx.on('agent/inbox/claimed', ({ agent, message }) => { this.notices.claimed(agent.id, message.id) })
     ctx.effect(function* (this: ContinuableActivationRegistry) {
       yield scope.dispose
       yield () => this.drain()
+      yield () => this.notices.dispose()
     }.bind(this), 'subagents.continuations()')
   }
 
@@ -682,6 +708,7 @@ export class ContinuableActivationRegistry {
       childId,
       parentSession: parent.id,
       provider,
+      noticeId: `${childId}#${++this.noticeSeq}`,
       handle,
       inbox: new SubagentInbox(handle.agent),
       ancestry: new WeakSet([handle.agent, ...parentLineage]),
@@ -895,41 +922,66 @@ export class ContinuableActivationRegistry {
     if (failure !== undefined) throw failure
   }
 
-  /** Tell the durable direct parent how this Activation ended. */
+  /**
+   * Tell the durable direct parent how this Activation ended. Delivery is
+   * idempotent per residency epoch and never drops: a failed send retries on a
+   * bounded backoff, a parent that is gone or closing keeps a held record that
+   * its next activation or idle transition drains with a wake, and a park
+   * keeps its record until the operator's next turn claims it.
+   */
   private notifySettlement(activation: Activation, terminal: ActivationTerminal): void {
     if (!activation.announced) return
     // Quiet fibers deliver nothing to the parent: the orchestrating tool
     // (council/oracle) reads the final synthesis from the child session itself.
     if (activation.quiet) return
-    try {
-      const parent = this.ctx.agents.get(activation.parentSession)
-      if (parent === undefined) return
-      const message = createSettlementMessage(activation.childId, terminal)
-      if (this.closingTeardownFor(parent) !== undefined) {
-        parent.inject(message)
-        return
-      }
-      // A user-initiated park (`aborted` epoch) and any settlement landing
-      // while a revert/edit is in flight queue quietly: the notice waits in
-      // the root parent's durable inbox for the operator's next send instead
-      // of waking a turn that would inject into the message being rewritten.
-      // A resident (nested) parent keeps the existing waking flow: a quiet
-      // hold there would leave its Activation waiting on unclaimed inbox work
-      // forever. Ordinary completions keep the wake/steer flow either way.
-      if (terminal.stopReason === 'aborted' || revertBoundaryOf(parent) !== undefined) {
-        const parentActivation = this.resident.get(parent.id)
-        if (parentActivation === undefined || parentActivation.handle.agent !== parent) {
-          parent.send(message, 'next-turn', false)
-          return
-        }
-      }
-      this.sendWaking(parent, message, parent.status === 'idle' ? 'queue' : 'steer')
-    } catch (error: unknown) {
-      this.ctx.logger.warn(
-        `subagent "${activation.childId}" settlement notice was not delivered to its parent: `
-        + errorChain(error),
-      )
+    const message = createSettlementMessage(activation.childId, terminal)
+    this.notices.notify(
+      activation.parentSession,
+      activation.childId,
+      activation.noticeId,
+      message,
+      terminal.stopReason,
+    )
+  }
+
+  /**
+   * Place one settlement notice into a live parent through the rail's own
+   * rules. A teardown queues durably without waking and stays `held` so a
+   * later activation or idle transition re-runs this placement and wakes over
+   * the queued copy; a park queues `parked` for the operator's next turn; every
+   * ordinary completion wakes or steers. `alreadyQueued` means this exact
+   * message is already pending, so the waking path replaces the queued copy
+   * with one wake instead of enqueueing a duplicate.
+   */
+  private placeNotice(
+    parent: Agent,
+    message: UserMessage,
+    stopReason: SubagentResult['stopReason'],
+    alreadyQueued: boolean,
+  ): NoticePlacement {
+    if (this.closingTeardownFor(parent) !== undefined) {
+      if (!alreadyQueued) parent.send(message, 'next-turn', false)
+      return 'held'
     }
+    // A user-initiated park (`aborted` epoch) and any settlement landing
+    // while a revert/edit is in flight queue quietly: the notice waits in
+    // the root parent's durable inbox for the operator's next send instead
+    // of waking a turn that would inject into the message being rewritten.
+    // A resident (nested) parent keeps the existing waking flow: a quiet
+    // hold there would leave its Activation waiting on unclaimed inbox work
+    // forever. Ordinary completions keep the wake/steer flow either way.
+    if (!alreadyQueued && (stopReason === 'aborted' || revertBoundaryOf(parent) !== undefined)) {
+      const parentActivation = this.resident.get(parent.id)
+      if (parentActivation === undefined || parentActivation.handle.agent !== parent) {
+        parent.send(message, 'next-turn', false)
+        return 'parked'
+      }
+    }
+    // A held copy that is still queued is replaced by one waking placement:
+    // the durable message already exists, and this delivery owns its wake.
+    if (alreadyQueued) parent.inbox.remove(message.id)
+    this.sendWaking(parent, message, parent.status === 'idle' ? 'queue' : 'steer')
+    return 'waking'
   }
 
   /** Request a best-effort final session flush before closing natural-settlement admission. */

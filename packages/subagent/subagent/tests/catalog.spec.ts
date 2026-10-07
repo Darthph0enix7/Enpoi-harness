@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { z } from 'zod'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -160,7 +159,7 @@ describe('subagent catalog projection', () => {
     { version: 9, childId: 'child', childCreatedAt: 0, mode: 'one-shot' },
     { version: 0, childId: 'child', childCreatedAt: 0, mode: 'continuable' },
     { version: 0, childId: 'child', childCreatedAt: -1, mode: 'one-shot' },
-  ])('refuses to restore a catalog containing an invalid fact: %j', async (data) => {
+  ])('drops the catalog unit whose own fact is invalid: %j', async (data) => {
     const ctx = new Context()
     try {
       await ctx.plugin(SessionStore)
@@ -170,7 +169,18 @@ describe('subagent catalog projection', () => {
         fact(0, 'valid-child', 0, { mode: 'one-shot' }),
         { type: 'subagent/catalog', seq: SessionSeq(1), time: 0, data } as unknown as SessionEvent,
       ]
-      expect(() => ctx.sessionProjections.restore({}, events, SessionLogOffset(0), header, SessionLogOffset(0))).toThrow(z.ZodError)
+      const { snapshot, checkpoint } = ctx.sessionProjections.restore(
+        {},
+        events,
+        SessionLogOffset(0),
+        header,
+        SessionLogOffset(0),
+      )
+      // The registry isolates per-unit faults: the catalog key is absent from
+      // both the cut and the refreshed checkpoint, so a later full read
+      // refolds it instead of serving an unproducible value.
+      expect('subagentCatalog' in snapshot.values).toBe(false)
+      expect('subagentCatalog' in checkpoint).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
