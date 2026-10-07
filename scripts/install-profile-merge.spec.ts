@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -499,7 +500,8 @@ describe('update artifact pruning', () => {
     mkdirSync(profile, { recursive: true })
     const base = Math.floor(Date.now() / 1000) - 100000
     for (let index = 0; index < 4; index += 1) {
-      const tarball = join(cache, `dsh-harness-1.0.0-${index}-linux-x64.tar.gz`)
+      // Release-version asset names (`<base>.<run number>`), no commit SHA.
+      const tarball = join(cache, `dsh-harness-1.0.0.${index}-linux-x64.tar.gz`)
       writeFileSync(tarball, `archive ${index}`)
       writeFileSync(`${tarball}.sha256`, `hash ${index}`)
       utimesSync(tarball, base + index, base + index)
@@ -660,5 +662,186 @@ describe('download resilience', () => {
     expect(install).not.toContain('rm -f "$asset_file.download"')
     // The stall-aware options also guard the source-archive fetch.
     expect(install).toMatch(/Downloading release archive"[\s\S]{0,200}--speed-time 60/)
+  })
+})
+
+/**
+ * The release/versioning scheme: one GitHub Release per build, tagged
+ * `v<package version>.<workflow run number>`, holding exactly the three
+ * platform tarballs plus their `.sha256` sidecars and a `SHA256SUMS` manifest.
+ * Asset names carry the release tag and never a commit SHA; the installer
+ * resolves the newest published release and accepts the tree's base version.
+ */
+describe('release-based prebuilt resolution', () => {
+  const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'harness-release.yml'), 'utf8')
+
+  it('names releases and assets with the version, never a commit SHA', () => {
+    const install = readFileSync(installSh, 'utf8')
+    // Installer: release tag -> version -> SHA-free asset.
+    expect(install).toContain('tag="$(latest_release_tag)"')
+    expect(install).toContain('version="${tag#v}"')
+    expect(install).toContain('asset="dsh-harness-$version-$OS-$ARCH.tar.gz"')
+    expect(install).toContain('url="$DSH_GITHUB_URL/releases/download/$tag/$asset"')
+    expect(install).not.toMatch(/dsh-harness-\$version-\$TARGET_COMMIT/)
+    expect(install).not.toMatch(/asset="[^"]*\$TARGET_COMMIT/)
+    expect(install).not.toMatch(/releases\/download\/v\$version/)
+
+    // Workflow: release version = package version + monotonic run number.
+    expect(workflow).toContain('VERSION="$BASE.$GITHUB_RUN_NUMBER"')
+    expect(workflow).toContain('ASSET="dsh-harness-$VERSION-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"')
+    expect(workflow).not.toMatch(/ASSET=.*COMMIT/)
+    expect(workflow).not.toMatch(/TOP=.*COMMIT/)
+  })
+
+  it('publishes exactly one release per commit through a draft that only publish flips', () => {
+    // One trigger branch: stable and beta are pushed with the same commit, so
+    // the stable run is the single build and beta resolves the same stream.
+    expect(workflow).toMatch(/push:\n\s+branches:\n\s+- stable\n/)
+    expect(workflow).not.toMatch(/branches:\n\s+- stable\n\s+- beta/)
+    // Duplicate suppression runs before any build starts, and only a complete
+    // new-style release (SHA256SUMS present) suppresses the run.
+    expect(workflow).toContain('select(.draft == false)')
+    expect(workflow).toContain('target_commitish ==')
+    expect(workflow).toContain('any(.assets[]; .name == \\"SHA256SUMS\\")')
+    // Draft until every platform (the matrix) landed; publish owns SHA256SUMS.
+    expect(workflow).toContain('gh release create "$TAG" --draft')
+    expect(workflow).toContain('gh release edit "$TAG" --draft=false')
+    expect(workflow).toContain("gh release download \"$TAG\" --pattern '*.sha256'")
+    expect(workflow).toContain('SHA256SUMS')
+    // The installer skips drafts twice over: /releases/latest excludes them.
+    expect(readFileSync(installSh, 'utf8')).toContain('/releases/latest')
+  })
+
+  it('accepts both the release version and its base in the staged-version check', () => {
+    const install = readFileSync(installSh, 'utf8')
+    expect(install).toContain('base="$(release_base_version "$version")"')
+    expect(install).toContain('if [ "$staged_version" != "$version" ] && [ "$staged_version" != "$base" ]; then')
+  })
+
+  it('derives the tree base version from the release tag', () => {
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'printf "A=%s\\n" "$(release_base_version 0.1.7-enpoi.2.42)"',
+      'printf "B=%s\\n" "$(release_base_version 1.2.3)"',
+      'printf "C=%s\\n" "$(release_base_version 1.2.3-rc.4)"',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh },
+      encoding: 'utf8',
+    })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('A=0.1.7-enpoi.2')
+    expect(result.stdout).toContain('B=1.2.3')
+    // A numeric prerelease tail strips one component; the staged check also
+    // accepts the tag's own version, so a base ending in a number still passes.
+    expect(result.stdout).toContain('C=1.2.3-rc')
+  })
+
+  it('stages the newest release, verifies it, and accepts the tree base version', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-release-'))
+    try {
+      const prefix = join(dir, 'prefix')
+      const tarball = join(dir, 'asset.tar.gz')
+      const releaseVersion = '0.1.7-enpoi.2.42'
+      const treeTop = join(dir, 'stage-tree', `dsh-harness-${releaseVersion}`)
+      mkdirSync(treeTop, { recursive: true })
+      writeFileSync(join(treeTop, 'package.json'), JSON.stringify({ name: 'dsh-harness', version: '0.1.7-enpoi.2' }))
+      writeFileSync(join(treeTop, 'MARKER'), 'prebuilt\n')
+      expect(spawnSync('tar', ['-czf', tarball, '-C', join(dir, 'stage-tree'), `dsh-harness-${releaseVersion}`]).status).toBe(0)
+      const sha = createHash('sha256').update(readFileSync(tarball)).digest('hex')
+      const shaFile = join(dir, 'asset.sha256')
+      writeFileSync(shaFile, `${sha}  dsh-harness-${releaseVersion}-linux-x64.tar.gz\n`)
+
+      // Stub curl serves the /releases/latest redirect, the probe headers, the
+      // tarball, and the sidecar; stub git resolves the release tag's commit.
+      const bin = join(dir, 'bin')
+      mkdirSync(bin)
+      writeFileSync(join(bin, 'curl'), `#!/bin/sh
+out=""; url=""; want_redirect=0; want_headers=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -w) case "$2" in *redirect_url*) want_redirect=1;; esac; shift 2;;
+    -D) [ "$2" = "-" ] && want_headers=1; shift 2;;
+    -C|--retry|--retry-delay|--connect-timeout|--speed-limit|--speed-time|--max-time|--range) shift 2;;
+    -*) shift;;
+    *) url="$1"; shift;;
+  esac
+done
+case "$url" in
+  */releases/latest)
+    [ "$want_redirect" = 1 ] && printf '%s\\n' "$FAKE_RELEASE_URL"
+    exit 0;;
+  *.sha256) cp "$FAKE_SHA_FILE" "$out"; exit 0;;
+  *.tar.gz)
+    if [ "$want_headers" = 1 ]; then printf 'content-range: bytes 0-0/1\\n%s' "\${FAKE_PROBE_STATUS:-200}"; exit 0; fi
+    cp "$FAKE_TARBALL" "$out"; exit 0;;
+esac
+exit 1
+`, { mode: 0o755 })
+      writeFileSync(join(bin, 'git'), `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    refs/heads/*) exit 0;;
+    refs/tags/*)
+      printf '%s\\t%s\\n' "2222222222222222222222222222222222222222" "$arg"
+      exit 0;;
+  esac
+done
+exit 0
+`, { mode: 0o755 })
+
+      const script = [
+        'export DSH_INSTALL_LIB_ONLY=1',
+        '. "$INSTALL_SH" 2>/dev/null',
+        'NODE="$(command -v node)"',
+        'PREFIX="$PREFIX_VALUE"',
+        'OS=linux',
+        'ARCH=x64',
+        'CHANNEL=stable',
+        'DSH_GITHUB_URL=https://github.com/example/repo',
+        'LOG_FILE=/dev/null',
+        'PATH="$STUB_BIN:$PATH"',
+        'stage_prebuilt; rc=$?',
+        'printf "RC=%s VERSION=%s PREBUILT=%s COMMIT=%s BASE=%s\\n" "$rc" "$VERSION" "$PREBUILT" "$RELEASE_COMMIT" "$(NODE="$NODE" read_version "$STAGED/package.json" 2>/dev/null || true)"',
+      ].join('\n')
+      const env = {
+        ...process.env,
+        INSTALL_SH: installSh,
+        PREFIX_VALUE: prefix,
+        STUB_BIN: bin,
+        FAKE_RELEASE_URL: `https://github.com/example/repo/releases/tag/v${releaseVersion}`,
+        FAKE_TARBALL: tarball,
+        FAKE_SHA_FILE: shaFile,
+        FAKE_PROBE_STATUS: '200',
+      }
+      const result = spawnSync('bash', ['-c', script], { env, encoding: 'utf8' })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('RC=0')
+      expect(result.stdout).toContain(`VERSION=${releaseVersion}`)
+      expect(result.stdout).toContain('PREBUILT=1')
+      // The recorded commit is the release tag's own commit.
+      expect(result.stdout).toContain('COMMIT=2222222222222222222222222222222222222222')
+      // The tree keeps the base version and the check accepted it.
+      expect(result.stdout).toContain('BASE=0.1.7-enpoi.2')
+      // The verified tarball and sidecar stay cached under the release name.
+      expect(existsSync(join(prefix, 'harness', '.cache', `dsh-harness-${releaseVersion}-linux-x64.tar.gz`))).toBe(true)
+      expect(existsSync(join(prefix, 'harness', '.cache', `dsh-harness-${releaseVersion}-linux-x64.tar.gz.sha256`))).toBe(true)
+
+      // A release without this platform's asset reads as a normal fallback:
+      // the 404 probe returns before any download, leaving no partial file.
+      const fallbackPrefix = join(dir, 'prefix-missing-asset')
+      const missing = spawnSync('bash', ['-c', script], {
+        env: { ...env, PREFIX_VALUE: fallbackPrefix, FAKE_PROBE_STATUS: '404' },
+        encoding: 'utf8',
+      })
+      expect(missing.status).toBe(0)
+      expect(missing.stdout).toContain('RC=1')
+      expect(missing.stdout).toContain('PREBUILT=0')
+      expect(existsSync(join(fallbackPrefix, 'harness', '.cache', `dsh-harness-${releaseVersion}-linux-x64.tar.gz.download`))).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

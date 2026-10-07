@@ -14,8 +14,10 @@
 #      downloads the official Node tarball into   <prefix>/runtime/node/<ver>;
 #   2. enables pnpm through corepack (ships with Node) — no system packages,
 #      no sudo, ever;
-#   3. fetches the channel build (GitHub tarball for the channel ref, or
-#      --source for a local path/tarball/URL) into  <prefix>/harness/<version>;
+#   3. fetches the channel build — the newest published GitHub Release tarball
+#      when one carries an asset for this platform, otherwise the GitHub tarball
+#      for the channel ref (or --source for a local path/tarball/URL) — into
+#      <prefix>/harness/<version>;
 #   4. pnpm install --frozen-lockfile + pnpm run build (host), then the
 #      profile's own plugin build when the profile ships one;
 #   5. when --profile-source / DSH_PROFILE_SOURCE names the companion profile
@@ -33,11 +35,13 @@
 #   (when present) -> self-check -> roll back to the previous versioned dir and
 #   restore backups on failure. Idempotent, re-runnable.
 #
-# Rolling channels: stable/beta branches can advance without a version bump, so
-# the update decision compares the target ref's commit SHA (git ls-remote, then
-# the GitHub API) with the SHA the installed tree recorded at build time. When
-# the branch moved, the build lands in `<version>-<short-sha>` so two builds of
-# one semver never collide and `current` can roll back to the previous build.
+# Build identity: every published release gets its own version — the tree's
+# package version plus the workflow run number (`0.1.7-enpoi.2.42`, tagged
+# `v0.1.7-enpoi.2.42`) — and a prebuilt install lands in a directory named
+# after it, so `current` can roll back per build. When no release is reachable
+# the source archive at the channel ref builds the tree's own base version, and
+# the target ref's commit SHA (git ls-remote, then the GitHub API) decides
+# whether a moved rolling branch rebuilds into `<version>-<short-sha>`.
 #
 # Invariants: the repo tree is pull-only and disposable; $DSH_HOME is only ever
 # seeded (never overwritten); versioned dirs make rollback a symlink move.
@@ -113,6 +117,7 @@ BACKFILL="skipped"
 BUILD_COMMIT=""
 BUILD_DIRTY=""
 TARGET_COMMIT=""
+RELEASE_COMMIT=""
 INSTALLED_COMMIT=""
 TREE_DIR_NAME=""
 REUSED_TREE_DIR=""
@@ -310,7 +315,8 @@ Options:
   --no-service        do not install or start a background service unit
                       (updates still restart a unit already referencing --prefix)
   --no-prebuilt       always build from the source archive; skip the verified
-                      GitHub Release prebuilt download (also DSH_NO_PREBUILT=1)
+                      prebuilt download from the newest published release
+                      (also DSH_NO_PREBUILT=1)
   --dsh-home DIR      harness home override (default: $DSH_HOME or $HOME/.dsh);
                       update fails loudly when it disagrees with install-state.json
   --merge-baseline F  run the profile's three-way merge engine against F
@@ -701,7 +707,12 @@ resolve_target_commit() { # ref url -> target commit SHA, empty when unresolvabl
   if [ -n "$ref" ] && [ -n "$url" ] && command -v git >/dev/null 2>&1; then
     sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/heads/$ref" 2>/dev/null | awk 'NR==1 {print $1}')"
     if [ -z "$sha" ]; then
-      sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/tags/$ref" "refs/tags/$ref^{}" 2>/dev/null | awk 'NR==1 {print $1}')"
+      # The peeled form resolves an annotated tag to its commit; a lightweight
+      # tag (what release creation makes) answers from the plain ref.
+      sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/tags/$ref^{}" 2>/dev/null | awk 'NR==1 {print $1}')"
+    fi
+    if [ -z "$sha" ]; then
+      sha="$(GIT_TERMINAL_PROMPT=0 run_limited 30 git ls-remote "$url" "refs/tags/$ref" 2>/dev/null | awk 'NR==1 {print $1}')"
     fi
   fi
   case "$sha" in *[!0-9a-fA-F]*|'') sha="";; esac
@@ -884,50 +895,81 @@ stage_remote() { # url
 }
 
 # ── Prebuilt release fast path ──────────────────────────────────────────────
-# The release workflow publishes a per-platform, fully built harness tree
-# (dsh-harness-<version>-<commit>-<os>-<arch>.tar.gz + .sha256) as GitHub
-# Release assets. When the asset for this exact commit exists, installing it
-# removes the pnpm install + full build (~5 minutes) and needs no build
-# toolchain. The checksum is mandatory; any failure falls back to the source
-# build with a warning, never to an unverified artifact.
+# The release workflow publishes one GitHub Release per build, tagged
+# `v<tree version>.<run number>` (e.g. `v0.1.7-enpoi.2.42`), holding exactly
+# the per-platform, fully built harness tarballs and their SHA-256 sidecars:
+#   dsh-harness-<release version>-<os>-<arch>.tar.gz (+ .sha256)
+# The release tag names the build — no commit SHA appears anywhere in the asset
+# name — and installing it removes the pnpm install + full build (~5 minutes)
+# and needs no build toolchain. The checksum is mandatory; any failure falls
+# back to the source build with a warning, never to an unverified artifact.
 sha256_of() { # file
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else printf ''; fi
 }
 
+# Newest published release tag, from the `/releases/latest` redirect: anonymous,
+# outside the API rate limit, and GitHub excludes draft releases (a build still
+# in progress) and prereleases. Both channels resolve this same stream because
+# the two channel branches are pushed with the same commit; the source-archive
+# fallback still uses the channel ref. Empty when no release exists yet.
+latest_release_tag() { # -> `v<version>` or empty
+  local target=""
+  target="$(run_limited 30 curl -fsS -o /dev/null -w '%{redirect_url}' --connect-timeout 10 "$DSH_GITHUB_URL/releases/latest" 2>/dev/null || true)"
+  case "$target" in
+    */releases/tag/*) printf '%s' "${target##*/}";;
+    *) printf '';;
+  esac
+}
+
+# A release tag appends one numeric build suffix to the tree's own version:
+# 0.1.7-enpoi.2 -> 0.1.7-enpoi.2.42. The packaged tree keeps the base version,
+# so the staged-version check accepts it; a version without a prerelease marker
+# or with a non-numeric tail is its own base.
+release_base_version() { # release-version -> tree base version
+  local v="$1" tail
+  case "$v" in *-*) : ;; *) printf '%s' "$v"; return 0;; esac
+  tail="${v##*.}"
+  case "$tail" in ''|*[!0-9]*) printf '%s' "$v"; return 0;; esac
+  printf '%s' "${v%.*}"
+}
+
 stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall back
   [ "${NO_PREBUILT:-0}" = 1 ] && return 1
   [ "${DSH_NO_PREBUILT:-0}" = 1 ] && return 1
   [ -n "$SOURCE" ] && return 1
-  # prepare_source resolves the target commit only after SOURCE_URL exists, so
-  # the fast path resolves it here when the caller has not.
-  if [ -z "${TARGET_COMMIT:-}" ]; then
-    TARGET_COMMIT="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
+  local tag version base asset url sha_url cache_dir asset_file expected actual staged_version probe_headers asset_bytes
+  tag="$(latest_release_tag)"
+  if [ -z "$tag" ]; then
+    log "prebuilt: no published release is available yet (release CI may still be building it)"
+    return 1
   fi
-  [ -n "${TARGET_COMMIT:-}" ] || return 1
-  local ref="${REF:-$CHANNEL}" meta version asset url sha_url cache_dir asset_file expected actual staged_version probe_headers asset_bytes
-  meta="$(curl -fsSL --connect-timeout 10 --max-time 20 "$DSH_GITHUB_URL/raw/$ref/package.json" 2>/dev/null || true)"
-  [ -n "$meta" ] || return 1
-  version="$(printf '%s\n' "$meta" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1)"
-  [ -n "$version" ] || return 1
-  asset="dsh-harness-$version-$TARGET_COMMIT-$OS-$ARCH.tar.gz"
-  url="$DSH_GITHUB_URL/releases/download/v$version/$asset"
+  case "$tag" in v?*) : ;; *) return 1;; esac
+  version="${tag#v}"
+  base="$(release_base_version "$version")"
+  asset="dsh-harness-$version-$OS-$ARCH.tar.gz"
+  url="$DSH_GITHUB_URL/releases/download/$tag/$asset"
   sha_url="$url.sha256"
   cache_dir="$PREFIX/harness/.cache"
   asset_file="$cache_dir/$asset"
   mkdir -p "$cache_dir" || return 1
   if [ ! -s "$asset_file" ] || [ ! -s "$asset_file.sha256" ]; then
     rm -f "$asset_file" "$asset_file.sha256"
-    # Probe before the logged download: assets for a just-pushed commit are
-    # often still being built by release CI, and that must read as a normal
-    # fallback, not as a failed download. The probe headers also carry the
-    # asset size for the progress line.
-    probe_headers="$(curl -fsSL --range 0-0 --connect-timeout 15 --max-time 30 -D - -o /dev/null "$url" 2>/dev/null || true)"
-    if [ -z "$probe_headers" ]; then
-      log "prebuilt: no published asset for ${OS}-${ARCH} at commit ${TARGET_COMMIT:0:7} yet (release CI may still be building it)"
-      return 1
-    fi
+    # Probe before the logged download: a release whose build is still running
+    # publishes no asset yet, and that must read as a normal fallback, not as a
+    # failed download. `--range 0-0` keeps the probe tiny; the trailing status
+    # code (`-w`) is the last line because the header block ends with a
+    # newline, and a non-2xx answer is the absence signal — GitHub still writes
+    # 404 headers, so header presence alone would misread as an asset.
+    probe_headers="$(curl -sSL --range 0-0 --connect-timeout 15 --max-time 30 -D - -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
+    probe_status="$(printf '%s\n' "$probe_headers" | tail -n 1 | tr -d '\r')"
+    case "$probe_status" in
+      200|206) : ;;
+      *)
+        log "prebuilt: release $tag carries no ${OS}-${ARCH} asset yet (release CI may still be building it)"
+        return 1;;
+    esac
     asset_bytes="$(printf '%s\n' "$probe_headers" | tr -d '\r' | sed -n 's/^content-range: *bytes [0-9]*-[0-9]*\/\([0-9]*\).*/\1/ip' | head -n 1)"
     log "prebuilt: fetching $asset${asset_bytes:+ ($((asset_bytes / 1048576)) MB)}"
     # Resumable + stall-aware: a killed or stalled transfer keeps its partial
@@ -960,13 +1002,20 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   fi
   flatten_stage "$STAGED"
   staged_version="$(read_version "$STAGED/package.json" 2>/dev/null || true)"
-  if [ "$staged_version" != "$version" ]; then
-    warn "prebuilt: payload version '$staged_version' does not match '$version'; falling back to the source build"
+  # The release version is the tree's base version plus the workflow run
+  # number; the tree's package.json keeps the base. Accept either so a
+  # manually tagged release at the exact tree version also validates.
+  if [ "$staged_version" != "$version" ] && [ "$staged_version" != "$base" ]; then
+    warn "prebuilt: payload version '$staged_version' is neither the release version '$version' nor its base '$base'; falling back to the source build"
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
   VERSION="$version"
   PREBUILT=1
+  # The tag's own commit is the recorded build identity; empty when git and
+  # the GitHub API cannot resolve it (install_tree then falls back to the
+  # channel ref's commit).
+  RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
   return 0
 }
 
@@ -994,7 +1043,11 @@ prepare_source() {
         if [ -f "$d/.dsh-install-complete" ]; then
           c="$(installed_tree_commit "$d")"
           if [ -n "$c" ] && commit_same "$TARGET_COMMIT" "$c"; then
-            VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
+            # The marker records the built identity: a release version for a
+            # prebuilt tree, the base version for a source build. The tree's
+            # package.json keeps the base version, so the marker wins.
+            VERSION="$(json_field "$d/.dsh-install-complete" version 2>/dev/null || true)"
+            [ -n "$VERSION" ] || VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
             if [ -n "$VERSION" ]; then
               TREE_DIR_NAME="$name"
               REUSED_TREE_DIR="$name"
@@ -1007,7 +1060,7 @@ prepare_source() {
       done
     fi
     if stage_prebuilt; then
-      substep_ok "Prebuilt harness reused for commit ${TARGET_COMMIT:0:7} ($OS-$ARCH)"
+      substep_ok "Prebuilt release v$VERSION installed ($OS-$ARCH)"
       return 0
     fi
     if [ "$NO_PREBUILT" = 1 ] || [ "${DSH_NO_PREBUILT:-0}" = 1 ]; then
@@ -1073,7 +1126,8 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
   if [ "$PREBUILT" = 1 ]; then
     # The tree arrived fully built and checksum-verified from the release
     # workflow: no dependency install, no compilation, no toolchain required.
-    BUILD_COMMIT="${TARGET_COMMIT:-}"
+    # The release tag's own commit is the build identity when it resolved.
+    BUILD_COMMIT="${RELEASE_COMMIT:-${TARGET_COMMIT:-}}"
     [ -n "$BUILD_COMMIT" ] || resolve_build_commit
     printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$VERSION" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
     if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
@@ -2412,7 +2466,8 @@ dry_run_plan() {
     v="$("$NODE" -e 'process.stdout.write(String(require(process.argv[1]+"/package.json").version))' "$SOURCE" 2>/dev/null || true)"
     [ -n "$v" ] && say "  version:   $v"
   fi
-  say "  steps:     fetch -> pnpm install --frozen-lockfile -> pnpm run build"
+  say "  steps:     verified prebuilt release (when one is published) or fetch"
+  say "             -> pnpm install --frozen-lockfile -> pnpm run build"
   say "             -> fetch+seed profile (if a source is set) -> seed \$DSH_HOME (initProfile)"
   say "             -> profile deps (pnpm install) -> profile plugin build (if present)"
   say "             -> shim $BIN_DIR/dsh -> install-state.json"
@@ -2443,7 +2498,11 @@ do_install() {
   step "Fetching release archive (${CHANNEL:-stable})"
   prepare_source
   resolve_target_for_source
-  substep_ok "Target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT:0:7})}"
+  if [ "${PREBUILT:-0}" = 1 ]; then
+    substep_ok "Target version: $VERSION (prebuilt release)"
+  else
+    substep_ok "Target version: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT:0:7})}"
+  fi
 
   # A complete tree found by prepare_source is already the target build; keep
   # its directory name instead of re-deriving one that may not exist.
@@ -2452,7 +2511,10 @@ do_install() {
   else
     TREE_DIR_NAME="$VERSION"
   fi
-  if [ -z "${REUSED_TREE_DIR:-}" ] && [ -n "$TARGET_COMMIT" ]; then
+  # A prebuilt release version is unique per build, so its directory is the
+  # version itself; the short-SHA suffix only disambiguates source builds of
+  # one base version on a moved channel.
+  if [ -z "${REUSED_TREE_DIR:-}" ] && [ "${PREBUILT:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
     if [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
@@ -2876,9 +2938,14 @@ do_update() {
   if [ -z "$current" ]; then current="$(json_field "$state" version)"; fi
   [ -n "$current" ] && [ -d "$PREFIX/harness/$current" ] || die "cannot find the active version under $PREFIX/harness (current='$current')"
   PREV_VERSION="$current"
-  # The active tree's own semver and recorded build commit. The directory name
-  # may carry a short-SHA suffix after a rolling rebuild; the manifest does not.
-  installed_version="$(read_version "$PREFIX/harness/$current/package.json" 2>/dev/null || true)"
+  # The active tree's build identity and recorded build commit. A prebuilt
+  # release tree records the release version (`0.1.7-enpoi.2.42`) in
+  # .dsh-install-complete while its package.json keeps the base version
+  # (`0.1.7-enpoi.2`); the marker wins so build-to-build updates compare
+  # release versions. The directory name may carry a short-SHA suffix after a
+  # rolling source rebuild; neither it nor the manifest is the identity.
+  installed_version="$(json_field "$PREFIX/harness/$current/.dsh-install-complete" version 2>/dev/null || true)"
+  [ -n "$installed_version" ] || installed_version="$(read_version "$PREFIX/harness/$current/package.json" 2>/dev/null || true)"
   [ -n "$installed_version" ] || installed_version="$(json_field "$state" version)"
   INSTALLED_COMMIT="$(installed_tree_commit "$PREFIX/harness/$current")"
   if [ "$DRY_RUN" = 1 ]; then
@@ -2905,7 +2972,7 @@ do_update() {
       if commit_same "$dry_target_commit" "$INSTALLED_COMMIT"; then
         say "  commit:   $dry_target_commit (already built)"
       else
-        say "  commit:   $dry_target_commit (rolling rebuild -> ${target_value:-<version>}-$(printf '%s' "$dry_target_commit" | cut -c1-7))"
+        say "  commit:   $dry_target_commit (newer than the installed build; the fetch resolves the newest release or rebuilds ${target_value:-<version>}-$(printf '%s' "$dry_target_commit" | cut -c1-7))"
       fi
     fi
     [ -n "$target_value" ] && say "  target:   $target_value"
@@ -2926,7 +2993,11 @@ do_update() {
   step "source: ${SOURCE:-$CHANNEL channel archive}"
   prepare_source
   resolve_target_for_source
-  log "update target: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
+  if [ "${PREBUILT:-0}" = 1 ]; then
+    log "update target: $VERSION (prebuilt release${RELEASE_COMMIT:+; commit ${RELEASE_COMMIT}})"
+  else
+    log "update target: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
+  fi
   # A complete tree found by prepare_source for this exact commit is reused
   # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
   # point install_tree at a directory that does not exist while $STAGED is empty
@@ -2937,13 +3008,13 @@ do_update() {
     TREE_DIR_NAME="$VERSION"
   fi
 
-  # Same semver on a rolling channel: the version is identical but the branch
-  # may have advanced. Only a matching recorded commit is "up to date"; a moved
-  # target rebuilds into <version>-<short-sha> so two builds of one semver do
-  # not collide and rollback can point back at the previous build. An
+  # A prebuilt release carries a unique version, so version equality alone is
+  # "up to date" even when the channel branch moved after the release was
+  # published. A source-archive target keeps the old rule: the base version can
+  # repeat on a rolling channel, so the recorded commit decides. An
   # unresolvable target (no git, no network) keeps the version-only behavior.
   if [ "$VERSION" = "$installed_version" ] && [ "$FORCE" != 1 ] \
-    && { [ -z "$TARGET_COMMIT" ] || commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; }; then
+    && { [ "${PREBUILT:-0}" = 1 ] || [ -z "$TARGET_COMMIT" ] || commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; }; then
     # The no-op path self-checks the ACTIVE tree, whose directory may carry a
     # short-SHA suffix after an earlier rolling rebuild.
     HARNESS="$PREFIX/harness/$current"
@@ -2985,16 +3056,30 @@ do_update() {
     emit_json noop 1
     return 0
   fi
-  if [ -z "${REUSED_TREE_DIR:-}" ] && [ "$VERSION" = "$installed_version" ] && [ -n "$TARGET_COMMIT" ] \
-    && ! commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; then
+  # A source build of the base version must not land on an existing directory
+  # that holds a different build of the same base (the pre-release tree, or an
+  # earlier rolling build): suffix the directory with the target's short SHA.
+  # The existing tree's own recorded commit decides, not the active release.
+  if [ -z "${REUSED_TREE_DIR:-}" ] && [ "${PREBUILT:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ] \
+    && [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
+    && ! commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION")"; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
     TREE_DIR_NAME="$VERSION-$short"
-    log "rolling channel advanced: recorded ${INSTALLED_COMMIT:-<none>} -> target $short; building into $TREE_DIR_NAME"
+    log "existing $VERSION tree records $(installed_tree_commit "$PREFIX/harness/$VERSION") -> target $short; building into $TREE_DIR_NAME"
   fi
   HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
+  # A source-archive fallback resolves the tree's base version
+  # (`0.1.7-enpoi.2`), which sorts below an installed release of the same line
+  # (`0.1.7-enpoi.2.42`) because the release adds prerelease identifiers. That
+  # is the same build line, not a downgrade; --no-prebuilt and a release whose
+  # platform asset is missing both land here. A base that is genuinely older
+  # (different core or RC marker) still refuses.
   if ver_lt "$VERSION" "$installed_version" && [ "$FORCE_DOWNGRADE" != 1 ]; then
-    die "refusing to downgrade from ${installed_version:-$current} to $VERSION without --force-downgrade"
+    case "$installed_version" in
+      "$VERSION".*) log "target $VERSION is the base of installed release $installed_version; same build line, not a downgrade";;
+      *) die "refusing to downgrade from ${installed_version:-$current} to $VERSION without --force-downgrade";;
+    esac
   fi
 
   step "pnpm: corepack"

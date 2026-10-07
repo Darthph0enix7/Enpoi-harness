@@ -1,10 +1,27 @@
-# Prebuilt harness release artifacts.
+# Prebuilt harness releases — one GitHub Release per published build.
 #
-# Builds the official harness per platform on GitHub-hosted runners and
-# publishes a pruned tarball (single top-level directory) plus its SHA-256 to
-# the GitHub Release tagged `v<VERSION>`; VERSION comes from the root
-# package.json and the asset name carries the build commit. scripts/install.sh
-# consumes the tarball to skip `pnpm install` + the full build on user machines.
+# Every push to `stable` (and every manual dispatch) publishes exactly one
+# release. The release version appends the workflow run number to the tree's
+# own package version: `v<package version>.<run number>`, e.g.
+# `v0.1.7-enpoi.2.42`. The run number is monotonic per repository and needs no
+# stored counter, so it names each build; no asset name carries a commit SHA.
+#
+# A release holds exactly these assets, and nothing ever accumulates on an
+# older release:
+#   dsh-harness-<version>-linux-x64.tar.gz        + .sha256
+#   dsh-harness-<version>-darwin-arm64.tar.gz     + .sha256
+#   dsh-harness-<version>-darwin-x64.tar.gz       + .sha256
+#   SHA256SUMS
+#
+# `prepare` resolves the version and skips a commit that already has a
+# published release (a re-dispatch must not duplicate it). Builds upload into a
+# DRAFT release so installers never observe a partially populated build;
+# `publish` adds SHA256SUMS and flips the draft to published. Only `stable`
+# triggers the workflow because both channel branches are pushed with the same
+# commit: the stable run is the single build for that commit, and the installer
+# resolves `beta` to the same newest release (scripts/install.sh
+# latest_release_tag). `workflow_dispatch` remains the escape hatch for an
+# explicit build.
 #
 # Runner labels: `macos-13` (x86_64) was retired on 2025-12-08. The closest
 # documented GitHub-hosted x86_64 image is `macos-15-intel` (the last Intel
@@ -24,7 +41,6 @@ on:
   push:
     branches:
       - stable
-      - beta
 
 permissions:
   contents: write
@@ -34,8 +50,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
+      skip: ${{ steps.dedupe.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+
+      - name: Resolve the release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version)")"
+          VERSION="$BASE.$GITHUB_RUN_NUMBER"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a commit that already has a published release
+        id: dedupe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SKIP=false
+          # A published release carrying SHA256SUMS is complete under this
+          # scheme (the manifest is uploaded by `publish` after every platform
+          # landed). The old single-release scheme's assets and any draft never
+          # suppress a build.
+          EXISTING="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.draft == false) | select(.target_commitish == \"$GITHUB_SHA\") | select(any(.assets[]; .name == \"SHA256SUMS\")) | .tag_name" 2>/dev/null || true)"
+          if [ -n "$EXISTING" ]; then
+            echo "commit $GITHUB_SHA already has a published release ($EXISTING); skipping"
+            SKIP=true
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft release
+        if: steps.dedupe.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.version.outputs.version }}"
+          gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Prebuilt Enpoi Harness ${{ steps.version.outputs.version }} (tree version ${{ steps.version.outputs.base }}, commit $GITHUB_SHA)."
+
+  build:
     name: ${{ matrix.os }}-${{ matrix.arch }}
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -76,6 +151,9 @@ jobs:
       # scripts/build.ts resolves the `official` profile through
       # resolveClientBuildEnvironment, which requires both values. The commit is
       # the canonical 7-character prefix (same shape the installer records).
+      # DSH_CLIENT_VERSION stays the tree's own package version: the release
+      # version (with the run-number suffix) names the release and the assets,
+      # not the source tree.
       - name: Resolve official build environment
         shell: bash
         run: |
@@ -145,12 +223,15 @@ jobs:
       - name: Pack artifact
         id: pack
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version)")"
-          COMMIT="$(git rev-parse HEAD)"
+          VERSION="$RELEASE_VERSION"
           TOP="dsh-harness-$VERSION"
-          ASSET="dsh-harness-$VERSION-$COMMIT-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          # SHA-free: the release tag names the build, so the asset carries the
+          # release version, OS, and architecture only.
+          ASSET="dsh-harness-$VERSION-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
           STAGE="$RUNNER_TEMP/dsh-stage"
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
@@ -178,26 +259,15 @@ jobs:
           fi
           ls -lh "$ASSET" "$ASSET.sha256"
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to GitHub Release
+      - name: Upload to the draft release
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           ASSET='${{ steps.pack.outputs.asset }}'
-          VERSION='${{ steps.pack.outputs.version }}'
-          TAG="v$VERSION"
-
-          # create-release is idempotent and tolerant of the matrix race: the
-          # other cells may create the same tag concurrently.
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            latest=""
-            if [ "${GITHUB_REF_NAME:-}" = "beta" ]; then latest="--latest=false"; fi
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
-              --notes "Prebuilt DeepSeek Harness $VERSION ($GITHUB_SHA)." $latest \
-              || gh release view "$TAG" >/dev/null 2>&1 \
-              || { echo "could not create or find release $TAG"; exit 1; }
-          fi
+          TAG="v$RELEASE_VERSION"
 
           attempt=1
           until gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber; do
@@ -205,3 +275,34 @@ jobs:
             attempt=$((attempt + 1))
             sleep 10
           done
+
+  publish:
+    name: publish release
+    needs:
+      - prepare
+      - build
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Assemble SHA256SUMS and publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+          SUMS="$RUNNER_TEMP/sums"
+          rm -rf "$SUMS"
+          mkdir -p "$SUMS"
+
+          # Each platform sidecar already carries `<hash>  <asset>`; download
+          # them all and concatenate into one manifest, then publish. A failed
+          # build cell never reaches this job, so the release is never visible
+          # with a missing platform.
+          gh release download "$TAG" --pattern '*.sha256' --dir "$SUMS"
+          ( cd "$SUMS" && cat ./*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS )
+          cat "$SUMS/SHA256SUMS"
+          gh release upload "$TAG" "$SUMS/SHA256SUMS" --clobber
+          gh release edit "$TAG" --draft=false

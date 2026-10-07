@@ -31,7 +31,7 @@ bash scripts/install.sh --source . --channel stable
 | Channel | Meaning |
 |---|---|
 | `stable` (default) | Released, verified builds. Used when `--channel` is omitted. |
-| `beta` | Pre-release builds for the next channel bump. |
+| `beta` | Same commit stream and prebuilt releases as `stable`, for pre-release validation. |
 
 ```sh
 dsh update                    # update on the current channel
