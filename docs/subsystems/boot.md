@@ -45,6 +45,31 @@ entries(): Entry[]
  */
 configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; override: Record<string, unknown> }>
 
+/**
+ * Insert a new top-level profile row and reconcile the Loader.
+ *
+ * The row is appended to the profile patch document (comment- and
+ * form-preserving), validated by recomposition, written atomically under the
+ * profile lock, and applied through the same reload path as {@link edit}.
+ * @param row - unique entry id, module name, and complete raw config.
+ * @returns Fulfillment after Loader reconciliation completes.
+ * @throws When the id already exists as an entry or a top-level row, or the
+ *   composed row does not carry exactly the supplied config.
+ */
+async insert(row: { id: string; name: string; config: Record<string, unknown> }): Promise<void>
+
+/**
+ * Remove every top-level profile row for an entry id and reconcile the Loader.
+ *
+ * Only top-level rows are removable: a row inside another layer's `insert`
+ * (a shipped declaration) is not owned by this document.
+ * @param id - unique composition entry id.
+ * @returns Fulfillment after Loader reconciliation completes.
+ * @throws When no top-level row carries the id, or the id still composes
+ *   after removal (for example when a bundle inserts it).
+ */
+async remove(id: string): Promise<void>
+
 /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
  * References to model groups the LLM runtime cannot route are dropped from the candidate with a warning.
  * A derived candidate equal to the live entry config returns before the profile reload, so a no-op

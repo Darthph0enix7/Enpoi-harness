@@ -393,6 +393,9 @@ Host service backing the generated `ctx.remote.peer` namespace.
  * Create or explicitly adopt a Session and bind it to a pairing alias.
  * @param request - pairing alias, participant, optional explicit session and routing.
  * @returns the resolved target and whether a new Session was created.
+ * @throws {@link RemoteError} `peer/not-paired`, `peer/forbidden`, or
+ * `peer/not-found` (a deeper create failure such as `agent-preset/not-found`
+ * is mapped into the peer vocabulary).
  */
 @Remote('create') async create(request: PeerCreateRequest): Promise<PeerCreateValue>
 

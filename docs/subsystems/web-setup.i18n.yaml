@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for web-setup.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/subsystems/web-setup.md
+/web-setup:
+  en: 54fdfbab66be8ab6
+  zh: 94a6715cf2604e13
+/web-setup/setup-flow:
+  en: eec21951176f0c49
+  zh: b8d9b31d9000f092
+/web-setup/status:
+  en: 2fc5847d114b4e86
+  zh: aee3c5d7a7d64f8d
+/web-setup/provider-validation:
+  en: 2480b404c800d2c1
+  zh: ec4633210cfaa64d
+/web-setup/apply-semantics:
+  en: 36912a70a776d9b3
+  zh: 7c2120b8b6a7e54c
+/web-setup/boundaries:
+  en: 9659d7b00979ddc4
+  zh: 8bb216b32ea34e43

@@ -700,6 +700,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Detached layer values alongside their Loader entries.',
       },
       {
+        signature: 'async insert(row: { id: string; name: string; config: Record<string, unknown> }): Promise<void>',
+        description: 'Insert a new top-level profile row and reconcile the Loader.\n\nThe row is appended to the profile patch document (comment- and form-preserving), validated by recomposition, written atomically under the profile lock, and applied through the same reload path as edit.',
+        parameters: [{ name: 'row', description: 'unique entry id, module name, and complete raw config.' }],
+        returns: 'Fulfillment after Loader reconciliation completes.',
+        throws: ['When the id already exists as an entry or a top-level row, or the composed row does not carry exactly the supplied config.'],
+      },
+      {
+        signature: 'async remove(id: string): Promise<void>',
+        description: 'Remove every top-level profile row for an entry id and reconcile the Loader.\n\nOnly top-level rows are removable: a row inside another layer\'s `insert` (a shipped declaration) is not owned by this document.',
+        parameters: [{ name: 'id', description: 'unique composition entry id.' }],
+        returns: 'Fulfillment after Loader reconciliation completes.',
+        throws: ['When no top-level row carries the id, or the id still composes after removal (for example when a bundle inserts it).'],
+      },
+      {
         signature: 'async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, ): Promise<void>',
         description: 'Validate, persist, and reconcile a plugin\'s next config; ordinary fields keep normal lifecycle rules. References to model groups the LLM runtime cannot route are dropped from the candidate with a warning. A derived candidate equal to the live entry config returns before the profile reload, so a no-op edit raises no reload, document write, or update notification.',
         parameters: [{ name: 'entry', description: 'Current Loader entry, also used to detect replacement during the write.' }, { name: 'change', description: 'Derive a raw config from the current entry and its inherited layer; it must be side-effect free because a committed edit invokes it for the no-op probe and again after the reload.' }],
@@ -1594,10 +1608,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'latch, descendants, pending asks, model selection, and cursor.',
       },
       {
+        signature: '@Remote(\'list\') list(request?: PeerListRequest): PeerListValue',
+        description: 'List the pairings this host exposes with a cheap live summary. Discovery is read-only and reports each pairing at its own exposure; a supplied target resolves through the same pairing gate as every other call, so an unpaired session is refused rather than listed.',
+        parameters: [{ name: 'request', description: 'optional target narrowing the answer to one pairing.' }],
+        returns: 'the host device and one row per selected pairing.',
+        throws: ['{@link RemoteError} `peer/not-paired` when a supplied target does not resolve.'],
+      },
+      {
         signature: '@Remote(\'create\') async create(request: PeerCreateRequest): Promise<PeerCreateValue>',
         description: 'Create or explicitly adopt a Session and bind it to a pairing alias.',
         parameters: [{ name: 'request', description: 'pairing alias, participant, optional explicit session and routing.' }],
         returns: 'the resolved target and whether a new Session was created.',
+        throws: ['{@link RemoteError} `peer/not-paired`, `peer/forbidden`, or `peer/not-found` (a deeper create failure such as `agent-preset/not-found` is mapped into the peer vocabulary).'],
       },
       {
         signature: '@Remote(\'prompt\') async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue>',
@@ -2045,6 +2067,30 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Restore reverted messages (restoreSeq omitted restores everything).',
         parameters: [{ name: 'request', description: 'session and the optional restore boundary.' }],
         returns: 'acknowledgement that the restore was accepted.',
+      },
+      {
+        signature: '@Remote(\'revertIterations\') revertIterations(request: SessionRevertIterationsRequest): Promise<SessionRevertIterationsValue>',
+        description: 'List the Session\'s durable iteration groups (variant chains).',
+        parameters: [{ name: 'request', description: 'session, optional group anchor, and listing bounds.' }],
+        returns: 'bounded groups with capped previews and surface-activity flags.',
+      },
+      {
+        signature: '@Remote(\'revertIterationRestore\') revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue>',
+        description: 'Restore one iteration variant as the active version (overwrite-since-point commit).',
+        parameters: [{ name: 'request', description: 'session, target variant, and the idempotency request id.' }],
+        returns: 'acknowledgement that the restore was accepted.',
+      },
+      {
+        signature: '@Remote(\'verifyLog\') verifyLog(request: SessionVerifyLogRequest): Promise<SessionVerifyLogValue>',
+        description: 'Verify one Session log against the durability invariants (marker targets, branch reachability, offload targets, compaction sources, surface and iteration folds).',
+        parameters: [{ name: 'request', description: 'Session to verify.' }],
+        returns: 'the findings and the committed prefix length.',
+      },
+      {
+        signature: '@Remote(\'repairLog\') repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue>',
+        description: 'Self-heal one Session log: rebuild derived folds and neutralize dangling references in the derived view without rewriting durable events.',
+        parameters: [{ name: 'request', description: 'Session to repair.' }],
+        returns: 'the repair receipt and verification of the repaired view.',
       },
       {
         signature: '@Remote(\'resolveFileConflict\') resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue>',
@@ -3539,7 +3585,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'async ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>',
-        description: 'Ask the scoped answerer waterfall and wait for the user\'s answer.\n\nWhen a caller supplies an agent, human interaction is valid only for the exact live runtime root. Runtime ownership, not durable session lineage, decides this boundary: an owned child has no human answerer and would block forever, while a lineage-bearing session resumed as a new runtime root may ask normally.',
+        description: 'Ask the scoped answerer waterfall and wait for the user\'s answer.\n\nThe dispatched request always carries a service-owned settle signal next to the caller\'s cancellation: once the answerer chain settles the ask — a local client answered, a peer registry won its race, or the caller withdrew it — that signal aborts, so every forwarded presentation still showing the question is cancelled and a client that attaches later is never offered it.\n\nWhen a caller supplies an agent, human interaction is valid only for the exact live runtime root. Runtime ownership, not durable session lineage, decides this boundary: an owned child has no human answerer and would block forever, while a lineage-bearing session resumed as a new runtime root may ask normally.',
         parameters: [{ name: 'request', description: 'Questions, owner agent, and abort signal.' }],
         returns: 'The answer chosen or typed by the human.',
         throws: ['{UserQuestionError} code `ASK_ABORTED` when the supplied signal is already or becomes aborted, `CALLER_NOT_LIVE` when a supplied agent is not the registry\'s exact live instance, or `DELEGATED_CALLER` when that live agent is owned by another agent.'],
@@ -3642,6 +3688,31 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Render one index.html body: the structured injection table first, then the raw `tapIndex` transforms over the result.',
         parameters: [{ name: 'html', description: 'the raw index.html body.' }],
         returns: 'the transformed body.',
+      },
+    ],
+  },
+  {
+    key: 'webSetup',
+    summary: 'The service behind the generated `webSetup` Remote namespace.',
+    description: 'The service behind the generated `webSetup` Remote namespace.',
+    methods: [
+      {
+        signature: '@Remote async status(): Promise<WebSetupStatus>',
+        description: 'The effective provider selection, the mounted catalog providers, and the vault state of every catalog reference.',
+        parameters: [],
+        returns: 'the status projection; row reads that fail degrade to empty state.',
+      },
+      {
+        signature: '@Remote async validateProvider(request: WebSetupValidateRequest, signal: AbortSignal): Promise<WebSetupValidation>',
+        description: 'Run one live provider canary. The candidate key is one-shot; when the request carries none, the catalog reference is resolved from the vault. `deepseek-official` reports credential presence only (it reuses the model key and its search is a full auxiliary model request), and `http` reports success without an external call.',
+        parameters: [{ name: 'request', description: 'kind, provider id, and optional one-shot key/baseURL.' }, { name: 'signal', description: 'caller cancellation supplied by the Remote carrier.' }],
+        returns: 'the probe outcome; every failure is a value, never a throw.',
+      },
+      {
+        signature: '@Remote async applySetup(request: WebSetupApplyRequest): Promise<WebSetupApplyResult>',
+        description: 'Apply one setup selection: store a given key, ensure the provider rows, set `web.searchProvider`/`fetchProvider` (`null` unsets), and write the `tool-web` toggles. `toolToggles.search`/`fetch` may only be `true` when the effective provider exists and its row is mounted or mounted by this call; a refusal stops before the tool row is touched.',
+        parameters: [{ name: 'request', description: 'selections and toggles; absent groups leave rows untouched.' }],
+        returns: 'the committed operations, or the first failure with them.',
       },
     ],
   },
@@ -6152,6 +6223,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PeerLatch = \'running\' | \'waiting_approval\' | \'waiting_subagents\' | \'idle\';',
   },
   {
+    name: 'PeerListEntry',
+    declaration: 'export interface PeerListEntry {\n    readonly alias: PeerAlias;\n    readonly peer: PeerDeviceName;\n    readonly exposure: PeerExposure;\n    readonly bound: boolean;\n    readonly sessionId?: SessionId;\n    readonly remoteSessionId?: SessionId;\n    readonly latch?: PeerLatch;\n    readonly lastActivity?: number;\n    readonly summary: string;\n}',
+  },
+  {
+    name: 'PeerListRequest',
+    declaration: 'export interface PeerListRequest {\n    readonly target?: PeerTarget;\n}',
+  },
+  {
+    name: 'PeerListValue',
+    declaration: 'export interface PeerListValue {\n    readonly hostDevice: PeerDeviceName;\n    readonly pairings: readonly PeerListEntry[];\n}',
+  },
+  {
     name: 'PeerModelSelection',
     declaration: 'export interface PeerModelSelection {\n    readonly provider: string;\n    readonly model: string;\n    readonly chain?: string;\n    readonly reasoningEffort?: string;\n}',
   },
@@ -6588,6 +6671,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ResumeAgentOptions {\n    readonly resumeSessionId: SessionId;\n    readonly parentAgent?: Agent;\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
   },
   {
+    name: 'RevertFileConflict',
+    declaration: 'export interface RevertFileConflict {\n    readonly conflictId: string;\n    readonly targetKey: string;\n    readonly displayPath: string;\n    readonly state: \'conflict\' | \'missing\' | \'unavailable\';\n    readonly reason: string;\n    readonly mode?: \'revert\' | \'restore\';\n    readonly boundarySeq?: number | null;\n    readonly spanStartSeq?: number;\n    readonly targetBlobSha?: string | null;\n    readonly targetAbsent?: boolean;\n    readonly spanPreExisted?: boolean;\n}',
+  },
+  {
+    name: 'RevertFileOutcome',
+    declaration: 'export interface RevertFileOutcome {\n    readonly status: string;\n    readonly fromSha?: string | null;\n    readonly toSha?: string | null;\n    readonly dest?: string;\n    readonly reason?: string;\n}',
+  },
+  {
     name: 'RpcId',
     declaration: 'export type RpcId = Branded<\'rpc-id\'>;',
   },
@@ -6949,7 +7040,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFollowFrame',
-    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly projections: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
+    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly revert: SessionRevertFold;\n    readonly projections: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
   },
   {
     name: 'SessionFollowRequest',
@@ -7002,6 +7093,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionInspection',
     declaration: 'export interface SessionInspection extends SessionStorageMetadata {\n    readonly events: readonly SessionEvent[];\n}',
+  },
+  {
+    name: 'SessionIterationEdge',
+    declaration: 'export interface SessionIterationEdge {\n    readonly anchorSeq: number;\n    readonly activeVariantSeq: number | null;\n    readonly variants: readonly SessionIterationEdgeVariant[];\n}',
+  },
+  {
+    name: 'SessionIterationEdgeVariant',
+    declaration: 'export interface SessionIterationEdgeVariant {\n    readonly seq: number;\n    readonly previousSeq: number | null;\n}',
+  },
+  {
+    name: 'SessionIterationGroup',
+    declaration: 'export interface SessionIterationGroup {\n    readonly anchorSeq: number;\n    readonly activeVariantSeq: number | null;\n    readonly variants: readonly SessionIterationVariant[];\n}',
+  },
+  {
+    name: 'SessionIterationVariant',
+    declaration: 'export interface SessionIterationVariant {\n    readonly seq: number;\n    readonly previousSeq: number | null;\n    readonly time: number;\n    readonly surfaceActive: boolean;\n    readonly text?: string;\n    readonly attachmentIds?: readonly string[];\n}',
   },
   {
     name: 'SessionLatch',
@@ -7061,7 +7168,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionPage',
-    declaration: 'export interface SessionPage {\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n}',
+    declaration: 'export interface SessionPage {\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly revert: SessionRevertFold;\n}',
   },
   {
     name: 'SessionPageRequest',
@@ -7172,6 +7279,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionRenameValue {\n    readonly title: string;\n    readonly seq: number;\n}',
   },
   {
+    name: 'SessionRepairAction',
+    declaration: 'export interface SessionRepairAction {\n    readonly kind: SessionRepairKind;\n    readonly seq?: number | undefined;\n    readonly detail: string;\n}',
+  },
+  {
+    name: 'SessionRepairKind',
+    declaration: 'export type SessionRepairKind = \'truncated-torn-tail\' | \'neutralized-record\' | \'filtered-references\' | \'rebuilt-iteration-fold\' | \'rebuilt-surface-fold\';',
+  },
+  {
+    name: 'SessionRepairLogRequest',
+    declaration: 'export interface SessionRepairLogRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionRepairLogValue',
+    declaration: 'export interface SessionRepairLogValue {\n    readonly ok: boolean;\n    readonly committedEventCount: number;\n    readonly repairs: readonly SessionRepairAction[];\n    readonly issues: readonly SessionVerifyIssue[];\n}',
+  },
+  {
     name: 'SessionRequestId',
     declaration: 'export type SessionRequestId = Branded<\'session-request-id\'>;',
   },
@@ -7220,6 +7343,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionResultRange {\n    from?: number;\n    to?: number;\n}',
   },
   {
+    name: 'SessionRevertFold',
+    declaration: 'export interface SessionRevertFold {\n    readonly fromSeq: number | null;\n    readonly shadowRanges: readonly SessionRevertShadowRange[];\n    readonly conflicts: readonly RevertFileConflict[];\n    readonly outcomes: Record<string, RevertFileOutcome>;\n    readonly iterations: readonly SessionIterationEdge[];\n    readonly asOfSeq: number;\n}',
+  },
+  {
+    name: 'SessionRevertIterationRestoreRequest',
+    declaration: 'export interface SessionRevertIterationRestoreRequest {\n    readonly sessionId: SessionId;\n    readonly variantSeq: number;\n    readonly requestId: SessionRequestId;\n}',
+  },
+  {
+    name: 'SessionRevertIterationRestoreValue',
+    declaration: 'export interface SessionRevertIterationRestoreValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionRevertIterationsRequest',
+    declaration: 'export interface SessionRevertIterationsRequest {\n    readonly sessionId: SessionId;\n    readonly anchorSeq?: number;\n    readonly limit?: number;\n    readonly beforeVariantSeq?: number;\n}',
+  },
+  {
+    name: 'SessionRevertIterationsValue',
+    declaration: 'export interface SessionRevertIterationsValue {\n    readonly groups: readonly SessionIterationGroup[];\n}',
+  },
+  {
     name: 'SessionRevertRequest',
     declaration: 'export interface SessionRevertRequest {\n    readonly sessionId: SessionId;\n    readonly atSeq: number;\n    readonly participant?: ParticipantTag;\n}',
   },
@@ -7230,6 +7373,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionRevertRestoreValue',
     declaration: 'export interface SessionRevertRestoreValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionRevertShadowRange',
+    declaration: 'export interface SessionRevertShadowRange {\n    readonly start: number;\n    readonly end: number;\n}',
   },
   {
     name: 'SessionRevertValue',
@@ -7370,6 +7517,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionUpdateQueueValue',
     declaration: 'export interface SessionUpdateQueueValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionVerifyIssue',
+    declaration: 'export interface SessionVerifyIssue {\n    readonly kind: SessionVerifyIssueKind;\n    readonly severity: \'error\' | \'warning\';\n    readonly seq?: number | undefined;\n    readonly message: string;\n    readonly repairable: boolean;\n}',
+  },
+  {
+    name: 'SessionVerifyIssueKind',
+    declaration: 'export type SessionVerifyIssueKind = \'torn-tail\' | \'sequence-gap\' | \'unknown-event\' | \'malformed-marker\' | \'missing-marker-target\' | \'missing-marker\' | \'malformed-branch-list\' | \'unreachable-branch-record\' | \'missing-branch-variant\' | \'orphan-offload-target\' | \'malformed-offload-target\' | \'missing-summary-source\' | \'missing-checkpoint-source\' | \'surface-fold-error\' | \'surface-fold-divergence\' | \'unresolved-surface-node\' | \'fold-divergence\';',
+  },
+  {
+    name: 'SessionVerifyLogRequest',
+    declaration: 'export interface SessionVerifyLogRequest {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'SessionVerifyLogValue',
+    declaration: 'export interface SessionVerifyLogValue {\n    readonly ok: boolean;\n    readonly committedEventCount: number;\n    readonly issues: readonly SessionVerifyIssue[];\n}',
   },
   {
     name: 'SessionWireEvent',
@@ -7528,12 +7691,8 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SkillResourceBase = {\n    readonly kind: \'directory\';\n    readonly path: string;\n} | {\n    readonly kind: \'url\';\n    readonly url: string;\n} | {\n    readonly kind: \'opaque\';\n    readonly description: string;\n};',
   },
   {
-    name: 'SkillSource',
-    declaration: 'export type SkillSource = \'project-dsh\' | \'project-agents\' | \'runtime\' | \'user-dsh\' | \'user-agents\' | \'custom\' | \'bundled\' | (string & {});',
-  },
-  {
     name: 'SkillSummary',
-    declaration: 'export interface SkillSummary {\n    readonly path?: string;\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly invocation: SkillInvocationPolicy;\n    readonly source: SkillSource;\n    readonly provider: string;\n    readonly resourceBase?: SkillResourceBase;\n}',
+    declaration: 'export interface SkillSummary {\n    readonly path?: string;\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly mcp?: readonly string[];\n    readonly invocation: SkillInvocationPolicy;\n    readonly source: SkillSource;\n    readonly provider: string;\n    readonly resourceBase?: SkillResourceBase;\n}',
   },
   {
     name: 'SkillViewOptions',
@@ -8374,6 +8533,54 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WebSearchSource',
     declaration: 'export interface WebSearchSource {\n    readonly url: string;\n    readonly title?: string;\n    readonly snippet?: string;\n    readonly publishedAt?: string;\n}',
+  },
+  {
+    name: 'WebSetupApplyRequest',
+    declaration: 'export interface WebSetupApplyRequest {\n    search?: WebSetupSearchSelection;\n    fetch?: WebSetupFetchSelection;\n    toolToggles?: WebSetupToolToggles;\n}',
+  },
+  {
+    name: 'WebSetupApplyResult',
+    declaration: 'export interface WebSetupApplyResult {\n    ok: boolean;\n    applied: string[];\n    pendingRestart?: WebSetupPendingRestart;\n    error?: string;\n}',
+  },
+  {
+    name: 'WebSetupCredentialState',
+    declaration: 'export interface WebSetupCredentialState {\n    configured: boolean;\n    source?: string;\n    writable: boolean;\n}',
+  },
+  {
+    name: 'WebSetupFetchSelection',
+    declaration: 'export interface WebSetupFetchSelection {\n    provider: string | null;\n}',
+  },
+  {
+    name: 'WebSetupMountedProvider',
+    declaration: 'export interface WebSetupMountedProvider {\n    kind: WebSetupProviderKind;\n    provider: string;\n}',
+  },
+  {
+    name: 'WebSetupPendingRestart',
+    declaration: 'export interface WebSetupPendingRestart {\n    ns: string;\n    message: string;\n}',
+  },
+  {
+    name: 'WebSetupProviderKind',
+    declaration: 'export type WebSetupProviderKind = \'search\' | \'fetch\';',
+  },
+  {
+    name: 'WebSetupSearchSelection',
+    declaration: 'export interface WebSetupSearchSelection {\n    provider: string | null;\n    apiKey?: string;\n    baseURL?: string;\n}',
+  },
+  {
+    name: 'WebSetupStatus',
+    declaration: 'export interface WebSetupStatus {\n    searchProvider: string | null;\n    fetchProvider: string | null;\n    mounted: WebSetupMountedProvider[];\n    credentials: Record<string, WebSetupCredentialState>;\n}',
+  },
+  {
+    name: 'WebSetupToolToggles',
+    declaration: 'export interface WebSetupToolToggles {\n    search: boolean;\n    fetch: boolean;\n}',
+  },
+  {
+    name: 'WebSetupValidateRequest',
+    declaration: 'export interface WebSetupValidateRequest {\n    kind: WebSetupProviderKind;\n    provider: string;\n    apiKey?: string;\n    baseURL?: string;\n}',
+  },
+  {
+    name: 'WebSetupValidation',
+    declaration: 'export interface WebSetupValidation {\n    ok: boolean;\n    status?: number;\n    latencyMs?: number;\n    error?: string;\n    sourcesCount?: number;\n}',
   },
   {
     name: 'WebSource',

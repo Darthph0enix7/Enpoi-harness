@@ -135,6 +135,13 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 /**
  * Ask the scoped answerer waterfall and wait for the user's answer.
  *
+ * The dispatched request always carries a service-owned settle signal next
+ * to the caller's cancellation: once the answerer chain settles the ask —
+ * a local client answered, a peer registry won its race, or the caller
+ * withdrew it — that signal aborts, so every forwarded presentation still
+ * showing the question is cancelled and a client that attaches later is
+ * never offered it.
+ *
  * When a caller supplies an agent, human interaction is valid only for the
  * exact live runtime root. Runtime ownership, not durable session lineage,
  * decides this boundary: an owned child has no human answerer and would

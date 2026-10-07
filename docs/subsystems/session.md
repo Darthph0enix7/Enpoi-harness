@@ -900,6 +900,37 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('revertRestore') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>
 
 /**
+ * List the Session's durable iteration groups (variant chains).
+ * @param request - session, optional group anchor, and listing bounds.
+ * @returns bounded groups with capped previews and surface-activity flags.
+ */
+@Remote('revertIterations') revertIterations(request: SessionRevertIterationsRequest): Promise<SessionRevertIterationsValue>
+
+/**
+ * Restore one iteration variant as the active version (overwrite-since-point commit).
+ * @param request - session, target variant, and the idempotency request id.
+ * @returns acknowledgement that the restore was accepted.
+ */
+@Remote('revertIterationRestore') revertIterationRestore(request: SessionRevertIterationRestoreRequest): Promise<SessionRevertIterationRestoreValue>
+
+/**
+ * Verify one Session log against the durability invariants (marker targets,
+ * branch reachability, offload targets, compaction sources, surface and
+ * iteration folds).
+ * @param request - Session to verify.
+ * @returns the findings and the committed prefix length.
+ */
+@Remote('verifyLog') verifyLog(request: SessionVerifyLogRequest): Promise<SessionVerifyLogValue>
+
+/**
+ * Self-heal one Session log: rebuild derived folds and neutralize dangling
+ * references in the derived view without rewriting durable events.
+ * @param request - Session to repair.
+ * @returns the repair receipt and verification of the repaired view.
+ */
+@Remote('repairLog') repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue>
+
+/**
  * Resolve a file revert conflict (bridged to the enpoi-file-revert plugin).
  * @param request - session, conflictId, and the chosen resolution.
  * @returns acknowledgement that the resolution was accepted.

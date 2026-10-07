@@ -133,6 +133,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   typertGateway: 'typert.md',
   userQuestions: 'user-questions.md',
   web: 'web.md',
+  webSetup: 'web-setup.md',
   workflowEngine: 'workflow.md',
   webhookRuntime: 'webhook.md',
   workspaceRegistry: 'workspace.md',
