@@ -4,7 +4,9 @@
  * producers. It also delivers completions the model has not already
  * collected to the owning agent: injected into a busy owner's next step, or
  * opening a turn on an idle one under the default `wakeup` delivery, unbounded
- * unless `maxConsecutiveWakes` caps it per owner.
+ * unless `maxConsecutiveWakes` caps it per owner. A completion whose owner
+ * Agent is absent when the job settles is retained and delivered on that
+ * owner's next activation or idle transition instead of being dropped.
  * @module @deepseek-ai/dsh-tool-jobs
  */
 
@@ -21,6 +23,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent'
 import { publicJob, renderModelDelta, statusLine } from './render.ts'
 import type { PublicJobSnapshot } from './render.ts'
+import { CompletionNoticeOutbox } from './completion-outbox.ts'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'tool-jobs': { kind: 'tool-jobs' } & ContextFormed
@@ -259,11 +262,44 @@ export function apply(ctx: Context, config: Config): void {
   // that released a live wait as `awaited`, whichever plugin was waiting.
   const killedByModel = new Set<JobId>()
 
+  // Delivery that cannot vanish: a notice the owner cannot receive now — its
+  // Agent is gone, or placement threw — is held in-process and re-placed with
+  // a real wake on the owner's next activation or idle transition, with
+  // bounded retries and `[SETTLEMENT_NOTICE_*]` diagnostics; see the module
+  // contract for the exact hold, idempotency, and disposal rules.
+  const notices = new CompletionNoticeOutbox(ctx, (owner, message, alreadyQueued) => {
+    // A held copy that is still queued is replaced by one placement: the
+    // durable message already exists, and this delivery owns its wake.
+    if (alreadyQueued) owner.inbox.remove(message.id)
+    if (delivery === 'wakeup' && owner.status === 'idle') {
+      if (wakeBudget === undefined) {
+        owner.followup(message)
+        return
+      }
+      const spent = spentWakes.get(owner) ?? 0
+      if (spent < wakeBudget) {
+        spentWakes.set(owner, spent + 1)
+        owner.followup(message)
+        return
+      }
+    }
+    owner.inject(message)
+  })
+  // A held notice is retried on the owner's activation and on each return to
+  // idle, and retired once its message is claimed by a turn.
+  ctx.on('agent/created', ({ agent }) => { notices.flush(agent.id) })
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (status === 'idle') notices.flush(agent.id)
+  })
+  ctx.on('agent/inbox/claimed', ({ agent, message }) => { notices.claimed(agent.id, message.id) })
+  ctx.effect(() => () => { notices.dispose() }, 'tool-jobs completion outbox')
+
   // A busy owner is injected: the notice waits in its next-step inbox, which
   // the turn cannot close over, so jobs settling together cost one step. An
   // idle owner is woken instead, because an undelivered notice is a completion
-  // the model never learns about. Either way, disposal before delivery
-  // discards it with the owner, and a teardown settlement has no reader left.
+  // the model never learns about. Either way, disposal after placement
+  // discards the message with the owner, while a notice that has not been
+  // placed yet is held by the outbox and survives to the next activation.
   //
   // The registry routes each settlement to the scope this plugin was mounted
   // under, so a mount under one preset never sees another preset's agents;
@@ -278,33 +314,23 @@ export function apply(ctx: Context, config: Config): void {
     if (delivered || event.cause === 'teardown' || event.job.owner === undefined) return
     // The destination is the agent registered for the owner session now. An
     // owned job needed the agent registry to start, so the registry is only
-    // absent here when it left before settlement — and then no inbox is left.
-    const owner = ctx.get('agents')?.get(event.job.owner)
-    if (owner === undefined) return
-    const message = createUserMessage({
-      content: [{
-        type: 'text',
-        text: fitCompletionNotice(event.job),
-      }],
-      source: {
-        kind: 'tool-jobs',
-        form: 'notice',
-        summary: completionSummary(event.job),
-      },
-    })
-    if (delivery === 'wakeup' && owner.status === 'idle') {
-      if (wakeBudget === undefined) {
-        owner.followup(message)
-        return
-      }
-      const spent = spentWakes.get(owner) ?? 0
-      if (spent < wakeBudget) {
-        spentWakes.set(owner, spent + 1)
-        owner.followup(message)
-        return
-      }
-    }
-    owner.inject(message)
+    // absent here when it left before settlement — and then the notice is
+    // held until an owner for that session appears.
+    notices.notify(
+      event.job.owner,
+      event.job.id,
+      createUserMessage({
+        content: [{
+          type: 'text',
+          text: fitCompletionNotice(event.job),
+        }],
+        source: {
+          kind: 'tool-jobs',
+          form: 'notice',
+          summary: completionSummary(event.job),
+        },
+      }),
+    )
   })
 
   ctx.tools.register(defineTool({

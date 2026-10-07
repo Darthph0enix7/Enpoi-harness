@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { emitAgentEvent } from '@deepseek-ai/dsh-agent'
@@ -12,6 +13,7 @@ import { JobId } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import type { JobAppendOptions, JobHandle, JobHooks, JobOutcome, JobOutputSource, JobSpec, JobView } from '@deepseek-ai/dsh-jobs'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
+import { CompletionNoticeOutbox } from '../src/completion-outbox.ts'
 import { publicJob, renderModelDelta, statusLine } from '../src/render.ts'
 
 const testToolSignal = new AbortController().signal
@@ -40,6 +42,12 @@ interface FakeDelivery {
   followup?: (...args: unknown[]) => void
   /** Defaults to `running`, the lane that never wakes, so notice-content tests pin one lane. */
   status?: 'idle' | 'running'
+  /** Pending input a redelivery checks before queueing another copy. */
+  inbox?: {
+    nextTurn: UserMessage[]
+    nextStep: UserMessage[]
+    remove: (messageId: MessageId) => boolean
+  }
 }
 
 /**
@@ -56,6 +64,7 @@ async function fakeAgent(ctx: Context, sessionId: string, delivery: FakeDelivery
     followup: delivery.followup ?? (() => {}),
     status: delivery.status ?? 'running',
     session: { id, header: { version: 0, id, createdAt: 0 } },
+    inbox: delivery.inbox ?? { nextTurn: [], nextStep: [], remove: () => false },
   } as unknown as Agent
   agentRegistryDisposers.set(agent, await ctx.agents.register(agent))
   agentScopeFibers.set(agent, scopeFiber)
@@ -1172,7 +1181,7 @@ describe('completion notices', () => {
     expect(inject).not.toHaveBeenCalled()
   })
 
-  it('drops the notice when the owner session has no live agent at settlement', async () => {
+  it('holds the notice when the owner session has no live agent at settlement', async () => {
     const { ctx } = await setup()
     const inject = vi.fn()
     const owner = await fakeAgent(ctx, 'sess-1', { inject })
@@ -1185,7 +1194,7 @@ describe('completion notices', () => {
     expect(inject).not.toHaveBeenCalled()
   })
 
-  it('surfaces an inject failure through listener containment (a real bug must be visible)', async () => {
+  it('surfaces a failing placement through the structured retry diagnostic', async () => {
     const { ctx } = await setup()
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     const owner = await fakeAgent(ctx, 'sess-1', { inject: () => { throw new Error('unexpected inject bug') } })
@@ -1193,8 +1202,223 @@ describe('completion notices', () => {
     ctx.jobs.start(p.spec)
     p.settle({ status: 'completed' })
     await tick()
-    // The throw escapes the notice listener and is contained (logged) by the
-    // registry's per-listener containment — visible, not swallowed.
+    // The failure is caught, retried, and reported with its error, so a real
+    // bug stays visible in the diagnostics ledger instead of being swallowed
+    // or left to the registry's listener containment.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[SETTLEMENT_NOTICE_RETRY]'))
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('unexpected inject bug'))
+  })
+})
+
+describe('completion notice durability', () => {
+  it('records a completion for a gone owner and wakes it on the next activation', async () => {
+    const { ctx } = await setup()
+    const infos: string[] = []
+    vi.spyOn(ctx.logger, 'info').mockImplementation((format: unknown) => { infos.push(String(format)) })
+    const staleInject = vi.fn()
+    const stale = await fakeAgent(ctx, 'sess-1', { inject: staleInject })
+    const p = producer({ owner: stale.id, label: 'pnpm test' })
+    ctx.jobs.start(p.spec)
+
+    // The owner leaves before settlement: nothing accepts the notice, so the
+    // outbox holds the record instead of dropping the completion.
+    await detachAgent(stale)
+    p.settle({ status: 'completed', detail: 'exit code: 0' })
+    await tick()
+    expect(staleInject).not.toHaveBeenCalled()
+    expect(infos.filter(info => info.includes('[SETTLEMENT_NOTICE_PENDING]'))).toHaveLength(1)
+
+    // The next activation resolves the owner and delivers with a real wake.
+    const inject = vi.fn()
+    const followup = vi.fn()
+    await fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle' })
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(inject).not.toHaveBeenCalled()
+    const message = followup.mock.calls[0]![0] as { content: readonly { text: string }[] }
+    expect(message.content[0]!.text).toContain('background job bash-1')
+    expect(message.content[0]!.text).toContain('[status: completed, exit code: 0]')
+  })
+
+  it('retries one failed wake and delivers the completion', async () => {
+    const { ctx } = await setup()
+    const inject = vi.fn()
+    let calls = 0
+    const followup = vi.fn(() => {
+      calls += 1
+      if (calls === 1) throw new Error('transient wake failure')
+    })
+    const owner = await fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle' })
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation((format: unknown) => { warnings.push(String(format)) })
+
+    const p = producer({ owner: owner.id, label: 'pnpm test' })
+    ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    // The first wake threw before accepting anything; the bounded retry
+    // delivered the same notice instead of dropping it.
+    await vi.waitFor(() => { expect(followup).toHaveBeenCalledTimes(2) })
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_RETRY]'))).toBe(true)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
+  it('replaces a copy queued by a failed wake instead of queueing a second one', async () => {
+    const { ctx } = await setup()
+    const inbox = {
+      nextTurn: [] as UserMessage[],
+      nextStep: [] as UserMessage[],
+      remove(messageId: MessageId): boolean {
+        const index = inbox.nextTurn.findIndex(message => message.id === messageId)
+        if (index < 0) return false
+        inbox.nextTurn.splice(index, 1)
+        return true
+      },
+    }
+    let queueThenThrow = true
+    const followup = vi.fn((...args: unknown[]) => {
+      const message = args[0] as UserMessage
+      inbox.nextTurn.push(message)
+      if (queueThenThrow) {
+        queueThenThrow = false
+        throw new Error('wake failed after queueing')
+      }
+    })
+    const inject = vi.fn()
+    const owner = await fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle', inbox })
+
+    const p = producer({ owner: owner.id })
+    ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    await vi.waitFor(() => { expect(followup).toHaveBeenCalledTimes(2) })
+    // The retry found the copy the failed wake had queued and replaced it.
+    expect(inbox.nextTurn).toHaveLength(1)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
+  it('holds a notice whose retries are exhausted and wakes on the next idle transition', async () => {
+    const { ctx } = await setup()
+    let blocked = true
+    const followup = vi.fn(() => { if (blocked) throw new Error('owner closed during delivery') })
+    const inject = vi.fn()
+    const owner = await fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle' })
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation((format: unknown) => { warnings.push(String(format)) })
+
+    const p = producer({ owner: owner.id })
+    ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    // The bounded retry budget is spent loudly, and the record stays held.
+    await vi.waitFor(() => {
+      expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_HELD]'))).toBe(true)
+    }, { timeout: 2000 })
+    expect(followup).toHaveBeenCalledTimes(4)
+
+    // The owner's next idle transition re-runs placement with a fresh budget.
+    blocked = false
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'idle' })
+    expect(followup).toHaveBeenCalledTimes(5)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
+  it('cancels a pending retry when the plugin unloads and reports the record', async () => {
+    const { ctx, toolsFiber } = await setup()
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation((format: unknown) => { warnings.push(String(format)) })
+    const owner = await fakeAgent(ctx, 'sess-1', {
+      inject: vi.fn(),
+      followup: () => { throw new Error('owner closed during delivery') },
+      status: 'idle',
+    })
+    const p = producer({ owner: owner.id })
+    ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    // The first placement failed and a backoff retry is pending.
+    await tick()
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_RETRY]'))).toBe(true)
+
+    // Unloading drops the timer and reports the record instead of letting it
+    // vanish with the process.
+    await toolsFiber.dispose()
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_UNRESOLVED]'))).toBe(true)
+  })
+
+  it('treats only the idle transition as a redelivery trigger', async () => {
+    const { ctx } = await setup()
+    const owner = await fakeAgent(ctx, 'sess-1')
+    // With no held notice neither transition delivers anything; this pins the
+    // listener to the idle flip the contract names.
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'idle' })
+  })
+
+  it('collapses duplicate completion notices for one job id', async () => {
+    const { ctx } = await setup()
+    const owner = await fakeAgent(ctx, 'sess-1')
+    const placed: UserMessage[] = []
+    const notices = new CompletionNoticeOutbox(ctx, (_owner, message) => { placed.push(message) })
+    const message = createUserMessage({
+      content: [{ type: 'text', text: 'background job bash-1 finished' }],
+      source: { kind: 'tool-jobs', form: 'notice', summary: 'bash' },
+    })
+
+    // A delivered key retains its settlement: a replay places nothing.
+    notices.notify(owner.id, JobId('bash-1'), message)
+    notices.notify(owner.id, JobId('bash-1'), message)
+    expect(placed).toEqual([message])
+
+    // A held key also survives a replay while its owner is gone.
+    await detachAgent(owner)
+    notices.notify(owner.id, JobId('bash-2'), message)
+    notices.notify(owner.id, JobId('bash-2'), message)
+    expect(placed).toEqual([message])
+
+    // A trigger for another session leaves the record alone, and a repeated
+    // trigger for its own session reports the hold once.
+    notices.flush(SessionId('sess-other'))
+    notices.flush(owner.id)
+    notices.flush(owner.id)
+    expect(placed).toEqual([message])
+  })
+
+  it('retires a held notice the owner claims before redelivery', async () => {
+    const { ctx } = await setup()
+    const owner = await fakeAgent(ctx, 'sess-1')
+    const placed: UserMessage[] = []
+    const notices = new CompletionNoticeOutbox(ctx, (_owner, message) => { placed.push(message) })
+    const message = createUserMessage({
+      content: [{ type: 'text', text: 'background job bash-1 finished' }],
+      source: { kind: 'tool-jobs', form: 'notice', summary: 'bash' },
+    })
+    const other = createUserMessage({
+      content: [{ type: 'text', text: 'background job bash-2 finished' }],
+      source: { kind: 'tool-jobs', form: 'notice', summary: 'bash' },
+    })
+
+    await detachAgent(owner)
+    notices.notify(owner.id, JobId('bash-1'), message)
+    // A claim from another session or for another message leaves the record.
+    notices.claimed(SessionId('sess-other'), message.id)
+    notices.claimed(owner.id, other.id)
+    // The message reached a turn without the outbox placing it; the record
+    // must not wake the owner again.
+    notices.claimed(owner.id, message.id)
+    await fakeAgent(ctx, 'sess-1')
+    expect(placed).toEqual([])
+  })
+
+  it('reports a notice queued after the outbox was disposed', async () => {
+    const { ctx } = await setup()
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation((format: unknown) => { warnings.push(String(format)) })
+    const notices = new CompletionNoticeOutbox(ctx, () => {})
+    const message = createUserMessage({
+      content: [{ type: 'text', text: 'notice' }],
+      source: { kind: 'tool-jobs', form: 'notice', summary: 'late' },
+    })
+
+    notices.dispose()
+    // flush after disposal is harmless; notify reports and drops nothing.
+    notices.flush(SessionId('sess-1'))
+    notices.notify(SessionId('sess-1'), JobId('bash-1'), message)
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_NOTICE_UNRESOLVED]'))).toBe(true)
   })
 })
