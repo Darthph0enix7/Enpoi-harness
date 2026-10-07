@@ -128,7 +128,14 @@ export function modelSelectionSetupAgent(ctx: Context): Agent {
 
 let callCounter = 0
 
-/** Execute the registered subagent tool through the real ToolRuntime pipeline. */
+/**
+ * Execute the registered subagent tool through the real ToolRuntime pipeline.
+ * Role is mandatory at the tool boundary, so a call without a `role` key
+ * defaults to `fixer`; specs that exercise text inference or the role-less
+ * refusal opt out with the test-only `inferRole: true` marker, which this
+ * helper strips before execution (an explicit `role: undefined` is not
+ * JSON-serializable and the executor rejects it).
+ */
 export function callSubagent(
   ctx: Context,
   args: unknown,
@@ -138,11 +145,17 @@ export function callSubagent(
   // `{ agent: undefined }` (test the no-agent path). Under
   // exactOptionalPropertyTypes the key is omitted rather than set to undefined.
   const agent = 'agent' in over ? over.agent : setupAgents.get(ctx) ?? fakeAgent()
+  const delegated = ((): unknown => {
+    if (typeof args !== 'object' || args === null) return args
+    const { inferRole, ...rest } = args as Record<string, unknown>
+    if (inferRole === true) return rest
+    return Object.hasOwn(args, 'role') ? args : { role: 'fixer', ...args }
+  })()
   return ctx.tools.execute({
     signal: testToolSignal,
     callId: ToolCallId(`call-${++callCounter}`),
     name: 'subagent',
-    arguments: args,
+    arguments: delegated,
     ...agent ? { agent } : {},
     ...over.signal ? { signal: over.signal } : {},
   })

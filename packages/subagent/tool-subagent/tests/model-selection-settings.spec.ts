@@ -226,6 +226,7 @@ describe('SubagentModelSelectionConfig', () => {
       callId: ToolCallId('disallowed-session-route'),
       name: 'subagent',
       arguments: {
+        role: 'fixer',
         description: 'forced route',
         prompt: 'do it',
         provider: 'alpha',

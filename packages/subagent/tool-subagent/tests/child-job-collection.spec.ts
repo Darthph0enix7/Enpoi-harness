@@ -90,7 +90,9 @@ describe('child promoted bash jobs are collectable', () => {
       signal: testToolSignal,
       callId: ToolCallId('dispatch-1'),
       name: 'subagent',
-      arguments: { description: 'long command child', prompt: 'run and collect the long probe', run_in_background: false },
+      // Explorer is deny-only, so the shared floor (which keeps the job
+      // controls) is exactly what this collection test observes.
+      arguments: { role: 'explorer', description: 'long command child', prompt: 'run and collect the long probe', run_in_background: false },
       agent: parent,
     })
 

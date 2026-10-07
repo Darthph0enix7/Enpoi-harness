@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import * as tool from '../src/index.ts'
 import { ROLE_CHILD_ALLOW, SHARED_CHILD_KEEP } from '../src/index.ts'
 import { callSubagent, setup, TEST_REGISTERED_TOOLS, text } from './harness.ts'
 
@@ -45,23 +46,25 @@ const SHARED_DENY = [
 // subagent survives its shared floor, like the Oracle's.
 const SHARED_DENY_DELEGATING = SHARED_DENY.filter(name => name !== 'subagent')
 
-const ROLE_EXTRAS = {
-  explorer: ['edit', 'write', 'str_replace_editor'],
-  fixer: [],
-  designer: [],
-}
+/** The explorer's built-in deny extras; every other shipped role is allowlisted. */
+const EXPLORER_EXTRAS = ['edit', 'write', 'str_replace_editor']
 
 /**
  * The built-in allowlist after the spawn path's live-registry audit. The test
  * composition registers only {@link TEST_REGISTERED_TOOLS} plus this plugin's
  * own `subagent` tool, so every other built-in name is dropped with a warning.
  */
-function auditedBuiltin(role: 'librarian' | 'oracle'): string[] {
+function auditedBuiltin(role: 'librarian' | 'fixer' | 'designer' | 'oracle'): string[] {
   const known = new Set<string>([...TEST_REGISTERED_TOOLS, 'subagent'])
   return ROLE_CHILD_ALLOW[role]!.filter(name => known.has(name))
 }
 
-/** Spawn one foreground delegation and return the request the provider saw. */
+/**
+ * Spawn one foreground delegation and return the request the provider saw.
+ * `inferRole: true` opts out of {@link callSubagent}'s harness default so the
+ * tool resolves the role from text; a per-role catalog test asserts the catalog
+ * the resolved role composes.
+ */
 async function captureRequest(
   description: string,
   toolConfig: Omit<Parameters<typeof setup>[0], 'provider'> = {},
@@ -72,24 +75,41 @@ async function captureRequest(
     { provider: 'mock', ...toolConfig },
     { ...mockConfig, onStart: (request) => { seen = request } },
   )
-  await callSubagent(ctx, { description, prompt: `Task: ${description}` })
+  await callSubagent(ctx, { description, prompt: `Task: ${description}`, inferRole: true })
   if (seen === undefined) throw new Error('scripted provider never saw a start request')
   return seen
 }
 
 describe('dsh-tool-subagent per-child tool filter', () => {
   it.each([
-    ['explorer', 'Explorer: map the delegation surface', ROLE_EXTRAS.explorer, SHARED_DENY],
-    ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer, SHARED_DENY],
-    ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer, SHARED_DENY],
-    // The Oracle is tool-only: a description naming it is NOT a role selection,
-    // so the generic delegation keeps the full shared deny set.
-    ['none (tool-only Oracle)', 'Oracle: architecture review', [], SHARED_DENY],
-    // No role inferred: shared set only.
-    ['unknown', 'Do the thing', [], SHARED_DENY],
-  ])('denies the shared worker set plus %s extras at spawn', async (_role, description, extras, shared) => {
+    ['explorer (named)', 'Explorer: map the delegation surface'],
+    ['explorer (review signal)', 'Review the parser diff'],
+    ['explorer (audit signal)', 'Audit the migration plan'],
+  ])('denies the shared worker set plus %s mutations at spawn', async (_role, description) => {
     const request = await captureRequest(description)
-    expect(request.toolFilter).toEqual({ deny: [...shared, ...extras] })
+    // The explorer is deny-only: its surface is the shared floor plus the
+    // mutation veto, with no allowlist to widen it.
+    expect(request.toolFilter).toEqual({ deny: [...SHARED_DENY, ...EXPLORER_EXTRAS] })
+  })
+
+  it.each([
+    ['fixer', 'Fixer: patch the parser bug'],
+    ['designer', 'Designer: restyle the settings page'],
+  ])('scopes the %s to its built-in allowlist plus the shared floor', async (role, description) => {
+    const request = await captureRequest(description)
+    expect(request.toolFilter?.allow).toEqual([
+      ...auditedBuiltin(role as 'fixer' | 'designer'),
+      ...SHARED_CHILD_KEEP,
+    ])
+    expect(request.toolFilter?.deny).toEqual(SHARED_DENY)
+  })
+
+  it('refuses a role-less description that resolves no registry role', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('requires a role')
+    expect(text(result)).toContain('enpoi-orchestration.roles')
   })
 
   it('composes the librarian built-in allowlist (server permissions parity) with the shared floor', async () => {
@@ -112,7 +132,11 @@ describe('dsh-tool-subagent per-child tool filter', () => {
       { onStart: (request) => { seen = request } },
     )
     ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
-    const result = await callSubagent(ctx, { description: 'Librarian: research the API documentation', prompt: 'work' })
+    const result = await callSubagent(ctx, {
+      description: 'Librarian: research the API documentation',
+      prompt: 'work',
+      inferRole: true,
+    })
     expect(result.isError).toBe(false)
     expect(seen?.toolFilter?.allow).toEqual([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])
     expect(warnings.filter(message => message.includes('"web_search"'))).toHaveLength(1)
@@ -162,15 +186,21 @@ describe('dsh-tool-subagent per-child tool filter', () => {
       'send_message',
       'dangerous',
       ...SHARED_DENY.filter(name => name !== 'send_message'),
-      ...ROLE_EXTRAS.explorer.filter(name => name !== 'bash'),
+      ...EXPLORER_EXTRAS.filter(name => name !== 'bash'),
     ])
     expect(new Set(deny).size).toBe(deny.length)
   })
 
-  it('keeps the whiteboard in every deny-only surface and never names it in a deny map', async () => {
-    // Structural: the pinned board is available to every delegated child, so
-    // no built-in role deny map may strip it.
-    for (const description of ['Fixer: patch the parser bug', 'Explorer: map the delegation surface', 'Oracle: architecture review']) {
+  it('keeps the whiteboard in every role surface and never names it in a deny map', async () => {
+    // Structural: the pinned board is available to every delegated child
+    // (allowlisted and deny-only alike), so no built-in role deny map may
+    // strip it.
+    for (const description of [
+      'Fixer: patch the parser bug',
+      'Librarian: research the API documentation',
+      'Explorer: map the delegation surface',
+      'Oracle: architecture review',
+    ]) {
       const request = await captureRequest(description)
       for (const tool of SHARED_CHILD_KEEP) {
         expect(request.toolFilter?.deny ?? []).not.toContain(tool)
@@ -179,11 +209,13 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('preserves a configured allow list while composing the deny policy', async () => {
-    const request = await captureRequest('Do the thing', {
+    // The explorer is deny-only: the configured allow list passes through and
+    // the composed deny list appends the shared floor plus the role extras.
+    const request = await captureRequest('Explorer: map the delegation surface', {
       toolFilter: { allow: ['read'], deny: ['dangerous'] },
     })
     expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
-    expect(request.toolFilter?.deny).toEqual(['dangerous', ...SHARED_DENY])
+    expect(request.toolFilter?.deny).toEqual(['dangerous', ...SHARED_DENY, ...EXPLORER_EXTRAS])
   })
 
   it('lets the permissions allowlist win over the registry tools.available', async () => {
@@ -226,7 +258,11 @@ describe('dsh-tool-subagent per-child tool filter', () => {
       { onStart: (request) => { seen = request } },
     )
     ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
-    const result = await callSubagent(ctx, { description: 'Librarian: research the API documentation', prompt: 'work' })
+    const result = await callSubagent(ctx, {
+      description: 'Librarian: research the API documentation',
+      prompt: 'work',
+      inferRole: true,
+    })
     expect(result.isError).toBe(false)
     expect(seen?.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
     expect(warnings.filter(message => message.includes('"todo_read"'))).toHaveLength(1)
@@ -260,26 +296,46 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     // The strict contract is unchanged for code-authored filters: config.toolFilter
     // is build-time data, so the audit never drops its names — the real child
     // composition still throws in tools.restrict() for an unknown allow name.
-    const request = await captureRequest('Do the thing', {
+    const request = await captureRequest('Explorer: map the delegation surface', {
       toolFilter: { allow: ['read', 'not_a_registered_tool'] },
     })
     expect(request.toolFilter?.allow).toContain('not_a_registered_tool')
   })
 
-  it('passes the configured filter through unchanged when the provider cannot apply one', async () => {
-    // The capability-less provider runtime rejects the unmodified filter rather
-    // than silently applying a partial worker surface.
+  it('composes the shared floor for every role regardless of provider capability', () => {
+    // Composition is provider-independent by construction: `childToolFilter`
+    // has no provider input, so a capability-less provider can only ever be
+    // offered the worker floor — never the parent's full surface.
+    const registry = tool.listRoleRegistry(undefined)
+    const audit = {
+      isKnown: (name: string): boolean => (TEST_REGISTERED_TOOLS as readonly string[]).includes(name) || name === 'subagent',
+      warn: (): void => {},
+    }
+    const explorer = tool.childToolFilter(undefined, undefined, 'explorer', registry['explorer']!, audit)
+    expect(explorer.allow).toBeUndefined()
+    expect(explorer.deny).toEqual([...SHARED_DENY, ...EXPLORER_EXTRAS])
+    const fixer = tool.childToolFilter(undefined, undefined, 'fixer', registry['fixer']!, audit)
+    expect(fixer.allow).toEqual([...auditedBuiltin('fixer'), ...SHARED_CHILD_KEEP])
+    expect(fixer.deny).toEqual(SHARED_DENY)
+  })
+
+  it('refuses a capability-less provider loudly instead of running it with the parent surface', async () => {
+    // The composed floor reaches `ctx.subagents.start`, whose capability check
+    // refuses a provider that cannot apply a filter; the tool never falls back
+    // to an unfiltered child.
     const ctx = await setup(
       { provider: 'mock', toolFilter: { deny: ['dangerous'] } },
       { capabilities: { toolFilter: false } },
     )
-    const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work' })
+    const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', role: 'explorer' })
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('does not support the "toolFilter" capability')
   })
 
-  it('emits no filter for a capability-less provider without a configured filter', async () => {
-    const request = await captureRequest('Do the thing', {}, { capabilities: { toolFilter: false } })
-    expect(request.toolFilter).toBeUndefined()
+  it('refuses a filter-less provider even when no filter is configured', async () => {
+    const ctx = await setup({ provider: 'mock' }, { capabilities: { toolFilter: false } })
+    const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', role: 'explorer' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('does not support the "toolFilter" capability')
   })
 })

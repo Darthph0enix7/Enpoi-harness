@@ -211,18 +211,30 @@ describe('fresh-home boot composition', () => {
       'memory_search', 'read', 'read_image', 'request_evidence', 'skill', 'subagent',
       'todo_write', 'web_search', 'whiteboard_read', 'write',
     ])
+    // The role-scoped worker lists (fixer/designer) encode the live battery
+    // evidence: every worker child there used bash/read/grep-class tools, so
+    // these are the narrower surfaces the fresh install must compose.
+    expect(ROLE_CHILD_ALLOW.designer).toEqual([
+      'edit', 'glob', 'grep', 'read', 'read_image', 'skill', 'todo_write', 'write',
+    ])
+    expect(ROLE_CHILD_ALLOW.fixer).toEqual([
+      'bash', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
+      'memory_save', 'memory_search', 'read', 'skill', 'todo_write',
+      'web_fetch', 'web_search', 'write',
+    ])
     // The delegation exception is the only built-in allow name the shared
-    // worker floor names; every other allow name survives it. The whiteboard
-    // keep list is unioned at composition time by `childToolFilter`, so the
-    // built-in lists carry only the one board tool the live server surface
-    // names.
-    expect(Object.keys(ROLE_CHILD_ALLOW).sort()).toEqual(['librarian', 'oracle'])
+    // worker floor names for the reader roles; the worker roles carry no
+    // shared-floor name at all. The whiteboard keep list is unioned at
+    // composition time by `childToolFilter`, so the built-in reader lists
+    // carry only the one board tool the live server surface names.
+    expect(Object.keys(ROLE_CHILD_ALLOW).sort()).toEqual(['designer', 'fixer', 'librarian', 'oracle'])
     for (const [role, allow] of Object.entries(ROLE_CHILD_ALLOW)) {
+      const reader = role === 'librarian' || role === 'oracle'
       const overlaps = allow.filter(name => SHARED_CHILD_DENY.includes(name))
-      expect(overlaps, `${role} allowlist overlaps the shared floor`).toEqual(['subagent'])
+      expect(overlaps, `${role} allowlist overlaps the shared floor`).toEqual(reader ? ['subagent'] : [])
       expect(new Set(allow).size, `${role} allowlist duplicates`).toBe(allow.length)
       const board = allow.filter(name => SHARED_CHILD_KEEP.includes(name))
-      expect(board, `${role} board entry`).toEqual(['whiteboard_read'])
+      expect(board, `${role} board entry`).toEqual(reader ? ['whiteboard_read'] : [])
     }
   })
 })
