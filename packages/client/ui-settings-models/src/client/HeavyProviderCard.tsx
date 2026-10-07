@@ -9,9 +9,10 @@
  * @module ui-settings-models/HeavyProviderCard
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
+import { autoPopulateDue, type AutoPopulateAttempt } from './heavy-auto-populate.ts'
 import { heavyApi, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyPreflightNote, useHeavyStatus } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
@@ -23,10 +24,20 @@ export interface HeavyProviderCardProps {
   /** Route id (the manifest lookup key). */
   providerId: string
   t: (key: keyof typeof en) => string
+  /** The route's configured model ids; the automatic-population trigger watches these. */
+  modelIds?: readonly string[]
+  /**
+   * Run discovery and merge it into the route; resolves true once the catalog
+   * holds at least one discovered model. Called automatically at most once per
+   * successful status check while the route still declares no real model, and
+   * never again for this card after a populated write. Absent on non-heavy
+   * surfaces.
+   */
+  onAutoPopulate?: () => Promise<boolean>
 }
 
 /** Provider detail card for a heavy provider. */
-export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): ReactNode {
+export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate }: HeavyProviderCardProps): ReactNode {
   // Host truth first: the status reply carries the manifest the running
   // profile executes; the shared table covers the pre-reply render.
   const listed = resolveHeavyManifest(providerId)
@@ -34,6 +45,29 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
   const manifest = status?.manifest ?? listed
   const [job, setJob] = useState<HeavyJobView | null>(null)
   const [showDocs, setShowDocs] = useState(false)
+  const autoAttempt = useRef<AutoPopulateAttempt | undefined>(undefined)
+  const autoSettled = useRef(false)
+
+  // Auto-population: a configured route with no real model (empty or only a
+  // fabricated legacy fallback) discovers once per successful status check
+  // while the service answers. The refs make the guard exact: a re-render or
+  // an unchanged cached snapshot can never attempt twice, and a completed
+  // write ends automatic attempts for this card (the manual Refresh stays).
+  useEffect(() => {
+    if (onAutoPopulate === undefined || autoSettled.current || status === null) return
+    if (!autoPopulateDue(autoAttempt.current, {
+      providerId,
+      configured: status.configured,
+      healthOk: status.health.ok,
+      checking,
+      checkedAt: status.health.checkedAt,
+      modelIds,
+    })) return
+    autoAttempt.current = { providerId, checkedAt: status.health.checkedAt }
+    void onAutoPopulate().then((settled) => {
+      if (settled) autoSettled.current = true
+    })
+  }, [status, checking, providerId, modelIds, onAutoPopulate])
 
   // A host snapshot (page reopened, or another surface started the job) is
   // adopted unless the locally polled copy is newer. A same-start terminal

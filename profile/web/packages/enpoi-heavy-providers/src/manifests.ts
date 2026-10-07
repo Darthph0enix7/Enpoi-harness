@@ -253,7 +253,12 @@ export interface HeavyProviderManifest {
     steps: readonly HeavyStep[]
     warnings: readonly string[]
   }
-  /** One model id written when discovery returns nothing and the provider accepts it. */
+  /**
+   * One model id written when discovery returns nothing and the provider
+   * accepts it. Omit for a fully-discoverable service: an empty discovery
+   * then writes an empty model list instead of fabricating an id the service
+   * never advertised.
+   */
   fallbackModel?: string
   /** Present when no llm-pi-ai route can exist yet; install is blocked in v1. */
   unsupported?: {
@@ -672,7 +677,9 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
         'DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown',
       ],
     },
-    fallbackModel: 'gemini-2.5-flash',
+    // No fallbackModel: discovery is the only model source for this service.
+    // An operator who has not added a Google account yet gets a route with an
+    // empty model list, never a fabricated id the proxy never advertised.
   },
   {
     id: 'commandcode',

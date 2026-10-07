@@ -219,6 +219,103 @@ it('pins the DOM and class contracts for HeavyProviderCard progress card and doc
   expect(docs.className).toContain(docsStyles.heavyDocs)
 })
 
+it('auto-populates a configured empty route once per health snapshot, not per render', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    health: { ok: true, status: 200, checkedAt: 11 },
+  } })
+  const onAutoPopulate = vi.fn(async () => true)
+  const view = render(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+
+  await waitFor(() => { expect(onAutoPopulate).toHaveBeenCalledTimes(1) })
+  // A re-render (with a fresh modelIds array, as the panel's memo produces)
+  // and a cached status snapshot never attempt twice.
+  view.rerender(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+  view.rerender(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+  await waitFor(() => { expect(screen.getByText(`${en.heavyHealthOk} · 200`)).toBeTruthy() })
+  expect(onAutoPopulate).toHaveBeenCalledTimes(1)
+})
+
+it('auto-populates a route whose only model is the fabricated legacy fallback', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    health: { ok: true, status: 200, checkedAt: 12 },
+  } })
+  const onAutoPopulate = vi.fn(async () => true)
+  render(
+    <HeavyProviderCard
+      providerId="antigravity"
+      t={t}
+      modelIds={['gemini-2.5-flash']}
+      onAutoPopulate={onAutoPopulate}
+    />,
+  )
+  await waitFor(() => { expect(onAutoPopulate).toHaveBeenCalledTimes(1) })
+})
+
+it('never auto-populates an unhealthy, unconfigured, or already populated route', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    health: { ok: false, error: 'ECONNREFUSED', checkedAt: 13 },
+  } })
+  const unhealthy = vi.fn(async () => true)
+  const first = render(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={unhealthy} />)
+  await waitFor(() => { expect(screen.getByText(en.heavyHealthDown)).toBeTruthy() })
+  expect(unhealthy).not.toHaveBeenCalled()
+  first.unmount()
+  heavyStatusCache.invalidate()
+
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    configured: false,
+    health: { ok: true, status: 200, checkedAt: 14 },
+  } })
+  const unconfigured = vi.fn(async () => true)
+  const second = render(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={unconfigured} />)
+  await waitFor(() => { expect(screen.getByText(`${en.heavyHealthOk} · 200`)).toBeTruthy() })
+  expect(unconfigured).not.toHaveBeenCalled()
+  second.unmount()
+  heavyStatusCache.invalidate()
+
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    health: { ok: true, status: 200, checkedAt: 15 },
+  } })
+  const populated = vi.fn(async () => true)
+  render(
+    <HeavyProviderCard
+      providerId="antigravity"
+      t={t}
+      modelIds={['gemini-3.1-pro-high']}
+      onAutoPopulate={populated}
+    />,
+  )
+  await waitFor(() => { expect(screen.getByText(`${en.heavyHealthOk} · 200`)).toBeTruthy() })
+  expect(populated).not.toHaveBeenCalled()
+})
+
+it('keeps a failed automatic pass from repeating on the same cached snapshot', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    health: { ok: true, status: 200, checkedAt: 16 },
+  } })
+  // A refused discovery (for example no proxy account yet) answers false; the
+  // status TTL is the retry cadence, so nothing repeats within one snapshot.
+  const onAutoPopulate = vi.fn(async () => false)
+  const view = render(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+  await waitFor(() => { expect(onAutoPopulate).toHaveBeenCalledTimes(1) })
+  view.rerender(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+  view.rerender(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} onAutoPopulate={onAutoPopulate} />)
+  await waitFor(() => { expect(screen.getByText(`${en.heavyHealthOk} · 200`)).toBeTruthy() })
+  expect(onAutoPopulate).toHaveBeenCalledTimes(1)
+})
+
 it('pins the scrollbar rebind and token discipline contract in HeavyProviderCard.module.css', () => {
   const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/HeavyProviderCard.module.css'), 'utf8')
   const themeTokensDir = resolve(import.meta.dirname, '../../ui-theme/src/styles')

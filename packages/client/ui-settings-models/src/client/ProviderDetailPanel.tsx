@@ -445,6 +445,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     return []
   }, [rawProfile.models])
 
+  // The route's model ids, stable across unrelated renders: the heavy card's
+  // automatic-population decision watches this list.
+  const modelIdList = useMemo(() => modelsList.map(model => model.id), [modelsList])
+
   // Filtered models
   const filteredModels = useMemo(() => {
     const q = modelSearch.toLowerCase().trim()
@@ -525,10 +529,21 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const [refreshState, setRefreshState] = useState<{ isRefreshing: boolean; message?: string; isError?: boolean }>({
     isRefreshing: false,
   })
+  const catalogRefreshInFlight = useRef(false)
 
-  const handleRefreshModels = async () => {
-    if (refreshState.isRefreshing || readOnly) return
-    setRefreshState({ isRefreshing: true })
+  /**
+   * Discover the route's models and merge them into its settings profile.
+   * Returns whether the write populated the catalog (a non-empty list); an
+   * in-flight refresh, a read-only surface, an empty listing, or any
+   * discovery/write failure answers false, so the automatic caller may try
+   * again on the next health snapshot. The automatic path passes `silent`,
+   * which suppresses the failure message but keeps the success message and
+   * the settings reload.
+   */
+  const runCatalogRefresh = useCallback(async (options: { silent?: boolean } = {}): Promise<boolean> => {
+    if (catalogRefreshInFlight.current || readOnly) return false
+    catalogRefreshInFlight.current = true
+    if (options.silent !== true) setRefreshState({ isRefreshing: true })
     try {
       const res = await api.llm.discoverModels(namespace.ns, {
         provider: providerId,
@@ -572,18 +587,31 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         })
         setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)
         onSaved()
-      } else {
-        throw new Error(res.error.message)
+        return merged.length > 0
       }
+      throw new Error(res.error.message)
     } catch (err) {
-      setRefreshState({
-        isRefreshing: false,
-        message: `Refresh failed: ${messageOf(err)}`,
-        isError: true,
-      })
-      setTimeout(() => setRefreshState({ isRefreshing: false }), 5000)
+      // An automatic pass is fail-soft and silent: the next successful status
+      // check retries, and the manual Refresh still reports the error.
+      if (options.silent !== true) {
+        setRefreshState({
+          isRefreshing: false,
+          message: `Refresh failed: ${messageOf(err)}`,
+          isError: true,
+        })
+        setTimeout(() => setRefreshState({ isRefreshing: false }), 5000)
+      }
+      return false
+    } finally {
+      catalogRefreshInFlight.current = false
     }
-  }
+  }, [api, baseURL, keyInput, namespace.ns, onSaved, providerId, protocol, rawProfile.models, readOnly, row.entry.settingsPath])
+
+  const handleRefreshModels = (): void => { void runCatalogRefresh() }
+
+  // The heavy card's automatic pass: silent on failure, success still reports
+  // the count and reloads the settings view.
+  const autoPopulate = useCallback(() => runCatalogRefresh({ silent: true }), [runCatalogRefresh])
 
   // Save Settings / API Key
   const handleSave = async () => {
@@ -943,7 +971,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const isConfigured = keyState?.configured === true
   // Dashboard links for a non-heavy provider that declares one; the heavy card
   // (below) renders the heavy manifest's own detected/local dashboards.
-  const nonHeavyDashboards = resolveHeavyManifest(providerId) === undefined ? providerDashboardUrls(providerId) : []
+  const heavyProvider = resolveHeavyManifest(providerId)
+  const nonHeavyDashboards = heavyProvider === undefined ? providerDashboardUrls(providerId) : []
 
   return (
     <div className={styles['detailPanel']}>
@@ -991,7 +1020,12 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
       {/* Heavy provider panel: manifest quirks, dashboard link, health probe.
           It renders only for the three manifest-backed routes. */}
-      <HeavyProviderCard providerId={providerId} t={_t} />
+      <HeavyProviderCard
+        providerId={providerId}
+        t={_t}
+        modelIds={modelIdList}
+        {...heavyProvider === undefined ? {} : { onAutoPopulate: autoPopulate }}
+      />
 
       {/* Key Pool & Identities Card */}
       {poolConfig && poolConfig.identities && poolConfig.identities.length > 0 ? (

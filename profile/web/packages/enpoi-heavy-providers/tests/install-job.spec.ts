@@ -76,7 +76,7 @@ it('a successful install writes the local route and reports progress', async () 
   const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
   const manifest = manifestById('antigravity')!
   const finalize = vi.fn(async () => {
-    await writeRoute(deps, manifest, 'local', [{ id: 'gemini-2.5-flash' }])
+    await writeRoute(deps, manifest, 'local', [{ id: 'gemini-3.1-pro-high' }])
   })
   manager.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, '').steps, finalize)
   const job = await settled(manager, manifest.id)
@@ -86,7 +86,7 @@ it('a successful install writes the local route and reports progress', async () 
   expect(mutations).toHaveLength(1)
   const value = (mutations[0]!.ops[0] as { value: Record<string, unknown> }).value
   expect(value.baseURL).toBe('http://127.0.0.1:8082')
-  expect(value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+  expect(value.models).toEqual([{ id: 'gemini-3.1-pro-high' }])
 })
 
 it('a local install finalizer on an unmounted namespace fails with the pendingRestart message, not a raw job error', async () => {

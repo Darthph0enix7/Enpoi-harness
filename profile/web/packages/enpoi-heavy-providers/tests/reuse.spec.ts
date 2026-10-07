@@ -185,16 +185,17 @@ it('a custom instance URL reaches the antigravity health path on the typed host'
     baseURL: 'http://10.0.0.9:9090',
   })
   // The proxy lists models at its native Anthropic address, never at
-  // `{baseURL}/models`; the refused listing keeps the fallback model.
+  // `{baseURL}/models`; the refused listing leaves the route with no model,
+  // never a fabricated fallback id.
   expect(calls).toEqual(['http://10.0.0.9:9090/v1/models?limit=1000', 'http://10.0.0.9:9090/health'])
   expect(outcome.health.ok).toBe(true)
   expect(outcome.models).toEqual([])
   const written = mutations[0]!.ops[0] as { value: { baseURL: string; models: unknown } }
   expect(written.value.baseURL).toBe('http://10.0.0.9:9090')
-  expect(written.value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+  expect(written.value.models).toEqual([])
 })
 
-it('an unreachable antigravity proxy keeps the fallback model in the written route', async () => {
+it('an unreachable antigravity proxy writes an empty model list — no fabricated fallback', async () => {
   const fetch: FetchLike = vi.fn(async () => { throw new Error('ECONNREFUSED') })
   const { deps, mutations } = depsWith({ fetch })
   const outcome = await useDetectedInstance(deps, manifestById('antigravity')!)
@@ -203,7 +204,23 @@ it('an unreachable antigravity proxy keeps the fallback model in the written rou
   expect(outcome.models).toEqual([])
   expect(outcome.endpoint).toBe('http://127.0.0.1:8082')
   const written = mutations[0]!.ops[0] as { value: { models: unknown } }
-  expect(written.value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+  expect(written.value.models).toEqual([])
+})
+
+it('writes models: [] for an antigravity route with no discovery; llm-pi-ai treats it as no declared list', () => {
+  // The empty list is the accepted route shape: llm-pi-ai resolves an absent
+  // and an empty `models` list identically, serving the installed catalog and
+  // then the route's discovered-cache record (llm-pi-ai `resolveRouteModels`),
+  // so nothing fabricated is ever persisted for a fully-discoverable service.
+  const manifest = manifestById('antigravity')!
+  expect(manifest.fallbackModel).toBeUndefined()
+  expect(routeProfile(manifest, 'reuse', []).models).toEqual([])
+  expect(routeProfile(manifest, 'local', []).models).toEqual([])
+  // The remaining two fallbacks name models their services actually support:
+  // FreeLLMAPI's real `auto` routing id, and Command Code's bundled catalog
+  // entry. They stay declarative.
+  expect(manifestById('freellmapi')!.fallbackModel).toBe('auto')
+  expect(manifestById('commandcode')!.fallbackModel).toBe('deepseek/deepseek-v4.1-flash')
 })
 
 it('the listing address follows the protocol, matching llm-pi-ai\'s Anthropic normalization', () => {
@@ -442,7 +459,9 @@ it('antigravity detection writes a placeholder anthropic route with no pool and 
   expect(profile).not.toHaveProperty('pool')
   expect(profile.baseURL).toBe('http://127.0.0.1:8082')
   expect(profile.displayName).toBe('Antigravity Proxy (detected)')
-  expect(profile.models).toEqual([{ id: 'gemini-2.5-flash' }])
+  // No fallbackModel: the route is written empty rather than carrying a
+  // model the proxy never advertised.
+  expect(profile.models).toEqual([])
 })
 
 it('an antigravity add with no key stores the placeholder credential under the declared reference', async () => {

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 /** The detail panel's local picker state survives settings echoes. */
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
 import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '../src/client/model-visibility.ts'
+import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
@@ -13,6 +14,7 @@ import styles from '../src/client/ModelsSection.module.css'
 
 afterEach(() => {
   cleanup()
+  heavyStatusCache.invalidate()
   localStorage.clear()
   vi.unstubAllGlobals()
 })
@@ -245,4 +247,134 @@ it('follows a published picker decision when the rules engine hides a row', asyn
   const eye = screen.getByLabelText<HTMLButtonElement>('Show rule-hidden')
   expect(eye.disabled).toBe(true)
   expect(eye.title).toContain('no-training')
+})
+
+/** The heavy status envelope for a healthy configured Antigravity route. */
+function heavyStatus(): unknown {
+  return {
+    id: 'antigravity',
+    configured: true,
+    health: { ok: true, status: 200, checkedAt: 1 },
+    platform: 'linux',
+    runtime: { docker: false, podman: false },
+    preflight: { path: 'node', label: 'Install locally (npm + user service)', missing: [], requires: [] },
+  }
+}
+
+/** Stub the gateway so the heavy card's status read answers. */
+function stubHeavyFetch(): void {
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { method?: string }
+    if (body.method === 'enpoiHeavy.status') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { ok: true, value: heavyStatus() } }),
+      } as unknown as Response
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ result: { ok: true, value: {} } }),
+    } as unknown as Response
+  }))
+}
+
+it('auto-populates a healthy heavy route with no models, without a Refresh click', async () => {
+  stubHeavyFetch()
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)', contextWindow: 200_000, maxTokens: 64_000 }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('antigravity')}
+      namespace={namespace('antigravity', [])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  expect(ops[0]?.path).toEqual(['providers', 'antigravity', 'models'])
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
+})
+
+it('the automatic pass replaces a stale fabricated fallback row with the discovered catalog', async () => {
+  stubHeavyFetch()
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('antigravity')}
+      // The row an older build wrote: the fabricated fallback id alone.
+      namespace={namespace('antigravity', [{ id: 'gemini-2.5-flash' }])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  // Discovery replaces the whole list: the stale id is pruned, not kept.
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
+})
+
+it('an automatic heavy refresh failure stays silent; the manual path still reports it', async () => {
+  stubHeavyFetch()
+  const discoverModels = vi.fn(async () => ({
+    ok: false as const,
+    error: { message: 'No accounts available' },
+  }))
+  const wireFace = {
+    ...wire(),
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('antigravity')}
+      namespace={namespace('antigravity', [])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+  // Fail-soft: the automatic pass renders nothing; the Models Refresh button
+  // remains the surface that reports the failure.
+  expect(screen.queryByText(/Refresh failed/)).toBeNull()
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(screen.getByText(/Refresh failed: No accounts available/)).toBeTruthy() })
 })

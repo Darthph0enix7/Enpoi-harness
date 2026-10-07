@@ -515,6 +515,12 @@ export function overlayManifest(
  * provider-native pool (identities only — secrets stay in the credentials
  * store). An llm-pi-ai route never declares a pool: the heavy
  * providers either have their own pool (antigravity) or a single key.
+ *
+ * An empty discovery with no `fallbackModel` writes `models: []`. llm-pi-ai
+ * resolves an absent and an empty `models` list identically — the installed
+ * catalog, then the route's discovered-cache record (llm-pi-ai
+ * `resolveRouteModels`) — so the empty list is a serviceable route with
+ * nothing fabricated in it.
  * @param manifest - heavy manifest.
  * @param mode - detected instance or local install.
  * @param models - discovered models; the fallback model fills an empty list.

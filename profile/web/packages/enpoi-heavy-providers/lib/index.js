@@ -633,8 +633,10 @@ var HEAVY_MANIFESTS = [
         "npm's shared content-addressed cache (~/.npm/_cacache) still holds the downloaded tarball; it is shared with other packages, holds no account data, and is left in place",
         "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
       ]
-    },
-    fallbackModel: "gemini-2.5-flash"
+    }
+    // No fallbackModel: discovery is the only model source for this service.
+    // An operator who has not added a Google account yet gets a route with an
+    // empty model list, never a fabricated id the proxy never advertised.
   },
   {
     id: "commandcode",
