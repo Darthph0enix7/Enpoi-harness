@@ -2,10 +2,13 @@
 # plugin into the Enpoi Harness web profile.
 #
 # The plugin refreshes each configured `llm-pi-ai` provider route's model list
-# from the provider's own `GET {baseURL}/models` endpoint and writes the
-# adopted entries back through the settings seam, so the pi-ai adapter
-# re-registers live (hot-swap, no restart). It runs once after boot and then
-# on the configured interval.
+# from the route's own protocol listing (`GET {baseURL}/models`, or the
+# Anthropic-native `GET {root}/v1/models` for anthropic-messages routes) and
+# writes the adopted entries back through the settings seam, so the pi-ai
+# adapter re-registers live (hot-swap, no restart). The Command Code namespace
+# is refreshed from its provider package's bundled catalog snapshot, because
+# the vendor serves no model listing. It runs once after boot and then on the
+# configured interval.
 - insert:
     - id: enpoi-provider-sync
       name: 'dsh-enpoi-provider-sync'
@@ -27,8 +30,10 @@
         # HEAVY providers (freellmapi, antigravity, commandcode) are NOT
         # seeded here: they are preset-only until the operator adds one, and
         # an uninstalled heavy route must never be probed/written by the
-        # hourly pass. Once added, the route itself is configured and syncs
-        # through `baseURL` like every other route.
+        # hourly pass. Once added, an llm-pi-ai heavy route (for example
+        # antigravity) syncs through its configured `baseURL` and protocol;
+        # a Command Code route lives in the `commandcode-provider` namespace
+        # and merges its bundled catalog snapshot.
         endpoints:
           deepseek: https://api.deepseek.com
           openrouter: https://openrouter.ai/api/v1

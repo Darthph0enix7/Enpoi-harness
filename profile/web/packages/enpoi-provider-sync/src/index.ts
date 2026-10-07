@@ -2,9 +2,13 @@
  * Enpoi Harness provider-catalog sync.
  *
  * Refreshes each `llm-pi-ai` provider route's model list from the provider's
- * own `GET {baseURL}/models` endpoint and enriches each entry using the
- * authoritative `models.dev` catalog (the exact single source of truth used
- * by OpenCode and OpenChamber).
+ * listing endpoint at the route's own wire protocol (`GET {baseURL}/models`
+ * for the OpenAI protocols, `GET {root}/v1/models` for Anthropic Messages) and
+ * enriches each entry using the authoritative `models.dev` catalog (the exact
+ * single source of truth used by OpenCode and OpenChamber). The Command Code
+ * namespace is covered from the provider package's bundled catalog snapshot:
+ * its vendor serves no model listing, so the sync merges the snapshot instead
+ * of probing a nonexistent endpoint.
  *
  * Features:
  * - 100% Dynamic Discovery from live provider endpoints.
@@ -25,6 +29,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
@@ -123,6 +128,8 @@ interface SettingsSeam {
 
 interface ProviderProfile {
   baseURL?: string
+  /** The route's wire protocol (`anthropic-messages`, an openai-* api, …), when configured. */
+  api?: string
   apiKeyEnv?: string
   /** Anonymous route: its listing is fetched without any credential, like its requests. */
   keyless?: boolean
@@ -133,8 +140,8 @@ interface ProviderProfile {
   }
 }
 
-function sectionOf(settings: SettingsSeam): { providers?: Record<string, ProviderProfile> } | undefined {
-  const section = readSettingsDocument(settings, LLM_NS) as { providers?: Record<string, ProviderProfile> } | undefined
+function sectionOf(settings: SettingsSeam, ns: string): { providers?: Record<string, ProviderProfile> } | undefined {
+  const section = readSettingsDocument(settings, ns) as { providers?: Record<string, ProviderProfile> } | undefined
   if (section === null || typeof section !== 'object') return undefined
   return section
 }
@@ -487,7 +494,7 @@ export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
   const row = entry as Record<string, unknown>
   const id = listingString(row.id)
   if (id === undefined) return undefined
-  const displayName = listingString(row.name, row.display_name, row.displayName)
+  const displayName = listingString(row.name, row.display_name, row.displayName, row.description)
   const topProvider = row.top_provider as { context_length?: unknown; max_completion_tokens?: unknown } | undefined
   const limit = row.limit as { context?: unknown; output?: unknown } | undefined
   const contextWindow = listingCapacity(
@@ -522,24 +529,60 @@ export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
   }
 }
 
+/** Stable API version required by Anthropic's native model-listing endpoint. */
+const ANTHROPIC_VERSION = '2023-06-01'
+
+/**
+ * The model-listing request one route's wire protocol expects: OpenAI-protocol
+ * routes list at `{baseURL}/models` with a Bearer token; an Anthropic-Messages
+ * route lists at the root's `/v1/models` with `anthropic-version` and
+ * `x-api-key` (llm-pi-ai's own discovery makes the same call). A base that
+ * already carries one trailing `/v1` segment keeps every other path segment
+ * and gets the prefix back, and the endpoint's page cap is requested so a
+ * large catalog is not truncated to the default page. The antigravity proxy
+ * serves exactly this Anthropic address while its route baseURL deliberately
+ * carries no `/v1`.
+ * @param baseURL - the configured endpoint base.
+ * @param api - the route's wire protocol, when known.
+ * @param key - the credential to present, when one resolves.
+ * @returns the absolute listing URL and the headers for it.
+ */
+export function modelListingRequest(
+  baseURL: string,
+  api?: string,
+  key?: string,
+): { url: string; headers: Record<string, string> } {
+  const base = baseURL.replace(/\/+$/, '')
+  const headers: Record<string, string> = { accept: 'application/json' }
+  if (api === 'anthropic-messages') {
+    const root = base.endsWith('/v1') ? base.slice(0, -3) : base
+    headers['anthropic-version'] = ANTHROPIC_VERSION
+    if (key !== undefined && key.length > 0) headers['x-api-key'] = key
+    return { url: `${root}/v1/models?limit=1000`, headers }
+  }
+  if (key !== undefined && key.length > 0) headers.authorization = `Bearer ${key}`
+  return { url: `${base}/models`, headers }
+}
+
 /**
  * GET one provider's model listing. Fails loudly for the caller to log; the
  * caller is also the only one that knows whether the route already has a
  * usable catalogue to fall back on.
- * @param baseURL - the provider endpoint; `/models` is appended.
+ * @param baseURL - the provider endpoint; the protocol's listing path is derived from it.
  * @param key - the route's credential, when one exists. Kilo and other
  *   anonymous gateways list unauthenticated.
+ * @param api - the route's wire protocol; Anthropic Messages selects the
+ *   native `/v1/models` address and `x-api-key` header, every OpenAI protocol
+ *   keeps `{baseURL}/models` with Bearer.
  * @returns the normalized listing in endpoint order, deduplicated by id.
  */
-export async function fetchModels(baseURL: string, key: string | undefined): Promise<LiveModel[]> {
-  const url = `${baseURL.replace(/\/+$/, '')}/models`
-  const headers: Record<string, string> = { accept: 'application/json' }
-  if (key !== undefined && key.length > 0) headers.authorization = `Bearer ${key}`
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) })
-  if (!response.ok) throw new Error(`GET ${url} -> HTTP ${String(response.status)}`)
+export async function fetchModels(baseURL: string, key: string | undefined, api?: string): Promise<LiveModel[]> {
+  const request = modelListingRequest(baseURL, api, key)
+  const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15_000) })
+  if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`)
   const body = (await response.json()) as { data?: unknown[] } | unknown[]
   const data = Array.isArray(body) ? body : body.data
-  if (!Array.isArray(data)) throw new Error(`GET ${url} -> unexpected shape`)
+  if (!Array.isArray(data)) throw new Error(`GET ${request.url} -> unexpected shape`)
   const seen = new Set<string>()
   const models: LiveModel[] = []
   for (const raw of data) {
@@ -548,6 +591,66 @@ export async function fetchModels(baseURL: string, key: string | undefined): Pro
     seen.add(model.id)
     models.push(model)
   }
+  return models
+}
+
+/** The Command Code adapter's settings namespace (the heavy manifest's `settingsNs`). */
+const COMMANDCODE_NS = 'commandcode-provider'
+
+/** The sibling provider package's bundled Command Code catalog snapshot. */
+export function commandCodeCatalogPath(): string {
+  const override = process.env.DSH_COMMANDCODE_CATALOG
+  if (override !== undefined && override.length > 0) return override
+  return fileURLToPath(new URL('../../enpoi-commandcode-provider/catalog.snapshot.json', import.meta.url))
+}
+
+/**
+ * Read the bundled Command Code catalog as a live listing. The vendor serves
+ * no model-listing endpoint — `dsh-enpoi-commandcode-provider` answers model
+ * discovery from its shipped `catalog.snapshot.json` (a legacy loopback
+ * keypool may serve `/catalog.json`, but the snapshot is the packaged source
+ * of truth) — so the sync merges from the snapshot instead of probing a
+ * `{baseURL}/models` address the vendor does not serve. Fails loudly for the
+ * caller to report; an unreadable, malformed, or empty snapshot never
+ * replaces a route's configured models.
+ * @param path - snapshot path; defaults to the sibling package's bundled file.
+ * @returns the normalized listing in snapshot order, deduplicated by id.
+ */
+export function loadCommandCodeCatalog(path: string = commandCodeCatalogPath()): LiveModel[] {
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown
+  const rows = Array.isArray(raw) ? raw : Object.values((raw ?? {}) as Record<string, unknown>)
+  const seen = new Set<string>()
+  const models: LiveModel[] = []
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) continue
+    const entry = row as Record<string, unknown>
+    const id = listingString(entry.id)
+    if (id === undefined || seen.has(id)) continue
+    const limit = entry.limit as { context?: unknown; output?: unknown } | undefined
+    const modalities = entry.modalities as { input?: unknown } | undefined
+    const supported = [
+      ...(entry.tool_call === true ? ['tools'] : []),
+      ...(entry.reasoning === true ? ['reasoning'] : []),
+    ]
+    const model = normalizeListingEntry({
+      id,
+      name: entry.name,
+      context_window: limit?.context,
+      max_output_tokens: limit?.output,
+      ...(Array.isArray(modalities?.input) ? { input_modalities: modalities.input } : {}),
+      ...(supported.length === 0 ? {} : { supported_parameters: supported }),
+      ...(entry.cost === null || typeof entry.cost !== 'object' || Array.isArray(entry.cost) ? {} : { pricing: entry.cost }),
+    })
+    if (model === undefined) continue
+    // The catalog's booleans are disclosures even when false; the listing
+    // parser only infers flags from `supported_parameters` presence.
+    if (typeof entry.tool_call === 'boolean') model.tools = entry.tool_call
+    if (typeof entry.reasoning === 'boolean') model.reasoning = entry.reasoning
+    if (entry.attachment === true && model.input === undefined) model.input = ['text', 'image']
+    seen.add(id)
+    models.push(model)
+  }
+  if (models.length === 0) throw new Error(`Command Code catalog ${path} held no usable models`)
   return models
 }
 
@@ -715,12 +818,13 @@ export function writeDiscoveredRoute(route: string, record: DiscoveredFileRoute)
  * the current error plus where a person can put models instead.
  * @param route - the provider route key.
  * @param error - the fetch failure.
+ * @param ns - the settings namespace that owns the route; defaults to `llm-pi-ai`.
  * @returns one line the caller logs verbatim.
  */
-export function describeSyncFailure(route: string, error: unknown): string {
+export function describeSyncFailure(route: string, error: unknown, ns: string = LLM_NS): string {
   return `route ${route}: sync failed — ${error instanceof Error ? error.message : String(error)};`
-    + ' add models manually on the Models page, or list them in llm-pi-ai.providers'
-    + `["${route}"].models`
+    + ' add models manually on the Models page, or list them in '
+    + `${ns}.providers["${route}"].models`
 }
 
 
@@ -1130,13 +1234,57 @@ export function apply(ctx: Context, config: Config): void {
       logger.warn('settings seam absent — skipping sync pass')
       return
     }
-    const section = sectionOf(settings)
-    if (section === undefined || section.providers === undefined) {
+    const section = sectionOf(settings, LLM_NS)
+    // Command Code lives in its own adapter settings namespace: a deployment
+    // that configures only that namespace still syncs its catalog snapshot.
+    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers
+    if ((section === undefined || section.providers === undefined) && commandCode === undefined) {
       logger.warn('llm-pi-ai section absent — nothing to sync')
       return
     }
+    const llmProviders = section?.providers ?? {}
     const credentials = ctx.get('credentials') as CredentialsSeam | undefined
-    const revision = () => settings.describe().find(entry => entry.ns === LLM_NS)?.revision
+    const revisionOf = (ns: string) => settings.describe().find(entry => entry.ns === ns)?.revision
+
+    /**
+     * Merge one route's live listing into its configured `models` and persist
+     * it under the settings revision-retry, keeping the sync's fail-soft
+     * semantics: a merge that changes nothing skips the write, and a
+     * concurrent settings edit elsewhere is retried rather than lost.
+     * @param ns - the settings namespace that owns the route.
+     * @param route - the provider route key.
+     * @param profile - the route's configured profile; its models are the merge base.
+     * @param live - the normalized listing to merge.
+     * @param source - the listing's origin for the log line (`live` or `catalog`).
+     * @returns the configured ids this pass did not advertise.
+     */
+    const persistRouteModels = async (
+      ns: string,
+      route: string,
+      profile: ProviderProfile,
+      live: LiveModel[],
+      source: string,
+    ): Promise<string[]> => {
+      const merge = mergeConfiguredModels(route, profile.models, live, capacities)
+      const before = stringifyComparable(profile.models)
+      const after = stringifyComparable(merge.models)
+      if (before === after) {
+        logger.debug(`route ${route}: ${String(live.length)} ${source} models, no change`)
+      } else {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await settings.mutate(ns as SettingsNamespace, [{ op: 'set', path: ['providers', route, 'models'], value: merge.models }], revisionOf(ns))
+            logger.info(`route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} ${source} models (${String(merge.unadvertised.length)} configured kept)`)
+            break
+          } catch (error) {
+            const conflict = error as Partial<SettingsConflictError>
+            if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
+            throw error
+          }
+        }
+      }
+      return merge.unadvertised
+    }
 
     // Configured routes plus every endpoint this deployment knows about. The
     // extra endpoints are how a provider the operator has *selected but not yet saved*
@@ -1144,12 +1292,12 @@ export function apply(ctx: Context, config: Config): void {
     // before the config write that would otherwise refuse it for resolving no
     // models. A catalog-less route is never written to settings unless it is
     // configured; the cache is its only home.
-    const routes = [...new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])]
+    const routes = [...new Set([...Object.keys(llmProviders), ...Object.keys(endpoints)])]
     /** Configured ids no endpoint advertised this pass, warned once at the end. */
     const unadvertised: string[] = []
 
     for (const route of routes) {
-      const profile: ProviderProfile | undefined = section.providers[route]
+      const profile: ProviderProfile | undefined = llmProviders[route]
       const baseURL = endpoints[route] ?? profile?.baseURL
       if (baseURL === undefined) {
         logger.debug(`route ${route}: no baseURL and no known endpoint — skipped`)
@@ -1182,27 +1330,10 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       try {
-        const live = await fetchModels(baseURL, key)
+        const live = await fetchModels(baseURL, key, profile?.api)
         if (profile !== undefined) {
-          const merge = mergeConfiguredModels(route, profile.models, live, capacities)
-          unadvertised.push(...merge.unadvertised.map(id => `${route}/${id}`))
-          const before = stringifyComparable(profile.models)
-          const after = stringifyComparable(merge.models)
-          if (before === after) {
-            logger.debug(`route ${route}: ${String(live.length)} live models, no change`)
-          } else {
-            for (let attempt = 0; ; attempt++) {
-              try {
-                await settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', route, 'models'], value: merge.models }], revision())
-                logger.info(`route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} live models (${String(merge.unadvertised.length)} configured kept)`)
-                break
-              } catch (error) {
-                const conflict = error as Partial<SettingsConflictError>
-                if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
-                throw error
-              }
-            }
-          }
+          const kept = await persistRouteModels(LLM_NS, route, profile, live, 'live')
+          unadvertised.push(...kept.map(id => `${route}/${id}`))
         }
         if (!catalogRoute) {
           // Everything the endpoint advertised, provenanced and timestamped,
@@ -1231,11 +1362,35 @@ export function apply(ctx: Context, config: Config): void {
         logger.warn(describeSyncFailure(route, error))
       }
     }
+
+    // Command Code lives in its own adapter namespace, not `llm-pi-ai`: the
+    // heavy flow writes `providers.commandcode` into the
+    // `commandcode-provider` settings section. The vendor serves no
+    // model-listing endpoint, so the pass merges the provider package's
+    // bundled catalog snapshot instead of probing a `/models` address that
+    // does not exist. No discovered-cache write follows: that file is
+    // llm-pi-ai's resolution source, while Command Code resolves its own
+    // adapter catalog.
+    if (commandCode !== undefined) {
+      let catalog: LiveModel[] | undefined
+      for (const route of Object.keys(commandCode)) {
+        const profile: ProviderProfile | undefined = commandCode[route]
+        if (profile === undefined) continue
+        try {
+          catalog ??= loadCommandCodeCatalog()
+          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, 'catalog')
+          unadvertised.push(...kept.map(id => `${route}/${id}`))
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS))
+        }
+      }
+    }
+
     // One line per pass, not one per entry: the operator needs to know the
     // working set is no longer purely endpoint-derived, without a wall of lines.
     if (unadvertised.length > 0) {
       process.stderr.write(
-        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their endpoint this pass — kept with source: "configured": ${unadvertised.join(', ')}\n`,
+        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their listing source this pass — kept with source: "configured": ${unadvertised.join(', ')}\n`,
       )
     }
   }

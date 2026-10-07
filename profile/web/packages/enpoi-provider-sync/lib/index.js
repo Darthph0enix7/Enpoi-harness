@@ -76026,6 +76026,7 @@ var init_pi_messages = __esm({
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2 } from "node:path";
+import { fileURLToPath } from "node:url";
 import Schema from "@deepseek-ai/schemastery";
 import { readSettingsDocument } from "dsh-enpoi-contracts";
 
@@ -77518,8 +77519,8 @@ var Config = Schema.object({
 });
 var SIGN_IN_REQUIRED = "sign-in required";
 var LLM_NS = "llm-pi-ai";
-function sectionOf(settings) {
-  const section = readSettingsDocument(settings, LLM_NS);
+function sectionOf(settings, ns) {
+  const section = readSettingsDocument(settings, ns);
   if (section === null || typeof section !== "object") return void 0;
   return section;
 }
@@ -77712,7 +77713,7 @@ function normalizeListingEntry(entry) {
   const row = entry;
   const id = listingString(row.id);
   if (id === void 0) return void 0;
-  const displayName = listingString(row.name, row.display_name, row.displayName);
+  const displayName = listingString(row.name, row.display_name, row.displayName, row.description);
   const topProvider = row.top_provider;
   const limit3 = row.limit;
   const contextWindow = listingCapacity(
@@ -77746,15 +77747,26 @@ function normalizeListingEntry(entry) {
     ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {}
   };
 }
-async function fetchModels(baseURL, key) {
-  const url = `${baseURL.replace(/\/+$/, "")}/models`;
+var ANTHROPIC_VERSION = "2023-06-01";
+function modelListingRequest(baseURL, api, key) {
+  const base = baseURL.replace(/\/+$/, "");
   const headers = { accept: "application/json" };
+  if (api === "anthropic-messages") {
+    const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
+    headers["anthropic-version"] = ANTHROPIC_VERSION;
+    if (key !== void 0 && key.length > 0) headers["x-api-key"] = key;
+    return { url: `${root}/v1/models?limit=1000`, headers };
+  }
   if (key !== void 0 && key.length > 0) headers.authorization = `Bearer ${key}`;
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(15e3) });
-  if (!response.ok) throw new Error(`GET ${url} -> HTTP ${String(response.status)}`);
+  return { url: `${base}/models`, headers };
+}
+async function fetchModels(baseURL, key, api) {
+  const request = modelListingRequest(baseURL, api, key);
+  const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15e3) });
+  if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`);
   const body = await response.json();
   const data = Array.isArray(body) ? body : body.data;
-  if (!Array.isArray(data)) throw new Error(`GET ${url} -> unexpected shape`);
+  if (!Array.isArray(data)) throw new Error(`GET ${request.url} -> unexpected shape`);
   const seen = /* @__PURE__ */ new Set();
   const models = [];
   for (const raw of data) {
@@ -77763,6 +77775,47 @@ async function fetchModels(baseURL, key) {
     seen.add(model.id);
     models.push(model);
   }
+  return models;
+}
+var COMMANDCODE_NS = "commandcode-provider";
+function commandCodeCatalogPath() {
+  const override = process.env.DSH_COMMANDCODE_CATALOG;
+  if (override !== void 0 && override.length > 0) return override;
+  return fileURLToPath(new URL("../../enpoi-commandcode-provider/catalog.snapshot.json", import.meta.url));
+}
+function loadCommandCodeCatalog(path6 = commandCodeCatalogPath()) {
+  const raw = JSON.parse(readFileSync(path6, "utf8"));
+  const rows = Array.isArray(raw) ? raw : Object.values(raw ?? {});
+  const seen = /* @__PURE__ */ new Set();
+  const models = [];
+  for (const row of rows) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+    const entry = row;
+    const id = listingString(entry.id);
+    if (id === void 0 || seen.has(id)) continue;
+    const limit3 = entry.limit;
+    const modalities = entry.modalities;
+    const supported = [
+      ...entry.tool_call === true ? ["tools"] : [],
+      ...entry.reasoning === true ? ["reasoning"] : []
+    ];
+    const model = normalizeListingEntry({
+      id,
+      name: entry.name,
+      context_window: limit3?.context,
+      max_output_tokens: limit3?.output,
+      ...Array.isArray(modalities?.input) ? { input_modalities: modalities.input } : {},
+      ...supported.length === 0 ? {} : { supported_parameters: supported },
+      ...entry.cost === null || typeof entry.cost !== "object" || Array.isArray(entry.cost) ? {} : { pricing: entry.cost }
+    });
+    if (model === void 0) continue;
+    if (typeof entry.tool_call === "boolean") model.tools = entry.tool_call;
+    if (typeof entry.reasoning === "boolean") model.reasoning = entry.reasoning;
+    if (entry.attachment === true && model.input === void 0) model.input = ["text", "image"];
+    seen.add(id);
+    models.push(model);
+  }
+  if (models.length === 0) throw new Error(`Command Code catalog ${path6} held no usable models`);
   return models;
 }
 var DISCOVERED_CACHE_VERSION = 1;
@@ -77835,8 +77888,8 @@ function writeDiscoveredRoute(route, record) {
   writeFileSync(temporary, JSON.stringify(document2), "utf8");
   renameSync(temporary, path6);
 }
-function describeSyncFailure(route, error) {
-  return `route ${route}: sync failed \u2014 ${error instanceof Error ? error.message : String(error)}; add models manually on the Models page, or list them in llm-pi-ai.providers["${route}"].models`;
+function describeSyncFailure(route, error, ns = LLM_NS) {
+  return `route ${route}: sync failed \u2014 ${error instanceof Error ? error.message : String(error)}; add models manually on the Models page, or list them in ${ns}.providers["${route}"].models`;
 }
 function fallbackFor(capacities, route, modelId) {
   const routeCaps = capacities?.[route];
@@ -78040,17 +78093,40 @@ function apply(ctx, config) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
       return;
     }
-    const section = sectionOf(settings);
-    if (section === void 0 || section.providers === void 0) {
+    const section = sectionOf(settings, LLM_NS);
+    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers;
+    if ((section === void 0 || section.providers === void 0) && commandCode === void 0) {
       logger.warn("llm-pi-ai section absent \u2014 nothing to sync");
       return;
     }
+    const llmProviders = section?.providers ?? {};
     const credentials = ctx.get("credentials");
-    const revision = () => settings.describe().find((entry) => entry.ns === LLM_NS)?.revision;
-    const routes = [.../* @__PURE__ */ new Set([...Object.keys(section.providers), ...Object.keys(endpoints)])];
+    const revisionOf = (ns) => settings.describe().find((entry) => entry.ns === ns)?.revision;
+    const persistRouteModels = async (ns, route, profile, live2, source) => {
+      const merge = mergeConfiguredModels(route, profile.models, live2, capacities);
+      const before = stringifyComparable(profile.models);
+      const after = stringifyComparable(merge.models);
+      if (before === after) {
+        logger.debug(`route ${route}: ${String(live2.length)} ${source} models, no change`);
+      } else {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await settings.mutate(ns, [{ op: "set", path: ["providers", route, "models"], value: merge.models }], revisionOf(ns));
+            logger.info(`route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} ${source} models (${String(merge.unadvertised.length)} configured kept)`);
+            break;
+          } catch (error) {
+            const conflict = error;
+            if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+            throw error;
+          }
+        }
+      }
+      return merge.unadvertised;
+    };
+    const routes = [.../* @__PURE__ */ new Set([...Object.keys(llmProviders), ...Object.keys(endpoints)])];
     const unadvertised = [];
     for (const route of routes) {
-      const profile = section.providers[route];
+      const profile = llmProviders[route];
       const baseURL = endpoints[route] ?? profile?.baseURL;
       if (baseURL === void 0) {
         logger.debug(`route ${route}: no baseURL and no known endpoint \u2014 skipped`);
@@ -78072,27 +78148,10 @@ function apply(ctx, config) {
         }
       }
       try {
-        const live2 = await fetchModels(baseURL, key);
+        const live2 = await fetchModels(baseURL, key, profile?.api);
         if (profile !== void 0) {
-          const merge = mergeConfiguredModels(route, profile.models, live2, capacities);
-          unadvertised.push(...merge.unadvertised.map((id) => `${route}/${id}`));
-          const before = stringifyComparable(profile.models);
-          const after = stringifyComparable(merge.models);
-          if (before === after) {
-            logger.debug(`route ${route}: ${String(live2.length)} live models, no change`);
-          } else {
-            for (let attempt = 0; ; attempt++) {
-              try {
-                await settings.mutate(LLM_NS, [{ op: "set", path: ["providers", route, "models"], value: merge.models }], revision());
-                logger.info(`route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} live models (${String(merge.unadvertised.length)} configured kept)`);
-                break;
-              } catch (error) {
-                const conflict = error;
-                if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
-                throw error;
-              }
-            }
-          }
+          const kept = await persistRouteModels(LLM_NS, route, profile, live2, "live");
+          unadvertised.push(...kept.map((id) => `${route}/${id}`));
         }
         if (!catalogRoute) {
           const previous = readDiscoveredFile(discoveredCachePath()).routes[route];
@@ -78117,9 +78176,23 @@ function apply(ctx, config) {
         logger.warn(describeSyncFailure(route, error));
       }
     }
+    if (commandCode !== void 0) {
+      let catalog;
+      for (const route of Object.keys(commandCode)) {
+        const profile = commandCode[route];
+        if (profile === void 0) continue;
+        try {
+          catalog ??= loadCommandCodeCatalog();
+          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, "catalog");
+          unadvertised.push(...kept.map((id) => `${route}/${id}`));
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS));
+        }
+      }
+    }
     if (unadvertised.length > 0) {
       process.stderr.write(
-        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their endpoint this pass \u2014 kept with source: "configured": ${unadvertised.join(", ")}
+        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their listing source this pass \u2014 kept with source: "configured": ${unadvertised.join(", ")}
 `
       );
     }
@@ -78146,14 +78219,17 @@ function apply(ctx, config) {
 export {
   Config,
   apply,
+  commandCodeCatalogPath,
   describeSyncFailure,
   discoveredCachePath,
   fetchModels,
   inject,
   isCatalogRoute,
+  loadCommandCodeCatalog,
   mergeConfiguredModels,
   mergeDiscoveredModels,
   mergeDiscoveredRoute,
+  modelListingRequest,
   modelsDevCachePath,
   name,
   normalizeListingEntry,
