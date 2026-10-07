@@ -10,8 +10,10 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { manifestById } from '../src/manifests.js'
 import {
+  PLACEHOLDER_CREDENTIAL,
   commitRoute,
   discoverModels,
+  discoverServiceModels,
   instanceBaseURLFromInput,
   modelListingUrl,
   routeProfile,
@@ -441,6 +443,109 @@ it('antigravity detection writes a placeholder anthropic route with no pool and 
   expect(profile.baseURL).toBe('http://127.0.0.1:8082')
   expect(profile.displayName).toBe('Antigravity Proxy (detected)')
   expect(profile.models).toEqual([{ id: 'gemini-2.5-flash' }])
+})
+
+it('an antigravity add with no key stores the placeholder credential under the declared reference', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ data: [{ id: 'gemini-3.1-pro-high', description: 'Gemini 3.1 Pro (High)' }] }),
+  }))
+  const { deps, mutations, credentialSets } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!)
+
+  expect(outcome.credentialStored).toBe(true)
+  expect(credentialSets).toEqual([{ ref: 'ANTIGRAVITY_API_KEY', value: PLACEHOLDER_CREDENTIAL }])
+  expect(mutations).toHaveLength(1)
+  const written = mutations[0]!.ops[0] as { value: { apiKeyEnv: string; keyless?: boolean } }
+  expect(written.value.apiKeyEnv).toBe('ANTIGRAVITY_API_KEY')
+  expect(written.value.keyless).toBeUndefined()
+})
+
+it('the placeholder credential is stored once and never overwrites an existing value', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  const stored = new Map<string, string>()
+  const unsets: string[] = []
+  deps.credentials = {
+    resolve: async ref => stored.has(ref) ? { value: stored.get(ref) } : undefined,
+    set: async (ref, value) => { credentialSets.push({ ref, value }); stored.set(ref, value) },
+    unset: async (ref) => { unsets.push(ref); stored.delete(ref) },
+  }
+  const manifest = manifestById('antigravity')!
+  const first = await commitRoute(deps, manifest, 'reuse', [], undefined)
+  const second = await commitRoute(deps, manifest, 'reuse', [], undefined)
+
+  expect(first.credentialStored).toBe(true)
+  expect(second.credentialStored).toBe(false)
+  expect(credentialSets).toEqual([{ ref: 'ANTIGRAVITY_API_KEY', value: PLACEHOLDER_CREDENTIAL }])
+  expect(unsets).toEqual([])
+})
+
+it('an operator value already stored under the reference is never replaced by the placeholder', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  deps.credentials = {
+    resolve: async ref => ref === 'ANTIGRAVITY_API_KEY' ? { value: 'sk-operator' } : undefined,
+    set: async (ref, value) => { credentialSets.push({ ref, value }) },
+    unset: async () => {},
+  }
+  const outcome = await commitRoute(deps, manifestById('antigravity')!, 'reuse', [], undefined)
+
+  expect(outcome.credentialStored).toBe(false)
+  expect(credentialSets).toEqual([])
+})
+
+it('a failed placeholder commit rolls the sentinel back out (no dangling credential)', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
+  const { deps } = depsWith({ fetch })
+  const stored = new Map<string, string>()
+  deps.credentials = {
+    resolve: async ref => stored.has(ref) ? { value: stored.get(ref) } : undefined,
+    set: async (ref, value) => { stored.set(ref, value) },
+    unset: async (ref) => { stored.delete(ref) },
+  }
+  deps.settings!.mutate = async () => { throw new Error('settings refused') }
+  await expect(commitRoute(deps, manifestById('antigravity')!, 'reuse', [], undefined)).rejects.toThrow('settings refused')
+  expect(stored.has('ANTIGRAVITY_API_KEY')).toBe(false)
+})
+
+it('a typed key still wins over the placeholder for a placeholder-auth route', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
+  const { deps, credentialSets } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!, 'sk-typed')
+
+  expect(outcome.credentialStored).toBe(true)
+  expect(credentialSets).toEqual([{ ref: 'ANTIGRAVITY_API_KEY', value: 'sk-typed' }])
+})
+
+it('a placeholder route leaves a resolvable credential for the keyless Refresh discovery', async () => {
+  // llm-pi-ai refuses a keyless anthropic route: its discovery resolves the
+  // route's apiKeyEnv and fails MISSING_CREDENTIAL when the reference holds no
+  // value. The committed sentinel is that value; the proxy ignores the header.
+  const auths: Array<string | undefined> = []
+  const fetch: FetchLike = vi.fn(async (_url, init) => {
+    auths.push(init?.headers?.['x-api-key'])
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ id: 'gemini-3.1-pro-high', description: 'Gemini 3.1 Pro (High)' }] }),
+    }
+  })
+  const { deps } = depsWith({ fetch })
+  const stored = new Map<string, string>()
+  deps.credentials = {
+    resolve: async ref => stored.has(ref) ? { value: stored.get(ref) } : undefined,
+    set: async (ref, value) => { stored.set(ref, value) },
+    unset: async (ref) => { stored.delete(ref) },
+  }
+  const manifest = manifestById('antigravity')!
+  await commitRoute(deps, manifest, 'reuse', [], undefined)
+
+  expect(await deps.credentials!.resolve('ANTIGRAVITY_API_KEY')).toEqual({ value: PLACEHOLDER_CREDENTIAL })
+  const models = await discoverServiceModels(deps, manifest, 'http://127.0.0.1:8082')
+  expect(auths[0]).toBe(PLACEHOLDER_CREDENTIAL)
+  expect(models).toEqual([{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' }])
 })
 
 it('a direct-vendor route writes at the vendor endpoint with the fallback model when no discovery is mounted', async () => {

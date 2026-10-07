@@ -161,6 +161,18 @@ it('shows the refused platform reason in the heavy form instead of install steps
   expect(screen.queryByText('Install the proxy package')).toBeNull()
 })
 
+it('a placeholder-auth provider offers no key field: the route stores the placeholder credential', async () => {
+  stubHeavyFetch({})
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('Antigravity Proxy'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  // The existing placeholder-auth copy says no key is needed and names the
+  // stored reference; the unified-key field is not offered at all.
+  expect(screen.getByText(en.heavyPlaceholderAuth.replace('{ref}', 'ANTIGRAVITY_API_KEY'))).toBeTruthy()
+  expect(screen.queryByPlaceholderText(en.heavyKeyPlaceholder)).toBeNull()
+})
+
 it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and search still finds it', () => {
   stubHeavyFetch({})
   render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)

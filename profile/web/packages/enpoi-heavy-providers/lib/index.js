@@ -220,6 +220,9 @@ function failed(id, error) {
     error
   };
 }
+function visibleJobSnapshot(job, configured) {
+  return job !== void 0 && job.state === "succeeded" && configured ? void 0 : job;
+}
 
 // src/manifests.ts
 function platformInstallVariant(local, platform) {
@@ -520,8 +523,9 @@ var HEAVY_MANIFESTS = [
     summary: "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
     protocol: "anthropic-messages",
     // The proxy itself needs no client key, but llm-pi-ai refuses
-    // keyless anthropic routes: a placeholder reference is stored, and the
-    // route MUST NOT declare a DSH pool — the proxy runs its own sticky one.
+    // keyless anthropic routes: the reference and a placeholder credential
+    // value are stored, and the route MUST NOT declare a DSH pool — the proxy
+    // runs its own sticky one.
     auth: { kind: "placeholder", apiKeyEnv: "ANTIGRAVITY_API_KEY", keyless: false },
     dashboardUrl: "http://127.0.0.1:8082",
     docsUrl: "https://www.npmjs.com/package/antigravity-claude-proxy",
@@ -1219,18 +1223,24 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   await settings.mutate(settingsNs, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, settingsNs));
   return profile;
 }
+var PLACEHOLDER_CREDENTIAL = "placeholder";
 async function commitRoute(deps, manifest, mode, models, key, overrides = {}) {
   if (deps.settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
   const pending = pendingRestartForManifest(deps, manifest);
   if (pending !== void 0) throw new Error(pending.message);
   const credentials = deps.credentials;
   const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
-  const value = key?.trim() ?? "";
-  const store = value !== "" && ref !== void 0;
+  let value = key?.trim() ?? "";
   let previous;
+  if (value === "" && ref !== void 0 && manifest.auth.kind === "placeholder") {
+    if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the placeholder credential");
+    previous = await credentials.resolve(ref);
+    if (previous?.value === void 0) value = PLACEHOLDER_CREDENTIAL;
+  }
+  const store = value !== "" && ref !== void 0;
   if (store) {
     if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
-    previous = await credentials.resolve(ref);
+    previous ??= await credentials.resolve(ref);
     await credentials.set(ref, value);
   }
   let route;
@@ -1517,7 +1527,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     );
     const health = configuredBase !== void 0 ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl) : direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
     const settingsReady = settingsNamespaceReady(deps, settingsNs);
-    const job = this.options.jobs.snapshot(manifest.id);
+    const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured);
     return {
       id: manifest.id,
       manifest,

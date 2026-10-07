@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { HeavyJobView } from './jobs.js'
-import { HeavyJobManager } from './jobs.js'
+import { HeavyJobManager, visibleJobSnapshot } from './jobs.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
 import {
   chooseLocalPath,
@@ -87,6 +87,11 @@ export interface StatusValue {
   /** The platform's best local path for this provider (detection first). */
   preflight: LocalPathChoice
   unsupported?: HeavyProviderManifest['unsupported']
+  /**
+   * The install job still worth showing (running progress, or a failure the
+   * operator must see). A succeeded run is omitted once `configured`: its
+   * route is the durable outcome, not a progress bar to re-render.
+   */
   job?: HeavyJobView
 }
 
@@ -241,7 +246,7 @@ export class HeavyProvidersService extends TypertRemoteService {
         ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
         : detection!.health
     const settingsReady = settingsNamespaceReady(deps, settingsNs)
-    const job = this.options.jobs.snapshot(manifest.id)
+    const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured)
     return {
       id: manifest.id,
       manifest,

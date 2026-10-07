@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { HeavyJobManager } from '../src/jobs.js'
+import { HeavyJobManager, visibleJobSnapshot } from '../src/jobs.js'
 import { manifestById, resolveHeavyInstall } from '../src/manifests.js'
 import { pendingRestartMessage, writeRoute, type HeavyDeps, type SettingsSeam } from '../src/planner.js'
 
@@ -139,4 +139,24 @@ it('optional step failures do not fail the run', async () => {
   manager.start(manifest.id, 'teardown', manifest.removal.steps, undefined)
   const job = await settled(manager, manifest.id)
   expect(job.state).toBe('succeeded')
+})
+
+it('a succeeded snapshot is history once the route is configured; running and failed stay visible', () => {
+  const base = {
+    id: 'antigravity',
+    kind: 'install' as const,
+    stage: 'Finishing',
+    stageIndex: 4,
+    stageCount: 4,
+    pct: 100,
+    logTail: '',
+    startedAt: 1,
+  }
+  expect(visibleJobSnapshot(undefined, true)).toBeUndefined()
+  expect(visibleJobSnapshot({ ...base, state: 'running', pct: 50 }, true)?.state).toBe('running')
+  expect(visibleJobSnapshot({ ...base, state: 'failed', error: 'boom' }, true)?.state).toBe('failed')
+  // A success with no route yet (a non-install write path, or a just-finished
+  // finalizer read before the settings reply settles) is still shown.
+  expect(visibleJobSnapshot({ ...base, state: 'succeeded', finishedAt: 2 }, false)?.state).toBe('succeeded')
+  expect(visibleJobSnapshot({ ...base, state: 'succeeded', finishedAt: 2 }, true)).toBeUndefined()
 })

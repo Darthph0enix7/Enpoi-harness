@@ -1,9 +1,10 @@
 /**
  * Provider detail card for a HEAVY provider: the cached health probe, the
  * dashboard URL(s), the "requires a browser" badges, the manifest quirks, the
- * live install job (polled while it runs, persisted on the host), and the full
- * documentation view. Fail-soft: an unreachable host or dashboard renders as a
- * badge, never as an error that blocks the page.
+ * live install job (polled while it runs; the progress block shows while
+ * running, a failure keeps its error and log tail, and a finished run collapses
+ * to one line), and the full documentation view. Fail-soft: an unreachable host
+ * or dashboard renders as a badge, never as an error that blocks the page.
  *
  * @module ui-settings-models/HeavyProviderCard
  */
@@ -130,10 +131,11 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
             </p>
           </div>
         )}
-        {job !== null && (
+        {job !== null && job.state !== 'succeeded' && (
           <div
             className={`${styles['heavyProgress']} ${cardStyles['heavyProgress']}`}
             data-heavy-progress
+            data-state={job.state}
           >
             <div className={styles['heavyProgressHead']}>
               <span>{t('heavyProgress').replace('{step}', String(job.stageIndex + 1)).replace('{total}', String(job.stageCount))}</span>
@@ -144,7 +146,6 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
             </div>
             <div className={styles['heavyStage']}>{job.stage}</div>
             {job.state === 'running' && <p className={styles['heavyModeNote']}>{t('heavyJobBackground')}</p>}
-            {job.state === 'succeeded' && <p className={styles['heavyModeNote']}>{t('heavyJobSucceeded')}</p>}
             {job.state === 'failed' && (
               <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error ?? t('heavyJobFailedHint')}</p>
             )}
@@ -157,6 +158,13 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
               </pre>
             )}
           </div>
+        )}
+        {/* A finished run collapses to one line: the bar, stage, and log tail
+            are process clutter once the job is done. The host stops reporting
+            the snapshot altogether once the route is configured, so this line
+            never survives a page reopen. */}
+        {job?.state === 'succeeded' && (
+          <p className={styles['heavyModeNote']} data-heavy-progress-done>{t('heavyJobSucceeded')}</p>
         )}
         {showDocs && <HeavyProviderDocs manifest={manifest} platform={status?.platform} t={t} />}
       </div>

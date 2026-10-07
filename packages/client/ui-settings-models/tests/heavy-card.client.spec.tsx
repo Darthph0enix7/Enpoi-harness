@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * The detail card: cached ONLINE badge with fail-soft unknown state, the
- * dashboard URL(s) for the mode in use, the polled install job (failed runs
- * show the error and the log tail), and the documentation toggle.
+ * dashboard URL(s) for the mode in use, the polled install job (running shows
+ * the bar, stage, and log tail; a failure keeps its error and log tail;
+ * success collapses to one line), and the documentation toggle.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -80,6 +81,60 @@ it('renders the dashboard URL and the polled job, then surfaces a failed run wit
   )
   expect(screen.getByText('compose exploded')).toBeTruthy()
   expect(screen.queryByText(en.heavyJobBackground)).toBeNull()
+  // A failure keeps the progress surface (bar and log) the operator needs.
+  const failed = document.querySelector('[data-heavy-progress]') as HTMLElement
+  expect(failed).toBeTruthy()
+  expect(failed.getAttribute('data-state')).toBe('failed')
+})
+
+it('collapses a finished run to one line: no bar, stage, or log tail', async () => {
+  stubFetch({
+    job: {
+      job: {
+        id: 'freellmapi', kind: 'install', state: 'succeeded', stage: 'Finishing',
+        stageIndex: 3, stageCount: 4, pct: 100, logTail: 'done', startedAt: 1, finishedAt: 2,
+      },
+    },
+  })
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+
+  // The status reply starts as a running snapshot; the direct poll settles it.
+  await waitFor(() => { expect(screen.getByText(en.heavyJobSucceeded)).toBeTruthy() }, { timeout: 6000 })
+  expect(document.querySelector('[data-heavy-progress]')).toBeNull()
+  expect(document.querySelector('[data-heavy-log]')).toBeNull()
+  expect(screen.queryByText('done')).toBeNull()
+  expect(screen.queryByText(en.heavyJobBackground)).toBeNull()
+})
+
+it('renders a persisted succeeded snapshot as one line, never the progress block', async () => {
+  stubFetch({ status: {
+    ...running,
+    job: {
+      id: 'freellmapi', kind: 'install', state: 'succeeded', stage: 'Finishing',
+      stageIndex: 3, stageCount: 4, pct: 100, logTail: 'done', startedAt: 1, finishedAt: 2,
+    },
+  } })
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+
+  await waitFor(() => { expect(screen.getByText(en.heavyJobSucceeded)).toBeTruthy() })
+  expect(document.querySelector('[data-heavy-progress]')).toBeNull()
+  expect(document.querySelector('[data-heavy-log]')).toBeNull()
+})
+
+it('keeps a failed persisted snapshot visible with its error and log tail', async () => {
+  stubFetch({ status: {
+    ...running,
+    job: {
+      id: 'freellmapi', kind: 'install', state: 'failed', stage: 'Start the stack',
+      stageIndex: 2, stageCount: 4, pct: 50, logTail: 'compose exploded', startedAt: 1, finishedAt: 2,
+      error: 'Start the stack: exit 1',
+    },
+  } })
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+
+  await waitFor(() => { expect(screen.getByText(`${en.heavyFailed}: Start the stack: exit 1`)).toBeTruthy() })
+  expect(screen.getByText('compose exploded')).toBeTruthy()
+  expect(document.querySelector('[data-heavy-progress]')).toBeTruthy()
 })
 
 it('opens the full documentation view from the card', async () => {

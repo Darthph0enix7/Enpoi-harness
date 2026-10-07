@@ -509,10 +509,11 @@ export function overlayManifest(
 
 /**
  * Build the route profile for one mode. Auth follows the manifest: `none`
- * writes `keyless`, `placeholder` writes only the reference (llm-pi-ai refuses
- * keyless anthropic routes), and a manifest-declared `pool` is written as the
- * route's provider-native pool (identities only — secrets stay in the
- * credentials store). An llm-pi-ai route never declares a pool: the heavy
+ * writes `keyless`, `placeholder` writes the reference (llm-pi-ai refuses
+ * keyless anthropic routes) and its credential value is staged by
+ * `commitRoute`, and a manifest-declared `pool` is written as the route's
+ * provider-native pool (identities only — secrets stay in the credentials
+ * store). An llm-pi-ai route never declares a pool: the heavy
  * providers either have their own pool (antigravity) or a single key.
  * @param manifest - heavy manifest.
  * @param mode - detected instance or local install.
@@ -947,13 +948,24 @@ export async function storeCredential(deps: HeavyDeps, manifest: HeavyProviderMa
 }
 
 /**
+ * The non-secret value staged for a `placeholder` auth route. The service
+ * ignores client auth, but llm-pi-ai refuses a keyless anthropic route and its
+ * discovery fails `MISSING_CREDENTIAL` while the named reference holds no
+ * value, so a route without an operator key would answer no models.
+ */
+export const PLACEHOLDER_CREDENTIAL = 'placeholder'
+
+/**
  * Write a route and its credential as one commit. The credential is stored
  * before the route, so a rejected store leaves no route behind; when the route
  * write then fails, the credential is rolled back to its previous value (unset
  * when it had none), so after any failure either both exist or neither. The
  * route namespace guard runs first: an unmounted namespace fails before any
  * credential is touched. A manifest with no reference, or a blank key, stores
- * no credential and the route write proceeds alone.
+ * no credential and the route write proceeds alone — except a `placeholder`
+ * auth route, which stages {@link PLACEHOLDER_CREDENTIAL} under its reference
+ * unless one already resolves (a typed or previously stored value always
+ * wins), keeping the route resolvable for discovery with no operator input.
  * @param deps - host seams.
  * @param manifest - heavy manifest.
  * @param mode - detected instance or local install.
@@ -977,12 +989,17 @@ export async function commitRoute(
   if (pending !== undefined) throw new Error(pending.message)
   const credentials = deps.credentials
   const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv
-  const value = key?.trim() ?? ''
-  const store = value !== '' && ref !== undefined
+  let value = key?.trim() ?? ''
   let previous: { value?: string } | undefined
+  if (value === '' && ref !== undefined && manifest.auth.kind === 'placeholder') {
+    if (credentials === undefined) throw new Error('credentials seam absent — cannot store the placeholder credential')
+    previous = await credentials.resolve(ref)
+    if (previous?.value === undefined) value = PLACEHOLDER_CREDENTIAL
+  }
+  const store = value !== '' && ref !== undefined
   if (store) {
     if (credentials === undefined) throw new Error('credentials seam absent — cannot store the key')
-    previous = await credentials.resolve(ref)
+    previous ??= await credentials.resolve(ref)
     await credentials.set(ref, value)
   }
   let route: HeavyRouteProfile

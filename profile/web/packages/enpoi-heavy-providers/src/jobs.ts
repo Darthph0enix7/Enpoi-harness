@@ -223,3 +223,17 @@ function failed(id: string, error: string): HeavyJobView {
     error,
   }
 }
+
+/**
+ * The snapshot a status reply may expose. A succeeded install is history once
+ * its route is configured: the route is the durable outcome, and the terminal
+ * snapshot would otherwise re-render finished progress on every page open. A
+ * running job (progress to show) and a failed one (the operator needs the
+ * error) stay visible.
+ * @param job - the stored snapshot, when one exists.
+ * @param configured - whether the provider's route is already written.
+ * @returns the snapshot to expose, or undefined when it is history.
+ */
+export function visibleJobSnapshot(job: HeavyJobView | undefined, configured: boolean): HeavyJobView | undefined {
+  return job !== undefined && job.state === 'succeeded' && configured ? undefined : job
+}
