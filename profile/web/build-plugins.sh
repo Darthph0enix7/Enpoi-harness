@@ -30,8 +30,11 @@ for dir in enpoi-*/; do
   pkg="${dir%/}"
   [ -f "$pkg/src/index.ts" ] || { echo "SKIP (no src/index.ts): $pkg"; continue; }
 
-  # Skip rebuild if prebuilt bundle exists and source has not been modified
-  if [ "${FORCE_BUILD:-0}" != 1 ] && [ -f "$pkg/lib/index.js" ] && [ ! "$pkg/src/index.ts" -nt "$pkg/lib/index.js" ]; then
+  # Skip rebuild if prebuilt bundle exists and no source file has been modified.
+  # Comparing only src/index.ts would miss edits in sibling sources (catalog.ts,
+  # tools.ts, …) and silently ship a stale bundle; any newer src file forces a
+  # rebuild.
+  if [ "${FORCE_BUILD:-0}" != 1 ] && [ -f "$pkg/lib/index.js" ] && [ -z "$(find "$pkg/src" -type f -newer "$pkg/lib/index.js" -print -quit 2>/dev/null)" ]; then
     echo "OK   $pkg  ($(du -h "$pkg/lib/index.js" | cut -f1)) (prebuilt)"
     continue
   fi

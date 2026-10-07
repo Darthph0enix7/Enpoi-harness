@@ -159,7 +159,10 @@ describe('tool-group catalog', () => {
     expect(byId.get('peer')?.members).toEqual(PEER)
     expect(byId.get('debug')?.members).toEqual(DEBUG)
     expect(byId.get('creator')?.members).toEqual(CREATOR)
-    expect(byId.get('creator')?.preAttach).toEqual(['creator'])
+    // No shipped group pre-attaches: every on-demand family starts detached.
+    for (const id of ['peer', 'debug', 'creator']) {
+      expect(byId.get(id)?.preAttach, id).toEqual([])
+    }
     expect(byId.get('creator')?.seats).toEqual(['creator'])
     // Core is the everyday surface; every shipped member is registered nowhere else.
     expect(byId.get('core')?.members.length).toBe(13)
@@ -241,22 +244,22 @@ describe('tool-group catalog', () => {
     if (!absent.ok) expect(absent.reason).toContain('not attached')
   })
 
-  it('ships the debug pre-attach for every main-agent seat and creator tools for the creator alone', () => {
+  it('starts every seat with nothing attached; only an operator seat override pre-attaches', () => {
     const fresh = catalogWith()
-    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker']) {
-      const expected = seat === 'creator' ? ['debug', 'creator'] : ['debug']
-      expect(preAttachFor(fresh, seat), seat).toEqual(expected)
+    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'skeptic', 'default']) {
+      expect(preAttachFor(fresh, seat), seat).toEqual([])
     }
-    expect(preAttachFor(fresh, 'default')).toEqual([])
     // An explicit operator override still wins, including an empty one.
-    const overridden = catalogWith({ toolGroups: { seats: { creator: { preAttach: [] } } } })
-    expect(preAttachFor(overridden, 'creator')).toEqual([])
+    const overridden = catalogWith({ toolGroups: { seats: { creator: { preAttach: ['debug'] } } } })
+    expect(preAttachFor(overridden, 'creator')).toEqual(['debug'])
+    const emptied = catalogWith({ toolGroups: { seats: { orchestrator: { preAttach: [] } } } })
+    expect(preAttachFor(emptied, 'orchestrator')).toEqual([])
   })
 
-  it('resolves per-seat pre-attach from the operator document over group defaults', () => {
+  it('resolves per-seat pre-attach from the operator document over the no-attach default', () => {
     const catalog = catalogWith({ toolGroups: { seats: { sysadmin: { preAttach: ['peer'] } } } })
     expect(preAttachFor(catalog, 'sysadmin')).toEqual(['peer'])
-    expect(preAttachFor(catalog, 'orchestrator')).toEqual(['debug'])
+    expect(preAttachFor(catalog, 'orchestrator')).toEqual([])
     expect(preAttachFor(catalog, 'default')).toEqual([])
     // A disabled group can never be pre-attached.
     const disabled = catalogWith({
@@ -274,16 +277,31 @@ describe('tool-group catalog', () => {
     expect(text).toContain('- debug —')
     expect(text).toContain('session log, event trace, and diagnostics inspection')
     expect(text).toContain('(7 tools, not attached)')
-    // The creator group is seat-restricted: orchestrator never reads it.
-    expect(text).not.toContain('- creator —')
+    // The creator group is seat-restricted: orchestrator reads a seat-only
+    // notice, never an attach state.
+    expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
+    expect(text).not.toContain('(3 tools, not attached)')
     const creator = renderMenuText(catalogWith(), new Set(), [], 'creator')
     expect(creator).toContain('- creator —')
     expect(creator).toContain('inspect and manage the harness plugin composition')
     expect(creator).toContain('(3 tools, not attached)')
+    expect(creator).not.toContain('seat-only family')
     expect(text).not.toContain('- core —')
     const disabled = renderMenuText(catalogWith({ toolGroups: { groups: { peer: { enabled: false } } } }), new Set(), [], 'orchestrator')
     expect(disabled).not.toContain('- peer —')
     expect(disabled).toContain('- debug —')
+  })
+
+  it('lists every on-demand family in the fresh menu: visible ones with state, hidden ones as a notice', () => {
+    const text = renderMenuText(catalogWith(), new Set(), [], 'orchestrator')
+    expect(text).toContain('- peer — cross-device peer sessions: status, ask, answer, cancel (5 tools, not attached)')
+    expect(text).toContain('- debug — session log, event trace, and diagnostics inspection (7 tools, not attached)')
+    expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
+    // A disabled family is offered nowhere, notice included.
+    const disabled = renderMenuText(
+      catalogWith({ toolGroups: { groups: { creator: { enabled: false } } } }), new Set(), [], 'orchestrator',
+    )
+    expect(disabled).not.toContain('creator')
   })
 })
 
@@ -302,15 +320,15 @@ describe('toolGroups projection', () => {
 })
 
 describe('tool_groups plugin', () => {
-  it('installs the base surface at agent creation: unattached on-demand members denied, nothing static', () => {
+  it('installs the base surface at agent creation: every on-demand member denied, nothing static', () => {
     const { ctx, installer } = mount()
     const agent = fakeAgent()
     ctx.fire('agent/created', { agent, source: 'fresh' })
     expect(installer.calls).toHaveLength(1)
-    // The debug group is pre-attached for the orchestrator seat; peer and the
-    // creator-only harness-authoring group stay on-demand and are denied.
-    expect(installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
-    for (const name of [...CORE, ...DEBUG]) expect(installer.live()).not.toContain(name)
+    // Nothing pre-attaches: all three on-demand families start denied, so a
+    // fresh session's durable attached set is empty.
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
+    for (const name of CORE) expect(installer.live()).not.toContain(name)
   })
 
   it('attach adds exactly the group members and detach removes exactly them, at the turn boundary', async () => {
@@ -320,31 +338,31 @@ describe('tool_groups plugin', () => {
       if (type === 'tool-groups/change') projections.set('session-1', data.attached)
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
-    expect(installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
 
     const attached = await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
     expect(attached.ok).toBe(true)
-    expect(attached.attached).toEqual(['peer', 'debug'])
+    expect(attached.attached).toEqual(['peer'])
     expect(agent.appended).toHaveLength(1)
     expect(agent.appended[0].type).toBe('tool-groups/change')
-    expect(agent.appended[0].data).toEqual({ attached: ['peer', 'debug'] })
+    expect(agent.appended[0].data).toEqual({ attached: ['peer'] })
     expect(agent.appended[0].opts).toEqual({ ignorable: true })
     // The filter does not change mid-turn: the current request's catalog stays.
-    expect(installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
     // The menu names the pending change instead of claiming it is live.
     expect(menu.text({ scope: agent })).toContain('attached — applies from the next turn')
 
     // The projection drive committed the event; turn/end applies it. The
     // creator-only group is unattachable here, so its members stay denied.
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
-    expect(installer.live()?.sort()).toEqual([...CREATOR].sort())
+    expect(installer.live()?.sort()).toEqual([...DEBUG, ...CREATOR].sort())
 
-    // Detaching the attached peer group restores both base denies.
+    // Detaching the attached peer group restores all three base denies.
     const detached = await tool.execute({ action: 'detach', group: 'peer' }, EXEC(agent))
     expect(detached.ok).toBe(true)
-    expect(detached.attached).toEqual(['debug'])
+    expect(detached.attached).toEqual([])
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
-    expect(installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
   })
 
   it('removes the restriction entirely when every on-demand group is attached', async () => {
@@ -355,7 +373,9 @@ describe('tool_groups plugin', () => {
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
     await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
-    expect(agent.appended[0].data).toEqual({ attached: ['peer', 'debug', 'creator'] })
+    await tool.execute({ action: 'attach', group: 'debug' }, EXEC(agent))
+    const attached = await tool.execute({ action: 'attach', group: 'creator' }, EXEC(agent))
+    expect(attached.attached).toEqual(['peer', 'debug', 'creator'])
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
     expect(installer.calls[0].disposed).toBe(true)
     expect(installer.live()).toBeNull()
@@ -387,7 +407,7 @@ describe('tool_groups plugin', () => {
     const first = mount({ projections })
     const agent = fakeAgent('resumed')
     first.ctx.fire('agent/created', { agent, source: 'resume' })
-    expect(first.installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
+    expect(first.installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
     projections.set('resumed', ['peer'])
     const second = mount({ projections })
     const secondInstaller = second.installer
@@ -402,15 +422,18 @@ describe('tool_groups plugin', () => {
     ctx.fire('agent/created', { agent, source: 'fresh' })
     const listed = await tool.execute({ action: 'list' }, EXEC(agent))
     expect(listed.ok).toBe(true)
-    // The orchestrator seat never reads the creator-restricted group.
+    // A fresh session's durable attached set is empty.
+    expect(listed.attached).toEqual([])
+    expect(listed.groups.every((group: any) => group.attached === false)).toBe(true)
+    // The orchestrator seat never reads the creator-restricted group's members.
     expect(listed.groups.map((group: any) => group.id)).toEqual(['peer', 'debug'])
     expect(listed.groups[0].members).toEqual(PEER)
-    expect(listed.groups[0].attached).toBe(false)
 
     const text = menu.text({ scope: agent })
     expect(text).toContain('- peer —')
     expect(text).toContain('- debug —')
-    expect(text).not.toContain('- creator —')
+    // Aware of the hidden family, with no attach state for it.
+    expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
     expect(text).toContain('(5 tools, not attached)')
     expect(menu.text({ scope: undefined })).toBe('')
   })
@@ -422,16 +445,23 @@ describe('tool_groups plugin', () => {
       if (type === 'tool-groups/change') projections.set('creator-session', data.attached)
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
-    // Pre-attached: the creator sees its authoring tools and no deny for them.
-    expect(installer.live()?.sort()).toEqual([...PEER].sort())
+    // Nothing pre-attaches: the creator starts detached like every seat.
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
 
     const listed = await tool.execute({ action: 'list' }, EXEC(agent))
     expect(listed.groups.map((group: any) => group.id)).toEqual(['peer', 'debug', 'creator'])
+    expect(listed.groups.every((group: any) => group.attached === false)).toBe(true)
+
+    const attached = await tool.execute({ action: 'attach', group: 'creator' }, EXEC(agent))
+    expect(attached.ok).toBe(true)
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    // The creator's authoring tools are callable; the other families stay denied.
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
 
     const detached = await tool.execute({ action: 'detach', group: 'creator' }, EXEC(agent))
     expect(detached.ok).toBe(true)
-    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
-    expect(installer.live()?.sort()).toEqual([...PEER, ...CREATOR].sort())
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
   })
 
   it('refuses an attach of a seat-restricted group outside its seats', async () => {
@@ -543,6 +573,13 @@ describe('tool_groups plugin', () => {
     expect(unattached.kind).toBe('deny')
     expect(unattached.reason).toContain('not attached')
     expect(unattached.reason).toContain('attach')
+
+    // The debug family is not attached on a fresh session either: its tools
+    // carry the same actionable hint instead of a bare UNKNOWN_TOOL.
+    const debugUnattached = await run('session_debug')
+    expect(debugUnattached.kind).toBe('deny')
+    expect(debugUnattached.reason).toContain('tool group "debug"')
+    expect(debugUnattached.reason).toContain('Call tool_groups with action "attach"')
 
     // Attached this turn but not callable yet: end the turn.
     await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))

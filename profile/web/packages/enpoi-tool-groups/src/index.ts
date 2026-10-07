@@ -405,8 +405,8 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
       const durable = state === undefined ? null : plannedAttached(state.agent, groups)
       const pending = durable?.filter(groupId => !appliedSet.has(groupId)) ?? []
       // The seat filter keeps a seat-restricted group (the creator's authoring
-      // tools) out of every other seat's menu: no agent reads a family it can
-      // never attach.
+      // tools) out of every other seat's surface: the menu still names the
+      // family in a seat-only notice, without an attach state or affordance.
       return renderMenuText(groups, appliedSet, pending, seatOfAgent(context.scope as Agent))
     },
   })

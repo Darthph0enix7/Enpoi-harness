@@ -120,11 +120,12 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     label: "Debug & observability",
     purpose: "session log, event trace, and diagnostics inspection",
     mode: "on-demand",
-    // Every main-agent seat pre-attaches the debug group. The Creator and the
-    // council broker advertise self-diagnosis in their personas; orchestrator
-    // and sysadmin carry the same read-only diagnostics surface. An operator
-    // seat override in the document still wins.
-    preAttach: ["orchestrator", "sysadmin", "creator", "broker"],
+    // Nothing pre-attaches by default: a fresh session starts with every
+    // on-demand family detached and the menu names it as attachable. The
+    // personas advertise self-diagnosis, so a seat attaches the group through
+    // the `tool_groups` meta-tool when it needs the diagnostics surface. An
+    // operator seat override in the document still wins.
+    preAttach: [],
     enabled: true,
     members: [
       "diagnostics_report",
@@ -141,15 +142,16 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     label: "Creator (harness authoring)",
     purpose: "inspect and manage the harness plugin composition",
     mode: "on-demand",
-    // Only the Creator seat pre-attaches, and only the Creator seat can see or
-    // attach the group at all (`seats`): harness authoring is its specialty, so
+    // Nothing pre-attaches by default; only the Creator seat can see or attach
+    // the group at all (`seats`): harness authoring is its specialty, so
     // orchestrator and sysadmin never SEE the tools — the group's deny filter
-    // removes them from the advertised surface and this group is absent from
-    // their menu and meta-tool listing (the seat guard in `enpoi-capabilities`
-    // stays as the execution backstop). This is a deliberate break of the
-    // byte-identical main-agent tool block: a cross-agent switch rebuilds the
-    // provider's prompt prefix once; turns within one seat keep the prefix.
-    preAttach: ["creator"],
+    // removes them from the advertised surface and their menu carries a
+    // seat-only notice instead of an attach state (the meta-tool listing omits
+    // it; the seat guard in `enpoi-capabilities` stays as the execution
+    // backstop). The per-seat menu line is a deliberate prompt-prefix
+    // difference: a cross-agent switch rebuilds the provider's prefix once;
+    // turns within one seat keep the prefix.
+    preAttach: [],
     seats: ["creator"],
     enabled: true,
     members: ["cordis_inspect_list", "cordis_inspect_query", "plugin_manager"]
@@ -268,7 +270,12 @@ function renderMenuText(catalog, attached, pending = [], seat) {
   const pendingSet = new Set(pending);
   const lines = [];
   for (const group of catalog.groups) {
-    if (group.mode !== "on-demand" || !group.enabled || !groupVisibleTo(group, seat)) continue;
+    if (group.mode !== "on-demand" || !group.enabled) continue;
+    if (!groupVisibleTo(group, seat)) {
+      const owner = (group.seats ?? []).map((seatId) => seatId.charAt(0).toUpperCase() + seatId.slice(1)).join("/");
+      lines.push(`- ${group.id} \u2014 ${owner}-seat-only family (${String(group.members.length)} tools)`);
+      continue;
+    }
     const state = pendingSet.has(group.id) ? "attached \u2014 applies from the next turn" : attached.has(group.id) ? "attached" : "not attached";
     lines.push(`- ${group.id} \u2014 ${group.purpose} (${String(group.members.length)} tools, ${state})`);
   }

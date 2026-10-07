@@ -6,10 +6,11 @@
  * Groups are data. The defaults below are derived from the live wire registry
  * (`deepseek-harness/scripts/tool-inventory/roster-baseline.json`,
  * 50/50/53 @ 2026-10-02: orchestrator and sysadmin drop the Creator group's
- * three harness-authoring tools) and frozen here; the operator document
- * `enpoi-orchestration.toolGroups` overrides `enabled` per group and
- * `preAttach` per seat. Everything not named by a group is never denied — the
- * presentation filter fails open.
+ * three harness-authoring tools) and frozen here; no shipped group
+ * pre-attaches, so every on-demand family starts detached on a fresh session.
+ * The operator document `enpoi-orchestration.toolGroups` overrides `enabled`
+ * per group and `preAttach` per seat. Everything not named by a group is never
+ * denied — the presentation filter fails open.
  *
  * @module dsh-enpoi-tool-groups/catalog
  */
@@ -155,11 +156,12 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     label: 'Debug & observability',
     purpose: 'session log, event trace, and diagnostics inspection',
     mode: 'on-demand',
-    // Every main-agent seat pre-attaches the debug group. The Creator and the
-    // council broker advertise self-diagnosis in their personas; orchestrator
-    // and sysadmin carry the same read-only diagnostics surface. An operator
-    // seat override in the document still wins.
-    preAttach: ['orchestrator', 'sysadmin', 'creator', 'broker'],
+    // Nothing pre-attaches by default: a fresh session starts with every
+    // on-demand family detached and the menu names it as attachable. The
+    // personas advertise self-diagnosis, so a seat attaches the group through
+    // the `tool_groups` meta-tool when it needs the diagnostics surface. An
+    // operator seat override in the document still wins.
+    preAttach: [],
     enabled: true,
     members: [
       'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',
@@ -171,15 +173,16 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     label: 'Creator (harness authoring)',
     purpose: 'inspect and manage the harness plugin composition',
     mode: 'on-demand',
-    // Only the Creator seat pre-attaches, and only the Creator seat can see or
-    // attach the group at all (`seats`): harness authoring is its specialty, so
+    // Nothing pre-attaches by default; only the Creator seat can see or attach
+    // the group at all (`seats`): harness authoring is its specialty, so
     // orchestrator and sysadmin never SEE the tools — the group's deny filter
-    // removes them from the advertised surface and this group is absent from
-    // their menu and meta-tool listing (the seat guard in `enpoi-capabilities`
-    // stays as the execution backstop). This is a deliberate break of the
-    // byte-identical main-agent tool block: a cross-agent switch rebuilds the
-    // provider's prompt prefix once; turns within one seat keep the prefix.
-    preAttach: ['creator'],
+    // removes them from the advertised surface and their menu carries a
+    // seat-only notice instead of an attach state (the meta-tool listing omits
+    // it; the seat guard in `enpoi-capabilities` stays as the execution
+    // backstop). The per-seat menu line is a deliberate prompt-prefix
+    // difference: a cross-agent switch rebuilds the provider's prefix once;
+    // turns within one seat keep the prefix.
+    preAttach: [],
     seats: ['creator'],
     enabled: true,
     members: ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager'],
@@ -391,14 +394,16 @@ export function planGroupAction(
 }
 
 /**
- * Render the model-facing menu for the enabled on-demand groups the seat can
- * see. Static groups are always present and need no menu entry; disabled and
- * seat-restricted-out groups are not offered.
+ * Render the model-facing menu for the enabled on-demand groups. Static groups
+ * are always present and need no menu entry; disabled groups are not offered.
+ * A seat-restricted group the seat cannot attach still gets one notice line
+ * naming the family and its owning seat, with no attach state and no attach
+ * affordance, so the model is aware of every family it cannot use.
  * @param catalog - the resolved catalog.
  * @param attached - the attached group ids the current tool block reflects.
  * @param pending - attached group ids whose change lands at the next turn.
  * @param seat - the seat the menu renders for; omitted means an unknown seat,
- *   which sees only unrestricted groups.
+ *   which sees only unrestricted groups plus the notices.
  * @returns the menu section text (empty when no on-demand group is available).
  */
 export function renderMenuText(
@@ -410,7 +415,14 @@ export function renderMenuText(
   const pendingSet = new Set(pending)
   const lines: string[] = []
   for (const group of catalog.groups) {
-    if (group.mode !== 'on-demand' || !group.enabled || !groupVisibleTo(group, seat)) continue
+    if (group.mode !== 'on-demand' || !group.enabled) continue
+    if (!groupVisibleTo(group, seat)) {
+      const owner = (group.seats ?? [])
+        .map(seatId => seatId.charAt(0).toUpperCase() + seatId.slice(1))
+        .join('/')
+      lines.push(`- ${group.id} — ${owner}-seat-only family (${String(group.members.length)} tools)`)
+      continue
+    }
     const state = pendingSet.has(group.id)
       ? 'attached — applies from the next turn'
       : attached.has(group.id) ? 'attached' : 'not attached'

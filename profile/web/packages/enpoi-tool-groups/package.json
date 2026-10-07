@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:zod --external:dsh-enpoi-* --outfile=lib/index.js"
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/* --external:schemastery --external:dsh-enpoi-* --outfile=lib/index.js"
   },
   "dependencies": {
     "dsh-enpoi-contracts": "workspace:*"
