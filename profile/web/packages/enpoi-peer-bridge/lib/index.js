@@ -1,9 +1,9 @@
-// src/index.ts
+// packages/enpoi-peer-bridge/src/index.ts
 import Schema from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
 import { dirname as dirname2 } from "node:path";
 
-// src/asks.ts
+// packages/enpoi-peer-bridge/src/asks.ts
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 function askLabel(alias, sessionId, ask) {
@@ -91,7 +91,7 @@ function defaultNoticesPath(dshHome) {
   return `${dshHome.replace(/\/+$/u, "")}/peer-bridge/asks.jsonl`;
 }
 
-// src/peer-client.ts
+// packages/enpoi-peer-bridge/src/peer-client.ts
 var PeerBridgeError = class extends Error {
   /** Stable peer error code (`peer/*`, `gateway/*`). */
   code;
@@ -148,6 +148,10 @@ var PeerClient = class {
   /** Read the latch for one target. */
   state(target) {
     return this.rpc("state", { target });
+  }
+  /** List the pairings the host exposes, optionally narrowed to one resolved target. */
+  list(request = {}) {
+    return this.rpc("list", request);
   }
   /** Create or adopt a Session under a pairing alias. */
   create(request) {
@@ -413,7 +417,7 @@ function delay(ms, signal) {
   });
 }
 
-// src/follow.ts
+// packages/enpoi-peer-bridge/src/follow.ts
 function recordRpcId(record) {
   if (record.type !== "user/message") return void 0;
   const source = field(record.data, "source");
@@ -456,7 +460,7 @@ function field(value, key) {
   return value[key];
 }
 
-// src/pairings.ts
+// packages/enpoi-peer-bridge/src/pairings.ts
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -728,7 +732,7 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// src/index.ts
+// packages/enpoi-peer-bridge/src/index.ts
 var name = "enpoi-peer-bridge";
 var inject = ["tools"];
 function live(schema) {
@@ -859,6 +863,107 @@ function registerTools(ctx, config, deps = {}) {
       } catch (error) {
         return failureFrom(error, pairing.endpoint);
       }
+    }
+  });
+  ctx.tools.register({
+    name: "peer_sessions",
+    description: [
+      "List paired peer sessions: for every caller-role pairing in the local document, the bound remote",
+      "session id (the local remoteSessionId pin or the session the host reports), the latch summary, and",
+      "last activity. Use it to discover which session an alias currently addresses before peer_ask or",
+      "peer_asks. Read-only; an unreachable host appears as that row's error."
+    ].join(" "),
+    parameters: {
+      type: "object",
+      properties: {
+        alias: { type: "string", description: "Limit the listing to one caller-role pairing alias." }
+      },
+      required: []
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          device: { type: "string" },
+          sessions: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                alias: { type: "string" },
+                peer: { type: "string" },
+                endpoint: { type: "string" },
+                remoteSessionId: { type: "string" },
+                exposure: { type: "string" },
+                bound: { type: "boolean" },
+                latch: { type: "string" },
+                lastActivity: { type: "string" },
+                summary: { type: "string" },
+                error: failureSchema()
+              },
+              required: ["alias", "peer"]
+            }
+          },
+          note: { type: "string" },
+          error: failureSchema()
+        },
+        required: ["ok"]
+      },
+      render: (_args, value) => [{ type: "text", text: renderSessions(value) }]
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const request = narrow(args);
+      const filter = typeof request.alias === "string" && request.alias !== "" ? request.alias : void 0;
+      let document;
+      try {
+        document = readPairingDocument(pairingsPath);
+      } catch (error) {
+        return { ok: false, device: "", sessions: [], error: badRequest(errorText(error)).error };
+      }
+      const dialable = callerPairings(document).filter((pairing) => filter === void 0 || pairing.alias === filter);
+      if (dialable.length === 0) {
+        return {
+          ok: false,
+          device: document.device,
+          sessions: [],
+          error: badRequest(filter === void 0 ? "no caller-role pairings in the pairing document" : `no caller-role pairing with alias ${JSON.stringify(filter)}`).error
+        };
+      }
+      const sessions = [];
+      for (const pairing of dialable) {
+        const base = {
+          alias: pairing.alias,
+          peer: pairing.peer,
+          endpoint: pairing.endpoint,
+          remoteSessionId: pairing.remoteSessionId ?? "",
+          exposure: pairing.exposure ?? ""
+        };
+        try {
+          const listed = await makeClient(pairing, config, document.device, deps).list({});
+          const entry = listed.pairings.find((candidate) => candidate.alias === pairing.alias);
+          sessions.push({
+            ...base,
+            remoteSessionId: pairing.remoteSessionId ?? entry?.sessionId ?? "",
+            exposure: entry?.exposure ?? base.exposure,
+            bound: entry?.bound ?? false,
+            ...entry?.latch === void 0 ? {} : { latch: entry.latch },
+            ...entry?.lastActivity === void 0 ? {} : { lastActivity: new Date(entry.lastActivity).toISOString() },
+            summary: entry === void 0 ? "the host lists no pairing under this alias" : entry.summary
+          });
+        } catch (error) {
+          sessions.push({
+            ...base,
+            bound: false,
+            summary: "",
+            error: failureFrom(error, pairing.endpoint).error
+          });
+        }
+      }
+      return { ok: true, device: document.device, sessions };
     }
   });
   ctx.tools.register({
@@ -1253,6 +1358,16 @@ async function runAsk(ctx, options) {
   let detached = false;
   const answerParts = [];
   const inFlight = /* @__PURE__ */ new Set();
+  const withdrawMissing = (pending) => {
+    const present = new Set(pending.map((ask) => ask.askId));
+    for (const record of asks.values()) {
+      if (present.has(record.askId) || record.withdrawn === true) continue;
+      if (record.decision !== void 0 || record.relay !== void 0) continue;
+      record.withdrawn = true;
+      record.note = "settled elsewhere first (another device answered) \u2014 local card dismissed";
+      record.card.abort(new Error("remote ask settled before the local answer"));
+    }
+  };
   const surface = (pending) => {
     const task = surfacePending(
       ctx,
@@ -1273,6 +1388,7 @@ async function runAsk(ctx, options) {
     inFlight.add(task);
   };
   const surfaceFrame = async (pending) => {
+    withdrawMissing(pending);
     while (inFlight.size >= MAX_SURFACE_TASKS) await Promise.race(inFlight);
     surface(pending);
   };
@@ -1396,11 +1512,13 @@ async function surfacePending(ctx, client, noticesPath, pairing, participant, ta
       ...ask.kind === "approval" && ask.toolName !== void 0 ? { toolName: ask.toolName } : {},
       ...ask.kind === "approval" && ask.reason !== void 0 ? { reason: ask.reason } : {},
       surfaced: "notice",
-      summary: askSummary(ask)
+      summary: askSummary(ask),
+      card: new AbortController()
     };
     asks.set(ask.askId, record);
+    const askSignal = AbortSignal.any([signal, record.card.signal]);
     if (ask.kind === "question") {
-      await surfaceQuestion(ctx, client, noticesPath, pairing, participant, target, ask, record, signal, agent);
+      await surfaceQuestion(ctx, client, noticesPath, pairing, participant, target, ask, record, askSignal, agent);
       continue;
     }
     const approval = ctx.get("approval");
@@ -1416,11 +1534,19 @@ async function surfacePending(ctx, client, noticesPath, pairing, participant, ta
         agent,
         toolName: ask.toolName ?? "peer.ask",
         reason: askLabel(pairing.alias, sessionLabel, ask),
-        signal
+        signal: askSignal
       });
+      if (record.withdrawn === true) {
+        record.decision = "cancelled";
+        continue;
+      }
       decision = outcome === "allowed-always" || outcome === "allowed-always-broad" ? "allowed-once" : outcome;
       record.surfaced = "approval";
     } catch {
+      if (record.withdrawn === true) {
+        record.decision = "cancelled";
+        continue;
+      }
       decision = "unsurfaced";
     }
     const mapped = localDecisionToPeerAnswer(decision);
@@ -1470,9 +1596,17 @@ async function surfaceQuestion(ctx, client, noticesPath, pairing, participant, t
       ...agent === void 0 ? {} : { agent },
       signal
     });
+    if (record.withdrawn === true) {
+      record.decision = "cancelled";
+      return;
+    }
     record.surfaced = "question";
     record.selected = answer.answers.flatMap((item) => item.selected);
   } catch (error) {
+    if (record.withdrawn === true) {
+      record.decision = "cancelled";
+      return;
+    }
     record.decision = "unsurfaced";
     record.note = `local question answerer declined (${errorText(error)}); question ask recorded with its options and answerable via peer_answer`;
     recordAskNotice(noticesPath, pairing.alias, sessionLabel, ask, record.note);
@@ -1618,6 +1752,23 @@ function renderStatus(value) {
     `session ${String(record.sessionId)} (${String(record.exposure)}) bound=${String(record.bound)}`,
     `latch ${String(record.latch)} (${String(record.latchSource)}), descendants ${String(record.activeDescendants)}, model ${String(record.model)}`,
     pendingAsks.length === 0 ? "no pending asks" : `pending: ${pendingAsks.join("; ")}`
+  ].join("\n");
+}
+function renderSessions(value) {
+  const record = narrow(value);
+  const sessions = Array.isArray(record.sessions) ? record.sessions : [];
+  if (record.ok !== true && sessions.length === 0) {
+    const error = narrow(record.error);
+    return `peer_sessions failed [${String(error.code ?? "unknown")}]: ${String(error.message ?? "")}`;
+  }
+  if (sessions.length === 0) return `no caller-role pairings on ${String(record.device ?? "")}`;
+  return [
+    `device ${String(record.device ?? "")} \xB7 ${String(sessions.length)} pairing(s)`,
+    ...sessions.map((session) => {
+      const error = session.error === void 0 ? void 0 : narrow(session.error);
+      const state = error !== void 0 ? `unreachable [${String(error.code ?? "unknown")}] ${String(error.message ?? "")}` : `${session.remoteSessionId === "" ? "not bound" : `session ${String(session.remoteSessionId)}`} (${String(session.exposure ?? "")}) bound=${String(session.bound === true)} latch=${String(session.latch ?? "unknown")}${session.summary === "" ? "" : ` \u2014 ${String(session.summary)}`}`;
+      return `\u2022 ${String(session.alias)} \u2192 ${String(session.peer)} @ ${String(session.endpoint)} \xB7 ${state}`;
+    })
   ].join("\n");
 }
 function renderAsk(value) {

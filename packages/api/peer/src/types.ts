@@ -223,6 +223,40 @@ export interface PeerStateValue {
   readonly cursor: SessionSeq
 }
 
+/**
+ * `peer.list` request: discovery over the host's pairing table. An absent
+ * target lists every pairing; a supplied target resolves first, so a caller
+ * pinned to one session can ask whether it is still bound.
+ */
+export interface PeerListRequest {
+  readonly target?: PeerTarget
+}
+
+/** One pairing row `peer.list` reports with its cheap live summary. */
+export interface PeerListEntry {
+  readonly alias: PeerAlias
+  readonly peer: PeerDeviceName
+  readonly exposure: PeerExposure
+  /** Whether the alias resolves to a Session right now (own pin or created binding). */
+  readonly bound: boolean
+  /** Session this host exposes for the pairing; the caller's `remoteSessionId`. */
+  readonly sessionId?: SessionId
+  /** The pairing's caller-role pin, echoed when the shared document declares one. */
+  readonly remoteSessionId?: SessionId
+  /** Host latch, present only for a bound Session that has a live execution state. */
+  readonly latch?: PeerLatch
+  /** Last activity time (epoch ms) the host latch carries without a durable scan. */
+  readonly lastActivity?: number
+  /** One-line latch summary for compact callers (`latch · asks · last turn`). */
+  readonly summary: string
+}
+
+/** `peer.list` value: the serving host's device name and one row per pairing. */
+export interface PeerListValue {
+  readonly hostDevice: PeerDeviceName
+  readonly pairings: readonly PeerListEntry[]
+}
+
 /** `peer.create` request: bind a fresh or explicitly adopted session to a pairing alias. */
 export interface PeerCreateRequest {
   readonly alias: PeerAlias
@@ -453,7 +487,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     /** The target or alias does not resolve through the serving host's pairing file. */
     'peer/not-paired': { readonly alias?: string; readonly sessionId?: SessionId }
     /** A paired target has no such session, or the ask id is unknown or expired. */
-    'peer/not-found': { readonly sessionId?: SessionId; readonly askId?: string }
+    'peer/not-found': { readonly sessionId?: SessionId; readonly askId?: string; readonly alias?: string; readonly reason?: string }
     /** Exposure or pairing permission refuses the operation. */
     'peer/forbidden': { readonly reason?: string }
     /** An answer raced another participant's settled answer. */

@@ -173,6 +173,17 @@ export class PeerPairingsStore {
       if (pairing === undefined) continue
       return { pairing, sessionId: target.sessionId, exposure: pairing.exposure, device: pairing.peer }
     }
+    // A shared pairing document may carry this host's session only in the
+    // caller-role `remoteSessionId` pin (the same logical entry authored from
+    // the other device's side). Resolving it to the pairing's own bound
+    // session keeps a caller's pin addressable without granting an arbitrary
+    // session id: the pin must be declared in this host's own file.
+    for (const candidate of loaded.pairings) {
+      if (candidate.remoteSessionId !== target.sessionId) continue
+      const sessionId = candidate.sessionId ?? loaded.bindings[candidate.alias]?.sessionId
+      if (sessionId === undefined) continue
+      return { pairing: candidate, sessionId, exposure: candidate.exposure, device: candidate.peer }
+    }
     return undefined
   }
 

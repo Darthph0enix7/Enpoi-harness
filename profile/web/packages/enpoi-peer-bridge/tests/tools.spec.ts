@@ -27,6 +27,10 @@ interface HostOptions {
   readonly networkFail?: boolean
   /** Hold the local approval card open until settled manually or its signal aborts. */
   readonly holdApproval?: boolean
+  /** Hold the local question card open until its signal aborts. */
+  readonly holdQuestion?: boolean
+  /** Emit a second state frame, after the ask frame, whose pendingAsks is empty. */
+  readonly settleAskRemotely?: boolean
   /** Stop the scripted follow after the prompt event, leaving the stream open. */
   readonly holdFollow?: boolean
   /** Local user-questions answerer; absent from the context when `withQuestions: false`. */
@@ -74,6 +78,20 @@ function createHarness(options: HostOptions = {}) {
           },
           cursor: 0,
         })
+      case 'list':
+        return ok({
+          hostDevice: 'serverlocal',
+          pairings: [{
+            alias: 'scratch',
+            peer: 'serverlocal',
+            exposure: 'debug',
+            bound: true,
+            sessionId: 'sess-1',
+            latch: 'idle',
+            lastActivity: 1_700_000_000_000,
+            summary: 'idle · no asks',
+          }],
+        })
       case 'prompt':
         captured.requestId = typeof args.requestId === 'string' ? args.requestId : undefined
         return ok({ accepted: true, queued: true, hopCount: 1 })
@@ -98,6 +116,18 @@ function createHarness(options: HostOptions = {}) {
         },
         cursor: 1,
       })
+      if (options.settleAskRemotely === true) {
+        setTimeout(() => {
+          socket.frame(streamId, {
+            type: 'state',
+            state: {
+              latch: 'running', since: 2, source: 'host-latch', activeDescendants: 0,
+              descendantsExact: true, pendingAsks: [],
+            },
+            cursor: 2,
+          })
+        }, 10)
+      }
     }
     socket.frame(streamId, {
       type: 'event',
@@ -139,6 +169,14 @@ function createHarness(options: HostOptions = {}) {
     ask: (request: Record<string, unknown>): Promise<unknown> => {
       questionCalls.push(request)
       if (options.questionRefusal === true) return Promise.reject(new Error('no user-questions answerer accepted the request'))
+      if (options.holdQuestion === true) {
+        const signal = request.signal as AbortSignal | undefined
+        return new Promise((_resolve, reject) => {
+          const abort = (): void => { reject(new Error('ask_user_question was aborted before the user answered')) }
+          if (signal?.aborted === true) { abort(); return }
+          signal?.addEventListener('abort', abort, { once: true })
+        })
+      }
       return Promise.resolve(options.questionAnswer ?? { answers: [{ id: 'colour', selected: ['blue'] }] })
     },
   }
@@ -201,9 +239,9 @@ const QUESTION_ASK: PeerPendingAsk = {
 }
 
 describe('enpoi-peer-bridge tools', () => {
-  it('registers the five bridge tools with model-facing descriptions and renders', () => {
+  it('registers the six bridge tools with model-facing descriptions and renders', () => {
     const harness = createHarness()
-    expect([...harness.tools.keys()]).toEqual(['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'])
+    expect([...harness.tools.keys()]).toEqual(['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'])
     for (const tool of harness.tools.values()) {
       expect(tool.description.length).toBeGreaterThan(40)
       expect(typeof tool.output.render).toBe('function')
@@ -269,6 +307,71 @@ describe('enpoi-peer-bridge tools', () => {
     // A withdrawn local ask is never relayed blind.
     expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
     expect((result.asks as string[])[0]).toContain('decision=cancelled')
+  })
+
+  it('dismisses a local approval card when the remote ask settles elsewhere', async () => {
+    const harness = createHarness({ ask: APPROVAL_ASK, holdApproval: true, holdFollow: true, settleAskRemotely: true })
+    const pending = harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
+    await waitFor(() => harness.approvalCalls.length === 1)
+    const request = harness.approvalCalls[0] as { signal: AbortSignal }
+    expect(request.signal.aborted).toBe(false)
+    await waitFor(() => request.signal.aborted)
+    // The remote settle must withdraw the card, never relay a blind answer.
+    expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
+    harness.abortExec()
+    const result = await pending
+    const askLine = (result.asks as string[])[0]!
+    expect(askLine).toContain('decision=cancelled')
+    expect(askLine).toContain('settled elsewhere')
+  })
+
+  it('dismisses a local question card when the remote ask settles elsewhere', async () => {
+    const harness = createHarness({ ask: QUESTION_ASK, holdQuestion: true, holdFollow: true, settleAskRemotely: true })
+    const pending = harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ask me something' }, harness.exec)
+    await waitFor(() => harness.questionCalls.length === 1)
+    const request = harness.questionCalls[0] as { signal: AbortSignal }
+    expect(request.signal.aborted).toBe(false)
+    await waitFor(() => request.signal.aborted)
+    expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
+    harness.abortExec()
+    const result = await pending
+    const askLine = (result.asks as string[])[0]!
+    expect(askLine).toContain('decision=cancelled')
+    expect(askLine).toContain('settled elsewhere')
+  })
+
+  it('peer_sessions lists caller pairings with bound remoteSessionId and latch summary', async () => {
+    const harness = createHarness()
+    const result = await harness.tools.get('peer_sessions')!.execute({}, harness.exec)
+    expect(result).toMatchObject({ ok: true, device: 'serverlocal' })
+    const sessions = result.sessions as Record<string, unknown>[]
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]).toMatchObject({
+      alias: 'scratch',
+      peer: 'serverlocal',
+      endpoint: 'https://serverlocal.pike-acrux.ts.net:8443',
+      remoteSessionId: 'sess-1',
+      exposure: 'debug',
+      bound: true,
+      latch: 'idle',
+      summary: 'idle · no asks',
+    })
+    const rendered = harness.tools.get('peer_sessions')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('session sess-1')
+    expect(rendered).toContain('latch=idle')
+    expect(rendered).toContain('idle · no asks')
+  })
+
+  it('peer_sessions reports an unreachable host per row and filters by alias', async () => {
+    const failing = createHarness({ networkFail: true })
+    const result = await failing.tools.get('peer_sessions')!.execute({}, failing.exec)
+    expect(result.ok).toBe(true)
+    const row = (result.sessions as Record<string, unknown>[])[0]!
+    expect((row.error as Record<string, unknown>).code).toBe('peer/target-unreachable')
+    expect(failing.tools.get('peer_sessions')!.output.render({}, result)[0]!.text).toContain('unreachable')
+    const missing = await failing.tools.get('peer_sessions')!.execute({ alias: 'nope' }, failing.exec)
+    expect(missing.ok).toBe(false)
+    expect(String((missing.error as Record<string, unknown>).message)).toContain('no caller-role pairing')
   })
 
   it('leaves a local ask answerable while the follow stays open, then relays the answer', async () => {

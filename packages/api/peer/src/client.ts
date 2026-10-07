@@ -20,6 +20,8 @@ import type {
   PeerFollowRequest,
   PeerHandshakeRequest,
   PeerHandshakeValue,
+  PeerListRequest,
+  PeerListValue,
   PeerPageRequest,
   PeerPageValue,
   PeerPromptRequest,
@@ -122,6 +124,11 @@ export class PeerClient {
   /** Read the latch for one target. */
   state(target: PeerTarget): Promise<PeerStateValue> {
     return this.rpc('state', { target } satisfies PeerStateRequest)
+  }
+
+  /** List the pairings the host exposes, optionally narrowed to one resolved target. */
+  list(request: PeerListRequest = {}): Promise<PeerListValue> {
+    return this.rpc('list', request)
   }
 
   /** Create or adopt a Session under a pairing alias. */

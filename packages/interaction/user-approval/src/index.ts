@@ -274,6 +274,13 @@ export class ApprovalService extends Service {
 
   /**
    * Dispatch the waterfall, contained and raced against the request signal.
+   *
+   * The dispatch always carries a service-owned settle signal in addition to
+   * the caller's: every way this ask can end — an answerer settles it, the
+   * bounded wait expires, the caller aborts, or a peer registry wins its race
+   * — aborts that signal, which is how a forwarded presentation (a browser
+   * approval card) is cancelled for every client still showing it and why a
+   * client that attaches later is no longer offered a settled ask.
    * @param req - the borrowed public request.
    * @param session - the request agent's session used for policy lookup.
    * @returns the normalized closed outcome.
@@ -287,54 +294,57 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
-    // The bounded wait ends the whole ask, not only the caller's wait: when
-    // the timer wins, aborting this controller aborts the signal the dispatch
-    // carries, so a forwarded presentation (a browser's approval card) is
-    // cancelled instead of staying answerable behind a settled ask. A
-    // disabled bound (`answerTimeoutMs <= 0`) keeps the caller's exact object.
     const expiry = this.answerTimeoutMs() > 0 ? new AbortController() : undefined
-    const dispatch: ApprovalRequest = expiry === undefined
-      ? req
-      : {
-        ...req,
-        signal: req.signal === undefined
-          ? expiry.signal
-          : AbortSignal.any([req.signal, expiry.signal]),
-      }
-    // Enter the promise chain BEFORE dispatching: a listener that throws
-    // SYNCHRONOUSLY (before its first await) must land in the same rejection
-    // path as an async one — `Promise.resolve(call())` would let it escape
-    // the containment into the caller.
-    const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
-      () => this.ctx.waterfall(
-        scopeTarget(req.agent, req.agent), 'approval/request', dispatch,
-        () => Promise.resolve<ApprovalOutcome>('unavailable'),
-      ),
-    ).then(
-      // Normalize a rogue (non-vocabulary) answerer return to the fail-closed
-      // outcome instead of leaking it into callers' closed-union switches.
-      outcome => OUTCOMES.includes(outcome) ? outcome : 'unavailable',
-      // A throwing answerer must fail the QUESTION closed, not the caller's
-      // tool call open — the seam contains its callbacks.
-      () => 'unavailable',
-    )
-    const bounded = this.withAnswerTimeout(answer, expiry === undefined ? undefined : () => {
-      expiry.abort(new Error('approval ask exceeded its bounded wait'))
-    })
-    if (signal === undefined) return await bounded
-    return await new Promise<ApprovalOutcome>((resolve) => {
-      const onAbort = () => {
-        signal.removeEventListener('abort', onAbort)
-        resolve('cancelled')
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      void bounded.then((outcome) => {
-        signal.removeEventListener('abort', onAbort)
-        // After an abort won the race this resolve is a settled-promise no-op:
-        // the late answer is discarded by construction.
-        resolve(outcome)
+    const settled = new AbortController()
+    const dispatch: ApprovalRequest = {
+      ...req,
+      signal: AbortSignal.any([
+        ...signal === undefined ? [] : [signal],
+        ...expiry === undefined ? [] : [expiry.signal],
+        settled.signal,
+      ]),
+    }
+    try {
+      // Enter the promise chain BEFORE dispatching: a listener that throws
+      // SYNCHRONOUSLY (before its first await) must land in the same rejection
+      // path as an async one — `Promise.resolve(call())` would let it escape
+      // the containment into the caller.
+      const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
+        () => this.ctx.waterfall(
+          scopeTarget(req.agent, req.agent), 'approval/request', dispatch,
+          () => Promise.resolve<ApprovalOutcome>('unavailable'),
+        ),
+      ).then(
+        // Normalize a rogue (non-vocabulary) answerer return to the fail-closed
+        // outcome instead of leaking it into callers' closed-union switches.
+        outcome => OUTCOMES.includes(outcome) ? outcome : 'unavailable',
+        // A throwing answerer must fail the QUESTION closed, not the caller's
+        // tool call open — the seam contains its callbacks.
+        () => 'unavailable',
+      )
+      const bounded = this.withAnswerTimeout(answer, expiry === undefined ? undefined : () => {
+        expiry.abort(new Error('approval ask exceeded its bounded wait'))
       })
-    })
+      if (signal === undefined) return await bounded
+      return await new Promise<ApprovalOutcome>((resolve) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          resolve('cancelled')
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        void bounded.then((outcome) => {
+          signal.removeEventListener('abort', onAbort)
+          // After an abort won the race this resolve is a settled-promise no-op:
+          // the late answer is discarded by construction.
+          resolve(outcome)
+        })
+      })
+    } finally {
+      // The outcome above is decided; the ask's own lifetime is over. Aborting
+      // here reaches the forwarded-event gateway through the dispatch signal,
+      // which cancels the pending ask on every client and stops replaying it.
+      settled.abort()
+    }
   }
 
   /** The configured bounded wait for one dispatched ask; `<= 0` disables the bound. */

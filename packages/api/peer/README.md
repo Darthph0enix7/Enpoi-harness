@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Opt-in device-to-device peer API (doc 69 P2, contract in `dsh-migration/70-peer-api-contract.md`). One host exposes paired sessions through a small `peer` namespace — `handshake`, `create`, `prompt`, `follow`, `page`, `cancel`, `answer`, `state` — while the other device drives and answers them through `PeerClient`. The serving surface is narrow by construction: every call resolves through `~/.dsh/pairings.yaml` and maps onto `session.*` behind a closed dispatch table, so it never re-exposes `settings.*`, `credentials.*`, `fs.*`, or `control.*`. There is no authentication on the peer path for now (doc 69 §9.2); binding stays tailnet/LAN-only, and the optional pairing `token` hook is reserved, not enforced — the host parses the field and callers send it, but no request header is read yet (doc 72 §2.4).
+Opt-in device-to-device peer API (doc 69 P2, contract in `dsh-migration/70-peer-api-contract.md`). One host exposes paired sessions through a small `peer` namespace — `handshake`, `list`, `create`, `prompt`, `follow`, `page`, `cancel`, `answer`, `state` — while the other device drives and answers them through `PeerClient`. The serving surface is narrow by construction: every call resolves through `~/.dsh/pairings.yaml` and maps onto `session.*` behind a closed dispatch table, so it never re-exposes `settings.*`, `credentials.*`, `fs.*`, or `control.*`. There is no authentication on the peer path for now (doc 69 §9.2); binding stays tailnet/LAN-only, and the optional pairing `token` hook is reserved, not enforced — the host parses the field and callers send it, but no request header is read yet (doc 72 §2.4).
 
 ## Table of Contents
 
@@ -69,6 +69,7 @@ pairings:
 ## Host surface
 
 - `peer.handshake` negotiates protocol/schema/capabilities and reports visible pairings (never tokens); a protocol mismatch is `peer/version-skew`.
+- `peer.list` discovers the exposed sessions: each row carries the pairing alias, peer, exposure, whether the alias resolves to a Session right now, the bound session id (the caller's `remoteSessionId`), and a one-line latch summary with last activity when the host latch answers cheaply. An optional target resolves through the same pairing gate first, so an unpaired session is `peer/not-paired` rather than listed.
 - `peer.state` returns the execution latch (`running | waiting_approval | waiting_subagents | idle`), `activeDescendants`, pending asks, current model selection, `lastParticipantAction`, and the cursor. It reads the host's `session.executionState` latch when that call answers (`source: 'host-latch'`, quiet children included), and otherwise derives the latch from `turn/*`, `approval/*`, `subagent/catalog`, settlement notices, and the ask registry (`source: 'derived'`).
 - `peer.follow` streams an opening snapshot plus exposure-filtered durable events and latch transitions; an ask mint or settle also pushes a `state` frame (the change key carries only `(askId, kind, since)` per pending ask), so a mid-tool-call ask surfaces without waiting for the next durable event; `cursor` is authoritative for repair because `answer-only` filters records.
 - `peer.prompt` always queues (a human preempts); `hopCount` is telemetry and only a configured `runawayCeiling` enforces a cap.
@@ -104,7 +105,8 @@ A peer prompt appends at the normal user-turn boundary and preserves the reusabl
 - **Pending questions are process-local.** A restart drops them, exactly like a browser; the peer sees the interrupted terminal plus `idle`.
 - **Exposure is per pairing only** (per-session overrides were cut) and the debug read surface stays P3: request snapshots and diagnostics are not exposed.
 - **SRC dispatch.** The namespace runs on `@Remote` SRC markers; generated strict Typert faces (`./typert`/`./remote`) are not published yet.
-- **A peer-answered ask is not actively cancelled in connected browsers** until the client answers or delegates, so a human may briefly still see a settled ask.
+- **A settled ask is broadcast, never left answerable.** Any settle — a local client, a peer answer, the bounded wait, or a cancellation — aborts the ask's dispatch signal, so the forwarded-event gateway cancels the pending ask for every connected client and stops replaying it to clients that attach later. The profile peer bridge withdraws its locally surfaced card when the follow's next `state` frame drops the ask.
+- **`peer.create` maps deeper failures into the peer vocabulary.** A create/adopt/routing failure raised by the Session Controller or preset registry (`agent-preset/not-found`, `session/model-unavailable`, …) becomes `peer/not-found` with the original code preserved in `details.reason` and as the cause; peer-domain and `gateway/bad-request` errors pass through unchanged.
 - **`peer.create` routing** goes through `session.selectModel` with `persistDefault: false`, so a peer-created Session is routed without rewriting the deployment default model (doc 70 §6, doc 72 G6).
 - **Aliases are unique per host.** The wire `PeerTarget` carries no peer discriminator, so the pairing loader rejects a repeated alias across peers instead of letting one device's `create` hijack another's bound session (doc 72 G8).
 - README translation (`README.zh.md`, `README.i18n.yaml`) and the `api/` group README row are deferred to the translation tooling.

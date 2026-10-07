@@ -379,6 +379,17 @@ Host service backing the generated `ctx.remote.peer` namespace.
 @Remote('state') async state(request: PeerStateRequest): Promise<PeerStateValue>
 
 /**
+ * List the pairings this host exposes with a cheap live summary. Discovery
+ * is read-only and reports each pairing at its own exposure; a supplied
+ * target resolves through the same pairing gate as every other call, so an
+ * unpaired session is refused rather than listed.
+ * @param request - optional target narrowing the answer to one pairing.
+ * @returns the host device and one row per selected pairing.
+ * @throws {@link RemoteError} `peer/not-paired` when a supplied target does not resolve.
+ */
+@Remote('list') list(request?: PeerListRequest): PeerListValue
+
+/**
  * Create or explicitly adopt a Session and bind it to a pairing alias.
  * @param request - pairing alias, participant, optional explicit session and routing.
  * @returns the resolved target and whether a new Session was created.

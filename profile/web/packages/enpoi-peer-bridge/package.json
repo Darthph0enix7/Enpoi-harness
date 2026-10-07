@@ -2,7 +2,7 @@
   "name": "dsh-enpoi-peer-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Caller-side bridge for the device-to-device peer API: peer_status/ask/asks/answer/cancel tools over a paired remote session",
+  "description": "Caller-side bridge for the device-to-device peer API: peer_status/sessions/ask/asks/answer/cancel tools over a paired remote session",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

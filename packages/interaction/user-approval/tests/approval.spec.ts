@@ -91,7 +91,7 @@ describe('ApprovalService.request', () => {
     expect(dispatched?.signal?.aborted).toBe(true)
   })
 
-  it('keeps the caller request object exact when the bounded wait is disabled', async () => {
+  it('keeps the caller object untouched but dispatches a service-owned lifetime signal', async () => {
     const ctx = new Context()
     await ctx.plugin(ApprovalService, { answerTimeoutMs: 0 })
     const { agent } = fakeAgent()
@@ -104,7 +104,53 @@ describe('ApprovalService.request', () => {
 
     await expect(ctx.approval.request(request)).resolves.toBe('allowed-once')
 
-    expect(received).toBe(request)
+    // Every dispatched ask carries its own settle signal, even when no bounded
+    // wait does; the caller's object is borrowed and never mutated.
+    expect(received).not.toBe(request)
+    expect(received).toMatchObject({ agent, toolName: 'echo' })
+    expect(received?.signal).toBeInstanceOf(AbortSignal)
+    expect(request.signal).toBeUndefined()
+    // The settle signal is aborted once the ask is decided, which is how every
+    // other client showing it is told to dismiss.
+    expect(received?.signal?.aborted).toBe(true)
+  })
+
+  it('aborts the forwarded ask lifetime when an answerer settles it (settle broadcast)', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService, { answerTimeoutMs: 0 })
+    const { agent } = fakeAgent()
+    let dispatched: ApprovalRequest | undefined
+    const answer = Promise.withResolvers<ApprovalOutcome>()
+    ctx.on('approval/request', (request) => {
+      dispatched = request
+      return answer.promise
+    })
+
+    const pending = ctx.approval.request(requestOf(agent))
+    await Promise.resolve()
+    expect(dispatched?.signal?.aborted).toBe(false)
+    answer.resolve('allowed-once')
+
+    await expect(pending).resolves.toBe('allowed-once')
+    expect(dispatched?.signal?.aborted).toBe(true)
+  })
+
+  it('aborts the forwarded ask lifetime when the caller cancels', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService, { answerTimeoutMs: 0 })
+    const { agent } = fakeAgent()
+    let dispatched: ApprovalRequest | undefined
+    ctx.on('approval/request', (request) => {
+      dispatched = request
+      return new Promise<ApprovalOutcome>(() => {})
+    })
+    const controller = new AbortController()
+
+    const pending = ctx.approval.request(requestOf(agent, { signal: controller.signal }))
+    controller.abort()
+
+    await expect(pending).resolves.toBe('cancelled')
+    expect(dispatched?.signal?.aborted).toBe(true)
   })
 
   it('fails closed to unavailable when nobody listens, auditing the asked/decided pair', async () => {

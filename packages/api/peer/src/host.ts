@@ -44,6 +44,7 @@ import {
 } from './pairings.ts'
 import { PeerAskRegistry } from './registry.ts'
 import type {
+  PeerAlias,
   PeerAnswer,
   PeerAnswerRequest,
   PeerAnswerValue,
@@ -58,6 +59,9 @@ import type {
   PeerFollowRequest,
   PeerHandshakeRequest,
   PeerHandshakeValue,
+  PeerListEntry,
+  PeerListRequest,
+  PeerListValue,
   PeerPageRequest,
   PeerPageValue,
   PeerPairing,
@@ -84,6 +88,7 @@ const PEER_METHODS = [
   'peer.create',
   'peer.follow',
   'peer.handshake',
+  'peer.list',
   'peer.page',
   'peer.prompt',
   'peer.state',
@@ -242,9 +247,70 @@ export class PeerService extends TypertRemoteService {
   }
 
   /**
+   * List the pairings this host exposes with a cheap live summary. Discovery
+   * is read-only and reports each pairing at its own exposure; a supplied
+   * target resolves through the same pairing gate as every other call, so an
+   * unpaired session is refused rather than listed.
+   * @param request - optional target narrowing the answer to one pairing.
+   * @returns the host device and one row per selected pairing.
+   * @throws {@link RemoteError} `peer/not-paired` when a supplied target does not resolve.
+   */
+  @Remote('list')
+  list(request?: PeerListRequest): PeerListValue {
+    const loaded = this.pairings.load()
+    const selected = request?.target === undefined
+      ? loaded.pairings
+      : [this.resolveTarget(request.target).pairing]
+    return {
+      hostDevice: loaded.device,
+      pairings: selected.map(pairing => this.describeListEntry(pairing)),
+    }
+  }
+
+  /** One `peer.list` row: binding facts plus the host latch when that read is cheap. */
+  private describeListEntry(pairing: PeerPairing): PeerListEntry {
+    const base = {
+      alias: pairing.alias,
+      peer: pairing.peer,
+      exposure: pairing.exposure,
+      ...(pairing.remoteSessionId === undefined ? {} : { remoteSessionId: pairing.remoteSessionId }),
+    }
+    const resolved = this.pairings.resolve({ kind: 'alias', alias: pairing.alias })
+    if (resolved === undefined) {
+      return { ...base, bound: false, summary: 'not bound to a session' }
+    }
+    const latch = this.hostLatchOf(resolved.sessionId)
+    if (latch === undefined) {
+      // A cold Session has no attached execution state; the row still reports
+      // the binding without paying for a durable scan.
+      return {
+        ...base,
+        bound: true,
+        sessionId: resolved.sessionId,
+        summary: 'bound; latch unavailable (cold session)',
+      }
+    }
+    const pendingAsks = this.registry.pendingFor(resolved.sessionId).length
+    const lastActivity = latch.lastParticipantAction?.at
+      ?? latch.lastTurnEnd?.at
+      ?? (latch.latch === 'idle' ? undefined : latch.since)
+    return {
+      ...base,
+      bound: true,
+      sessionId: resolved.sessionId,
+      latch: latch.latch,
+      ...(lastActivity === undefined ? {} : { lastActivity }),
+      summary: latchSummary(latch, pendingAsks),
+    }
+  }
+
+  /**
    * Create or explicitly adopt a Session and bind it to a pairing alias.
    * @param request - pairing alias, participant, optional explicit session and routing.
    * @returns the resolved target and whether a new Session was created.
+   * @throws {@link RemoteError} `peer/not-paired`, `peer/forbidden`, or
+   * `peer/not-found` (a deeper create failure such as `agent-preset/not-found`
+   * is mapped into the peer vocabulary).
    */
   @Remote('create')
   async create(request: PeerCreateRequest): Promise<PeerCreateValue> {
@@ -261,29 +327,36 @@ export class PeerService extends TypertRemoteService {
       || request.reasoningEffort !== undefined
     let created = true
     let sessionId = request.sessionId
-    if (sessionId !== undefined && await this.sessionExists(sessionId)) {
-      created = false
-      if (routingRequested && pairing.allowModelChange !== true) {
-        throw new RemoteError(
-          'peer/forbidden',
-          'adopting an existing Session may not change its routing without allowModelChange',
-          { reason: 'model-change' },
-        )
+    try {
+      if (sessionId !== undefined && await this.sessionExists(sessionId)) {
+        created = false
+        if (routingRequested && pairing.allowModelChange !== true) {
+          throw new RemoteError(
+            'peer/forbidden',
+            'adopting an existing Session may not change its routing without allowModelChange',
+            { reason: 'model-change' },
+          )
+        }
+      } else {
+        const workspaceId = request.workspaceId ?? pairing.create.workspaceId
+        const cwd = request.cwd ?? pairing.create.cwd
+        const agentPreset = request.agentPreset ?? pairing.create.agentPreset
+        const createRequest: SessionCreateRequest = {
+          ...sessionId === undefined ? {} : { sessionId },
+          ...workspaceId === undefined ? {} : { workspaceId: brandString<NonNullable<SessionCreateRequest['workspaceId']>>(workspaceId) },
+          ...cwd === undefined ? {} : { cwd },
+          ...agentPreset === undefined ? {} : { agentPreset },
+        }
+        sessionId = (await this.ctx.sessionController.create(createRequest)).sessionId
       }
-    } else {
-      const workspaceId = request.workspaceId ?? pairing.create.workspaceId
-      const cwd = request.cwd ?? pairing.create.cwd
-      const agentPreset = request.agentPreset ?? pairing.create.agentPreset
-      const createRequest: SessionCreateRequest = {
-        ...sessionId === undefined ? {} : { sessionId },
-        ...workspaceId === undefined ? {} : { workspaceId: brandString<NonNullable<SessionCreateRequest['workspaceId']>>(workspaceId) },
-        ...cwd === undefined ? {} : { cwd },
-        ...agentPreset === undefined ? {} : { agentPreset },
+      if (routingRequested) {
+        await this.applySessionRouting(sessionId, request)
       }
-      sessionId = (await this.ctx.sessionController.create(createRequest)).sessionId
-    }
-    if (routingRequested) {
-      await this.applySessionRouting(sessionId, request)
+    } catch (error) {
+      // Deeper stacks raise their own codes (`agent-preset/not-found`,
+      // `session/not-found`, …); a peer caller gets the closed peer vocabulary
+      // with the original code preserved as `reason` and the cause.
+      throw createFailure(error, pairing.alias)
     }
     await this.pairings.bind(pairing.alias, pairing.peer, sessionId)
     this.recordPeerAction(sessionId, { action: 'create', actor: participant, at: Date.now() })
@@ -732,6 +805,48 @@ function latchKey(state: PeerExecutionState): string {
     state.lastTurnEnd?.reason ?? null,
     state.lastParticipantAction?.at ?? null,
   ])
+}
+
+/** One compact latch line for `peer.list` rows. */
+function latchSummary(latch: HostLatchFacts, pendingAskCount: number): string {
+  const asks = pendingAskCount === 0 ? 'no asks' : `${String(pendingAskCount)} ask${pendingAskCount === 1 ? '' : 's'}`
+  const descendants = latch.activeDescendants === 0
+    ? ''
+    : ` · ${String(latch.activeDescendants)} descendant${latch.activeDescendants === 1 ? '' : 's'}`
+  const turn = latch.lastTurnEnd === undefined
+    ? ''
+    : ` · last turn ${String(latch.lastTurnEnd.turn)} ${latch.lastTurnEnd.reason}`
+  return `${latch.latch} · ${asks}${descendants}${turn}`
+}
+
+/**
+ * Map a failure from the create/adopt/routing stack into the peer vocabulary.
+ * Peer-domain and transport-shape errors pass through unchanged; any deeper
+ * code (`agent-preset/not-found`, `session/not-found`, …) becomes
+ * `peer/not-found` with the original code preserved in `reason` and as cause.
+ */
+function createFailure(error: unknown, alias: PeerAlias): unknown {
+  const code = errorCodeOf(error)
+  if (error instanceof RemoteError && (code === 'gateway/bad-request' || code?.startsWith('peer/') === true)) {
+    return error
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return new RemoteError(
+    'peer/not-found',
+    `create for alias ${JSON.stringify(alias)} failed: ${code === undefined ? message : `${code} (${message})`}`,
+    {
+      alias,
+      ...(code === undefined ? {} : { reason: code }),
+    },
+    { cause: error },
+  )
+}
+
+/** Read one thrown value's stable error code structurally; no class is assumed. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code: unknown = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' && code.length > 0 ? code : undefined
 }
 
 /**

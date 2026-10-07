@@ -47,7 +47,45 @@ describe('UserQuestionService', () => {
     const result = await ctx.userQuestions.ask({ questions })
 
     expect(result).toEqual({ answers: [{ id: 'confirm', selected: ['yes'] }] })
-    expect(p.seen).toEqual([{ questions }])
+    expect(p.seen).toHaveLength(1)
+    expect(p.seen[0]?.questions).toEqual(questions)
+    // The provider receives the dispatched request with its settle signal.
+    expect(p.seen[0]?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('aborts the forwarded question lifetime once an answerer settles it (settle broadcast)', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const p = provider('yes')
+    registerAnswerer(ctx, p)
+
+    await ctx.userQuestions.ask({ questions: [{ id: 'confirm', question: 'Proceed?' }] })
+
+    expect(p.seen[0]?.signal?.aborted).toBe(true)
+  })
+
+  it('aborts the forwarded question lifetime when the caller cancels', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const seen: AskUserQuestionRequest[] = []
+    const pendingQuestion = Promise.withResolvers<never>()
+    registerAnswerer(ctx, {
+      ask: (request) => {
+        seen.push(request)
+        return pendingQuestion.promise
+      },
+    })
+    const controller = new AbortController()
+
+    const answer = ctx.userQuestions.ask({
+      questions: [{ id: 'confirm', question: 'Proceed?' }],
+      signal: controller.signal,
+    })
+    controller.abort()
+    pendingQuestion.reject(new DOMException('This operation was aborted', 'AbortError'))
+
+    await expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
+    expect(seen[0]?.signal?.aborted).toBe(true)
   })
 
   it('rejects ask requests when no provider is registered', async () => {

@@ -369,8 +369,8 @@ describe('Typert Remote streams', () => {
       streamInboxBytes: 262_144,
       remoteEventReplayMaxAgeMs: 900_000,
     })
-    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 }))
-      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 })
+    const maxDelayConfig = { websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 }
+    expect(TypertGatewayService.Config(maxDelayConfig)).toEqual(maxDelayConfig)
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
     }
@@ -1246,6 +1246,35 @@ describe('Typert Remote streams', () => {
     })
     expect(pending.resolve).toHaveBeenCalledTimes(1)
     expect(pending.reject).not.toHaveBeenCalled()
+    first.socket.close()
+    second.socket.close()
+    await unregister()
+  })
+
+  it('does not replay a settled ask to a Client that attaches afterwards', async () => {
+    const { ctx } = await setup(true)
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const agent = ctx.extend()
+    const first = await openEventClient(ctx, 'events-settled-a')
+    const second = await openEventClient(ctx, 'events-settled-b')
+    const pending = pendingInvocation(agent)
+    source.push(pending.dispatch)
+    await vi.waitFor(() => {
+      expect(deliveredInvocation(first)).toBeDefined()
+      expect(deliveredInvocation(second)).toBeDefined()
+    })
+    const frame = deliveredInvocation(second)!
+    await sendEventResult(second, frame, { kind: 'result', value: 'allowed' })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+
+    // The ask settled: a Client that connects after the first answer is no
+    // longer offered it, so it cannot be answered a second time.
+    const late = await openEventClient(ctx, 'events-settled-late')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(deliveredInvocation(late)).toBeUndefined()
+
+    late.socket.close()
     first.socket.close()
     second.socket.close()
     await unregister()

@@ -179,6 +179,27 @@ export interface PeerStateValue {
   readonly cursor: number
 }
 
+/** One pairing row `peer.list` reports. */
+export interface PeerListEntry {
+  readonly alias: string
+  readonly peer: string
+  readonly exposure: string
+  readonly bound: boolean
+  /** Session the host exposes; the caller's `remoteSessionId`. */
+  readonly sessionId?: string
+  /** Caller-role pin echoed from a shared pairing document, when declared. */
+  readonly remoteSessionId?: string
+  readonly latch?: string
+  readonly lastActivity?: number
+  readonly summary: string
+}
+
+/** `peer.list` value. */
+export interface PeerListValue {
+  readonly hostDevice: string
+  readonly pairings: readonly PeerListEntry[]
+}
+
 /** `peer.create` value. */
 export interface PeerCreateValue {
   readonly target: { readonly device: string; readonly sessionId: string; readonly exposure: string; readonly alias?: string }
@@ -240,6 +261,11 @@ export class PeerClient {
   /** Read the latch for one target. */
   state(target: PeerTarget): Promise<PeerStateValue> {
     return this.rpc('state', { target })
+  }
+
+  /** List the pairings the host exposes, optionally narrowed to one resolved target. */
+  list(request: { readonly target?: PeerTarget } = {}): Promise<PeerListValue> {
+    return this.rpc('list', request)
   }
 
   /** Create or adopt a Session under a pairing alias. */

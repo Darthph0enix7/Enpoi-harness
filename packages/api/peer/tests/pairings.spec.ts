@@ -107,6 +107,36 @@ pairings:
     expect(statSync(bindingsPath).mode & 0o777).toBe(0o600)
   })
 
+  it('resolves a caller-pinned remoteSessionId to the pairing session it names', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: pinned
+    peer: laptop
+    exposure: debug
+    sessionId: sess-local
+    remoteSessionId: sess-pin
+  - alias: created
+    peer: desktop
+    exposure: debug
+    remoteSessionId: sess-bound-pin
+    create:
+      cwd: ${root}
+`)
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
+    const resolved = store.resolve({ kind: 'session', sessionId: 'sess-pin' as never })
+    expect(resolved?.pairing.alias).toBe('pinned')
+    expect(resolved?.sessionId).toBe('sess-local')
+    // A pin with no own session resolves through the created binding.
+    await store.bind('created' as never, 'desktop', 'sess-created' as never)
+    expect(store.resolve({ kind: 'session', sessionId: 'sess-bound-pin' as never })?.sessionId).toBe('sess-created')
+    // An undeclared pin grants nothing.
+    expect(store.resolve({ kind: 'session', sessionId: 'sess-unknown' as never })).toBeUndefined()
+  })
+
   it('reloads a changed pairing file and keeps the last good snapshot on corruption', async () => {
     const root = tempRoot()
     const pairingsPath = join(root, 'pairings.yaml')

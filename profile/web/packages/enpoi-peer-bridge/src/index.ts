@@ -2,14 +2,17 @@
  * enpoi-peer-bridge — the caller side of the device-to-device peer API
  * (doc 69 P2, doc 70, doc 27's thin bridge).
  *
- * A local agent uses five tools to work with a *remote* harness session:
+ * A local agent uses six tools to work with a *remote* harness session:
  * `peer_status` (handshake + latch + model), `peer_ask` (prompt the remote as
  * an attributed peer turn, follow to a terminal state, return the answer),
+ * `peer_sessions` (discover bound sessions across the caller-role pairings),
  * `peer_asks` (pending remote asks), `peer_answer` (settle one), and
  * `peer_cancel`. A remote approval ask raised while following is surfaced to
  * the local operator through the local approval service when that is usable,
  * and the local decision is relayed back with `peer.answer` — first answer
- * wins; a `peer/conflict` is reported, never retried blind.
+ * wins; a `peer/conflict` is reported, never retried blind. When the remote
+ * ask settles elsewhere first, the follow's next `state` frame withdraws the
+ * local card instead of leaving it answerable.
  *
  * Pairings are read from `~/.dsh/pairings.yaml` by default; `pairingsPath`
  * points at another document (the live test uses a scratch file and never
@@ -43,7 +46,7 @@ import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnsw
 import { PeerBridgeError, PeerClient } from './peer-client.js'
 import { recordAssistantText, recordRpcId, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
-import { defaultPairingsPath, loadCallerPairing } from './pairings.js'
+import { callerPairings, defaultPairingsPath, loadCallerPairing, readPairingDocument } from './pairings.js'
 
 /** Cordis plugin name. */
 export const name = 'enpoi-peer-bridge'
@@ -129,6 +132,10 @@ interface ToolFailure {
 
 interface AskBridgeRecord extends AskRecord {
   readonly summary: string
+  /** Aborts only this ask's locally surfaced card when the remote ask settles elsewhere. */
+  readonly card: AbortController
+  /** Set when the remote state first showed the ask gone while its card was open. */
+  withdrawn?: boolean
 }
 
 /**
@@ -254,6 +261,110 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       } catch (error) {
         return failureFrom(error, pairing.endpoint)
       }
+    },
+  })
+
+  ctx.tools.register({
+    name: 'peer_sessions',
+    description: [
+      'List paired peer sessions: for every caller-role pairing in the local document, the bound remote',
+      'session id (the local remoteSessionId pin or the session the host reports), the latch summary, and',
+      'last activity. Use it to discover which session an alias currently addresses before peer_ask or',
+      'peer_asks. Read-only; an unreachable host appears as that row\'s error.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        alias: { type: 'string', description: 'Limit the listing to one caller-role pairing alias.' },
+      },
+      required: [],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          device: { type: 'string' },
+          sessions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                alias: { type: 'string' },
+                peer: { type: 'string' },
+                endpoint: { type: 'string' },
+                remoteSessionId: { type: 'string' },
+                exposure: { type: 'string' },
+                bound: { type: 'boolean' },
+                latch: { type: 'string' },
+                lastActivity: { type: 'string' },
+                summary: { type: 'string' },
+                error: failureSchema(),
+              },
+              required: ['alias', 'peer'],
+            },
+          },
+          note: { type: 'string' },
+          error: failureSchema(),
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => [{ type: 'text', text: renderSessions(value) }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const request = narrow(args)
+      const filter = typeof request.alias === 'string' && request.alias !== '' ? request.alias : undefined
+      let document: PairingDocument
+      try {
+        document = readPairingDocument(pairingsPath)
+      } catch (error) {
+        return { ok: false, device: '', sessions: [], error: badRequest(errorText(error)).error }
+      }
+      const dialable = callerPairings(document).filter(pairing => filter === undefined || pairing.alias === filter)
+      if (dialable.length === 0) {
+        return {
+          ok: false,
+          device: document.device,
+          sessions: [],
+          error: badRequest(filter === undefined
+            ? 'no caller-role pairings in the pairing document'
+            : `no caller-role pairing with alias ${JSON.stringify(filter)}`).error,
+        }
+      }
+      const sessions: Record<string, unknown>[] = []
+      for (const pairing of dialable) {
+        const base = {
+          alias: pairing.alias,
+          peer: pairing.peer,
+          endpoint: pairing.endpoint,
+          remoteSessionId: pairing.remoteSessionId ?? '',
+          exposure: pairing.exposure ?? '',
+        }
+        try {
+          const listed = await makeClient(pairing, config, document.device, deps).list({})
+          const entry = listed.pairings.find(candidate => candidate.alias === pairing.alias)
+          sessions.push({
+            ...base,
+            remoteSessionId: pairing.remoteSessionId ?? entry?.sessionId ?? '',
+            exposure: entry?.exposure ?? base.exposure,
+            bound: entry?.bound ?? false,
+            ...(entry?.latch === undefined ? {} : { latch: entry.latch }),
+            ...(entry?.lastActivity === undefined ? {} : { lastActivity: new Date(entry.lastActivity).toISOString() }),
+            summary: entry === undefined ? 'the host lists no pairing under this alias' : entry.summary,
+          })
+        } catch (error) {
+          sessions.push({
+            ...base,
+            bound: false,
+            summary: '',
+            error: failureFrom(error, pairing.endpoint).error,
+          })
+        }
+      }
+      return { ok: true, device: document.device, sessions }
     },
   })
 
@@ -681,6 +792,20 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   // local card is open. The in-flight set is capped, and each task's failure
   // is contained so a broken answerer never takes the follow down.
   const inFlight = new Set<Promise<void>>()
+  // A remote ask can settle on the peer (another device answered) while its
+  // local card is open. The registry pushes a state frame on every settle, so
+  // a card whose ask vanished from pendingAsks is withdrawn here instead of
+  // staying answerable behind a settled ask.
+  const withdrawMissing = (pending: readonly PeerPendingAsk[]): void => {
+    const present = new Set(pending.map(ask => ask.askId))
+    for (const record of asks.values()) {
+      if (present.has(record.askId) || record.withdrawn === true) continue
+      if (record.decision !== undefined || record.relay !== undefined) continue
+      record.withdrawn = true
+      record.note = 'settled elsewhere first (another device answered) — local card dismissed'
+      record.card.abort(new Error('remote ask settled before the local answer'))
+    }
+  }
   const surface = (pending: readonly PeerPendingAsk[]): void => {
     const task = surfacePending(
       ctx, client, options.noticesPath, pairing, participant, requestedTarget, pending, asks,
@@ -691,6 +816,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     inFlight.add(task)
   }
   const surfaceFrame = async (pending: readonly PeerPendingAsk[]): Promise<void> => {
+    withdrawMissing(pending)
     // At the cap, wait for a slot; every task settles on answer, abort, or
     // timeout, so this cannot park the follow indefinitely.
     while (inFlight.size >= MAX_SURFACE_TASKS) await Promise.race(inFlight)
@@ -834,11 +960,16 @@ async function surfacePending(
       ...(ask.kind === 'approval' && ask.reason !== undefined ? { reason: ask.reason } : {}),
       surfaced: 'notice',
       summary: askSummary(ask),
+      card: new AbortController(),
     }
     asks.set(ask.askId, record)
+    // The card's lifetime: the follow generation and this one ask. A remote
+    // settle aborts only this controller (withdrawMissing), so one settled
+    // ask never tears down a sibling card.
+    const askSignal = AbortSignal.any([signal, record.card.signal])
 
     if (ask.kind === 'question') {
-      await surfaceQuestion(ctx, client, noticesPath, pairing, participant, target, ask, record, signal, agent)
+      await surfaceQuestion(ctx, client, noticesPath, pairing, participant, target, ask, record, askSignal, agent)
       continue
     }
     const approval = ctx.get('approval')
@@ -854,13 +985,23 @@ async function surfacePending(
         agent,
         toolName: ask.toolName ?? 'peer.ask',
         reason: askLabel(pairing.alias, sessionLabel, ask),
-        signal,
+        signal: askSignal,
       })
+      if (record.withdrawn === true) {
+        // The remote settled while the local card was open: no relay (it would
+        // only race a decided ask) and no notice (settlement is not a refusal).
+        record.decision = 'cancelled'
+        continue
+      }
       // A peer answer is one-shot by contract: both standing outcomes degrade
       // to `allowed-once` (never a peer-granted durable grant).
       decision = outcome === 'allowed-always' || outcome === 'allowed-always-broad' ? 'allowed-once' : outcome
       record.surfaced = 'approval'
     } catch {
+      if (record.withdrawn === true) {
+        record.decision = 'cancelled'
+        continue
+      }
       // No open local turn, no answerer, or a withdrawn ask: the remote ask
       // stays answerable through peer_answer and gets a durable notice.
       decision = 'unsurfaced'
@@ -931,9 +1072,19 @@ async function surfaceQuestion(
       ...(agent === undefined ? {} : { agent }),
       signal,
     })
+    if (record.withdrawn === true) {
+      // The remote settled while the local question was open: no relay and no
+      // notice; settlement is not a local refusal.
+      record.decision = 'cancelled'
+      return
+    }
     record.surfaced = 'question'
     record.selected = answer.answers.flatMap(item => item.selected)
   } catch (error) {
+    if (record.withdrawn === true) {
+      record.decision = 'cancelled'
+      return
+    }
     record.decision = 'unsurfaced'
     record.note = `local question answerer declined (${errorText(error)}); question ask recorded with its options and answerable via peer_answer`
     recordAskNotice(noticesPath, pairing.alias, sessionLabel, ask, record.note)
@@ -1110,6 +1261,28 @@ function renderStatus(value: unknown): string {
     `session ${String(record.sessionId)} (${String(record.exposure)}) bound=${String(record.bound)}`,
     `latch ${String(record.latch)} (${String(record.latchSource)}), descendants ${String(record.activeDescendants)}, model ${String(record.model)}`,
     pendingAsks.length === 0 ? 'no pending asks' : `pending: ${pendingAsks.join('; ')}`,
+  ].join('\n')
+}
+
+function renderSessions(value: unknown): string {
+  const record = narrow(value)
+  const sessions = Array.isArray(record.sessions) ? record.sessions as Record<string, unknown>[] : []
+  if (record.ok !== true && sessions.length === 0) {
+    const error = narrow(record.error)
+    return `peer_sessions failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`
+  }
+  if (sessions.length === 0) return `no caller-role pairings on ${String(record.device ?? '')}`
+  return [
+    `device ${String(record.device ?? '')} · ${String(sessions.length)} pairing(s)`,
+    ...sessions.map(session => {
+      const error = session.error === undefined ? undefined : narrow(session.error)
+      const state = error !== undefined
+        ? `unreachable [${String(error.code ?? 'unknown')}] ${String(error.message ?? '')}`
+        : `${session.remoteSessionId === '' ? 'not bound' : `session ${String(session.remoteSessionId)}`}`
+          + ` (${String(session.exposure ?? '')}) bound=${String(session.bound === true)} latch=${String(session.latch ?? 'unknown')}`
+          + `${session.summary === '' ? '' : ` — ${String(session.summary)}`}`
+      return `• ${String(session.alias)} → ${String(session.peer)} @ ${String(session.endpoint)} · ${state}`
+    }),
   ].join('\n')
 }
 

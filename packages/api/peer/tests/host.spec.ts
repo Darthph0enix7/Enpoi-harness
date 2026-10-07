@@ -13,7 +13,7 @@ import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PeerService } from '../src/host.ts'
@@ -408,6 +408,65 @@ describe('peer host service', () => {
     }
   })
 
+  it('lists pairings with bound sessions, latch summaries, and unbound rows', async () => {
+    const { peer, sessionId, target } = await setup({ exposures: ['debug', 'answer-only'], extraAliases: ['spare'] })
+    const value = peer.list({})
+    expect(value.hostDevice).toBe('serverlocal')
+    expect(value.pairings.map(row => row.alias)).toEqual(['debug', 'answer-only', 'spare'])
+    expect(value.pairings[0]).toMatchObject({
+      alias: 'debug',
+      peer: 'laptop',
+      exposure: 'debug',
+      bound: true,
+      sessionId,
+      latch: 'idle',
+      summary: 'idle · no asks',
+    })
+    // Exposure is reported per pairing and never widened by the listing.
+    expect(value.pairings[1]).toMatchObject({ alias: 'answer-only', exposure: 'answer-only', bound: true, sessionId })
+    expect(value.pairings[2]).toMatchObject({ alias: 'spare', bound: false, summary: 'not bound to a session' })
+    // A resolved target narrows the listing to that one pairing.
+    const byTarget = peer.list({ target })
+    expect(byTarget.pairings).toHaveLength(1)
+    expect(byTarget.pairings[0]?.alias).toBe('debug')
+    expect(peer.list({ target: { kind: 'session', sessionId } }).pairings[0]?.alias).toBe('debug')
+  })
+
+  it('reports a pending ask in the peer.list summary and last activity', async () => {
+    const { peer, ctx, sessionId } = await setup()
+    const agent = ctx.agents.get(sessionId) as Agent
+    mintQuestionAsk(ctx, agent)
+    await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+    const row = peer.list({}).pairings[0]!
+    expect(row.latch).toBe('waiting_approval')
+    expect(row.summary).toContain('1 ask')
+    expect(typeof row.lastActivity).toBe('number')
+  })
+
+  it('refuses an unpaired list target and maps deeper create failures into peer/not-found', async () => {
+    const { peer, ctx } = await setup({ extraAliases: ['spare'] })
+    try {
+      peer.list({ target: { kind: 'session', sessionId: 'ghost' as never } })
+      expect.unreachable('an unpaired list target must be refused')
+    } catch (error) {
+      expect((error as RemoteError).code).toBe('peer/not-paired')
+    }
+    const presetFailure = new RemoteError('agent-preset/not-found', 'Unknown agent preset: nope', {
+      agentPreset: 'nope',
+      available: [],
+    })
+    vi.spyOn(ctx.sessionController, 'create').mockRejectedValueOnce(presetFailure)
+    try {
+      await peer.create({ alias: 'spare' as never, participant: { kind: 'peer', name: 'laptop' }, agentPreset: 'nope' })
+      expect.unreachable('an unknown preset must fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(RemoteError)
+      expect((error as RemoteError).code).toBe('peer/not-found')
+      expect((error as RemoteError).details).toMatchObject({ alias: 'spare', reason: 'agent-preset/not-found' })
+      expect((error as Error & { cause?: unknown }).cause).toBe(presetFailure)
+    }
+  })
+
   it('creates, prompts, observes a completed turn, and pages history', async () => {
     const { peer, ctx, sessionId, target } = await setup()
     const bound = JSON.parse(readFileSync(join(peer.pairings.bindingsPath), 'utf8')) as {
@@ -541,7 +600,11 @@ describe('peer host service', () => {
     // Stand in for the local browser answerer: it parks until a human decides,
     // which is exactly the window the peer may answer in.
     const localDecision = Promise.withResolvers<ApprovalOutcome>()
-    ctx.on('approval/request', () => localDecision.promise)
+    let localAsk: ApprovalRequest | undefined
+    ctx.on('approval/request', (request) => {
+      localAsk = request
+      return localDecision.promise
+    })
     const agent = ctx.agents.get(sessionId) as Agent
     const decision = ctx.approval.request({ agent, toolName: 'peer-test', reason: 'unit ask' })
     await waitFor(async () => (await peer.state({ target })).state.latch === 'waiting_approval')
@@ -561,6 +624,10 @@ describe('peer host service', () => {
     })
     expect(answered).toEqual({ accepted: true, settled: true })
     await expect(decision).resolves.toBe('allowed-once')
+    // Settle broadcast: the local forwarded ask's lifetime signal aborts as
+    // soon as the peer wins, so every other client dismisses its card and a
+    // client that attaches later is never offered the settled ask.
+    expect(localAsk?.signal?.aborted).toBe(true)
     expect(() => peer.answer({
       target,
       participant: { kind: 'peer', name: 'laptop' },

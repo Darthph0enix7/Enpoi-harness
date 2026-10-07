@@ -70,6 +70,13 @@ export class UserQuestionService extends Service {
   /**
    * Ask the scoped answerer waterfall and wait for the user's answer.
    *
+   * The dispatched request always carries a service-owned settle signal next
+   * to the caller's cancellation: once the answerer chain settles the ask —
+   * a local client answered, a peer registry won its race, or the caller
+   * withdrew it — that signal aborts, so every forwarded presentation still
+   * showing the question is cancelled and a client that attaches later is
+   * never offered it.
+   *
    * When a caller supplies an agent, human interaction is valid only for the
    * exact live runtime root. Runtime ownership, not durable session lineage,
    * decides this boundary: an owned child has no human answerer and would
@@ -131,13 +138,20 @@ export class UserQuestionService extends Service {
       'no user-questions answerer accepted the request',
       'NO_PROVIDER',
     ))
+    const settled = new AbortController()
+    const dispatch: AskUserQuestionRequest = {
+      ...request,
+      signal: request.signal === undefined
+        ? settled.signal
+        : AbortSignal.any([request.signal, settled.signal]),
+    }
     try {
       return await (agent === undefined
-        ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
+        ? this.ctx.waterfall('user-questions/request', dispatch, noAnswerer)
         : this.ctx.waterfall(
           scopeTarget(agent, agent),
           'user-questions/request',
-          { ...request, agent },
+          { ...dispatch, agent },
           noAnswerer,
         ))
     } catch (error) {
@@ -147,6 +161,11 @@ export class UserQuestionService extends Service {
         throw abortedQuestion(error)
       }
       throw restored
+    } finally {
+      // The answer (or failure) is decided; the question's lifetime is over.
+      // The abort reaches the forwarded-event gateway through the dispatch
+      // signal, cancelling the pending question on every attached client.
+      settled.abort()
     }
   }
 }

@@ -2,7 +2,7 @@
 
 English | [中文](peer.zh.md)
 
-The device-to-device peer seam of [`@deepseek-ai/dsh-api-peer`](../../packages/api/peer). One host exposes a narrow `peer` namespace — `handshake`, `state`, `create`, `prompt`, `cancel`, `answer`, `page`, `follow` — that maps onto `session.*` operations behind a closed dispatch table; the other device drives and observes paired Sessions through it. Pairing is the addressing boundary: every call resolves its `PeerTarget` through the host's pairing table first, so only Sessions named there are audible, and exposure filtering, participant validation, the hop ceiling, and the orphan watchdog are applied host-side, never by the caller.
+The device-to-device peer seam of [`@deepseek-ai/dsh-api-peer`](../../packages/api/peer). One host exposes a narrow `peer` namespace — `handshake`, `list`, `state`, `create`, `prompt`, `cancel`, `answer`, `page`, `follow` — that maps onto `session.*` operations behind a closed dispatch table; the other device drives and observes paired Sessions through it. Pairing is the addressing boundary: every call resolves its `PeerTarget` through the host's pairing table first, so only Sessions named there are audible, and exposure filtering, participant validation, the hop ceiling, and the orphan watchdog are applied host-side, never by the caller.
 
 Source: [`packages/api/peer/src/host.ts`](../../packages/api/peer/src/host.ts)
 
@@ -140,6 +140,34 @@ interface PeerHandshakeValue {
 
 `protocolVersion` is the hard compatibility gate: any value other than `1` throws `peer/version-skew` with the expected and received values before any other handshake work. `harnessVersion` and `schemaDigest` are advisory values the host returns for the caller's own comparison, so a differing digest at a matching protocol version is accepted. `device` must be a non-empty string (`gateway/bad-request` otherwise). Each pairing in the reply is a `PeerPairingSummary` of alias, peer, exposure, `tokenRequired`, and — when the alias currently resolves to a Session — the resolved target.
 
+## Discovery
+
+`list` is the read-only discovery call. Without a target it reports every pairing the host exposes; with a `target` it resolves that target through the same pairing gate as every other call (`peer/not-paired` when it does not resolve) and returns only that pairing. Each row carries the alias, peer, and exposure, whether the alias resolves to a Session right now, the bound session id — the caller's `remoteSessionId`, from the pairing's own pin or the `peer.create` binding — and, when `sessionController.executionState` answers cheaply for the bound Session, the host latch, a last-activity time, and a one-line summary (`latch · asks · last turn`). A pin declared only as the pairing's caller-role `remoteSessionId` also resolves an explicit `peer.state`/`peer.list` session target, so a shared document authored from the other device's side stays addressable without granting an arbitrary session id.
+
+```ts
+/** `peer.list` request: an absent target lists every pairing; a target narrows the answer. */
+interface PeerListRequest { readonly target?: PeerTarget }
+
+/** One pairing row `peer.list` reports. */
+interface PeerListEntry {
+  readonly alias: PeerAlias
+  readonly peer: PeerDeviceName
+  readonly exposure: PeerExposure
+  readonly bound: boolean
+  readonly sessionId?: SessionId
+  readonly remoteSessionId?: SessionId
+  readonly latch?: PeerLatch
+  readonly lastActivity?: number
+  readonly summary: string
+}
+
+/** `peer.list` value: the serving host's device name and one row per pairing. */
+interface PeerListValue {
+  readonly hostDevice: PeerDeviceName
+  readonly pairings: readonly PeerListEntry[]
+}
+```
+
 ## Sessions: create, prompt, cancel
 
 `create` requires the addressed pairing to carry a `create` block (`peer/not-paired` otherwise). With an explicit `sessionId` that already exists, the Session is adopted and `created` is false; routing fields on an adoption are refused with `peer/forbidden` unless the pairing sets `allowModelChange: true`. Otherwise the Session is created through `sessionController.create`, with the request's `workspaceId`, `cwd`, and `agentPreset` falling back to the pairing's `create` defaults, and the alias→session binding is persisted.
@@ -248,7 +276,7 @@ The host latch wins when it answers. `state` first calls `sessionController.exec
 
 The ask registry observes `approval/request` and `user-questions/request` with `prepend: true`, so it mints a `PeerAskId` before any local forwarding parks the waterfall. Only asks whose root Session is exposed by a pairing are published; an ask raised by a child agent is bound to the root Session a peer follows by walking the `parentSession` chain (bounded to 32 levels), and an ask with no attributable agent or no resolvable root Session stays local.
 
-The local chain is started immediately with `next()` and the registry races it against the peer answer: whichever settles first decides and the loser's value is discarded. A settled ask is retired with bounded 256-entry tombstones, so a late answer is `peer/conflict` rather than `peer/not-found`. Since pending-ask membership has no durable event, the registry pushes a coalesced change wakeup on mint and settle, and a `follow` generation turns a latch-key change into at most one `state` frame.
+The local chain is started immediately with `next()` and the registry races it against the peer answer: whichever settles first decides and the loser's value is discarded. The services own the settle broadcast: every dispatched ask carries a service-owned signal that aborts as soon as the ask settles by any route — a local answerer, the peer registry winning, the approval bound expiring, or the caller cancelling — and the forwarded-event gateway watches that signal to cancel the pending ask on every connected client and to stop replaying it to clients that attach later. The profile peer bridge likewise withdraws its locally surfaced card when the follow's next `state` frame drops the ask. A settled ask is retired with bounded 256-entry tombstones, so a late answer is `peer/conflict` rather than `peer/not-found`. Since pending-ask membership has no durable event, the registry pushes a coalesced change wakeup on mint and settle, and a `follow` generation turns a latch-key change into at most one `state` frame.
 
 ```ts
 /** One ask a peer may answer, correlated by the host-minted `askId`. */
@@ -337,12 +365,12 @@ A peer turn whose follower leaves is bounded. Prompt admission arms the watchdog
 ## Limits and known gaps
 
 - Pending asks live only in the registry's in-memory tables: a host restart loses them, and only asks minted while the host process lives can be answered. Question asks are the strictest case — the host accepts structured `{answers: [...]}` replies at `peer.answer`, but the shipped caller surfaces answer approvals only, so a remote question parks the turn until a browser answers or the watchdog aborts (doc 72 G1).
-- A peer-settled ask is not actively cancelled for local answerers: the race starts the browser chain and only discards its late value, so the browser can still display a card whose outcome is already decided. A local chain that rejects settles the race with that rejection and retires the ask.
+- A local chain that rejects settles the race with that rejection and retires the ask; a peer-settled ask aborts the dispatched request's settle signal (the settle broadcast) and is never replayed to a client that attaches afterwards.
 - `hopCount` and `runawayCeiling` are effectively reserved for shipped callers: the ceiling is enforced only when a pairing configures it, and it compares the raw caller-supplied `hopCount`, which the shipped callers send as `0`.
 - `token` is reserved, not enforced: the host parses it and reports only `tokenRequired`; no request header is read in this package, so any reachable caller may address a paired alias.
 - The follow latch key omits the model selection, so a model-only change emits no `state` frame (and `model/selection` is filtered at `answer-only` exposure); `peer.state` remains authoritative.
 - A host latch can report `latch: 'waiting_approval'` while `pendingAsks` is empty when the ask was never minted by the registry, such as an unattributable question; the state does not join the two sources.
-- Watchdog cancellations are unattributed, and `create` failures raised deeper in the stack (for example `agent-preset/not-found`) pass through as their original codes rather than peer-domain errors.
+- Watchdog cancellations are unattributed. A `create`/routing failure raised deeper in the stack is mapped to `peer/not-found` with the original code preserved in `details.reason` and as the cause, so the closed `peer/*` vocabulary holds at the wire.
 - `create` is gated by the pairing's `create` block, but participant identity is validated only structurally — it is not matched against the pairing's `peer` device.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
@@ -377,6 +405,17 @@ Host service backing the generated `ctx.remote.peer` namespace.
  * @returns latch, descendants, pending asks, model selection, and cursor.
  */
 @Remote('state') async state(request: PeerStateRequest): Promise<PeerStateValue>
+
+/**
+ * List the pairings this host exposes with a cheap live summary. Discovery
+ * is read-only and reports each pairing at its own exposure; a supplied
+ * target resolves through the same pairing gate as every other call, so an
+ * unpaired session is refused rather than listed.
+ * @param request - optional target narrowing the answer to one pairing.
+ * @returns the host device and one row per selected pairing.
+ * @throws {@link RemoteError} `peer/not-paired` when a supplied target does not resolve.
+ */
+@Remote('list') list(request?: PeerListRequest): PeerListValue
 
 /**
  * Create or explicitly adopt a Session and bind it to a pairing alias.
