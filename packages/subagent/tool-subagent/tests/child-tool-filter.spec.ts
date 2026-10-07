@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
-import { SHARED_CHILD_KEEP } from '../src/index.ts'
-import { callSubagent, setup, text } from './harness.ts'
+import { ROLE_CHILD_ALLOW, SHARED_CHILD_KEEP } from '../src/index.ts'
+import { callSubagent, setup, TEST_REGISTERED_TOOLS, text } from './harness.ts'
 
 // The always-denied worker surface, pinned verbatim as the model-visible
 // contract. Deny-only: `tools.restrict()` skips names it does not know, so
@@ -47,9 +47,18 @@ const SHARED_DENY_DELEGATING = SHARED_DENY.filter(name => name !== 'subagent')
 
 const ROLE_EXTRAS = {
   explorer: ['edit', 'write', 'str_replace_editor'],
-  librarian: ['str_replace_editor'],
   fixer: [],
   designer: [],
+}
+
+/**
+ * The built-in allowlist after the spawn path's live-registry audit. The test
+ * composition registers only {@link TEST_REGISTERED_TOOLS} plus this plugin's
+ * own `subagent` tool, so every other built-in name is dropped with a warning.
+ */
+function auditedBuiltin(role: 'librarian' | 'oracle'): string[] {
+  const known = new Set<string>([...TEST_REGISTERED_TOOLS, 'subagent'])
+  return ROLE_CHILD_ALLOW[role]!.filter(name => known.has(name))
 }
 
 /** Spawn one foreground delegation and return the request the provider saw. */
@@ -71,7 +80,6 @@ async function captureRequest(
 describe('dsh-tool-subagent per-child tool filter', () => {
   it.each([
     ['explorer', 'Explorer: map the delegation surface', ROLE_EXTRAS.explorer, SHARED_DENY],
-    ['librarian', 'Librarian: research the API documentation', ROLE_EXTRAS.librarian, SHARED_DENY_DELEGATING],
     ['fixer', 'Fixer: patch the parser bug', ROLE_EXTRAS.fixer, SHARED_DENY],
     ['designer', 'Designer: restyle the settings page', ROLE_EXTRAS.designer, SHARED_DENY],
     // The Oracle is tool-only: a description naming it is NOT a role selection,
@@ -84,15 +92,63 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(request.toolFilter).toEqual({ deny: [...shared, ...extras] })
   })
 
+  it('composes the librarian built-in allowlist (server permissions parity) with the shared floor', async () => {
+    const request = await captureRequest('Librarian: research the API documentation')
+    // The built-in allowlist is audited against the live registry, so the test
+    // composition keeps only the registered names; the whiteboard keep list is
+    // unioned into every explicit allow surface.
+    expect(request.toolFilter?.allow).toEqual([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])
+    expect(request.toolFilter?.deny).toEqual(SHARED_DENY_DELEGATING)
+  })
+
+  it('drops built-in allowlist names the deployment does not register and still spawns', async () => {
+    // A fresh install without the wizard keeps `web_search` unregistered; the
+    // librarian must still spawn (dropped with a warning) instead of aborting
+    // on `tools.restrict()`'s unknown-allow check.
+    const warnings: string[] = []
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      { provider: 'mock' },
+      { onStart: (request) => { seen = request } },
+    )
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    const result = await callSubagent(ctx, { description: 'Librarian: research the API documentation', prompt: 'work' })
+    expect(result.isError).toBe(false)
+    expect(seen?.toolFilter?.allow).toEqual([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])
+    expect(warnings.filter(message => message.includes('"web_search"'))).toHaveLength(1)
+    expect(warnings[0]).toContain('role "librarian"')
+  })
+
+  it('composes the Oracle built-in allowlist when spawnable re-enables it', async () => {
+    const request = await captureRequest('Oracle: architecture review', {
+      settingsDocument: { roles: { oracle: { spawnable: true } } },
+    })
+    expect(request.toolFilter?.allow).toEqual([...auditedBuiltin('oracle'), ...SHARED_CHILD_KEEP])
+    expect(request.toolFilter?.deny).toEqual(SHARED_DENY_DELEGATING)
+  })
+
   it('keeps the generic subagent for the librarian research fan-out and denies it to other workers', async () => {
     const librarian = await captureRequest('Librarian: research the API documentation')
-    const deny = librarian.toolFilter?.deny ?? []
-    expect(deny).not.toContain('subagent')
+    expect(librarian.toolFilter?.allow).toContain('subagent')
+    expect(librarian.toolFilter?.deny).not.toContain('subagent')
     // Only the generic delegation tool survives; the provider-specific
     // variants stay on the shared floor.
-    expect(deny).toEqual(expect.arrayContaining(['subagent_fork', 'subagent_codex', 'subagent_claude_code']))
+    expect(librarian.toolFilter?.deny).toEqual(expect.arrayContaining(['subagent_fork', 'subagent_codex', 'subagent_claude_code']))
     const fixer = await captureRequest('Fixer: patch the parser bug')
     expect(fixer.toolFilter?.deny).toContain('subagent')
+  })
+
+  it('pins the built-in allowlists to the server surfaces they encode', () => {
+    expect(ROLE_CHILD_ALLOW.librarian).toEqual([
+      'bash', 'custom_research-fetch', 'custom_research-verify', 'edit', 'glob', 'grep',
+      'memory_save', 'memory_search', 'read', 'read_image', 'skill', 'subagent',
+      'todo_write', 'web_fetch', 'web_search', 'whiteboard_read', 'write',
+    ])
+    expect(ROLE_CHILD_ALLOW.oracle).toEqual([
+      'bash', 'edit', 'glob', 'grep', 'memory_confirm', 'memory_rescind', 'memory_save',
+      'memory_search', 'read', 'read_image', 'request_evidence', 'skill', 'subagent',
+      'todo_write', 'web_search', 'whiteboard_read', 'write',
+    ])
   })
 
   it('merges an existing configured deny list first and de-duplicates the union', async () => {

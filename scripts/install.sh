@@ -1298,12 +1298,166 @@ strip_patch_sections() { # patch-file key...
   return 0
 }
 
+# Drop every `roles`/`personas` entry that is not a template exception. The
+# tracked template carries only designer/oracle (keys label/group/seat) and
+# keeper/compaction on the keyless Kilo route; operator roles, personas,
+# routes, and extra keys are removed entry-by-entry, so a live-sourced tree can
+# never seed them through a `roles`/`personas` section name that is otherwise
+# operator-owned. Allowlists mirror scripts/verify-profile-template.mjs and
+# packages/enpoi-capabilities/tests/profile-patch.spec.ts; pinned in lockstep
+# by scripts/install-profile-merge.spec.ts.
+PROFILE_PATCH_TEMPLATE_ROLE_IDS="designer oracle"
+PROFILE_PATCH_TEMPLATE_ROLE_KEYS="label group seat"
+PROFILE_PATCH_TEMPLATE_PERSONA_IDS="keeper compaction"
+PROFILE_PATCH_TEMPLATE_PERSONA_KEYS="provider model"
+PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER="kilo"
+PROFILE_PATCH_TEMPLATE_PERSONA_MODEL="kilo-auto/free"
+
+strip_template_entry_sections() { # patch-file
+  local file="$1" tmp
+  tmp="$(mktemp)" || return 0
+  awk -v r_ids="$PROFILE_PATCH_TEMPLATE_ROLE_IDS" \
+      -v r_keys="$PROFILE_PATCH_TEMPLATE_ROLE_KEYS" \
+      -v p_ids="$PROFILE_PATCH_TEMPLATE_PERSONA_IDS" \
+      -v p_keys="$PROFILE_PATCH_TEMPLATE_PERSONA_KEYS" \
+      -v p_provider="$PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER" \
+      -v p_model="$PROFILE_PATCH_TEMPLATE_PERSONA_MODEL" '
+    BEGIN {
+      n = split(r_ids, a, " "); for (i = 1; i <= n; i++) role_id[a[i]] = 1
+      n = split(r_keys, a, " "); for (i = 1; i <= n; i++) role_key[a[i]] = 1
+      n = split(p_ids, a, " "); for (i = 1; i <= n; i++) persona_id[a[i]] = 1
+      n = split(p_keys, a, " "); for (i = 1; i <= n; i++) persona_key[a[i]] = 1
+    }
+    function flush_persona(   i) {
+      if (current != "" && pprov && pmodel) for (i = 1; i <= pn; i++) print pend[i]
+      current = ""; pn = 0; pprov = 0; pmodel = 0
+    }
+    /^- / { flush_persona(); inorch = 0; section = "" }
+    /^- id: enpoi-orchestration$/ { inorch = 1; print; next }
+    inorch && /^    [A-Za-z0-9_@.\/-]+:/ {
+      flush_persona()
+      key = $0; sub(/^    /, "", key); sub(/:.*/, "", key)
+      if (key == "roles") { section = "roles"; print; next }
+      if (key == "personas") { section = "personas"; print; next }
+      section = ""; print; next
+    }
+    section == "roles" {
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        if (id in role_id) { print; current = id } else { current = "" }
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        if (current != "" && k in role_key) print
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/) { print; next }
+      next
+    }
+    section == "personas" {
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        flush_persona()
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        current = (id in persona_id) ? id : ""
+        pn = 0; pprov = 0; pmodel = 0
+        if (current != "") pend[++pn] = $0
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        v = $0; sub(/^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+        if (current != "") {
+          if (k == "provider" && v == p_provider) { pprov = 1; pend[++pn] = $0 }
+          else if (k == "model" && v == p_model) { pmodel = 1; pend[++pn] = $0 }
+        }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/ && current != "") { pend[++pn] = $0 }
+      next
+    }
+    { print }
+    END { flush_persona() }
+  ' "$file" > "$tmp"
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
+# Whether a document's `roles`/`personas` sections carry only the template
+# exceptions. A disallowed entry id, an extra key, or a non-Kilo persona route
+# fails the check; the section names themselves stay operator-owned.
+assert_template_entry_sections() { # patch-file -> 0 when only template entries are present
+  local file="$1"
+  awk -v r_ids="$PROFILE_PATCH_TEMPLATE_ROLE_IDS" \
+      -v r_keys="$PROFILE_PATCH_TEMPLATE_ROLE_KEYS" \
+      -v p_ids="$PROFILE_PATCH_TEMPLATE_PERSONA_IDS" \
+      -v p_keys="$PROFILE_PATCH_TEMPLATE_PERSONA_KEYS" \
+      -v p_provider="$PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER" \
+      -v p_model="$PROFILE_PATCH_TEMPLATE_PERSONA_MODEL" '
+    BEGIN {
+      n = split(r_ids, a, " "); for (i = 1; i <= n; i++) role_id[a[i]] = 1
+      n = split(r_keys, a, " "); for (i = 1; i <= n; i++) role_key[a[i]] = 1
+      n = split(p_ids, a, " "); for (i = 1; i <= n; i++) persona_id[a[i]] = 1
+      n = split(p_keys, a, " "); for (i = 1; i <= n; i++) persona_key[a[i]] = 1
+    }
+    /^- / { inorch = 0; section = "" }
+    /^- id: enpoi-orchestration$/ { inorch = 1; next }
+    inorch && /^    [A-Za-z0-9_@.\/-]+:/ {
+      key = $0; sub(/^    /, "", key); sub(/:.*/, "", key)
+      if (key == "roles") section = "roles"
+      else if (key == "personas") section = "personas"
+      else section = ""
+      next
+    }
+    section == "roles" {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        if (!(id in role_id)) bad = 1
+        current = id
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        if (!(current in role_id) || !(k in role_key)) bad = 1
+        next
+      }
+      bad = 1; next
+    }
+    section == "personas" {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        if (!(id in persona_id)) bad = 1
+        persona_seen[id] = 1
+        current = id
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        v = $0; sub(/^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+        if (!(current in persona_id) || !(k in persona_key)) bad = 1
+        else if (k == "provider") { if (v != p_provider) bad = 1; prov_seen[current] = 1 }
+        else if (k == "model") { if (v != p_model) bad = 1; model_seen[current] = 1 }
+        next
+      }
+      bad = 1; next
+    }
+    { next }
+    END {
+      for (id in persona_seen) if (!(id in prov_seen) || !(id in model_seen)) bad = 1
+      exit bad ? 1 : 0
+    }
+  ' "$file"
+}
+
 # Fresh-home patch: strip everything that belongs to the configured machine.
 strip_fresh_patch() { # patch-file
   local file="$1"
   strip_patch_rows "$file" agent-default-model ui-settings-general ui-settings-models ui-theme llm-pi-ai
-  strip_patch_sections "$file" capabilities mcpServers mcpStatus personas roles councils chains \
+  strip_patch_sections "$file" capabilities mcpServers mcpStatus councils chains \
     catalogRules uiPreferences permissions whiteboard toolGroups
+  strip_template_entry_sections "$file"
   strip_onboarding_completed "$file"
   return 0
 }
@@ -1313,6 +1467,8 @@ strip_fresh_patch() { # patch-file
 # that still carries the configured machine's rows after stripping is a
 # packaging bug, and end-user installs must never inherit the operator's
 # providers, default model, UI settings, seats, grants, or MCP catalog.
+# `roles`/`personas` stay operator-owned names with the template exceptions
+# checked by assert_template_entry_sections.
 assert_fresh_patch() { # patch-file -> 0 when the document carries no operator state
   local file="$1" id section
   [ -f "$file" ] || return 0
@@ -1330,8 +1486,8 @@ assert_fresh_patch() { # patch-file -> 0 when the document carries no operator s
     warn "profile patch carries a providers block"
     return 1
   fi
-  for section in capabilities mcpServers mcpStatus personas roles councils chains catalogRules \
-    uiPreferences permissions whiteboard toolGroups; do
+  for section in $PROFILE_PATCH_OPERATOR_SECTIONS; do
+    case "$section" in roles|personas) continue;; esac
     if awk -v key="$section" '
       /^- / { inorch = ($0 == "- id: enpoi-orchestration") }
       inorch && /^    [A-Za-z0-9_@.\/-]+:/ { k = $0; sub(/^    /, "", k); sub(/:.*/, "", k); if (k == key) found = 1 }
@@ -1341,6 +1497,10 @@ assert_fresh_patch() { # patch-file -> 0 when the document carries no operator s
       return 1
     fi
   done
+  if ! assert_template_entry_sections "$file"; then
+    warn "profile patch carries operator state inside the template roles/personas entries"
+    return 1
+  fi
   return 0
 }
 

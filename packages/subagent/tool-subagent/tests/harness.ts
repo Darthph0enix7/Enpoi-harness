@@ -50,7 +50,7 @@ const TEST_ALLOWED_MODELS = [
  * audits a stored allowlist against the live registry, so a real deployment
  * registers these tools and the specs must too.
  */
-const TEST_REGISTERED_TOOLS = ['bash', 'read', 'grep', 'edit', 'write'] as const
+export const TEST_REGISTERED_TOOLS = ['bash', 'read', 'grep', 'edit', 'write'] as const
 
 /** Register the stub surface after the ToolRuntime is active. */
 function registerStubTools(ctx: Context): void {

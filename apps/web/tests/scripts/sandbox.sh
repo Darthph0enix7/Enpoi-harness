@@ -176,12 +176,95 @@ strip_patch_sections() { # patch-file key...
   return 0
 }
 
+# Drop every `roles`/`personas` entry that is not a template exception (the
+# tracked template carries only designer/oracle with label/group/seat, and
+# keeper/compaction on the keyless Kilo route). Operator roles, personas,
+# routes, and extra keys are removed entry-by-entry so a live-sourced tree can
+# never provision them. Kept in lockstep with scripts/install.sh,
+# profile/web/scripts/verify-profile-template.mjs, and
+# profile/web/packages/enpoi-capabilities/tests/profile-patch.spec.ts via
+# scripts/install-profile-merge.spec.ts.
+TEMPLATE_ROLE_IDS="designer oracle"
+TEMPLATE_ROLE_KEYS="label group seat"
+TEMPLATE_PERSONA_IDS="keeper compaction"
+TEMPLATE_PERSONA_KEYS="provider model"
+TEMPLATE_PERSONA_PROVIDER="kilo"
+TEMPLATE_PERSONA_MODEL="kilo-auto/free"
+
+strip_template_entry_sections() { # patch-file
+  local file="$1" tmp="$1.tmpl-$$"
+  [ -f "$file" ] || return 0
+  awk -v r_ids="$TEMPLATE_ROLE_IDS" -v r_keys="$TEMPLATE_ROLE_KEYS" \
+      -v p_ids="$TEMPLATE_PERSONA_IDS" -v p_keys="$TEMPLATE_PERSONA_KEYS" \
+      -v p_provider="$TEMPLATE_PERSONA_PROVIDER" -v p_model="$TEMPLATE_PERSONA_MODEL" '
+    BEGIN {
+      n = split(r_ids, a, " "); for (i = 1; i <= n; i++) role_id[a[i]] = 1
+      n = split(r_keys, a, " "); for (i = 1; i <= n; i++) role_key[a[i]] = 1
+      n = split(p_ids, a, " "); for (i = 1; i <= n; i++) persona_id[a[i]] = 1
+      n = split(p_keys, a, " "); for (i = 1; i <= n; i++) persona_key[a[i]] = 1
+    }
+    function flush_persona(   i) {
+      if (current != "" && pprov && pmodel) for (i = 1; i <= pn; i++) print pend[i]
+      current = ""; pn = 0; pprov = 0; pmodel = 0
+    }
+    /^- / { flush_persona(); inorch = 0; section = "" }
+    /^- id: enpoi-orchestration$/ { inorch = 1; print; next }
+    inorch && /^    [A-Za-z0-9_@.\/-]+:/ {
+      flush_persona()
+      key = $0; sub(/^    /, "", key); sub(/:.*/, "", key)
+      if (key == "roles") { section = "roles"; print; next }
+      if (key == "personas") { section = "personas"; print; next }
+      section = ""; print; next
+    }
+    section == "roles" {
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        if (id in role_id) { print; current = id } else { current = "" }
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        if (current != "" && k in role_key) print
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/) { print; next }
+      next
+    }
+    section == "personas" {
+      if ($0 ~ /^      [A-Za-z0-9_-]+:[[:space:]]*$/) {
+        flush_persona()
+        id = $0; sub(/^[[:space:]]+/, "", id); sub(/:.*/, "", id)
+        current = (id in persona_id) ? id : ""
+        pn = 0; pprov = 0; pmodel = 0
+        if (current != "") pend[++pn] = $0
+        next
+      }
+      if ($0 ~ /^        [A-Za-z0-9_-]+:/) {
+        k = $0; sub(/^[[:space:]]+/, "", k); sub(/:.*/, "", k)
+        v = $0; sub(/^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+        if (current != "") {
+          if (k == "provider" && v == p_provider) { pprov = 1; pend[++pn] = $0 }
+          else if (k == "model" && v == p_model) { pmodel = 1; pend[++pn] = $0 }
+        }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/ && current != "") { pend[++pn] = $0 }
+      next
+    }
+    { print }
+    END { flush_persona() }
+  ' "$file" > "$tmp"
+  if [ -s "$tmp" ]; then mv "$tmp" "$file"; else rm -f "$tmp"; fi
+  return 0
+}
+
 # Fresh-home patch: strip everything that belongs to the configured machine.
 strip_fresh_patch() { # patch-file
   local file="$1"
   strip_patch_rows "$file" agent-default-model ui-settings-general ui-settings-models ui-theme llm-pi-ai
-  strip_patch_sections "$file" capabilities mcpServers mcpStatus personas roles councils chains \
+  strip_patch_sections "$file" capabilities mcpServers mcpStatus councils chains \
     catalogRules uiPreferences permissions whiteboard toolGroups
+  strip_template_entry_sections "$file"
   strip_fresh_markers "$file"
   return 0
 }

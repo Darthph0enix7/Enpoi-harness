@@ -121,10 +121,12 @@ const REVIEW_CHILD_PERSONA = /^you are the (?:oracle|reviewer|critic|referee|cha
  * Tools a seat may never CALL, enforced at the pre-execute boundary.
  *
  * The presentation layer is the primary mechanism: the `creator` tool group in
- * the `enpoi-tool-groups` catalog pre-attaches only to the Creator seat, so
- * orchestrator and sysadmin never SEE `plugin_manager` or the two
- * `cordis_inspect_*` tools (their group's deny filter removes them from the
- * advertised surface; `denyNames` in `enpoi-tool-groups/catalog`). This table
+ * the `enpoi-tool-groups` catalog belongs to the Creator seat alone
+ * (`seats: ['creator']`) and pre-attaches nowhere, so orchestrator and sysadmin
+ * never SEE `plugin_manager` or the two `cordis_inspect_*` tools — the group is
+ * omitted from their advertised surface (their menu carries a seat-only notice
+ * instead of an attach state; `groupVisibleTo`/`denyNames` in
+ * `enpoi-tool-groups/catalog`). This table
  * is the EXECUTION backstop behind that structural absence — a call that
  * reaches the pre-execute boundary anyway (a stale composition, a direct
  * invocation path) is denied with the seat message. The cost is accepted and

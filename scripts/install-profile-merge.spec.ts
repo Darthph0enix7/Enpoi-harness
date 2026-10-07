@@ -319,6 +319,225 @@ describe('operator-state gate', () => {
       expect(extractQuotedList(source, 'STATE_SECTIONS').sort()).toEqual(sections)
     }
   })
+
+  it('keeps the roles/personas template allowlists in lockstep across the guards', () => {
+    const install = readFileSync(installSh, 'utf8')
+    const shellValue = (source: string, name: string): string => {
+      const match = new RegExp(`${name}="([^"]*)"`).exec(source)
+      if (match === null) throw new Error(`no ${name} assignment in the guard`)
+      return match[1] ?? ''
+    }
+    const pairs: ReadonlyArray<readonly [string, string]> = [
+      ['TEMPLATE_ROLE_IDS', 'PROFILE_PATCH_TEMPLATE_ROLE_IDS'],
+      ['TEMPLATE_ROLE_KEYS', 'PROFILE_PATCH_TEMPLATE_ROLE_KEYS'],
+      ['TEMPLATE_PERSONA_IDS', 'PROFILE_PATCH_TEMPLATE_PERSONA_IDS'],
+      ['TEMPLATE_PERSONA_KEYS', 'PROFILE_PATCH_TEMPLATE_PERSONA_KEYS'],
+    ]
+    for (const guard of [
+      'profile/web/scripts/verify-profile-template.mjs',
+      'profile/web/packages/enpoi-capabilities/tests/profile-patch.spec.ts',
+    ]) {
+      const source = readFileSync(join(repoRoot, guard), 'utf8')
+      for (const [jsName, shName] of pairs) {
+        expect(extractQuotedList(source, jsName).sort(), `${guard} ${jsName}`)
+          .toEqual(shellValue(install, shName).split(' ').sort())
+      }
+      expect(/const TEMPLATE_PERSONA_PROVIDER = '([^']+)'/.exec(source)?.[1], `${guard} provider`)
+        .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER'))
+      expect(/const TEMPLATE_PERSONA_MODEL = '([^']+)'/.exec(source)?.[1], `${guard} model`)
+        .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_MODEL'))
+    }
+    // The web sandbox duplicates the fresh-patch stripper for its own homes;
+    // its standalone allowlist constants must match install.sh's.
+    const sandbox = readFileSync(join(repoRoot, 'apps/web/tests/scripts/sandbox.sh'), 'utf8')
+    for (const [, shName] of pairs) {
+      const sandboxName = shName.replace('PROFILE_PATCH_', '')
+      expect(shellValue(sandbox, sandboxName).split(' ').sort(), `sandbox.sh ${sandboxName}`)
+        .toEqual(shellValue(install, shName).split(' ').sort())
+    }
+    expect(shellValue(sandbox, 'TEMPLATE_PERSONA_PROVIDER'))
+      .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER'))
+    expect(shellValue(sandbox, 'TEMPLATE_PERSONA_MODEL'))
+      .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_MODEL'))
+  })
+})
+
+/** One guard fixture: the minimal enpoi-orchestration row the gates inspect. */
+function guardFixture(extra = ''): string {
+  return `# fixture template
+- id: enpoi-orchestration
+  name: dsh-enpoi-capabilities
+  config:
+    parameters:
+      keeper:
+        structuralDistanceK: 24
+${extra}`
+}
+
+const CLEAN_ENTRIES = `    roles:
+      designer:
+        label: Designer
+        group: specialists
+        seat: true
+      oracle:
+        label: The Oracle
+        group: supervision
+        seat: true
+    personas:
+      keeper:
+        provider: kilo
+        model: kilo-auto/free
+      compaction:
+        provider: kilo
+        model: kilo-auto/free
+`
+
+const HOSTILE_ENTRIES = `    roles:
+      designer:
+        persona: |
+          operator text
+        label: Designer
+        group: specialists
+        seat: true
+      toto:
+        label: Operator
+        group: specialists
+    personas:
+      keeper:
+        provider: openrouter
+        model: kilo-auto/free
+        chain: free
+      oracle:
+        provider: kilo
+        model: kilo-auto/free
+      compaction:
+        provider: kilo
+        model: kilo-auto/free
+`
+
+describe('template entry allowlist gate', () => {
+  const verifyScript = join(repoRoot, 'profile/web/scripts/verify-profile-template.mjs')
+
+  function runVerify(file: string): { status: number; output: string } {
+    const result = spawnSync(process.execPath, [verifyScript, file], { encoding: 'utf8' })
+    return { status: result.status ?? -1, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+  }
+
+  function runPatchGate(file: string): { status: number; output: string } {
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'if assert_fresh_patch "$SHIPPED"; then echo ASSERT=PASS; else echo ASSERT=FAIL; fi',
+      'strip_fresh_patch "$SHIPPED"',
+      'if assert_fresh_patch "$SHIPPED"; then echo STRIPPED=PASS; else echo STRIPPED=FAIL; fi',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh, SHIPPED: file },
+      encoding: 'utf8',
+    })
+    return { status: result.status ?? -1, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+  }
+
+  it('accepts a clean template through the packaging script and the installer gates', () => {
+    const clean = fixture('clean-template.patch.yml', guardFixture(CLEAN_ENTRIES))
+    const verified = runVerify(clean)
+    expect(verified.status).toBe(0)
+    expect(verified.output).toContain('profile template clean')
+    const gated = runPatchGate(clean)
+    expect(gated.status).toBe(0)
+    expect(gated.output).toContain('ASSERT=PASS')
+    expect(gated.output).toContain('STRIPPED=PASS')
+  })
+
+  it('rejects every operator escape inside roles/personas and strips it entry-by-entry', () => {
+    const hostile = fixture('hostile-template.patch.yml', guardFixture(HOSTILE_ENTRIES))
+    const verified = runVerify(hostile)
+    expect(verified.status).toBe(1)
+    for (const marker of [
+      "role 'toto' is not a template role",
+      "role 'designer' carries operator key 'persona'",
+      "persona 'keeper' provider must be 'kilo'",
+      "persona 'keeper' carries operator key 'chain'",
+      "persona 'oracle' is not a template persona",
+    ]) {
+      expect(verified.output, marker).toContain(marker)
+    }
+    const gated = runPatchGate(hostile)
+    expect(gated.status).toBe(0)
+    expect(gated.output).toContain('ASSERT=FAIL')
+    expect(gated.output).toContain('STRIPPED=PASS')
+    const stripped = readFileSync(hostile, 'utf8')
+    expect(stripped).not.toContain('toto')
+    expect(stripped).not.toContain('operator text')
+    expect(stripped).not.toContain('openrouter')
+    expect(stripped).not.toContain('chain: free')
+    // The disallowed persona entries drop whole; the clean designer entry and
+    // the untouched compaction persona survive entry-by-entry.
+    expect(stripped).not.toContain('      oracle:\n        provider: kilo')
+    expect(stripped).not.toContain('      keeper:\n        provider:')
+    expect(stripped).toContain('      designer:\n        label: Designer')
+    expect(stripped).toContain('      compaction:\n        provider: kilo\n        model: kilo-auto/free')
+  })
+})
+
+describe('promoted web composition merge', () => {
+  it('adds the web rows and wizard inserts without merging the operator-owned sections', () => {
+    const shipped = fixture('web-shipped.patch.yml', `# shipped template
+- id: web
+  name: "@deepseek-ai/dsh-web"
+  config:
+    searchProvider: exa
+    fetchProvider: http
+
+- insert:
+    - id: web-search-exa
+      name: "@deepseek-ai/dsh-web-search-exa"
+      config:
+        searchType: auto
+        highlightsPerResult: 2
+
+- insert:
+    - id: web-setup
+      name: "@deepseek-ai/dsh-web-setup"
+
+- id: enpoi-orchestration
+  name: dsh-enpoi-capabilities
+  config:
+    parameters:
+      keeper:
+        structuralDistanceK: 24
+    roles:
+      designer:
+        label: Designer
+        group: specialists
+        seat: true
+    personas:
+      keeper:
+        provider: kilo
+        model: kilo-auto/free
+`)
+    const live = fixture('web-live.patch.yml', `- id: enpoi-orchestration
+  name: dsh-enpoi-capabilities
+  config:
+    parameters:
+      keeper:
+        structuralDistanceK: 24
+    capabilities:
+      operator: true
+`)
+    const result = runPatchMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = readFileSync(live, 'utf8')
+    // Additive rows and inserts arrive.
+    expect(merged).toContain('\n- id: web\n')
+    expect(merged).toContain('    - id: web-search-exa\n')
+    expect(merged).toContain('    - id: web-setup\n')
+    // roles/personas stay operator-owned section names: the shipped template
+    // entries never converge into an existing live document.
+    expect(merged).not.toContain('    roles:')
+    expect(merged).not.toContain('    personas:')
+    expect(merged).toContain('    capabilities:\n      operator: true\n')
+  })
 })
 
 describe('rollback restore', () => {

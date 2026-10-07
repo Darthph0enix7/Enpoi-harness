@@ -492,12 +492,11 @@ export const SHARED_CHILD_KEEP: readonly string[] = [
 /**
  * Extra tools denied per inferred specialist role, unioned with
  * {@link SHARED_CHILD_DENY}. Each role keeps only the surface its work needs:
- * explorers read and search but never mutate; the librarian is the research
- * worker and authors its own claim files, so `write`/`edit` are part of its
- * work (the generic `subagent` survives through {@link childToolFilter} for
- * the deep dial's fan-out); fixers and designers implement but never run code
- * or reach the web. A role outside this map (e.g. `oracle`) receives the
- * shared set only.
+ * explorers read and search but never mutate; fixers and designers implement
+ * but never run code or reach the web. A role outside this map (e.g. `oracle`)
+ * receives the shared set only. A role carrying a built-in allowlist
+ * ({@link ROLE_CHILD_ALLOW}) never reaches this deny map: the allowlist is its
+ * whole surface.
  */
 const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   // `run_code` is deliberately absent everywhere: the PTC presentation
@@ -507,12 +506,68 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   //
   // Operator defaults: every sub-agent may run bash (reading,
   // analysis, tests — not only writing), use skills, search memory, and keep
-  // its own todo list. Readers keep the mutation veto; the research librarian
-  // writes its claims; implementers are unrestricted beyond the shared
-  // anti-leak floor.
+  // its own todo list. Readers keep the mutation veto; implementers are
+  // unrestricted beyond the shared anti-leak floor.
   explorer: ['edit', 'write', 'str_replace_editor'],
-  librarian: ['str_replace_editor'],
 }
+
+/**
+ * Built-in child allowlists for the two delegating roles whose shipped surface
+ * is narrower than the deny-only worker floor. These are the server's live
+ * `permissions.agents.librarian`/`.oracle` availability allowlists encoded as
+ * code defaults, so a fresh install composes the same child catalogs as the
+ * configured machine: the librarian is the research worker (bash, research
+ * archive/verify custom tools, read/search/edit/write, its own delegation for
+ * the deep dial, no memory curation, no council/oracle tools) and the Oracle
+ * is a read-only reviewer (no mutation beyond `edit`/`write` for its own
+ * reports, no web fetch, no harness authoring). `web_search`, the custom
+ * tools, and `request_evidence` exist only in compositions that register
+ * them, so the caller audits these names against the live registry like an
+ * operator list: an unknown name is dropped with a warning instead of aborting
+ * the child's spawn. The whiteboard keep list survives through
+ * {@link childToolFilter}'s union, and {@link SHARED_CHILD_DENY} still wins
+ * over every allow entry.
+ */
+export const ROLE_CHILD_ALLOW: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  librarian: Object.freeze([
+    'bash',
+    'custom_research-fetch',
+    'custom_research-verify',
+    'edit',
+    'glob',
+    'grep',
+    'memory_save',
+    'memory_search',
+    'read',
+    'read_image',
+    'skill',
+    'subagent',
+    'todo_write',
+    'web_fetch',
+    'web_search',
+    'whiteboard_read',
+    'write',
+  ]),
+  oracle: Object.freeze([
+    'bash',
+    'edit',
+    'glob',
+    'grep',
+    'memory_confirm',
+    'memory_rescind',
+    'memory_save',
+    'memory_search',
+    'read',
+    'read_image',
+    'request_evidence',
+    'skill',
+    'subagent',
+    'todo_write',
+    'web_search',
+    'whiteboard_read',
+    'write',
+  ]),
+})
 
 /** Grouping label for one role seat on the operator's orchestration surfaces. */
 export type RoleGroup = 'supervision' | 'specialists' | 'council' | 'custom'
@@ -723,13 +778,16 @@ export function listRoleRegistry(
 }
 
 /**
- * The registry read used to audit a STORED availability list (`permissions.
- * agents[role].available` and the registry's `tools.available`): operator data
- * outlives tool renames, so an unresolvable name is dropped with a warning
- * instead of reaching `tools.restrict()`, whose unknown-allow check would
- * abort the child's spawn. The code-authored `config.toolFilter` never goes
- * through this audit — there an unknown name stays a build-time contract and
- * keeps throwing.
+ * The registry read used to audit a STORED or BUILT-IN availability list
+ * (`permissions.agents[role].available`, the registry's `tools.available`, and
+ * the {@link ROLE_CHILD_ALLOW} code defaults): operator data and profile
+ * composition outlive tool renames, so an unresolvable name is dropped with a
+ * warning instead of reaching `tools.restrict()`, whose unknown-allow check
+ * would abort the child's spawn. The code-authored `config.toolFilter` never
+ * goes through this audit — there an unknown name stays a build-time contract
+ * and keeps throwing; the built-in role allowlists name profile-provided tools
+ * (research customs, web tools) whose registration depends on the deployment
+ * composition, so they are audited like stored lists and never fail a spawn.
  */
 interface StoredAvailabilityAudit {
   /** Whether the registry resolves a tool name for the spawning agent's scope. */
@@ -739,13 +797,13 @@ interface StoredAvailabilityAudit {
 }
 
 /**
- * Drop names a stored availability list carries that the live registry no
- * longer resolves, warning once per name. The known subset keeps its order;
- * the caller re-deduplicates when composing the filter.
- * @param available - the stored allowlist, in stored order.
+ * Drop names a stored or built-in availability list carries that the live
+ * registry no longer resolves, warning once per name. The known subset keeps
+ * its order; the caller re-deduplicates when composing the filter.
+ * @param available - the availability allowlist, in authored order.
  * @param role - the role the list belongs to (for the warning).
  * @param audit - registry lookup plus warning sink.
- * @returns the resolvable names, in their stored order.
+ * @returns the resolvable names, in their authored order.
  */
 function auditStoredAvailability(
   available: readonly string[],
@@ -765,16 +823,17 @@ function auditStoredAvailability(
  * shared worker deny list and the selected role's surface. Configured deny
  * entries survive (first, de-duplicated), the configured `allow` list passes
  * through untouched, and `deny` wins over `allow` in `tools.restrict()`.
- * Unknown deny names are no-ops there. A stored availability list is audited
- * against the live registry first (see {@link StoredAvailabilityAudit});
- * configured code-authored names are never audited. Providers without the
- * `toolFilter` capability keep the configured filter unchanged.
+ * Unknown deny names are no-ops there. A stored or built-in availability list
+ * is audited against the live registry first (see
+ * {@link StoredAvailabilityAudit}); configured code-authored names are never
+ * audited. Providers without the `toolFilter` capability keep the configured
+ * filter unchanged.
  * @param provider - the provider that will start the child.
  * @param configured - the tool instance's configured filter, if any.
  * @param document - the live `enpoi-orchestration` document, if any.
  * @param role - the selected specialist role, if any.
  * @param roleEntry - the registry entry for `role`, when the registry has it.
- * @param audit - live-registry audit for stored availability names.
+ * @param audit - live-registry audit for stored and built-in availability names.
  * @returns the composed filter, or the configured filter for a provider that cannot apply one.
  */
 function childToolFilter(
@@ -797,14 +856,18 @@ function childToolFilter(
     : SHARED_CHILD_DENY).filter(name => !keepTool(name))
   // Layer precedence (doc 61 WP-S6): the permission allowlist is the operator's
   // hard gate and wins; the role registry's `tools.available` (Dynamic → Roles)
-  // is the fallback that gives a user-defined role a surface; absent both, the
-  // registry entry's built-in deny extras apply. The shared anti-leak floor is
-  // always unioned in, and the whiteboard keep list survives every surface.
-  const stored = roleAvailableAllowlist(document, role) ?? roleEntry?.available
+  // is the fallback that gives a user-defined role a surface; then the built-in
+  // allowlist for the librarian/oracle roles (`ROLE_CHILD_ALLOW`, the server's
+  // live surfaces as code defaults); absent all three, the registry entry's
+  // built-in deny extras apply. The shared anti-leak floor is always unioned
+  // in, and the whiteboard keep list survives every surface.
+  const stored = roleAvailableAllowlist(document, role)
+    ?? roleEntry?.available
+    ?? (role === undefined ? undefined : ROLE_CHILD_ALLOW[role])
   if (stored !== undefined) {
-    // Operator-defined surface: allow the named tools plus the whiteboard
-    // keep list, deny everything else except the shared anti-leak floor
-    // (never widen what SHARED_CHILD_DENY already removes).
+    // Explicit surface: allow the named tools plus the whiteboard keep list,
+    // deny everything else except the shared anti-leak floor (never widen what
+    // SHARED_CHILD_DENY already removes).
     return {
       ...configured,
       allow: [...new Set([...configured?.allow ?? [], ...auditStoredAvailability(stored, role, audit), ...SHARED_CHILD_KEEP])],
@@ -823,10 +886,11 @@ function childToolFilter(
 /**
  * Operator-overridable role availability (doc 55 P2): when the permission
  * settings define `agents[role].available`, that allowlist REPLACES the
- * registry's `tools.available` and the built-in role deny map (the operator's
- * explicit surface wins wholesale); absent → the registry's `tools.available`
- * or the built-in ROLE_CHILD_DENY table applies. Read fresh per spawn, so
- * edits hot-swap on the next dispatch.
+ * registry's `tools.available`, the built-in {@link ROLE_CHILD_ALLOW} surface,
+ * and the built-in role deny map (the operator's explicit surface wins
+ * wholesale); absent → the registry's `tools.available`, then the built-in
+ * allowlist, else the built-in ROLE_CHILD_DENY table applies. Read fresh per
+ * spawn, so edits hot-swap on the next dispatch.
  * @param document - the live `enpoi-orchestration` document, if any.
  * @param role - the selected specialist role, if any.
  * @returns the permission allowlist, or undefined when the operator set none.
@@ -1159,8 +1223,9 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             ...rolePersona !== undefined ? { persona: rolePersona } : {},
             ...(() => {
               const delegated = childToolFilter(subagentProvider, config.toolFilter, document, role, roleEntry, {
-                // A stored availability name counts as known when the parent's
-                // scope resolves it; the child inherits exactly that surface.
+                // A stored or built-in availability name counts as known when
+                // the parent's scope resolves it; the child inherits exactly
+                // that surface.
                 isKnown: name => runtimeCtx.tools.get(name, parent) !== undefined,
                 warn: (message) => { runtimeCtx.logger.warn(message) },
               })

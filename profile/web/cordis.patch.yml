@@ -3,9 +3,11 @@
 #
 # This file ships the reproducible composition only: the three agent presets,
 # the upstream preset rows disabled, the preset-registry default, the retired
-# llm-deepseek entry, and the orchestration parameters that fresh-settings.yaml
-# also carries. Personal state (provider routes, default model, UI settings,
-# seats, permissions, grants, MCP catalog, chains, favorites, whiteboard) is
+# llm-deepseek entry, the research web layer (Exa search + HTTP fetch + the
+# welcome-wizard host rows), the shipped role/persona template entries, and the
+# orchestration parameters that fresh-settings.yaml also carries. Personal state
+# (provider routes, default model, UI settings, seats beyond the template
+# entries, permissions, grants, MCP catalog, chains, favorites, whiteboard) is
 # written by the settings service on the machine where the operator edits it
 # and must never be committed here. A fresh home gets its settings from the
 # seeded fresh-settings.yaml and its keyless Kilo route from the first-run seed
@@ -80,6 +82,28 @@
             description: Optional short slug for the file name (defaults to the URL path).
         command: node "$DSH_HOME/profiles/web/scripts/research-fetch.mjs" --url
           {{url}} --dir {{dir}} --name {{name}}
+    # Template registry entries (shipped composition, not operator state): the
+    # two specialist roles the Fleet screens expect, and the keeper/compaction
+    # personas pinned to the keyless Kilo route the first-run seed writes. The
+    # template guards (scripts/verify-profile-template.mjs, scripts/install.sh,
+    # packages/enpoi-capabilities/tests/profile-patch.spec.ts) allow exactly
+    # these ids and keys; any other role/persona entry is operator state.
+    roles:
+      designer:
+        label: Designer
+        group: specialists
+        seat: true
+      oracle:
+        label: The Oracle
+        group: supervision
+        seat: true
+    personas:
+      keeper:
+        provider: kilo
+        model: kilo-auto/free
+      compaction:
+        provider: kilo
+        model: kilo-auto/free
 
 # Research fan-out needs one delegation level below a dispatched librarian:
 # main → librarian (depth 1) → readers (depth 2). The librarian holds the
@@ -89,6 +113,30 @@
   name: "@deepseek-ai/dsh-subagent"
   config:
     maxDepth: 2
+
+# The research web layer. Exa is the search provider; its key resolves from the
+# launch environment ($DSH_HOME/.env — layer order: process > cwd/.env > home/.env)
+# and is never stored in this file. The anonymous SSRF-hardened HTTP fetcher is
+# the fetch provider, so web_fetch reads full pages with no third-party reader.
+- id: web
+  name: "@deepseek-ai/dsh-web"
+  config:
+    searchProvider: exa
+    fetchProvider: http
+
+- insert:
+    - id: web-search-exa
+      name: "@deepseek-ai/dsh-web-search-exa"
+      config:
+        searchType: auto
+        highlightsPerResult: 2
+
+# The welcome wizard's host controller (webSetup Remote namespace). The wizard
+# lifts each preset's `tool-web.search: false` gate once a provider key checks
+# out; until then `web_fetch` stays keyless and `web_search` stays absent.
+- insert:
+    - id: web-setup
+      name: "@deepseek-ai/dsh-web-setup"
 
 # ── agent presets (merged registry: declarations, not directories) ──────────
 # Our three presets, visible; the shipped standard/ptc/minimal/cordis rows are
@@ -902,7 +950,7 @@
           # except this declaration's metadata and the persona suffix below (the
           # cacheable prefix must not differ across main agents; see
           # tests/preset-prompt-parity.spec.ts). The seat id stays `creator` for
-          # per-seat group resolution, and the group pre-attach is uniform.
+          # per-seat group resolution, and no group pre-attaches by default.
           #
           # The `code` agent preset: the standard coding agent, presented as Code Mode.
           #
@@ -984,7 +1032,7 @@
                 These workbook paths are this machine's; where they are absent, the code and the gates in doc 11 are the authority.
 
                 ## Toolbox
-                read/grep/glob, edit/write, bash (pwsh on Windows), jobs, skills (`editing-cordis-compositions` before changing a composition; `cordis-plugin-development` for plugin work), `plugin_manager`, `cordis_inspect_*`, `session_debug`, `diagnostics_report`, `tool_groups` (attach/detach on-demand tool families; `debug` is pre-attached for diagnostics), `ask_user_question` when a decision is blocked.
+                read/grep/glob, edit/write, bash (pwsh on Windows), jobs, skills (`editing-cordis-compositions` before changing a composition; `cordis-plugin-development` for plugin work), `plugin_manager`, `cordis_inspect_*`, `session_debug`, `diagnostics_report`, `tool_groups` (attach/detach on-demand tool families; nothing is attached by default — attach the `debug` family through the meta-tool when self-diagnosis is needed), `ask_user_question` when a decision is blocked.
 
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'

@@ -36,15 +36,19 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(registry['librarian']?.persona).toContain('You are the Librarian')
     expect(registry['librarian']?.builtin).toBe(true)
     expect(registry['explorer']?.deny).toEqual(['edit', 'write', 'str_replace_editor'])
-    // The research librarian authors its claim files, so only the generic
-    // mutating editor stays out; `subagent` survives via childToolFilter.
-    expect(registry['librarian']?.deny).toEqual(['str_replace_editor'])
+    // The research librarian's built-in allowlist is its whole surface, so the
+    // registry carries no deny extras for it; `subagent` survives via
+    // childToolFilter's delegating exception.
+    expect(registry['librarian']?.deny).toEqual([])
   })
 
   it('keeps built-in personas and tool surfaces when the registry is empty', async () => {
     const request = await captureRequest('Librarian: research the API documentation', undefined)
     expect(request.persona).toContain('You are the Librarian')
-    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['str_replace_editor']))
+    // The librarian carries its built-in allowlist (the server's live surface);
+    // the generic mutating editor is never part of it.
+    expect(request.toolFilter?.allow).toBeDefined()
+    expect(request.toolFilter?.allow).not.toContain('str_replace_editor')
     expect(request.toolFilter?.deny).not.toContain('subagent')
   })
 
@@ -53,8 +57,9 @@ describe('dsh-tool-subagent settings role registry', () => {
       roles: { librarian: { persona: 'You are the Archive Keeper.', label: 'Archive' } },
     })
     expect(request.persona).toBe('You are the Archive Keeper.')
-    // Fields the entry omits keep their built-in definition.
-    expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['str_replace_editor']))
+    // Fields the entry omits keep their built-in definition (the allowlist).
+    expect(request.toolFilter?.allow).toBeDefined()
+    expect(request.toolFilter?.allow).not.toContain('str_replace_editor')
   })
 
   it('spawns a settings-defined role by name with its persona and allowlist', async () => {
@@ -217,7 +222,9 @@ describe('dsh-tool-subagent settings role registry', () => {
       roles: { oracle: { spawnable: true } },
     })
     expect(request.persona).toContain('You are the Oracle')
-    // Re-enabled Oracle keeps its delegation exception in the child filter.
+    // The re-enabled Oracle keeps its built-in allowlist and its delegation
+    // exception in the child filter.
+    expect(request.toolFilter?.allow).toContain('subagent')
     expect(request.toolFilter?.deny).not.toContain('subagent')
   })
 

@@ -86,8 +86,8 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
         .filter((row, index) => JSON.stringify(row.config ?? null) !== JSON.stringify(rows[seat][index].config ?? null))
         .map(row => row.id)
       // `persona` carries the per-preset doctrine (the tail); `enpoi-orchestration`
-      // carries the seat id, which only resolves group pre-attach — with the
-      // shipped catalog the rendered menu is identical for every main seat.
+      // carries the seat id, which only resolves group pre-attach and menu
+      // visibility — the shipped catalog pre-attaches nothing for any seat.
       expect(differing, `${seat} differing configs`)
         .toEqual(seat === 'orchestrator' ? [] : ['persona', 'enpoi-orchestration'])
     }
@@ -113,14 +113,19 @@ describe('preset prompt parity (cache-neutral switch contract)', () => {
     }
 
     // `enpoi-orchestration` differs only by the seat label, and the seat only resolves group
-    // pre-attach: with the shipped catalog the rendered menu is identical for every main seat.
+    // pre-attach and menu visibility: the shipped catalog pre-attaches nothing, and the
+    // orchestrator/sysadmin menus are byte-identical because both hide the creator family.
     const catalog = resolveToolGroups(undefined)
     const orchestratorAttach = preAttachFor(catalog, 'orchestrator')
+    expect(orchestratorAttach).toEqual([])
     expect(orchestratorAttach).toEqual(preAttachFor(catalog, 'sysadmin'))
-    expect(preAttachFor(catalog, 'creator')).toEqual(['debug', 'creator'])
-    const menu = (seat: string): string => renderMenuText(catalog, new Set(preAttachFor(catalog, seat)))
+    expect(preAttachFor(catalog, 'creator')).toEqual([])
+    const menu = (seat: string): string => renderMenuText(catalog, new Set(preAttachFor(catalog, seat)), [], seat)
     expect(menu('orchestrator')).toBe(menu('sysadmin'))
     expect(menu('orchestrator')).toContain('peer')
+    // Awareness for the seat-hidden family: notice for every seat, attach state only for the owner.
+    expect(menu('orchestrator')).toContain('Creator-seat-only family')
+    expect(menu('creator')).toContain('(3 tools, not attached)')
   })
 
   it('mounts the profile skills dir on every fleet preset', () => {
