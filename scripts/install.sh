@@ -1595,6 +1595,75 @@ seed_dir_once() { # src-dir dst-dir
   return 0
 }
 
+# Record for one seeded file: the shipped copy this record refers to and the
+# live file's content when the installer last handled it.
+write_seed_record() { # stamp shipped-hash live-hash
+  printf '%s\n%s\n' "$2" "$3" > "$1" 2>/dev/null || true
+  return 0
+}
+
+# The profile's fish function and completions are seeded into the user's fish
+# config on first install and refreshed on every later install/update when the
+# shipped content changed. The `.dsh-seeded` sidecar records the shipped hash
+# and the live hash from the last handling: a live copy byte-identical to the
+# recorded shipped copy is replaced; a copy with no record (a pre-refresh
+# install) or a locally edited copy is kept byte-identical, with the updated
+# shipped copy parked beside it and one warning naming both locations. Never
+# fails the caller.
+refresh_seeded_fish() { # src dst rel(relative to the profile root)
+  local src="$1" dst="$2" rel="$3"
+  [ -f "$src" ] || return 0
+  local stamp="$dst.dsh-seeded" want have last_shipped="" last_live="" backup ts profile_copy
+  want="$(sha256_of "$src" 2>/dev/null || true)"
+  if [ -z "$want" ]; then
+    # No digest tool on this host: fall back to the old seed-only behavior.
+    seed_file_once "$src" "$dst"
+    return 0
+  fi
+  if [ -f "$stamp" ]; then
+    last_shipped="$(sed -n '1p' "$stamp" 2>/dev/null || true)"
+    last_live="$(sed -n '2p' "$stamp" 2>/dev/null || true)"
+  fi
+  if [ ! -f "$dst" ]; then
+    mkdir -p "$(dirname "$dst")" 2>/dev/null || return 0
+    cp -p "$src" "$dst" 2>/dev/null || return 0
+    write_seed_record "$stamp" "$want" "$want"
+    log "seeded $dst"
+    return 0
+  fi
+  have="$(sha256_of "$dst" 2>/dev/null || true)"
+  if [ "$have" = "$want" ]; then
+    # Already current; keep the record pointing at the shipped copy.
+    write_seed_record "$stamp" "$want" "$have"
+    return 0
+  fi
+  if [ -n "$have" ] && [ "$have" = "$last_shipped" ]; then
+    if cp -p "$src" "$dst" 2>/dev/null; then
+      write_seed_record "$stamp" "$want" "$want"
+      log "refreshed $dst ($rel changed)"
+    fi
+    return 0
+  fi
+  if [ "$have" = "$last_live" ] && [ "$want" = "$last_shipped" ]; then
+    # The same local edit was kept against the same shipped copy; the notice
+    # already fired for it.
+    return 0
+  fi
+  # Operator drift: keep the live file, park the updated shipped copy beside
+  # it, and tell the operator where both copies are.
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup="$dst.dsh-shipped-$ts"
+  [ -e "$backup" ] && backup="$backup-$$"
+  if [ -n "${PROFILE_DIR:-}" ]; then profile_copy="$PROFILE_DIR/$rel"; else profile_copy="$src"; fi
+  if cp -p "$src" "$backup" 2>/dev/null; then
+    warn "$dst has local edits and was kept; the updated $rel is at $backup and lives in the profile tree at $profile_copy — merge it or remove $dst to re-seed"
+  else
+    warn "$dst has local edits and was kept; the updated $rel lives in the profile tree at $profile_copy — merge it or remove $dst to re-seed"
+  fi
+  write_seed_record "$stamp" "$want" "$have"
+  return 0
+}
+
 seed_profile_home() { # stage
   local stage="$1" fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
   seed_file_once "$stage/fresh-settings.yaml" "$DSH_HOME/settings.yaml"
@@ -1606,8 +1675,8 @@ seed_profile_home() { # stage
   seed_dir_once "$stage/skins" "$DSH_HOME/skins"
   seed_file_once "$stage/skin-center-active.json" "$DSH_HOME/skin-center-active.json"
   if [ -d "$fish_dir" ]; then
-    seed_file_once "$stage/fish/ds.fish" "$fish_dir/functions/ds.fish"
-    seed_file_once "$stage/fish/completions/ds.fish" "$fish_dir/completions/ds.fish"
+    refresh_seeded_fish "$stage/fish/ds.fish" "$fish_dir/functions/ds.fish" "fish/ds.fish"
+    refresh_seeded_fish "$stage/fish/completions/ds.fish" "$fish_dir/completions/ds.fish" "fish/completions/ds.fish"
   fi
   return 0
 }

@@ -870,6 +870,108 @@ describe('peer CLI distribution', () => {
   })
 })
 
+describe('fish function refresh', () => {
+  function runSeedProfileHome(stage: string, home: string): { status: number; output: string } {
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'VERBOSE=1',
+      'DSH_HOME="$HOME/.dsh"',
+      'PROFILE_DIR="$DSH_HOME/profiles/web"',
+      'seed_profile_home "$STAGE" 2>&1',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', script], {
+      env: {
+        ...process.env,
+        INSTALL_SH: installSh,
+        STAGE: stage,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
+      },
+      encoding: 'utf8',
+    })
+    return { status: result.status ?? -1, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+  }
+
+  function fishStage(name: string, fn: string, completion: string): string {
+    const dir = join(root, name)
+    mkdirSync(join(dir, 'fish', 'completions'), { recursive: true })
+    writeFileSync(join(dir, 'fish', 'ds.fish'), fn)
+    writeFileSync(join(dir, 'fish', 'completions', 'ds.fish'), completion)
+    return dir
+  }
+
+  function fishHome(): { home: string; fn: string; comp: string } {
+    const home = mkdtempSync(join(root, 'fish-home-'))
+    const fish = join(home, '.config', 'fish')
+    mkdirSync(fish, { recursive: true })
+    return { home, fn: join(fish, 'functions', 'ds.fish'), comp: join(fish, 'completions', 'ds.fish') }
+  }
+
+  it('seeds both files and records the shipped hash on a fresh install', () => {
+    const { home, fn, comp } = fishHome()
+    const result = runSeedProfileHome(fishStage('seed-stage', 'function ds-v1\nend\n', 'complete -c ds -a v1\n'), home)
+    expect(result.status).toBe(0)
+    expect(readFileSync(fn, 'utf8')).toBe('function ds-v1\nend\n')
+    expect(readFileSync(comp, 'utf8')).toBe('complete -c ds -a v1\n')
+    expect(result.output).toContain('seeded')
+    for (const target of [fn, comp]) {
+      const record = readFileSync(`${target}.dsh-seeded`, 'utf8').trim().split('\n')
+      expect(record).toHaveLength(2)
+      expect(record[0]).toMatch(/^[0-9a-f]{64}$/)
+      expect(record[1]).toBe(record[0])
+    }
+  })
+
+  it('refreshes an untouched seeded copy on the next install/update', () => {
+    const { home, fn, comp } = fishHome()
+    runSeedProfileHome(fishStage('refresh-stage-v1', 'function ds-v1\nend\n', 'complete -c ds -a v1\n'), home)
+    const result = runSeedProfileHome(fishStage('refresh-stage-v2', 'function ds-v2\nend\n', 'complete -c ds -a v2\n'), home)
+    expect(result.status).toBe(0)
+    expect(readFileSync(fn, 'utf8')).toBe('function ds-v2\nend\n')
+    expect(readFileSync(comp, 'utf8')).toBe('complete -c ds -a v2\n')
+    expect(result.output).toContain('refreshed')
+    // The record now points at the refreshed shipped copy.
+    const record = readFileSync(`${fn}.dsh-seeded`, 'utf8').trim().split('\n')
+    expect(record[0]).toBe(record[1])
+  })
+
+  it('keeps a locally edited copy, parks the shipped update beside it, and warns once', () => {
+    const { home, fn, comp } = fishHome()
+    runSeedProfileHome(fishStage('drift-stage-v1', 'function ds-v1\nend\n', 'complete -c ds -a v1\n'), home)
+    writeFileSync(fn, 'function ds-local\nend\n')
+    const drift = runSeedProfileHome(fishStage('drift-stage-v2', 'function ds-v2\nend\n', 'complete -c ds -a v2\n'), home)
+    expect(drift.status).toBe(0)
+    // The local edit is preserved byte-identical, the shipped update is parked
+    // beside it, and the notice names the profile tree copy.
+    expect(readFileSync(fn, 'utf8')).toBe('function ds-local\nend\n')
+    expect(drift.output).toContain('local edits')
+    expect(drift.output).toContain(join(home, '.dsh', 'profiles', 'web', 'fish', 'ds.fish'))
+    const backups = readdirSync(dirname(fn)).filter(name => name.startsWith('ds.fish.dsh-shipped-'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dirname(fn), backups[0]!), 'utf8')).toBe('function ds-v2\nend\n')
+    // The untouched completions file refreshes alongside the kept function.
+    expect(readFileSync(comp, 'utf8')).toBe('complete -c ds -a v2\n')
+    // The same local edit against the same shipped copy does not warn again.
+    const again = runSeedProfileHome(fishStage('drift-stage-v2', 'function ds-v2\nend\n', 'complete -c ds -a v2\n'), home)
+    expect(again.output).not.toContain('local edits')
+  })
+
+  it('routes both fish files through the refresh helper on the install and update paths', () => {
+    const install = readFileSync(installSh, 'utf8')
+    const seedProfileHome = /seed_profile_home\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
+    expect(seedProfileHome).toBeDefined()
+    expect(seedProfileHome!.match(/refresh_seeded_fish/g) ?? []).toHaveLength(2)
+    expect(seedProfileHome!).toContain('"$stage/fish/ds.fish"')
+    expect(seedProfileHome!).toContain('"$stage/fish/completions/ds.fish"')
+    // Install, the already-current update path, and the full update path all
+    // reach seed_profile_home through prepare_profile.
+    expect(/do_install\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]).toMatch(/prepare_profile/)
+    const doUpdate = /do_update\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
+    expect(doUpdate!.match(/prepare_profile/g) ?? []).toHaveLength(2)
+  })
+})
+
 describe('download resilience', () => {
   it('resumes partial prebuilt downloads and aborts stalled transfers', () => {
     const install = readFileSync(installSh, 'utf8')

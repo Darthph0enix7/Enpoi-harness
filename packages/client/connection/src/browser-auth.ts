@@ -1,6 +1,7 @@
 /** Browser-session authentication for the Host Connection carrier. */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { hostname } from 'node:os'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import type {
@@ -77,11 +78,23 @@ function requestAuthority(headers: ConnectionTrustRequest['headers']): string | 
   }
 }
 
+/** The machine's own hostnames: the OS hostname and its short form, lowercased once per process. */
+const OWN_HOSTNAMES: readonly string[] = (() => {
+  const qualified = hostname().toLowerCase()
+  const short = qualified.replace(/\..*$/u, '')
+  return [...new Set([qualified, short])].filter(name => name.length > 0)
+})()
+
+/** Whether the authority's host names this machine (its hostname, short form, or a subdomain of either). */
+function isSelfHostname(host: string): boolean {
+  return OWN_HOSTNAMES.some(name => host === name || host.startsWith(`${name}.`))
+}
+
 /** Tailscale/WireGuard authorities are already private (ACL) — no browser cookie needed. */
 function isTailscaleBypass(authority: string): boolean {
-  const host = (authority.split(':')[0] ?? '').toLowerCase()
+  const host = authority.replace(/:.*$/u, '').toLowerCase()
   if (host.endsWith('.ts.net')) return true
-  if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
+  if (isSelfHostname(host)) return true
   if (host.startsWith('100.')) {
     const octets = host.split('.').map(Number)
     const cgnatSecond = octets[1]

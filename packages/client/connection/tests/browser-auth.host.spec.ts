@@ -1,6 +1,7 @@
 /** Browser launch-token and persistent-cookie behavior. */
 
 import { createHmac } from 'node:crypto'
+import { hostname } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { BrowserAuth } from '../src/browser-auth.ts'
@@ -269,5 +270,32 @@ describe('BrowserAuth', () => {
 
     await expect(createAuth(new RecordCredentials(), Number.MAX_SAFE_INTEGER))
       .rejects.toThrow(/safe timestamp range/u)
+  })
+})
+
+describe('Tailscale bypass authorities', () => {
+  it("accepts this machine's own hostname, its short form, .ts.net, and 100.64/10", async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const qualified = hostname().toLowerCase()
+    const short = qualified.replace(/\..*$/u, '')
+    for (const host of [...new Set([qualified, short])]) {
+      expect(auth.isAuthenticated({ headers: { host: `${host}:3080` } }), `own hostname ${host}`).toBe(true)
+    }
+    for (const host of ['box.tailnet-abc.ts.net', '100.64.0.1', '100.127.255.254']) {
+      expect(auth.isAuthenticated({ headers: { host: `${host}:3080` } }), host).toBe(true)
+    }
+    // The index fence honors the same bypass without writing a response.
+    const res = response()
+    expect(auth.authorizeIndex(request('/', qualified), res.value)).toBe(true)
+    expect(res.state).toEqual({})
+  })
+
+  it('rejects a foreign single-label host and addresses outside 100.64/10', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const qualified = hostname().toLowerCase()
+    const foreign = qualified === 'foreignbox' ? 'foreignbox2' : 'foreignbox'
+    for (const host of [foreign, '100.63.0.1', '100.128.0.1', '101.64.0.1']) {
+      expect(auth.isAuthenticated({ headers: { host: `${host}:3080` } }), host).toBe(false)
+    }
   })
 })
