@@ -218,6 +218,7 @@ describe.each(['reconnect', 'delayed-inbox'] as const)('web e2e: composer shortc
       const server = route.connectToServer()
       server.onMessage((message) => {
         const frame = parseRemoteStreamServerMessage(String(message))
+        if (frame.type === 'heartbeat') { route.send(message); return }
         if (holdInbox && frame.type === 'item') {
           const value = frame.value as { type?: string; key?: string }
           if (value.type === 'projection' && value.key === 'inbox') heldStream = frame.streamId

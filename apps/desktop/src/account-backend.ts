@@ -106,6 +106,7 @@ export function desktopAccountBackend(origin: string, invoke: AccountInvoke, coo
             try {
               const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data)
               const frame = parseRemoteStreamServerMessage(bytes.toString('utf8'))
+              if (frame.type === 'heartbeat') return
               if (frame.streamId === expiryStreamId && frame.type === 'item' && frame.value === 'session-expired') { expired(); return }
               if (frame.streamId !== streamId) throw new Error('desktop account: unexpected stream')
               if (frame.type === 'item') listener(accountView(frame.value))
