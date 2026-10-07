@@ -12,6 +12,7 @@ import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
+import modalStyles from './AddProviderModal.module.css'
 
 export interface AddProviderModalProps {
   open: boolean
@@ -525,7 +526,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       onClose={() => { void onClose(false) }}
       title={selected === null ? t('add') : `Add ${displayName || 'Provider'}`}
       closeLabel={t('close')}
-      className={styles['addProviderDialog'] ?? ''}
+      className={`${styles['addProviderDialog'] ?? ''} ${modalStyles.dialog ?? ''}`}
+      contentClassName={modalStyles.content ?? ''}
       footer={
         selected === null ? (
           <Button variant="outline" onClick={() => { void onClose(false) }}>
@@ -907,7 +909,10 @@ function HeavyProviderForm(props: {
               </p>
               {install.unsupported !== undefined && <p className={styles['heavyModeNote']}>{install.unsupported}</p>}
               {install.steps.length > 0 && (
-                <ol className={styles['heavyList']}>
+                <ol
+                  className={`${styles['heavyList']} ${modalStyles['heavyStepsList']}`}
+                  data-heavy-steps-list
+                >
                   {install.steps.map(step => <li key={step.label}>{step.label}</li>)}
                 </ol>
               )}
@@ -945,7 +950,10 @@ function HeavyProviderForm(props: {
           )}
 
           {job !== null && (
-            <div className={styles['heavyProgress']}>
+            <div
+              className={`${styles['heavyProgress']} ${modalStyles['heavyProgress']}`}
+              data-heavy-progress
+            >
               <div className={styles['heavyProgressHead']}>
                 <span>{t('heavyProgress').replace('{step}', String(job.stageIndex + 1)).replace('{total}', String(job.stageCount))}</span>
                 <span>{job.pct}%</span>
@@ -955,7 +963,14 @@ function HeavyProviderForm(props: {
               </div>
               <div className={styles['heavyStage']}>{job.stage}</div>
               {job.state === 'running' && <p className={styles['heavyModeNote']}>{t('heavyJobBackground')}</p>}
-              {job.logTail !== '' && <pre className={styles['heavyLog']}>{job.logTail}</pre>}
+              {job.logTail !== '' && (
+                <pre
+                  className={`${styles['heavyLog']} ${modalStyles['heavyLog']}`}
+                  data-heavy-log
+                >
+                  {job.logTail}
+                </pre>
+              )}
               {job.state === 'failed' && (
                 <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error}</p>
               )}

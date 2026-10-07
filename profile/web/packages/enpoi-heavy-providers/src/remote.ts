@@ -20,8 +20,7 @@ import {
   configuredProfile,
   detectInstance,
   detectRuntimes,
-  discoverModels,
-  discoverRouteModels,
+  discoverServiceModels,
   healthForBase,
   instanceBaseURLFromInput,
   modeBaseURL,
@@ -333,13 +332,11 @@ export class HeavyProvidersService extends TypertRemoteService {
       // install may have been started through another surface) since the guard.
       const late = pendingRestartForManifest(current, manifest)
       if (late !== undefined) throw new Error(late.message)
-      // A direct route's catalog is the bundled snapshot: the vendor exposes no
-      // model listing, so discovery answers from the route namespace's
-      // registered model discovery and the fallback model applies when none is
-      // mounted.
-      const models = manifest.delivery === 'direct'
-        ? await discoverRouteModels(current, manifest, modeBaseURL(manifest, 'local'))
-        : await discoverModels(modeBaseURL(manifest, 'local'), key, current.fetchImpl)
+      // A service route lists its own endpoint at its protocol's native
+      // address; a direct route's catalog is the bundled snapshot (the vendor
+      // exposes no listing), so both resolve through the same seam. The
+      // fallback model applies when discovery answers nothing.
+      const models = await discoverServiceModels(current, manifest, modeBaseURL(manifest, 'local'), key)
       // Route and credential commit atomically: a credential-store failure
       // fails the job before any route exists.
       await commitRoute(current, manifest, 'local', models, key)

@@ -1,0 +1,106 @@
+.dialog {
+  width: min(600px, 100%);
+  max-width: 600px;
+  max-height: min(840px, 100%);
+  display: flex;
+  flex-direction: column;
+
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+/* Modal header stays visible at top while content scrolls */
+.content > :first-child {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.heavyStepsList {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.heavyProgress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  max-height: 240px;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
+.heavyLog {
+  margin: 0;
+  max-height: 120px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+
+  /* Elevated-surface scrollbar rebind (ui-theme scrollbar gate). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+@media (max-width: 560px) {
+  .dialog {
+    width: 100%;
+    max-height: 100%;
+  }
+
+  .heavyStepsList {
+    max-height: 140px;
+  }
+
+  .heavyProgress {
+    max-height: 200px;
+  }
+
+  .heavyLog {
+    max-height: 100px;
+  }
+}

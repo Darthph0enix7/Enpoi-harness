@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 /** The detail panel's local picker state survives settings echoes. */
 import type { ReactElement } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
+import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '../src/client/model-visibility.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
@@ -33,10 +34,19 @@ function pool(strategy: string) {
   }
 }
 
+/** One model row as the route stores it; only the visibility markers vary here. */
+type TestModel = {
+  id: string
+  name?: string
+  isFree?: boolean
+  gated?: boolean
+  gateReason?: string
+}
+
 /** One pi-ai namespace view; a fresh object is the store's settings echo. */
 function namespace(
   provider: string,
-  models: Array<{ id: string; name?: string }>,
+  models: TestModel[],
   stored?: { strategy?: string; identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }> },
 ): SettingsNamespaceView {
   const profile = {
@@ -84,7 +94,7 @@ function wire(): ModelsWire {
   } as unknown as ModelsWire
 }
 
-function panel(provider: string, models = MODELS) {
+function panel(provider: string, models: TestModel[] = MODELS) {
   return (
     <ProviderDetailPanel
       row={row(provider)}
@@ -197,4 +207,42 @@ it('renders the detail panel root container with the detailPanel class contract'
   const panelEl = container.querySelector(`.${styles.detailPanel}`)
   expect(panelEl).not.toBeNull()
   expect(panelEl?.className).toContain(styles.detailPanel)
+})
+
+it('states the picker verdict on the eye: non-free rows off and locked, free rows on', () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ result: { ok: true } }) })))
+  render(panel('gateway', [
+    { id: 'gateway/auto-free', name: 'Auto Free', isFree: true },
+    { id: 'gateway/auto-efficient', name: 'Auto Efficient', isFree: false, gated: true, gateReason: 'sign-in required' },
+    { id: 'gateway/silent-gate', name: 'Silent Gate', gated: true },
+    { id: 'gateway/undisclosed', name: 'Undisclosed' },
+  ]))
+
+  const paid = screen.getByLabelText<HTMLButtonElement>('Show gateway/auto-efficient')
+  expect(paid.disabled).toBe(true)
+  expect(paid.title).toContain('sign-in required')
+  // A gate the listing never explained still renders off, with a generic title.
+  const silent = screen.getByLabelText<HTMLButtonElement>('Show gateway/silent-gate')
+  expect(silent.disabled).toBe(true)
+  expect(silent.title).toBe('Hidden in picker by provider or rule')
+  expect(screen.getByLabelText<HTMLButtonElement>('Hide gateway/auto-free').disabled).toBe(false)
+  // An absent free/paid marker is undisclosed, not a paid claim.
+  expect(screen.getByLabelText<HTMLButtonElement>('Hide gateway/undisclosed').disabled).toBe(false)
+})
+
+it('follows a published picker decision when the rules engine hides a row', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ result: { ok: true } }) })))
+  render(panel('gateway', [{ id: 'rule-hidden', name: 'Rule Hidden' }]))
+  expect(screen.getByLabelText<HTMLButtonElement>('Hide rule-hidden').disabled).toBe(false)
+
+  await act(async () => {
+    localStorage.setItem(CATALOG_DECISIONS_MIRROR_KEY, JSON.stringify({
+      'gateway/rule-hidden': { state: 'hidden', reason: 'hidden by rule: no-training' },
+    }))
+    window.dispatchEvent(new CustomEvent(CATALOG_DECISIONS_CHANGED_EVENT))
+  })
+
+  const eye = screen.getByLabelText<HTMLButtonElement>('Show rule-hidden')
+  expect(eye.disabled).toBe(true)
+  expect(eye.title).toContain('no-training')
 })

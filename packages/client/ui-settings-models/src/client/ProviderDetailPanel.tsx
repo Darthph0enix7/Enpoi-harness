@@ -13,6 +13,9 @@ import {
 import {
   toggleModelHidden, hideAllModels, showAllModels,
 } from './hidden-models.ts'
+import {
+  CATALOG_DECISIONS_CHANGED_EVENT, modelVisibility, readCatalogDecisions,
+} from './model-visibility.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
@@ -47,6 +50,12 @@ interface ModelItem {
   audio?: boolean
   video?: boolean
   files?: boolean
+  /** Provider sync marked this model sign-in/paid-only; the eye renders off. */
+  gated?: boolean
+  /** The listing's own free marker, when the row still carries discovery fields. */
+  isFree?: boolean
+  /** Picker-facing reason for a gated model; rendered in the eye's tooltip. */
+  gateReason?: string
 }
 
 /** One row of a route's discovered model list (the wire subset the panel merges). */
@@ -290,10 +299,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     const bump = () => setPrefsVersion(v => v + 1)
     window.addEventListener('dsh:hidden-models-changed', bump)
     window.addEventListener('dsh:model-picker-prefs-changed', bump)
+    // The picker's published rule decisions ride their own event; the eye must
+    // follow them or it would state a visibility the picker does not show.
+    window.addEventListener(CATALOG_DECISIONS_CHANGED_EVENT, bump)
     window.addEventListener('storage', bump)
     return () => {
       window.removeEventListener('dsh:hidden-models-changed', bump)
       window.removeEventListener('dsh:model-picker-prefs-changed', bump)
+      window.removeEventListener(CATALOG_DECISIONS_CHANGED_EVENT, bump)
       window.removeEventListener('storage', bump)
     }
   }, [])
@@ -304,6 +317,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     return m
   }, [hiddenMap])
   const hiddenSet = useMemo(() => hiddenSets.get(providerId) ?? new Set<string>(), [hiddenSets, providerId])
+  // The picker's own decision mirror, so a gated or rule-hidden model shows the
+  // same eye state the picker renders. The route row's own data is the fallback
+  // when no host engine published decisions.
+  const catalogDecisions = useMemo(() => readCatalogDecisions(), [prefsVersion])
   const [testStatus, setTestStatus] = useState<{
     state: 'idle' | 'testing' | 'success' | 'error'
     message?: string
@@ -443,12 +460,12 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const enrichedFilteredModels = useMemo(() => {
     return filteredModels.map(m => ({
       model: m,
-      hidden: hiddenSet.has(m.id),
+      visibility: modelVisibility(m, hiddenSet, catalogDecisions.get(`${providerId}/${m.id}`)),
       caps: getCapsCached(m),
       contextStr: formatTokens(m.contextWindow),
       maxTokStr: formatTokens(m.maxTokens),
     }))
-  }, [filteredModels, hiddenSet])
+  }, [filteredModels, hiddenSet, catalogDecisions, providerId])
 
   // Toggle model hidden
   // 0ms optimistic hide toggles: write store + bump prefsVersion so hiddenMap memo updates synchronously
@@ -1465,12 +1482,12 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
               {modelSearch ? `No models matching "${modelSearch}"` : 'No models found.'}
             </div>
           ) : (
-            enrichedFilteredModels.map(({ model: m, hidden, caps, contextStr, maxTokStr }) => {
+            enrichedFilteredModels.map(({ model: m, visibility, caps, contextStr, maxTokStr }) => {
 
               return (
                 <div
                   key={m.id}
-                  className={`${styles['modelCard']} ${hidden ? styles['modelCardHidden'] : ''}`}
+                  className={`${styles['modelCard']} ${visibility.hidden ? styles['modelCardHidden'] : ''}`}
                 >
                   <div className={styles['modelCardMain']}>
                     <div className={styles['modelTitleRow']}>
@@ -1522,15 +1539,21 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     </div>
                   </div>
 
-                  {/* Eye Toggle */}
+                  {/* Eye Toggle: gated/rule-hidden models state the picker's
+                      verdict and cannot be toggled from here; a manual pin can. */}
                   <button
                     type="button"
-                    className={`${styles['modelEyeBtn']} ${hidden ? styles['modelEyeBtnHidden'] : ''}`}
+                    className={`${styles['modelEyeBtn']} ${visibility.hidden ? styles['modelEyeBtnHidden'] : ''}`}
+                    disabled={visibility.locked}
                     onClick={() => handleToggleHide(m.id)}
-                    title={hidden ? 'Hidden in picker (click to show)' : 'Visible in picker (click to hide)'}
-                    aria-label={hidden ? `Show ${m.id}` : `Hide ${m.id}`}
+                    title={visibility.hidden
+                      ? visibility.locked
+                        ? visibility.reason === null ? 'Hidden in picker by provider or rule' : `Hidden in picker: ${visibility.reason}`
+                        : 'Hidden in picker (click to show)'
+                      : 'Visible in picker (click to hide)'}
+                    aria-label={visibility.hidden ? `Show ${m.id}` : `Hide ${m.id}`}
                   >
-                    {hidden ? <IconEyeOff size={13} /> : <IconEye size={13} />}
+                    {visibility.hidden ? <IconEyeOff size={13} /> : <IconEye size={13} />}
                   </button>
                 </div>
               )

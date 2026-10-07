@@ -595,36 +595,150 @@ export interface DiscoveredModel {
   input?: readonly string[]
 }
 
+/** Stable API version required by Anthropic's native model-listing endpoint. */
+const ANTHROPIC_VERSION = '2023-06-01'
+
 /**
- * Discover a route's models from `GET {baseURL}/models`. Best-effort: an
- * unreachable or refusing endpoint answers `[]` and the caller falls back to
- * the manifest's fallback model.
+ * The model-listing URL one protocol serves. OpenAI protocols list at
+ * `{baseURL}/models`. Anthropic Messages lists at the root's `/v1/models`
+ * (`discovery.ts` in llm-pi-ai makes the same call): a base that already
+ * carries one trailing `/v1` segment keeps every other path segment and gets
+ * the required prefix back, and the public endpoint's page cap is requested so
+ * a large catalog is not truncated to the default page. The proxy under the
+ * antigravity route serves exactly this Anthropic address while its route
+ * baseURL deliberately carries no `/v1`.
+ * @param baseURL - the configured endpoint base.
+ * @param api - the route's wire protocol, when known.
+ * @returns the absolute listing URL.
+ */
+export function modelListingUrl(baseURL: string, api?: string): string {
+  const base = baseURL.replace(/\/+$/, '')
+  if (api !== 'anthropic-messages') return `${base}/models`
+  const root = base.endsWith('/v1') ? base.slice(0, -3) : base
+  return `${root}/v1/models?limit=1000`
+}
+
+/**
+ * One listing entry field as a non-empty label. The proxy discloses the human
+ * model name in `description`; a value long enough to be prose rather than a
+ * name is refused so it never becomes a route row's label.
+ */
+function listingLabel(...candidates: readonly unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 200) return candidate
+  }
+  return undefined
+}
+
+/** One listing entry field as a positive integer capacity, or undefined. */
+function listingCapacity(...candidates: readonly unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0) return candidate
+  }
+  return undefined
+}
+
+/** The listing fields a compatible endpoint may disclose beyond the id. */
+interface ListingEntry {
+  id?: unknown
+  name?: unknown
+  displayName?: unknown
+  display_name?: unknown
+  description?: unknown
+  contextWindow?: unknown
+  context_window?: unknown
+  context_length?: unknown
+  max_input_tokens?: unknown
+  limit?: { context?: unknown; output?: unknown } | null
+  maxOutputTokens?: unknown
+  max_output_tokens?: unknown
+  maxTokens?: unknown
+  max_tokens?: unknown
+  top_provider?: { max_completion_tokens?: unknown } | null
+}
+
+/**
+ * Read one model listing: the standard `data` array or an enriched `models`
+ * map, whose property key is the endpoint-facing id. Entries without an id
+ * are skipped; capacities are kept only when the endpoint discloses them.
+ */
+function readModelListing(body: unknown): DiscoveredModel[] {
+  const listing = body as { data?: unknown; models?: unknown } | null
+  let rows: Array<{ key?: string; raw: unknown }>
+  if (Array.isArray(body)) {
+    rows = body.map(raw => ({ raw }))
+  } else if (Array.isArray(listing?.data)) {
+    rows = (listing.data as readonly unknown[]).map(raw => ({ raw }))
+  } else if (listing?.models !== null && typeof listing?.models === 'object' && !Array.isArray(listing.models)) {
+    rows = Object.entries(listing.models as Record<string, unknown>)
+      .filter(([, raw]) => raw !== null && typeof raw === 'object' && !Array.isArray(raw))
+      .map(([key, raw]) => ({ key, raw }))
+  } else {
+    return []
+  }
+  const seen = new Set<string>()
+  const models: DiscoveredModel[] = []
+  for (const { key, raw } of rows.slice(0, 2000)) {
+    const entry = raw as ListingEntry | null
+    const id = listingLabel(key, entry?.id)
+    if (id === undefined || seen.has(id)) continue
+    seen.add(id)
+    const name = listingLabel(entry?.name, entry?.displayName, entry?.display_name, entry?.description)
+    const contextWindow = listingCapacity(
+      entry?.contextWindow,
+      entry?.context_window,
+      entry?.context_length,
+      entry?.max_input_tokens,
+      entry?.limit?.context,
+    )
+    const maxTokens = listingCapacity(
+      entry?.maxOutputTokens,
+      entry?.max_output_tokens,
+      entry?.maxTokens,
+      entry?.max_tokens,
+      entry?.limit?.output,
+      entry?.top_provider?.max_completion_tokens,
+    )
+    models.push({
+      id,
+      ...name === undefined || name === id ? {} : { name },
+      ...contextWindow === undefined ? {} : { contextWindow },
+      ...maxTokens === undefined ? {} : { maxTokens },
+    })
+  }
+  return models
+}
+
+/**
+ * Discover a route's models at its protocol's native listing address — `GET
+ * {baseURL}/models` for the OpenAI protocols, `GET /v1/models` for Anthropic
+ * Messages. Best-effort: an unreachable or refusing endpoint answers `[]` and
+ * the caller falls back to the manifest's fallback model.
+ * @param baseURL - the configured endpoint base.
+ * @param apiKey - the credential to present, when any.
+ * @param fetchImpl - fetch seam (tests inject one).
+ * @param api - the route's wire protocol; Anthropic routes select the native
+ *   listing address and credential header.
+ * @returns the disclosed models in endpoint order.
  */
 export async function discoverModels(
   baseURL: string,
   apiKey: string | undefined,
   fetchImpl: FetchLike = globalThis.fetch as unknown as FetchLike,
+  api?: string,
 ): Promise<DiscoveredModel[]> {
-  const url = `${baseURL.replace(/\/+$/, '')}/models`
+  const url = modelListingUrl(baseURL, api)
   const headers: Record<string, string> = { accept: 'application/json' }
-  if (apiKey !== undefined && apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`
+  if (api === 'anthropic-messages') {
+    headers['anthropic-version'] = ANTHROPIC_VERSION
+    if (apiKey !== undefined && apiKey.length > 0) headers['x-api-key'] = apiKey
+  } else if (apiKey !== undefined && apiKey.length > 0) {
+    headers.authorization = `Bearer ${apiKey}`
+  }
   try {
     const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(15_000) })
     if (!response.ok) return []
-    const body = JSON.parse(await response.text()) as { data?: unknown } | unknown[]
-    const rows = Array.isArray(body) ? body : body.data
-    if (!Array.isArray(rows)) return []
-    const seen = new Set<string>()
-    const models: DiscoveredModel[] = []
-    for (const row of rows.slice(0, 2000)) {
-      if (row === null || typeof row !== 'object') continue
-      const id = (row as { id?: unknown }).id
-      if (typeof id !== 'string' || id === '' || seen.has(id)) continue
-      seen.add(id)
-      const name = (row as { name?: unknown }).name
-      models.push(typeof name === 'string' && name !== '' ? { id, name } : { id })
-    }
-    return models
+    return readModelListing(JSON.parse(await response.text()) as unknown)
   } catch {
     return []
   }
@@ -640,12 +754,15 @@ export async function discoverModels(
  * @param deps - host seams.
  * @param manifest - heavy manifest.
  * @param baseURL - endpoint the written route points at.
+ * @param apiKey - one-shot credential the add carries, when any; a configured
+ *   route's stored credential is resolved by the namespace's own discovery.
  * @returns discovered models with the capacities and modalities disclosed.
  */
 export async function discoverRouteModels(
   deps: HeavyDeps,
   manifest: HeavyProviderManifest,
   baseURL: string,
+  apiKey?: string,
 ): Promise<DiscoveredModel[]> {
   const llm = deps.llm
   if (llm === undefined) return []
@@ -654,6 +771,7 @@ export async function discoverRouteModels(
       provider: manifest.id,
       baseURL,
       api: manifest.protocol,
+      ...apiKey === undefined || apiKey.length === 0 ? {} : { apiKey },
     })
     return found.flatMap((model): DiscoveredModel[] => {
       if (model.id === '') return []
@@ -671,6 +789,43 @@ export async function discoverRouteModels(
     // place; the route write must not depend on the enrichment answering.
     return []
   }
+}
+
+/**
+ * Discover the models for a route being added. A service route asks its own
+ * endpoint first at the protocol's native listing address, using the key
+ * carried by the add or — when none was typed — the route reference's already
+ * stored credential, so a re-add never downgrades a configured gateway to its
+ * fallback model. A listing that answers nothing falls back to the route
+ * namespace's registered discovery (the same path the Refresh action uses),
+ * which can resolve a configured route's stored credential and any listing
+ * path its adapter knows. A direct vendor route has no endpoint to list and
+ * always uses the namespace discovery. Best-effort throughout: an unreachable
+ * or refusing source leaves the caller's fallback model in place.
+ * @param deps - host seams.
+ * @param manifest - heavy manifest.
+ * @param baseURL - endpoint the written route points at.
+ * @param apiKey - credential the operator supplied with the add, when any.
+ * @returns discovered models, or `[]` when nothing could be read.
+ */
+export async function discoverServiceModels(
+  deps: HeavyDeps,
+  manifest: HeavyProviderManifest,
+  baseURL: string,
+  apiKey?: string,
+): Promise<DiscoveredModel[]> {
+  if (manifest.delivery === 'direct') return discoverRouteModels(deps, manifest, baseURL, apiKey)
+  let key = apiKey
+  const ref = manifest.auth.apiKeyEnv
+  if (key === undefined && ref !== undefined && deps.credentials !== undefined) {
+    try {
+      key = (await deps.credentials.resolve(ref))?.value
+    } catch {
+      key = undefined
+    }
+  }
+  const listed = await discoverModels(baseURL, key, deps.fetchImpl, manifest.protocol)
+  return listed.length > 0 ? listed : discoverRouteModels(deps, manifest, baseURL, key)
 }
 
 /** Current settings revision for one namespace, when the seam exposes one. */
@@ -907,12 +1062,11 @@ export async function useDetectedInstance(
   const endpoint = direct
     ? manifest.reuse.baseURL
     : customBase ?? (detection!.ok ? detection!.baseURL : manifest.reuse.baseURL)
-  // A direct vendor route has no /models endpoint to interrogate: the route
-  // namespace's registered discovery answers from its bundled catalog. A
-  // served route keeps the endpoint's own listing.
-  const models = direct
-    ? await discoverRouteModels(deps, manifest, endpoint)
-    : await discoverModels(endpoint, key, deps.fetchImpl)
+  // A service route lists its own endpoint at its protocol's native address;
+  // a refused listing falls back to the route namespace's registered
+  // discovery. A direct vendor route has no /models endpoint at all and
+  // always uses the namespace discovery.
+  const models = await discoverServiceModels(deps, manifest, endpoint, key)
   const health = direct
     ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
     : typedOrigin !== undefined

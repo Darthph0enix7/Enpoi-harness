@@ -5,7 +5,7 @@
  * direct-vendor route whose fresh-machine dependency is the provider package.
  */
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
@@ -361,11 +361,15 @@ it('the antigravity install targets the fixed ~/.local prefix and both units fal
   // nvm/fnm node directories are present as the shim's PATH fallback.
   expect(darwin).toContain('{home}/.nvm/versions/node/current/bin')
   expect(darwin).toContain('fnm/aliases/default/bin')
-  // The removal uninstalls both candidate locations, fail-soft.
-  const uninstall = manifest.removal.steps.find(step => step.label === 'Uninstall the package')
+  // The removal sweeps every prefix a package can live in, fail-soft, and
+  // reports anything it could not remove instead of failing the run.
+  const uninstall = manifest.removal.steps.find(step => step.label === 'Uninstall the package from every npm prefix')
   expect(uninstall?.optional).toBe(true)
-  expect(uninstall?.command).toContain('npm uninstall -g --prefix "{home}/.local" antigravity-claude-proxy 2>/dev/null || true')
-  expect(uninstall?.command).toContain('npm uninstall -g antigravity-claude-proxy 2>/dev/null || true')
+  expect(uninstall?.command).toContain('npm uninstall -g --prefix "$p" "$PKG"')
+  expect(uninstall?.command).toContain('{home}/.local')
+  expect(uninstall?.command).toContain('npm prefix -g')
+  expect(uninstall?.command).toContain('.nvm/versions/node')
+  expect(uninstall?.command).toContain('still holds $PKG')
 })
 
 it('the commandcode vendor health probe carries the adapter CLI identity and accepts the documented statuses', () => {
@@ -423,4 +427,155 @@ it('flags an install variant whose declared runtime contradicts its steps', () =
   expect(manifestProblems([nodeDeclared]).join('\n')).toContain('declares runtime "node" but its steps invoke docker/podman tooling instead')
   // ...and the shipped table stays clean.
   expect(manifestProblems()).toEqual([])
+})
+
+it('every rendered install and removal step parses as bash', () => {
+  for (const manifest of HEAVY_MANIFESTS) {
+    for (const platform of ['linux', 'darwin', 'win32', 'freebsd'] as const) {
+      for (const step of resolveHeavyInstall(manifest.local, platform).steps) {
+        const command = substitute(step.command, '/tmp/step-home', '/tmp/step-dsh')
+        expect(
+          () => execFileSync('/bin/bash', ['-n', '-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }),
+          `${manifest.id}/${platform}: ${step.label}`,
+        ).not.toThrow()
+      }
+    }
+    for (const step of manifest.removal.steps) {
+      const command = substitute(step.command, '/tmp/step-home', '/tmp/step-dsh')
+      expect(
+        () => execFileSync('/bin/bash', ['-n', '-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }),
+        `${manifest.id}/removal: ${step.label}`,
+      ).not.toThrow()
+    }
+  }
+})
+
+/** Run one rendered shell step in a scratch home with a recording npm stub on PATH. */
+function runRenderedStep(home: string, command: string): { status: number; stdout: string; npmCalls: string } {
+  const bin = join(home, 'stub-bin')
+  mkdirSync(bin, { recursive: true })
+  const npmStub = join(bin, 'npm')
+  writeFileSync(npmStub, '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$HOME/npm-calls"\nexit 0\n', 'utf8')
+  chmodSync(npmStub, 0o755)
+  let status = 0
+  let stdout = ''
+  try {
+    stdout = execFileSync('/bin/bash', ['-c', command], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string }
+    status = failure.status ?? 1
+    stdout = failure.stdout ?? ''
+  }
+  const calls = join(home, 'npm-calls')
+  return { status, stdout, npmCalls: existsSync(calls) ? readFileSync(calls, 'utf8') : '' }
+}
+
+it('the antigravity teardown removes the package from ~/.local and nvm prefixes, keeps foreign shims, and reports the rest', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-agp-sweep-'))
+  try {
+    const home = join(scratch, 'home')
+    const sweep = manifestById('antigravity')!.removal.steps
+      .find(step => step.label === 'Uninstall the package from every npm prefix')!
+
+    // ~/.local: the install's fixed prefix, package dir plus both npm shims.
+    const localPkg = join(home, '.local', 'lib', 'node_modules', 'antigravity-claude-proxy')
+    mkdirSync(join(localPkg, 'bin'), { recursive: true })
+    writeFileSync(join(localPkg, 'bin', 'cli.js'), '//', 'utf8')
+    mkdirSync(join(home, '.local', 'bin'), { recursive: true })
+    symlinkSync(join(localPkg, 'bin', 'cli.js'), join(home, '.local', 'bin', 'antigravity-claude-proxy'))
+    symlinkSync(join(localPkg, 'bin', 'cli.js'), join(home, '.local', 'bin', 'acc'))
+
+    // nvm version prefix: the same package, an interrupted-install staging
+    // dir, and an `acc` shim another package owns, which must survive.
+    const nvm = join(home, '.local', 'share', 'nvm', 'versions', 'node', 'v22.22.2')
+    const nvmPkg = join(nvm, 'lib', 'node_modules', 'antigravity-claude-proxy')
+    mkdirSync(join(nvmPkg, 'bin'), { recursive: true })
+    writeFileSync(join(nvmPkg, 'bin', 'cli.js'), '//', 'utf8')
+    mkdirSync(join(nvm, 'bin'), { recursive: true })
+    mkdirSync(join(nvm, 'lib', 'node_modules', '.antigravity-claude-proxy-stage42'), { recursive: true })
+    symlinkSync(join(nvmPkg, 'bin', 'cli.js'), join(nvm, 'bin', 'antigravity-claude-proxy'))
+    const foreignTarget = join(nvm, 'bin', 'unrelated-tool')
+    writeFileSync(foreignTarget, '//', 'utf8')
+    symlinkSync(foreignTarget, join(nvm, 'bin', 'acc'))
+
+    const result = runRenderedStep(home, substitute(sweep.command, home, join(home, '.dsh')))
+    expect(result.status).toBe(0)
+    expect(existsSync(localPkg)).toBe(false)
+    expect(existsSync(join(home, '.local', 'bin', 'antigravity-claude-proxy'))).toBe(false)
+    expect(existsSync(join(home, '.local', 'bin', 'acc'))).toBe(false)
+    expect(existsSync(nvmPkg)).toBe(false)
+    expect(existsSync(join(nvm, 'lib', 'node_modules', '.antigravity-claude-proxy-stage42'))).toBe(false)
+    expect(existsSync(join(nvm, 'bin', 'antigravity-claude-proxy'))).toBe(false)
+    // Both prefixes were also uninstalled through npm, fail-soft.
+    expect(result.npmCalls).toContain('uninstall -g --prefix')
+    expect(result.npmCalls).toContain('antigravity-claude-proxy')
+    // The unrelated `acc` shim and its target belong to another package.
+    expect(existsSync(join(nvm, 'bin', 'acc'))).toBe(true)
+    expect(existsSync(foreignTarget)).toBe(true)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+it('the macOS log step is platform-guarded and would remove only the proxy\'s own logs', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-agp-logs-'))
+  try {
+    const home = join(scratch, 'home')
+    const step = manifestById('antigravity')!.removal.steps
+      .find(candidate => candidate.label === 'Remove the macOS agent logs')!
+    const logs = join(home, 'Library', 'Logs')
+    mkdirSync(logs, { recursive: true })
+    const proxyLog = join(logs, 'antigravity-proxy.log')
+    const proxyErr = join(logs, 'antigravity-proxy.err.log')
+    const foreignLog = join(logs, 'other-tool.log')
+    for (const file of [proxyLog, proxyErr, foreignLog]) writeFileSync(file, 'x', 'utf8')
+
+    const result = runRenderedStep(home, substitute(step.command, home, join(home, '.dsh')))
+    expect(result.status).toBe(0)
+    if (process.platform === 'darwin') {
+      expect(existsSync(proxyLog)).toBe(false)
+      expect(existsSync(proxyErr)).toBe(false)
+    } else {
+      // The guard exits before touching anything on a foreign platform.
+      expect(existsSync(proxyLog)).toBe(true)
+    }
+    expect(existsSync(foreignLog)).toBe(true)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+it('the antigravity teardown removes the proxy state directory and only the package\'s npx residue', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-agp-state-'))
+  try {
+    const home = join(scratch, 'home')
+    const steps = manifestById('antigravity')!.removal.steps
+    const stateDir = join(home, '.config', 'antigravity-proxy')
+    mkdirSync(stateDir, { recursive: true })
+    writeFileSync(join(stateDir, 'accounts.json'), '{"accounts":[]}', 'utf8')
+    writeFileSync(join(stateDir, 'usage-history.json'), '{}', 'utf8')
+    const npxPkg = join(home, '.npm', '_npx', 'deadbeef', 'node_modules', 'antigravity-claude-proxy')
+    mkdirSync(npxPkg, { recursive: true })
+    const npxForeign = join(home, '.npm', '_npx', 'deadbeef', 'node_modules', 'other-tool')
+    mkdirSync(npxForeign, { recursive: true })
+
+    for (const label of [
+      'Remove the config directory (accounts.json OAuth tokens, usage history, presets)',
+      'Remove npm npx cache residue',
+    ]) {
+      const step = steps.find(candidate => candidate.label === label)!
+      const result = runRenderedStep(home, substitute(step.command, home, join(home, '.dsh')))
+      expect(result.status, label).toBe(0)
+    }
+    expect(existsSync(stateDir)).toBe(false)
+    expect(existsSync(npxPkg)).toBe(false)
+    // A foreign npx package tree is never touched.
+    expect(existsSync(npxForeign)).toBe(true)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 })

@@ -24,6 +24,7 @@ import {
 import { HeavyDashboardLinks } from './HeavyProviderStatus.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
+import docsStyles from './HeavyProviderDocs.module.css'
 
 export interface HeavyProviderDocsProps {
   manifest: HeavyProviderManifest
@@ -54,7 +55,7 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
     value === 'linux' ? t('heavyPlatformLinux') : value === 'darwin' ? t('heavyPlatformMacos') : t('heavyPlatformWindows')
 
   return (
-    <section className={styles['heavyDocs']}>
+    <section className={`${styles['heavyDocs']} ${docsStyles['heavyDocs']}`} data-heavy-docs>
       <div className={styles['heavyDocsHead']}>
         <h4 className={styles['heavyDocsTitle']}>{manifest.label} · {t('heavyDocumentation')}</h4>
         <span className={styles['protocolTag']}>{manifest.protocol}</span>
@@ -121,12 +122,12 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
       {resolved.unsupported !== undefined && <p className={styles['heavyModeNote']}>{resolved.unsupported}</p>}
 
       {resolved.unsupported === undefined && (
-        <ol className={styles['heavyList']}>
+        <ol className={`${styles['heavyList']} ${docsStyles['heavyDocsStepsList']}`} data-heavy-docs-steps>
           {resolved.steps.map(step => (
             <li key={step.label}>
               <strong>{step.label}</strong>
               {step.optional === true ? ` (${t('heavyOptional')})` : ''}
-              <pre className={styles['heavyLog']}>{step.command}</pre>
+              <pre className={`${styles['heavyLog']} ${docsStyles['heavyDocsLog']}`}>{step.command}</pre>
             </li>
           ))}
         </ol>

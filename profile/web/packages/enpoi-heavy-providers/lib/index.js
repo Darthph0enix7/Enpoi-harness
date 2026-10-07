@@ -47,11 +47,11 @@ var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read fr
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
-// profile/web/packages/enpoi-heavy-providers/src/index.ts
+// src/index.ts
 import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 
-// profile/web/packages/enpoi-heavy-providers/src/jobs.ts
+// src/jobs.ts
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 var LOG_CAP_BYTES = 8192;
@@ -221,7 +221,7 @@ function failed(id, error) {
   };
 }
 
-// profile/web/packages/enpoi-heavy-providers/src/manifests.ts
+// src/manifests.ts
 function platformInstallVariant(local, platform) {
   return platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
 }
@@ -244,9 +244,10 @@ var RUNTIME_TOOL_RE = {
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/
 };
 var ANTIGRAVITY_LAUNCHD_LABEL = "dev.enpoi.antigravity-proxy";
+var ANTIGRAVITY_PACKAGE = "antigravity-claude-proxy";
 var ANTIGRAVITY_NPM_STEP = {
   label: "Install the proxy package",
-  command: 'mkdir -p "{home}/.local/bin" && npm install -g --prefix "{home}/.local" antigravity-claude-proxy',
+  command: `mkdir -p "{home}/.local/bin" && npm install -g --prefix "{home}/.local" ${ANTIGRAVITY_PACKAGE}`,
   weight: 2
 };
 var ANTIGRAVITY_WAIT_STEP = {
@@ -334,6 +335,7 @@ EOF`
   },
   ANTIGRAVITY_WAIT_STEP
 ];
+var ANTIGRAVITY_PREFIX_SWEEP_COMMAND = `PKG=${ANTIGRAVITY_PACKAGE}; strip_prefix() { p="$1"; [ -n "$p" ] || return 0; if command -v npm >/dev/null 2>&1; then npm uninstall -g --prefix "$p" "$PKG" >/dev/null 2>&1 || true; fi; rm -rf "$p/lib/node_modules/$PKG" "$p/bin/$PKG" 2>/dev/null || true; if [ -L "$p/bin/acc" ]; then case "$(readlink "$p/bin/acc" 2>/dev/null)" in *"$PKG"*) rm -f "$p/bin/acc" 2>/dev/null || true;; esac; fi; for stage in "$p"/lib/node_modules/."$PKG"-*; do if [ -e "$stage" ]; then rm -rf "$stage" 2>/dev/null || true; fi; done; if [ -d "$p/lib/node_modules/$PKG" ] || [ -e "$p/bin/$PKG" ]; then echo "warning: $p still holds $PKG; remove it manually (system prefixes may need sudo): rm -rf $p/lib/node_modules/$PKG $p/bin/$PKG $p/bin/acc"; fi; }; strip_prefix "{home}/.local"; strip_prefix "{home}/.npm-global"; if command -v npm >/dev/null 2>&1; then strip_prefix "$(npm prefix -g 2>/dev/null)"; fi; for prefix in "{home}/.nvm/versions/node"/* "{home}/.local/share/nvm/versions/node"/* "{home}/.local/share/fnm/aliases/default" "{home}/Library/Application Support/fnm/aliases/default" "/opt/homebrew"; do if [ -d "$prefix" ]; then strip_prefix "$prefix"; fi; done; for prefix in "/usr/local" "/usr"; do if [ -d "$prefix/lib/node_modules/$PKG" ] || [ -e "$prefix/bin/$PKG" ]; then strip_prefix "$prefix"; fi; done; exit 0`;
 var COMMANDCODE_HEALTH = {
   url: "https://api.commandcode.ai/",
   timeoutMs: 5e3,
@@ -571,7 +573,9 @@ var HEAVY_MANIFESTS = [
     },
     removal: {
       // Platform-neutral on purpose: the same teardown runs on Linux and macOS
-      // and touches whichever user-service file the platform used.
+      // and touches whichever user-service file the platform used. Loginctl
+      // lingering is deliberately never disabled: it is a per-user setting the
+      // provider does not own.
       steps: [
         {
           label: "Stop and disable the user service",
@@ -583,20 +587,46 @@ var HEAVY_MANIFESTS = [
           optional: true,
           command: `rm -f {config}/systemd/user/antigravity-proxy.service {home}/Library/LaunchAgents/${ANTIGRAVITY_LAUNCHD_LABEL}.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi`
         },
-        // The package may live in `~/.local` (the install's prefix) or in a
-        // version-manager global prefix a previous setup used; both are
-        // uninstalled, fail-soft, so neither location keeps a stale binary.
+        // The package can sit in the install's fixed prefix, npm's own global
+        // prefix, a version-manager prefix, or a system prefix; the sweep
+        // uninstalls every one of them, fail-soft, and reports anything it
+        // could not remove (a system prefix may need sudo).
         {
-          label: "Uninstall the package",
+          label: "Uninstall the package from every npm prefix",
           optional: true,
-          command: 'npm uninstall -g --prefix "{home}/.local" antigravity-claude-proxy 2>/dev/null || true; npm uninstall -g antigravity-claude-proxy 2>/dev/null || true'
+          command: ANTIGRAVITY_PREFIX_SWEEP_COMMAND
         },
-        { label: "Remove the config directory (OAuth tokens, presets, usage history)", command: "rm -rf {config}/antigravity-proxy" }
+        // The launchd agent redirects stdout/stderr into ~/Library/Logs; the
+        // step is a no-op on every other platform.
+        {
+          label: "Remove the macOS agent logs",
+          optional: true,
+          command: 'test "$(uname -s)" = Darwin || exit 0; rm -rf "{home}/Library/Logs/antigravity-proxy"*; exit 0'
+        },
+        // The package's full state directory: config.json, accounts.json
+        // (every Google OAuth refresh token), usage-history.json, and the two
+        // presets files. Required, not optional: a failure here means user
+        // data survived the removal and must be reported.
+        {
+          label: "Remove the config directory (accounts.json OAuth tokens, usage history, presets)",
+          command: "rm -rf {config}/antigravity-proxy"
+        },
+        // npm's content-addressed cache is shared with every other package and
+        // self-pruning, so it is never wiped; an npx throwaway tree is
+        // package-owned residue and is removed.
+        {
+          label: "Remove npm npx cache residue",
+          optional: true,
+          command: `rm -rf "{home}/.npm/_npx"/*/node_modules/${ANTIGRAVITY_PACKAGE} 2>/dev/null || true; exit 0`
+        }
       ],
       warnings: [
         "Any other tool configured against the same proxy stops working when the service is removed",
         "If a dotfiles/config repository manages the service file (systemd unit or launchd plist), remove it there too or the next sync resurrects it",
-        "Deleting ~/.config/antigravity-proxy destroys every Google OAuth token and the usage history",
+        "The proxy state directory ~/.config/antigravity-proxy is deleted in full: accounts.json (every Google OAuth refresh token), usage-history.json, config.json, claude-presets.json, and server-presets.json are unrecoverable afterwards \u2014 back them up first if the accounts are shared elsewhere",
+        "The Google Antigravity app's own database (~/.config/Antigravity) is only read by the proxy and is never touched by this removal",
+        "loginctl lingering is left enabled \u2014 it is a per-user setting this teardown does not own",
+        "npm's shared content-addressed cache (~/.npm/_cacache) still holds the downloaded tarball; it is shared with other packages, holds no account data, and is left in place",
         "DSH route, credential, pool state, discovered cache, and chain links are removed separately by this teardown"
       ]
     },
@@ -781,7 +811,7 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
   return problems;
 }
 
-// profile/web/packages/enpoi-heavy-providers/src/planner.ts
+// src/planner.ts
 import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname, join as join2 } from "node:path";
 var LLM_NS = "llm-pi-ai";
@@ -1029,39 +1059,95 @@ async function probeHealth(probe, fetchImpl = globalThis.fetch, now = Date.now) 
     return { ok: false, error: error instanceof Error ? error.message : String(error), checkedAt };
   }
 }
-async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch) {
-  const url = `${baseURL.replace(/\/+$/, "")}/models`;
+var ANTHROPIC_VERSION = "2023-06-01";
+function modelListingUrl(baseURL, api) {
+  const base = baseURL.replace(/\/+$/, "");
+  if (api !== "anthropic-messages") return `${base}/models`;
+  const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
+  return `${root}/v1/models?limit=1000`;
+}
+function listingLabel(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 200) return candidate;
+  }
+  return void 0;
+}
+function listingCapacity(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
+  }
+  return void 0;
+}
+function readModelListing(body) {
+  const listing = body;
+  let rows;
+  if (Array.isArray(body)) {
+    rows = body.map((raw) => ({ raw }));
+  } else if (Array.isArray(listing?.data)) {
+    rows = listing.data.map((raw) => ({ raw }));
+  } else if (listing?.models !== null && typeof listing?.models === "object" && !Array.isArray(listing.models)) {
+    rows = Object.entries(listing.models).filter(([, raw]) => raw !== null && typeof raw === "object" && !Array.isArray(raw)).map(([key, raw]) => ({ key, raw }));
+  } else {
+    return [];
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const models = [];
+  for (const { key, raw } of rows.slice(0, 2e3)) {
+    const entry = raw;
+    const id = listingLabel(key, entry?.id);
+    if (id === void 0 || seen.has(id)) continue;
+    seen.add(id);
+    const name2 = listingLabel(entry?.name, entry?.displayName, entry?.display_name, entry?.description);
+    const contextWindow = listingCapacity(
+      entry?.contextWindow,
+      entry?.context_window,
+      entry?.context_length,
+      entry?.max_input_tokens,
+      entry?.limit?.context
+    );
+    const maxTokens = listingCapacity(
+      entry?.maxOutputTokens,
+      entry?.max_output_tokens,
+      entry?.maxTokens,
+      entry?.max_tokens,
+      entry?.limit?.output,
+      entry?.top_provider?.max_completion_tokens
+    );
+    models.push({
+      id,
+      ...name2 === void 0 || name2 === id ? {} : { name: name2 },
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxTokens === void 0 ? {} : { maxTokens }
+    });
+  }
+  return models;
+}
+async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch, api) {
+  const url = modelListingUrl(baseURL, api);
   const headers = { accept: "application/json" };
-  if (apiKey !== void 0 && apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`;
+  if (api === "anthropic-messages") {
+    headers["anthropic-version"] = ANTHROPIC_VERSION;
+    if (apiKey !== void 0 && apiKey.length > 0) headers["x-api-key"] = apiKey;
+  } else if (apiKey !== void 0 && apiKey.length > 0) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
   try {
     const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(15e3) });
     if (!response.ok) return [];
-    const body = JSON.parse(await response.text());
-    const rows = Array.isArray(body) ? body : body.data;
-    if (!Array.isArray(rows)) return [];
-    const seen = /* @__PURE__ */ new Set();
-    const models = [];
-    for (const row of rows.slice(0, 2e3)) {
-      if (row === null || typeof row !== "object") continue;
-      const id = row.id;
-      if (typeof id !== "string" || id === "" || seen.has(id)) continue;
-      seen.add(id);
-      const name2 = row.name;
-      models.push(typeof name2 === "string" && name2 !== "" ? { id, name: name2 } : { id });
-    }
-    return models;
+    return readModelListing(JSON.parse(await response.text()));
   } catch {
     return [];
   }
 }
-async function discoverRouteModels(deps, manifest, baseURL) {
+async function discoverRouteModels(deps, manifest, baseURL, apiKey) {
   const llm = deps.llm;
   if (llm === void 0) return [];
   try {
     const found = await llm.discoverModels(routeSettingsNs(manifest), {
       provider: manifest.id,
       baseURL,
-      api: manifest.protocol
+      api: manifest.protocol,
+      ...apiKey === void 0 || apiKey.length === 0 ? {} : { apiKey }
     });
     return found.flatMap((model) => {
       if (model.id === "") return [];
@@ -1077,6 +1163,20 @@ async function discoverRouteModels(deps, manifest, baseURL) {
   } catch {
     return [];
   }
+}
+async function discoverServiceModels(deps, manifest, baseURL, apiKey) {
+  if (manifest.delivery === "direct") return discoverRouteModels(deps, manifest, baseURL, apiKey);
+  let key = apiKey;
+  const ref = manifest.auth.apiKeyEnv;
+  if (key === void 0 && ref !== void 0 && deps.credentials !== void 0) {
+    try {
+      key = (await deps.credentials.resolve(ref))?.value;
+    } catch {
+      key = void 0;
+    }
+  }
+  const listed = await discoverModels(baseURL, key, deps.fetchImpl, manifest.protocol);
+  return listed.length > 0 ? listed : discoverRouteModels(deps, manifest, baseURL, key);
 }
 function revisionOf(settings, ns) {
   return settings.describe?.().find((entry) => entry.ns === ns)?.revision;
@@ -1162,7 +1262,7 @@ async function useDetectedInstance(deps, manifest, key, options = {}) {
   const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
   const detection = direct || customBase !== void 0 ? void 0 : await detectInstance(deps, manifest, configuredBase);
   const endpoint = direct ? manifest.reuse.baseURL : customBase ?? (detection.ok ? detection.baseURL : manifest.reuse.baseURL);
-  const models = direct ? await discoverRouteModels(deps, manifest, endpoint) : await discoverModels(endpoint, key, deps.fetchImpl);
+  const models = await discoverServiceModels(deps, manifest, endpoint, key);
   const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : typedOrigin !== void 0 ? await probeHealth(healthForBase(manifest, typedOrigin), deps.fetchImpl) : detection.health;
   const { route, credentialStored } = await commitRoute(deps, manifest, "reuse", models, key, { baseURL: endpoint });
   const customPort = typedOrigin === void 0 ? void 0 : urlPort(typedOrigin);
@@ -1330,7 +1430,7 @@ ${outcome.output}
   return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, warnings, errors };
 }
 
-// profile/web/packages/enpoi-heavy-providers/src/remote.ts
+// src/remote.ts
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 var MAX_KEY_CHARS = 4096;
 var RUNTIME_TTL_MS = 6e4;
@@ -1480,7 +1580,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       const current = this.options.deps();
       const late = pendingRestartForManifest(current, manifest);
       if (late !== void 0) throw new Error(late.message);
-      const models = manifest.delivery === "direct" ? await discoverRouteModels(current, manifest, modeBaseURL(manifest, "local")) : await discoverModels(modeBaseURL(manifest, "local"), key, current.fetchImpl);
+      const models = await discoverServiceModels(current, manifest, modeBaseURL(manifest, "local"), key);
       await commitRoute(current, manifest, "local", models, key);
     });
     return { ok: true, job };
@@ -1511,7 +1611,7 @@ __decoratorMetadata(_init, HeavyProvidersService);
 /** Nothing is injected into the service fiber; the plugin passes its deps. */
 __publicField(HeavyProvidersService, "inject", []);
 
-// profile/web/packages/enpoi-heavy-providers/src/index.ts
+// src/index.ts
 var name = "enpoi-heavy-providers";
 var inject = [];
 async function runStep(ctx, step, home, dshHome) {

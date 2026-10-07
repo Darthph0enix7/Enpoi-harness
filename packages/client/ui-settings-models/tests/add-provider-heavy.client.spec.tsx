@@ -8,7 +8,11 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { readdirSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
+import modalStyles from '../src/client/AddProviderModal.module.css'
+import docsStyles from '../src/client/HeavyProviderDocs.module.css'
 import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
 import type { ModelsWire } from '../src/client/store.ts'
@@ -314,4 +318,136 @@ it('a malformed host manifest address falls back to its raw text in the origin p
   // A host address that cannot parse renders as-is instead of crashing the
   // modal; the shipped table's address yields its origin (test above).
   expect(screen.getByPlaceholderText('not-a-url')).toBeTruthy()
+})
+
+it('contains modal dialog, content scroller, and documentation inside scrollable surfaces', async () => {
+  stubHeavyFetch({})
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('Command Code'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+
+  // The modal dialog must carry the contained layout and dialog class contract.
+  const dialog = document.querySelector('[class*="addProviderDialog"]') as HTMLElement
+  expect(dialog).toBeTruthy()
+  expect(dialog.className).toContain(modalStyles.dialog)
+
+  // The modal content wrapper must carry the scrollable scroller class.
+  const content = dialog.querySelector(`.${modalStyles.content}`) as HTMLElement
+  expect(content).toBeTruthy()
+
+  // Opening the docs panel mounts the contained docs section inside the modal body.
+  const docsBtn = screen.getByRole('button', { name: en.heavyDocumentation })
+  fireEvent.click(docsBtn)
+  await waitFor(() => {
+    expect(screen.getByText(en.heavyHideDocumentation)).toBeTruthy()
+  })
+
+  const docsSection = document.querySelector('[data-heavy-docs]') as HTMLElement
+  expect(docsSection).toBeTruthy()
+  expect(docsSection.className).toContain(docsStyles.heavyDocs)
+
+  // Controls in the footer remain mounted, reachable, and unpushed.
+  expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: en.create })).toBeTruthy()
+})
+
+it('contains local install steps list as a contained scrollable container', async () => {
+  stubHeavyFetch({})
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  fireEvent.click(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) }))
+
+  await waitFor(() => {
+    expect(screen.getByText(en.heavyInstallSteps)).toBeTruthy()
+  })
+
+  const stepsList = document.querySelector('[data-heavy-steps-list]') as HTMLElement
+  expect(stepsList).toBeTruthy()
+  expect(stepsList.className).toContain(modalStyles.heavyStepsList)
+})
+
+it('contains progress card and log tail as contained surfaces with ≤8 KB log without pushing controls', async () => {
+  const hugeLog = 'step execution line\n'.repeat(450) // ~9 KB log
+  stubHeavyFetch({
+    install: {
+      ok: true,
+      job: {
+        id: 'freellmapi',
+        kind: 'install',
+        state: 'running',
+        stage: 'Extracting images',
+        stageIndex: 1,
+        stageCount: 4,
+        pct: 35,
+        logTail: hugeLog,
+        startedAt: 1,
+      },
+    },
+    job: {
+      job: {
+        id: 'freellmapi',
+        kind: 'install',
+        state: 'running',
+        stage: 'Extracting images',
+        stageIndex: 1,
+        stageCount: 4,
+        pct: 35,
+        logTail: hugeLog,
+        startedAt: 1,
+      },
+    },
+  })
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  fireEvent.click(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) }))
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => {
+    expect(document.querySelector('[data-heavy-progress]')).toBeTruthy()
+  })
+
+  const progress = document.querySelector('[data-heavy-progress]') as HTMLElement
+  expect(progress.className).toContain(modalStyles.heavyProgress)
+
+  const log = document.querySelector('[data-heavy-log]') as HTMLElement
+  expect(log).toBeTruthy()
+  expect(log.className).toContain(modalStyles.heavyLog)
+  expect(log.textContent).toContain('step execution line')
+
+  // Back and Installing buttons in the footer remain mounted and accessible.
+  expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: en.heavyInstalling })).toBeTruthy()
+})
+
+it('pins the scrollbar rebind and token discipline contract in AddProviderModal.module.css', () => {
+  const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/AddProviderModal.module.css'), 'utf8')
+  const themeTokensDir = resolve(import.meta.dirname, '../../ui-theme/src/styles')
+  const themeTokens = readdirSync(themeTokensDir)
+    .filter(name => name.endsWith('.css'))
+    .map(name => readFileSync(resolve(themeTokensDir, name), 'utf8'))
+    .join('\n')
+
+  // Elevated-surface scrollbar rebind on the containers.
+  expect(sheet).toContain('--dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);')
+  expect(sheet).toContain('--dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);')
+
+  // Scroller properties on dialog, content, steps list, and log.
+  expect(sheet).toContain('overflow-y: auto;')
+  expect(sheet).toContain('max-height: min(840px, 100%);')
+  expect(sheet).toContain('overscroll-behavior: contain;')
+  expect(sheet).toContain('position: sticky;')
+
+  // Token discipline: every used variable must be defined in ui-theme styles.
+  const named = [...sheet.matchAll(/var\((--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(match => match[1])
+  const undeclared = [...new Set(named)].filter(name => !themeTokens.includes(`  ${String(name)}:`))
+  expect(undeclared).toEqual([])
+
+  // Block balancing: no unclosed brackets.
+  const bare = sheet.replace(/\/\*[\s\S]*?\*\//g, '')
+  expect((bare.match(/\}/g) ?? []).length).toBe((bare.match(/\{/g) ?? []).length)
 })

@@ -13,11 +13,13 @@ import {
   commitRoute,
   discoverModels,
   instanceBaseURLFromInput,
+  modelListingUrl,
   routeProfile,
   useDetectedInstance,
   type CredentialsSeam,
   type FetchLike,
   type HeavyDeps,
+  type ModelDiscoverySeam,
   type SettingsSeam,
 } from '../src/planner.js'
 
@@ -180,10 +182,144 @@ it('a custom instance URL reaches the antigravity health path on the typed host'
   const outcome = await useDetectedInstance(deps, manifestById('antigravity')!, undefined, {
     baseURL: 'http://10.0.0.9:9090',
   })
-  expect(calls).toEqual(['http://10.0.0.9:9090/models', 'http://10.0.0.9:9090/health'])
+  // The proxy lists models at its native Anthropic address, never at
+  // `{baseURL}/models`; the refused listing keeps the fallback model.
+  expect(calls).toEqual(['http://10.0.0.9:9090/v1/models?limit=1000', 'http://10.0.0.9:9090/health'])
   expect(outcome.health.ok).toBe(true)
-  const written = mutations[0]!.ops[0] as { value: { baseURL: string } }
+  expect(outcome.models).toEqual([])
+  const written = mutations[0]!.ops[0] as { value: { baseURL: string; models: unknown } }
   expect(written.value.baseURL).toBe('http://10.0.0.9:9090')
+  expect(written.value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+})
+
+it('an unreachable antigravity proxy keeps the fallback model in the written route', async () => {
+  const fetch: FetchLike = vi.fn(async () => { throw new Error('ECONNREFUSED') })
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!)
+  expect(outcome.health.ok).toBe(false)
+  expect(outcome.health.error).toContain('ECONNREFUSED')
+  expect(outcome.models).toEqual([])
+  expect(outcome.endpoint).toBe('http://127.0.0.1:8082')
+  const written = mutations[0]!.ops[0] as { value: { models: unknown } }
+  expect(written.value.models).toEqual([{ id: 'gemini-2.5-flash' }])
+})
+
+it('the listing address follows the protocol, matching llm-pi-ai\'s Anthropic normalization', () => {
+  expect(modelListingUrl('http://127.0.0.1:8082', 'anthropic-messages')).toBe('http://127.0.0.1:8082/v1/models?limit=1000')
+  expect(modelListingUrl('http://127.0.0.1:8082/', 'anthropic-messages')).toBe('http://127.0.0.1:8082/v1/models?limit=1000')
+  expect(modelListingUrl('http://127.0.0.1:8082/v1', 'anthropic-messages')).toBe('http://127.0.0.1:8082/v1/models?limit=1000')
+  expect(modelListingUrl('http://127.0.0.1:3002/v1', 'openai-completions')).toBe('http://127.0.0.1:3002/v1/models')
+  expect(modelListingUrl('http://127.0.0.1:8082', undefined)).toBe('http://127.0.0.1:8082/models')
+})
+
+it('antigravity discovery reads the proxy\'s native /v1/models and names models from description', async () => {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = []
+  const fetch: FetchLike = vi.fn(async (url, init) => {
+    calls.push({ url, headers: { ...init?.headers } })
+    if (url.endsWith('/health')) return { ok: true, status: 200, text: async () => '{}' }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        object: 'list',
+        data: [
+          { id: 'claude-sonnet-4-6', object: 'model', created: 1, owned_by: 'anthropic', description: 'Claude Sonnet 4.6 (Thinking)' },
+          { id: 'gemini-3.1-pro-high', object: 'model', created: 1, owned_by: 'anthropic', description: 'Gemini 3.1 Pro (High)' },
+        ],
+      }),
+    }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!, undefined, {
+    baseURL: 'http://10.0.0.9:9090',
+  })
+
+  // One listing call, at the Anthropic address, carrying the version header.
+  expect(calls[0]!.url).toBe('http://10.0.0.9:9090/v1/models?limit=1000')
+  expect(calls[0]!.headers['anthropic-version']).toBe('2023-06-01')
+  expect(calls[0]!.headers['x-api-key']).toBeUndefined()
+  expect(calls[0]!.headers.authorization).toBeUndefined()
+  expect(outcome.models).toEqual([
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
+  ])
+  const written = mutations[0]!.ops[0] as { value: { models: unknown } }
+  expect(written.value.models).toEqual(outcome.models)
+})
+
+it('antigravity discovery presents a typed key as x-api-key, never as a bearer token', async () => {
+  const headers: Array<Record<string, string> | undefined> = []
+  const fetch: FetchLike = vi.fn(async (_url, init) => {
+    headers.push(init?.headers)
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'gemini-3-flash' }] }) }
+  })
+  const { deps } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!, 'sk-typed', {
+    baseURL: 'http://10.0.0.9:9090',
+  })
+  expect(headers[0]?.['x-api-key']).toBe('sk-typed')
+  expect(headers[0]?.authorization).toBeUndefined()
+  expect(outcome.models).toEqual([{ id: 'gemini-3-flash' }])
+})
+
+it('a service route falls back to the registered namespace discovery when the endpoint listing answers nothing', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: false, status: 401, text: async () => 'unauthorized' }))
+  const { deps } = depsWith({ fetch })
+  const seen: Array<{ ns: string; request: Record<string, unknown> }> = []
+  const llm: ModelDiscoverySeam = {
+    discoverModels: async (ns, request) => {
+      seen.push({ ns, request: { ...request } })
+      return [{ id: 'glm-5.2', name: 'GLM 5.2', contextWindow: 200_000 }]
+    },
+  }
+  const outcome = await useDetectedInstance({ ...deps, llm }, manifestById('antigravity')!, undefined, {
+    baseURL: 'http://10.0.0.9:9090',
+  })
+  expect(outcome.models).toEqual([{ id: 'glm-5.2', name: 'GLM 5.2', contextWindow: 200_000 }])
+  expect(seen).toHaveLength(1)
+  expect(seen[0]!.ns).toBe('llm-pi-ai')
+  expect(seen[0]!.request.provider).toBe('antigravity')
+  expect(seen[0]!.request.api).toBe('anthropic-messages')
+})
+
+it('discovery uses the reference\'s stored credential when the add carries no key', async () => {
+  const auths: Array<string | undefined> = []
+  const fetch: FetchLike = vi.fn(async (url, init) => {
+    auths.push(init?.headers?.authorization)
+    if (url.endsWith('/api/ping')) return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }, { id: 'glm-5.2', name: 'GLM 5.2' }] }) }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+  deps.credentials = {
+    resolve: async ref => ref === 'FREELLMAPI_API_KEY' ? { value: 'sk-stored' } : undefined,
+    set: async () => {},
+    unset: async () => {},
+  }
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!)
+
+  // The stored unified key reached the wire even though the add typed none.
+  expect(auths).toContain('Bearer sk-stored')
+  expect(outcome.models.map(model => model.id)).toEqual(['auto', 'glm-5.2'])
+  const written = mutations[0]!.ops[0] as { value: { models: unknown } }
+  expect(written.value.models).toEqual([{ id: 'auto' }, { id: 'glm-5.2', name: 'GLM 5.2' }])
+})
+
+it('an enriched models map is read with the capacities the endpoint discloses', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      models: {
+        'glm-5.2': { name: 'GLM 5.2', context_length: 200_000, max_output_tokens: 65_536 },
+        plain: { description: 'Plain Model' },
+      },
+    }),
+  }))
+  const models = await discoverModels('http://127.0.0.1:3002/v1', undefined, fetch, 'openai-completions')
+  expect(models).toEqual([
+    { id: 'glm-5.2', name: 'GLM 5.2', contextWindow: 200_000, maxTokens: 65_536 },
+    { id: 'plain', name: 'Plain Model' },
+  ])
 })
 
 it('validates a typed instance address: absolute http(s) origin only, no credentials', () => {

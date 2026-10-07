@@ -16,6 +16,7 @@ import { HeavyDashboardLinks, HeavyPreflightNote, useHeavyStatus } from './Heavy
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
+import cardStyles from './HeavyProviderCard.module.css'
 
 export interface HeavyProviderCardProps {
   /** Route id (the manifest lookup key). */
@@ -130,7 +131,10 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
           </div>
         )}
         {job !== null && (
-          <div className={styles['heavyProgress']}>
+          <div
+            className={`${styles['heavyProgress']} ${cardStyles['heavyProgress']}`}
+            data-heavy-progress
+          >
             <div className={styles['heavyProgressHead']}>
               <span>{t('heavyProgress').replace('{step}', String(job.stageIndex + 1)).replace('{total}', String(job.stageCount))}</span>
               <span>{job.pct}%</span>
@@ -144,7 +148,14 @@ export function HeavyProviderCard({ providerId, t }: HeavyProviderCardProps): Re
             {job.state === 'failed' && (
               <p className={styles['heavyProgressError']}>{t('heavyFailed')}: {job.error ?? t('heavyJobFailedHint')}</p>
             )}
-            {job.logTail !== '' && <pre className={styles['heavyLog']}>{job.logTail}</pre>}
+            {job.logTail !== '' && (
+              <pre
+                className={`${styles['heavyLog']} ${cardStyles['heavyLog']}`}
+                data-heavy-log
+              >
+                {job.logTail}
+              </pre>
+            )}
           </div>
         )}
         {showDocs && <HeavyProviderDocs manifest={manifest} platform={status?.platform} t={t} />}

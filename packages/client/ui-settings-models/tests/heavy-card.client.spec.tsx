@@ -6,7 +6,11 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { readdirSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { HeavyProviderCard } from '../src/client/HeavyProviderCard.tsx'
+import cardStyles from '../src/client/HeavyProviderCard.module.css'
+import docsStyles from '../src/client/HeavyProviderDocs.module.css'
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import { en } from '../src/client/locales.ts'
 
@@ -138,4 +142,52 @@ it('fails soft when the probe is refused: unknown state, no page error', async (
   render(<HeavyProviderCard providerId="freellmapi" t={t} />)
   await waitFor(() => { expect(screen.getByText(en.heavyHealthUnknown)).toBeTruthy() })
   expect(screen.queryByText(/gateway responded 503/)).toBeNull()
+})
+
+it('pins the DOM and class contracts for HeavyProviderCard progress card and docs container', async () => {
+  stubFetch({})
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+
+  // Progress card and log elements carry the contained scroller contracts.
+  await waitFor(() => { expect(document.querySelector('[data-heavy-progress]')).toBeTruthy() })
+  const progress = document.querySelector('[data-heavy-progress]') as HTMLElement
+  expect(progress.className).toContain(cardStyles.heavyProgress)
+
+  const log = document.querySelector('[data-heavy-log]') as HTMLElement
+  expect(log).toBeTruthy()
+  expect(log.className).toContain(cardStyles.heavyLog)
+
+  // Toggling docs mounts the contained docs section.
+  fireEvent.click(screen.getByRole('button', { name: en.heavyDocumentation }))
+  await waitFor(() => { expect(document.querySelector('[data-heavy-docs]')).toBeTruthy() })
+  const docs = document.querySelector('[data-heavy-docs]') as HTMLElement
+  expect(docs.className).toContain(docsStyles.heavyDocs)
+})
+
+it('pins the scrollbar rebind and token discipline contract in HeavyProviderCard.module.css', () => {
+  const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/HeavyProviderCard.module.css'), 'utf8')
+  const themeTokensDir = resolve(import.meta.dirname, '../../ui-theme/src/styles')
+  const themeTokens = readdirSync(themeTokensDir)
+    .filter(name => name.endsWith('.css'))
+    .map(name => readFileSync(resolve(themeTokensDir, name), 'utf8'))
+    .join('\n')
+
+  // Elevated-surface scrollbar rebind on the progress/log containers.
+  expect(sheet).toContain('--dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);')
+  expect(sheet).toContain('--dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);')
+
+  // Scroller properties on log element.
+  expect(sheet).toContain('overflow-y: auto;')
+  expect(sheet).toContain('max-height: 240px;')
+  expect(sheet).toContain('max-height: 120px;')
+  expect(sheet).toContain('overscroll-behavior: contain;')
+
+  // Token discipline: every used variable must be defined in ui-theme styles.
+  const named = [...sheet.matchAll(/var\((--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(match => match[1])
+  const undeclared = [...new Set(named)].filter(name => !themeTokens.includes(`  ${String(name)}:`))
+  expect(undeclared).toEqual([])
+
+  // Block balancing: no unclosed brackets.
+  const bare = sheet.replace(/\/\*[\s\S]*?\*\//g, '')
+  expect((bare.match(/\}/g) ?? []).length).toBe((bare.match(/\{/g) ?? []).length)
 })

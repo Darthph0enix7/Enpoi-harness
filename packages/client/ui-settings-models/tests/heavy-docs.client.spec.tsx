@@ -7,7 +7,10 @@
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
+import { readdirSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { HeavyProviderDocs } from '../src/client/HeavyProviderDocs.tsx'
+import docsStyles from '../src/client/HeavyProviderDocs.module.css'
 import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { en } from '../src/client/locales.ts'
 
@@ -109,4 +112,48 @@ it('renders the placeholder auth reference and the direct-vendor install/removal
   expect(screen.getByText(/provider-package setup step runs through \/bin\/bash/)).toBeTruthy()
   expect(screen.queryByText('Link and build the DSH provider package')).toBeNull()
   expect(screen.queryByText(/\{dshHome\}/)).toBeNull()
+})
+
+it('pins the DOM and class contracts for HeavyProviderDocs scroll containers', () => {
+  const manifest = fallbackHeavyManifest('freellmapi')!
+  render(<HeavyProviderDocs manifest={manifest} platform="linux" t={t} />)
+
+  const docs = document.querySelector('[data-heavy-docs]') as HTMLElement
+  expect(docs).toBeTruthy()
+  expect(docs.className).toContain(docsStyles.heavyDocs)
+
+  const steps = document.querySelector('[data-heavy-docs-steps]') as HTMLElement
+  expect(steps).toBeTruthy()
+  expect(steps.className).toContain(docsStyles.heavyDocsStepsList)
+
+  const pre = steps.querySelector('pre') as HTMLElement
+  expect(pre).toBeTruthy()
+  expect(pre.className).toContain(docsStyles.heavyDocsLog)
+})
+
+it('pins the scrollbar rebind and token discipline contract in HeavyProviderDocs.module.css', () => {
+  const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/HeavyProviderDocs.module.css'), 'utf8')
+  const themeTokensDir = resolve(import.meta.dirname, '../../ui-theme/src/styles')
+  const themeTokens = readdirSync(themeTokensDir)
+    .filter(name => name.endsWith('.css'))
+    .map(name => readFileSync(resolve(themeTokensDir, name), 'utf8'))
+    .join('\n')
+
+  // Elevated-surface scrollbar rebind.
+  expect(sheet).toContain('--dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);')
+  expect(sheet).toContain('--dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);')
+
+  // Scroller properties on docs container and steps list.
+  expect(sheet).toContain('overflow-y: auto;')
+  expect(sheet).toContain('max-height: 380px;')
+  expect(sheet).toContain('overscroll-behavior: contain;')
+
+  // Token discipline: every used variable must be defined in ui-theme styles.
+  const named = [...sheet.matchAll(/var\((--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(match => match[1])
+  const undeclared = [...new Set(named)].filter(name => !themeTokens.includes(`  ${String(name)}:`))
+  expect(undeclared).toEqual([])
+
+  // Block balancing: no unclosed brackets.
+  const bare = sheet.replace(/\/\*[\s\S]*?\*\//g, '')
+  expect((bare.match(/\}/g) ?? []).length).toBe((bare.match(/\{/g) ?? []).length)
 })

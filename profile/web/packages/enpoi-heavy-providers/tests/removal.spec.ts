@@ -171,7 +171,42 @@ it('a failing required teardown step is reported without aborting state cleanup'
     : { exitCode: 1, output: 'rm refused' }
   const summary = await removeProvider(deps, manifestById('antigravity')!, { uninstall: true })
   expect(summary.teardown.ok).toBe(false)
-  expect(summary.teardown.failedStep).toBe('Remove the config directory (OAuth tokens, presets, usage history)')
+  expect(summary.teardown.failedStep).toBe('Remove the config directory (accounts.json OAuth tokens, usage history, presets)')
   expect(summary.routeRemoved).toBe(true)
   expect(mutations.some(entry => entry.ns === 'llm-pi-ai')).toBe(true)
+})
+
+it('antigravity removal sweeps every npm prefix, the launchd logs, the state directory, and npx residue', () => {
+  const manifest = manifestById('antigravity')!
+  expect(manifest.removal.steps.map(step => step.label)).toEqual([
+    'Stop and disable the user service',
+    'Remove the user service file',
+    'Uninstall the package from every npm prefix',
+    'Remove the macOS agent logs',
+    'Remove the config directory (accounts.json OAuth tokens, usage history, presets)',
+    'Remove npm npx cache residue',
+  ])
+  const commands = manifest.removal.steps.map(step => step.command).join('\n')
+  // Every prefix the install or a legacy setup can land in, plus npm's own.
+  expect(commands).toContain('{home}/.local')
+  expect(commands).toContain('{home}/.npm-global')
+  expect(commands).toContain('npm prefix -g')
+  expect(commands).toContain('.nvm/versions/node')
+  expect(commands).toContain('.local/share/nvm/versions/node')
+  expect(commands).toContain('fnm/aliases/default')
+  expect(commands).toContain('/usr/local')
+  expect(commands).toContain('sudo')
+  // Intact install leftovers npm can leave behind, macOS logs, state, npx.
+  expect(commands).toContain('lib/node_modules/."$PKG"-*')
+  expect(commands).toContain('Library/Logs/antigravity-proxy')
+  expect(commands).toContain('rm -rf {config}/antigravity-proxy')
+  expect(commands).toContain('.npm/_npx')
+  // The linger step's effect is left alone: removal never disables lingering.
+  expect(commands).not.toContain('disable-linger')
+  const warnings = manifest.removal.warnings.join('\n')
+  expect(warnings).toContain('accounts.json')
+  expect(warnings).toContain('usage-history.json')
+  expect(warnings).toContain('lingering is left enabled')
+  expect(warnings).toContain('~/.npm/_cacache')
+  expect(warnings).toContain('never touched')
 })
