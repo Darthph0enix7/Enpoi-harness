@@ -121,51 +121,65 @@ export function withChildBudgetGuidance(prompt: ContentBlock[]): ContentBlock[] 
 
 /**
  * One line telling a parent that a background child is finished and why, in
- * the parent's own task vocabulary.
+ * the parent's own task vocabulary. A failed final flush is stated in the same
+ * line: the parent must not read "finished" as "fully persisted".
  * @param childId - the durable child the parent knows by id.
  * @param stopReason - how the child's last ordinary turn ended.
+ * @param flushFailed - whether the epoch's final session flush failed.
  * @returns the model-facing opening line of the settlement notice.
  */
-function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
+function settlementSummary(
+  childId: SessionId,
+  stopReason: SubagentResult['stopReason'],
+  flushFailed: boolean,
+): string {
   const subject = `Background subagent ${childId}`
   // A stopped-before-finished child is recoverable: the notice names the
   // session so the parent can inspect it or continue it by id. New work stays
   // a fresh dispatch; this hint is for deliberate recovery only.
   const recovery = `inspect its session ${childId} or continue it with a follow-up`
-  switch (stopReason) {
-    case 'completed':
-      // enpoi: a completed child is the normal end of a dispatch. A deliberate
-      // follow-up can still reach it by id; the next task is a fresh dispatch.
-      return `${subject} finished.`
-    case 'aborted':
-      return `${subject} was stopped before it finished — ${recovery}.`
-    case 'max-tokens':
-      return `${subject} ran out of room before it finished — ${recovery}.`
-    // A pre-step rejection — a hook deny, a policy plugin — discarded input
-    // the child had claimed, so the parent must not treat the task as done.
-    case 'refusal':
-      return `${subject} declined the task — ${recovery}.`
-    case 'error':
-      return `${subject} failed before it finished — ${recovery}.`
-    /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
-     * needs a backend that adds a variant; an unnameable ending is reported as unfinished
-     * rather than silently as success. */
-    default:
-      return `${subject} ended abnormally (${String(stopReason)}) before it finished — ${recovery}.`
-  }
+  const summary = (() => {
+    switch (stopReason) {
+      case 'completed':
+        // enpoi: a completed child is the normal end of a dispatch. A deliberate
+        // follow-up can still reach it by id; the next task is a fresh dispatch.
+        return `${subject} finished.`
+      case 'aborted':
+        return `${subject} was stopped before it finished — ${recovery}.`
+      case 'max-tokens':
+        return `${subject} ran out of room before it finished — ${recovery}.`
+      // A pre-step rejection — a hook deny, a policy plugin — discarded input
+      // the child had claimed, so the parent must not treat the task as done.
+      case 'refusal':
+        return `${subject} declined the task — ${recovery}.`
+      case 'error':
+        return `${subject} failed before it finished — ${recovery}.`
+      /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
+       * needs a backend that adds a variant; an unnameable ending is reported as unfinished
+       * rather than silently as success. */
+      default:
+        return `${subject} ended abnormally (${String(stopReason)}) before it finished — ${recovery}.`
+    }
+  })()
+  return flushFailed
+    ? `${summary} Its final session flush failed, so its persisted state may be stale.`
+    : summary
 }
 
 /**
  * Build the runtime-owned settlement notice from the child's nonempty closing text.
  * @param childId - durable child session id named in the notice.
  * @param terminal - recorded terminal state for the settled Activation.
+ * @param flushFailed - whether the epoch's final session flush failed; the
+ *   notice then states that the persisted child state may be stale.
  * @returns the durable user-message representation delivered to the parent.
  */
 export function createSettlementMessage(
   childId: SessionId,
   terminal: ActivationTerminal,
+  flushFailed = false,
 ): ReturnType<typeof createUserMessage> {
-  const summary = settlementSummary(childId, terminal.stopReason)
+  const summary = settlementSummary(childId, terminal.stopReason, flushFailed)
   // Parent providers receive this notice as a user message and may reject
   // nontext assistant blocks. Keep this conversion local so SDK/UI consumers
   // retain the complete child output.

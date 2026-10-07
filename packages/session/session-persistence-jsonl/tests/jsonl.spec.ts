@@ -1457,6 +1457,127 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await reopened.fiber.dispose()
   })
 
+  it('retries a transient final-drain failure and delivers the buffered tail', async () => {
+    const m = meta('final-drain-retry', '/work')
+    const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
+    const service = ctx.sessionPersistence as unknown as {
+      persistBatch: (...args: [SessionHeader, readonly SessionEvent[], boolean]) => Promise<void>
+    }
+    const original = service.persistBatch.bind(service)
+    let calls = 0
+    vi.spyOn(service, 'persistBatch').mockImplementation(async (...args) => {
+      calls += 1
+      if (calls === 1) throw new Error('transient backend failure')
+      return original(...args)
+    })
+
+    for (const event of oneTurnLog()) handle.enqueueLive(event, () => {})
+    // The first drain fails; the bounded retry delivers the same batch exactly once.
+    await handle.close()
+    expect(calls).toBe(2)
+    await expect(readAll(ctx.sessionPersistence, m.id)).resolves.toMatchObject({ events: oneTurnLog() })
+  })
+
+  it('parks a persistently failing final drain in a sidecar the next write open re-appends', async () => {
+    const m = meta('final-drain-parked', '/work')
+    const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
+    await handle.flush() // materialize the empty log so a later write open can find it
+    const service = ctx.sessionPersistence as unknown as {
+      persistBatch: (...args: [SessionHeader, readonly SessionEvent[], boolean]) => Promise<void>
+    }
+    const failure = new Error('backend write refused')
+    const persist = vi.spyOn(service, 'persistBatch').mockRejectedValue(failure)
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+
+    for (const event of oneTurnLog()) handle.enqueueLive(event, () => {})
+    await expect(handle.close()).rejects.toBe(failure)
+    // The first pass plus the three bounded retries.
+    expect(persist.mock.calls).toHaveLength(4)
+    persist.mockRestore()
+
+    const markerPath = join(sessionDir(root, '/work', m.id), 'pending-flush.jsonl')
+    expect((await readFile(markerPath, 'utf8')).trim().split('\n')).toHaveLength(oneTurnLog().length)
+    expect(warnings.some(warning => warning.includes('[SESSION_FINAL_DRAIN_PARKED]'))).toBe(true)
+
+    // The next write open re-appends the parked tail and removes the marker.
+    const reopened = await ctx.sessionPersistence.open(m.id, 'write')
+    expect((await reopened.read()).events).toMatchObject(oneTurnLog())
+    await reopened.close()
+    await expect(stat(markerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(warnings.some(warning => warning.includes('[SESSION_FINAL_DRAIN_RECOVERED]'))).toBe(true)
+    // Reopening again does not duplicate the recovered events.
+    await expect(readAll(ctx.sessionPersistence, m.id)).resolves.toMatchObject({ events: oneTurnLog() })
+  })
+
+  it('reports an AggregateError and a lost-tail diagnostic when the marker cannot be written', async () => {
+    const m = meta('final-drain-lost', '/work')
+    const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
+    // A file where the session directory must be makes the sidecar write fail
+    // while the session itself stays unmaterialized.
+    const dir = sessionDir(root, '/work', m.id)
+    await mkdir(dirname(dir), { recursive: true })
+    await writeFile(dir, 'not a directory')
+    const service = ctx.sessionPersistence as unknown as {
+      persistBatch: (...args: [SessionHeader, readonly SessionEvent[], boolean]) => Promise<void>
+    }
+    vi.spyOn(service, 'persistBatch').mockRejectedValue(new Error('backend write refused'))
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+
+    for (const event of oneTurnLog()) handle.enqueueLive(event, () => {})
+    const failure = await handle.close().then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as Error).message).toContain('pending-flush marker could not be written')
+    expect(warnings.some(warning => warning.includes('[SESSION_FINAL_DRAIN_LOST]'))).toBe(true)
+  })
+
+  it('retains a corrupt pending-flush marker and reports it instead of dropping the tail', async () => {
+    const m = meta('final-drain-corrupt', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const markerPath = join(sessionDir(root, '/work', m.id), 'pending-flush.jsonl')
+    await writeFile(markerPath, '{"torn": tru')
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+
+    const writer = await ctx.sessionPersistence.open(m.id, 'write')
+    expect((await writer.read()).events).toMatchObject(oneTurnLog())
+    await writer.close()
+    expect(await readFile(markerPath, 'utf8')).toBe('{"torn": tru')
+    expect(warnings.some(warning => warning.includes('[SESSION_PENDING_FLUSH_CORRUPT]'))).toBe(true)
+  })
+
+  it('retains a pending-flush marker whose seqs no longer line up with the log', async () => {
+    const m = meta('final-drain-stale', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const markerPath = join(sessionDir(root, '/work', m.id), 'pending-flush.jsonl')
+    await writeFile(markerPath, `${JSON.stringify({
+      type: 'turn/start', seq: SessionSeq(99), time: 9, data: { turn: 2 },
+    })}\n`)
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+
+    const writer = await ctx.sessionPersistence.open(m.id, 'write')
+    await writer.close()
+    expect(await readFile(markerPath, 'utf8')).toContain('"seq":99')
+    expect(warnings.some(warning => warning.includes('[SESSION_PENDING_FLUSH_UNRECOVERABLE]'))).toBe(true)
+  })
+
+  it('reports an unreadable pending-flush marker and leaves it in place', async () => {
+    const m = meta('final-drain-unreadable', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const markerPath = join(sessionDir(root, '/work', m.id), 'pending-flush.jsonl')
+    await writeFile(markerPath, '[]\n')
+    readFailure.path = markerPath
+    readFailure.error = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+
+    const writer = await ctx.sessionPersistence.open(m.id, 'write')
+    await writer.close()
+    expect(warnings.some(warning => warning.includes('[SESSION_PENDING_FLUSH_UNREADABLE]'))).toBe(true)
+  })
+
   it('service flush skips a write claim whose handle is still opening', async () => {
     const m = meta('opening-claim', '/work')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())

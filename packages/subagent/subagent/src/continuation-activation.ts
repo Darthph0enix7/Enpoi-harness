@@ -112,6 +112,13 @@ export interface Activation {
    */
   announced: boolean
   /**
+   * Whether this epoch's final session flush failed. Set by
+   * {@link ContinuableActivationRegistry.flushFinalState} and read when the
+   * settlement notice is built, so the notice states the child's true
+   * persisted state instead of an unqualified "finished".
+   */
+  finalFlushFailed: boolean
+  /**
    * Whether settlement notices and child-to-parent messages are suppressed for
    * this Activation (quiet deliberation fibers). Persisted in the descriptor so
    * a cold resume restores it.
@@ -230,6 +237,13 @@ export class ContinuableActivationRegistry {
   private draining = false
   /** Retained settlement notices that still owe a parent a wake. */
   private readonly notices: SettlementNoticeOutbox
+  /**
+   * Child ids whose final session flush failed and whose persisted state is
+   * therefore stale. The settlement notice carries that fact durably to the
+   * parent; this set is the process-local retry marker, drained by the flush
+   * retry on the child's next materialization (resume).
+   */
+  private readonly pendingFinalFlush = new Set<SessionId>()
   /** Monotonic source of per-epoch settlement identities. */
   private noticeSeq = 0
 
@@ -715,6 +729,7 @@ export class ContinuableActivationRegistry {
       ownedChildren: new Set(),
       observer,
       announced: false,
+      finalFlushFailed: false,
       quiet: inputs.quiet ?? false,
       poke: Promise.withResolvers<void>(),
     }
@@ -734,6 +749,12 @@ export class ContinuableActivationRegistry {
       throw error
     }
     this.watchSettlement(activation)
+    // A final flush that failed in an earlier epoch left this child's durable
+    // state stale; retry it now that the child has a fresh handle. A cold
+    // resume is the path that finds the process-local retry marker.
+    if (create === undefined && this.pendingFinalFlush.has(childId)) {
+      await this.flushFinalState(activation)
+    }
     return activation
   }
 
@@ -934,7 +955,7 @@ export class ContinuableActivationRegistry {
     // Quiet fibers deliver nothing to the parent: the orchestrating tool
     // (council/oracle) reads the final synthesis from the child session itself.
     if (activation.quiet) return
-    const message = createSettlementMessage(activation.childId, terminal)
+    const message = createSettlementMessage(activation.childId, terminal, activation.finalFlushFailed)
     this.notices.notify(
       activation.parentSession,
       activation.childId,
@@ -984,16 +1005,29 @@ export class ContinuableActivationRegistry {
     return 'waking'
   }
 
-  /** Request a best-effort final session flush before closing natural-settlement admission. */
-  private async flushFinalState(activation: Activation): Promise<void> {
+  /**
+   * Flush the child's final session state before closing natural-settlement
+   * admission. A failure is never dropped: the epoch and the registry are
+   * marked, the settlement notice states the stale persisted state, and the
+   * flush is retried when this child is next materialized (resumed).
+   * @param activation - the settling epoch whose child session is flushed.
+   * @returns whether the session reached durable storage.
+   */
+  private async flushFinalState(activation: Activation): Promise<boolean> {
     const child = activation.handle.agent
     try {
       await child.ctx.sessions.flush(child.session)
+      activation.finalFlushFailed = false
+      this.pendingFinalFlush.delete(activation.childId)
+      return true
     } catch (error: unknown) {
+      activation.finalFlushFailed = true
+      this.pendingFinalFlush.add(activation.childId)
       this.ctx.logger.warn(
-        `subagent "${activation.childId}" best-effort final session flush failed; `
-        + `the persisted state may be unavailable or stale on resume: ${errorChain(error)}`,
+        `subagent "${activation.childId}" final session flush failed `
+        + `[SUBAGENT_FLUSH_FAILED]; the persisted state may be unavailable or stale on resume: ${errorChain(error)}`,
       )
+      return false
     }
   }
 }

@@ -144,10 +144,15 @@ export class RevertExecutor {
         }
         // Pre-clobber backup (Zero Data Loss): stage current content to blob store
         // before overwriting or trashing so uncommitted user edits are never destroyed.
+        // A failed backup destroys the only copy of those edits, so it escalates
+        // this file exactly like a missing target blob (Oracle B2); the batch continues.
         if (current !== null) {
           try {
             await this.opts.blobStore.put(current)
-          } catch { /* best-effort backup */ }
+          } catch (err) {
+            outcomes[targetKey] = { status: 'conflict_escalated', reason: `pre-clobber backup failed: ${String(err)}` }
+            continue
+          }
         }
         const path = await opts.resolvePath(targetKey)
         if (action === 'restore') {

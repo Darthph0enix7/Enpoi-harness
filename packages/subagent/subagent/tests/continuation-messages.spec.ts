@@ -73,6 +73,21 @@ describe('continuable settlement content', () => {
       senderSessionId: childId,
     })
   })
+
+  it('states the stale persisted state when the final session flush failed', () => {
+    const message = createSettlementMessage(childId, { stopReason: 'completed' }, true)
+    const stated = `${subject} finished. Its final session flush failed, so its persisted state may be stale.`
+
+    // Both the model-visible opening line and the collapsed summary row carry
+    // the true state: "finished" alone would overstate durability.
+    expect(message.content[0]).toEqual({ type: 'text', text: stated })
+    expect(message.source).toEqual({
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: boundContextSummary(stated),
+      senderSessionId: childId,
+    })
+  })
 })
 
 describe('delegation budget guidance', () => {

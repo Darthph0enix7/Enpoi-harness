@@ -1635,7 +1635,7 @@ describe('continuable durability and teardown', () => {
   })
 
   it('logs a failed final flush after every listener settles without failing the Activation', async () => {
-    const { ctx, parent } = await setup([textResponse('answer')])
+    const { ctx, parent } = await setup([textResponse('answer'), textResponse('parent ack')])
     const warnings: string[] = []
     const ends: SubagentRunEndInfo[] = []
     let peerFlushed = false
@@ -1651,8 +1651,54 @@ describe('continuable durability and teardown', () => {
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await waitNoActivation(ctx, started.childId)
     expect(peerFlushed).toBe(true)
-    expect(warnings.some(warning => warning.includes('best-effort final session flush failed'))).toBe(true)
+    expect(warnings.some(warning => warning.includes('[SUBAGENT_FLUSH_FAILED]'))).toBe(true)
     expect(ends.at(-1)?.stopReason).toBe('completed')
+    // The failed flush is marked for retry and the settlement notice tells the
+    // parent the persisted child state may be stale.
+    const registry = continuationActivations(ctx) as unknown as { pendingFinalFlush: Set<SessionId> }
+    expect(registry.pendingFinalFlush.has(started.childId)).toBe(true)
+    await vi.waitFor(() => {
+      expect(settlementNotices(parent).some(notice => notice.text.includes('final session flush failed'))).toBe(true)
+    })
+    const notice = settlementNotices(parent).at(-1)!
+    expect(notice.text).toContain('Its final session flush failed, so its persisted state may be stale.')
+    // The collapsed summary row carries the same fact within its 120-char bound.
+    expect(notice.summary).toContain('final session flush failed')
+  })
+
+  it('retries a failed final flush on the child\'s next resume and clears the retry marker', async () => {
+    const releaseResumedTurn = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('answer') },
+      { chunks: textResponse('resumed answer'), gate: releaseResumedTurn.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
+    let failFlush = true
+    let childFlushes = 0
+    ctx.on('session/flush', (session) => {
+      if (session.header.parentSession === undefined) return
+      childFlushes += 1
+      if (failFlush) throw new Error('disk full')
+    })
+    const registry = continuationActivations(ctx) as unknown as { pendingFinalFlush: Set<SessionId> }
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    expect(childFlushes).toBe(1)
+    expect(registry.pendingFinalFlush.has(started.childId)).toBe(true)
+
+    // The resume materializes a fresh handle and retries the pending flush
+    // while the resumed turn is still gated, so this is the retry and not the
+    // later settlement flush.
+    failFlush = false
+    await queuePrompt(ctx, parent, started.childId, message('continue'))
+    await vi.waitFor(() => { expect(childFlushes).toBeGreaterThanOrEqual(2) })
+    expect(ctx.agents.get(started.childId)).toBeDefined()
+    expect(registry.pendingFinalFlush.has(started.childId)).toBe(false)
+
+    releaseResumedTurn.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
   })
 
   it('logs a teardown failure reached through normal settlement', async () => {

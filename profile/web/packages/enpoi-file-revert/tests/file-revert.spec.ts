@@ -466,6 +466,61 @@ describe('WAL, crash recovery & durability', () => {
     expect(outcomes['b.txt']?.status).toBe('restored')
   })
 
+  it('execute: failed pre-clobber backup escalates the file, never writes it, and the batch continues', async () => {
+    await writeFile(join(env.work, 'a.txt'), 'origA')
+    await writeFile(join(env.work, 'b.txt'), 'origB')
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('origA'), postBytes: Buffer.from('agentA') })
+    await simulateMutation({ seq: 11, callId: 'c2', targetKey: 'b.txt', displayPath: 'b.txt', preBytes: Buffer.from('origB'), postBytes: Buffer.from('agentB') })
+    const { plan } = await buildRevertPlan(env.manifest, 10, readDisk)
+    // Sabotage the backup write for a.txt's disk state only: its uncommitted
+    // content is the only copy and must never be clobbered.
+    const brokenBlobs = {
+      put: async (bytes: Buffer) => {
+        if (bytes.toString() === 'agentA') throw new Error('disk full')
+        return env.blobs.put(bytes)
+      },
+      get: async (sha: string) => env.blobs.get(sha),
+    }
+    const brokenExecutor = new RevertExecutor({ blobStore: brokenBlobs as unknown as BlobStore, trashRoot: join(env.root, 'trash2'), walFile: join(env.root, 'wal2.jsonl') })
+    await brokenExecutor.init()
+    const { outcomes, sealed } = await brokenExecutor.execute({
+      sessionId: 's1', revertSeq: 10, plan,
+      resolvePath, readDisk, writeDisk: atomicWriter, trashFile,
+    })
+    expect(sealed).toBe(true)
+    expect(outcomes['a.txt']?.status).toBe('conflict_escalated')
+    expect(outcomes['a.txt']?.reason).toContain('pre-clobber backup failed')
+    // a.txt was not overwritten; the healthy sibling still reverted.
+    expect(await readFile(join(env.work, 'a.txt'), 'utf8')).toBe('agentA')
+    expect(outcomes['b.txt']?.status).toBe('restored')
+    expect(await readFile(join(env.work, 'b.txt'), 'utf8')).toBe('origB')
+    // The sealed WAL result records the reason for recovery/audit.
+    const result = brokenExecutor.wal.find(entry => entry.kind === 'result' && entry.revertSeq === 10)
+    expect(result?.kind === 'result' ? result.outcomes['a.txt']?.reason : undefined).toContain('pre-clobber backup failed')
+  })
+
+  it('execute: failed pre-clobber backup escalates a trash action and never trashes the file', async () => {
+    await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'new.txt', displayPath: 'new.txt', preBytes: null, postBytes: Buffer.from('created by agent') })
+    const { plan } = await buildRevertPlan(env.manifest, 10, readDisk)
+    expect(plan.get('new.txt')?.state).toBe(STATE.CLEAN_TRASH)
+    const brokenBlobs = {
+      put: async () => { throw new Error('disk full') },
+      get: async (sha: string) => env.blobs.get(sha),
+    }
+    const brokenExecutor = new RevertExecutor({ blobStore: brokenBlobs as unknown as BlobStore, trashRoot: join(env.root, 'trash2'), walFile: join(env.root, 'wal2.jsonl') })
+    await brokenExecutor.init()
+    let trashed = false
+    const { outcomes } = await brokenExecutor.execute({
+      sessionId: 's1', revertSeq: 10, plan,
+      resolvePath, readDisk, writeDisk: atomicWriter,
+      trashFile: async (p: string) => { trashed = true; return env.executor.trash(p, 's1') },
+    })
+    expect(outcomes['new.txt']?.status).toBe('conflict_escalated')
+    expect(outcomes['new.txt']?.reason).toContain('pre-clobber backup failed')
+    expect(trashed).toBe(false)
+    expect(await readFile(join(env.work, 'new.txt'), 'utf8')).toBe('created by agent')
+  })
+
   it('TOCTOU: disk modified between evaluation and write escalates to conflict', async () => {
     await writeFile(join(env.work, 'a.txt'), 'original')
     await simulateMutation({ seq: 10, callId: 'c1', targetKey: 'a.txt', displayPath: 'a.txt', preBytes: Buffer.from('original'), postBytes: Buffer.from('agent edit') })

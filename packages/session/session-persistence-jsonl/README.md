@@ -67,6 +67,7 @@ Each session gets a session-owned directory under a readable project directory. 
       session.v1.jsonl           # released v1, raw root
       session.v2.jsonl           # released v2, raw root
       session.v3.jsonl           # released v3/current, raw root; later versions use vN
+      pending-flush.jsonl        # buffered tail of a failed final drain, awaiting the next write open
 ```
 
 Session ids are injectively escaped to one safe path segment before use (no traversal, no collision). The normalized cwd keeps the project directory readable for navigation; cwd strings that normalize alike share a project directory while session ids still select distinct session directories. Runtime operations select the numerically highest canonical generation, and format-refusal diagnostics name that absolute path so an operator can find the raw log a build refused to interpret.
@@ -74,6 +75,8 @@ Session ids are injectively escaped to one safe path segment before use (no trav
 ### Durability and crash semantics
 
 A session is materialized lazily: `create(header)` writes nothing and returns the owned write handle, and the handle's first `append` writes and `fsync`s the encoded header and first batch through a no-overwrite publish — so a created-but-never-appended session leaves nothing on disk unless its owner calls `handle.flush()`, which publishes one header frame without an event. Each subsequent batch appends lines or one compressed frame and `fsync`s before the append resolves; a caught write or sync failure rolls the file back to its prior length. Committed events are never rewritten. After a crash, the stored log keeps its interrupted final turn — every record in the committed prefix survives, and the resuming reader appends synthetic closers through its write handle. An incomplete final raw line is discarded. A torn final Zstandard frame contributes only its complete decoded JSONL records; a write handle truncates the torn bytes and durably rewrites those recovered records before its first new batch. Checksum, decompression, or structural failure in a complete committed frame rejects as corruption.
+
+Backend teardown and `session/disposed` close each write handle, and close drains the routed live buffer before releasing. A failing final drain is retried on a bounded backoff; a drain still failing after the last retry parks its buffered tail in the session directory's `pending-flush.jsonl` sidecar, and the next write open (or re-create) re-appends that tail before serving the session and removes the marker. A marker that cannot be read, parsed, or appended contiguously is retained and reported through the backend logger rather than dropped, and it is removed with the session directory on delete.
 
 The current-generation scanner applies the current codec owner’s structural admission checks before recoverable-tail handling. Retired required PTC tags and `request/header.header.system` refuse the file even after an earlier malformed row; recovery never truncates them as ordinary damaged tail data.
 

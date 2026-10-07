@@ -67,6 +67,7 @@ kind: "package-reference"
       session.v1.jsonl           # released v1, raw root
       session.v2.jsonl           # released v2, raw root
       session.v3.jsonl           # released v3/current, raw root; later versions use vN
+      pending-flush.jsonl        # buffered tail of a failed final drain, awaiting the next write open
 ```
 
 会话 id 在使用前被单射转义为一个安全路径段（无遍历、无冲突）。规范化 cwd 让项目目录保持可读、便于导航；规范化相同的 cwd 字符串共享项目目录，而会话 id 仍选择不同会话目录。运行时操作选择数值最高的规范 generation，格式拒绝诊断会点名该绝对路径，让操作者能找到构建拒绝解读的原始日志。
@@ -74,6 +75,8 @@ kind: "package-reference"
 ### 持久性与崩溃语义
 
 会话延迟实体化：`create(header)` 不写入任何内容并返回持有的写句柄，句柄的第一次 `append` 通过无覆盖发布写入并 `fsync` 编码后的 header 与第一批——因此已创建但从未 append 的会话不留下任何磁盘内容，除非其所有者调用 `handle.flush()`，以无事件的单个 header 帧发布它。后续每个批次追加行或一个压缩帧，并在 append 完成前 `fsync`；捕获到写入或同步失败时把文件回滚到之前的字节长度。已提交事件绝不重写。崩溃后，已存储日志保留被中断的最终轮次——已提交前缀中的每条记录都保留下来，由执行恢复的读方通过其写句柄追加合成 closer。不完整的最终原始行会被丢弃。撕裂的最终 Zstandard 帧只贡献其中完整解码出的 JSONL 记录；写句柄会截掉撕裂字节，并在第一次新批次之前持久重写这些恢复出的记录。完整已提交帧中的校验和、解压或结构失败以损坏拒绝。
+
+后端拆卸与 `session/disposed` 会关闭每个写句柄，close 在释放前排空已路由的实时缓冲。最终排空失败会按有界退避重试；最后一次重试后仍失败时，缓冲尾部会被停放为会话目录中的 `pending-flush.jsonl` sidecar，下一次写 open（或重新 create）会在服务该会话之前重新追加该尾部并删除标记。无法读取、解析或按连续性追加的标记会被保留并通过后端 logger 上报，而不是被丢弃；删除会话目录时该标记一并移除。
 
 当前代际扫描器在处理可恢复尾部之前，执行当前编解码器所有者的结构准入检查。已退役的必需 PTC 标签与 `request/header.header.system` 即使出现在较早的畸形行之后也会导致文件被拒绝；恢复绝不将它们作为普通损坏尾部数据截断。
 

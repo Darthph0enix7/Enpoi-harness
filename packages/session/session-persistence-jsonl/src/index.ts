@@ -14,7 +14,7 @@ import {
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
 import { readdirSync, type Dirent } from 'node:fs'
-import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readdir, readFile, realpath, link, rename, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -64,6 +64,13 @@ export type { JsonlCompression } from './format.ts'
  * log, so the memo only needs the sessions in flight between those steps.
  */
 const COLD_LOG_MEMO_MAX_ENTRIES = 2
+
+/**
+ * Session-directory sidecar naming a routed live batch whose final drain
+ * failed. It lives beside the log until the next write open (or re-create)
+ * re-appends it, and is removed with the session directory on delete.
+ */
+const PENDING_FLUSH_FILENAME = 'pending-flush.jsonl'
 
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
@@ -348,7 +355,11 @@ class JsonlSessionPersistence extends SessionPersistence {
     // before its first log bytes publish (ensureLease); an unmaterialized
     // session leaves no filesystem footprint at all.
     this.tracker.registerCreated(snapshot, inheritedEventCount)
-    return this.tracker.adopt(new JsonlSessionHandle(this, snapshot.id, snapshot, 'write', { cursor: 0, materialized: false, inheritedEventCount }))
+    const handle = this.tracker.adopt(new JsonlSessionHandle(this, snapshot.id, snapshot, 'write', { cursor: 0, materialized: false, inheritedEventCount }))
+    // A sidecar marker means this id's earlier final drain failed before the
+    // session ever materialized; re-append that tail before handing out the handle.
+    await this.recoverPendingFlush(handle, snapshot)
+    return handle
   }
 
   /**
@@ -408,7 +419,7 @@ class JsonlSessionPersistence extends SessionPersistence {
         stored = prepared
       }
       options?.signal?.throwIfAborted()
-      return this.tracker.adopt(new JsonlSessionHandle(this, id, stored.meta, 'write', {
+      const handle = this.tracker.adopt(new JsonlSessionHandle(this, id, stored.meta, 'write', {
         cursor: stored.events.length,
         materialized: true,
         tornTruncateTo: stored.tornTruncateTo,
@@ -416,6 +427,8 @@ class JsonlSessionPersistence extends SessionPersistence {
         inheritedEventCount: stored.inheritedEventCount,
         primed: stored,
       }, lease))
+      await this.recoverPendingFlush(handle, stored.meta)
+      return handle
     } catch (error) {
       // Free the in-process claim no matter how the kernel-lock release
       // fares, and keep the original diagnostic: a release failure joins it
@@ -939,6 +952,87 @@ class JsonlSessionPersistence extends SessionPersistence {
     this.coldLogMemo.delete(header.id)
     await this.repair(header, truncateTo)
     this.ctx.logger.warn(`${this.name}: session "${header.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
+  }
+
+  /**
+   * Park a live batch whose final drain failed as the session directory's
+   * pending-flush sidecar. The next write open (or re-create) re-appends the
+   * batch and removes the marker. A failure here leaves the buffered tail with
+   * no durable copy, is reported, and rejects.
+   * @param header - the session whose handle failed to drain.
+   * @param events - the still-buffered events in seq order.
+   */
+  async persistPendingFlush(header: SessionHeader, events: readonly SessionEvent[]): Promise<void> {
+    const dir = sessionDir(this.root, header.cwd, header.id)
+    const path = join(dir, PENDING_FLUSH_FILENAME)
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 })
+      const content = `${events.map(event => JSON.stringify(event)).join('\n')}\n`
+      const tmp = await this.writeSyncedTempFile(path, content)
+      await rename(tmp, path)
+      // Publish the marker's directory entry durably, the same discipline the
+      // log's own materialization uses.
+      /* v8 ignore next -- native Windows coverage exercises its own durable-directory path; Linux covers the POSIX peer */
+      if (process.platform !== 'win32') await this.syncDirPosix(dir)
+      this.ctx.logger.warn(
+        `${this.name}: session "${header.id}" final drain failed after retries; `
+        + `${events.length} buffered event(s) parked at ${path} [SESSION_FINAL_DRAIN_PARKED]; `
+        + 'the next write open re-appends them',
+      )
+    } catch (error: unknown) {
+      this.ctx.logger.warn(
+        `${this.name}: session "${header.id}" final drain failed and its pending-flush marker could not be written `
+        + `[SESSION_FINAL_DRAIN_LOST]; the buffered tail has no durable copy: ${String(error)}`,
+      )
+      throw error
+    }
+  }
+
+  /**
+   * Re-append a pending-flush sidecar before serving a write handle, then
+   * remove the marker. An absent marker is the normal path; one that cannot be
+   * read, parsed, or appended contiguously stays in place and is reported,
+   * because dropping it would destroy the only copy of the tail.
+   * @param handle - the freshly adopted write handle for the session.
+   * @param header - the session's stored header.
+   */
+  private async recoverPendingFlush(handle: JsonlSessionHandle, header: SessionHeader): Promise<void> {
+    const path = join(sessionDir(this.root, header.cwd, header.id), PENDING_FLUSH_FILENAME)
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (error: unknown) {
+      if (isENOENT(error)) return
+      this.ctx.logger.warn(
+        `${this.name}: session "${header.id}" pending-flush marker could not be read `
+        + `[SESSION_PENDING_FLUSH_UNREADABLE] (${path}): ${String(error)}`,
+      )
+      return
+    }
+    let events: SessionEvent[]
+    try {
+      events = raw.split('\n').filter(line => line.length > 0).map(line => JSON.parse(line) as SessionEvent)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(
+        `${this.name}: session "${header.id}" pending-flush marker is corrupt `
+        + `[SESSION_PENDING_FLUSH_CORRUPT] (${path}): ${String(error)}`,
+      )
+      return
+    }
+    try {
+      await handle.reflushPending(events)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(
+        `${this.name}: session "${header.id}" pending-flush recovery failed `
+        + `[SESSION_PENDING_FLUSH_UNRECOVERABLE] (${path}); the marker is retained: ${String(error)}`,
+      )
+      return
+    }
+    await rm(path, { force: true })
+    this.ctx.logger.warn(
+      `${this.name}: session "${header.id}" recovered ${events.length} event(s) from a failed final drain `
+      + '[SESSION_FINAL_DRAIN_RECOVERED]',
+    )
   }
 
   /**

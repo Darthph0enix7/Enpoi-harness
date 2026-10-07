@@ -12,6 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionHeader, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   assertContiguous,
   SessionAlreadyExistsError,
@@ -35,6 +36,12 @@ import type { SessionWriteLease } from './lease.ts'
 /** Maximum intentional wait before a routed live session batch starts writing. */
 export const LIVE_WRITE_BATCH_MAX_DELAY_MS = 200
 
+/** Bounded retries of a failing final routed-buffer drain before its tail is parked durably. */
+export const FINAL_DRAIN_RETRY_ATTEMPTS = 3
+
+/** First final-drain retry delay; each further attempt doubles it (25ms, 50ms, 100ms). */
+export const FINAL_DRAIN_RETRY_BASE_MS = 25
+
 /** The file-storage primitives the handle drives on its owning service. */
 export interface JsonlHandleStorage {
   /** Append encoded lines; `isMaterialized` selects create-vs-extend publication. */
@@ -48,6 +55,12 @@ export interface JsonlHandleStorage {
   persistHeader(header: SessionHeader, inheritedEventCount: SessionLogOffset): Promise<void>
   /** Truncate a torn physical tail before the first new append lands. */
   truncateTornTail(header: SessionHeader, truncateTo: number): Promise<void>
+  /**
+   * Park a live batch whose final drain failed in the session directory's
+   * pending-flush sidecar. The next write open (or re-create) re-appends it;
+   * a failure here means the buffered tail has no durable copy left.
+   */
+  persistPendingFlush(header: SessionHeader, events: readonly SessionEvent[]): Promise<void>
   /** Resolve the current-generation artifact path, or `undefined` when absent. */
   resolveCurrentLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
   /** Read and validate the stored log at `path`, including its established event aliasing state. */
@@ -212,12 +225,28 @@ export class JsonlSessionHandle implements SessionHandle {
   }
 
   /**
+   * Re-append a batch parked by a failed final drain. The caller holds write
+   * ownership and the batch must be the exact contiguous tail after the stored
+   * log; the same contiguity check as any append rejects a superseded marker.
+   * @param events - the parked events in seq order.
+   */
+  reflushPending(events: readonly SessionEvent[]): Promise<void> {
+    const batch = materializeAppendBatch(events)
+    return this.enqueueChain(async () => {
+      await this.persistContiguous(batch)
+    })
+  }
+
+  /**
    * Release the handle; see the seam contract. Idempotent and uncancellable.
    * A write handle first drains its routed live buffer through the still-open
    * storage, so backend teardown loses nothing regardless of which fiber
-   * unwinds first; a drain or lock-release failure still frees the in-process
-   * claim, then rejects — both failures together reject as one
-   * `AggregateError`.
+   * unwinds first; a failing drain is retried on a bounded backoff, and a
+   * drain still failing after the last retry parks its buffered tail in the
+   * session directory's pending-flush sidecar before releasing — the next
+   * write open (or re-create) re-appends it. A drain, parking, or lock-release
+   * failure still frees the in-process claim, then rejects; failures together
+   * reject as one `AggregateError`.
    * @returns settlement of the release.
    */
   close(): Promise<void> {
@@ -227,16 +256,19 @@ export class JsonlSessionHandle implements SessionHandle {
       // in-flight mutations (root disposal is concurrent), so drain again
       // until a full pass leaves the routed buffer empty. The chain never
       // rejects because run() swallows each operation's rejection after its
-      // caller observed it.
-      for (;;) {
+      // caller observed it. A failed pass retains its batch in order, so the
+      // drain is retried on a bounded backoff before the tail is parked.
+      for (let attempt = 0; ; attempt++) {
         try {
           await this.drainLive()
+          drainFailure = undefined
         } catch (error: unknown) {
           drainFailure = error
-          break
         }
         await this.chain
         if (this.buffered.length === 0) break
+        if (attempt >= FINAL_DRAIN_RETRY_ATTEMPTS) break
+        await delay(FINAL_DRAIN_RETRY_BASE_MS * 2 ** attempt)
       }
       // After a drain failure the chain may still hold in-flight mutations.
       await this.chain
@@ -245,6 +277,17 @@ export class JsonlSessionHandle implements SessionHandle {
       // behind a lock the kernel may already have dropped.
       const failures: Error[] = []
       if (drainFailure !== undefined) {
+        // The buffered tail dies with this handle unless the backend parks it
+        // durably; that copy is what the next open re-appends. A failed drain
+        // retains its batch, so there is always a tail to park here.
+        try {
+          await this.storage.persistPendingFlush(this.header, this.buffered)
+        } catch (markerFailure: unknown) {
+          drainFailure = new AggregateError(
+            [drainFailure, markerFailure],
+            `session "${this.id}": final drain failed and its pending-flush marker could not be written`,
+          )
+        }
         failures.push(drainFailure instanceof Error ? drainFailure : new Error(errorChain(drainFailure)))
       }
       try {

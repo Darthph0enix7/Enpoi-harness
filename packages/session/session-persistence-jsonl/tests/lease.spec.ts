@@ -391,14 +391,19 @@ describe('cross-process write lock', () => {
     const holder = await backend.create(meta('drain-and-release-fail')) as JsonlSessionHandle
     await holder.append([...EVENTS])
 
-    vi.spyOn(backend as unknown as { persistBatch: () => Promise<void> }, 'persistBatch')
-      .mockRejectedValueOnce(new Error('injected drain refusal'))
+    // A PERSISTENT drain refusal: a transient one is retried and recovered
+    // (see the final-drain retry tests), so only an unrecovered drain joins
+    // the release failure in the aggregate.
+    const persist = vi.spyOn(backend as unknown as { persistBatch: () => Promise<void> }, 'persistBatch')
+      .mockRejectedValue(new Error('injected drain refusal'))
     holder.enqueueLive({ type: 'turn/start', seq: SessionSeq(2), time: 3, data: { turn: 2 } }, () => {})
     failReleaseOnce()
     const outcome = await holder.close().then(() => undefined, (error: unknown) => error)
     expect(outcome).toBeInstanceOf(AggregateError)
     expect((outcome as AggregateError).errors.map(String).join('\n')).toMatch(/drain refusal[\s\S]*release failure/)
-    // Both failures reported, and the id is still not wedged.
+    persist.mockRestore()
+    // Both failures reported, and the id is still not wedged: the parked tail
+    // is re-appended by the next write open.
     const reopened = await backend.open(SessionId('drain-and-release-fail'), 'write')
     await reopened.close()
   })

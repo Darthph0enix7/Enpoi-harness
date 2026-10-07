@@ -429,7 +429,9 @@ var RevertExecutor = class {
         if (current !== null) {
           try {
             await this.opts.blobStore.put(current);
-          } catch {
+          } catch (err) {
+            outcomes[targetKey] = { status: "conflict_escalated", reason: `pre-clobber backup failed: ${String(err)}` };
+            continue;
           }
         }
         const path = await opts.resolvePath(targetKey);
