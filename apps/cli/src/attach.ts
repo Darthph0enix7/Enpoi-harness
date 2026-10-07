@@ -7,6 +7,15 @@
  * port. The serving instance records its URL under `$DSH_HOME/state/web-url.json`
  * at readiness; this module reads that record before any profile mounts.
  *
+ * When nothing answers the managed unit's own loopback endpoint, the launcher
+ * delegates to `dsh service` instead of silently serving an unsupervised
+ * process that dies with the terminal: a stopped unit is started and its
+ * readiness awaited, an active unit's boot is waited out, and an incomplete
+ * install names its remedy before the terminal fallback. Every service probe
+ * fails soft; an unreadable or uninspectable service state keeps today's
+ * behavior with a warning. Any other explicit endpoint is not the managed
+ * unit's to serve, so it keeps today's behavior untouched.
+ *
  * `--foreground` opts out and always serves, which is what supervised units
  * pass. A non-interactive invocation (no TTY) also serves unchanged, so tests
  * and pipelines keep today's behavior.
@@ -17,6 +26,7 @@ import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { webStatePath } from '@deepseek-ai/dsh-web-app/state'
+import { MANAGED_PORT, probeManagedService, runService, type ManagedServiceState } from './service.ts'
 
 /** What one `dsh web` invocation decided to do. */
 export type AttachOutcome = 'attached' | 'occupied' | 'serve'
@@ -32,6 +42,23 @@ const PROBE_TIMEOUT_MS = 250
 
 /** Hosts that mean "this machine" for endpoint matching. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/** How long the launcher waits for a managed service to announce its attach state. */
+const MANAGED_READY_TIMEOUT_MS = 15_000
+
+/** Readiness poll interval while waiting on a managed service. */
+const MANAGED_READY_POLL_MS = 250
+
+/**
+ * Whether the invocation targets the loopback endpoint the managed unit owns.
+ * The unit serves one fixed loopback endpoint; any other requested endpoint is
+ * not its to serve and keeps the historical path.
+ * @param endpoint - the resolved attach endpoint.
+ * @returns true when the managed service can answer this invocation.
+ */
+function targetsManagedEndpoint(endpoint: { host: string; port: number }): boolean {
+  return endpoint.port === MANAGED_PORT && LOOPBACK_HOSTS.has(endpoint.host)
+}
 
 /**
  * Read a `--flag value` or `--flag=value` option from raw inner arguments.
@@ -169,10 +196,19 @@ export interface AttachOptions {
   probe?: (host: string, port: number) => Promise<boolean>
   /** Browser handoff override (tests). */
   openBrowser?: (url: string) => void
+  /** Managed-service inspection override (tests); defaults to {@link probeManagedService}. */
+  managedService?: () => ManagedServiceState
+  /** Managed-service start override (tests); defaults to `dsh service start`. */
+  startService?: () => Promise<number> | number
+  /** Readiness budget override (tests) for a delegated managed service. */
+  managedReadyTimeoutMs?: number
 }
 
 /**
- * Decide and, on a live instance, print + open + report `attached`.
+ * Decide and, on a live instance, print + open + report `attached`. When the
+ * managed service owns the requested endpoint, starting or waiting for it
+ * replaces the unsupervised serve fallback; otherwise the outcome is the
+ * historical one.
  * @param args - raw arguments after the launcher's own flags.
  * @param options - injected seams; every field defaults to production behavior.
  * @returns the outcome the launcher acts on (`serve` continues to profile boot).
@@ -190,27 +226,45 @@ export async function runAttach(args: readonly string[], options: AttachOptions 
   const openBrowser = options.openBrowser
     ?? ((url: string) => { defaultOpenBrowser(url, (message) => { stderr.write(`dsh web: ${message}\n`) }) })
   const statePath = options.statePath ?? webStatePath()
+  const managedService = options.managedService ?? (() => probeManagedService())
+  const startService = options.startService ?? (() => runService(['start'], { stdout, stderr }))
+  const readyTimeoutMs = options.managedReadyTimeoutMs ?? MANAGED_READY_TIMEOUT_MS
 
-  let state: { url: string; host: string; port: number; pid: number } | undefined
-  try {
-    state = parseState(readFileSync(statePath, 'utf8'))
-  } catch {
-    state = undefined
-  }
-
-  const hostMatches = state !== undefined
-    && (state.host === endpoint.host
-      || (LOOPBACK_HOSTS.has(state.host) && LOOPBACK_HOSTS.has(endpoint.host)))
-  if (state !== undefined && hostMatches && state.port === endpoint.port
-    && pidAlive(state.pid) && await probe(state.host, state.port)) {
+  /** One attach attempt against the recorded state; prints and opens on success. */
+  const attemptAttach = async (): Promise<boolean> => {
+    let state: { url: string; host: string; port: number; pid: number } | undefined
+    try {
+      state = parseState(readFileSync(statePath, 'utf8'))
+    } catch {
+      state = undefined
+    }
+    const hostMatches = state !== undefined
+      && (state.host === endpoint.host
+        || (LOOPBACK_HOSTS.has(state.host) && LOOPBACK_HOSTS.has(endpoint.host)))
+    if (state === undefined || !hostMatches || state.port !== endpoint.port
+      || !pidAlive(state.pid) || !await probe(state.host, state.port)) {
+      return false
+    }
     stdout.write(`dsh web: ${state.url}\n`)
     const viaSsh = Boolean(env.SSH_CONNECTION ?? env.SSH_CLIENT ?? env.SSH_TTY)
     if (!hasFlag(args, '--no-open') && !viaSsh) {
       stdout.write('dsh web: opening the default browser; pass --no-open to disable\n')
       openBrowser(state.url)
     }
-    return 'attached'
+    return true
   }
+
+  /** Poll the attach attempt until the managed service answers or the budget runs out. */
+  const waitForAttach = async (): Promise<boolean> => {
+    const deadline = Date.now() + readyTimeoutMs
+    for (;;) {
+      if (await attemptAttach()) return true
+      if (Date.now() >= deadline) return false
+      await new Promise<void>((resolve) => { setTimeout(resolve, MANAGED_READY_POLL_MS) })
+    }
+  }
+
+  if (await attemptAttach()) return 'attached'
 
   if (await probe(endpoint.host, endpoint.port)) {
     stderr.write(
@@ -219,5 +273,48 @@ export async function runAttach(args: readonly string[], options: AttachOptions 
     )
     return 'occupied'
   }
+
+  // Nothing answers. Before serving an unsupervised process that dies with the
+  // terminal, delegate to the managed background service for its own endpoint:
+  // start a stopped unit and attach to it, wait out an active unit's boot, or
+  // name the remedy when the install is incomplete.
+  const managed: ManagedServiceState = targetsManagedEndpoint(endpoint)
+    ? managedService()
+    : { kind: 'none' }
+  let delegated = false
+  switch (managed.kind) {
+    case 'stopped': {
+      const code = await startService()
+      if (code === 0) {
+        stdout.write('dsh web: started the background service; attaching\n')
+        delegated = true
+      } else {
+        stderr.write('dsh web: could not start the background service; run `dsh service start`\n')
+      }
+      break
+    }
+    case 'active': {
+      stdout.write('dsh web: waiting for the background service; attaching\n')
+      delegated = true
+      break
+    }
+    case 'missing': {
+      stderr.write('dsh web: the background service unit is missing; run `dsh service install`\n')
+      break
+    }
+    case 'unknown': {
+      stderr.write('dsh web: could not determine the background service state\n')
+      break
+    }
+    case 'none': break
+  }
+  if (delegated) {
+    if (await waitForAttach()) return 'attached'
+    stderr.write(managed.kind === 'stopped'
+      ? 'dsh web: the background service did not answer in time; check it with `dsh service status`\n'
+      : 'dsh web: the background service is active but did not answer; check it with `dsh service status`\n')
+    return 'occupied'
+  }
+  stderr.write('dsh web: serving in the terminal; this server is unsupervised and stops when the terminal closes\n')
   return 'serve'
 }

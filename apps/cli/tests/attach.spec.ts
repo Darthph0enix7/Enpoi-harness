@@ -78,12 +78,16 @@ describe('runAttach outcomes', () => {
   })
 
   it('serves when no instance answers', async () => {
+    const err = sink()
     const outcome = await runAttach([], {
       tty: true,
       statePath: join(tempDir(), 'absent.json'),
       probe: async () => false,
+      managedService: () => ({ kind: 'none' }),
+      stderr: err,
     })
     expect(outcome).toBe('serve')
+    expect(err.text()).toContain('this server is unsupervised')
   })
 
   it('attaches on a live recorded instance, printing the URL and opening the browser', async () => {
@@ -162,6 +166,7 @@ describe('runAttach outcomes', () => {
       pidAlive: () => true,
       probe: async (host, port) => { probed.push([host, port]); return false },
       stdout: sink(),
+      stderr: sink(),
     })
     expect(outcome).toBe('serve')
     expect(probed).toEqual([['127.0.0.1', 9999]])
@@ -175,6 +180,8 @@ describe('runAttach outcomes', () => {
       tty: true,
       statePath: path,
       probe: async () => false,
+      managedService: () => ({ kind: 'none' }),
+      stderr: sink(),
     })
     expect(outcome).toBe('serve')
   })
@@ -189,5 +196,153 @@ describe('runAttach outcomes', () => {
       openBrowser: () => {},
     })
     expect(outcome).toBe('attached')
+  })
+})
+
+describe('managed service delegation', () => {
+  it('starts a stopped managed service and attaches to it', async () => {
+    const out = sink()
+    const err = sink()
+    const path = join(tempDir(), 'web-url.json')
+    let started = 0
+    let live = false
+    const outcome = await runAttach(['--no-open'], {
+      tty: true,
+      statePath: path,
+      managedService: () => ({ kind: 'stopped', unit: 'dsh-web.service' }),
+      startService: () => {
+        started += 1
+        live = true
+        writeFileSync(path, JSON.stringify({ url: 'http://127.0.0.1:3080/?token=svc', host: '127.0.0.1', port: 3080, pid: 99 }))
+        return 0
+      },
+      pidAlive: () => true,
+      probe: async () => live,
+      stdout: out,
+      stderr: err,
+    })
+    expect(outcome).toBe('attached')
+    expect(started).toBe(1)
+    expect(out.text()).toContain('started the background service; attaching')
+    expect(out.text()).toContain('dsh web: http://127.0.0.1:3080/?token=svc')
+    expect(err.text()).toBe('')
+  })
+
+  it('names the start remedy and serves when the managed service fails to start', async () => {
+    const err = sink()
+    const outcome = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'stopped', unit: 'dsh-web.service' }),
+      startService: () => 1,
+      probe: async () => false,
+      stderr: err,
+    })
+    expect(outcome).toBe('serve')
+    expect(err.text()).toContain('could not start the background service')
+    expect(err.text()).toContain('`dsh service start`')
+    expect(err.text()).toContain('this server is unsupervised')
+  })
+
+  it('names the install remedy and serves when the managed unit is missing', async () => {
+    const err = sink()
+    const outcome = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'missing', unit: 'dsh-web.service' }),
+      probe: async () => false,
+      stderr: err,
+    })
+    expect(outcome).toBe('serve')
+    expect(err.text()).toContain('`dsh service install`')
+    expect(err.text()).toContain('this server is unsupervised')
+  })
+
+  it('serves a dev checkout with the unsupervised warning when no managed install exists', async () => {
+    const err = sink()
+    const outcome = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'none' }),
+      probe: async () => false,
+      stderr: err,
+    })
+    expect(outcome).toBe('serve')
+    expect(err.text()).toContain('this server is unsupervised')
+  })
+
+  it('waits out an active managed service and attaches to it', async () => {
+    const out = sink()
+    let probes = 0
+    const outcome = await runAttach(['--no-open'], {
+      tty: true,
+      statePath: stateFile('http://127.0.0.1:3080/?token=svc'),
+      managedService: () => ({ kind: 'active', unit: 'dsh-web.service' }),
+      pidAlive: () => true,
+      probe: async () => { probes += 1; return probes > 2 },
+      stdout: out,
+      stderr: sink(),
+    })
+    expect(outcome).toBe('attached')
+    expect(out.text()).toContain('waiting for the background service; attaching')
+    expect(out.text()).toContain('http://127.0.0.1:3080/?token=svc')
+  })
+
+  it('never boots a second server when a delegated managed service stays silent', async () => {
+    const err = sink()
+    const stopped = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'stopped', unit: 'u' }),
+      startService: () => 0,
+      probe: async () => false,
+      managedReadyTimeoutMs: 0,
+      stdout: sink(),
+      stderr: err,
+    })
+    expect(stopped).toBe('occupied')
+    expect(err.text()).toContain('did not answer in time')
+    const active = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'active', unit: 'u' }),
+      probe: async () => false,
+      managedReadyTimeoutMs: 0,
+      stdout: sink(),
+      stderr: err,
+    })
+    expect(active).toBe('occupied')
+    expect(err.text()).toContain('active but did not answer')
+  })
+
+  it('fails soft when the managed service state cannot be determined', async () => {
+    const err = sink()
+    const outcome = await runAttach([], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      managedService: () => ({ kind: 'unknown' }),
+      probe: async () => false,
+      stderr: err,
+    })
+    expect(outcome).toBe('serve')
+    expect(err.text()).toContain('could not determine the background service state')
+    expect(err.text()).toContain('this server is unsupervised')
+  })
+
+  it('does not inspect the managed service for --foreground or a non-managed endpoint', async () => {
+    let inspected = 0
+    const managedService = (): { kind: 'stopped'; unit: string } => {
+      inspected += 1
+      return { kind: 'stopped', unit: 'u' }
+    }
+    expect(await runAttach(['--foreground'], { tty: true, managedService })).toBe('serve')
+    expect(await runAttach(['--port', '9999'], {
+      tty: true,
+      statePath: join(tempDir(), 'absent.json'),
+      probe: async () => false,
+      managedService,
+      stderr: sink(),
+    })).toBe('serve')
+    expect(inspected).toBe(0)
   })
 })
