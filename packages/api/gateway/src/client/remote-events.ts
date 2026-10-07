@@ -64,6 +64,7 @@ export class ClientRemoteEvents {
   private readonly eventPrefix = `internal/api-gateway/remote-event/${randomUUID()}/`
   private readonly unregisterGeneration: () => void
   private activeGeneration: Promise<void> | undefined
+  private generationActivity: (() => void) | undefined
 
   /**
    * @param ownerCtx - Client Gateway root used for Agent Context resolution.
@@ -103,10 +104,21 @@ export class ClientRemoteEvents {
     await Promise.allSettled([this.activeGeneration])
   }
 
+  /**
+   * Report one inbound frame on any logical stream of the current physical
+   * carrier to the active generation's Connection liveness timestamp.
+   */
+  reportActivity(): void {
+    this.generationActivity?.()
+  }
+
   /** Track the current generation so plugin disposal waits for listener work to stop. */
-  private readonly runGeneration: ConnectionGenerationSource = (signal, ready) => {
-    const tracked = this.pumpEvents(signal, ready).finally(() => {
-      if (this.activeGeneration === tracked) this.activeGeneration = undefined
+  private readonly runGeneration: ConnectionGenerationSource = (signal, ready, activity) => {
+    this.generationActivity = activity
+    const tracked = this.pumpEvents(signal, ready, activity).finally(() => {
+      if (this.activeGeneration !== tracked) return
+      this.activeGeneration = undefined
+      this.generationActivity = undefined
     })
     this.activeGeneration = tracked
     return tracked
@@ -123,6 +135,7 @@ export class ClientRemoteEvents {
   private async pumpEvents(
     signal: AbortSignal,
     ready: (host: ConnectionHostInfo) => void,
+    activity: () => void,
   ): Promise<void> {
     let clientId: RemoteEventClientId | undefined
     const failed = new AbortController()
@@ -138,6 +151,7 @@ export class ClientRemoteEvents {
     let streamError: unknown
     try {
       for await (const value of source) {
+        activity()
         if (clientId === undefined) {
           const opening = parseRemoteEventReady(value)
           clientId = opening.clientId

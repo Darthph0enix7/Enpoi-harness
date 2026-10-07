@@ -62,11 +62,15 @@ export interface ConnectionSinks {
  * delivery, release its resources, and settle before a replacement can start.
  * @param signal - cancellation for the current generation.
  * @param ready - one-shot report that incremental delivery is attached.
+ * @param activity - report one inbound frame of this generation, refreshing
+ * the liveness timestamp {@link ConnectionController.isProbablyStale} reads;
+ * calls after this generation ends are ignored.
  * @returns a promise settling only when this generation ends or fails.
  */
 export type ConnectionGenerationSource = (
   signal: AbortSignal,
   ready: (host: ConnectionHostInfo) => void,
+  activity: () => void,
 ) => Promise<void>
 
 /**
@@ -83,6 +87,7 @@ export class ConnectionController {
   private immediateRetry = false
   private networkAvailable = true
   private lastState: ConnectionState | undefined
+  private lastActivityAt: number | undefined
   private readonly config: Required<ConnectionRecoveryConfig>
 
   constructor(
@@ -118,6 +123,18 @@ export class ConnectionController {
     if (!this.isRunning()) return
     this.current?.abort(MANUAL_RECONNECT)
     this.retryDelay?.abort(MANUAL_RECONNECT)
+  }
+
+  /**
+   * Whether no inbound frame has been observed within `thresholdMs`. The
+   * timestamp advances when a generation reports ready and each time its
+   * source reports an inbound frame; a loop that has not reported ready yet
+   * counts as stale.
+   * @param thresholdMs - staleness window in milliseconds.
+   * @returns true when the last observed inbound frame is older than the window.
+   */
+  isProbablyStale(thresholdMs: number): boolean {
+    return this.lastActivityAt === undefined || Date.now() - this.lastActivityAt > thresholdMs
   }
 
   /**
@@ -213,9 +230,14 @@ export class ConnectionController {
       const sourceLost = new Promise<never>((_resolve, reject) => {
         rejectSourceLost = reject
       })
+      const reportActivity = (): void => {
+        if (gen !== this.generation || !this.isGenerationActive(ac)) return
+        this.lastActivityAt = Date.now()
+      }
       const reportReady = (host: ConnectionHostInfo): void => {
         if (sourceReady || gen !== this.generation || !this.isGenerationActive(ac)) return
         sourceReady = true
+        reportActivity()
         resolveReady(host)
       }
 
@@ -225,7 +247,7 @@ export class ConnectionController {
           resolve()
         }
         void Promise.resolve()
-          .then(() => this.source(ac.signal, reportReady))
+          .then(() => this.source(ac.signal, reportReady, reportActivity))
           .then(
             () => {
               const error = new Error('connection generation ended')

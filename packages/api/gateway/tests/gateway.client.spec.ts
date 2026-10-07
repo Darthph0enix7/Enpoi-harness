@@ -365,6 +365,8 @@ interface GenerationRun {
   readonly signal: AbortSignal
   readonly ready: Promise<void>
   readonly done: Promise<void>
+  /** Inbound-frame reports the source sent for this generation. */
+  readonly activity: ReturnType<typeof vi.fn<() => void>>
   abort(reason?: unknown): void
 }
 
@@ -391,8 +393,9 @@ class GenerationHarness {
     this.active = controller
     let reportReady!: () => void
     const ready = new Promise<void>((resolve) => { reportReady = resolve })
+    const activity = vi.fn<() => void>()
     const done = Promise.resolve()
-      .then(() => source(controller.signal, reportReady))
+      .then(() => source(controller.signal, reportReady, activity))
       .finally(() => {
         if (this.active === controller) this.active = undefined
       })
@@ -401,6 +404,7 @@ class GenerationHarness {
       signal: controller.signal,
       ready,
       done,
+      activity,
       abort: (reason) => { controller.abort(reason) },
     }
   }
@@ -410,13 +414,15 @@ class GenerationHarness {
     const controller = new AbortController()
     let reportReady!: () => void
     const ready = new Promise<void>((resolve) => { reportReady = resolve })
-    const done = Promise.resolve().then(() => this.source?.(controller.signal, reportReady))
+    const activity = vi.fn<() => void>()
+    const done = Promise.resolve().then(() => this.source?.(controller.signal, reportReady, activity))
       .then(() => undefined)
     void done.catch(() => undefined)
     return {
       signal: controller.signal,
       ready,
       done,
+      activity,
       abort: (reason) => { controller.abort(reason) },
     }
   }
@@ -1496,6 +1502,19 @@ describe('Client Typert API', () => {
 
     await client.dispose()
     expect(ctx.get('remote')).toBeUndefined()
+  })
+
+  it('reports every forwarded-event frame to the generation activity reporter', async () => {
+    const { client, carrier, run } = await eventBench()
+    try {
+      const atReady = run.activity.mock.calls.length
+      expect(atReady).toBeGreaterThan(0)
+
+      carrier.emit({ type: 'emit', event: 'fixture/idle', args: [1] })
+      await vi.waitFor(() => { expect(run.activity.mock.calls.length).toBeGreaterThan(atReady) })
+    } finally {
+      await client.dispose()
+    }
   })
 
   it('isolates throwing and rejected notification listeners', async () => {
@@ -2828,6 +2847,60 @@ describe('Remote stream client carrier lifecycle', () => {
       } finally {
         await client.close()
         sent.mockRestore()
+      }
+    })
+  })
+
+  it('reports every inbound frame of the current socket to its activity observer', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const onFrame = vi.fn<() => void>()
+      const client = new RemoteStreamMuxClient(onFrame)
+      client.start()
+      const first = FakeWebSocket.sockets[0]!
+      await vi.waitFor(() => { expect(first.readyState).toBe(FakeWebSocket.OPEN) })
+      try {
+        first.receive({ type: 'item', streamId: 'unknown', value: 1 })
+        first.receive({ type: 'end', streamId: 'unknown' })
+        expect(onFrame).toHaveBeenCalledTimes(2)
+
+        // A replaced socket's frames are not activity for the current carrier.
+        client.reconnect()
+        const replacement = FakeWebSocket.sockets[1]!
+        expect(replacement).not.toBe(first)
+        await vi.waitFor(() => { expect(replacement.readyState).toBe(FakeWebSocket.OPEN) })
+        first.receive({ type: 'item', streamId: 'unknown', value: 2 })
+        expect(onFrame).toHaveBeenCalledTimes(2)
+        replacement.receive({ type: 'item', streamId: 'unknown', value: 3 })
+        expect(onFrame).toHaveBeenCalledTimes(3)
+      } finally {
+        await client.close()
+      }
+    })
+  })
+
+  it('reports physical WebSocket frames on any stream to the active generation activity', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const { client, generation } = await benchFiber(vi.fn<ConnectionHandle['rpc']['call']>(), 'web')
+      try {
+        const run = generation.start()
+        const socket = FakeWebSocket.sockets[0]!
+        await vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+        const opened = parseRemoteStreamClientMessage(socket.sent[0]!)
+        if (opened.type !== 'open') throw new Error('fixture expected an open frame')
+        socket.receive({
+          type: 'item',
+          streamId: opened.streamId,
+          value: { type: 'ready', clientId: 'web-client', host: { home: '/h' } },
+        })
+        await run.ready
+        const atReady = run.activity.mock.calls.length
+        expect(atReady).toBeGreaterThan(0)
+
+        // The ready frame is activity; any later physical frame proves the socket is alive.
+        socket.receive({ type: 'item', streamId: 'other-stream', value: 1 })
+        expect(run.activity.mock.calls.length).toBe(atReady + 1)
+      } finally {
+        await client.dispose()
       }
     })
   })

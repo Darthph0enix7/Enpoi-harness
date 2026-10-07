@@ -5,11 +5,15 @@ type StreamItem = { kind: 'end' } | { kind: 'fail'; error: unknown }
 
 interface StreamConnection {
   feed(item: StreamItem): void
+  activity: () => void
 }
 
 /** Hand-pumped generation source for Connection lifecycle tests. */
 export class FakeGenerationSource {
   private readonly connections: StreamConnection[] = []
+
+  /** Every activity reporter passed to a generation, retained across replacement. */
+  readonly reporters: Array<() => void> = []
 
   /** When true, the source never reports ready. */
   suppressReady = false
@@ -20,7 +24,10 @@ export class FakeGenerationSource {
   private heldReady: Array<() => void> = []
 
   /** Open one generation. */
-  readonly source: ConnectionGenerationSource = (signal, ready) => this.open(signal, ready)
+  readonly source: ConnectionGenerationSource = (signal, ready, activity) => {
+    this.reporters.push(activity)
+    return this.open(signal, ready, activity)
+  }
 
   /** Release every generation currently parked before readiness. */
   releaseReady(): void {
@@ -39,6 +46,11 @@ export class FakeGenerationSource {
     for (const connection of [...this.connections]) connection.feed({ kind: 'fail', error })
   }
 
+  /** Report one inbound frame on every active generation. */
+  pulse(): void {
+    for (const connection of [...this.connections]) connection.activity()
+  }
+
   /** Number of currently active generations. */
   get activeCount(): number {
     return this.connections.length
@@ -47,6 +59,7 @@ export class FakeGenerationSource {
   private async open(
     signal: AbortSignal,
     onReady: (host: { readonly home: string }) => void,
+    activity: () => void,
   ): Promise<void> {
     const inbox: StreamItem[] = []
     let wake: (() => void) | null = null
@@ -55,6 +68,7 @@ export class FakeGenerationSource {
         inbox.push(item)
         wake?.()
       },
+      activity,
     }
     this.connections.push(connection)
     const ready = (): void => { onReady({ home: '/h' }) }

@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   apply,
+  installConnection,
   type ClientConnectionRpc,
   type ClientTransportHooks,
   type ConnectionGenerationSource,
@@ -13,6 +14,7 @@ import {
   type ConnectionHandle,
   type ConnectionState,
 } from '../src/client/index.ts'
+import { WAKE_RECONNECT_DEBOUNCE_MS, WAKE_STALE_THRESHOLD_MS } from '../src/client/network-watch.ts'
 
 type Win = {
   location?: { hostname: string; origin?: string }
@@ -37,17 +39,20 @@ class BrowserNetworkProbe extends EventTarget {
 
 class GenerationProbe {
   private readonly active = new Set<() => void>()
+  private readonly activities = new Set<() => void>()
 
-  readonly source: ConnectionGenerationSource = (signal, ready) => new Promise<void>((resolve) => {
+  readonly source: ConnectionGenerationSource = (signal, ready, activity) => new Promise<void>((resolve) => {
     let settled = false
     const finish = (): void => {
       if (settled) return
       settled = true
       signal.removeEventListener('abort', finish)
       this.active.delete(finish)
+      this.activities.delete(activity)
       resolve()
     }
     this.active.add(finish)
+    this.activities.add(activity)
     signal.addEventListener('abort', finish, { once: true })
     ready({ home: '/h' })
     if (signal.aborted) finish()
@@ -55,6 +60,11 @@ class GenerationProbe {
 
   end(): void {
     for (const finish of [...this.active]) finish()
+  }
+
+  /** Report one inbound frame on every active generation. */
+  pulse(): void {
+    for (const activity of [...this.activities]) activity()
   }
 }
 
@@ -127,6 +137,13 @@ describe('connection client apply', () => {
     ;(globalThis as Win).location = { hostname: 'localhost' }
     const handle = await mount()
     expect(handle.isLoopback).toBe(true)
+  })
+
+  it('installs the connection service from default composition inputs', () => {
+    const ctx = new Context()
+    installConnection(ctx)
+    const handle = ctx.get('connection') as ConnectionHandle | undefined
+    expect(handle?.isLoopback).toBe(true)
   })
 
   it('reports non-loopback page authority through the connection handle', async () => {
@@ -306,6 +323,135 @@ describe('connection client apply', () => {
       expect(states).toEqual(['connected', 'disconnected', 'connecting', 'connected'])
     } finally {
       unsubscribe()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('reconnects immediately on wake events once the connection is unhealthy', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', browser)
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const generation = installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      // A healthy connection ignores the wake burst instead of churning generations.
+      page.dispatchEvent(new Event('visibilitychange'))
+      browser.dispatchEvent(new Event('pageshow'))
+      await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1])
+
+      // A lost generation sits in the 60s backoff; the wake event resets it to attempt 1 immediately.
+      generation.end()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(handle.generation.getSnapshot()).toBeUndefined()
+      page.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1, undefined, 2])
+      expect(warnSpy).toHaveBeenCalledWith('[connection] connection lost, retry #1')
+    } finally {
+      stopGeneration()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('stays fresh across a wake while a connected generation keeps receiving frames', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', browser)
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const generation = installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      // Host heartbeats arrive every 2 s; a 10 s window never crosses the 4 s threshold.
+      for (let elapsed = 0; elapsed < 10_000; elapsed += 2_000) {
+        await vi.advanceTimersByTimeAsync(2_000)
+        generation.pulse()
+      }
+      page.dispatchEvent(new Event('visibilitychange'))
+      browser.dispatchEvent(new Event('pageshow'))
+      await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1])
+      expect(warnSpy).not.toHaveBeenCalledWith('[connection] connection lost, retry #1')
+    } finally {
+      stopGeneration()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('reconnects once on wake when a connected generation went silent past the stale window', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', browser)
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      await vi.advanceTimersByTimeAsync(WAKE_STALE_THRESHOLD_MS + 1)
+      page.dispatchEvent(new Event('visibilitychange'))
+      browser.dispatchEvent(new Event('pageshow'))
+      await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1, undefined, 2])
+      expect(warnSpy).toHaveBeenCalledWith('[connection] connection lost, retry #1')
+    } finally {
+      stopGeneration()
       loop.stop()
       randomSpy.mockRestore()
       warnSpy.mockRestore()

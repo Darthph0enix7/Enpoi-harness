@@ -58,6 +58,13 @@ export class RemoteStreamMuxClient {
   private running = false
   private disposed = false
 
+  /**
+   * @param onFrame - observes every inbound frame on the current physical socket,
+   * including frames for unknown logical streams; frames of a replaced socket
+   * are not reported.
+   */
+  constructor(private readonly onFrame?: () => void) {}
+
   /** Ensure a physical attempt exists, following the current attempt once if needed. */
   start(): void {
     if (this.disposed) return
@@ -305,6 +312,7 @@ export class RemoteStreamMuxClient {
 
   private receive(socket: WebSocket, data: unknown): void {
     if (socket !== this.socket) return
+    this.onFrame?.()
     try {
       if (typeof data !== 'string') throw new Error('api gateway: Remote stream WebSocket requires text messages')
       const frame = parseRemoteStreamServerMessage(data)

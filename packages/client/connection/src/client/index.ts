@@ -9,6 +9,7 @@ import {
   type ConnectionState,
 } from './connection.ts'
 import { createWebConnectionRpc, type RpcFetch, type RpcStreamOpen } from './rpc.ts'
+import { watchBrowserNetwork } from './network-watch.ts'
 import { isPrivilegedHostname } from '../loopback-hostname.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
 import { resolveConnectionConfig } from '../recovery-config.ts'
@@ -176,27 +177,6 @@ interface ConnectionOwner {
   readonly stopNetworkWatch: () => void
 }
 
-interface BrowserNetworkTarget {
-  readonly navigator?: { readonly onLine?: boolean }
-  addEventListener(type: 'online' | 'offline', listener: () => void): void
-  removeEventListener(type: 'online' | 'offline', listener: () => void): void
-}
-
-function watchBrowserNetwork(controller: ConnectionController): () => void {
-  const browser = (globalThis as { readonly window?: BrowserNetworkTarget }).window
-  const initiallyAvailable = browser?.navigator?.onLine
-  if (browser === undefined || initiallyAvailable === undefined) return () => {}
-  const online = (): void => { controller.setNetworkAvailable(true) }
-  const offline = (): void => { controller.setNetworkAvailable(false) }
-  controller.setNetworkAvailable(initiallyAvailable)
-  browser.addEventListener('online', online)
-  browser.addEventListener('offline', offline)
-  return () => {
-    browser.removeEventListener('online', online)
-    browser.removeEventListener('offline', offline)
-  }
-}
-
 /**
  * Install one Context-owned Connection service from explicit composition inputs.
  * @param ctx - client Cordis context.
@@ -299,7 +279,12 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
           sinks.onStateChange?.(state)
         },
       }, { ...recovery, ...config })
-      const current = { token, source, controller, stopNetworkWatch: watchBrowserNetwork(controller) }
+      const current = {
+        token,
+        source,
+        controller,
+        stopNetworkWatch: watchBrowserNetwork(controller, () => state),
+      }
       owner = current
       controller.start()
       return {

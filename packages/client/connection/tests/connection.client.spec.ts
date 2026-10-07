@@ -784,6 +784,95 @@ describe('connection lifecycle', () => {
     }
   })
 
+  it('reports staleness from the last received generation frame', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const controller = new ConnectionController(source.source, {}, FAST)
+    try {
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+
+      controller.start()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(controller.isProbablyStale(4_000)).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(controller.isProbablyStale(4_000)).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes staleness when a replacement generation reports ready', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const controller = new ConnectionController(source.source, {}, FAST)
+    try {
+      controller.start()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(controller.isProbablyStale(4_000)).toBe(false)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes staleness when a generation reports inbound frames', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const controller = new ConnectionController(source.source, {}, FAST)
+    try {
+      controller.start()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(4_001)
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+
+      source.pulse()
+      expect(controller.isProbablyStale(4_000)).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(4_001)
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores inbound frames from a replaced or stopped generation', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const controller = new ConnectionController(source.source, {}, FAST)
+    try {
+      controller.start()
+      await vi.advanceTimersByTimeAsync(0)
+      const replaced = source.reporters[0] as () => void
+
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+
+      replaced()
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+
+      controller.stop()
+      const stopped = source.reporters[1] as () => void
+      stopped()
+      expect(controller.isProbablyStale(4_000)).toBe(true)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+    }
+  })
+
   it('start() is idempotent', async () => {
     const source = new FakeGenerationSource()
     let connected = 0
