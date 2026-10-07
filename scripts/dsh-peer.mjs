@@ -26,13 +26,22 @@
  * within the quiet window — and only then return the newest turn's text.
  * `--once` restores the historical behavior (return at the first turn/end).
  *
+ * `ask` persists the minted requestId per (alias, target, message) under
+ * `<pairing dir>/peer-bridge/ask-state.json` until the follow reports a
+ * terminal. Re-running the same message after a transport failure reuses that
+ * requestId, so an already-admitted prompt is deduplicated by the host instead
+ * of queued twice; a settled run clears the entry, and a stale entry older
+ * than one hour is ignored. The state file is the only place the requestId
+ * survives a process restart.
+ *
  * Flags: --pairings <path> · --json · --header "k: v" (repeatable) ·
  *        --name <participant> · --wait <seconds> · --session <id> · --no-create ·
  *        --once · --settle-ms <ms> · --select <label> (repeatable;
  *        `questionId=label` for multi-question asks)
  */
 
-import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -65,7 +74,17 @@ const REPAIR_PAGE_LIMIT = 20
  */
 export const DEFAULT_SETTLE_QUIET_MS = 2000
 
-class LocalPeerClient {
+/** How long a persisted `ask` requestId stays reusable across process restarts. */
+export const ASK_RETRY_TTL_MS = 60 * 60 * 1000
+
+/**
+ * Error frames that cannot be fixed by retrying the same follow: the pairing,
+ * session, or exposure is gone or refused. A healthy reconnect cannot change
+ * them, so `follow` surfaces them instead of reconnecting at backoff cadence.
+ */
+const CALLER_TERMINAL_CODES = new Set(['peer/version-skew', 'peer/not-paired', 'peer/not-found', 'peer/forbidden'])
+
+export class LocalPeerClient {
   constructor(options) {
     this.endpoint = options.endpoint.replace(/\/+$/u, '')
     this.headers = options.headers ?? {}
@@ -75,6 +94,7 @@ class LocalPeerClient {
     this.maxReconnects = options.maxReconnects
     this.pageSize = options.pageSize ?? 50
     this.device = options.device ?? hostname()
+    this.onWarning = options.onWarning
   }
 
   async handshake() {
@@ -173,7 +193,7 @@ class LocalPeerClient {
         }
       } catch (error) {
         if (signal.aborted) return
-        if (isPeerError(error) && error.code === 'peer/version-skew') throw error
+        if (isPeerError(error) && CALLER_TERMINAL_CODES.has(error.code)) throw error
       }
       if (signal.aborted) return
       attempt = progressed ? 1 : attempt + 1
@@ -187,15 +207,28 @@ class LocalPeerClient {
   async *repairForward(target, fromExclusive, toExclusive, signal) {
     const collected = []
     let throughSeq = toExclusive - 1
-    for (let page = 0; page < REPAIR_PAGE_LIMIT; page += 1) {
+    let hole
+    let pages = 0
+    while (pages < REPAIR_PAGE_LIMIT) {
       if (signal.aborted || throughSeq <= fromExclusive) break
       const value = await this.page({ target, throughSeq, maxMessages: this.pageSize })
-      if (value.records.length === 0) break
+      pages += 1
+      if (value.records.length === 0) {
+        hole = { from: fromExclusive + 1, to: throughSeq + 1 }
+        break
+      }
       for (const record of value.records) if (record.seq > fromExclusive && record.seq < toExclusive) collected.push(record)
       const oldest = value.records[0]?.seq
-      if (oldest === undefined || oldest <= fromExclusive || !value.hasMore) break
+      if (oldest === undefined || oldest <= fromExclusive + 1 || !value.hasMore) {
+        if (oldest !== undefined && oldest > fromExclusive + 1) hole = { from: fromExclusive + 1, to: oldest }
+        break
+      }
       throughSeq = oldest - 1
     }
+    if (hole === undefined && !signal.aborted && throughSeq > fromExclusive) {
+      hole = { from: fromExclusive + 1, to: throughSeq + 1 }
+    }
+    if (hole !== undefined) this.onWarning?.(hole)
     collected.sort((left, right) => left.seq - right.seq)
     for (const record of collected) yield { type: 'event', record, cursor: record.seq }
   }
@@ -435,7 +468,8 @@ function usage() {
     '  handshake <endpoint>            Handshake only (no pairing needed)',
     '  status [alias]                  Host summary; with alias: latch + model + asks',
     '  list [alias]                    Discover peer sessions: alias, remoteSessionId, latch summary',
-    '  ask <alias> <message>           Create/adopt, prompt, follow until the session settles',
+    '  ask <alias> <message>           Create/adopt, prompt, follow until the session settles;',
+    '                                  a same-message retry reuses the last requestId (host dedup)',
     '  follow <alias>                  Stream frames until the session settles (asks printed loudly)',
     '  asks <alias>                    List pending remote asks (question options included)',
     '  answer <alias> <askId> <once|reject>',
@@ -556,17 +590,21 @@ export async function followToSettled(options) {
     clearQuiet()
     quietTimer = setTimeout(() => { quietExpired = true; controller.abort() }, quietMs)
   }
-  const absorb = (record) => absorbRecord(record, {
+  const absorption = {
     requestId,
     baselineTurn,
     seen: seenSeqs,
+    admittedTurn: undefined,
+    observedTurn: undefined,
+    admissionSeen: false,
     addAnswer: (turn, text) => {
       if (currentTurn === undefined || turn > currentTurn) { currentTurn = turn; answerParts.length = 0 }
       if (turn === currentTurn) answerParts.push(text)
     },
     markAdmitted: () => { admitted = true },
     setTerminal: (value) => { terminal = value },
-  })
+  }
+  const absorb = (record) => absorbRecord(record, absorption)
   const absorbState = (state) => {
     latch = state.latch
     activeDescendants = state.activeDescendants
@@ -622,6 +660,17 @@ export async function followToSettled(options) {
     clearQuiet()
     if (timer !== undefined) clearTimeout(timer)
     process.removeListener('SIGINT', onSignal)
+  }
+  // The quiet window aborts the follow, so a frame in flight at the cut can be
+  // lost. Confirm the session is still quiet before accepting the terminal.
+  if (quietExpired && typeof client.state === 'function') {
+    try {
+      const confirmed = await client.state(target)
+      absorbState(confirmed.state)
+      cursor = Math.max(cursor, confirmed.cursor)
+    } catch {
+      // Without the confirming read the last observed settled signals stand.
+    }
   }
   if (terminal === undefined) {
     return {
@@ -730,15 +779,41 @@ export function isPeerSessionSettled(state) {
  * turn — a later turn REPLACES the previous turn's text, so a fan-out
  * dispatch announcement is superseded by the settled summary. Records are
  * deduplicated by seq, so a reconnect snapshot never doubles the text.
+ *
+ * With a `requestId`, answers and terminals are attributed causally: only the
+ * turn whose `turn/start` preceded our admitted `user/message` (or a later
+ * turn) feeds the answer. A concurrent third-party turn that ended before our
+ * admission is ignored. Without a `requestId` (the `follow` command) every
+ * turn after `baselineTurn` counts.
  */
 function absorbRecord(record, sink) {
-  if (sink.requestId !== undefined && recordRpcId(record) === sink.requestId) sink.markAdmitted()
+  if (sink.requestId !== undefined && recordRpcId(record) === sink.requestId) {
+    sink.markAdmitted()
+    if (sink.admissionSeen !== true) {
+      sink.admissionSeen = true
+      const turn = recordTurn(record) ?? sink.observedTurn
+      if (turn !== undefined) sink.admittedTurn = turn
+    }
+  }
   const seq = typeof record.seq === 'number' ? record.seq : undefined
   if (seq !== undefined) {
     if (sink.seen.has(seq)) return
     sink.seen.add(seq)
   }
   const turn = recordTurn(record)
+  if (record.type === 'turn/start' && turn !== undefined) {
+    sink.observedTurn = turn
+    if (sink.requestId !== undefined && sink.admissionSeen === true && sink.admittedTurn === undefined) sink.admittedTurn = turn
+    return
+  }
+  // The first turn-bound record after admission is the turn carrying our
+  // prompt when the snapshot window cut its `turn/start`.
+  if (sink.requestId !== undefined && sink.admissionSeen === true && sink.admittedTurn === undefined && turn !== undefined) {
+    sink.admittedTurn = turn
+  }
+  const attributed = sink.requestId === undefined
+    || (turn !== undefined && sink.admittedTurn !== undefined && turn >= sink.admittedTurn)
+  if (!attributed) return
   if (record.type === 'assistant/message' && turn !== undefined && turn > sink.baselineTurn) {
     const text = recordAssistantText(record)
     if (text !== '') sink.addAnswer(turn, text)
@@ -900,7 +975,82 @@ async function commandList(flags, positional) {
   return { ok: true, client: source, device: document.device, sessions }
 }
 
-async function commandAsk(flags, positional) {
+// ── Ask retry state ──────────────────────────────────────────────────────────
+// A transport failure after remote admission makes a re-run ambiguous: a new
+// requestId queues a duplicate user message, while the host deduplicates a
+// same-requestId retry (session-controller `hasPromptRequest`). Persist the
+// minted requestId per (alias, message digest) together with the baseline turn
+// that preceded the original attempt, reuse it on retry, and clear it once the
+// follow reports a terminal. The entry is the only cross-process memory.
+
+/** Retry-state path beside the pairing document: `<dir>/peer-bridge/ask-state.json`. */
+export function askStatePath(pairingsPath) {
+  return join(dirname(pairingsPath), 'peer-bridge', 'ask-state.json')
+}
+
+function readAskState(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    if (parsed !== null && typeof parsed === 'object' && parsed.version === 1 && parsed.entries !== null && typeof parsed.entries === 'object') {
+      return { version: 1, entries: parsed.entries }
+    }
+  } catch {
+    // Missing or corrupt state starts fresh; the only cost is retry dedup.
+  }
+  return { version: 1, entries: {} }
+}
+
+function writeAskState(path, state) {
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+  } catch {
+    // A read-only DSH_HOME still runs `ask`; the cost is retry dedup.
+  }
+}
+
+/**
+ * Mint or reuse the requestId for one `ask`. Reuse requires the same alias,
+ * target, and message digest and an entry younger than `ASK_RETRY_TTL_MS`; the
+ * stored baseline turn is returned so a retry collects a turn that settled
+ * since the first attempt.
+ * @param options - state path, alias, target key, message, baseline turn, and clock.
+ * @returns the requestId, whether it was reused, and the baseline turn to follow from.
+ */
+export function beginAsk(options) {
+  const { statePath, alias, message, baselineTurn, now, target } = options
+  const digest = createHash('sha256').update(message, 'utf8').digest('hex')
+  const state = readAskState(statePath)
+  const entry = state.entries[alias]
+  const reusable = entry !== undefined
+    && entry.digest === digest
+    && entry.target === target
+    && typeof entry.requestId === 'string'
+    && typeof entry.at === 'number'
+    && now - entry.at <= ASK_RETRY_TTL_MS
+  const requestId = reusable ? entry.requestId : `peer-cli-${globalThis.crypto.randomUUID()}`
+  const followBaselineTurn = reusable && typeof entry.baselineTurn === 'number' ? entry.baselineTurn : baselineTurn
+  state.entries[alias] = { digest, target, requestId, at: now, baselineTurn: followBaselineTurn }
+  writeAskState(statePath, state)
+  return { requestId, reused: reusable, baselineTurn: followBaselineTurn }
+}
+
+/**
+ * Drop the retry entry once the follow reported a terminal (settled or failed).
+ * A pending follow keeps the entry so a retry reuses the admitted requestId.
+ * @param statePath - the ask-state file.
+ * @param alias - pairing alias.
+ * @param requestId - the requestId whose entry to clear.
+ */
+export function finishAsk(statePath, alias, requestId) {
+  const state = readAskState(statePath)
+  const entry = state.entries[alias]
+  if (entry === undefined || entry.requestId !== requestId) return
+  delete state.entries[alias]
+  writeAskState(statePath, state)
+}
+
+export async function commandAsk(flags, positional, deps = {}) {
   const alias = positional[1]
   const message = positional[2]
   if (alias === undefined || message === undefined) throw new Error('ask needs <alias> and <message>')
@@ -909,7 +1059,16 @@ async function commandAsk(flags, positional) {
   const pairing = resolvePairing(document, alias)
   const { PeerClient, source } = await loadPeerClient()
   const participant = { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device }
-  const client = new PeerClient({ endpoint: pairing.endpoint, device: participant.device, headers: headersOf(flags, pairing), maxReconnects: 3 })
+  const clientOptions = {
+    endpoint: pairing.endpoint,
+    device: participant.device,
+    headers: headersOf(flags, pairing),
+    // `ask` follows until --wait expires, exactly like `follow`: a bounded
+    // reconnect budget would throw while the remote turn is still alive.
+    maxReconnects: undefined,
+    onWarning: deps.onWarning ?? (hole => console.error(`[peer] durable history hole [${String(hole.from)}, ${String(hole.to)}) — records in that range are missing locally`)),
+  }
+  const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
   await client.handshake()
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
   let baseline
@@ -928,19 +1087,39 @@ async function commandAsk(flags, positional) {
     created = true
     baseline = await client.state(target)
   }
-  const requestId = `peer-cli-${globalThis.crypto.randomUUID()}`
-  await client.prompt({ target, participant, requestId, content: [{ type: 'text', text: message }], hopCount: 0 })
+  const statePath = deps.askStatePath ?? askStatePath(pairingsPath)
+  const started = beginAsk({
+    statePath,
+    alias,
+    target: target.kind === 'session' ? target.sessionId : alias,
+    message,
+    baselineTurn: baseline.state.lastTurnEnd?.turn ?? 0,
+    now: deps.now === undefined ? Date.now() : deps.now(),
+  })
+  // The entry survives a prompt failure on purpose: a retry of the same
+  // message reuses this requestId and the host dedups the admission.
+  await client.prompt({ target, participant, requestId: started.requestId, content: [{ type: 'text', text: message }], hopCount: 0 })
   const result = await followToSettled({
     client,
     target,
     pairing,
     flags: { ...flags, wait: flags.wait ?? 300 },
-    requestId,
-    baselineTurn: baseline.state.lastTurnEnd?.turn ?? 0,
+    requestId: started.requestId,
+    baselineTurn: started.baselineTurn,
     baselineState: baseline.state,
     log: (line) => console.error(line),
   })
-  return { alias, endpoint: pairing.endpoint, sessionId: baseline.target.sessionId, created, requestId, client: source, ...result }
+  if (result.pending !== true) finishAsk(statePath, alias, started.requestId)
+  return {
+    alias,
+    endpoint: pairing.endpoint,
+    sessionId: baseline.target.sessionId,
+    created,
+    requestId: started.requestId,
+    requestReused: started.reused,
+    client: source,
+    ...result,
+  }
 }
 
 async function commandFollow(flags, positional) {
@@ -950,7 +1129,13 @@ async function commandFollow(flags, positional) {
   const document = loadPairings(pairingsPath)
   const pairing = resolvePairing(document, alias)
   const { PeerClient, source } = await loadPeerClient()
-  const client = new PeerClient({ endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: undefined })
+  const client = new PeerClient({
+    endpoint: pairing.endpoint,
+    device: flags.name ?? document.device,
+    headers: headersOf(flags, pairing),
+    maxReconnects: undefined,
+    onWarning: hole => console.error(`[peer] durable history hole [${String(hole.from)}, ${String(hole.to)}) — records in that range are missing locally`),
+  })
   await client.handshake()
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
   const result = await followToSettled({ client, target, pairing, flags, requestId: undefined, baselineTurn: -1, log: (line) => console.error(line) })
@@ -984,7 +1169,35 @@ async function commandAsks(flags, positional) {
   }
 }
 
-async function commandAnswer(flags, positional) {
+/**
+ * Send one `peer.answer`. A transport failure may hide a settled answer, so a
+ * transport error re-reads the pending asks: an ask that is gone means
+ * "settled remotely, confirmation lost"; one still pending keeps the failure.
+ */
+export async function answerWithConfirmation(client, request) {
+  try {
+    await client.answer(request)
+    return { settled: true, confirmation: 'confirmed' }
+  } catch (error) {
+    if (isPeerError(error) && error.code === 'peer/target-unreachable' && typeof client.state === 'function') {
+      try {
+        const value = await client.state(request.target)
+        if (!value.state.pendingAsks.some(ask => ask.askId === request.askId)) {
+          return {
+            settled: false,
+            confirmation: 'lost',
+            note: 'the answer transport failed with no confirmation, but the remote ask is no longer pending — it was settled remotely (by this answer or another participant); re-run asks before resending',
+          }
+        }
+      } catch {
+        // The confirming read failed too; report the original transport failure.
+      }
+    }
+    throw error
+  }
+}
+
+export async function commandAnswer(flags, positional, deps = {}) {
   const alias = positional[1]
   const askId = positional[2]
   const outcome = positional[3]
@@ -997,7 +1210,8 @@ async function commandAnswer(flags, positional) {
   const document = loadPairings(flags.pairings ?? defaultPairingsPath())
   const pairing = resolvePairing(document, alias)
   const { PeerClient, source } = await loadPeerClient()
-  const client = new PeerClient({ endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 })
+  const clientOptions = { endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 }
+  const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
   const participant = { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device }
   if (flags.select.length > 0) {
@@ -1006,17 +1220,34 @@ async function commandAnswer(flags, positional) {
     if (ask === undefined) throw new Error(`no pending ask ${askId} on ${alias} — it may have settled; re-run asks`)
     if (ask.kind !== 'question') throw new Error(`ask ${askId} is an approval ask; answer it with once or reject`)
     const answers = buildQuestionAnswers(Array.isArray(ask.questions) ? ask.questions : [], flags.select)
-    await client.answer({ target, participant, askId, answer: { kind: 'question', answer: { answers } } })
+    const confirmation = await answerWithConfirmation(client, { target, participant, askId, answer: { kind: 'question', answer: { answers } } })
     const rendered = answers.map(answer => `${answer.id}=${answer.selected.join('+')}`).join(', ')
-    return { ok: true, alias, askId, kind: 'question', answers, client: source, note: `question settled (${rendered}); the first answer won` }
+    return {
+      ok: true,
+      alias,
+      askId,
+      kind: 'question',
+      answers,
+      client: source,
+      ...confirmation,
+      note: confirmation.note ?? `question settled (${rendered}); the first answer won`,
+    }
   }
-  await client.answer({
+  const confirmation = await answerWithConfirmation(client, {
     target,
     participant,
     askId,
     answer: { kind: 'approval', outcome: outcome === 'once' ? 'allowed-once' : 'rejected' },
   })
-  return { ok: true, alias, askId, outcome: outcome === 'once' ? 'allowed-once' : 'rejected', client: source, note: 'ask settled; the first answer won' }
+  return {
+    ok: true,
+    alias,
+    askId,
+    outcome: outcome === 'once' ? 'allowed-once' : 'rejected',
+    client: source,
+    ...confirmation,
+    note: confirmation.note ?? 'ask settled; the first answer won',
+  }
 }
 
 /**
@@ -1063,16 +1294,52 @@ function buildQuestionAnswers(questions, selectors) {
   return answers
 }
 
-async function commandCancel(flags, positional) {
+/**
+ * Send one `peer.cancel`. A transport failure may hide a preempted turn, so a
+ * transport error re-reads the latch: no running turn means "confirmation
+ * lost", a still-running turn keeps the failure.
+ */
+export async function cancelWithConfirmation(client, request) {
+  try {
+    const value = await client.cancel(request)
+    return {
+      cancelled: value.cancelled,
+      confirmation: 'confirmed',
+      note: value.cancelled ? 'remote turn cancelled' : 'remote session had no active turn',
+    }
+  } catch (error) {
+    if (isPeerError(error) && error.code === 'peer/target-unreachable' && typeof client.state === 'function') {
+      try {
+        const value = await client.state(request.target)
+        if (value.state.latch !== 'running') {
+          return {
+            cancelled: false,
+            confirmation: 'lost',
+            note: 'the cancel confirmation was lost (transport failure); the remote reports no active turn — it may have completed or been cancelled',
+          }
+        }
+      } catch {
+        // The confirming read failed too; report the original transport failure.
+      }
+    }
+    throw error
+  }
+}
+
+export async function commandCancel(flags, positional, deps = {}) {
   const alias = positional[1]
   if (alias === undefined) throw new Error('cancel needs an alias')
   const document = loadPairings(flags.pairings ?? defaultPairingsPath())
   const pairing = resolvePairing(document, alias)
   const { PeerClient, source } = await loadPeerClient()
-  const client = new PeerClient({ endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 })
+  const clientOptions = { endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 }
+  const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
-  const value = await client.cancel({ target, participant: { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device } })
-  return { ok: true, alias, cancelled: value.cancelled, client: source, note: value.cancelled ? 'remote turn cancelled' : 'remote session had no active turn' }
+  const result = await cancelWithConfirmation(client, {
+    target,
+    participant: { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device },
+  })
+  return { ok: true, alias, client: source, ...result }
 }
 
 function defaultPairingsPath() {
@@ -1125,6 +1392,7 @@ function render(command, result, flags) {
     return
   }
   if (command === 'ask' || command === 'follow') {
+    if (result.requestReused === true) console.log(`(retry: reused requestId ${result.requestId} — the host dedups a repeated prompt)`)
     if (result.pending === true) { console.log(`PENDING on ${result.alias}: ${result.note}`); return }
     if (result.ok !== true) {
       console.log(`REMOTE TURN FAILED on ${result.alias}: ${String(result.terminal)}${result.remoteError === undefined ? '' : ` [${String(result.remoteError.code)}] ${String(result.remoteError.message)}`}`)

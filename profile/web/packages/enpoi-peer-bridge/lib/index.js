@@ -1,9 +1,9 @@
-// packages/enpoi-peer-bridge/src/index.ts
+// src/index.ts
 import Schema from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
 import { dirname as dirname2 } from "node:path";
 
-// packages/enpoi-peer-bridge/src/asks.ts
+// src/asks.ts
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 function askLabel(alias, sessionId, ask) {
@@ -91,7 +91,7 @@ function defaultNoticesPath(dshHome) {
   return `${dshHome.replace(/\/+$/u, "")}/peer-bridge/asks.jsonl`;
 }
 
-// packages/enpoi-peer-bridge/src/peer-client.ts
+// src/peer-client.ts
 var PeerBridgeError = class extends Error {
   /** Stable peer error code (`peer/*`, `gateway/*`). */
   code;
@@ -115,6 +115,12 @@ var PeerBridgeError = class extends Error {
 };
 var DEFAULT_BACKOFF = { initialMs: 250, maxMs: 4e3, factor: 2 };
 var REPAIR_PAGE_LIMIT = 20;
+var CALLER_TERMINAL_CODES = /* @__PURE__ */ new Set([
+  "peer/version-skew",
+  "peer/not-paired",
+  "peer/not-found",
+  "peer/forbidden"
+]);
 var PeerClient = class {
   /**
    * @param options - target endpoint, identity, and carrier replacements.
@@ -293,7 +299,7 @@ var PeerClient = class {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof PeerBridgeError && error.code === "peer/version-skew") throw error;
+        if (error instanceof PeerBridgeError && CALLER_TERMINAL_CODES.has(error.code)) throw error;
       }
       if (signal.aborted) return;
       attempt = progressed ? 1 : attempt + 1;
@@ -305,6 +311,7 @@ var PeerClient = class {
   }
   /**
    * Fill a durable hole between two cursors by paging backwards from the newer cut.
+   * A hole the pages cannot prove contiguous emits `onWarning` with the missing range.
    * @param target - resolved peer target.
    * @param fromExclusive - last durable seq the caller already folded.
    * @param toExclusive - first durable seq the caller is about to receive.
@@ -314,17 +321,30 @@ var PeerClient = class {
   async *repairForward(target, fromExclusive, toExclusive, signal) {
     const collected = [];
     let throughSeq = toExclusive - 1;
-    for (let page = 0; page < REPAIR_PAGE_LIMIT; page += 1) {
+    let hole;
+    let pages = 0;
+    while (pages < REPAIR_PAGE_LIMIT) {
       if (signal.aborted || throughSeq <= fromExclusive) break;
       const value = await this.page({ target, throughSeq, maxMessages: this.pageSize });
-      if (value.records.length === 0) break;
+      pages += 1;
+      if (value.records.length === 0) {
+        hole = { from: fromExclusive + 1, to: throughSeq + 1 };
+        break;
+      }
       for (const record of value.records) {
         if (record.seq > fromExclusive && record.seq < toExclusive) collected.push(record);
       }
       const oldest = value.records[0]?.seq;
-      if (oldest === void 0 || oldest <= fromExclusive || !value.hasMore) break;
+      if (oldest === void 0 || oldest <= fromExclusive + 1 || !value.hasMore) {
+        if (oldest !== void 0 && oldest > fromExclusive + 1) hole = { from: fromExclusive + 1, to: oldest };
+        break;
+      }
       throughSeq = oldest - 1;
     }
+    if (hole === void 0 && !signal.aborted && throughSeq > fromExclusive) {
+      hole = { from: fromExclusive + 1, to: throughSeq + 1 };
+    }
+    if (hole !== void 0) this.options.onWarning?.(hole);
     collected.sort((left, right) => left.seq - right.seq);
     for (const record of collected) yield { type: "event", record, cursor: record.seq };
   }
@@ -417,7 +437,15 @@ function delay(ms, signal) {
   });
 }
 
-// packages/enpoi-peer-bridge/src/follow.ts
+// src/follow.ts
+var DEFAULT_SETTLE_QUIET_MS = 2e3;
+function isPeerSessionSettled(state) {
+  if (state === void 0 || state.terminal === void 0) return false;
+  if ((state.pendingAskCount ?? 0) > 0) return false;
+  if ((state.activeDescendants ?? 0) > 0) return false;
+  if (state.descendantsExact === false) return false;
+  return state.latch === void 0 || state.latch === "unknown" || state.latch === "idle";
+}
 function recordRpcId(record) {
   if (record.type !== "user/message") return void 0;
   const source = field(record.data, "source");
@@ -460,7 +488,7 @@ function field(value, key) {
   return value[key];
 }
 
-// packages/enpoi-peer-bridge/src/pairings.ts
+// src/pairings.ts
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -732,7 +760,7 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// packages/enpoi-peer-bridge/src/index.ts
+// src/index.ts
 var name = "enpoi-peer-bridge";
 var inject = ["tools"];
 function live(schema) {
@@ -751,6 +779,7 @@ var Config = Schema.object({
   device: live(Schema.string()),
   participantName: live(Schema.string()),
   waitMs: live(Schema.number()),
+  settleMs: live(Schema.number()),
   maxReconnects: live(Schema.number())
 });
 var DEFAULT_WAIT_MS = 3e5;
@@ -768,6 +797,13 @@ function registerTools(ctx, config, deps = {}) {
   const pairingsPath = config.pairingsPath ?? defaultPairingsPath();
   const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname2(pairingsPath));
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS;
+  const settleMs = config.settleMs ?? DEFAULT_SETTLE_QUIET_MS;
+  const effectiveDeps = {
+    ...deps,
+    onWarning: deps.onWarning ?? ((hole) => {
+      ctx.logger?.warn?.(`enpoi-peer-bridge: peer follow history hole [${String(hole.from)}, ${String(hole.to)}) \u2014 records in that range are missing locally`);
+    })
+  };
   ctx.tools.register({
     name: "peer_status",
     description: [
@@ -824,7 +860,7 @@ function registerTools(ctx, config, deps = {}) {
       const request = narrow(args);
       const alias = requireAlias(request.alias);
       const { pairing, document } = resolveEntry(pairingsPath, alias);
-      const client = makeClient(pairing, config, document.device, deps);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
       try {
         const handshake = await client.handshake();
         let bound = pairing.remoteSessionId !== void 0;
@@ -943,7 +979,7 @@ function registerTools(ctx, config, deps = {}) {
           exposure: pairing.exposure ?? ""
         };
         try {
-          const listed = await makeClient(pairing, config, document.device, deps).list({});
+          const listed = await makeClient(pairing, config, document.device, effectiveDeps).list({});
           const entry = listed.pairings.find((candidate) => candidate.alias === pairing.alias);
           sessions.push({
             ...base,
@@ -995,6 +1031,7 @@ function registerTools(ctx, config, deps = {}) {
           created: { type: "boolean" },
           requestId: { type: "string" },
           admitted: { type: "boolean" },
+          settled: { type: "boolean" },
           turn: { type: "number" },
           terminal: { type: "string" },
           error: failureSchema(),
@@ -1032,13 +1069,14 @@ function registerTools(ctx, config, deps = {}) {
         pairingsPath,
         noticesPath,
         waitMs: requestedWait,
+        settleMs,
         config,
         signal: exec.signal,
         agent: exec.agent,
         alias,
         message,
         allowCreate: true,
-        deps
+        deps: effectiveDeps
       });
     }
   });
@@ -1101,7 +1139,7 @@ function registerTools(ctx, config, deps = {}) {
       const request = narrow(args);
       const alias = requireAlias(request.alias);
       const { pairing } = resolveEntry(pairingsPath, alias);
-      const client = makeClient(pairing, config, void 0, deps);
+      const client = makeClient(pairing, config, void 0, effectiveDeps);
       try {
         const value = await client.state(targetOf(pairing));
         return {
@@ -1169,6 +1207,7 @@ function registerTools(ctx, config, deps = {}) {
           alias: { type: "string" },
           askId: { type: "string" },
           settled: { type: "boolean" },
+          confirmation: { type: "string" },
           note: { type: "string" },
           error: failureSchema()
         },
@@ -1193,7 +1232,7 @@ function registerTools(ctx, config, deps = {}) {
         return badRequest("peer_answer outcome must be allowed-once or rejected (allowed-always is not grantable from a peer)");
       }
       const { pairing, document } = resolveEntry(pairingsPath, alias);
-      const client = makeClient(pairing, config, document.device, deps);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
       let answer;
       if (outcome !== void 0) {
         answer = { kind: "approval", outcome };
@@ -1217,9 +1256,10 @@ function registerTools(ctx, config, deps = {}) {
         if (!normalized.ok) return badRequest(normalized.message);
         answer = { kind: "question", answer: normalized.answer };
       }
+      const target = targetOf(pairing);
       try {
         await client.answer({
-          target: targetOf(pairing),
+          target,
           participant: participantOf(config, document),
           askId,
           answer
@@ -1229,10 +1269,24 @@ function registerTools(ctx, config, deps = {}) {
           alias,
           askId,
           settled: true,
+          confirmation: "confirmed",
           note: answer.kind === "question" ? "question settled; the first answer won" : "ask settled; the first answer won"
         };
       } catch (error) {
         const conflict = error instanceof PeerBridgeError && error.code === "peer/conflict";
+        if (!conflict && error instanceof PeerBridgeError && error.code === "peer/target-unreachable") {
+          const reread = await client.state(target).catch(() => void 0);
+          if (reread !== void 0 && !reread.state.pendingAsks.some((candidate) => candidate.askId === askId)) {
+            return {
+              ok: true,
+              alias,
+              askId,
+              settled: false,
+              confirmation: "lost",
+              note: "the answer transport failed with no confirmation, but the remote ask is no longer pending \u2014 it was settled remotely (by this answer or another participant); re-run peer_asks before resending"
+            };
+          }
+        }
         return {
           ok: false,
           alias,
@@ -1262,6 +1316,7 @@ function registerTools(ctx, config, deps = {}) {
           ok: { type: "boolean" },
           alias: { type: "string" },
           cancelled: { type: "boolean" },
+          confirmation: { type: "string" },
           note: { type: "string" },
           error: failureSchema()
         },
@@ -1279,16 +1334,29 @@ function registerTools(ctx, config, deps = {}) {
       const request = narrow(args);
       const alias = requireAlias(request.alias);
       const { pairing, document } = resolveEntry(pairingsPath, alias);
-      const client = makeClient(pairing, config, document.device, deps);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
       try {
         const value = await client.cancel({ target: targetOf(pairing), participant: participantOf(config, document) });
         return {
           ok: true,
           alias,
           cancelled: value.cancelled,
+          confirmation: "confirmed",
           note: value.cancelled ? "remote turn cancelled" : "remote session had no active turn"
         };
       } catch (error) {
+        if (error instanceof PeerBridgeError && error.code === "peer/target-unreachable") {
+          const reread = await client.state(targetOf(pairing)).catch(() => void 0);
+          if (reread !== void 0 && reread.state.latch !== "running") {
+            return {
+              ok: true,
+              alias,
+              cancelled: false,
+              confirmation: "lost",
+              note: "the cancel confirmation was lost (transport failure); the remote reports no active turn \u2014 it may have completed or been cancelled"
+            };
+          }
+        }
         return failureFrom(error, pairing.endpoint);
       }
     }
@@ -1356,7 +1424,37 @@ async function runAsk(ctx, options) {
   let admitted = false;
   let terminal;
   let detached = false;
+  let activeDescendants = baseline.state.activeDescendants;
+  let descendantsExact = baseline.state.descendantsExact;
+  let pendingAskCount = baseline.state.pendingAsks.length;
   const answerParts = [];
+  let answerTurn;
+  const seenSeqs = /* @__PURE__ */ new Set();
+  let admittedTurn;
+  let observedTurn;
+  let admissionSeen = false;
+  let quietExpired = false;
+  let quietTimer;
+  const clearQuiet = () => {
+    if (quietTimer !== void 0) {
+      clearTimeout(quietTimer);
+      quietTimer = void 0;
+    }
+  };
+  const armQuiet = () => {
+    clearQuiet();
+    quietTimer = setTimeout(() => {
+      quietExpired = true;
+      controller.abort();
+    }, options.settleMs);
+  };
+  const settledNow = () => isPeerSessionSettled({
+    terminal,
+    latch,
+    activeDescendants,
+    descendantsExact,
+    pendingAskCount
+  });
   const inFlight = /* @__PURE__ */ new Set();
   const withdrawMissing = (pending) => {
     const present = new Set(pending.map((ask) => ask.askId));
@@ -1393,12 +1491,36 @@ async function runAsk(ctx, options) {
     surface(pending);
   };
   const absorb = (record) => {
-    if (recordRpcId(record) === requestId) admitted = true;
-    if (terminal !== void 0) return;
+    if (recordRpcId(record) === requestId) {
+      admitted = true;
+      if (!admissionSeen) {
+        admissionSeen = true;
+        const turn2 = recordTurn(record) ?? observedTurn;
+        if (turn2 !== void 0) admittedTurn = turn2;
+      }
+    }
+    if (typeof record.seq === "number") {
+      if (seenSeqs.has(record.seq)) return;
+      seenSeqs.add(record.seq);
+    }
     const turn = recordTurn(record);
-    if (record.type === "assistant/message" && turn !== void 0 && turn > baselineTurn) {
+    if (record.type === "turn/start" && turn !== void 0) {
+      observedTurn = turn;
+      if (admissionSeen && admittedTurn === void 0) admittedTurn = turn;
+      return;
+    }
+    if (admittedTurn === void 0 && admissionSeen && turn !== void 0) admittedTurn = turn;
+    const attributed = admittedTurn !== void 0 && turn !== void 0 && turn >= admittedTurn;
+    if (!attributed) return;
+    if (record.type === "assistant/message" && turn > baselineTurn) {
       const text = recordAssistantText(record);
-      if (text !== "") answerParts.push(text);
+      if (text !== "") {
+        if (answerTurn === void 0 || turn > answerTurn) {
+          answerTurn = turn;
+          answerParts.length = 0;
+        }
+        if (turn === answerTurn) answerParts.push(text);
+      }
       return;
     }
     const end = recordTerminal(record);
@@ -1409,11 +1531,17 @@ async function runAsk(ctx, options) {
       if (frame.type === "snapshot") {
         cursor = frame.cursor;
         latch = frame.state.latch;
+        activeDescendants = frame.state.activeDescendants;
+        descendantsExact = frame.state.descendantsExact;
+        pendingAskCount = frame.state.pendingAsks.length;
         for (const record of frame.records) absorb(record);
         await surfaceFrame(frame.state.pendingAsks);
       } else if (frame.type === "state") {
         cursor = frame.cursor;
         latch = frame.state.latch;
+        activeDescendants = frame.state.activeDescendants;
+        descendantsExact = frame.state.descendantsExact;
+        pendingAskCount = frame.state.pendingAsks.length;
         await surfaceFrame(frame.state.pendingAsks);
       } else if (frame.type === "event") {
         cursor = Math.max(cursor, frame.record.seq);
@@ -1422,15 +1550,30 @@ async function runAsk(ctx, options) {
         detached = true;
         break;
       }
-      if (terminal !== void 0 && terminal.turn > baselineTurn) break;
+      if (terminal !== void 0) {
+        if (settledNow()) armQuiet();
+        else clearQuiet();
+      }
     }
   } catch (error) {
     if (!timedOut && !controller.signal.aborted) return failureFrom(error, pairing.endpoint);
   } finally {
     clearTimeout(timer);
+    clearQuiet();
     options.signal.removeEventListener("abort", relayAbort);
     controller.abort();
     await Promise.allSettled([...inFlight]);
+  }
+  if (quietExpired) {
+    try {
+      const confirmed = await client.state(requestedTarget);
+      latch = confirmed.state.latch;
+      activeDescendants = confirmed.state.activeDescendants;
+      descendantsExact = confirmed.state.descendantsExact;
+      pendingAskCount = confirmed.state.pendingAsks.length;
+      cursor = Math.max(cursor, confirmed.cursor);
+    } catch {
+    }
   }
   if (detached) {
     return {
@@ -1457,15 +1600,44 @@ async function runAsk(ctx, options) {
       created,
       requestId,
       admitted,
+      answer,
       asks: askLines(asks),
       latch,
       cursor,
       note: `no terminal within ${String(options.waitMs)}ms \u2014 the remote turn is still live (follow it again with peer_ask or ds peer follow)`
     };
   }
+  if (!settledNow()) {
+    return {
+      ok: false,
+      pending: true,
+      settled: false,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...terminal.error === void 0 ? {} : {
+        remoteError: {
+          code: terminal.error.code ?? "unknown",
+          message: terminal.error.message ?? "",
+          provider: terminal.error.provider ?? "",
+          model: terminal.error.model ?? ""
+        }
+      },
+      answer,
+      asks: askLines(asks),
+      latch,
+      cursor,
+      note: `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) \u2014 follow again to collect the remainder`
+    };
+  }
   if (terminal.reason !== "completed") {
     return {
       ok: false,
+      settled: true,
       alias: pairing.alias,
       sessionId: baseline.target.sessionId,
       created,
@@ -1489,6 +1661,7 @@ async function runAsk(ctx, options) {
   }
   return {
     ok: true,
+    settled: true,
     alias: pairing.alias,
     sessionId: baseline.target.sessionId,
     created,
@@ -1501,6 +1674,14 @@ async function runAsk(ctx, options) {
     cursor,
     note: asks.size === 0 ? "" : "remote asks were raised locally; see asks[] for the decisions relayed"
   };
+}
+function unsettledSummary(latch, activeDescendants, pendingAskCount) {
+  if (activeDescendants > 0) return `${String(activeDescendants)} live descendant(s)`;
+  if (pendingAskCount > 0) return `${String(pendingAskCount)} pending ask(s)`;
+  if (latch === "running") return "a turn is still running";
+  if (latch === "waiting_subagents") return "descendants are still settling";
+  if (latch === "waiting_approval") return "an ask is pending";
+  return "the quiet window had not elapsed";
 }
 async function surfacePending(ctx, client, noticesPath, pairing, participant, target, pending, asks, signal, agent) {
   const sessionLabel = target.kind === "session" ? target.sessionId : pairing.remoteSessionId ?? pairing.alias;
@@ -1654,7 +1835,8 @@ function makeClient(pairing, config, device, deps = {}) {
     headers,
     ...config.maxReconnects === void 0 ? {} : { maxReconnects: config.maxReconnects },
     ...deps.fetch === void 0 ? {} : { fetch: deps.fetch },
-    ...deps.webSocket === void 0 ? {} : { webSocket: deps.webSocket }
+    ...deps.webSocket === void 0 ? {} : { webSocket: deps.webSocket },
+    ...deps.onWarning === void 0 ? {} : { onWarning: deps.onWarning }
   });
 }
 function narrow(args) {

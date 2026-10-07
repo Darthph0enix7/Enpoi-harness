@@ -12,6 +12,38 @@
 
 import type { PeerEventRecord } from './peer-client.js'
 
+/** Default quiet window after a terminal before a followed session is accepted as settled. */
+export const DEFAULT_SETTLE_QUIET_MS = 2_000
+
+/** Signals deciding whether a followed session is provably quiet. */
+export interface PeerSettleSignals {
+  /** Latest terminal `turn/end` folded from the follow. */
+  readonly terminal?: TurnTerminal
+  /** Latch reported by the newest state frame. */
+  readonly latch?: string
+  /** Live descendants reported by the newest state frame. */
+  readonly activeDescendants?: number
+  /** Whether the descendant count is exact; false leaves settling to the quiet window. */
+  readonly descendantsExact?: boolean
+  /** Pending ask count reported by the newest state frame. */
+  readonly pendingAskCount?: number
+}
+
+/**
+ * Whether a followed session is settled: a terminal arrived, no ask or
+ * descendant is live, and the latch is not running/waiting. Absent signals
+ * leave settling to the quiet window.
+ * @param state - latest observed signals.
+ * @returns true only when the session is provably quiet.
+ */
+export function isPeerSessionSettled(state: PeerSettleSignals | undefined): boolean {
+  if (state === undefined || state.terminal === undefined) return false
+  if ((state.pendingAskCount ?? 0) > 0) return false
+  if ((state.activeDescendants ?? 0) > 0) return false
+  if (state.descendantsExact === false) return false
+  return state.latch === undefined || state.latch === 'unknown' || state.latch === 'idle'
+}
+
 /** Structured turn failure carried by `turn/end{reason:'error'}`. */
 export interface TurnFailure {
   readonly code?: string

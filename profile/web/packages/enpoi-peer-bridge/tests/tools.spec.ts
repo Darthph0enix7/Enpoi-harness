@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
-import type { PeerPendingAsk, PeerWebSocket } from '../src/peer-client.ts'
+import type { PeerExecutionState, PeerPendingAsk, PeerWebSocket } from '../src/peer-client.ts'
 import { registerTools } from '../src/index.ts'
 import { FakeSocket, rpcResponse, SNAPSHOT } from './helpers.ts'
 
@@ -39,6 +39,28 @@ interface HostOptions {
   readonly questionRefusal?: boolean
   /** Answer the local user-questions request resolves with. */
   readonly questionAnswer?: { readonly answers: readonly { readonly id: string; readonly selected: readonly string[] }[] }
+  /** Prepend a completed third-party turn 1 before our admitted prompt in turn 2. */
+  readonly prelude?: boolean
+  /** Stop the script after our admitted user/message, leaving our turn terminal open. */
+  readonly thirdPartyOnly?: boolean
+  /** Replay seqs 10-12 in a reconnect snapshot after the first terminal. */
+  readonly replay?: boolean
+  /** Start a follow-up turn carrying this text after the first terminal. */
+  readonly secondTurn?: string
+  /** Skip the trailing settled state frame, leaving the last follow state busy. */
+  readonly noFinalState?: boolean
+  /** Quiet window override for the follow's settle clock. */
+  readonly settleMs?: number
+  /** Latch the unary `peer.state` read reports (default idle). */
+  readonly stateLatch?: string
+  /** Live descendants the unary `peer.state` read reports (default 0). */
+  readonly stateDescendants?: number
+  /** Throw a transport error after removing the ask (the remote applied it). */
+  readonly answerTransportLost?: boolean
+  /** Throw a transport error without removing the ask (the remote never saw it). */
+  readonly answerTransportFail?: boolean
+  /** Throw a transport error on cancel; `peer.state` reports the configured latch. */
+  readonly cancelTransportFail?: boolean
 }
 
 interface RegisteredTool {
@@ -56,6 +78,10 @@ function createHarness(options: HostOptions = {}) {
 
   const calls: Array<{ method: string; args: Record<string, unknown> }> = []
   const captured = { requestId: undefined as string | undefined }
+  // The scripted remote: state reads report the asks currently pending, and a
+  // successful answer removes its ask, so a later confirming read agrees with
+  // the state frames the socket already emitted.
+  let pendingAsksNow: PeerPendingAsk[] = options.ask === undefined || options.ask === null ? [] : [options.ask]
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (options.networkFail === true) throw new Error('econnrefused')
     const method = String(input).split('/api/peer/')[1]!
@@ -71,8 +97,9 @@ function createHarness(options: HostOptions = {}) {
         return ok({
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
           state: {
-            latch: 'idle', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true,
-            pendingAsks: options.ask === undefined || options.ask === null ? [] : [options.ask],
+            latch: options.stateLatch ?? 'idle', since: 0, source: 'host-latch',
+            activeDescendants: options.stateDescendants ?? 0, descendantsExact: true,
+            pendingAsks: pendingAsksNow,
             model: { provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
             lastTurnEnd: { turn: 0, reason: 'completed', at: 0 },
           },
@@ -96,9 +123,16 @@ function createHarness(options: HostOptions = {}) {
         captured.requestId = typeof args.requestId === 'string' ? args.requestId : undefined
         return ok({ accepted: true, queued: true, hopCount: 1 })
       case 'answer':
+        if (options.answerTransportFail === true) throw new Error('econnrefused')
+        if (options.answerTransportLost === true) {
+          pendingAsksNow = pendingAsksNow.filter(ask => ask.askId !== args.askId)
+          throw new Error('econnrefused')
+        }
         if (options.answerError !== undefined) return fail(options.answerError, 'already settled')
+        pendingAsksNow = pendingAsksNow.filter(ask => ask.askId !== args.askId)
         return ok({ accepted: true, settled: true })
       case 'cancel':
+        if (options.cancelTransportFail === true) throw new Error('econnrefused')
         return ok({ accepted: true, cancelled: true })
       default:
         return fail('peer/not-paired', `no ${method}`)
@@ -106,6 +140,11 @@ function createHarness(options: HostOptions = {}) {
   }) as unknown as typeof fetch
 
   const socketFactory = (): PeerWebSocket => new FakeSocket((socket, streamId) => {
+    const ourTurn = options.prelude === true ? 2 : 1
+    const settled: PeerExecutionState = {
+      latch: 'idle', since: 20, source: 'host-latch', activeDescendants: 0,
+      descendantsExact: true, pendingAsks: [],
+    }
     socket.frame(streamId, SNAPSHOT)
     if (options.ask !== undefined && options.ask !== null) {
       socket.frame(streamId, {
@@ -118,6 +157,7 @@ function createHarness(options: HostOptions = {}) {
       })
       if (options.settleAskRemotely === true) {
         setTimeout(() => {
+          pendingAsksNow = []
           socket.frame(streamId, {
             type: 'state',
             state: {
@@ -129,22 +169,80 @@ function createHarness(options: HostOptions = {}) {
         }, 10)
       }
     }
+    if (options.prelude === true) {
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 6, time: 1, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'third party answer' }] } } },
+        cursor: 6,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 7, time: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+        cursor: 7,
+      })
+    }
     socket.frame(streamId, {
       type: 'event',
-      record: { seq: 10, time: 1, type: 'user/message', data: { source: { kind: 'user', rpcId: captured.requestId }, content: [{ type: 'text', text: 'run it' }] } },
+      record: { seq: 9, time: 3, type: 'turn/start', data: { turn: ourTurn } },
+      cursor: 9,
+    })
+    socket.frame(streamId, {
+      type: 'event',
+      record: { seq: 10, time: 4, type: 'user/message', data: { source: { kind: 'user', rpcId: captured.requestId }, content: [{ type: 'text', text: 'run it' }] } },
       cursor: 10,
     })
-    if (options.holdFollow === true) return
+    if (options.holdFollow === true || options.thirdPartyOnly === true) return
     socket.frame(streamId, {
       type: 'event',
-      record: { seq: 11, time: 2, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'remote answer text' }] } } },
+      record: { seq: 11, time: 5, type: 'assistant/message', data: { turn: ourTurn, message: { content: [{ type: 'text', text: 'remote answer text' }] } } },
       cursor: 11,
     })
     socket.frame(streamId, {
       type: 'event',
-      record: { seq: 12, time: 3, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+      record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: 'completed' } } },
       cursor: 12,
     })
+    if (options.replay === true) {
+      socket.frame(streamId, {
+        ...SNAPSHOT,
+        cursor: 12,
+        state: settled,
+        records: [
+          { seq: 10, time: 4, type: 'user/message', data: { source: { kind: 'user', rpcId: captured.requestId }, content: [{ type: 'text', text: 'run it' }] } },
+          { seq: 11, time: 5, type: 'assistant/message', data: { turn: ourTurn, message: { content: [{ type: 'text', text: 'remote answer text' }] } } },
+          { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: 'completed' } } },
+        ],
+      })
+    }
+    if (options.secondTurn !== undefined) {
+      socket.frame(streamId, {
+        type: 'state',
+        state: {
+          latch: 'idle', since: 13, source: 'host-latch', activeDescendants: 1,
+          descendantsExact: true, pendingAsks: [],
+        },
+        cursor: 13,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 14, time: 7, type: 'turn/start', data: { turn: ourTurn + 1 } },
+        cursor: 14,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 15, time: 8, type: 'assistant/message', data: { turn: ourTurn + 1, message: { content: [{ type: 'text', text: options.secondTurn }] } } },
+        cursor: 15,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 16, time: 9, type: 'turn/end', data: { turn: ourTurn + 1, reason: { kind: 'completed' } } },
+        cursor: 16,
+      })
+    }
+    if (options.noFinalState !== true) {
+      pendingAsksNow = []
+      socket.frame(streamId, { type: 'state', state: settled, cursor: 20 })
+    }
   })
 
   const tools = new Map<string, RegisteredTool>()
@@ -195,7 +293,7 @@ function createHarness(options: HostOptions = {}) {
     logger: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
   } as unknown as Context
 
-  registerTools(ctx, { pairingsPath, noticesPath }, { fetch: fetchImpl, webSocket: socketFactory })
+  registerTools(ctx, { pairingsPath, noticesPath, settleMs: options.settleMs ?? 20 }, { fetch: fetchImpl, webSocket: socketFactory })
   const execController = new AbortController()
   return {
     tools,
@@ -508,6 +606,64 @@ describe('enpoi-peer-bridge tools', () => {
     })
     const rendered = harness.tools.get('peer_asks')!.output.render({}, result)[0]!.text
     expect(rendered).toContain('options: red, blue')
+  })
+
+  it('folds a reconnect snapshot replay without doubling the answer', async () => {
+    const harness = createHarness({ replay: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, settled: true, turn: 1, terminal: 'completed' })
+    expect(result.answer).toBe('remote answer text')
+  })
+
+  it('keeps following past the first terminal while descendants are live', async () => {
+    const harness = createHarness({ secondTurn: 'FINAL SUMMARY: children settled' })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'fan out' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, settled: true, turn: 2, terminal: 'completed' })
+    expect(result.answer).toBe('FINAL SUMMARY: children settled')
+  })
+
+  it('reports a terminal that arrived while the session was still busy as pending', async () => {
+    const harness = createHarness({ secondTurn: 'too late', noFinalState: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'fan out', waitMs: 40 }, harness.exec)
+    expect(result).toMatchObject({ ok: false, pending: true, settled: false, turn: 2, terminal: 'completed' })
+    expect(String(result.note)).toContain('live descendant')
+  })
+
+  it('ignores a third-party turn that ended before our prompt was admitted', async () => {
+    const harness = createHarness({ prelude: true, thirdPartyOnly: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours', waitMs: 40 }, harness.exec)
+    expect(result.pending).toBe(true)
+    expect(result.answer).toBe('')
+    expect(result.turn).toBeUndefined()
+    expect(result.terminal).toBeUndefined()
+  })
+
+  it('confirms a settled quiet window against a fresh state read', async () => {
+    const harness = createHarness({ stateLatch: 'running', stateDescendants: 1 })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing' }, harness.exec)
+    expect(result).toMatchObject({ ok: false, pending: true, settled: false, turn: 1, terminal: 'completed' })
+    expect(String(result.note)).toContain('live descendant')
+  })
+
+  it('reports an answer whose confirmation was lost as settled remotely', async () => {
+    const harness = createHarness({ ask: APPROVAL_ASK, answerTransportLost: true })
+    const result = await harness.tools.get('peer_answer')!.execute({ alias: 'scratch', askId: 'ask-1', outcome: 'allowed-once' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, settled: false, confirmation: 'lost' })
+    expect(String(result.note)).toContain('no longer pending')
+  })
+
+  it('keeps a transport failure when the confirming read still shows the ask', async () => {
+    const harness = createHarness({ ask: APPROVAL_ASK, answerTransportFail: true })
+    const result = await harness.tools.get('peer_answer')!.execute({ alias: 'scratch', askId: 'ask-1', outcome: 'allowed-once' }, harness.exec)
+    expect(result.ok).toBe(false)
+    expect((result.error as Record<string, unknown>).code).toBe('peer/target-unreachable')
+  })
+
+  it('reports a cancel whose confirmation was lost when no turn is running', async () => {
+    const harness = createHarness({ cancelTransportFail: true })
+    const result = await harness.tools.get('peer_cancel')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, cancelled: false, confirmation: 'lost' })
+    expect(String(result.note)).toContain('no active turn')
   })
 
   it('fails loud on an unknown alias', async () => {

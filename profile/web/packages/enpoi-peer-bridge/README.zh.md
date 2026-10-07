@@ -10,10 +10,10 @@
 | 工具 | 作用 |
 |---|---|
 | `peer_status {alias}` | 握手（对端身份、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型。 |
-| `peer_ask {alias, message, waitMs?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，返回回答或结构化终态失败。 |
+| `peer_ask {alias, message, waitMs?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。 |
 | `peer_asks {alias}` | 远端待决询问（审批与提问两种）。 |
-| `peer_answer {alias, askId, outcome}` | 解决审批询问（`allowed-once` \| `rejected`）。先到先得。 |
-| `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。 |
+| `peer_answer {alias, askId, outcome}` | 解决审批询问（`allowed-once` \| `rejected`）。先到先得。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
+| `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。传输失败时重读闩锁：无活动回合时报 `confirmation: 'lost'`。 |
 
 ## 配对文件
 
@@ -36,7 +36,7 @@ pairings:
 
 主机角色字段（`sessionId`、`exposure`）被调用方忽略；条目需要 `alias`、
 `peer`、`endpoint` 才可拨号。插件 Config 字段（`pairingsPath`、`noticesPath`、
-`device`、`participantName`、`waitMs`、`maxReconnects`）均声明为
+`device`、`participantName`、`waitMs`、`settleMs`、`maxReconnects`）均声明为
 `.volatile()`，合并后的 settings 服务会将其暴露为实时表单并持久化到 profile
 patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他文档，测试因此
 不会碰操作者真实的配对文件。
@@ -55,6 +55,19 @@ patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他�
 `peer_answer` / `ds peer answer` 应答。`peer/conflict` 表示其他参与者已先行
 应答——本插件如实报告，绝不盲目重试。不会自动应答任何询问。
 
+## 跟踪可靠性
+
+`peer_ask` 与 `ds peer ask`/`follow` 在首个 `turn/end` 之后，只要仍有子代理、
+待决询问或后续回合活动，就会继续跟踪；只有在静默窗口（`settleMs`，默认 2000
+毫秒；CLI 的 `--settle-ms`）结束并重读一次 `peer.state` 确认后，才认定会话
+静默。记录按 seq 去重，重连快照重放不会重复追加同一段助手文本；较新的回合会
+**替换**先前回合的文本。回答按因果归属：只有 `turn/start` 早于我们已采纳的
+`user/message` 的回合（及其后续回合）才计入结果，因此并发的第三方回合不会被
+当作我们的回答返回。`peer/not-paired`、`peer/not-found`、`peer/forbidden`、
+`peer/version-skew` 错误帧会立即终止跟踪并上报该错误，而不是按退避节奏无限
+重连；`peer.page` 无法证明连续的持久化空洞会带 `[from, to)` 范围经警告回调
+上报，重放则跨过该空洞继续。
+
 ## 已知限制与后续工作
 
 - 提问类询问会展示但暂不可从本桥应答（尚未暴露结构化的
@@ -63,4 +76,6 @@ patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他�
 - 主机侧 `peer.create` 绑定与主机配对是两件事；本包只读取调用方条目。
 - 因 `@deepseek-ai/dsh-api-peer` 不是 profile 依赖，这里保留一份本地
   peer 客户端副本（`src/peer-client.ts`）；帧协议需与
-  `packages/api/peer/src/client.ts` 保持同步。
+  `packages/api/peer/src/client.ts` 保持同步。本地副本额外在调用方终态错误帧上
+  终止、对已接受的修复空洞发出警告，并在 `src/index.ts` 中先结算再返回；
+  harness 客户端目前仍对除版本偏差外的错误一律重试。

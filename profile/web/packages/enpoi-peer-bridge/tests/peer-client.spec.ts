@@ -181,4 +181,71 @@ describe('PeerClient follow', () => {
     }).rejects.toThrowError(PeerBridgeError)
     expect(generation).toBe(1)
   })
+
+  it('rethrows caller-terminal peer errors instead of retrying at backoff cadence', async () => {
+    for (const code of ['peer/not-paired', 'peer/not-found', 'peer/forbidden']) {
+      let generation = 0
+      const client = new PeerClient({
+        endpoint: 'https://host',
+        device: 'caller',
+        fetch: (async () => rpcResponse({})) as typeof fetch,
+        backoff: { initialMs: 1, maxMs: 2, factor: 2 },
+        webSocket: (): PeerWebSocket => {
+          generation += 1
+          return new FakeSocket((self, streamId) => {
+            self.fail(streamId, { code, message: 'terminal' })
+          })
+        },
+      })
+      const controller = new AbortController()
+      await expect(async () => {
+        for await (const _frame of client.follow({ target: { kind: 'alias', alias: 'x' } }, controller.signal)) {
+          // drain
+        }
+      }).rejects.toMatchObject({ code })
+      expect(generation).toBe(1)
+    }
+  })
+
+  it('warns with the missing range when a repair cannot prove contiguity', async () => {
+    const warnings: Array<{ from: number; to: number }> = []
+    let generation = 0
+    const fetchImpl = (async () => rpcResponse({
+      records: [{ seq: 7, time: 1, type: 'assistant/message', data: {} }],
+      hasMore: false,
+    })) as typeof fetch
+    const client = new PeerClient({
+      endpoint: 'https://host',
+      device: 'caller',
+      fetch: fetchImpl,
+      backoff: { initialMs: 1, maxMs: 2, factor: 2 },
+      onWarning: hole => { warnings.push(hole) },
+      webSocket: (): PeerWebSocket => {
+        generation += 1
+        const current = generation
+        return new FakeSocket((self, streamId) => {
+          if (current === 1) {
+            self.frame(streamId, { ...SNAPSHOT, cursor: 5 })
+            self.end(streamId)
+          } else {
+            self.frame(streamId, {
+              ...SNAPSHOT,
+              cursor: 8,
+              records: [{ seq: 8, time: 2, type: 'assistant/message', data: {} }],
+            })
+            self.end(streamId)
+          }
+        })
+      },
+    })
+    const controller = new AbortController()
+    const seen: string[] = []
+    for await (const frame of client.follow({ target: { kind: 'alias', alias: 'x' } }, controller.signal)) {
+      if (frame.type === 'event') seen.push(`event:${String(frame.record.seq)}`)
+      if (frame.type === 'snapshot') seen.push(`snapshot:${String(frame.cursor)}`)
+      if (seen.includes('snapshot:8')) controller.abort()
+    }
+    expect(seen).toEqual(['snapshot:5', 'event:7', 'snapshot:8'])
+    expect(warnings).toEqual([{ from: 6, to: 7 }])
+  })
 })

@@ -42,9 +42,9 @@ import {
   normalizeQuestionSelections,
   renderQuestion,
 } from './asks.js'
-import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnswer, PeerQuestionItem, PeerWebSocket } from './peer-client.js'
+import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnswer, PeerQuestionItem, PeerRepairHole, PeerWebSocket } from './peer-client.js'
 import { PeerBridgeError, PeerClient } from './peer-client.js'
-import { recordAssistantText, recordRpcId, recordTerminal, recordTurn } from './follow.js'
+import { DEFAULT_SETTLE_QUIET_MS, isPeerSessionSettled, recordAssistantText, recordRpcId, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
 import { callerPairings, defaultPairingsPath, loadCallerPairing, readPairingDocument } from './pairings.js'
 
@@ -82,6 +82,8 @@ export interface Config {
   participantName?: Volatile<string>
   /** Default `peer_ask` wait in milliseconds (default 300000). */
   waitMs?: Volatile<number>
+  /** Quiet window after a terminal before `peer_ask` accepts the session as settled (default 2000). */
+  settleMs?: Volatile<number>
   /** Maximum consecutive follow reconnects before `peer/target-unreachable`. */
   maxReconnects?: Volatile<number>
 }
@@ -93,6 +95,7 @@ export const Config = Schema.object({
   device: live(Schema.string()),
   participantName: live(Schema.string()),
   waitMs: live(Schema.number()),
+  settleMs: live(Schema.number()),
   maxReconnects: live(Schema.number()),
 })
 
@@ -103,6 +106,7 @@ export interface ResolvedConfig {
   device?: string
   participantName?: string
   waitMs?: number
+  settleMs?: number
   maxReconnects?: number
 }
 
@@ -112,6 +116,8 @@ export interface BridgeDeps {
   readonly fetch?: typeof fetch
   /** WebSocket factory for `peer/follow`. */
   readonly webSocket?: (url: string) => PeerWebSocket
+  /** Receives a durable-repair hole; defaults to a context warning. */
+  readonly onWarning?: (hole: PeerRepairHole) => void
 }
 
 const DEFAULT_WAIT_MS = 300_000
@@ -163,6 +169,13 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
   const pairingsPath = config.pairingsPath ?? defaultPairingsPath()
   const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname(pairingsPath))
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS
+  const settleMs = config.settleMs ?? DEFAULT_SETTLE_QUIET_MS
+  const effectiveDeps: BridgeDeps = {
+    ...deps,
+    onWarning: deps.onWarning ?? ((hole: PeerRepairHole): void => {
+      ctx.logger?.warn?.(`enpoi-peer-bridge: peer follow history hole [${String(hole.from)}, ${String(hole.to)}) — records in that range are missing locally`)
+    }),
+  }
 
   ctx.tools.register({
     name: 'peer_status',
@@ -220,7 +233,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const request = narrow(args)
       const alias = requireAlias(request.alias)
       const { pairing, document } = resolveEntry(pairingsPath, alias)
-      const client = makeClient(pairing, config, document.device, deps)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
       try {
         const handshake = await client.handshake()
         let bound = pairing.remoteSessionId !== undefined
@@ -344,7 +357,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           exposure: pairing.exposure ?? '',
         }
         try {
-          const listed = await makeClient(pairing, config, document.device, deps).list({})
+          const listed = await makeClient(pairing, config, document.device, effectiveDeps).list({})
           const entry = listed.pairings.find(candidate => candidate.alias === pairing.alias)
           sessions.push({
             ...base,
@@ -397,6 +410,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           created: { type: 'boolean' },
           requestId: { type: 'string' },
           admitted: { type: 'boolean' },
+          settled: { type: 'boolean' },
           turn: { type: 'number' },
           terminal: { type: 'string' },
           error: failureSchema(),
@@ -436,13 +450,14 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         pairingsPath,
         noticesPath,
         waitMs: requestedWait,
+        settleMs,
         config,
         signal: exec.signal,
         agent: exec.agent,
         alias,
         message,
         allowCreate: true,
-        deps,
+        deps: effectiveDeps,
       })
     },
   })
@@ -506,7 +521,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const request = narrow(args)
       const alias = requireAlias(request.alias)
       const { pairing } = resolveEntry(pairingsPath, alias)
-      const client = makeClient(pairing, config, undefined, deps)
+      const client = makeClient(pairing, config, undefined, effectiveDeps)
       try {
         const value = await client.state(targetOf(pairing))
         return {
@@ -577,6 +592,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           alias: { type: 'string' },
           askId: { type: 'string' },
           settled: { type: 'boolean' },
+          confirmation: { type: 'string' },
           note: { type: 'string' },
           error: failureSchema(),
         },
@@ -601,7 +617,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         return badRequest('peer_answer outcome must be allowed-once or rejected (allowed-always is not grantable from a peer)')
       }
       const { pairing, document } = resolveEntry(pairingsPath, alias)
-      const client = makeClient(pairing, config, document.device, deps)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
       let answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: PeerQuestionAnswer }
       if (outcome !== undefined) {
         answer = { kind: 'approval', outcome }
@@ -625,9 +641,10 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         if (!normalized.ok) return badRequest(normalized.message)
         answer = { kind: 'question', answer: normalized.answer }
       }
+      const target = targetOf(pairing)
       try {
         await client.answer({
-          target: targetOf(pairing),
+          target,
           participant: participantOf(config, document),
           askId,
           answer,
@@ -637,12 +654,28 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           alias,
           askId,
           settled: true,
+          confirmation: 'confirmed',
           note: answer.kind === 'question'
             ? 'question settled; the first answer won'
             : 'ask settled; the first answer won',
         }
       } catch (error) {
         const conflict = error instanceof PeerBridgeError && error.code === 'peer/conflict'
+        if (!conflict && error instanceof PeerBridgeError && error.code === 'peer/target-unreachable') {
+          // The answer may have settled before the confirmation was lost; a
+          // fresh read distinguishes "applied" from "never reached".
+          const reread = await client.state(target).catch(() => undefined)
+          if (reread !== undefined && !reread.state.pendingAsks.some(candidate => candidate.askId === askId)) {
+            return {
+              ok: true,
+              alias,
+              askId,
+              settled: false,
+              confirmation: 'lost',
+              note: 'the answer transport failed with no confirmation, but the remote ask is no longer pending — it was settled remotely (by this answer or another participant); re-run peer_asks before resending',
+            }
+          }
+        }
         return {
           ok: false,
           alias,
@@ -675,6 +708,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           ok: { type: 'boolean' },
           alias: { type: 'string' },
           cancelled: { type: 'boolean' },
+          confirmation: { type: 'string' },
           note: { type: 'string' },
           error: failureSchema(),
         },
@@ -694,16 +728,31 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const request = narrow(args)
       const alias = requireAlias(request.alias)
       const { pairing, document } = resolveEntry(pairingsPath, alias)
-      const client = makeClient(pairing, config, document.device, deps)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
       try {
         const value = await client.cancel({ target: targetOf(pairing), participant: participantOf(config, document) })
         return {
           ok: true,
           alias,
           cancelled: value.cancelled,
+          confirmation: 'confirmed',
           note: value.cancelled ? 'remote turn cancelled' : 'remote session had no active turn',
         }
       } catch (error) {
+        if (error instanceof PeerBridgeError && error.code === 'peer/target-unreachable') {
+          // The cancel may have preempted the turn before the confirmation was
+          // lost; a fresh latch read distinguishes that from "never reached".
+          const reread = await client.state(targetOf(pairing)).catch(() => undefined)
+          if (reread !== undefined && reread.state.latch !== 'running') {
+            return {
+              ok: true,
+              alias,
+              cancelled: false,
+              confirmation: 'lost',
+              note: 'the cancel confirmation was lost (transport failure); the remote reports no active turn — it may have completed or been cancelled',
+            }
+          }
+        }
         return failureFrom(error, pairing.endpoint)
       }
     },
@@ -714,6 +763,8 @@ interface AskRunOptions {
   readonly pairingsPath: string
   readonly noticesPath: string
   readonly waitMs: number
+  /** Quiet window after a terminal before the session is accepted as settled. */
+  readonly settleMs: number
   readonly config: ResolvedConfig
   readonly signal: AbortSignal
   readonly agent?: Agent
@@ -785,7 +836,35 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   let admitted = false
   let terminal: ReturnType<typeof recordTerminal>
   let detached = false
+  let activeDescendants = baseline.state.activeDescendants
+  let descendantsExact = baseline.state.descendantsExact
+  let pendingAskCount = baseline.state.pendingAsks.length
   const answerParts: string[] = []
+  let answerTurn: number | undefined
+  // Durable seqs already folded: a reconnect snapshot replay must never append
+  // the same assistant text twice.
+  const seenSeqs = new Set<number>()
+  // Causal attribution: assistant text and terminals count only for the turn
+  // that carried our admitted prompt (or a later one). A concurrent
+  // third-party turn that ends before our `user/message` appears is ignored.
+  let admittedTurn: number | undefined
+  let observedTurn: number | undefined
+  let admissionSeen = false
+  let quietExpired = false
+  let quietTimer: ReturnType<typeof setTimeout> | undefined
+  const clearQuiet = (): void => {
+    if (quietTimer !== undefined) { clearTimeout(quietTimer); quietTimer = undefined }
+  }
+  const armQuiet = (): void => {
+    clearQuiet()
+    quietTimer = setTimeout(() => {
+      quietExpired = true
+      controller.abort()
+    }, options.settleMs)
+  }
+  const settledNow = (): boolean => isPeerSessionSettled({
+    terminal, latch, activeDescendants, descendantsExact, pendingAskCount,
+  })
 
   // Surface remote asks concurrently: the follow loop keeps processing frames
   // (and therefore notices a terminal, a timeout, or a dead socket) while a
@@ -823,12 +902,40 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     surface(pending)
   }
   const absorb = (record: PeerEventRecord): void => {
-    if (recordRpcId(record) === requestId) admitted = true
-    if (terminal !== undefined) return
+    if (recordRpcId(record) === requestId) {
+      admitted = true
+      if (!admissionSeen) {
+        admissionSeen = true
+        const turn = recordTurn(record) ?? observedTurn
+        if (turn !== undefined) admittedTurn = turn
+      }
+    }
+    if (typeof record.seq === 'number') {
+      if (seenSeqs.has(record.seq)) return
+      seenSeqs.add(record.seq)
+    }
     const turn = recordTurn(record)
-    if (record.type === 'assistant/message' && turn !== undefined && turn > baselineTurn) {
+    if (record.type === 'turn/start' && turn !== undefined) {
+      observedTurn = turn
+      if (admissionSeen && admittedTurn === undefined) admittedTurn = turn
+      return
+    }
+    // The first turn-bound record after admission is the turn carrying our
+    // prompt when the snapshot window cut its `turn/start`.
+    if (admittedTurn === undefined && admissionSeen && turn !== undefined) admittedTurn = turn
+    const attributed = admittedTurn !== undefined && turn !== undefined && turn >= admittedTurn
+    if (!attributed) return
+    if (record.type === 'assistant/message' && turn > baselineTurn) {
       const text = recordAssistantText(record)
-      if (text !== '') answerParts.push(text)
+      if (text !== '') {
+        // A later turn REPLACES the previous turn's text, so a fan-out
+        // dispatch announcement is superseded by the settled summary.
+        if (answerTurn === undefined || turn > answerTurn) {
+          answerTurn = turn
+          answerParts.length = 0
+        }
+        if (turn === answerTurn) answerParts.push(text)
+      }
       return
     }
     const end = recordTerminal(record)
@@ -839,11 +946,17 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       if (frame.type === 'snapshot') {
         cursor = frame.cursor
         latch = frame.state.latch
+        activeDescendants = frame.state.activeDescendants
+        descendantsExact = frame.state.descendantsExact
+        pendingAskCount = frame.state.pendingAsks.length
         for (const record of frame.records) absorb(record)
         await surfaceFrame(frame.state.pendingAsks)
       } else if (frame.type === 'state') {
         cursor = frame.cursor
         latch = frame.state.latch
+        activeDescendants = frame.state.activeDescendants
+        descendantsExact = frame.state.descendantsExact
+        pendingAskCount = frame.state.pendingAsks.length
         await surfaceFrame(frame.state.pendingAsks)
       } else if (frame.type === 'event') {
         cursor = Math.max(cursor, frame.record.seq)
@@ -852,18 +965,39 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         detached = true
         break
       }
-      if (terminal !== undefined && terminal.turn > baselineTurn) break
+      if (terminal !== undefined) {
+        // Keep following while a child, an ask, or a follow-up turn can still
+        // move the session; only a settled state starts the quiet clock.
+        if (settledNow()) armQuiet()
+        else clearQuiet()
+      }
     }
   } catch (error) {
     if (!timedOut && !controller.signal.aborted) return failureFrom(error, pairing.endpoint)
   } finally {
     clearTimeout(timer)
+    clearQuiet()
     options.signal.removeEventListener('abort', relayAbort)
     // The follower is gone (terminal, waitMs, exec abort, or a dead socket):
     // withdraw any local card still open for it and let the contained tasks
     // settle, so the result below reports their final decisions.
     controller.abort()
     await Promise.allSettled([...inFlight])
+  }
+
+  // The quiet window aborts the follow, so a frame in flight at the cut can be
+  // lost. Confirm the session is still quiet before accepting the terminal.
+  if (quietExpired) {
+    try {
+      const confirmed = await client.state(requestedTarget)
+      latch = confirmed.state.latch
+      activeDescendants = confirmed.state.activeDescendants
+      descendantsExact = confirmed.state.descendantsExact
+      pendingAskCount = confirmed.state.pendingAsks.length
+      cursor = Math.max(cursor, confirmed.cursor)
+    } catch {
+      // Without the confirming read the last observed settled signals stand.
+    }
   }
 
   if (detached) {
@@ -892,15 +1026,44 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      answer,
       asks: askLines(asks),
       latch,
       cursor,
       note: `no terminal within ${String(options.waitMs)}ms — the remote turn is still live (follow it again with peer_ask or ds peer follow)`,
     }
   }
+  if (!settledNow()) {
+    return {
+      ok: false,
+      pending: true,
+      settled: false,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...(terminal.error === undefined ? {} : {
+        remoteError: {
+          code: terminal.error.code ?? 'unknown',
+          message: terminal.error.message ?? '',
+          provider: terminal.error.provider ?? '',
+          model: terminal.error.model ?? '',
+        },
+      }),
+      answer,
+      asks: askLines(asks),
+      latch,
+      cursor,
+      note: `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) — follow again to collect the remainder`,
+    }
+  }
   if (terminal.reason !== 'completed') {
     return {
       ok: false,
+      settled: true,
       alias: pairing.alias,
       sessionId: baseline.target.sessionId,
       created,
@@ -924,6 +1087,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   }
   return {
     ok: true,
+    settled: true,
     alias: pairing.alias,
     sessionId: baseline.target.sessionId,
     created,
@@ -936,6 +1100,16 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     cursor,
     note: asks.size === 0 ? '' : 'remote asks were raised locally; see asks[] for the decisions relayed',
   }
+}
+
+/** Human summary of why the latest terminal did not settle the session. */
+function unsettledSummary(latch: string, activeDescendants: number, pendingAskCount: number): string {
+  if (activeDescendants > 0) return `${String(activeDescendants)} live descendant(s)`
+  if (pendingAskCount > 0) return `${String(pendingAskCount)} pending ask(s)`
+  if (latch === 'running') return 'a turn is still running'
+  if (latch === 'waiting_subagents') return 'descendants are still settling'
+  if (latch === 'waiting_approval') return 'an ask is pending'
+  return 'the quiet window had not elapsed'
 }
 
 async function surfacePending(
@@ -1144,6 +1318,7 @@ function makeClient(pairing: DialablePairing, config: ResolvedConfig, device?: s
     ...(config.maxReconnects === undefined ? {} : { maxReconnects: config.maxReconnects }),
     ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
     ...(deps.webSocket === undefined ? {} : { webSocket: deps.webSocket }),
+    ...(deps.onWarning === undefined ? {} : { onWarning: deps.onWarning }),
   })
 }
 

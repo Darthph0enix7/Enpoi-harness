@@ -55,6 +55,17 @@ export interface PeerBackoff {
   readonly factor: number
 }
 
+/**
+ * A durable-history hole `peer.page` could not fill. The replay continues past
+ * it; the caller decides whether to warn, retry, or stop.
+ */
+export interface PeerRepairHole {
+  /** First missing durable seq (inclusive). */
+  readonly from: number
+  /** First seq after the missing range (exclusive). */
+  readonly to: number
+}
+
 /** Caller configuration: one target host and its carrier details. */
 export interface PeerClientOptions {
   readonly endpoint: string
@@ -67,6 +78,8 @@ export interface PeerClientOptions {
   readonly backoff?: PeerBackoff
   readonly maxReconnects?: number
   readonly pageSize?: number
+  /** Receives a repair hole when `peer.page` cannot prove durable contiguity. */
+  readonly onWarning?: (hole: PeerRepairHole) => void
 }
 
 /** One selectable option on a remote question. */
@@ -215,6 +228,18 @@ export interface PeerParticipant {
 
 const DEFAULT_BACKOFF: PeerBackoff = { initialMs: 250, maxMs: 4_000, factor: 2 }
 const REPAIR_PAGE_LIMIT = 20
+
+/**
+ * Error frames that cannot be fixed by retrying the same follow: the pairing,
+ * session, or exposure is gone or refused. A healthy reconnect cannot change
+ * them, so `follow` surfaces them instead of reconnecting at backoff cadence.
+ */
+const CALLER_TERMINAL_CODES: ReadonlySet<string> = new Set([
+  'peer/version-skew',
+  'peer/not-paired',
+  'peer/not-found',
+  'peer/forbidden',
+])
 
 interface WireFrame {
   readonly streamId: string
@@ -429,7 +454,7 @@ export class PeerClient {
         }
       } catch (error) {
         if (signal.aborted) return
-        if (error instanceof PeerBridgeError && error.code === 'peer/version-skew') throw error
+        if (error instanceof PeerBridgeError && CALLER_TERMINAL_CODES.has(error.code)) throw error
       }
       if (signal.aborted) return
       attempt = progressed ? 1 : attempt + 1
@@ -442,6 +467,7 @@ export class PeerClient {
 
   /**
    * Fill a durable hole between two cursors by paging backwards from the newer cut.
+   * A hole the pages cannot prove contiguous emits `onWarning` with the missing range.
    * @param target - resolved peer target.
    * @param fromExclusive - last durable seq the caller already folded.
    * @param toExclusive - first durable seq the caller is about to receive.
@@ -451,17 +477,30 @@ export class PeerClient {
   async *repairForward(target: PeerTarget, fromExclusive: number, toExclusive: number, signal: AbortSignal): AsyncGenerator<PeerFollowFrame> {
     const collected: PeerEventRecord[] = []
     let throughSeq = toExclusive - 1
-    for (let page = 0; page < REPAIR_PAGE_LIMIT; page += 1) {
+    let hole: PeerRepairHole | undefined
+    let pages = 0
+    while (pages < REPAIR_PAGE_LIMIT) {
       if (signal.aborted || throughSeq <= fromExclusive) break
       const value = await this.page({ target, throughSeq, maxMessages: this.pageSize })
-      if (value.records.length === 0) break
+      pages += 1
+      if (value.records.length === 0) {
+        hole = { from: fromExclusive + 1, to: throughSeq + 1 }
+        break
+      }
       for (const record of value.records) {
         if (record.seq > fromExclusive && record.seq < toExclusive) collected.push(record)
       }
       const oldest = value.records[0]?.seq
-      if (oldest === undefined || oldest <= fromExclusive || !value.hasMore) break
+      if (oldest === undefined || oldest <= fromExclusive + 1 || !value.hasMore) {
+        if (oldest !== undefined && oldest > fromExclusive + 1) hole = { from: fromExclusive + 1, to: oldest }
+        break
+      }
       throughSeq = oldest - 1
     }
+    if (hole === undefined && !signal.aborted && throughSeq > fromExclusive) {
+      hole = { from: fromExclusive + 1, to: throughSeq + 1 }
+    }
+    if (hole !== undefined) this.options.onWarning?.(hole)
     collected.sort((left, right) => left.seq - right.seq)
     for (const record of collected) yield { type: 'event', record, cursor: record.seq }
   }

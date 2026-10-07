@@ -12,10 +12,10 @@ executes anything remotely.
 |---|---|
 | `peer_status {alias}` | Handshake (host identity, capabilities, protocol) + `peer.state`: exposure, target session, latch, descendants, pending asks, current model. |
 | `peer_sessions {alias?}` | Discovery across every caller-role pairing: alias, peer, endpoint, the bound remote session id (local `remoteSessionId` pin or the host-reported session), exposure, latch summary, and last activity; an unreachable host is that row's error. Read-only. |
-| `peer_ask {alias, message, waitMs?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows with reconnect + `peer.page` repair, returns the answer or the structured terminal failure. |
+| `peer_ask {alias, message, waitMs?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. |
 | `peer_asks {alias}` | Pending remote asks (approval and question kinds); question rows carry the question ids and option labels. |
-| `peer_answer {alias, askId, outcome \| answers[]}` | Settles an approval ask (`allowed-once` \| `rejected`) or a question ask (`answers: [{id, selected[], custom?}]`). First answer wins. A malformed selection is rejected locally with the reason; the host is never called. |
-| `peer_cancel {alias}` | Cancels the remote active turn, attributed to this caller. |
+| `peer_answer {alias, askId, outcome \| answers[]}` | Settles an approval ask (`allowed-once` \| `rejected`) or a question ask (`answers: [{id, selected[], custom?}]`). First answer wins. A malformed selection is rejected locally with the reason; the host is never called. A transport failure re-reads `peer.state` and reports `confirmation: 'lost'` when the ask is already gone, instead of a failure that invites a blind retry. |
+| `peer_cancel {alias}` | Cancels the remote active turn, attributed to this caller. A transport failure re-reads the latch: no active turn surfaces as `confirmation: 'lost'`, not as a failed cancel. |
 
 ## Pairing document
 
@@ -39,10 +39,10 @@ pairings:
 Host-role fields (`sessionId`, `exposure`) are ignored by the caller; an entry
 needs `alias`, `peer`, and `endpoint` to be dialable. The plugin's Config
 fields (`pairingsPath`, `noticesPath`, `device`, `participantName`, `waitMs`,
-`maxReconnects`) are declared `.volatile()`, so the merged settings service
-exposes them as a live form persisted in the profile patch. `pairingsPath` in
-the plugin config (and `--pairings` on the CLI) points at another document so a
-test never touches the operator's real file.
+`settleMs`, `maxReconnects`) are declared `.volatile()`, so the merged settings
+service exposes them as a live form persisted in the profile patch.
+`pairingsPath` in the plugin config (and `--pairings` on the CLI) points at
+another document so a test never touches the operator's real file.
 
 The shipped host-side bundle row is `peer-api` (`packages/api/peer`); a
 `--patch` overlay must override that row by id — an `insert` registers a second
@@ -84,6 +84,22 @@ an operator can find the bound session before prompting or answering.
 so on a host that mounts it they report `source: 'host-latch'`; a cold session
 keeps the derived fold.
 
+## Follow reliability
+
+`peer_ask` and `ds peer ask`/`follow` keep following past the first `turn/end`
+while a child, an ask, or a follow-up turn is live, and accept the session as
+settled only after a quiet window (`settleMs`, default 2000 ms; `--settle-ms`
+on the CLI) and a confirming `peer.state` read at the cut. Records are
+deduplicated by seq, so a reconnect snapshot replay never appends the same
+assistant text twice, and a later turn REPLACES the previous turn's text.
+Answers are attributed causally: only the turn whose `turn/start` precedes our
+admitted `user/message` (or a later turn) feeds the result, so a concurrent
+third-party turn is never returned as ours. An error frame for
+`peer/not-paired`, `peer/not-found`, `peer/forbidden`, or `peer/version-skew`
+stops the follow with that code instead of reconnecting at backoff cadence; a
+durable hole `peer.page` cannot prove contiguous is reported through the
+warning sink with its `[from, to)` range and the replay continues past it.
+
 ## Known limitations and deferred work
 
 - `hopCount` is sent as 0: this bridge does not track autonomous-exchange
@@ -95,4 +111,7 @@ keeps the derived fold.
   concerns; this package only reads caller-role entries.
 - Uses a local copy of the harness peer client (`src/peer-client.ts`) because
   `@deepseek-ai/dsh-api-peer` is not a profile dependency; keep the frame
-  contract in step with `packages/api/peer/src/client.ts`.
+  contract in step with `packages/api/peer/src/client.ts`. The local copy
+  additionally breaks on caller-terminal error frames, warns on accepted
+  repair holes, and (in `src/index.ts`) settles a followed turn before
+  returning; the harness client still retries every non-skew error.

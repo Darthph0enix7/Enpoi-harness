@@ -10,9 +10,32 @@ import {
   localDecisionToPeerAnswer,
   normalizeQuestionSelections,
 } from '../src/asks.ts'
-import { contentText, recordAssistantText, recordRpcId, recordTerminal, recordTurn } from '../src/follow.ts'
+import { DEFAULT_SETTLE_QUIET_MS, contentText, isPeerSessionSettled, recordAssistantText, recordRpcId, recordTerminal, recordTurn } from '../src/follow.ts'
 
 const event = (type: string, data: unknown) => ({ seq: 1, time: 1, type, data })
+
+describe('isPeerSessionSettled', () => {
+  const terminal = { turn: 6, reason: 'completed' }
+
+  it('requires a terminal and a quiet state', () => {
+    expect(isPeerSessionSettled(undefined)).toBe(false)
+    expect(isPeerSessionSettled({})).toBe(false)
+    expect(isPeerSessionSettled({ terminal })).toBe(true)
+    expect(isPeerSessionSettled({ terminal, latch: 'unknown', activeDescendants: 0, pendingAskCount: 0 })).toBe(true)
+    expect(isPeerSessionSettled({ terminal, latch: 'idle', activeDescendants: 0, pendingAskCount: 0 })).toBe(true)
+  })
+
+  it('refuses while a turn, a child, an ask, or an inexact descendant count is live', () => {
+    expect(isPeerSessionSettled({ terminal, latch: 'running', activeDescendants: 0, pendingAskCount: 0 })).toBe(false)
+    expect(isPeerSessionSettled({ terminal, latch: 'idle', activeDescendants: 1, pendingAskCount: 0 })).toBe(false)
+    expect(isPeerSessionSettled({ terminal, latch: 'waiting_approval', activeDescendants: 0, pendingAskCount: 1 })).toBe(false)
+    expect(isPeerSessionSettled({ terminal, latch: 'idle', activeDescendants: 0, pendingAskCount: 0, descendantsExact: false })).toBe(false)
+  })
+
+  it('ships a positive quiet window', () => {
+    expect(DEFAULT_SETTLE_QUIET_MS).toBeGreaterThan(0)
+  })
+})
 
 describe('follow record readers', () => {
   it('reads the prompt rpcId from a user/message source', () => {
