@@ -6,7 +6,9 @@
  * writes the finished general profile — a structured JSON summary plus a short
  * Markdown document — into a scratch workspace the run owns. The durable
  * writes and the decision belong to the runner; this module owns the session,
- * the prompt, the stage mapping, the specificity check, and the time bound.
+ * the prompt, the stage mapping, the specificity check, the time bound, and
+ * the run's release: the finished session is archived (never deleted) and its
+ * scratch workspace removed.
  * @module @deepseek-ai/dsh-host-first-run/investigation
  */
 
@@ -252,8 +254,56 @@ function turnSettled(agent: Agent, signal: AbortSignal): Promise<void> {
   return Promise.race([agent.whenIdle(), aborted(signal)])
 }
 
-/** Let the published turn close, then release the investigation session. */
-async function settle(ctx: Context, handle: AgentHandle, waitForIdle: boolean): Promise<void> {
+/** Structural view of the optional workspace registry read through `ctx.get('workspaceRegistry')`. */
+interface SessionArchiver {
+  archiveSession(sessionId: SessionId): Promise<void>
+}
+
+/**
+ * Archive the finished investigation session so it does not linger in the
+ * session list. Archive, never delete: the transcript stays for forensics and
+ * the operator can restore the row through Unarchive. The registry is
+ * optional, so a composition without a workspace layer (headless hosts, unit
+ * tests) logs at debug level and leaves the session in place instead of
+ * failing the run.
+ * @param ctx - host context the workspace registry may be mounted on.
+ * @param sessionId - the exact session id this run created.
+ */
+async function archiveInvestigation(ctx: Context, sessionId: SessionId): Promise<void> {
+  const registry = ctx.get('workspaceRegistry') as SessionArchiver | undefined
+  if (registry === undefined) {
+    ctx.logger.debug('first-run: no workspace registry is mounted; the system-analysis session stays unarchived')
+    return
+  }
+  try {
+    await registry.archiveSession(sessionId)
+  } catch (error: unknown) {
+    ctx.logger.warn('first-run: the system-analysis session did not archive:', error)
+  }
+}
+
+/**
+ * Drop the run-owned scratch workspace. The caller already holds the published
+ * outcome in memory; the durable profile files live in the harness home and
+ * are never part of this directory.
+ * @param ctx - host context for the failure log.
+ * @param workspace - the scratch directory this run cleared and created.
+ */
+function clearInvestigationWorkspace(ctx: Context, workspace: string): void {
+  try {
+    rmSync(workspace, { recursive: true, force: true })
+  } catch (error: unknown) {
+    ctx.logger.warn('first-run: the system-analysis workspace did not clear:', error)
+  }
+}
+
+/** Let the published turn close, release the investigation session, and archive its durable log. */
+async function settle(
+  ctx: Context,
+  handle: AgentHandle,
+  sessionId: SessionId,
+  waitForIdle: boolean,
+): Promise<void> {
   try {
     if (waitForIdle) await Promise.race([handle.agent.whenIdle(), delay(60_000)])
   } catch (error: unknown) {
@@ -264,12 +314,14 @@ async function settle(ctx: Context, handle: AgentHandle, waitForIdle: boolean): 
   } catch (error: unknown) {
     ctx.logger.warn('first-run: the investigation session did not dispose cleanly:', error)
   }
+  await archiveInvestigation(ctx, sessionId)
 }
 
 /**
  * Run one bounded read-only investigation on the configured agent preset and
  * return the published profile. The caller supplies the stage observer and the
- * cancellation signal; the session is released before this resolves.
+ * cancellation signal; the session is archived and released, and its scratch
+ * workspace removed, before this resolves.
  * @param options - deployment services, route, preset, bound, and workspace.
  * @param request - stage observer and cancellation signal.
  * @returns the published structured profile and Markdown document.
@@ -371,7 +423,10 @@ export async function runSystemInvestigation(
   } finally {
     clearTimeout(timer)
     // An aborted run is already being torn down; only a completed turn is
-    // worth waiting for before the session is released.
-    if (handle !== undefined) await settle(options.ctx, handle, !signal.aborted)
+    // worth waiting for before the session is released. This is the one
+    // release choke point for the run: every one-shot session archives its
+    // durable log here and drops its scratch workspace.
+    if (handle !== undefined) await settle(options.ctx, handle, sessionId, !signal.aborted)
+    clearInvestigationWorkspace(options.ctx, options.workspace)
   }
 }

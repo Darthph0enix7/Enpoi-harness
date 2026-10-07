@@ -1,18 +1,28 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  documentViolations, INVESTIGATION_STAGES, PROFILE_DOCUMENT_FILENAME, PROFILE_JSON_FILENAME,
-  REQUIRED_PROFILE_KEYS, SYSTEM_ANALYSIS_CORRECTION, SYSTEM_ANALYSIS_PROMPT, isSystemProfile,
-  runSystemInvestigation, stageFromTodos,
+  documentViolations, INVESTIGATION_STAGES, investigationWorkspacePath, PROFILE_DOCUMENT_FILENAME,
+  PROFILE_JSON_FILENAME, REQUIRED_PROFILE_KEYS, SYSTEM_ANALYSIS_CORRECTION, SYSTEM_ANALYSIS_PROMPT,
+  isSystemProfile, runSystemInvestigation, stageFromTodos,
 } from '../src/investigation.ts'
 
 const roots: string[] = []
 
+// The scratch-cleanup failure arm needs one forced rmSync rejection; every
+// other fs call stays real.
+const originalFs = vi.hoisted(() => ({ rmSync: undefined as typeof import('node:fs').rmSync | undefined }))
+vi.mock('node:fs', async (original) => {
+  const fs = await original<typeof import('node:fs')>()
+  originalFs.rmSync = fs.rmSync
+  return { ...fs, rmSync: vi.fn(fs.rmSync) }
+})
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  if (originalFs.rmSync !== undefined) vi.mocked(rmSync).mockImplementation(originalFs.rmSync)
 })
 
 /** One fresh scratch workspace. */
@@ -147,15 +157,21 @@ function run(options: {
   readonly writeOnAttempt?: (attempt: number) => boolean
   readonly hangIdle?: boolean
   readonly document?: string
+  readonly registryAbsent?: boolean
+  readonly archiveSession?: (sessionId: string) => Promise<void> | void
+  readonly workspace?: string
+  readonly onIdle?: () => void
+  readonly createFails?: boolean
 } = {}) {
   const ctx = new Context()
-  const workspace = scratch()
+  const workspace = options.workspace ?? scratch()
   const followups: string[] = []
   let attempt = 0
   const agent = {
     id: 'system-analysis-test',
     session: { id: 'system-analysis-test' },
     whenIdle: async () => {
+      options.onIdle?.()
       if (options.hangIdle === true) await new Promise(() => {})
     },
     followup(message: { content: readonly { type: string; text?: string }[] }) {
@@ -173,6 +189,7 @@ function run(options: {
   }
   const agents = {
     create: vi.fn(async (createOptions: Record<string, unknown>) => {
+      if (options.createFails === true) throw new Error('session creation failed')
       const setup = createOptions['setup']
       if (typeof setup === 'function') {
         await (setup as (agentCtx: unknown, agent: unknown) => Promise<void>)({
@@ -187,15 +204,19 @@ function run(options: {
     acquireScope: vi.fn(async () => ({ key: {}, [Symbol.asyncDispose]: async () => {} })),
     mount: vi.fn(async (_agentCtx: unknown, id: string) => ({ id })),
   }
+  const archiveSession = vi.fn(async (sessionId: string) => { await options.archiveSession?.(sessionId) })
   ctx.provide('agents', agents as never)
   ctx.provide('agentPresets', presets as never)
+  if (options.registryAbsent !== true) {
+    ctx.provide('workspaceRegistry', { archiveSession } as never)
+  }
   if (options.permissionSet !== undefined) {
     ctx.provide('permissionPresets', { set: options.permissionSet } as never)
   }
   if (options.titleRename !== undefined) {
     ctx.provide('sessionTitle', { rename: options.titleRename } as never)
   }
-  return { ctx, agents, presets, workspace, followups, handle, attempts: () => attempt }
+  return { ctx, agents, presets, workspace, followups, handle, archiveSession, attempts: () => attempt }
 }
 
 const RUN_OPTIONS = {
@@ -220,6 +241,9 @@ describe('runSystemInvestigation', () => {
     const createOptions = test.agents.create.mock.calls[0]?.[0] as Record<string, unknown>
     expect(createOptions['meta']).toMatchObject({ cwd: test.workspace, agentPreset: 'sysadmin' })
     expect(createOptions['agentOptions']).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+    // The run's session id is the archived one, and it keeps the pinned prefix.
+    const createdId = createOptions['sessionId']
+    expect(createdId).toMatch(/^system-analysis-/u)
     expect(test.presets.resolve).toHaveBeenCalledWith('sysadmin')
     expect(test.presets.mount).toHaveBeenCalledWith(expect.anything(), 'sysadmin')
     expect(permissionSet).toHaveBeenCalledWith(expect.anything(), 'workspace-write')
@@ -227,6 +251,14 @@ describe('runSystemInvestigation', () => {
     expect(test.followups).toEqual([SYSTEM_ANALYSIS_PROMPT])
     expect(stages).toEqual([])
     expect(test.handle.dispose).toHaveBeenCalledTimes(1)
+    // Archiving happens exactly once, after teardown, and removes the scratch workspace.
+    expect(test.archiveSession).toHaveBeenCalledTimes(1)
+    expect(test.archiveSession).toHaveBeenCalledWith(createdId)
+    const [disposedAt = 0] = test.handle.dispose.mock.invocationCallOrder
+    const [archivedAt = 0] = test.archiveSession.mock.invocationCallOrder
+    expect(disposedAt).toBeGreaterThan(0)
+    expect(archivedAt).toBeGreaterThan(disposedAt)
+    expect(existsSync(test.workspace)).toBe(false)
     await test.ctx.fiber.dispose()
   })
 
@@ -238,6 +270,9 @@ describe('runSystemInvestigation', () => {
       onStage: () => {},
       signal: new AbortController().signal,
     })).rejects.toThrow(/ended without writing/u)
+    // A run that fails after creating its session still archives and cleans up.
+    expect(test.archiveSession).toHaveBeenCalledTimes(1)
+    expect(existsSync(test.workspace)).toBe(false)
     await test.ctx.fiber.dispose()
   })
 
@@ -305,6 +340,8 @@ describe('runSystemInvestigation', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow(/did not finish within/u)
     expect(test.handle.dispose).toHaveBeenCalledTimes(1)
+    expect(test.archiveSession).toHaveBeenCalledTimes(1)
+    expect(existsSync(test.workspace)).toBe(false)
     await test.ctx.fiber.dispose()
   })
 
@@ -317,6 +354,114 @@ describe('runSystemInvestigation', () => {
     })
     controller.abort(new Error('operator cancelled'))
     await expect(pending).rejects.toThrow(/operator cancelled/u)
+    // The abort landed before the session was created: nothing to archive.
+    expect(test.archiveSession).not.toHaveBeenCalled()
     await test.ctx.fiber.dispose()
+  })
+
+  it('archives the session when the caller cancels a running investigation', async () => {
+    const controller = new AbortController()
+    let turnStarted: () => void = () => {}
+    const started = new Promise<void>((resolve) => { turnStarted = resolve })
+    const test = run({ hangIdle: true, onIdle: turnStarted })
+    const pending = runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+      onStage: () => {},
+      signal: controller.signal,
+    })
+    await started
+    controller.abort(new Error('operator cancelled'))
+    await expect(pending).rejects.toThrow(/operator cancelled/u)
+    expect(test.archiveSession).toHaveBeenCalledTimes(1)
+    expect(existsSync(test.workspace)).toBe(false)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('cleans the scratch workspace but does not archive when session creation fails', async () => {
+    const test = run({ createFails: true })
+    await expect(runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+      onStage: () => {},
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/session creation failed/u)
+    // No session exists to archive, but the run still owns and drops its workspace.
+    expect(test.archiveSession).not.toHaveBeenCalled()
+    expect(existsSync(test.workspace)).toBe(false)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('leaves the session unarchived with a debug line when no workspace registry is mounted', async () => {
+    const test = run({ writeOnAttempt: () => true, registryAbsent: true })
+    const debug = vi.spyOn(test.ctx.logger, 'debug')
+    await expect(runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+      onStage: () => {},
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ profile: { hostKind: 'server' } })
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining('no workspace registry'))
+    expect(test.archiveSession).not.toHaveBeenCalled()
+    await test.ctx.fiber.dispose()
+  })
+
+  it('keeps the run successful and logs when the session cannot be archived', async () => {
+    const test = run({
+      writeOnAttempt: () => true,
+      archiveSession: () => { throw new Error('archive refused') },
+    })
+    const warn = vi.spyOn(test.ctx.logger, 'warn')
+    await expect(runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+      onStage: () => {},
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ profile: { hostKind: 'server' } })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not archive'), expect.any(Error))
+    expect(existsSync(test.workspace)).toBe(false)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('keeps the run successful and logs when the scratch workspace cannot be cleared', async () => {
+    const test = run({ writeOnAttempt: () => true })
+    const warn = vi.spyOn(test.ctx.logger, 'warn')
+    // The first rmSync is the pre-run wipe; fail the post-run cleanup instead.
+    let calls = 0
+    vi.mocked(rmSync).mockImplementation((...args) => {
+      calls += 1
+      if (calls === 2) throw new Error('EBUSY: the scratch workspace is held')
+      originalFs.rmSync?.(...args)
+    })
+    try {
+      await expect(runSystemInvestigation({ ctx: test.ctx, workspace: test.workspace, ...RUN_OPTIONS }, {
+        onStage: () => {},
+        signal: new AbortController().signal,
+      })).resolves.toMatchObject({ profile: { hostKind: 'server' } })
+      expect(test.archiveSession).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace did not clear'), expect.any(Error))
+      expect(existsSync(test.workspace)).toBe(true)
+    } finally {
+      if (originalFs.rmSync !== undefined) vi.mocked(rmSync).mockImplementation(originalFs.rmSync)
+    }
+    await test.ctx.fiber.dispose()
+  })
+
+  it('removes the run scratch workspace and leaves the durable profile files untouched', async () => {
+    const home = scratch()
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      for (const name of ['system-profile.md', 'system-profile.json', 'system-profile.decision']) {
+        writeFileSync(join(home, name), `durable ${name}`)
+      }
+      const workspace = investigationWorkspacePath()
+      expect(workspace).toBe(join(home, 'system-analysis-work'))
+      const test = run({ writeOnAttempt: () => true, workspace })
+      await expect(runSystemInvestigation({ ctx: test.ctx, workspace, ...RUN_OPTIONS }, {
+        onStage: () => {},
+        signal: new AbortController().signal,
+      })).resolves.toMatchObject({ profile: { hostKind: 'server' } })
+      expect(existsSync(workspace)).toBe(false)
+      for (const name of ['system-profile.md', 'system-profile.json', 'system-profile.decision']) {
+        expect(readFileSync(join(home, name), 'utf8')).toBe(`durable ${name}`)
+      }
+      await test.ctx.fiber.dispose()
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
   })
 })
