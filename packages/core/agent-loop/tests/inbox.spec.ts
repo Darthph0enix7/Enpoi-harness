@@ -250,6 +250,33 @@ describe('ReactLoopInbox', () => {
     expect(() => { agent.inbox.append('next-step', first) }).toThrow(`message "${first.id}" is already pending`)
   })
 
+  it('delivers concurrently enqueued prompts in arrival order (FIFO)', async () => {
+    const { session, inbox } = await inboxAgent('fifo-inbox')
+    const prompts = Array.from({ length: 12 }, (_, index) => createUserMessage({
+      content: [{ type: 'text', text: `prompt-${String(index)}` }],
+      source: { kind: 'user' },
+    }))
+    // Interleave the enqueue through microtasks: arrival order is the only
+    // ordering signal available to the inbox.
+    await Promise.all(prompts.map(async (prompt) => {
+      await Promise.resolve()
+      inbox.append('next-turn', prompt)
+    }))
+
+    expect(inbox.nextTurn.map(message => message.id)).toEqual(prompts.map(message => message.id))
+    // Each insert lands BEHIND the pending queue: `start: 0` appears only
+    // while the list is empty (the first prompt), and the index of every later
+    // insert is the current length. `claim` removes index 0, so the oldest
+    // queued prompt is delivered first.
+    const inserts = session.snapshotEvents()
+      .flatMap(event => event.type === 'agent/inbox/spliced' ? [event.data] : [])
+    expect(inserts.map(data => data.start)).toEqual(prompts.map((_, index) => index))
+    for (const [index, prompt] of prompts.entries()) {
+      expect(inbox.claim('next-turn', index + 1).map(message => message.id)).toEqual([prompt.id])
+    }
+    expect(inbox.nextTurn).toEqual([])
+  })
+
   it('clears both pending lists as durable cancellations', async () => {
     const { ctx, session, agent } = await inboxAgent('clear-inbox')
     const discarded: UserMessage[] = []

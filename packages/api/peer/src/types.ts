@@ -505,10 +505,25 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 }
 
 /** One created-session binding persisted by the serving host (`~/.dsh/peer-state.json`). */
+/**
+ * One superseded alias binding. `peer.create` replaces the alias's current
+ * binding; the previous session is retained here so an explicit `PeerTarget`
+ * for it stays page-able through the same pairing.
+ */
+export interface RetiredPeerBinding {
+  readonly sessionId: SessionId
+  readonly device: PeerDeviceName
+  readonly createdAt: number
+  readonly retiredAt: number
+}
+
+/** One alias's current created-session binding plus the sessions it replaced. */
 export interface PeerBinding {
   readonly sessionId: SessionId
   readonly device: PeerDeviceName
   readonly createdAt: number
+  /** Earlier sessions this alias was bound to, newest last; empty when never rebound. */
+  readonly retired?: readonly RetiredPeerBinding[]
 }
 
 /**

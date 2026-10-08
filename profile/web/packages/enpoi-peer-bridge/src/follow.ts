@@ -139,6 +139,17 @@ export function recordUserText(record: PeerEventRecord): string {
   return contentText(field(record.data, 'content'))
 }
 
+/**
+ * Read `data.source.kind` from a `user/message` record.
+ * @param record - durable event record.
+ * @returns the source kind, or undefined when the record carries none.
+ */
+export function recordSourceKind(record: PeerEventRecord): string | undefined {
+  if (record.type !== 'user/message') return undefined
+  const kind = field(field(record.data, 'source'), 'kind')
+  return typeof kind === 'string' ? kind : undefined
+}
+
 function field(value: unknown, key: string): unknown {
   if (typeof value !== 'object' || value === null) return undefined
   return (value as Record<string, unknown>)[key]

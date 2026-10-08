@@ -101,7 +101,7 @@ interface PeerPairingsFile {
 - `sessionId` 与 `create` 至少存在其一，否则该条目不可达并在加载时被拒绝。
 - `watchdogMs` 与 `runawayCeiling` 存在时必须是正的安全整数。
 - `token` 会被解析，但在握手中只以 `tokenRequired` 报告；它从不被回显，也从不在此包中强制执行。
-- 绑定以别名为键，携带 `{sessionId, device, createdAt}`；格式错误的绑定文档会抛出 `PeerConfigError`。
+- 绑定以别名为键，携带 `{sessionId, device, createdAt}`，外加可选的 `retired` 列表（该别名此前绑定过的会话）；格式错误的绑定文档会抛出 `PeerConfigError`。同一别名下再次 `peer.create` 会替换当前绑定并把旧绑定移入 `retired`，因此该别名解析到最新会话，而每个被替换的会话仍可通过同一配对以显式 `sessionId` target 寻址。
 
 ## 暴露过滤器
 
@@ -140,9 +140,37 @@ interface PeerHandshakeValue {
 
 `protocolVersion` 是硬性兼容门：任何非 `1` 的值都会在任何其他握手工作之前抛出 `peer/version-skew`，并附带期望值与收到的值。`harnessVersion` 与 `schemaDigest` 是宿主返回给调用方自行比较的提示值，因此在协议版本一致时摘要不同也会被接受。`device` 必须是非空字符串（否则为 `gateway/bad-request`）。回复中的每个配对是一个 `PeerPairingSummary`，包含别名、peer、exposure、`tokenRequired`，以及——当该别名当前可解析到会话时——解析后的 target。
 
+## 发现
+
+`list` 是只读的发现调用。不带 target 时，它报告宿主暴露的每个配对；带 `target` 时，它先通过与其它调用相同的配对门解析该 target（无法解析时为 `peer/not-paired`），并且只返回该配对。每一行携带别名、peer 与 exposure、该别名当前是否可解析到会话、绑定会话 id——即调用方的 `remoteSessionId`，来自配对自身的钉住或 `peer.create` 绑定——以及当 `sessionController.executionState` 能廉价回答绑定会话时，宿主 latch、最后活动时间与一行摘要（`latch · asks · last turn`）。仅声明为配对调用方角色 `remoteSessionId` 的钉住同样能解析显式的 `peer.state`/`peer.list` 会话 target，因此由另一台设备一侧撰写的共享文档保持可寻址，而不会因此授予任意会话 id。
+
+```ts
+/** `peer.list` request: an absent target lists every pairing; a target narrows the answer. */
+interface PeerListRequest { readonly target?: PeerTarget }
+
+/** One pairing row `peer.list` reports. */
+interface PeerListEntry {
+  readonly alias: PeerAlias
+  readonly peer: PeerDeviceName
+  readonly exposure: PeerExposure
+  readonly bound: boolean
+  readonly sessionId?: SessionId
+  readonly remoteSessionId?: SessionId
+  readonly latch?: PeerLatch
+  readonly lastActivity?: number
+  readonly summary: string
+}
+
+/** `peer.list` value: the serving host's device name and one row per pairing. */
+interface PeerListValue {
+  readonly hostDevice: PeerDeviceName
+  readonly pairings: readonly PeerListEntry[]
+}
+```
+
 ## 会话：create、prompt、cancel
 
-`create` 要求被寻址的配对条目带有 `create` 块（否则为 `peer/not-paired`）。当显式给出已存在的 `sessionId` 时，该会话被领养且 `created` 为 false；除非配对设置 `allowModelChange: true`，否则在领养时携带路由字段会被以 `peer/forbidden` 拒绝。否则会话通过 `sessionController.create` 创建，请求中的 `workspaceId`、`cwd` 与 `agentPreset` 回退到配对的 `create` 默认值，别名到会话的绑定随后被持久化。
+`create` 要求被寻址的配对条目带有 `create` 块（否则为 `peer/not-paired`）。当显式给出已存在的 `sessionId` 时，该会话被领养且 `created` 为 false；除非配对设置 `allowModelChange: true`，否则在领养时携带路由字段会被以 `peer/forbidden` 拒绝。否则会话通过 `sessionController.create` 创建，请求中的 `workspaceId`、`cwd` 与 `agentPreset` 回退到配对的 `create` 默认值，别名到会话的绑定随后被持久化。在通过绑定解析的别名下创建会替换该绑定；旧绑定移入 `retired`，因此之后每次别名调用都到达最新会话，而被替换的会话仍可通过显式 `sessionId` target 寻址。由配对自身 `sessionId` 钉住的别名始终解析到该钉住的会话，`create` 写入的绑定只能通过显式 `sessionId` 访问；需要新会话又不想移动别名当前目标的调用方应改用另一个别名。
 
 ```ts
 /** `peer.create` request: bind a fresh or explicitly adopted session to a pairing alias. */

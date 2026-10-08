@@ -103,7 +103,7 @@ interface PeerPairingsFile {
 - At least one of `sessionId` and `create` must be present, or the entry is unreachable and rejected at load.
 - `watchdogMs` and `runawayCeiling` must be positive safe integers when present.
 - `token` is parsed and reported only as `tokenRequired` in the handshake summary; it is never echoed and never enforced in this package.
-- Bindings are keyed by alias and carry `{sessionId, device, createdAt}`; a malformed binding document throws `PeerConfigError`.
+- Bindings are keyed by alias and carry `{sessionId, device, createdAt}` plus an optional `retired` list of earlier sessions; a malformed binding document throws `PeerConfigError`. A later `peer.create` under the same alias replaces the current binding and moves it to `retired`, so the alias resolves to the newest session while each replaced session stays addressable by explicit `sessionId` target through the same pairing.
 
 ## Exposure filter
 
@@ -172,7 +172,7 @@ interface PeerListValue {
 
 ## Sessions: create, prompt, cancel
 
-`create` requires the addressed pairing to carry a `create` block (`peer/not-paired` otherwise). With an explicit `sessionId` that already exists, the Session is adopted and `created` is false; routing fields on an adoption are refused with `peer/forbidden` unless the pairing sets `allowModelChange: true`. Otherwise the Session is created through `sessionController.create`, with the request's `workspaceId`, `cwd`, and `agentPreset` falling back to the pairing's `create` defaults, and the alias→session binding is persisted.
+`create` requires the addressed pairing to carry a `create` block (`peer/not-paired` otherwise). With an explicit `sessionId` that already exists, the Session is adopted and `created` is false; routing fields on an adoption are refused with `peer/forbidden` unless the pairing sets `allowModelChange: true`. Otherwise the Session is created through `sessionController.create`, with the request's `workspaceId`, `cwd`, and `agentPreset` falling back to the pairing's `create` defaults, and the alias→session binding is persisted. Creating under an alias that resolves through its binding replaces that binding; the previous binding moves to `retired`, so every later alias call reaches the newest Session and the replaced Session stays addressable by explicit `sessionId` target. An alias pinned by the pairing's own `sessionId` keeps resolving to that pin, and the binding `create` writes is reachable only by explicit `sessionId`; a caller that needs a fresh Session without moving the alias's current target seeds a distinct alias instead.
 
 ```ts
 /** `peer.create` request: bind a fresh or explicitly adopted session to a pairing alias. */

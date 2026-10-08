@@ -114,6 +114,7 @@ function options(
   steps: ReadonlyArray<ScriptedStep>,
   flags: Record<string, unknown> = {},
   stateValues: ReadonlyArray<ScriptedStateValue> = [],
+  extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     client: scriptedClient(steps, stateValues),
@@ -122,6 +123,7 @@ function options(
     requestId: 'peer-cli-spec',
     baselineTurn: 5,
     log: () => {},
+    ...extra,
   }
 }
 
@@ -255,6 +257,73 @@ describe('followToSettled', () => {
     expect(result.admitted).toBe(false)
     expect(result.answer).toBe('')
     expect(result.turn).toBeUndefined()
+  })
+
+  it('reports a host-accepted prompt as admitted before its turn starts', async () => {
+    const result = await followToSettled(options([
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 10) },
+      { frame: assistantFrame(6, 'third-party noise', 11) },
+      { frame: turnEndFrame(6, 12) },
+    ], { wait: 0.05, settleMs: 5000 }, [], { promptAccepted: true }))
+    expect(result.pending).toBe(true)
+    expect(result.admitted).toBe(true)
+    expect(result.answer).toBe('')
+    expect(result.turn).toBeUndefined()
+  })
+
+  it("keeps our turn's answer when a different operator's prompt opens a later turn", async () => {
+    const result = await followToSettled(options([
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 10) },
+      { frame: turnStartFrame(6, 11) },
+      { frame: userFrame('peer-cli-spec', 12) },
+      { frame: assistantFrame(6, 'our answer', 13) },
+      { frame: turnEndFrame(6, 14) },
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 15) },
+      { delayMs: 10, frame: turnStartFrame(7, 16) },
+      { frame: userFrame('peer-cli-other', 17) },
+      { frame: assistantFrame(7, 'their answer', 18) },
+      { frame: turnEndFrame(7, 19) },
+      { frame: stateFrame({ latch: 'idle', activeDescendants: 0 }, 20) },
+    ], { settleMs: 5000 }))
+    expect(result.answer).toBe('our answer')
+    expect(result.turn).toBe(6)
+    expect(result.terminal).toBe('completed')
+    expect(result.ok).toBe(true)
+    expect(result.settled).toBe(true)
+    expect(result.superseded).toBe(true)
+  })
+
+  it("does not report an earlier turn's answer under a later turn's terminal", async () => {
+    const result = await followToSettled(options([
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 10) },
+      { frame: turnStartFrame(6, 11) },
+      { frame: userFrame('peer-cli-spec', 12) },
+      { frame: assistantFrame(6, 'our answer', 13) },
+      { frame: turnEndFrame(6, 14) },
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 15) },
+      { delayMs: 10, frame: turnStartFrame(7, 16) },
+      { frame: turnEndFrame(7, 17, 'error') },
+      { frame: stateFrame({ latch: 'idle', activeDescendants: 0 }, 18) },
+    ]))
+    expect(result.turn).toBe(7)
+    expect(result.terminal).toBe('error')
+    expect(result.answer).toBe('')
+    expect(result.ok).toBe(false)
+  })
+
+  it('keeps the answer committed by a turn that ended in error', async () => {
+    const result = await followToSettled(options([
+      { frame: stateFrame({ latch: 'running', activeDescendants: 0 }, 10) },
+      { frame: turnStartFrame(6, 11) },
+      { frame: userFrame('peer-cli-spec', 12) },
+      { frame: assistantFrame(6, 'work done then upstream died', 13) },
+      { frame: turnEndFrame(6, 14, 'error') },
+      { frame: stateFrame({ latch: 'idle', activeDescendants: 0 }, 15) },
+    ]))
+    expect(result.turn).toBe(6)
+    expect(result.terminal).toBe('error')
+    expect(result.answer).toBe('work done then upstream died')
+    expect(result.ok).toBe(false)
   })
 
   it('confirms a settled quiet window against a fresh state read', async () => {
@@ -423,6 +492,43 @@ describe('commandAsk requestId persistence', () => {
     const first = beginAsk({ statePath: askStatePath(pairingsPath), alias: 'other', message: 'hello', baselineTurn: 0, now: 1 })
     await expect(commandAsk(flags, positional, deps)).rejects.toThrowError('socket hang up after admission')
     expect(harness.state.admitted[0]).not.toBe(first.requestId)
+  })
+
+  it('reports a recorded prompt as admitted even when no turn of ours has started', async () => {
+    const pairingsPath = pairingFile()
+    const { flags, positional } = commandArgs(['ask', 'co-dev', 'hello'], pairingsPath)
+    const baseline = {
+      target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'co-dev' },
+      state: {
+        latch: 'running', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true,
+        pendingAsks: [] as unknown[], lastTurnEnd: { turn: 0, reason: 'completed', at: 0 },
+      },
+      cursor: 8,
+    }
+    const client = {
+      handshake: async () => ({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: [], pairings: [] }),
+      state: async () => baseline,
+      prompt: async () => ({ accepted: true, queued: true, hopCount: 1 }),
+      follow: async function* (): AsyncGenerator<unknown> {
+        // Another operator's turn runs while our accepted prompt waits in the
+        // queue; its terminal and answer are not ours.
+        yield {
+          type: 'snapshot',
+          cursor: 12,
+          state: { latch: 'running', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true, pendingAsks: [] },
+          records: [
+            { seq: 9, time: 1, type: 'turn/start', data: { turn: 1 } },
+            { seq: 10, time: 1, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'another operator answer' }] } } },
+            { seq: 11, time: 1, type: 'turn/end', data: { turn: 1, reason: { kind: 'error' } } },
+          ],
+        }
+      },
+    }
+    const result = await commandAsk(flags, positional, { clientFactory: () => client }) as Record<string, unknown>
+    expect(result).toMatchObject({ admitted: true, pending: true, ok: false })
+    expect(result.terminal).toBeUndefined()
+    expect(result.answer).toBe('')
+    expect(String(result.note)).toContain('without a terminal')
   })
 })
 

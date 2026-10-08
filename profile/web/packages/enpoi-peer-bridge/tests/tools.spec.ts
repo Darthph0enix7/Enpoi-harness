@@ -41,12 +41,20 @@ interface HostOptions {
   readonly questionAnswer?: { readonly answers: readonly { readonly id: string; readonly selected: readonly string[] }[] }
   /** Prepend a completed third-party turn 1 before our admitted prompt in turn 2. */
   readonly prelude?: boolean
+  /** Stop the script after the prelude, before our prompt ever starts a turn. */
+  readonly stopAfterPrelude?: boolean
   /** Stop the script after our admitted user/message, leaving our turn terminal open. */
   readonly thirdPartyOnly?: boolean
   /** Replay seqs 10-12 in a reconnect snapshot after the first terminal. */
   readonly replay?: boolean
   /** Start a follow-up turn carrying this text after the first terminal. */
   readonly secondTurn?: string
+  /** Start a later turn opened by another operator's prompt, carrying this answer text. */
+  readonly foreignPrompt?: string
+  /** Start a later continuation turn that produces no assistant text and ends in error. */
+  readonly silentSecondTurn?: boolean
+  /** End our own turn in error after committing its assistant text. */
+  readonly ourTurnError?: boolean
   /** Skip the trailing settled state frame, leaving the last follow state busy. */
   readonly noFinalState?: boolean
   /** Quiet window override for the follow's settle clock. */
@@ -181,6 +189,7 @@ function createHarness(options: HostOptions = {}) {
         cursor: 7,
       })
     }
+    if (options.stopAfterPrelude === true) return
     socket.frame(streamId, {
       type: 'event',
       record: { seq: 9, time: 3, type: 'turn/start', data: { turn: ourTurn } },
@@ -199,7 +208,7 @@ function createHarness(options: HostOptions = {}) {
     })
     socket.frame(streamId, {
       type: 'event',
-      record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: 'completed' } } },
+      record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: options.ourTurnError === true ? 'error' : 'completed' } } },
       cursor: 12,
     })
     if (options.replay === true) {
@@ -236,6 +245,48 @@ function createHarness(options: HostOptions = {}) {
       socket.frame(streamId, {
         type: 'event',
         record: { seq: 16, time: 9, type: 'turn/end', data: { turn: ourTurn + 1, reason: { kind: 'completed' } } },
+        cursor: 16,
+      })
+    }
+    if (options.foreignPrompt !== undefined) {
+      socket.frame(streamId, {
+        type: 'state',
+        state: {
+          latch: 'running', since: 13, source: 'host-latch', activeDescendants: 0,
+          descendantsExact: true, pendingAsks: [],
+        },
+        cursor: 13,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 14, time: 7, type: 'turn/start', data: { turn: ourTurn + 1 } },
+        cursor: 14,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 15, time: 8, type: 'user/message', data: { source: { kind: 'user', rpcId: 'peer-bridge-other' }, content: [{ type: 'text', text: 'their prompt' }] } },
+        cursor: 15,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 16, time: 9, type: 'assistant/message', data: { turn: ourTurn + 1, message: { content: [{ type: 'text', text: options.foreignPrompt }] } } },
+        cursor: 16,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 17, time: 10, type: 'turn/end', data: { turn: ourTurn + 1, reason: { kind: 'completed' } } },
+        cursor: 17,
+      })
+    }
+    if (options.silentSecondTurn === true) {
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 14, time: 7, type: 'turn/start', data: { turn: ourTurn + 1 } },
+        cursor: 14,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 16, time: 9, type: 'turn/end', data: { turn: ourTurn + 1, reason: { kind: 'error' } } },
         cursor: 16,
       })
     }
@@ -636,6 +687,37 @@ describe('enpoi-peer-bridge tools', () => {
     expect(result.answer).toBe('')
     expect(result.turn).toBeUndefined()
     expect(result.terminal).toBeUndefined()
+  })
+
+  it('reports a host-accepted prompt as admitted before any turn of ours starts', async () => {
+    const harness = createHarness({ prelude: true, stopAfterPrelude: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours', waitMs: 40 }, harness.exec)
+    expect(result).toMatchObject({ ok: false, pending: true, admitted: true })
+    expect(result.terminal).toBeUndefined()
+    expect(result.answer).toBe('')
+  })
+
+  it("keeps our turn's answer when a different operator's prompt opens a later turn", async () => {
+    const harness = createHarness({ foreignPrompt: 'their answer' })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, settled: true, superseded: true, turn: 1, terminal: 'completed' })
+    expect(result.answer).toBe('remote answer text')
+    const rendered = harness.tools.get('peer_ask')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('different operator')
+  })
+
+  it("does not report an earlier turn's answer under a later turn's terminal", async () => {
+    const harness = createHarness({ silentSecondTurn: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours' }, harness.exec)
+    expect(result).toMatchObject({ ok: false, settled: true, turn: 2, terminal: 'error' })
+    expect(result.answer).toBe('')
+  })
+
+  it('keeps the answer committed by a turn that ended in error', async () => {
+    const harness = createHarness({ ourTurnError: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours' }, harness.exec)
+    expect(result).toMatchObject({ ok: false, settled: true, turn: 1, terminal: 'error' })
+    expect(result.answer).toBe('remote answer text')
   })
 
   it('confirms a settled quiet window against a fresh state read', async () => {

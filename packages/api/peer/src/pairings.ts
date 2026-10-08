@@ -30,6 +30,7 @@ import type {
   PeerPairingsFile,
   PeerTarget,
   PeerTargetResolved,
+  RetiredPeerBinding,
 } from './types.ts'
 
 /** Default watchdog before an orphaned peer turn is aborted (doc 69 §8). */
@@ -175,6 +176,15 @@ export class PeerPairingsStore {
       if (pairing === undefined) continue
       return { pairing, sessionId: target.sessionId, exposure: pairing.exposure, device: pairing.peer }
     }
+    // A session this alias was bound to before a `peer.create` rebound it
+    // stays addressable by explicit id: the pairing gate still applies, only
+    // the alias resolution moved on.
+    for (const [alias, binding] of Object.entries(loaded.bindings)) {
+      if (binding.retired?.some(entry => entry.sessionId === target.sessionId) !== true) continue
+      const pairing = loaded.pairings.find(candidate => candidate.alias === alias)
+      if (pairing === undefined) continue
+      return { pairing, sessionId: target.sessionId, exposure: pairing.exposure, device: pairing.peer }
+    }
     // A shared pairing document may carry this host's session only in the
     // caller-role `remoteSessionId` pin (the same logical entry authored from
     // the other device's side). Resolving it to the pairing's own bound
@@ -194,12 +204,29 @@ export class PeerPairingsStore {
     return this.resolve({ kind: 'session', sessionId })
   }
 
-  /** Persist one alias→session binding (atomic, 0600). */
+  /** Persist one alias→session binding (atomic, 0600); a replaced binding moves to `retired`. */
   async bind(alias: PeerAlias, device: PeerDeviceName, sessionId: SessionId): Promise<void> {
     const run = async (): Promise<void> => {
       const current = this.readBindings()
+      const previous = current[alias]
+      const retired: readonly RetiredPeerBinding[] | undefined = previous === undefined || previous.sessionId === sessionId
+        ? previous?.retired
+        : [
+          ...previous.retired ?? [],
+          {
+            sessionId: previous.sessionId,
+            device: previous.device,
+            createdAt: previous.createdAt,
+            retiredAt: Date.now(),
+          },
+        ]
       const bindings: Record<string, PeerBinding> = Object.assign({}, current)
-      bindings[alias] = { sessionId, device, createdAt: Date.now() }
+      bindings[alias] = {
+        sessionId,
+        device,
+        createdAt: Date.now(),
+        ...(retired === undefined || retired.length === 0 ? {} : { retired }),
+      }
       const next: PeerBindingsFile = { version: 1, bindings }
       await writeFileAtomic(this.bindingsPath, `${JSON.stringify(next, undefined, 2)}\n`, {
         mode: PRIVATE_MODE,
@@ -254,10 +281,12 @@ export class PeerPairingsStore {
         || typeof value.createdAt !== 'number') {
         throw new PeerConfigError(`peer binding ${JSON.stringify(alias)} must carry sessionId, device, and createdAt`)
       }
+      const retired = readRetiredBindings(alias, value.retired)
       bindings[alias] = {
         sessionId: sessionIdOf(value.sessionId),
         device: value.device,
         createdAt: value.createdAt,
+        ...(retired === undefined ? {} : { retired }),
       }
     }
     return bindings
@@ -361,6 +390,35 @@ function parsePairing(value: unknown, subject: string): PeerPairing {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Validate one binding's optional retired-session history.
+ * @param alias - owning alias for diagnostics.
+ * @param value - raw `retired` value; absent and empty are equivalent.
+ * @returns retired entries, or undefined when the field is absent or empty.
+ * @throws {@link PeerConfigError} when an entry is malformed.
+ */
+function readRetiredBindings(alias: string, value: unknown): readonly RetiredPeerBinding[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    throw new PeerConfigError(`peer binding ${JSON.stringify(alias)}: retired must be a list`)
+  }
+  const retired: RetiredPeerBinding[] = []
+  for (const [index, entry] of value.entries()) {
+    const subject = `peer binding ${JSON.stringify(alias)}.retired[${index}]`
+    if (!isRecord(entry) || typeof entry.sessionId !== 'string' || typeof entry.device !== 'string'
+      || typeof entry.createdAt !== 'number' || typeof entry.retiredAt !== 'number') {
+      throw new PeerConfigError(`${subject} must carry sessionId, device, createdAt, and retiredAt`)
+    }
+    retired.push({
+      sessionId: sessionIdOf(entry.sessionId),
+      device: entry.device,
+      createdAt: entry.createdAt,
+      retiredAt: entry.retiredAt,
+    })
+  }
+  return retired.length === 0 ? undefined : retired
 }
 
 function requireString(record: Record<string, unknown>, key: string, subject: string): string {

@@ -26,6 +26,15 @@
  * within the quiet window — and only then return the newest turn's text.
  * `--once` restores the historical behavior (return at the first turn/end).
  *
+ * Turn attribution is causal and exclusive. `admitted` means the host accepted
+ * and recorded the prompt (the `prompt` response, or the durable `user/message`
+ * when following another driver's run), so a recorded prompt is never reported
+ * as unadmitted. Once our admitted turn has a terminal, a later turn opened by
+ * a different operator prompt cannot replace that answer or terminal: the
+ * result freezes on our own turn and reports `superseded: true`. A terminal
+ * only carries the answer text committed for that same turn; a later turn with
+ * no text clears the stale one.
+ *
  * `ask` persists the minted requestId per (alias, target, message) under
  * `<pairing dir>/peer-bridge/ask-state.json` until the follow reports a
  * terminal. Re-running the same message after a transport failure reuses that
@@ -562,7 +571,7 @@ function askSummary(ask) {
 }
 
 export async function followToSettled(options) {
-  const { client, target, flags, requestId, baselineTurn, baselineState, log, onAsk } = options
+  const { client, target, flags, requestId, baselineTurn, baselineState, log, onAsk, promptAccepted } = options
   const controller = new AbortController()
   const deadline = flags.wait !== undefined && Number.isFinite(flags.wait) && flags.wait > 0 ? Date.now() + flags.wait * 1000 : undefined
   const timer = deadline === undefined ? undefined : setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()))
@@ -575,7 +584,7 @@ export async function followToSettled(options) {
   const answerParts = []
   let currentTurn
   let terminal
-  let admitted = false
+  let admitted = promptAccepted === true
   let latch = baselineState?.latch ?? 'unknown'
   let activeDescendants = baselineState?.activeDescendants ?? 0
   let descendantsExact = baselineState?.descendantsExact
@@ -597,10 +606,16 @@ export async function followToSettled(options) {
     admittedTurn: undefined,
     observedTurn: undefined,
     admissionSeen: false,
+    answerTurn: undefined,
+    abandoned: false,
     addAnswer: (turn, text) => {
-      if (currentTurn === undefined || turn > currentTurn) { currentTurn = turn; answerParts.length = 0 }
-      if (turn === currentTurn) answerParts.push(text)
+      if (currentTurn === undefined || turn > currentTurn) { currentTurn = turn; absorption.answerTurn = turn; answerParts.length = 0 }
+      if (turn === currentTurn) {
+        absorption.answerTurn = turn
+        answerParts.push(text)
+      }
     },
+    clearAnswer: () => { currentTurn = undefined; absorption.answerTurn = undefined; answerParts.length = 0 },
     markAdmitted: () => { admitted = true },
     setTerminal: (value) => { terminal = value },
   }
@@ -637,6 +652,10 @@ export async function followToSettled(options) {
       } else if (frame.type === 'end' && frame.reason === 'target-detached') {
         return { ok: false, pending: true, admitted, latch, cursor, asks: [...seenAsks], answer: answerParts.join('\n').trim(), note: 'remote target-detached (pairing/session binding gone)' }
       }
+      // A different operator's prompt opened a later turn after our admitted
+      // turn already had its terminal: our result is complete, and continuing
+      // would return their answer as ours.
+      if (absorption.abandoned === true && terminal !== undefined) break
       if (terminal !== undefined) {
         if (once) break
         // Keep following while a child, an ask, or a follow-up turn can still
@@ -682,6 +701,22 @@ export async function followToSettled(options) {
       asks: [...seenAsks],
       answer: answerParts.join('\n').trim(),
       note: deadline === undefined ? 'follow ended without a terminal' : 'wait elapsed without a terminal',
+    }
+  }
+  if (absorption.abandoned === true) {
+    return {
+      ok: terminal.reason === 'completed',
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...(terminal.error === undefined ? {} : { remoteError: terminal.error }),
+      answer: answerParts.join('\n').trim(),
+      asks: [...seenAsks],
+      cursor,
+      latch,
+      settled: true,
+      superseded: true,
+      note: `a different operator's prompt opened a later turn after turn ${String(terminal.turn)} ended; returning this turn's own result — follow again to collect the session remainder`,
     }
   }
   const settled = once || settledNow()
@@ -783,8 +818,11 @@ export function isPeerSessionSettled(state) {
  * With a `requestId`, answers and terminals are attributed causally: only the
  * turn whose `turn/start` preceded our admitted `user/message` (or a later
  * turn) feeds the answer. A concurrent third-party turn that ended before our
- * admission is ignored. Without a `requestId` (the `follow` command) every
- * turn after `baselineTurn` counts.
+ * admission is ignored. Once our admitted turn has a terminal, a later turn
+ * opened by a different operator's `user/message` marks the sink abandoned so
+ * the caller's own result cannot be replaced by that operator's answer.
+ * Without a `requestId` (the `follow` command) every turn after
+ * `baselineTurn` counts.
  */
 function absorbRecord(record, sink) {
   if (sink.requestId !== undefined && recordRpcId(record) === sink.requestId) {
@@ -801,6 +839,14 @@ function absorbRecord(record, sink) {
     sink.seen.add(seq)
   }
   const turn = recordTurn(record)
+  // A different operator's prompt claims a later turn: what that turn answers
+  // belongs to their run, not ours.
+  if (record.type === 'user/message' && sink.requestId !== undefined
+    && sink.admittedTurn !== undefined && recordRpcId(record) !== sink.requestId) {
+    const promptTurn = turn ?? sink.observedTurn
+    const source = typeof record.data?.source === 'object' && record.data.source !== null ? record.data.source : undefined
+    if (promptTurn !== undefined && promptTurn !== sink.admittedTurn && source?.kind === 'user') sink.abandoned = true
+  }
   if (record.type === 'turn/start' && turn !== undefined) {
     sink.observedTurn = turn
     if (sink.requestId !== undefined && sink.admissionSeen === true && sink.admittedTurn === undefined) sink.admittedTurn = turn
@@ -812,7 +858,8 @@ function absorbRecord(record, sink) {
     sink.admittedTurn = turn
   }
   const attributed = sink.requestId === undefined
-    || (turn !== undefined && sink.admittedTurn !== undefined && turn >= sink.admittedTurn)
+    || (turn !== undefined && sink.admittedTurn !== undefined && turn >= sink.admittedTurn
+      && (sink.abandoned !== true || turn <= sink.admittedTurn))
   if (!attributed) return
   if (record.type === 'assistant/message' && turn !== undefined && turn > sink.baselineTurn) {
     const text = recordAssistantText(record)
@@ -820,7 +867,12 @@ function absorbRecord(record, sink) {
     return
   }
   const end = recordTerminal(record)
-  if (end !== undefined && end.turn > sink.baselineTurn) sink.setTerminal(end)
+  if (end !== undefined && end.turn > sink.baselineTurn) {
+    // A terminal owns only the text committed for its own turn: a later turn
+    // that produced no answer must not report the previous turn's text.
+    if (sink.answerTurn !== undefined && sink.answerTurn !== end.turn) sink.clearAnswer()
+    sink.setTerminal(end)
+  }
 }
 
 function logFrame(record) {
@@ -1107,6 +1159,7 @@ export async function commandAsk(flags, positional, deps = {}) {
     requestId: started.requestId,
     baselineTurn: started.baselineTurn,
     baselineState: baseline.state,
+    promptAccepted: true,
     log: (line) => console.error(line),
   })
   if (result.pending !== true) finishAsk(statePath, alias, started.requestId)

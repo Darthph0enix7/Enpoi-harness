@@ -88,7 +88,7 @@ await handle.agent.whenIdle()
 
 `Agent.inbox` 只暴露结构型 `Inbox` 接口，投影词汇仍位于本包。dsh-agent-loop 持有包内部的 `ReactLoopInbox` 与标准 `inbox` 投影；构造具体 inbox 时会确保投影注册表为持久 `agent/inbox/spliced` fold 持有一份注册。注册表继续作为实时 `{ 'next-turn', 'next-step' }` 状态的唯一所有者。重建过程会拒绝不安全或越界的 splice 坐标，以及跨两份待处理列表重复的 `MessageId`，并报告出错事件的 seq。
 
-`Inbox` 暴露待处理的 `nextTurn` 与 `nextStep` 消息，并通过 `append`、`prepend`、`replace`、`remove`、`clear` 与 `splice` 变更它们。普通删除和 `clear()` 都是持久取消。在步骤边界，循环的内部实现会通过纯删除 splice 领取待处理输入。实时通知刻意采用逐消息的最小载荷：`agent/inbox/inserted { message }`、`agent/inbox/claimed { message, turn }` 与 `agent/inbox/discarded { message }`。
+`Inbox` 暴露待处理的 `nextTurn` 与 `nextStep` 消息，并通过 `append`、`prepend`、`replace`、`remove`、`clear` 与 `splice` 变更它们。`append` 追加到待处理列表末尾，而循环从索引 0 领取，因此排队的 `next-turn` 提示按到达顺序投递；`prepend` 是显式优先路径，用于必须先于已排队工作执行的上下文。普通删除和 `clear()` 都是持久取消。在步骤边界，循环的内部实现会通过纯删除 splice 领取待处理输入。实时通知刻意采用逐消息的最小载荷：`agent/inbox/inserted { message }`、`agent/inbox/claimed { message, turn }` 与 `agent/inbox/discarded { message }`。
 
 ### 源码地图
 

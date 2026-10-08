@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -137,6 +137,44 @@ pairings:
     expect(store.resolve({ kind: 'session', sessionId: 'sess-unknown' as never })).toBeUndefined()
   })
 
+  it('keeps a rebound alias previous session page-able by explicit id', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    const bindingsPath = join(root, 'peer-state.json')
+    write(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: bound
+    peer: laptop
+    exposure: debug
+    create:
+      cwd: ${root}
+`)
+    const store = new PeerPairingsStore(pairingsPath, bindingsPath)
+    await store.bind('bound' as never, 'laptop', 'sess-first' as never)
+    await store.bind('bound' as never, 'laptop', 'sess-second' as never)
+
+    // The alias resolves to the newest session; the replaced one stays
+    // addressable by explicit id through the same pairing.
+    expect(store.resolve({ kind: 'alias', alias: 'bound' as never })?.sessionId).toBe('sess-second')
+    const retired = store.resolve({ kind: 'session', sessionId: 'sess-first' as never })
+    expect(retired?.pairing.alias).toBe('bound')
+    expect(retired?.sessionId).toBe('sess-first')
+
+    // History survives a restart: the bindings document is the only memory.
+    const restarted = new PeerPairingsStore(pairingsPath, bindingsPath)
+    expect(restarted.resolve({ kind: 'session', sessionId: 'sess-first' as never })?.pairing.alias).toBe('bound')
+    expect(restarted.resolve({ kind: 'session', sessionId: 'sess-second' as never })?.pairing.alias).toBe('bound')
+
+    // Re-adopting the same session is not a rebind: the history does not grow.
+    await store.bind('bound' as never, 'laptop', 'sess-second' as never)
+    const file = JSON.parse(readFileSync(bindingsPath, 'utf8')) as {
+      bindings: Record<string, { retired?: unknown[] }>
+    }
+    expect(file.bindings.bound?.retired).toHaveLength(1)
+  })
+
   it('reloads a changed pairing file and keeps the last good snapshot on corruption', async () => {
     const root = tempRoot()
     const pairingsPath = join(root, 'pairings.yaml')
@@ -156,6 +194,25 @@ pairings:
     const pairingsPath = join(root, 'pairings.yaml')
     write(pairingsPath, 'version: 1\ndevice: a\npairings: []')
     write(join(root, 'peer-state.json'), '{"version": 2, "bindings": {}}')
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
+    expect(() => store.load()).toThrow(PeerConfigError)
+  })
+
+  it('rejects a malformed retired-binding entry', () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, 'version: 1\ndevice: a\npairings: []')
+    write(join(root, 'peer-state.json'), JSON.stringify({
+      version: 1,
+      bindings: {
+        bound: {
+          sessionId: 'sess-current',
+          device: 'laptop',
+          createdAt: 1,
+          retired: [{ sessionId: 'sess-old' }],
+        },
+      },
+    }))
     const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
     expect(() => store.load()).toThrow(PeerConfigError)
   })

@@ -44,7 +44,7 @@ import {
 } from './asks.js'
 import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnswer, PeerQuestionItem, PeerRepairHole, PeerWebSocket } from './peer-client.js'
 import { PeerBridgeError, PeerClient } from './peer-client.js'
-import { DEFAULT_SETTLE_QUIET_MS, isPeerSessionSettled, recordAssistantText, recordRpcId, recordTerminal, recordTurn } from './follow.js'
+import { DEFAULT_SETTLE_QUIET_MS, isPeerSessionSettled, recordAssistantText, recordRpcId, recordSourceKind, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
 import { callerPairings, defaultPairingsPath, loadCallerPairing, readPairingDocument } from './pairings.js'
 
@@ -411,6 +411,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           requestId: { type: 'string' },
           admitted: { type: 'boolean' },
           settled: { type: 'boolean' },
+          superseded: { type: 'boolean' },
           turn: { type: 'number' },
           terminal: { type: 'string' },
           error: failureSchema(),
@@ -833,7 +834,9 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   const asks = new Map<string, AskBridgeRecord>()
   let latch = baseline.state.latch
   let cursor = baseline.cursor
-  let admitted = false
+  // The prompt response already proved the host recorded this prompt; the
+  // durable `user/message` below only marks which turn carried it.
+  const admitted = true
   let terminal: ReturnType<typeof recordTerminal>
   let detached = false
   let activeDescendants = baseline.state.activeDescendants
@@ -846,10 +849,13 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   const seenSeqs = new Set<number>()
   // Causal attribution: assistant text and terminals count only for the turn
   // that carried our admitted prompt (or a later one). A concurrent
-  // third-party turn that ends before our `user/message` appears is ignored.
+  // third-party turn that ends before our `user/message` appears is ignored,
+  // and a later turn opened by a different operator's prompt cannot replace
+  // our own result (`abandoned`).
   let admittedTurn: number | undefined
   let observedTurn: number | undefined
   let admissionSeen = false
+  let abandoned = false
   let quietExpired = false
   let quietTimer: ReturnType<typeof setTimeout> | undefined
   const clearQuiet = (): void => {
@@ -903,7 +909,6 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   }
   const absorb = (record: PeerEventRecord): void => {
     if (recordRpcId(record) === requestId) {
-      admitted = true
       if (!admissionSeen) {
         admissionSeen = true
         const turn = recordTurn(record) ?? observedTurn
@@ -915,6 +920,12 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       seenSeqs.add(record.seq)
     }
     const turn = recordTurn(record)
+    // A different operator's prompt claims a later turn: what that turn
+    // answers belongs to their run, not ours.
+    if (record.type === 'user/message' && admittedTurn !== undefined && recordRpcId(record) !== requestId) {
+      const promptTurn = turn ?? observedTurn
+      if (promptTurn !== undefined && promptTurn !== admittedTurn && recordSourceKind(record) === 'user') abandoned = true
+    }
     if (record.type === 'turn/start' && turn !== undefined) {
       observedTurn = turn
       if (admissionSeen && admittedTurn === undefined) admittedTurn = turn
@@ -924,6 +935,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     // prompt when the snapshot window cut its `turn/start`.
     if (admittedTurn === undefined && admissionSeen && turn !== undefined) admittedTurn = turn
     const attributed = admittedTurn !== undefined && turn !== undefined && turn >= admittedTurn
+      && (!abandoned || turn <= admittedTurn)
     if (!attributed) return
     if (record.type === 'assistant/message' && turn > baselineTurn) {
       const text = recordAssistantText(record)
@@ -939,7 +951,15 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       return
     }
     const end = recordTerminal(record)
-    if (end !== undefined && end.turn > baselineTurn) terminal = end
+    if (end !== undefined && end.turn > baselineTurn) {
+      // A terminal owns only the text committed for its own turn: a later turn
+      // that produced no answer must not report the previous turn's text.
+      if (answerTurn !== undefined && answerTurn !== end.turn) {
+        answerTurn = undefined
+        answerParts.length = 0
+      }
+      terminal = end
+    }
   }
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
@@ -965,6 +985,10 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         detached = true
         break
       }
+      // A different operator's prompt opened a later turn after our admitted
+      // turn already had its terminal: our result is complete, and continuing
+      // would return their answer as ours.
+      if (abandoned && terminal !== undefined) break
       if (terminal !== undefined) {
         // Keep following while a child, an ask, or a follow-up turn can still
         // move the session; only a settled state starts the quiet clock.
@@ -1031,6 +1055,32 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       latch,
       cursor,
       note: `no terminal within ${String(options.waitMs)}ms — the remote turn is still live (follow it again with peer_ask or ds peer follow)`,
+    }
+  }
+  if (abandoned) {
+    return {
+      ok: terminal.reason === 'completed',
+      settled: true,
+      superseded: true,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...(terminal.error === undefined ? {} : {
+        remoteError: {
+          code: terminal.error.code ?? 'unknown',
+          message: terminal.error.message ?? '',
+          provider: terminal.error.provider ?? '',
+          model: terminal.error.model ?? '',
+        },
+      }),
+      answer,
+      asks: askLines(asks),
+      cursor,
+      note: `a different operator's prompt opened a later turn after turn ${String(terminal.turn)} ended; returning this turn's own result — follow the alias again to collect the remainder`,
     }
   }
   if (!settledNow()) {
@@ -1485,6 +1535,7 @@ function renderAsk(value: unknown): string {
   if (typeof record.answer === 'string' && record.answer !== '') lines.push(record.answer)
   if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${(record.asks as string[]).join('; ')}`)
   if (record.created === true) lines.push('(a new remote session was created for this alias)')
+  if (record.superseded === true) lines.push('(a different operator prompted the session after this turn ended; the result above is our own turn)')
   return lines.join('\n')
 }
 

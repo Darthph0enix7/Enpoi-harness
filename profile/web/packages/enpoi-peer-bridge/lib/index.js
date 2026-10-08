@@ -483,6 +483,11 @@ function contentText(content) {
   }
   return parts.join("\n");
 }
+function recordSourceKind(record) {
+  if (record.type !== "user/message") return void 0;
+  const kind = field(field(record.data, "source"), "kind");
+  return typeof kind === "string" ? kind : void 0;
+}
 function field(value, key) {
   if (typeof value !== "object" || value === null) return void 0;
   return value[key];
@@ -1032,6 +1037,7 @@ function registerTools(ctx, config, deps = {}) {
           requestId: { type: "string" },
           admitted: { type: "boolean" },
           settled: { type: "boolean" },
+          superseded: { type: "boolean" },
           turn: { type: "number" },
           terminal: { type: "string" },
           error: failureSchema(),
@@ -1421,7 +1427,7 @@ async function runAsk(ctx, options) {
   const asks = /* @__PURE__ */ new Map();
   let latch = baseline.state.latch;
   let cursor = baseline.cursor;
-  let admitted = false;
+  const admitted = true;
   let terminal;
   let detached = false;
   let activeDescendants = baseline.state.activeDescendants;
@@ -1433,6 +1439,7 @@ async function runAsk(ctx, options) {
   let admittedTurn;
   let observedTurn;
   let admissionSeen = false;
+  let abandoned = false;
   let quietExpired = false;
   let quietTimer;
   const clearQuiet = () => {
@@ -1492,7 +1499,6 @@ async function runAsk(ctx, options) {
   };
   const absorb = (record) => {
     if (recordRpcId(record) === requestId) {
-      admitted = true;
       if (!admissionSeen) {
         admissionSeen = true;
         const turn2 = recordTurn(record) ?? observedTurn;
@@ -1504,13 +1510,17 @@ async function runAsk(ctx, options) {
       seenSeqs.add(record.seq);
     }
     const turn = recordTurn(record);
+    if (record.type === "user/message" && admittedTurn !== void 0 && recordRpcId(record) !== requestId) {
+      const promptTurn = turn ?? observedTurn;
+      if (promptTurn !== void 0 && promptTurn !== admittedTurn && recordSourceKind(record) === "user") abandoned = true;
+    }
     if (record.type === "turn/start" && turn !== void 0) {
       observedTurn = turn;
       if (admissionSeen && admittedTurn === void 0) admittedTurn = turn;
       return;
     }
     if (admittedTurn === void 0 && admissionSeen && turn !== void 0) admittedTurn = turn;
-    const attributed = admittedTurn !== void 0 && turn !== void 0 && turn >= admittedTurn;
+    const attributed = admittedTurn !== void 0 && turn !== void 0 && turn >= admittedTurn && (!abandoned || turn <= admittedTurn);
     if (!attributed) return;
     if (record.type === "assistant/message" && turn > baselineTurn) {
       const text = recordAssistantText(record);
@@ -1524,7 +1534,13 @@ async function runAsk(ctx, options) {
       return;
     }
     const end = recordTerminal(record);
-    if (end !== void 0 && end.turn > baselineTurn) terminal = end;
+    if (end !== void 0 && end.turn > baselineTurn) {
+      if (answerTurn !== void 0 && answerTurn !== end.turn) {
+        answerTurn = void 0;
+        answerParts.length = 0;
+      }
+      terminal = end;
+    }
   };
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
@@ -1550,6 +1566,7 @@ async function runAsk(ctx, options) {
         detached = true;
         break;
       }
+      if (abandoned && terminal !== void 0) break;
       if (terminal !== void 0) {
         if (settledNow()) armQuiet();
         else clearQuiet();
@@ -1605,6 +1622,32 @@ async function runAsk(ctx, options) {
       latch,
       cursor,
       note: `no terminal within ${String(options.waitMs)}ms \u2014 the remote turn is still live (follow it again with peer_ask or ds peer follow)`
+    };
+  }
+  if (abandoned) {
+    return {
+      ok: terminal.reason === "completed",
+      settled: true,
+      superseded: true,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      turn: terminal.turn,
+      terminal: terminal.reason,
+      ...terminal.error === void 0 ? {} : {
+        remoteError: {
+          code: terminal.error.code ?? "unknown",
+          message: terminal.error.message ?? "",
+          provider: terminal.error.provider ?? "",
+          model: terminal.error.model ?? ""
+        }
+      },
+      answer,
+      asks: askLines(asks),
+      cursor,
+      note: `a different operator's prompt opened a later turn after turn ${String(terminal.turn)} ended; returning this turn's own result \u2014 follow the alias again to collect the remainder`
     };
   }
   if (!settledNow()) {
@@ -1977,6 +2020,7 @@ function renderAsk(value) {
   if (typeof record.answer === "string" && record.answer !== "") lines.push(record.answer);
   if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${record.asks.join("; ")}`);
   if (record.created === true) lines.push("(a new remote session was created for this alias)");
+  if (record.superseded === true) lines.push("(a different operator prompted the session after this turn ended; the result above is our own turn)");
   return lines.join("\n");
 }
 function renderAsks(value) {

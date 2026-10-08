@@ -62,8 +62,12 @@ patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他�
 毫秒；CLI 的 `--settle-ms`）结束并重读一次 `peer.state` 确认后，才认定会话
 静默。记录按 seq 去重，重连快照重放不会重复追加同一段助手文本；较新的回合会
 **替换**先前回合的文本。回答按因果归属：只有 `turn/start` 早于我们已采纳的
-`user/message` 的回合（及其后续回合）才计入结果，因此并发的第三方回合不会被
-当作我们的回答返回。`peer/not-paired`、`peer/not-found`、`peer/forbidden`、
+`user/message` 的回合（及其后续延续回合）才计入结果，因此并发的第三方回合不会被
+当作我们的回答返回。我们的回合一旦拿到 terminal，由另一位操作者提示开启的更晚
+回合会把结果冻结在我们自己的回合上（`superseded: true`），且 terminal 只携带其
+自身回合提交的回答文本。`admitted` 报告宿主已接受提示（`peer.prompt` 返回接受，
+或持久的 `user/message`），因此已记录的提示绝不会被报告为未采纳。
+`peer/not-paired`、`peer/not-found`、`peer/forbidden`、
 `peer/version-skew` 错误帧会立即终止跟踪并上报该错误，而不是按退避节奏无限
 重连；`peer.page` 无法证明连续的持久化空洞会带 `[from, to)` 范围经警告回调
 上报，重放则跨过该空洞继续。

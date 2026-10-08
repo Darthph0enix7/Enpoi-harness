@@ -63,7 +63,7 @@ pairings:
     allowModelChange: false   # default false (doc 69 §10)
 ```
 
-`peer.create` bindings persist in `~/.dsh/peer-state.json` (0600, versioned, atomic replacement); the pairing file is never rewritten by the host.
+`peer.create` bindings persist in `~/.dsh/peer-state.json` (0600, versioned, atomic replacement); a `create` that replaces an alias binding moves the previous session into that binding's `retired` list, so a rebound alias resolves to the newest session while every replaced session stays addressable by explicit `sessionId`. The pairing file is never rewritten by the host.
 
 <a id="host-surface"></a>
 ## Host surface

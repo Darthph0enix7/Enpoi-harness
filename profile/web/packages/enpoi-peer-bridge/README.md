@@ -93,8 +93,13 @@ on the CLI) and a confirming `peer.state` read at the cut. Records are
 deduplicated by seq, so a reconnect snapshot replay never appends the same
 assistant text twice, and a later turn REPLACES the previous turn's text.
 Answers are attributed causally: only the turn whose `turn/start` precedes our
-admitted `user/message` (or a later turn) feeds the result, so a concurrent
-third-party turn is never returned as ours. An error frame for
+admitted `user/message` (or a later continuation turn) feeds the result, so a
+concurrent third-party turn is never returned as ours. Once our turn has a
+terminal, a later turn opened by a different operator's prompt freezes the
+result on our own turn (`superseded: true`), and a terminal carries only the
+answer text committed for that same turn. `admitted` reports the host's prompt
+acceptance (the accepted `peer.prompt` response or the durable `user/message`),
+so a recorded prompt is never reported as unadmitted. An error frame for
 `peer/not-paired`, `peer/not-found`, `peer/forbidden`, or `peer/version-skew`
 stops the follow with that code instead of reconnecting at backoff cadence; a
 durable hole `peer.page` cannot prove contiguous is reported through the

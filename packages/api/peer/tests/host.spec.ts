@@ -522,6 +522,23 @@ describe('peer host service', () => {
     void ctx
   })
 
+  it('keeps the previous session addressable after a create rebinds the alias', async () => {
+    const { peer, sessionId } = await setup()
+    const created = await peer.create({
+      alias: 'debug' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+    })
+    expect(created.created).toBe(true)
+    expect(created.target.sessionId).not.toBe(sessionId)
+
+    // The alias now resolves to the new session...
+    const byAlias = await peer.state({ target: { kind: 'alias', alias: 'debug' as never } })
+    expect(byAlias.target.sessionId).toBe(created.target.sessionId)
+    // ...while the session it replaced stays observable by explicit id.
+    const replaced = await peer.state({ target: { kind: 'session', sessionId } })
+    expect(replaced.target.sessionId).toBe(sessionId)
+  })
+
   it('applies create-time routing to that Session only and leaves the default model untouched', async () => {
     const { peer, savedDefaults, sessionId } = await setup({ extraAliases: ['routed'] })
     const before = (await peer.state({ target: { kind: 'session', sessionId } })).state.model
