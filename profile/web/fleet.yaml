@@ -1,0 +1,36 @@
+# Fleet registry — the single source of truth for device-to-device peer pairings.
+#
+# `scripts/install.sh` runs `scripts/generate-pairings.mjs` after every profile
+# refresh, which renders THIS device's `$DSH_HOME/pairings.yaml` from this file:
+# one entry per other member, endpoint from the member's live tailnet IPv4
+# (`tailscale status --json`, then `tailscale ip -4`, then `ip` below).
+# Devices change only through `dsh update`; never hand-edit a generated
+# pairings document.
+#
+# Alias convention: a pairing's alias names its member (non-hub) device, and
+# both files carry that same string because the serving host resolves the
+# incoming alias against its own table. On a member device the entry for the
+# hub therefore carries the member's own alias. `exposure` and `create` are the
+# named member's serving defaults, stamped wherever its alias is addressed.
+#
+# Local identity: the member whose `name` or a `hostnames` wildcard matches the
+# OS hostname or a Tailscale self name is this device. `DSH_PEER_DEVICE`
+# overrides the match when a host is ambiguous or unknown.
+version: 1
+hub: serverlocal
+members:
+  - name: serverlocal
+    exposure: debug
+    create: orchestrator
+    hostnames: [serverlocal]
+    ip: 100.122.163.25
+  - name: pc
+    exposure: debug
+    create: orchestrator
+    hostnames: [mainpc, pc]
+    ip: 100.98.71.68
+  - name: macbook
+    exposure: debug
+    create: orchestrator
+    hostnames: ["Dartphoenixs-MacBook-Air*", macbook]
+    ip: 100.97.227.64

@@ -421,8 +421,9 @@ export interface PeerCreateDefaults {
  * One pairing entry in `~/.dsh/pairings.yaml`. An entry describes this host's
  * side of a link: `sessionId`/`create` are the sessions peers may address on
  * this host (target role), `remoteSessionId`/`endpoint` are what this host
- * calls on `peer` (caller role). The same logical pairing appears in both
- * devices' files; per-device session ids may be patch-substituted at `ds pull`.
+ * calls on `peer` (caller role). `dsh update` renders the document from the
+ * profile fleet registry (`profile/web/scripts/generate-pairings.mjs`), and a
+ * pairing uses the same alias string in both devices' files.
  */
 export interface PeerPairing {
   readonly alias: PeerAlias

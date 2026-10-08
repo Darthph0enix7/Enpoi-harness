@@ -55,7 +55,7 @@ set -o pipefail
 umask 022
 
 SCRIPT_NAME="dsh-install"
-SCRIPT_REVISION="2"
+SCRIPT_REVISION="3"
 
 # ── Distribution parameters (the public repo fills these) ───────────────────
 DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/enpoi-harness}"
@@ -1994,6 +1994,33 @@ apply_profile_ref_default() { # from_state(0|1) -> sets PROFILE_REF from $CHANNE
   return 0
 }
 
+# ── Fleet pairings generation ───────────────────────────────────────────────
+# `dsh update` owns device pairings: when the profile ships a fleet registry
+# (profile/<name>/fleet.yaml) and its generator, render $DSH_HOME/pairings.yaml
+# for this device so no file is hand-edited. The generator validates with the
+# peer package's own parser, keeps the previous document on any rejection, and
+# honors a first-line `# dsh-managed: false` opt-out. Fail-soft: a missing
+# generator or registry, an unknown local device, or a generator error leaves
+# the existing document untouched and never fails install/update.
+generate_peer_pairings() {
+  resolve_home
+  local script="$PROFILE_DIR/scripts/generate-pairings.mjs"
+  if [ ! -f "$script" ]; then
+    log "pairings: no fleet generator in $PROFILE_DIR; $DSH_HOME/pairings.yaml left untouched"
+    return 0
+  fi
+  if [ -z "$NODE" ]; then
+    warn "pairings: no Node.js available; $DSH_HOME/pairings.yaml left untouched"
+    return 0
+  fi
+  if run_limited 120 env "DSH_HARNESS=${HARNESS:-}" "$NODE" "$script"; then
+    log "pairings: fleet generator finished for $PROFILE_DIR (details above)"
+  else
+    warn "pairings: generator exited non-zero; $DSH_HOME/pairings.yaml left untouched"
+  fi
+  return 0
+}
+
 prepare_profile() {
   # An installer-recorded bundled source names the previous versioned tree.
   # The tree actually being installed/seeded ($HARNESS) carries the current
@@ -2009,7 +2036,7 @@ prepare_profile() {
       PROFILE_SOURCE="$HARNESS/profile/$PROFILE"
     fi
   fi
-  [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; return 0; }
+  [ -n "$PROFILE_SOURCE" ] || { log "profile source: none; shipped template only"; generate_peer_pairings; return 0; }
   local kind rc=0 mode=seed fresh=0
   kind="$(profile_source_kind "$PROFILE_SOURCE")"
   log "profile source: $PROFILE_SOURCE ($kind${PROFILE_REF:+ ref $PROFILE_REF})"
@@ -2033,6 +2060,7 @@ prepare_profile() {
       die "profile fetch failed: $PROFILE_SOURCE and $DSH_HOME/profiles/$PROFILE does not exist yet; refusing to fall back to the shipped upstream template. Fix the source, or pass --profile-source '' to seed it deliberately."
     fi
     warn "profile fetch failed: $PROFILE_SOURCE (continuing with the shipped template)"
+    generate_peer_pairings
     return 0
   fi
   resolve_home
@@ -2050,6 +2078,7 @@ prepare_profile() {
     PROFILE_SHIPPED_DIR=""
   fi
   rm -rf "$PROFILE_STAGE"; PROFILE_STAGE=""
+  generate_peer_pairings
   return 0
 }
 
@@ -2264,7 +2293,27 @@ restart_service() {
   log "service: restarting $SERVICE_UNIT"
   case "$OS" in
     linux) systemctl --user restart "$SERVICE_UNIT" || warn "service restart failed";;
-    darwin) launchctl kickstart -k "gui/$(id -u)/$SERVICE_UNIT" || warn "service restart failed";;
+    darwin)
+      # kickstart fails with `Could not find service ... in domain` when the
+      # unit file exists but was never loaded (or was unloaded since install).
+      # Load it first with the same probe/remedy the repair path uses; a
+      # headless/SSH-only Mac has no GUI domain, so the unit simply loads at
+      # the next desktop login and the update is not a failure.
+      local uid plist
+      uid="$(id -u)"
+      plist="$HOME/Library/LaunchAgents/$SERVICE_UNIT.plist"
+      if launchctl print "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1; then
+        launchctl kickstart -k "gui/$uid/$SERVICE_UNIT" || warn "service restart failed"
+      elif [ ! -f "$plist" ]; then
+        warn "service restart failed: launchd unit $SERVICE_UNIT is not loaded and $plist does not exist; run 'dsh service install'"
+      elif launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
+        log "service: $SERVICE_UNIT was not loaded; bootstrapped it"
+      elif launchctl print "gui/$uid" >/dev/null 2>&1; then
+        warn "service restart failed: launchctl bootstrap gui/$uid '$plist'"
+      else
+        log "service: no GUI login session for gui/$uid (headless or SSH-only Mac); $SERVICE_UNIT starts at the next desktop login"
+      fi
+      ;;
   esac
   return 0
 }
@@ -2691,7 +2740,7 @@ run_backfill() {
 backup_user_files() { # dir
   local b="$1" f rel d
   for f in "$DSH_HOME/settings.yaml" "$DSH_HOME/cordis.patch.yml" "$DSH_HOME/sync-local.yaml" \
-           "$DSH_HOME/heavy-server-overlay.json" \
+           "$DSH_HOME/heavy-server-overlay.json" "$DSH_HOME/pairings.yaml" \
            "$PROFILE_DIR/settings.yaml" "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/package.json" \
            "$PROFILE_DIR/pnpm-lock.yaml"; do
     [ -f "$f" ] || continue

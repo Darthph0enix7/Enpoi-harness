@@ -1,7 +1,9 @@
 /**
  * Pairing-file loading, strict validation, and created-session bindings.
  *
- * The pairing file (`~/.dsh/pairings.yaml`) is human-edited and only read; a
+ * The pairing file (`~/.dsh/pairings.yaml`) is rendered by `dsh update` from
+ * the profile fleet registry and only read here; a first-line
+ * `# dsh-managed: false` marker hands the document back to the operator. A
  * malformed document fails loud at the first load instead of degrading to an
  * empty table. Created-session bindings live in a separate machine-written
  * document (`~/.dsh/peer-state.json`, 0600, atomic replacement).
@@ -74,7 +76,7 @@ export interface LoadedPeerPairings {
  * keeps the previous valid snapshot in place until the file is corrected.
  */
 export class PeerPairingsStore {
-  /** Absolute pairing-file path (also the write target of `ds`-distributed config). */
+  /** Absolute pairing-file path; `dsh update` renders it from the profile fleet registry (`profile/web/scripts/generate-pairings.mjs`). */
   readonly pairingsPath: string
   /** Absolute created-session binding path owned exclusively by this module. */
   readonly bindingsPath: string

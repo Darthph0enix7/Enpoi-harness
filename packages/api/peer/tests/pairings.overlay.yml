@@ -1,0 +1,20 @@
+# Loader overlay for the fleet-pairings round-trip e2e
+# (`pairings-roundtrip.e2e.ts`): re-point the shipped `peer-api` row at the
+# generated pairing documents (same override as `peer.overlay.yml`), and
+# declare a minimal `orchestrator` preset so a peer create can name the
+# generated `create.agentPreset` on a profileless source boot. The row is
+# id-targeted config plus an insert, never a second `peer-api` registration —
+# a duplicate `peerService` provider fails the whole load.
+- id: peer-api
+  name: '@deepseek-ai/dsh-api-peer'
+  config:
+    pairingsPath: !!js process.env.DSH_PEER_TEST_PAIRINGS
+    bindingsPath: !!js process.env.DSH_PEER_TEST_BINDINGS
+    watchdogMs: 60000
+
+- insert:
+    - id: preset-orchestrator
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: orchestrator
+        plugins: []

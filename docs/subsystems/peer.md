@@ -30,7 +30,7 @@ The runtime constants are `PEER_PROTOCOL_VERSION = 1`, `DEFAULT_WATCHDOG_MS = 15
 
 ## Pairing model
 
-Two documents define the boundary. The human-edited pairing document (`~/.dsh/pairings.yaml`, 0600) describes this host's side of each link; created-session bindings live in a separate machine-written document (`~/.dsh/peer-state.json`, 0600, atomic replacement) that `peer.create` alone writes. `PeerPairingsStore.load()` re-reads the pairing file whenever its mtime or size changes; a reload that fails validation keeps the previous valid snapshot, a vanished file withdraws exposure (empty pairing table, device name falls back to the host name), and a malformed first load throws `PeerConfigError` rather than degrading to an empty table.
+Two documents define the boundary. The pairing document (`~/.dsh/pairings.yaml`, 0600) is rendered by `dsh update` from the profile fleet registry (`profile/web/fleet.yaml` through `profile/web/scripts/generate-pairings.mjs`); a first-line `# dsh-managed: false` marker hands the document back to the operator, and every other local edit is replaced on the next install or update. The document describes this host's side of each link; created-session bindings live in a separate machine-written document (`~/.dsh/peer-state.json`, 0600, atomic replacement) that `peer.create` alone writes. `PeerPairingsStore.load()` re-reads the pairing file whenever its mtime or size changes; a reload that fails validation keeps the previous valid snapshot, a vanished file withdraws exposure (empty pairing table, device name falls back to the host name), and a malformed first load throws `PeerConfigError` rather than degrading to an empty table.
 
 ```ts
 /**
@@ -61,6 +61,8 @@ type PeerExposure = 'answer-only' | 'debug'
 ```
 
 An alias resolves to the pairing's `sessionId`, or to the binding `peer.create` persisted under that alias; an explicit `sessionId` resolves through a pairing that names it directly or through any binding that does. The wire target carries no peer discriminator, so the loader rejects a repeated alias across entries (`peer pairings ... repeats alias`) — uniqueness is per host, not per peer.
+
+The fleet registry's alias convention follows from that host-side resolution: a pairing uses the same alias string in both devices' files, and that alias names the pairing's member device — the non-hub side. The live `serverlocal` file carries `alias: macbook`/`peer: macbook` and `alias: pc`/`peer: pc`; the member's own file carries the same alias string with `endpoint` pointing at the hub, so on a member the entry for the hub uses the member's own alias. The registry member named by the alias also supplies the entry's `exposure` and `create.agentPreset`, which keeps a member's serving defaults consistent wherever its alias is addressed.
 
 The one pairing entry shape hosts and peers share is `PeerPairing`; `create` is present exactly when peers may create or adopt a Session under the alias.
 
