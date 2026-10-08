@@ -58,9 +58,18 @@ describe('reasoning schema boundary', () => {
 })
 
 describe('modality schema boundary', () => {
-  it('rejects a modality pi-ai does not know, at either level', () => {
-    expect(configWith({ input: ['audio'] })).toThrow(/expected/)
-    expect(routeWith({ defaultInput: ['text', 'audio'] })).toThrow(/expected/)
+  it('accepts the harness modality vocabulary at either level', () => {
+    // models.dev publishes audio/video/pdf input; the stored entry keeps them
+    // so the sync does not discard what the provider catalog disclosed.
+    expect(configWith({ input: ['text', 'image', 'audio', 'video', 'pdf'] })).not.toThrow()
+    expect(routeWith({ defaultInput: ['text', 'audio'] })).not.toThrow()
+  })
+
+  it('keeps existing text|image data valid and rejects a token outside the vocabulary', () => {
+    expect(configWith({ input: ['text', 'image'] })).not.toThrow()
+    expect(routeWith({ defaultInput: ['text', 'image'] })).not.toThrow()
+    expect(configWith({ input: ['hologram'] })).toThrow(/expected/)
+    expect(routeWith({ defaultInput: ['text', 'hologram'] })).toThrow(/expected/)
   })
 
   it('refuses a route whose models could accept nothing', () => {
@@ -82,6 +91,22 @@ describe('modality schema boundary', () => {
     const absent = configWith({})() as Materialized
     expect(absent.providers['acme-gateway']?.models?.[0]?.input).toEqual([])
     expect(absent.providers['acme-gateway']?.defaultInput).toEqual(['text'])
+  })
+})
+
+describe('synced display tags', () => {
+  it('passes models.dev release dates and price tiers through the entry schema', () => {
+    type Materialized = { providers: Record<string, { models?: Record<string, unknown>[] }> }
+    const materialized = configWith({
+      releaseDate: '2026-05-21',
+      costTiers: [{ inputTokensAbove: 200_000, input: 4, output: 24 }],
+    })() as Materialized
+    // The sync writes these beside the request-relevant fields; the schema
+    // must keep them, because the Models page renders its markers from them.
+    expect(materialized.providers['acme-gateway']?.models?.[0]).toMatchObject({
+      releaseDate: '2026-05-21',
+      costTiers: [{ inputTokensAbove: 200_000, input: 4, output: 24 }],
+    })
   })
 })
 

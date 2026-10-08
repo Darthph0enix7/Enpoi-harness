@@ -17,6 +17,45 @@ interface CapacityInput {
   onBlur?: () => void
 }
 
+/** Days after a model's release date during which the row reads as new. */
+const NEW_MODEL_WINDOW_DAYS = 90
+
+/** Milliseconds in one day. */
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Whether the row's models.dev release date falls inside the new-model window.
+ * A missing or unreadable date never reads as new, and a future date does not
+ * either — it is not a release that happened.
+ * @param model - the drafted row.
+ * @returns whether the "new" marker shows.
+ */
+function isNewModel(model: DeepSeekModelDraft): boolean {
+  const released = model['releaseDate']
+  if (typeof released !== 'string') return false
+  const at = Date.parse(`${released}T00:00:00Z`)
+  if (Number.isNaN(at)) return false
+  const age = Date.now() - at
+  return age >= 0 && age <= NEW_MODEL_WINDOW_DAYS * DAY_MS
+}
+
+/**
+ * Whether the row carries a request-wide price tier at or above 200K context
+ * tokens, which is how models.dev publishes the higher price a model charges
+ * for large requests.
+ * @param model - the drafted row.
+ * @returns whether the usage-tier marker shows.
+ */
+function hasUsageTier(model: DeepSeekModelDraft): boolean {
+  const tiers = model['costTiers']
+  if (!Array.isArray(tiers)) return false
+  return tiers.some((tier) => {
+    if (tier === null || typeof tier !== 'object') return false
+    const above = (tier as { inputTokensAbove?: unknown }).inputTokensAbove
+    return typeof above === 'number' && above >= 200_000
+  })
+}
+
 /** Adapter-owned data and actions for one model row. */
 interface ModelRowProps {
   model: DeepSeekModelDraft
@@ -45,7 +84,11 @@ export function ModelRow(props: ModelRowProps): ReactNode {
   const { model, position, t, disabled } = props
   return (
     <div className={styles['modelEntry']}>
-      <div className={styles['modelRow']}>
+      <div
+        className={styles['modelRow']}
+        data-release-date={typeof model['releaseDate'] === 'string' ? model['releaseDate'] : undefined}
+        data-cost-tiers={Array.isArray(model['costTiers']) ? JSON.stringify(model['costTiers']) : undefined}
+      >
         {(['id', 'name'] as const).map(field => (
           <input
             key={field}
@@ -62,6 +105,22 @@ export function ModelRow(props: ModelRowProps): ReactNode {
             onBlur={field === 'id' ? event => props.onIdBlur?.(event.target.value) : undefined}
           />
         ))}
+        <span className={styles['modelBadges']}>
+          {isNewModel(model)
+            ? <span className={styles['modelBadge']} data-model-badge="new">{t('modelNewBadge')}</span>
+            : null}
+          {hasUsageTier(model)
+            ? (
+              <span
+                className={styles['modelBadge']}
+                data-model-badge="usage-tier"
+                title={t('modelTieredPricingHint')}
+              >
+                {t('modelTieredPricingBadge')}
+              </span>
+            )
+            : null}
+        </span>
         <button
           type="button"
           className={styles['iconButton']}

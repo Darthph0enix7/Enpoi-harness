@@ -250,6 +250,39 @@ describe('model discovery registry', () => {
     ])
   })
 
+  it('carries disclosed fields beyond the shared vocabulary through the boundary', async () => {
+    const ctx = await setup()
+    // A discovery implementation may disclose capability fields the shared
+    // LlmDiscoveredModel does not name yet; the boundary dedupes, never
+    // redacts, so the configuration surface can adopt what it can express.
+    ctx.llm.registerModelDiscovery('llm-example', () => Promise.resolve([
+      {
+        id: 'rich',
+        name: 'Rich',
+        tools: true,
+        reasoning: true,
+        cost: { input: 1, output: 2 },
+        gated: true,
+        gateReason: 'sign-in required',
+        inputModalities: ['text', 'image'],
+      },
+      { id: 'rich', name: 'Duplicate' },
+    ] as never))
+
+    expect(await ctx.llm.discoverModels('llm-example', { baseURL: 'https://gateway.example/v1' })).toEqual([
+      {
+        id: 'rich',
+        name: 'Rich',
+        tools: true,
+        reasoning: true,
+        cost: { input: 1, output: 2 },
+        gated: true,
+        gateReason: 'sign-in required',
+        inputModalities: ['text', 'image'],
+      },
+    ])
+  })
+
   it('carries cancellation into Remote discovery and maps provider failures', async () => {
     const ctx = await setup()
     const discover = vi.fn()

@@ -60,8 +60,54 @@ function parseModelIds(text: string): string[] {
 /** One endpoint-interrogation answer at the modal's own boundary. */
 type DiscoveryAnswer = { models: readonly { id: string }[] } | { message: string }
 
-/** One model row the discovery endpoint reports for a route. */
-type DiscoveredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+/**
+ * One model row the discovery endpoint reports for a route. The shared wire
+ * type names the minimum; a discovery may disclose capabilities beyond it
+ * (modalities, tools, reasoning, price, gate markers), and adoption carries
+ * what the stored profile can express instead of dropping it.
+ */
+type DiscoveredModel = {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+  inputModalities?: readonly string[]
+  reasoning?: boolean | object
+  reasoningEfforts?: Record<string, unknown>
+  supported_parameters?: string[]
+  tools?: boolean
+  cost?: unknown
+  gated?: boolean
+  gateReason?: string
+  isFree?: boolean
+}
+
+/**
+ * One discovered model as the stored profile carries it. A field the discovery
+ * did not disclose stays out; a gate reason rides its gate. The settings
+ * schema tolerates the capability keys the profile type does not enumerate —
+ * the provider sync writes the same ones.
+ * @param model - one row of a discovery answer.
+ * @returns the settings `models` entry for that row.
+ */
+function adoptedModel(model: DiscoveredModel): Record<string, unknown> {
+  return {
+    id: model.id,
+    ...model.name !== undefined && model.name !== model.id ? { name: model.name } : {},
+    ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+    ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+    ...model.inputModalities === undefined || model.inputModalities.length === 0
+      ? {} : { input: [...model.inputModalities] },
+    ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
+    ...model.reasoningEfforts === undefined ? {} : { reasoningEfforts: model.reasoningEfforts },
+    ...model.supported_parameters === undefined ? {} : { supported_parameters: model.supported_parameters },
+    ...model.tools === undefined ? {} : { tools: model.tools },
+    ...model.cost === undefined ? {} : { cost: model.cost },
+    ...model.gated === true ? { gated: true } : {},
+    ...model.gated === true && model.gateReason !== undefined ? { gateReason: model.gateReason } : {},
+    ...model.isFree === undefined ? {} : { isFree: model.isFree },
+  }
+}
 
 export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const { open, taken, protocols, api, t, readOnly, onClose } = props
@@ -297,12 +343,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
 
   /** Persist discovered models onto the stored route. */
   const storeDiscovered = async (id: string, models: readonly DiscoveredModel[]): Promise<boolean> => {
-    const value = models.map(model => ({
-      id: model.id,
-      ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
-      ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
-      ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
-    }))
+    const value = models.map(adoptedModel)
     const res = await api.settings.mutate(
       'llm-pi-ai',
       [{ op: 'set', path: ['providers', id, 'models'], value: value as unknown as JsonValue }],
@@ -331,12 +372,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         : cleanKey.length > 0 ? { apiKeyEnv: deriveKeyRef(id) } : {},
       ...needsPlaceholderModel ? { models: [{ id: 'auto' }] } : {},
       ...modelIds.length > 0 ? { models: modelIds.map(modelId => ({ id: modelId })) } : {},
-      ...discovered !== undefined ? { models: discovered.map(model => ({
-        id: model.id,
-        ...(model.name !== undefined && model.name !== model.id ? { name: model.name } : {}),
-        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
-        ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
-      })) } : {},
+      ...discovered !== undefined ? { models: discovered.map(adoptedModel) } : {},
     }
   }
 

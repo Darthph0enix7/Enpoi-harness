@@ -465,9 +465,30 @@
 
 .modelRow {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
+}
+
+/* Provider-tag markers (release freshness, tiered usage): compact pills that
+   never displace the identity inputs, empty and zero-width without a marker. */
+.modelBadges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.modelBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* Square, label-free affordances: the row's own inputs carry the meaning, so

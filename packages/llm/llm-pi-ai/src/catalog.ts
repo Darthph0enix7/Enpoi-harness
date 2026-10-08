@@ -14,6 +14,7 @@
 
 import { builtinProviders, getBuiltinModels, getBuiltinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { BuiltinProvider } from '@earendil-works/pi-ai/providers/all'
+import type { ModelModality } from '@deepseek-ai/dsh-llm'
 import type { DiscoveredModelRecord } from './discovered.ts'
 import type {
   AnthropicMessagesCompat,
@@ -37,21 +38,54 @@ import type {
  */
 const NO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
-/** One request modality a pi-ai model may accept. */
-export type PiAiModality = Model<Api>['input'][number]
-
 /**
- * Every pi-ai request modality. The `Record` key type is a drift gate: a pi-ai
- * upgrade that adds or removes a modality fails compilation here naming the
- * drifted key, instead of silently narrowing what a profile may declare.
+ * pi-ai's own request modalities. The `Record` key type is the upstream drift
+ * gate: a pi-ai upgrade that adds or removes a wire modality fails compilation
+ * here naming the drifted key, instead of silently changing what can reach a
+ * request.
  */
-const MODALITY_GATE: Record<PiAiModality, true> = {
+const PI_AI_WIRE_MODALITY_GATE: Record<Model<Api>['input'][number], true> = {
   text: true,
   image: true,
 }
 
+/** Every modality pi-ai's request type can carry. */
+const PI_AI_WIRE_MODALITIES = Object.keys(PI_AI_WIRE_MODALITY_GATE) as readonly Model<Api>['input'][number][]
+
+/**
+ * Every request modality a profile may declare: pi-ai's wire modalities plus
+ * the disclosure-side tokens provider catalogs publish (`audio`, `video`,
+ * `pdf` — models.dev's vocabulary, carried by {@link ModelModality}). The
+ * `Record` key type is a drift gate: a pi-ai upgrade that adds or removes a
+ * wire modality fails compilation here naming the drifted key, instead of
+ * silently narrowing what a profile may declare.
+ */
+export type PiAiModality = Model<Api>['input'][number] | ModelModality
+
+/** Every request modality a profile may declare. */
+const MODALITY_GATE: Record<PiAiModality, true> = {
+  ...PI_AI_WIRE_MODALITY_GATE,
+  audio: true,
+  video: true,
+  pdf: true,
+}
+
 /** Every request modality a profile may declare. */
 export const MODALITIES = Object.keys(MODALITY_GATE) as readonly PiAiModality[]
+
+/**
+ * Narrow declared modalities to the wire tokens pi-ai's request type carries.
+ * A declaration naming only disclosure-side tokens (`audio`, `video`, `pdf`)
+ * still takes text — the floor every supported protocol carries — while the
+ * declared list itself stays stored in configuration and the discovered cache.
+ * @param modalities - the declared modalities.
+ * @returns the request input list pi-ai's model type accepts.
+ */
+function wireInput(modalities: readonly PiAiModality[]): Model<Api>['input'] {
+  const wire = modalities.filter((modality): modality is Model<Api>['input'][number] =>
+    PI_AI_WIRE_MODALITIES.some(wireModality => wireModality === modality))
+  return wire.length > 0 ? wire : ['text']
+}
 
 /**
  * One entry's modality list, or `undefined` when it states no answer. Absent
@@ -62,7 +96,7 @@ export const MODALITIES = Object.keys(MODALITY_GATE) as readonly PiAiModality[]
  * @param configured - the list a `models` or `modelOverrides` entry supplied.
  * @returns the declared modalities, or `undefined` to ask the next level.
  */
-function declaredInput(configured: readonly PiAiModality[] | undefined): Model<Api>['input'] | undefined {
+function declaredInput(configured: readonly PiAiModality[] | undefined): PiAiModality[] | undefined {
   return configured === undefined || configured.length === 0 ? undefined : [...configured]
 }
 
@@ -592,10 +626,13 @@ export interface PiAiModelProfile {
    * installed catalog entry's modalities, then the route's `defaultInput`.
    * Declaring images is what makes a hand-declared vision model usable, and
    * declaring text alone corrects a catalog model whose gateway does not serve
-   * what the catalog records. This is a claim about the endpoint, not a check
-   * of it: nothing interrogates a gateway for what it accepts, so a model
-   * claiming images its endpoint refuses is refused by the provider instead,
-   * mid-turn.
+   * what the catalog records. The vocabulary also carries the disclosure-side
+   * tokens `audio`, `video`, and `pdf`, which provider catalogs report and
+   * pi-ai's request type cannot express: those stay stored here and in the
+   * discovered cache, while the materialized pi-ai model carries only the wire
+   * modalities. This is a claim about the endpoint, not a check of it: nothing
+   * interrogates a gateway for what it accepts, so a model claiming images its
+   * endpoint refuses is refused by the provider instead, mid-turn.
    */
   input?: PiAiModality[]
   /**
@@ -646,7 +683,7 @@ export interface RouteCatalogRequest {
   /** Output capability for a model neither the entry nor the catalog sizes. */
   defaultMaxTokens: number
   /** Modalities for a model neither the entry nor the catalog declares. */
-  defaultInput: Model<Api>['input']
+  defaultInput: readonly PiAiModality[]
 }
 
 /** An expected configuration failure that stored-catalog reads may retain for repair. */
@@ -952,7 +989,7 @@ export function resolveRouteModels(
       api,
       provider,
       baseUrl,
-      input: declaredInput(entry.input) ?? base?.input ?? [...request.defaultInput],
+      input: wireInput(declaredInput(entry.input) ?? base?.input ?? request.defaultInput),
       cost: base?.cost ?? NO_COST,
       contextWindow,
       maxTokens,

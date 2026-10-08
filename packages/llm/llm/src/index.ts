@@ -896,11 +896,12 @@ export class LlmRuntime extends TypertRemoteService {
     for (const model of discovered) {
       if (typeof model.id !== 'string' || model.id.length === 0 || seen.has(model.id)) continue
       seen.add(model.id)
+      // Spread, never enumerate: an adapter may disclose fields this build's
+      // LlmDiscoveredModel does not name yet (tools, reasoning, cost, gated),
+      // and the configuration surface adopts what it can express. The boundary
+      // dedupes and detaches the modality list; it does not redact.
       models.push({
-        id: model.id,
-        ...model.name === undefined ? {} : { name: model.name },
-        ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-        ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+        ...model,
         ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] },
       })
     }

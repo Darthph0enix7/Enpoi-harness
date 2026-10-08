@@ -70,6 +70,15 @@ describe('enpoi-catalog-rules predicates', () => {
     expect(evaluatePredicate(unknownContext, { minContextWindow: 1 }, 'unknown').matched).toBe(false)
   })
 
+  it('matches the disclosure-side modality clauses', () => {
+    const omni = entry({ provider: 'p', id: 'omni', input: ['text', 'image', 'audio', 'video', 'pdf'] })
+    expect(evaluatePredicate(omni, { audio: true, video: true, pdf: true }, 'unknown').matched).toBe(true)
+    expect(evaluatePredicate(omni, { audio: false }, 'unknown')).toEqual({ matched: false, failed: 'no audio' })
+    const textOnly = entry({ provider: 'p', id: 'text-only', input: ['text'] })
+    expect(evaluatePredicate(textOnly, { audio: true }, 'unknown')).toEqual({ matched: false, failed: 'audio' })
+    expect(evaluatePredicate(textOnly, { audio: false, video: false, pdf: false }, 'unknown').matched).toBe(true)
+  })
+
   it('matches provider ids, globs, and refuses an empty predicate', () => {
     const target = entry({ provider: 'opencode-go', id: 'qwen3.8-2.4t-a95b', name: 'Qwen 3.8 2.4T' })
     expect(evaluatePredicate(target, { provider: 'opencode-go' }, 'unknown').matched).toBe(true)
@@ -85,6 +94,7 @@ describe('enpoi-catalog-rules predicates', () => {
   it('describes predicates for reasons, including zero-price', () => {
     expect(describePredicate({ zeroPrice: true })).toBe('zero-price')
     expect(describePredicate({ tools: true, minContextWindow: 32_768 })).toBe('tool-calling + context ≥ 32768')
+    expect(describePredicate({ audio: true, video: true, pdf: true })).toBe('audio + video + pdf')
     expect(describePredicate({})).toBe('empty predicate')
   })
 })

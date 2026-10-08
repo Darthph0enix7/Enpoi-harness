@@ -1,8 +1,8 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
-import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Config } from '../src/index.ts'
@@ -19,6 +19,8 @@ import {
   mergeDiscoveredRoute,
   modelListingRequest,
   modelsDevCachePath,
+  modelsDevCostTiers,
+  modelsDevReleaseDate,
   normalizeListingEntry,
   osCacheDir,
   refreshModelsDevOnline,
@@ -93,6 +95,16 @@ describe('listing normalization', () => {
     expect(live[1]).toEqual({ id: 'zzz-mystery-endpoint-model-77' })
     expect(normalizeListingEntry({ id: 'x', supported_parameters: ['temperature'] }))
       .toMatchObject({ id: 'x', tools: false, reasoning: false })
+  })
+
+  it('maps the full modality vocabulary from a listing and drops unknown tokens', () => {
+    expect(normalizeListingEntry({
+      id: 'omni',
+      architecture: { input_modalities: ['text', 'image', 'audio', 'video', 'pdf', 'file'] },
+    })?.input).toEqual(['text', 'image', 'audio', 'video', 'pdf'])
+    // `vision` is the one alias mapped; an unrecognized token is not guessed at.
+    expect(normalizeListingEntry({ id: 'v', input_modalities: ['vision'] })?.input).toEqual(['image'])
+    expect(normalizeListingEntry({ id: 'u', input_modalities: ['file'] })).toEqual({ id: 'u' })
   })
 
   it('marks a listing-marked non-free model gated with the sign-in reason', () => {
@@ -519,6 +531,79 @@ describe('route passes', () => {
       expect(harness.mutations[1]!.ops[0]!.value.map(model => model.id)).toEqual(['zzz-commandcode-model-c'])
     } finally {
       harness.dispose()
+    }
+  })
+})
+
+describe('models.dev display tags', () => {
+  it('accepts published release dates and normalizes the price tiers', () => {
+    expect(modelsDevReleaseDate('2026-05-21')).toBe('2026-05-21')
+    expect(modelsDevReleaseDate('2026-5-1')).toBeUndefined()
+    expect(modelsDevReleaseDate('not-a-date')).toBeUndefined()
+    expect(modelsDevReleaseDate(20260521)).toBeUndefined()
+
+    expect(modelsDevCostTiers({
+      input: 2,
+      output: 12,
+      tiers: [
+        { input: 3, output: 18, tier: { type: 'context', size: 128_000 } },
+        { input: 9, tier: { size: 0 } },
+        { input: 5, output: 'free', tier: { size: 64_000 } },
+      ],
+      context_over_200k: { input: 4, output: 24 },
+    })).toEqual([
+      { inputTokensAbove: 64_000, input: 5 },
+      { inputTokensAbove: 128_000, input: 3, output: 18 },
+      { inputTokensAbove: 200_000, input: 4, output: 24 },
+    ])
+    // The named 200K tier is not duplicated when `tiers` already carries it.
+    expect(modelsDevCostTiers({ tiers: [{ input: 4, tier: { size: 200_000 } }], context_over_200k: { input: 4 } }))
+      .toEqual([{ inputTokensAbove: 200_000, input: 4 }])
+    expect(modelsDevCostTiers({ input: 2 })).toBeUndefined()
+    expect(modelsDevCostTiers(undefined)).toBeUndefined()
+  })
+
+  it('carries release dates and cost tiers into the settings and discovered entries', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-models-dev-'))
+    directories.push(directory)
+    const cache = join(directory, 'opencode', 'models.json')
+    mkdirSync(dirname(cache), { recursive: true })
+    writeFileSync(cache, JSON.stringify({
+      'zzz-provider': {
+        id: 'zzz-provider',
+        models: {
+          'zzz-tagged-model': {
+            id: 'zzz-tagged-model',
+            name: 'Tagged Model',
+            release_date: '2026-05-21',
+            modalities: { input: ['text', 'image', 'audio', 'video', 'pdf', 'hologram'] },
+            cost: { input: 2, output: 12, context_over_200k: { input: 4, output: 24 } },
+          },
+        },
+      },
+    }))
+    const previous = process.env.XDG_CACHE_HOME
+    process.env.XDG_CACHE_HOME = directory
+    try {
+      // A fresh module copy, so the memoized models.dev database is the one
+      // written above rather than whatever the host machine has cached.
+      vi.resetModules()
+      const fresh = await import('../src/index.ts')
+      const settings = fresh.mergeConfiguredModels('zzz-provider', undefined, [{ id: 'zzz-tagged-model' }], undefined)
+      expect(settings.models[0]).toMatchObject({
+        id: 'zzz-tagged-model',
+        input: ['text', 'image', 'audio', 'video', 'pdf'],
+        releaseDate: '2026-05-21',
+        costTiers: [{ inputTokensAbove: 200_000, input: 4, output: 24 }],
+      })
+      const [discovered] = fresh.mergeDiscoveredModels('zzz-provider', [{ id: 'zzz-tagged-model' }], undefined)
+      expect(discovered).toMatchObject({
+        releaseDate: '2026-05-21',
+        costTiers: [{ inputTokensAbove: 200_000, input: 4, output: 24 }],
+      })
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(process.env, 'XDG_CACHE_HOME')
+      else process.env.XDG_CACHE_HOME = previous
     }
   })
 })

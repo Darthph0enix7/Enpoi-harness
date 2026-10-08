@@ -2,9 +2,9 @@
 /** The detail panel's local picker state survives settings echoes. */
 import type { ReactElement } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
-import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
+import { ProviderDetailPanel, mergeRefreshedModels } from '../src/client/ProviderDetailPanel.tsx'
 import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '../src/client/model-visibility.ts'
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
@@ -40,6 +40,14 @@ function pool(strategy: string) {
 type TestModel = {
   id: string
   name?: string
+  contextWindow?: number
+  maxTokens?: number
+  reasoning?: boolean | Record<string, string>
+  reasoningEfforts?: Record<string, string | null>
+  supported_parameters?: string[]
+  tools?: boolean
+  cost?: Record<string, number>
+  input?: string[]
   isFree?: boolean
   gated?: boolean
   gateReason?: string
@@ -50,6 +58,7 @@ function namespace(
   provider: string,
   models: TestModel[],
   stored?: { strategy?: string; identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }> },
+  defaults?: { defaultContextWindow?: number; defaultMaxTokens?: number },
 ): SettingsNamespaceView {
   const profile = {
     displayName: provider,
@@ -57,6 +66,7 @@ function namespace(
     api: 'openai-completions',
     models,
     ...stored === undefined ? {} : { pool: stored },
+    ...defaults ?? {},
   }
   return {
     ns: 'llm-pi-ai',
@@ -313,7 +323,7 @@ it('auto-populates a healthy heavy route with no models, without a Refresh click
   expect(ops[0]?.value.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
 })
 
-it('the automatic pass replaces a stale fabricated fallback row with the discovered catalog', async () => {
+it('the automatic pass keeps a configured id the discovered catalog does not advertise', async () => {
   stubHeavyFetch()
   const discoverModels = vi.fn(async () => ({
     ok: true as const,
@@ -343,8 +353,9 @@ it('the automatic pass replaces a stale fabricated fallback row with the discove
   await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
   await waitFor(() => { expect(mutate).toHaveBeenCalled() })
   const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
-  // Discovery replaces the whole list: the stale id is pruned, not kept.
-  expect(ops[0]?.value.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
+  // Discovery merges, never replaces: the configured id stays ahead of the
+  // newly advertised one.
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['gemini-2.5-flash', 'gemini-3.1-pro-high'])
 })
 
 it('an automatic heavy refresh failure stays silent; the manual path still reports it', async () => {
@@ -377,4 +388,254 @@ it('an automatic heavy refresh failure stays silent; the manual path still repor
   expect(screen.queryByText(/Refresh failed/)).toBeNull()
   fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
   await waitFor(() => { expect(screen.getByText(/Refresh failed: No accounts available/)).toBeTruthy() })
+})
+
+it('Refresh merges the answer into settings without deleting or stripping configured models', async () => {
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [
+      // Re-listed bare: every configured per-id field must survive.
+      { id: 'configured' },
+      // Newly advertised: appended after the configured rows.
+      { id: 'advertised', name: 'Advertised', inputModalities: ['text', 'image'] },
+    ],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [
+        {
+          id: 'configured',
+          name: 'Hand Name',
+          contextWindow: 111_111,
+          maxTokens: 2_222,
+          reasoning: true,
+          tools: true,
+          input: ['text', 'image'],
+        },
+        { id: 'retired', name: 'Retired', contextWindow: 9_999 },
+      ])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: TestModel[] }>]
+  expect(ops[0]?.path).toEqual(['providers', 'gateway', 'models'])
+  expect(ops[0]?.value).toEqual([
+    // The advertised-but-bare id keeps its configured fields untouched.
+    {
+      id: 'configured',
+      name: 'Hand Name',
+      contextWindow: 111_111,
+      maxTokens: 2_222,
+      reasoning: true,
+      tools: true,
+      input: ['text', 'image'],
+    },
+    // The configured id the answer omitted stays exactly as configured.
+    { id: 'retired', name: 'Retired', contextWindow: 9_999 },
+    // The newly advertised id carries what the answer disclosed.
+    { id: 'advertised', name: 'Advertised', input: ['text', 'image'] },
+  ])
+})
+
+it('Refresh sizes a newly advertised id from the route profile capacity defaults', async () => {
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'fresh' }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [], undefined, { defaultContextWindow: 1_000_000, defaultMaxTokens: 16_384 })}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: TestModel[] }>]
+  // The panel never invents 131072/8192: an undisclosed capacity takes the
+  // route's configured default, and nothing else.
+  expect(ops[0]?.value).toEqual([{ id: 'fresh', name: 'fresh', contextWindow: 1_000_000, maxTokens: 16_384 }])
+})
+
+it('recognizes the current audio, video, and reasoning families by id when no structured data exists', () => {
+  render(panel('gateway', [
+    { id: 'xiaomi/mimo-v2.6-pro' },
+    { id: 'xiaomi/mimo-v2.5' },
+    { id: 'meta/muse-spark-1.2-contributor' },
+    { id: 'meta/muse-spark-1.3-contributor' },
+    { id: 'space-bunny-preview' },
+    { id: 'openai/gpt-6-astra' },
+    { id: 'moonshotai/kimi-k2.6' },
+    { id: 'x-ai/grok-4.6' },
+    { id: 'qwen/qwen3.8-max' },
+    { id: 'z-ai/glm-4.7' },
+    { id: 'tencent/hy3-preview' },
+    { id: 'tencent/hy4-preview' },
+    { id: 'meituan/longcat-2.0' },
+    { id: 'minimax-m2.7' },
+    { id: 'omen-alpha' },
+  ]))
+
+  // Audio: the mimo v2.6/v2.5 and muse-spark contributor families, plus the
+  // already-covered minimax-m2.7.
+  expect(screen.getAllByTitle('Audio Processing')).toHaveLength(5)
+  // Video: the space-bunny family, plus the already-covered minimax-m2.7.
+  expect(screen.getAllByTitle('Video Processing')).toHaveLength(2)
+  // Reasoning: every listed family but space-bunny (14 of 15 rows).
+  expect(screen.getAllByTitle('Reasoning / Thinking')).toHaveLength(14)
+})
+
+describe('mergeRefreshedModels', () => {
+  it('accepts only positive integer capacity defaults', () => {
+    const configured: TestModel[] = [{ id: 'm' }]
+    const discovered = [{ id: 'm' }]
+    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 0, maxTokens: 'none' })[0])
+      .toEqual({ id: 'm', name: 'm' })
+    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 1.5 })[0])
+      .toEqual({ id: 'm', name: 'm' })
+    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 1_000, maxTokens: 2_000 })[0])
+      .toEqual({ id: 'm', name: 'm', contextWindow: 1_000, maxTokens: 2_000 })
+  })
+
+  it('keeps entries without a usable id and collapses duplicate ids', () => {
+    const merged = mergeRefreshedModels(
+      [{ id: '' }, { id: undefined as unknown as string }, { id: 'dup', name: 'First' }, { id: 'dup', name: 'Second' }],
+      [{ id: 'dup', name: 'Fresh' }, { id: 'dup', name: 'Fresh again' }, { id: 'new' }],
+    )
+    expect(merged.map(model => model.id)).toEqual(['', undefined, 'dup', 'new'])
+    // The first answer for a duplicate id is the one that refreshes.
+    expect(merged[2]).toEqual({ id: 'dup', name: 'Fresh' })
+  })
+
+  it('refreshes an advertised id in place and preserves per-id fields the answer omits', () => {
+    const configured: TestModel[] = [
+      { id: 'a', name: 'Hand', contextWindow: 111, maxTokens: 22, reasoning: true, tools: true, input: ['text', 'image'] },
+      { id: 'b', name: 'Bee', contextWindow: 333 },
+      { id: 'c', name: 'Cee' },
+      { id: 'd' },
+      { id: 'e', name: 'Eee', contextWindow: 555, maxTokens: 66 },
+      { id: 'f', name: 'Eff', contextWindow: 777 },
+    ]
+    const discovered = [
+      // A name echoing the id keeps the configured name; nothing else disclosed.
+      { id: 'a', name: 'a' },
+      // A rich disclosure refreshes in place, gaps and all.
+      {
+        id: 'b',
+        name: 'Bee Live',
+        contextWindow: 444,
+        maxTokens: 55,
+        inputModalities: ['text', 'image', 'audio'],
+        reasoning: false,
+        reasoningEfforts: { high: 'high' },
+        supported_parameters: ['tools'],
+        tools: false,
+        cost: { input: 1 },
+        gated: true,
+        gateReason: 'sign-in required',
+        isFree: false,
+      },
+      // A nameless answer keeps the configured name; capacities stay configured.
+      { id: 'c' },
+      // No configured name and no answer name: the id is the label.
+      { id: 'd' },
+      // An empty modality list states no answer.
+      { id: 'e', inputModalities: [] },
+      // A gate without a reason is still a gate.
+      { id: 'f', gated: true },
+    ]
+
+    expect(mergeRefreshedModels(configured, discovered)).toEqual([
+      { id: 'a', name: 'Hand', contextWindow: 111, maxTokens: 22, reasoning: true, tools: true, input: ['text', 'image'] },
+      {
+        id: 'b',
+        name: 'Bee Live',
+        contextWindow: 444,
+        maxTokens: 55,
+        input: ['text', 'image', 'audio'],
+        reasoning: false,
+        reasoningEfforts: { high: 'high' },
+        supported_parameters: ['tools'],
+        tools: false,
+        cost: { input: 1 },
+        gated: true,
+        gateReason: 'sign-in required',
+        isFree: false,
+      },
+      { id: 'c', name: 'Cee' },
+      { id: 'd', name: 'd' },
+      { id: 'e', name: 'Eee', contextWindow: 555, maxTokens: 66 },
+      { id: 'f', name: 'Eff', contextWindow: 777, gated: true },
+    ])
+  })
+
+  it('appends an advertised id the configuration does not name, carrying what it disclosed', () => {
+    const merged = mergeRefreshedModels(
+      [{ id: 'kept' }],
+      [
+        // A real label, capacities, modalities, and a gate reason.
+        {
+          id: 'g',
+          name: 'Gee',
+          contextWindow: 4_000,
+          maxTokens: 500,
+          inputModalities: ['text', 'pdf'],
+          tools: true,
+          gated: true,
+          gateReason: 'sign-in required',
+        },
+        // A name echoing the id is not a label; an empty modality list is not a claim.
+        { id: 'h', name: 'h', inputModalities: [] },
+        // Nothing but an id: no capacities and no capabilities are invented.
+        { id: 'i' },
+      ],
+      { contextWindow: 9_000, maxTokens: 900 },
+    )
+
+    expect(merged).toEqual([
+      { id: 'kept' },
+      {
+        id: 'g',
+        name: 'Gee',
+        contextWindow: 4_000,
+        maxTokens: 500,
+        input: ['text', 'pdf'],
+        tools: true,
+        gated: true,
+        gateReason: 'sign-in required',
+      },
+      // The route defaults size the rows the answer left unsized.
+      { id: 'h', name: 'h', contextWindow: 9_000, maxTokens: 900 },
+      { id: 'i', name: 'i', contextWindow: 9_000, maxTokens: 900 },
+    ])
+  })
 })

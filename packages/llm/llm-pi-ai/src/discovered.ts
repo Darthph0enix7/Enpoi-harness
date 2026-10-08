@@ -36,6 +36,8 @@
  *           "isFree": false,
  *           "gated": true,
  *           "gateReason": "sign-in required",
+ *           "releaseDate": "2026-05-21",
+ *           "costTiers": [{ "inputTokensAbove": 200000, "input": 4, "output": 18 }],
  *           "source": "discovered",
  *           "discoveredAt": 1790000000000
  *         }
@@ -56,9 +58,21 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { MODALITIES } from './catalog.ts'
+import type { PiAiModality } from './catalog.ts'
 
 /** Cache format version; a file stamped otherwise is ignored rather than guessed at. */
 export const DISCOVERED_CACHE_VERSION = 1
+
+/** One request-wide price tier above an input-token threshold, as models.dev publishes it. */
+export interface DiscoveredCostTier {
+  /** Input tokens above which this tier prices the whole request. */
+  readonly inputTokensAbove: number
+  /** Tier input price per million tokens, when disclosed. */
+  readonly input?: number | undefined
+  /** Tier output price per million tokens, when disclosed. */
+  readonly output?: number | undefined
+}
 
 /** One model an endpoint advertised, normalized and provenanced. */
 export interface DiscoveredModelRecord {
@@ -70,8 +84,13 @@ export interface DiscoveredModelRecord {
   readonly contextWindow?: number | undefined
   /** Maximum output tokens, when disclosed. */
   readonly maxTokens?: number | undefined
-  /** Accepted input types; absent means undisclosed, never "text only" as a claim. */
-  readonly input?: readonly ('text' | 'image')[] | undefined
+  /**
+   * Accepted input types; absent means undisclosed, never "text only" as a
+   * claim. Carries the full declared vocabulary — the disclosure-side tokens
+   * `audio`, `video`, and `pdf` are stored even though pi-ai's request type
+   * cannot express them.
+   */
+  readonly input?: readonly PiAiModality[] | undefined
   /** Whether the endpoint advertised tool calling; absent means undisclosed. */
   readonly tools?: boolean | undefined
   /** Whether the endpoint advertised reasoning; absent means undisclosed. */
@@ -89,6 +108,10 @@ export interface DiscoveredModelRecord {
   readonly gated?: boolean | undefined
   /** The picker-facing reason a gated model is unavailable; absent when not gated. */
   readonly gateReason?: string | undefined
+  /** models.dev's release date (`YYYY-MM-DD`), when disclosed. */
+  readonly releaseDate?: string | undefined
+  /** Request-wide price tiers above an input-token threshold, when models.dev disclosed any. */
+  readonly costTiers?: readonly DiscoveredCostTier[] | undefined
   /** True when neither models.dev, the installed catalog, nor the listing disclosed any capability. */
   readonly unverified?: boolean | undefined
   /** Provenance marker: this record came from an endpoint listing, not configuration. */
@@ -133,14 +156,51 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/** The modality tokens the cache accepts; every other token drops. */
+const MODALITY_TOKENS: ReadonlySet<string> = new Set(MODALITIES)
+
+/** The accepted modality tokens of one recorded list, preserving order and duplicates. */
+function readModalities(value: unknown): PiAiModality[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.filter((token): token is PiAiModality => typeof token === 'string' && MODALITY_TOKENS.has(token))
+}
+
+/** A parseable `YYYY-MM-DD` release date, or `undefined`. */
+function releaseDateValue(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
+  return Number.isNaN(Date.parse(`${value}T00:00:00Z`)) ? undefined : value
+}
+
+/** A finite non-negative price, or `undefined`. */
+function priceValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** One cost tier of a recorded list, or `undefined` when it names no usable threshold. */
+function readCostTier(value: unknown): DiscoveredCostTier | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const tier = value as Record<string, unknown>
+  const inputTokensAbove = positiveInteger(tier.inputTokensAbove)
+  if (inputTokensAbove === undefined) return undefined
+  const input = priceValue(tier.input)
+  const output = priceValue(tier.output)
+  if (input === undefined && output === undefined) return undefined
+  return { inputTokensAbove, ...input === undefined ? {} : { input }, ...output === undefined ? {} : { output } }
+}
+
 /** Normalize one model entry, or `undefined` when it names no usable id. */
 function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
   const entry = raw as Record<string, unknown>
   const id = nonEmptyString(entry.id)
   if (id === undefined) return undefined
-  const input = Array.isArray(entry.input)
-    ? entry.input.filter((value): value is 'text' | 'image' => value === 'text' || value === 'image')
+  const input = readModalities(entry.input)
+  const releaseDate = releaseDateValue(entry.releaseDate)
+  const costTiers = Array.isArray(entry.costTiers)
+    ? entry.costTiers.flatMap((candidate): DiscoveredCostTier[] => {
+      const tier = readCostTier(candidate)
+      return tier === undefined ? [] : [tier]
+    })
     : undefined
   const pricing = entry.pricing !== null && typeof entry.pricing === 'object' && !Array.isArray(entry.pricing)
     ? Object.fromEntries(
@@ -163,6 +223,8 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
     ...typeof entry.isFree === 'boolean' ? { isFree: entry.isFree } : {},
     ...entry.gated === true ? { gated: true } : {},
     ...gateReason === undefined ? {} : { gateReason },
+    ...releaseDate === undefined ? {} : { releaseDate },
+    ...costTiers === undefined || costTiers.length === 0 ? {} : { costTiers },
     ...entry.unverified === true ? { unverified: true } : {},
     source: 'discovered',
     discoveredAt: positiveInteger(entry.discoveredAt) ?? fallbackStamp,

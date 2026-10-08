@@ -77818,6 +77818,74 @@ function loadCommandCodeCatalog(path6 = commandCodeCatalogPath()) {
   if (models.length === 0) throw new Error(`Command Code catalog ${path6} held no usable models`);
   return models;
 }
+function catalogOverlaysPath() {
+  const override = process.env.DSH_CATALOG_OVERLAYS;
+  if (override !== void 0 && override.length > 0) return override;
+  return fileURLToPath(new URL("../catalog-overlays.json", import.meta.url));
+}
+function loadCatalogOverlays(path6 = catalogOverlaysPath()) {
+  if (!existsSync(path6)) return {};
+  const raw = JSON.parse(readFileSync(path6, "utf8"));
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`catalog overlays ${path6}: document must be an object`);
+  }
+  const routes = raw.routes;
+  if (routes === void 0) return raw;
+  if (routes === null || typeof routes !== "object" || Array.isArray(routes)) {
+    throw new Error(`catalog overlays ${path6}: "routes" must be an object keyed by route id`);
+  }
+  for (const [route, value2] of Object.entries(routes)) {
+    if (value2 === null || typeof value2 !== "object" || Array.isArray(value2)) {
+      throw new Error(`catalog overlays ${path6}: route "${route}" must be an object`);
+    }
+    const overlay = value2;
+    if (overlay.remove !== void 0 && !Array.isArray(overlay.remove)) {
+      throw new Error(`catalog overlays ${path6}: route "${route}" has a "remove" that is not a list of model ids`);
+    }
+    for (const id of overlay.remove ?? []) {
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(`catalog overlays ${path6}: route "${route}" has a remove entry that is not a model id`);
+      }
+    }
+    if (overlay.upsert !== void 0 && !Array.isArray(overlay.upsert)) {
+      throw new Error(`catalog overlays ${path6}: route "${route}" has an "upsert" that is not a list of model records`);
+    }
+    for (const entry of overlay.upsert ?? []) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry) || listingString(entry.id) === void 0) {
+        throw new Error(`catalog overlays ${path6}: route "${route}" has an upsert entry without a model id`);
+      }
+    }
+  }
+  return raw;
+}
+function applyCatalogOverlay(models, overlay) {
+  if (overlay === void 0) return models;
+  const removed = new Set(overlay.remove ?? []);
+  const upserts = /* @__PURE__ */ new Map();
+  for (const entry of overlay.upsert ?? []) {
+    const id = listingString(entry.id);
+    if (id !== void 0) upserts.set(id, entry);
+  }
+  if (removed.size === 0 && upserts.size === 0) return models;
+  const applied = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of models) {
+    const id = listingString(entry.id);
+    if (id !== void 0 && removed.has(id)) continue;
+    const upsert = id === void 0 ? void 0 : upserts.get(id);
+    if (upsert === void 0) {
+      applied.push(entry);
+    } else {
+      applied.push({ ...entry, ...upsert, unverified: void 0 });
+    }
+    if (id !== void 0) seen.add(id);
+  }
+  for (const [id, entry] of upserts) {
+    if (seen.has(id)) continue;
+    applied.push({ ...entry });
+  }
+  return applied;
+}
 var DISCOVERED_CACHE_VERSION = 1;
 function resolveDshHome(env = process.env, platform = process.platform) {
   const explicit = firstNonEmpty(env.DSH_HOME);
@@ -78088,6 +78156,12 @@ function apply(ctx, config) {
   void refreshModelsDevOnline(reportSyncDiagnostic);
   async function syncOnce() {
     await refreshModelsDevOnline(reportSyncDiagnostic);
+    let overlays = {};
+    try {
+      overlays = loadCatalogOverlays();
+    } catch (error) {
+      reportSyncDiagnostic("provider-sync/catalog-overlays", error instanceof Error ? error.message : String(error));
+    }
     const settings = ctx.get("settings");
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
@@ -78102,17 +78176,19 @@ function apply(ctx, config) {
     const llmProviders = section?.providers ?? {};
     const credentials = ctx.get("credentials");
     const revisionOf = (ns) => settings.describe().find((entry) => entry.ns === ns)?.revision;
-    const persistRouteModels = async (ns, route, profile, live2, source) => {
-      const merge = mergeConfiguredModels(route, profile.models, live2, capacities);
+    const persistRouteModels = async (ns, route, profile, live2, source, overlay) => {
+      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities);
+      const merged = merge?.models ?? profile.models ?? [];
+      const models = applyCatalogOverlay(merged, overlay);
       const before = stringifyComparable(profile.models);
-      const after = stringifyComparable(merge.models);
+      const after = stringifyComparable(models);
       if (before === after) {
-        logger.debug(`route ${route}: ${String(live2.length)} ${source} models, no change`);
+        logger.debug(`route ${route}: ${live2 === void 0 ? "overlay" : `${String(live2.length)} ${source} models`}, no change`);
       } else {
         for (let attempt = 0; ; attempt++) {
           try {
-            await settings.mutate(ns, [{ op: "set", path: ["providers", route, "models"], value: merge.models }], revisionOf(ns));
-            logger.info(`route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} ${source} models (${String(merge.unadvertised.length)} configured kept)`);
+            await settings.mutate(ns, [{ op: "set", path: ["providers", route, "models"], value: models }], revisionOf(ns));
+            logger.info(live2 === void 0 ? `route ${route}: catalog overlay applied \u2014 ${String(models.length)} models` : `route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} ${source} models (${String(merge?.unadvertised.length ?? 0)} configured kept)`);
             break;
           } catch (error) {
             const conflict = error;
@@ -78121,7 +78197,7 @@ function apply(ctx, config) {
           }
         }
       }
-      return merge.unadvertised;
+      return merge?.unadvertised ?? [];
     };
     const routes = [.../* @__PURE__ */ new Set([...Object.keys(llmProviders), ...Object.keys(endpoints)])];
     const unadvertised = [];
@@ -78134,6 +78210,7 @@ function apply(ctx, config) {
       }
       const catalogRoute = isCatalogRoute(route);
       if (profile === void 0 && catalogRoute) continue;
+      const overlay = overlays.routes?.[route];
       let key;
       if (profile?.keyless === true) {
         key = void 0;
@@ -78147,13 +78224,22 @@ function apply(ctx, config) {
           key = hit?.value;
         }
       }
+      let live2;
       try {
-        const live2 = await fetchModels(baseURL, key, profile?.api);
-        if (profile !== void 0) {
-          const kept = await persistRouteModels(LLM_NS, route, profile, live2, "live");
+        live2 = await fetchModels(baseURL, key, profile?.api);
+      } catch (error) {
+        logger.warn(describeSyncFailure(route, error));
+      }
+      if (profile !== void 0 && (live2 !== void 0 || overlay !== void 0 && (profile.models?.length ?? 0) > 0)) {
+        try {
+          const kept = await persistRouteModels(LLM_NS, route, profile, live2, live2 === void 0 ? "overlay" : "live", overlay);
           unadvertised.push(...kept.map((id) => `${route}/${id}`));
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error));
         }
-        if (!catalogRoute) {
+      }
+      if (live2 !== void 0 && !catalogRoute) {
+        try {
           const previous = readDiscoveredFile(discoveredCachePath()).routes[route];
           const record = mergeDiscoveredRoute(
             previous,
@@ -78171,9 +78257,9 @@ function apply(ctx, config) {
               logger.warn(`route ${route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
             }
           }
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error));
         }
-      } catch (error) {
-        logger.warn(describeSyncFailure(route, error));
       }
     }
     if (commandCode !== void 0) {
@@ -78183,7 +78269,7 @@ function apply(ctx, config) {
         if (profile === void 0) continue;
         try {
           catalog ??= loadCommandCodeCatalog();
-          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, "catalog");
+          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, "catalog", void 0);
           unadvertised.push(...kept.map((id) => `${route}/${id}`));
         } catch (error) {
           logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS));
@@ -78219,12 +78305,15 @@ function apply(ctx, config) {
 export {
   Config,
   apply,
+  applyCatalogOverlay,
+  catalogOverlaysPath,
   commandCodeCatalogPath,
   describeSyncFailure,
   discoveredCachePath,
   fetchModels,
   inject,
   isCatalogRoute,
+  loadCatalogOverlays,
   loadCommandCodeCatalog,
   mergeConfiguredModels,
   mergeDiscoveredModels,

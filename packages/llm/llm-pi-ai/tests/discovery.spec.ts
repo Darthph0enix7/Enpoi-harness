@@ -82,18 +82,101 @@ describe('catalog-route model discovery', () => {
     expect(models.find(model => model.id === 'gpt-6-astra')).toMatchObject({ inputModalities: installed?.input })
   })
 
-  it('answers from the installed registry, with capacities and no network call', async () => {
-    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'from-the-endpoint' }] }) })
+  it('asks a catalog route\'s endpoint first and enriches the answer from the installed registry', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          // A catalog id the listing named and sized not at all: every field
+          // the endpoint left out comes from the catalog.
+          { id: 'deepseek-v4-flash' },
+          // A catalog id the listing sized itself: the live values win.
+          { id: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro', context_length: 400_000, max_output_tokens: 90_000 },
+          // An id the catalog does not describe: returned as the listing read it.
+          { id: 'deepseek-v4-edge', context_length: 65_536 },
+        ],
+      }),
+    })
     const ctx = await harness()
 
+    // No protocol is named: the route's installed models agree on one, so the
+    // probe asks in that protocol instead of guessing OpenAI Chat Completions.
     const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek', baseURL: server.url })
 
-    // pi-ai's own registry is the authority for its own providers, and it
-    // carries what a listing endpoint would not disclose.
+    expect(server.paths).toEqual(['/models'])
+    const installed = new Map(getBuiltinModels('deepseek').map(model => [model.id, model]))
+    const flash = installed.get('deepseek-v4-flash')
+    const pro = installed.get('deepseek-v4-pro')
+    expect(models).toEqual([
+      {
+        id: 'deepseek-v4-flash',
+        name: flash?.name,
+        contextWindow: flash?.contextWindow,
+        maxTokens: flash?.maxTokens,
+        inputModalities: flash?.input,
+      },
+      {
+        id: 'deepseek-v4-pro',
+        name: 'DeepSeek V4 Pro',
+        contextWindow: 400_000,
+        maxTokens: 90_000,
+        inputModalities: pro?.input,
+      },
+      { id: 'deepseek-v4-edge', name: 'deepseek-v4-edge', contextWindow: 65_536 },
+    ])
+  })
+
+  it('asks a route whose installed models disagree on protocol as OpenAI Chat Completions', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'zen-1' }] }) })
+    const ctx = await harness()
+
+    // opencode-go's installed models span Anthropic Messages and OpenAI
+    // protocols, so there is no shared answer; the listing path falls through
+    // to the OpenAI default, and an id the catalog does not describe is
+    // returned exactly as the listing read it.
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'opencode-go', baseURL: server.url }))
+      .resolves.toEqual([{ id: 'zen-1', name: 'zen-1' }])
+    expect(server.paths).toEqual(['/models'])
+  })
+
+  it('falls back to the installed registry when a catalog route\'s endpoint cannot be reached', async () => {
+    const ctx = await harness()
+
+    // Port 9 is the discard service: nothing accepts a connection there. The
+    // route is a catalog one, so its installed entries are the fail-soft
+    // answer instead of an error.
+    const models = await ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'deepseek',
+      baseURL: 'http://127.0.0.1:9/v1',
+    })
+
     expect(models.map(model => model.id).sort())
       .toEqual(getBuiltinModels('deepseek').map(model => model.id).sort())
     expect(models.every(model => (model.contextWindow ?? 0) > 0 && (model.maxTokens ?? 0) > 0)).toBe(true)
-    expect(server.paths).toEqual([])
+  })
+
+  it('falls back to the installed registry for a protocol it cannot interrogate', async () => {
+    const ctx = await harness()
+
+    // The probe refuses before any fetch; a catalog route still answers with
+    // its installed entries rather than surfacing the unsupported protocol.
+    const models = await ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'google',
+      baseURL: 'https://gateway.example/v1',
+      api: 'google-generative-ai',
+    })
+
+    expect(models.map(model => model.id).sort())
+      .toEqual(getBuiltinModels('google').map(model => model.id).sort())
+  })
+
+  it('reports caller cancellation for a catalog route instead of falling back', async () => {
+    const ctx = await harness()
+    const aborted = AbortSignal.abort('test cancellation')
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'deepseek',
+      baseURL: 'http://127.0.0.1:9/v1',
+    }, aborted)).rejects.toMatchObject({ code: 'ABORTED' })
   })
 
   it('needs no endpoint for a route the catalog describes', async () => {

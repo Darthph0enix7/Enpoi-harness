@@ -158,6 +158,12 @@ export interface CatalogPredicate {
   tools?: boolean
   /** Image input modality. */
   vision?: boolean
+  /** Audio input modality. */
+  audio?: boolean
+  /** Video input modality. */
+  video?: boolean
+  /** PDF (document) input modality. */
+  pdf?: boolean
   /** Reasoning capability. */
   reasoning?: boolean
   /** Context window ≥ N; unknown context fails. */
@@ -220,6 +226,21 @@ function hasVision(entry: CatalogEntry): boolean {
   return Array.isArray(entry.input) && (entry.input.includes('image') || entry.input.includes('vision'))
 }
 
+/** Whether the entry carries an audio input modality. */
+function hasAudio(entry: CatalogEntry): boolean {
+  return Array.isArray(entry.input) && entry.input.includes('audio')
+}
+
+/** Whether the entry carries a video input modality. */
+function hasVideo(entry: CatalogEntry): boolean {
+  return Array.isArray(entry.input) && entry.input.includes('video')
+}
+
+/** Whether the entry carries a PDF (document) input modality. */
+function hasPdf(entry: CatalogEntry): boolean {
+  return Array.isArray(entry.input) && entry.input.includes('pdf')
+}
+
 /**
  * Evaluate one predicate against one entry.
  * A predicate with no recognized clauses never matches (a malformed rule must
@@ -250,6 +271,18 @@ export function evaluatePredicate(entry: CatalogEntry, predicate: CatalogPredica
   if (predicate.vision !== undefined) {
     clauses += 1
     if (predicate.vision !== hasVision(entry)) return fail(predicate.vision ? 'vision' : 'no vision')
+  }
+  if (predicate.audio !== undefined) {
+    clauses += 1
+    if (predicate.audio !== hasAudio(entry)) return fail(predicate.audio ? 'audio' : 'no audio')
+  }
+  if (predicate.video !== undefined) {
+    clauses += 1
+    if (predicate.video !== hasVideo(entry)) return fail(predicate.video ? 'video' : 'no video')
+  }
+  if (predicate.pdf !== undefined) {
+    clauses += 1
+    if (predicate.pdf !== hasPdf(entry)) return fail(predicate.pdf ? 'pdf' : 'no pdf')
   }
   if (predicate.reasoning !== undefined) {
     clauses += 1
@@ -302,6 +335,9 @@ export function describePredicate(predicate: CatalogPredicate): string {
   if (predicate.maxPrice !== undefined) parts.push(`price ≤ ${String(predicate.maxPrice)}`)
   if (predicate.tools !== undefined) parts.push(predicate.tools ? 'tool-calling' : 'no tool-calling')
   if (predicate.vision !== undefined) parts.push(predicate.vision ? 'vision' : 'no vision')
+  if (predicate.audio !== undefined) parts.push(predicate.audio ? 'audio' : 'no audio')
+  if (predicate.video !== undefined) parts.push(predicate.video ? 'video' : 'no video')
+  if (predicate.pdf !== undefined) parts.push(predicate.pdf ? 'pdf' : 'no pdf')
   if (predicate.reasoning !== undefined) parts.push(predicate.reasoning ? 'reasoning' : 'no reasoning')
   if (predicate.minContextWindow !== undefined) parts.push(`context ≥ ${String(predicate.minContextWindow)}`)
   if (predicate.provider !== undefined) parts.push(`provider ${predicate.provider}`)
@@ -373,7 +409,7 @@ export function parseCatalogPredicate(raw: unknown, context: string, warnings: s
     return {}
   }
   const predicate: CatalogPredicate = {}
-  const booleanKeys = ['zeroPrice', 'tools', 'vision', 'reasoning', 'noTraining', 'gated'] as const
+  const booleanKeys = ['zeroPrice', 'tools', 'vision', 'audio', 'video', 'pdf', 'reasoning', 'noTraining', 'gated'] as const
   for (const key of booleanKeys) {
     const value = raw[key]
     if (value === undefined) continue

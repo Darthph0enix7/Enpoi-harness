@@ -214,6 +214,31 @@ describe('hand-declared providers', () => {
     expect(inputOf('anthropic', vision.id)).toEqual(vision.input)
   })
 
+  it('stores disclosure-side modalities and materializes only what pi-ai can carry', () => {
+    const resolved = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'wide', input: ['text', 'image', 'audio', 'video', 'pdf'] }],
+      },
+    })
+    const [model] = resolved.get('acme-gateway')?.piProvider?.getModels() ?? []
+    // The declaration is accepted in full; the materialized pi-ai model keeps
+    // the wire modalities and drops the disclosure-side ones.
+    expect(model?.input).toEqual(['text', 'image'])
+  })
+
+  it('gives a declaration naming only disclosure-side modalities the text floor', () => {
+    const resolved = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'listening', input: ['audio'] }],
+      },
+    })
+    expect(resolved.get('acme-gateway')?.piProvider?.getModels()[0]?.input).toEqual(['text'])
+  })
+
   it('carries a written modality declaration all the way to the seam’s model metadata', async () => {
     // The resolver-level cases above cannot see a break between the settings
     // document and `LlmModelInfo`, so each rung is asserted once more through

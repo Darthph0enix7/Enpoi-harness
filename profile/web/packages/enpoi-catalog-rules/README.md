@@ -32,11 +32,11 @@ enpoi-orchestration:
 ```
 
 Predicates (all present clauses ANDed): `zeroPrice`, `maxPrice`, `tools`,
-`vision`, `reasoning`, `minContextWindow`, `provider`, `providerGlob`,
-`idGlob`, `nameGlob`, `noTraining`, `gated`. Unknown price/context/name fails
-the clause rather than guessing; **unknown privacy fails `noTraining` in both
-directions** — never treated as safe. The curated privacy seed lives in
-`src/rules.ts` and the profile settings document.
+`vision`, `audio`, `video`, `pdf`, `reasoning`, `minContextWindow`, `provider`,
+`providerGlob`, `idGlob`, `nameGlob`, `noTraining`, `gated`. Unknown
+price/context/name fails the clause rather than guessing; **unknown privacy
+fails `noTraining` in both directions** — never treated as safe. The curated
+privacy seed lives in `src/rules.ts` and the profile settings document.
 
 ## Precedence
 

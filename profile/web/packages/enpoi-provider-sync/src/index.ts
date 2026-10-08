@@ -61,7 +61,7 @@ export interface RouteCapacity {
 
 /** Live-editable sync schedule and enrichment configuration. */
 export interface Config {
-  /** Refresh cadence in milliseconds. */
+  /** Refresh cadence in milliseconds; hourly by default, matching the shipped profile. */
   intervalMs: Volatile<number>
   /** Run one pass shortly after boot. */
   syncOnStart: Volatile<boolean>
@@ -81,6 +81,19 @@ export const Config = Schema.object({
   capacityDefaults: live(Schema.any().default({})),
 })
 
+/** One request-modality token a listing or catalog may disclose. */
+export type LiveModality = 'text' | 'image' | 'audio' | 'video' | 'pdf'
+
+/** One request-wide price tier above an input-token threshold, normalized from models.dev. */
+export interface LiveCostTier {
+  /** Input tokens above which this tier prices the whole request. */
+  inputTokensAbove: number
+  /** Tier input price per million tokens, when disclosed. */
+  input?: number
+  /** Tier output price per million tokens, when disclosed. */
+  output?: number
+}
+
 /** One entry from a provider's OpenAI-style `GET /models` listing. */
 interface LiveModel {
   id: string
@@ -88,7 +101,7 @@ interface LiveModel {
   contextWindow?: number
   maxTokens?: number
   /** Modalities the listing itself disclosed; `undefined` means it said nothing. */
-  input?: Array<'text' | 'image'>
+  input?: Array<LiveModality>
   /** Whether the listing advertised tool calling; `undefined` means undisclosed. */
   tools?: boolean
   /** Whether the listing advertised reasoning; `undefined` means undisclosed. */
@@ -157,10 +170,20 @@ interface ModelsDevModel {
   reasoning_options?: Array<{ type?: string; values?: string[] }>
   tool_call?: boolean
   structured_output?: boolean
+  /** ISO `YYYY-MM-DD` release date models.dev publishes. */
+  release_date?: string
   /** USD per million tokens, as models.dev publishes it. */
   cost?: {
     input?: number
     output?: number
+    /** Request-wide price tiers above an input-token threshold. */
+    tiers?: Array<{
+      input?: number
+      output?: number
+      tier?: { type?: string, size?: number }
+    }>
+    /** Pricing above a 200K-token context, which models.dev publishes beside the base cost. */
+    context_over_200k?: { input?: number, output?: number }
   }
   modalities?: {
     input?: string[]
@@ -435,8 +458,28 @@ function listingString(...candidates: readonly unknown[]): string | undefined {
   return undefined
 }
 
+/**
+ * One disclosed token as a vocabulary token, or `undefined` for a token the
+ * vocabulary does not carry. `vision` is the one alias mapped: gateways spell
+ * image input with it.
+ */
+function liveModality(value: unknown): LiveModality | undefined {
+  if (value === 'text' || value === 'image' || value === 'audio' || value === 'video' || value === 'pdf') return value
+  return value === 'vision' ? 'image' : undefined
+}
+
+/** The deduplicated vocabulary tokens of one disclosure, preserving disclosure order. */
+function liveModalities(raw: readonly unknown[]): LiveModality[] {
+  const inputs: LiveModality[] = []
+  for (const value of raw) {
+    const modality = liveModality(value)
+    if (modality !== undefined && !inputs.includes(modality)) inputs.push(modality)
+  }
+  return inputs
+}
+
 /** The modalities one listing entry disclosed, or `undefined` when it stayed silent. */
-function listingModalities(entry: Record<string, unknown>): Array<'text' | 'image'> | undefined {
+function listingModalities(entry: Record<string, unknown>): LiveModality[] | undefined {
   const architecture = entry.architecture as { input_modalities?: unknown } | undefined
   const raw = Array.isArray(entry.input_modalities)
     ? entry.input_modalities
@@ -446,11 +489,7 @@ function listingModalities(entry: Record<string, unknown>): Array<'text' | 'imag
         ? architecture.input_modalities
         : undefined
   if (raw === undefined) return undefined
-  const inputs: Array<'text' | 'image'> = []
-  for (const value of raw) {
-    if (value === 'text' && !inputs.includes('text')) inputs.push('text')
-    if ((value === 'image' || value === 'vision') && !inputs.includes('image')) inputs.push('image')
-  }
+  const inputs = liveModalities(raw)
   return inputs.length === 0 ? undefined : inputs
 }
 
@@ -655,6 +694,124 @@ export function loadCommandCodeCatalog(path: string = commandCodeCatalogPath()):
 }
 
 /**
+ * One route's maintained catalog correction. The overlay is a data file, not
+ * code: `remove` names ids this deployment no longer serves even when the
+ * endpoint still advertises them, and `upsert` carries the settings records
+ * (the same field-for-field shape this sync writes and the Models page edits)
+ * for ids the endpoint does not advertise or whose metadata is wrong. Applied
+ * after the live merge, an upsert's fields win over the listing's, which is
+ * what lets a record pin a display name the upstream catalog spells wrong.
+ */
+export interface RouteCatalogOverlay {
+  /** Model ids dropped from the route after the live merge. */
+  remove?: readonly string[]
+  /** Settings records upserted into the route by id; named fields win over the merged entry. */
+  upsert?: ReadonlyArray<Record<string, unknown>>
+}
+
+/** The overlays document, keyed by provider route id. */
+export interface CatalogOverlayDocument {
+  version?: number
+  routes?: Record<string, RouteCatalogOverlay>
+}
+
+/** The shipped catalog overlays, sibling of this module in the package. */
+export function catalogOverlaysPath(): string {
+  const override = process.env.DSH_CATALOG_OVERLAYS
+  if (override !== undefined && override.length > 0) return override
+  return fileURLToPath(new URL('../catalog-overlays.json', import.meta.url))
+}
+
+/**
+ * Read the catalog overlays. An absent file is no overlays; a present but
+ * malformed one throws so the caller reports it instead of silently dropping
+ * a maintained correction. Shape errors are refused at load rather than
+ * guessed at merge time, and the message names the file.
+ * @param path - overlays path; defaults to the package's bundled file.
+ * @returns the parsed document; `{}` when the file is absent.
+ */
+export function loadCatalogOverlays(path: string = catalogOverlaysPath()): CatalogOverlayDocument {
+  if (!existsSync(path)) return {}
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`catalog overlays ${path}: document must be an object`)
+  }
+  const routes = (raw as { routes?: unknown }).routes
+  if (routes === undefined) return raw as CatalogOverlayDocument
+  if (routes === null || typeof routes !== 'object' || Array.isArray(routes)) {
+    throw new Error(`catalog overlays ${path}: "routes" must be an object keyed by route id`)
+  }
+  for (const [route, value] of Object.entries(routes)) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`catalog overlays ${path}: route "${route}" must be an object`)
+    }
+    const overlay = value as { remove?: unknown; upsert?: unknown }
+    if (overlay.remove !== undefined && !Array.isArray(overlay.remove)) {
+      throw new Error(`catalog overlays ${path}: route "${route}" has a "remove" that is not a list of model ids`)
+    }
+    for (const id of (overlay.remove ?? []) as unknown[]) {
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new Error(`catalog overlays ${path}: route "${route}" has a remove entry that is not a model id`)
+      }
+    }
+    if (overlay.upsert !== undefined && !Array.isArray(overlay.upsert)) {
+      throw new Error(`catalog overlays ${path}: route "${route}" has an "upsert" that is not a list of model records`)
+    }
+    for (const entry of (overlay.upsert ?? []) as unknown[]) {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry) || listingString((entry as { id?: unknown }).id) === undefined) {
+        throw new Error(`catalog overlays ${path}: route "${route}" has an upsert entry without a model id`)
+      }
+    }
+  }
+  return raw as CatalogOverlayDocument
+}
+
+/**
+ * Apply one route's overlay to its merged settings-model list: removal wins
+ * over the listing, an upsert replaces the entry's named fields, and an id
+ * neither the listing nor the configuration carries is appended. The input is
+ * returned unchanged when the route has no overlay, so routes the file does
+ * not name are untouched.
+ * @param models - the merged settings records, in endpoint/configuration order.
+ * @param overlay - the route's overlay, `undefined` when the file names none.
+ * @returns the corrected list.
+ */
+export function applyCatalogOverlay(
+  models: Array<Record<string, unknown>>,
+  overlay: RouteCatalogOverlay | undefined,
+): Array<Record<string, unknown>> {
+  if (overlay === undefined) return models
+  const removed = new Set(overlay.remove ?? [])
+  const upserts = new Map<string, Record<string, unknown>>()
+  for (const entry of overlay.upsert ?? []) {
+    const id = listingString(entry.id)
+    if (id !== undefined) upserts.set(id, entry)
+  }
+  if (removed.size === 0 && upserts.size === 0) return models
+  const applied: Array<Record<string, unknown>> = []
+  const seen = new Set<string>()
+  for (const entry of models) {
+    const id = listingString(entry.id)
+    if (id !== undefined && removed.has(id)) continue
+    const upsert = id === undefined ? undefined : upserts.get(id)
+    if (upsert === undefined) {
+      applied.push(entry)
+    } else {
+      // The overlay record is maintained truth: its fields win, and the
+      // "nothing described this model" marker the merge may have stamped is
+      // cleared because the overlay does describe it.
+      applied.push({ ...entry, ...upsert, unverified: undefined })
+    }
+    if (id !== undefined) seen.add(id)
+  }
+  for (const [id, entry] of upserts) {
+    if (seen.has(id)) continue
+    applied.push({ ...entry })
+  }
+  return applied
+}
+
+/**
  * One model of the discovered-model cache written for `llm-pi-ai` to read.
  * The cache file is the contract between this profile plugin and the
  * `dsh-llm-pi-ai` resolution layer (`src/discovered.ts` there owns the
@@ -665,7 +822,7 @@ export interface DiscoveredFileModel {
   name?: string
   contextWindow?: number
   maxTokens?: number
-  input?: Array<'text' | 'image'>
+  input?: Array<LiveModality>
   tools?: boolean
   reasoning?: boolean
   pricing?: Record<string, string>
@@ -674,6 +831,10 @@ export interface DiscoveredFileModel {
   gated?: boolean
   /** The picker-facing reason a gated model is unavailable; absent when not gated. */
   gateReason?: string
+  /** models.dev's release date (`YYYY-MM-DD`), when disclosed. */
+  releaseDate?: string
+  /** Request-wide price tiers above an input-token threshold, when models.dev disclosed any. */
+  costTiers?: LiveCostTier[]
   /** True only when neither models.dev, the installed catalog, nor the listing disclosed a capability. */
   unverified?: boolean
   source: 'discovered'
@@ -845,12 +1006,14 @@ function fallbackFor(capacities: Record<string, RouteCapacity> | undefined, rout
   return routeCaps.default === undefined ? undefined : { ...routeCaps.default, matched: 'default' }
 }
 
-/** Detect input modalities (strictly 'text' | 'image' as required by pi-ai schema).
+/** Detect the declared input modalities of one model.
  *
  * Data-first: when models.dev / catalog / the live listing carry modalities,
  * they are AUTHORITATIVE — id heuristics never add image on top (that produced
  * false vision claims for text-only models). Heuristics run only when no
- * structured data exists at all (custom/alias models).
+ * structured data exists at all (custom/alias models). The disclosed tokens
+ * are mapped faithfully, including the disclosure-side `audio`, `video`, and
+ * `pdf`; text is the floor every model carries.
  * @param id - the model id.
  * @param mDev - the models.dev entry, when one exists.
  * @param cat - the installed pi-ai catalog entry, when one exists.
@@ -861,15 +1024,13 @@ function detectModalities(
   id: string,
   mDev: ModelsDevModel | undefined,
   cat: Model<Api> | undefined,
-  live?: Array<'text' | 'image'>,
-): ('text' | 'image')[] {
-  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? live ?? []
+  live?: readonly LiveModality[],
+): LiveModality[] {
+  const rawInputs: readonly unknown[] = mDev?.modalities?.input ?? cat?.input ?? live ?? []
   const lower = id.toLowerCase()
 
   if (rawInputs.length > 0) {
-    const inputs: ('text' | 'image')[] = ['text']
-    if (rawInputs.includes('image') || rawInputs.includes('vision')) inputs.push('image')
-    return inputs
+    return ['text', ...liveModalities(rawInputs).filter(modality => modality !== 'text')]
   }
 
   if (
@@ -941,6 +1102,62 @@ function isReasoningModel(
   )
 }
 
+/**
+ * models.dev's `release_date`, when it carries the `YYYY-MM-DD` spelling the
+ * catalogue publishes and parses as an ISO date. Anything else is the absence
+ * of a fact, not a date to guess at.
+ * @param value - the raw `release_date`.
+ * @returns the ISO date, or `undefined`.
+ */
+export function modelsDevReleaseDate(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
+  return Number.isNaN(Date.parse(`${value}T00:00:00Z`)) ? undefined : value
+}
+
+/** One finite non-negative price, or `undefined`. */
+function finitePrice(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * models.dev's request-wide price tiers, normalized. `cost.tiers` carries the
+ * per-threshold prices; `cost.context_over_200k` is the same fact published as
+ * a named 200K tier. Duplicate thresholds collapse, a tier naming no price is
+ * dropped, and anything that is not a positive integer threshold is ignored.
+ * @param value - the raw `cost` object.
+ * @returns the tiers ordered by ascending threshold, or `undefined` when none is usable.
+ */
+export function modelsDevCostTiers(value: unknown): LiveCostTier[] | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const cost = value as { tiers?: unknown, context_over_200k?: unknown }
+  const tiers: LiveCostTier[] = []
+  const add = (rawThreshold: unknown, input: unknown, output: unknown): void => {
+    if (typeof rawThreshold !== 'number' || !Number.isInteger(rawThreshold) || rawThreshold <= 0) return
+    const priceIn = finitePrice(input)
+    const priceOut = finitePrice(output)
+    if (priceIn === undefined && priceOut === undefined) return
+    if (tiers.some(tier => tier.inputTokensAbove === rawThreshold)) return
+    tiers.push({
+      inputTokensAbove: rawThreshold,
+      ...priceIn === undefined ? {} : { input: priceIn },
+      ...priceOut === undefined ? {} : { output: priceOut },
+    })
+  }
+  if (Array.isArray(cost.tiers)) {
+    for (const raw of cost.tiers) {
+      if (raw === null || typeof raw !== 'object') continue
+      const tier = raw as { input?: unknown, output?: unknown, tier?: { size?: unknown } }
+      add(tier.tier?.size, tier.input, tier.output)
+    }
+  }
+  const over = cost.context_over_200k
+  if (over !== null && typeof over === 'object') {
+    const rates = over as { input?: unknown, output?: unknown }
+    add(200_000, rates.input, rates.output)
+  }
+  return tiers.length === 0 ? undefined : tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove)
+}
+
 /** One model's two renderings: what settings stores and what the discovery cache keeps. */
 interface AnalyzedModel {
   /**
@@ -1009,7 +1226,7 @@ function analyzeModel(
 
   // 3. Resolve Modalities & Capabilities. An unverified model gets the floor,
   // not the heuristics: "no metadata" must not read as "probably vision".
-  const inputModalities: ('text' | 'image')[] = unverified ? ['text'] : detectModalities(model.id, mDev, cat, model.input)
+  const inputModalities: LiveModality[] = unverified ? ['text'] : detectModalities(model.id, mDev, cat, model.input)
   const isReasoning = unverified ? false : isReasoningModel(model.id, mDev, cat, model.reasoning)
 
   // 4. Resolve Reasoning Efforts
@@ -1072,6 +1289,12 @@ function analyzeModel(
     ? { ...(costInput !== undefined ? { input: costInput } : {}), ...(costOutput !== undefined ? { output: costOutput } : {}) }
     : undefined
 
+  // 5b. Display tags models.dev carries beyond scalar facts: the release date
+  // feeds the Models page's "new" marker and the request-wide price tiers feed
+  // its usage-tier marker. Neither is guessed when models.dev says nothing.
+  const releaseDate = modelsDevReleaseDate(mDev?.release_date)
+  const costTiers = modelsDevCostTiers(mDev?.cost)
+
   // 6. Gate marker. The listing's own `isFree: false` verdict means the model
   // is sign-in/paid-only on that gateway; both records carry the rules engine's
   // `gated` flag so the picker dims it with the reason and a `gated` rule
@@ -1090,6 +1313,8 @@ function analyzeModel(
       reasoning: isReasoning,
       ...(tools !== undefined ? { tools } : {}),
       ...(cost !== undefined ? { cost } : {}),
+      ...(releaseDate === undefined ? {} : { releaseDate }),
+      ...(costTiers === undefined ? {} : { costTiers }),
       ...(reasoningEfforts ? { reasoningEfforts } : {}),
       ...gate,
       ...(unverified ? { unverified: true } : {}),
@@ -1104,6 +1329,8 @@ function analyzeModel(
       ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
       ...(model.isFree === undefined ? {} : { isFree: model.isFree }),
+      ...(releaseDate === undefined ? {} : { releaseDate }),
+      ...(costTiers === undefined ? {} : { costTiers }),
       ...gate,
       ...(unverified ? { unverified: true } : {}),
     },
@@ -1187,9 +1414,12 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       name: m.name,
       contextWindow: m.contextWindow,
       maxTokens: m.maxTokens,
+      input: m.input ?? null,
       reasoning: m.reasoningEfforts ? Object.keys(m.reasoningEfforts as object).sort() : null,
       tools: m.tools ?? null,
       cost: m.cost ?? null,
+      releaseDate: m.releaseDate ?? null,
+      costTiers: m.costTiers ?? null,
       gated: m.gated ?? null,
       gateReason: m.gateReason ?? null,
       unverified: m.unverified ?? null,
@@ -1226,9 +1456,17 @@ export function apply(ctx: Context, config: Config): void {
 
   async function syncOnce(): Promise<void> {
     // Refresh models.dev metadata on every pass (not just startup) so new
-    // models and corrected limits appear within one interval, matching
-    // OpenCode's hourly cadence.
+    // models and corrected limits appear within one interval; the pass cadence
+    // itself is the configured interval (hourly in the shipped profile).
     await refreshModelsDevOnline(reportSyncDiagnostic)
+    // The overlays are a maintained deployment correction: read once per pass,
+    // report a malformed file, and carry on with the live merge alone.
+    let overlays: CatalogOverlayDocument = {}
+    try {
+      overlays = loadCatalogOverlays()
+    } catch (error) {
+      reportSyncDiagnostic('provider-sync/catalog-overlays', error instanceof Error ? error.message : String(error))
+    }
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) {
       logger.warn('settings seam absent — skipping sync pass')
@@ -1247,34 +1485,44 @@ export function apply(ctx: Context, config: Config): void {
     const revisionOf = (ns: string) => settings.describe().find(entry => entry.ns === ns)?.revision
 
     /**
-     * Merge one route's live listing into its configured `models` and persist
-     * it under the settings revision-retry, keeping the sync's fail-soft
-     * semantics: a merge that changes nothing skips the write, and a
-     * concurrent settings edit elsewhere is retried rather than lost.
+     * Merge one route's live listing into its configured `models`, apply the
+     * route's catalog overlay, and persist the result under the settings
+     * revision-retry, keeping the sync's fail-soft semantics: a merge that
+     * changes nothing skips the write, and a concurrent settings edit
+     * elsewhere is retried rather than lost.
      * @param ns - the settings namespace that owns the route.
      * @param route - the provider route key.
      * @param profile - the route's configured profile; its models are the merge base.
-     * @param live - the normalized listing to merge.
+     * @param live - the normalized listing to merge; `undefined` when the fetch failed.
      * @param source - the listing's origin for the log line (`live` or `catalog`).
+     * @param overlay - the route's maintained catalog correction, when the file names one.
      * @returns the configured ids this pass did not advertise.
      */
     const persistRouteModels = async (
       ns: string,
       route: string,
       profile: ProviderProfile,
-      live: LiveModel[],
+      live: LiveModel[] | undefined,
       source: string,
+      overlay: RouteCatalogOverlay | undefined,
     ): Promise<string[]> => {
-      const merge = mergeConfiguredModels(route, profile.models, live, capacities)
+      // A failed fetch must not stamp every configured entry `source:
+      // configured`, so the merge is skipped and the overlay applies to the
+      // configuration exactly as stored.
+      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities)
+      const merged = merge?.models ?? profile.models ?? []
+      const models = applyCatalogOverlay(merged, overlay)
       const before = stringifyComparable(profile.models)
-      const after = stringifyComparable(merge.models)
+      const after = stringifyComparable(models)
       if (before === after) {
-        logger.debug(`route ${route}: ${String(live.length)} ${source} models, no change`)
+        logger.debug(`route ${route}: ${live === undefined ? 'overlay' : `${String(live.length)} ${source} models`}, no change`)
       } else {
         for (let attempt = 0; ; attempt++) {
           try {
-            await settings.mutate(ns as SettingsNamespace, [{ op: 'set', path: ['providers', route, 'models'], value: merge.models }], revisionOf(ns))
-            logger.info(`route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} ${source} models (${String(merge.unadvertised.length)} configured kept)`)
+            await settings.mutate(ns as SettingsNamespace, [{ op: 'set', path: ['providers', route, 'models'], value: models }], revisionOf(ns))
+            logger.info(live === undefined
+              ? `route ${route}: catalog overlay applied — ${String(models.length)} models`
+              : `route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} ${source} models (${String(merge?.unadvertised.length ?? 0)} configured kept)`)
             break
           } catch (error) {
             const conflict = error as Partial<SettingsConflictError>
@@ -1283,7 +1531,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       }
-      return merge.unadvertised
+      return merge?.unadvertised ?? []
     }
 
     // Configured routes plus every endpoint this deployment knows about. The
@@ -1308,6 +1556,7 @@ export function apply(ctx: Context, config: Config): void {
       // fetched nor written here.
       const catalogRoute = isCatalogRoute(route)
       if (profile === undefined && catalogRoute) continue
+      const overlay = overlays.routes?.[route]
       let key: string | undefined
       // A keyless route's listing is fetched anonymously: a stored, ambient, or
       // env-provided key is never attached, exactly as its requests never send
@@ -1329,13 +1578,30 @@ export function apply(ctx: Context, config: Config): void {
           key = hit?.value
         }
       }
+      // The listing is best-effort: a failed fetch is reported and never
+      // blocks the overlay, which is the route's maintained truth independent
+      // of what the endpoint advertises this pass.
+      let live: LiveModel[] | undefined
       try {
-        const live = await fetchModels(baseURL, key, profile?.api)
-        if (profile !== undefined) {
-          const kept = await persistRouteModels(LLM_NS, route, profile, live, 'live')
+        live = await fetchModels(baseURL, key, profile?.api)
+      } catch (error) {
+        logger.warn(describeSyncFailure(route, error))
+      }
+      // A route with nothing configured and no listing has nothing to persist:
+      // its models stay the installed catalog plus anything discovered below.
+      // A route without configured models is also never materialized from the
+      // overlay alone, which would replace the installed catalog with the
+      // overlay's few records.
+      if (profile !== undefined && (live !== undefined || (overlay !== undefined && (profile.models?.length ?? 0) > 0))) {
+        try {
+          const kept = await persistRouteModels(LLM_NS, route, profile, live, live === undefined ? 'overlay' : 'live', overlay)
           unadvertised.push(...kept.map(id => `${route}/${id}`))
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error))
         }
-        if (!catalogRoute) {
+      }
+      if (live !== undefined && !catalogRoute) {
+        try {
           // Everything the endpoint advertised, provenanced and timestamped,
           // for the llm-pi-ai resolution layer to serve while this route has
           // no configured models. Idempotent: an unchanged listing leaves the
@@ -1357,9 +1623,9 @@ export function apply(ctx: Context, config: Config): void {
               logger.warn(`route ${route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
             }
           }
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error))
         }
-      } catch (error) {
-        logger.warn(describeSyncFailure(route, error))
       }
     }
 
@@ -1378,7 +1644,7 @@ export function apply(ctx: Context, config: Config): void {
         if (profile === undefined) continue
         try {
           catalog ??= loadCommandCodeCatalog()
-          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, 'catalog')
+          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, 'catalog', undefined)
           unadvertised.push(...kept.map(id => `${route}/${id}`))
         } catch (error) {
           logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS))

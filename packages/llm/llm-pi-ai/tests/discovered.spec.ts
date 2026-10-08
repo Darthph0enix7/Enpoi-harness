@@ -57,7 +57,7 @@ describe('discovered-model cache parsing', () => {
       { id: 'm', name: 'shadowed', contextWindow: 1 },
       { id: 'n' },
       { id: '' },
-      { id: 'bad', contextWindow: -1, input: ['audio'], discoveredAt: 'later' },
+      { id: 'bad', contextWindow: -1, input: ['hologram'], discoveredAt: 'later' },
       'not an object',
     ])
     await cacheFile(document)
@@ -83,6 +83,43 @@ describe('discovered-model cache parsing', () => {
     expect(models?.[1]).toMatchObject({ id: 'reason-only' })
     expect(models?.[1]?.gated).toBeUndefined()
     expect(models?.[1]?.gateReason).toBeUndefined()
+  })
+
+  it('keeps audio, video, and pdf inputs and the models.dev release and price tags', async () => {
+    await cacheFile(cacheWith([
+      {
+        id: 'tagged',
+        input: ['text', 'audio', 'video', 'pdf'],
+        releaseDate: '2026-05-21',
+        costTiers: [
+          { inputTokensAbove: 128_000, input: 3, output: 18 },
+          { inputTokensAbove: 200_000, input: 4, output: 24 },
+        ],
+        source: 'discovered',
+        discoveredAt: 9,
+      },
+      {
+        id: 'malformed-tags',
+        input: ['nonsense', 'text'],
+        releaseDate: 'not-a-date',
+        costTiers: [{ inputTokensAbove: 0, input: 1 }, { output: 3 }, 'nope'],
+        source: 'discovered',
+        discoveredAt: 10,
+      },
+    ]))
+    const models = discoveredModelsFor('acme-gateway')
+    expect(models?.[0]).toMatchObject({
+      input: ['text', 'audio', 'video', 'pdf'],
+      releaseDate: '2026-05-21',
+      costTiers: [
+        { inputTokensAbove: 128_000, input: 3, output: 18 },
+        { inputTokensAbove: 200_000, input: 4, output: 24 },
+      ],
+    })
+    // Unknown tokens and unusable tag data drop instead of failing the read.
+    expect(models?.[1]).toMatchObject({ input: ['text'] })
+    expect(models?.[1]?.releaseDate).toBeUndefined()
+    expect(models?.[1]?.costTiers).toBeUndefined()
   })
 
   it('reads an unreadable or malformed cache as empty instead of failing resolution', async () => {
@@ -148,6 +185,14 @@ describe('resolution over discovered models', () => {
     expect(model).toMatchObject({ id: 'mystery-1', name: 'mystery-1', input: ['text'], reasoning: false })
     expect(model?.contextWindow).toBe(262_144)
     expect(model?.maxTokens).toBe(32_768)
+  })
+
+  it('materializes a discovered record declared with disclosure-side modalities as its wire subset', async () => {
+    await cacheFile(cacheWith([
+      { id: 'wide', input: ['text', 'image', 'audio', 'video', 'pdf'], source: 'discovered', discoveredAt: 11 },
+    ]))
+    const model = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()[0]
+    expect(model?.input).toEqual(['text', 'image'])
   })
 
   it('keeps the clear error, with the manual affordance, when nothing has discovered the route', async () => {

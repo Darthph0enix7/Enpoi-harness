@@ -237,10 +237,21 @@ export interface LlmProviderInfo {
   name: string
 }
 
-/** Merge-extensible provider model modality vocabulary. */
+/**
+ * Merge-extensible provider model modality vocabulary.
+ *
+ * `text` and `image` are the request modalities every supported provider
+ * protocol can carry; `audio`, `video`, and `pdf` are the disclosure-side
+ * tokens provider catalogs such as models.dev report. An adapter may store the
+ * disclosure-side tokens even where its wire protocol cannot express them yet,
+ * so a catalogue read does not discard what the provider published.
+ */
 export interface ModelModalityMap {
   text: 'text'
   image: 'image'
+  audio: 'audio'
+  video: 'video'
+  pdf: 'pdf'
 }
 
 /** Any declared provider model modality. */

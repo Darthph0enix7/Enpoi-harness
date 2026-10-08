@@ -50,6 +50,8 @@ interface ModelItem {
   audio?: boolean
   video?: boolean
   files?: boolean
+  /** The listing's own price fields, when the row still carries discovery fields. */
+  cost?: unknown
   /** Provider sync marked this model sign-in/paid-only; the eye renders off. */
   gated?: boolean
   /** The listing's own free marker, when the row still carries discovery fields. */
@@ -58,13 +60,120 @@ interface ModelItem {
   gateReason?: string
 }
 
-/** One row of a route's discovered model list (the wire subset the panel merges). */
+/**
+ * One row of a route's discovered model list. The shared wire type names the
+ * minimum; a discovery may disclose capabilities beyond it (modalities,
+ * tools, reasoning, price, gate markers), and the merge preserves what the
+ * stored row can express instead of dropping it.
+ */
 interface DiscoveredModel {
   id: string
   name?: string
   contextWindow?: number
   maxTokens?: number
-  inputModalities?: string[]
+  inputModalities?: readonly string[]
+  reasoning?: boolean | object
+  reasoningEfforts?: Record<string, unknown>
+  supported_parameters?: string[]
+  tools?: boolean
+  cost?: unknown
+  gated?: boolean
+  gateReason?: string
+  isFree?: boolean
+}
+
+/** One positive integer route field, or `undefined` when it is not one. */
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * The capability fields one discovered row disclosed, as a stored model row
+ * carries them. A field the discovery said nothing about stays out, and a gate
+ * reason rides its gate.
+ */
+function disclosedCapabilities(discovered: DiscoveredModel): Partial<ModelItem> {
+  return {
+    ...discovered.reasoning === undefined ? {} : { reasoning: discovered.reasoning },
+    ...discovered.reasoningEfforts === undefined ? {} : { reasoningEfforts: discovered.reasoningEfforts },
+    ...discovered.supported_parameters === undefined ? {} : { supported_parameters: discovered.supported_parameters },
+    ...discovered.tools === undefined ? {} : { tools: discovered.tools },
+    ...discovered.cost === undefined ? {} : { cost: discovered.cost },
+    ...discovered.gated === true ? { gated: true } : {},
+    ...discovered.gated === true && discovered.gateReason !== undefined ? { gateReason: discovered.gateReason } : {},
+    ...discovered.isFree === undefined ? {} : { isFree: discovered.isFree },
+  }
+}
+
+/**
+ * Merge one discovery answer into a route's configured models without
+ * deleting any: an advertised id refreshes the fields the answer disclosed
+ * while keeping every per-id field the answer did not mention, an id the
+ * answer omits stays exactly as configured, and an id configuration does not
+ * name is appended. An undisclosed capacity falls back to the route's
+ * configured default, then stays absent so the adapter's own default applies
+ * at resolution — the panel never invents a number.
+ * @param configured - the route's current `models` array.
+ * @param discovered - one discovery answer, in endpoint order.
+ * @param capacityDefaults - the route profile's fallback capacities
+ *   (`defaultContextWindow` / `defaultMaxTokens`); unusable values are ignored.
+ * @returns the merged list, configured entries first.
+ */
+export function mergeRefreshedModels(
+  configured: readonly ModelItem[],
+  discovered: readonly DiscoveredModel[],
+  capacityDefaults: { contextWindow?: unknown; maxTokens?: unknown } = {},
+): ModelItem[] {
+  const contextFallback = positiveInteger(capacityDefaults.contextWindow)
+  const maxTokensFallback = positiveInteger(capacityDefaults.maxTokens)
+  const advertised = new Map<string, DiscoveredModel>()
+  for (const model of discovered) {
+    if (advertised.has(model.id)) continue
+    advertised.set(model.id, model)
+  }
+  const merged: ModelItem[] = []
+  const seen = new Set<string>()
+  for (const model of configured) {
+    const id = typeof model.id === 'string' && model.id.length > 0 ? model.id : undefined
+    if (id === undefined) {
+      merged.push(model)
+      continue
+    }
+    if (seen.has(id)) continue
+    seen.add(id)
+    const fresh = advertised.get(id)
+    if (fresh === undefined) {
+      merged.push(model)
+      continue
+    }
+    const contextWindow = fresh.contextWindow ?? model.contextWindow ?? contextFallback
+    const maxTokens = fresh.maxTokens ?? model.maxTokens ?? maxTokensFallback
+    merged.push({
+      ...model,
+      name: fresh.name !== undefined && fresh.name !== fresh.id ? fresh.name : model.name ?? fresh.id,
+      ...contextWindow === undefined ? {} : { contextWindow },
+      ...maxTokens === undefined ? {} : { maxTokens },
+      ...model.input === undefined && fresh.inputModalities !== undefined && fresh.inputModalities.length > 0
+        ? { input: [...fresh.inputModalities] } : {},
+      ...disclosedCapabilities(fresh),
+    })
+  }
+  for (const model of discovered) {
+    if (seen.has(model.id)) continue
+    seen.add(model.id)
+    const contextWindow = model.contextWindow ?? contextFallback
+    const maxTokens = model.maxTokens ?? maxTokensFallback
+    merged.push({
+      id: model.id,
+      name: model.name !== undefined && model.name !== model.id ? model.name : model.id,
+      ...contextWindow === undefined ? {} : { contextWindow },
+      ...maxTokens === undefined ? {} : { maxTokens },
+      ...model.inputModalities === undefined || model.inputModalities.length === 0
+        ? {} : { input: [...model.inputModalities] },
+      ...disclosedCapabilities(model),
+    })
+  }
+  return merged
 }
 
 /** Detect capabilities based on model ID, name, modalities, or provider metadata.
@@ -113,7 +222,19 @@ function detectCapabilities(model: ModelItem) {
       id.includes('opus-5') ||
       id.includes('opus-4-8') ||
       id.includes('opus-4-7') ||
-      id.includes('opus-4-6')
+      id.includes('opus-4-6') ||
+      id.includes('muse-spark') ||
+      id.includes('astra') ||
+      id.includes('mimo-v2') ||
+      id.includes('grok-4') ||
+      id.includes('kimi-k2') ||
+      id.includes('qwen3.8') ||
+      id.includes('glm-4.7') ||
+      id.includes('longcat') ||
+      id.includes('hy3') ||
+      id.includes('hy4') ||
+      id.includes('m2.7') ||
+      id.includes('omen-alpha')
     )),
   )
 
@@ -163,7 +284,11 @@ function detectCapabilities(model: ModelItem) {
         id.includes('minimax-m2.7') ||
         id.includes('minimax-m2.5') ||
         id.includes('gpt-4o-audio') ||
-        id.includes('gpt-4o-realtime')
+        id.includes('gpt-4o-realtime') ||
+        id.includes('mimo-v2.6') ||
+        id.includes('mimo-v2.5') ||
+        id.includes('muse-spark-1.2') ||
+        id.includes('muse-spark-1.3')
       )),
   )
 
@@ -181,7 +306,8 @@ function detectCapabilities(model: ModelItem) {
         id.includes('minimax-m3') ||
         id.includes('minimax-m2.7') ||
         id.includes('qwen-vl') ||
-        id.includes('qwen2.5-vl')
+        id.includes('qwen2.5-vl') ||
+        id.includes('space-bunny')
       )),
   )
 
@@ -532,13 +658,15 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const catalogRefreshInFlight = useRef(false)
 
   /**
-   * Discover the route's models and merge them into its settings profile.
-   * Returns whether the write populated the catalog (a non-empty list); an
-   * in-flight refresh, a read-only surface, an empty listing, or any
-   * discovery/write failure answers false, so the automatic caller may try
-   * again on the next health snapshot. The automatic path passes `silent`,
-   * which suppresses the failure message but keeps the success message and
-   * the settings reload.
+   * Discover the route's models and merge them into its settings profile. The
+   * merge never deletes: configured ids the answer omits stay untouched,
+   * advertised ids refresh in place, and ids configuration does not name are
+   * appended. Returns whether the write left the route with any model at all;
+   * an in-flight refresh, a read-only surface, an empty route with an empty
+   * listing, or any discovery/write failure answers false, so the automatic
+   * caller may try again on the next health snapshot. The automatic path
+   * passes `silent`, which suppresses the failure message but keeps the
+   * success message and the settings reload.
    */
   const runCatalogRefresh = useCallback(async (options: { silent?: boolean } = {}): Promise<boolean> => {
     if (catalogRefreshInFlight.current || readOnly) return false
@@ -552,22 +680,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         ...(keyInput.trim() ? { apiKey: keyInput.trim() } : {}),
       })
       if (res.ok) {
-        const discovered = (res.value as DiscoveredModel[]) || []
+        const discovered = (res.value as DiscoveredModel[] | undefined) || []
         const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
-        const merged = discovered.map((d: DiscoveredModel) => {
-          const existing = currentModels.find(m => m.id === d.id) as ModelItem | undefined
-          return {
-            ...(existing || {}),
-            id: d.id,
-            name: d.name && d.name !== d.id ? d.name : existing?.name || d.id,
-            contextWindow: d.contextWindow || existing?.contextWindow || 131072,
-            maxTokens: d.maxTokens || existing?.maxTokens || 8192,
-            // Keep a stored structured modality claim; adopt the discovered
-            // one only where the row carries none.
-            ...(d.inputModalities === undefined || d.inputModalities.length === 0 || Array.isArray(existing?.input)
-              ? {}
-              : { input: d.inputModalities }),
-          }
+        // Merge, never replace: a Refresh may add and update models, but
+        // deleting one is the operator's decision, not a listing's.
+        const merged = mergeRefreshedModels(currentModels, discovered, {
+          contextWindow: rawProfile.defaultContextWindow,
+          maxTokens: rawProfile.defaultMaxTokens,
         })
 
         const settingsRes = await api.settings.mutate(
@@ -582,7 +701,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
         setRefreshState({
           isRefreshing: false,
-          message: `Refreshed ${merged.length} models live!`,
+          message: `Refreshed ${merged.length} models!`,
           isError: false,
         })
         setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)

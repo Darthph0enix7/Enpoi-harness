@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
+import type { LlmDiscoveredModel } from '@deepseek-ai/dsh-llm'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
 import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
@@ -78,6 +79,73 @@ it('discovers and stores the new provider models before closing', async () => {
     value: [
       { id: 'm-1', name: 'Model One', contextWindow: 128_000, maxTokens: 8_192 },
       { id: 'm-2' },
+    ],
+  }], undefined)
+})
+
+it('adopts every capability field a discovery discloses onto the stored route', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [
+      {
+        id: 'rich',
+        name: 'Rich',
+        contextWindow: 4_000,
+        maxTokens: 500,
+        inputModalities: ['text', 'image'],
+        reasoning: true,
+        reasoningEfforts: { high: 'high' },
+        supported_parameters: ['tools', 'reasoning'],
+        tools: true,
+        cost: { input: 1, output: 2 },
+        gated: true,
+        gateReason: 'sign-in required',
+        isFree: false,
+      },
+      { id: 'silent-gate', gated: true },
+      { id: 'bare', inputModalities: [] },
+    ] as unknown as LlmDiscoveredModel[],
+  }))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [
+      {
+        id: 'rich',
+        name: 'Rich',
+        contextWindow: 4_000,
+        maxTokens: 500,
+        input: ['text', 'image'],
+        reasoning: true,
+        reasoningEfforts: { high: 'high' },
+        supported_parameters: ['tools', 'reasoning'],
+        tools: true,
+        cost: { input: 1, output: 2 },
+        gated: true,
+        gateReason: 'sign-in required',
+        isFree: false,
+      },
+      // A gate without a reason is still a gate.
+      { id: 'silent-gate', gated: true },
+      // An empty modality list states no answer.
+      { id: 'bare' },
     ],
   }], undefined)
 })

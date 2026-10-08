@@ -13,8 +13,8 @@
     - id: enpoi-provider-sync
       name: 'dsh-enpoi-provider-sync'
       config:
-        # One pass shortly after boot, then every 6 hours.
-        intervalMs: 21600000
+        # One pass shortly after boot, then hourly.
+        intervalMs: 3600000
         syncOnStart: true
         syncDelayMs: 8000
         # Known endpoints for routes whose profile leaves baseURL to the
@@ -40,13 +40,17 @@
           huggingface: https://router.huggingface.co/v1
           kilo: https://api.kilo.ai/api/gateway
         # Capacity fallbacks for models the live /models endpoint does not
-        # describe (most OpenAI-style listings carry only ids). Catalog
-        # routes still inherit pi-ai catalog capacities for known ids; these
-        # defaults cover brand-new ids. `prefixes` matches by model-id
-        # prefix; `default` covers everything else on the route.
+        # describe (most OpenAI-style listings carry only ids). Per-model
+        # truth wins first: models.dev, the installed catalog, and the
+        # catalog overlays (catalog-overlays.json) all size a known id before
+        # these defaults apply. The opencode-go maxTokens ceiling is 131072
+        # because every model that route serves outputs at least 65536 and
+        # most cap at 128k–131k; the old 16384 silently under-capped every id
+        # nothing else described. `prefixes` matches by model-id prefix;
+        # `default` covers everything else on the route.
         capacityDefaults:
           opencode-go:
-            default: { contextWindow: 1000000, maxTokens: 16384 }
+            default: { contextWindow: 1000000, maxTokens: 131072 }
           opencode:
             default: { contextWindow: 1000000, maxTokens: 64000 }
           minimax:
