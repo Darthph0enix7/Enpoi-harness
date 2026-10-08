@@ -41,7 +41,7 @@ export interface AcpConfig {
 ## `@deepseek-ai/dsh-agent-default-model`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/core/agent-default-model/src/index.ts:26`](../packages/core/agent-default-model/src/index.ts)
+- `source`: [`packages/core/agent-default-model/src/index.ts:30`](../packages/core/agent-default-model/src/index.ts)
 
 ```ts config-catalog
 /** Default model selection supplied by plugin configuration. */
@@ -54,7 +54,17 @@ export interface Config {
   chain?: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+  /**
+   * Fallback for an unset (blank) provider or model. `kilo` (default) resolves
+   * each blank field to the keyless Kilo Gateway free tier; `off` keeps blanks
+   * blank, so a deployment that configures no route creates Agents without the
+   * Kilo fallback.
+   */
+  baseline: Volatile<BaselineMode>
 }
+
+/** Baseline policy for an unset provider or model. */
+export type BaselineMode = 'kilo' | 'off'
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-agent-default-model -->
 

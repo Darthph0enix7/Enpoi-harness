@@ -606,16 +606,20 @@ function resolveToolPolicy(toolName, input2) {
     const agentLadder = mcpLadder(toolName, agentCfg.tools, input2.mcpServerNames);
     if (agentLadder !== null) return agentLadder;
   }
-  const globalPolicy = input2.config.tools?.[toolName] ?? SHIPPED_TOOL_DEFAULTS[toolName];
+  const operatorPolicy = input2.config.tools?.[toolName];
+  const seatPolicy = input2.delegated === true || input2.agent === void 0 ? void 0 : SHIPPED_SEAT_TOOL_POLICY[input2.agent]?.[toolName];
+  const globalPolicy = operatorPolicy ?? seatPolicy ?? SHIPPED_TOOL_DEFAULTS[toolName];
   if (globalPolicy !== void 0) {
-    if (globalPolicy === "deny") return { kind: "deny", reason: `operator policy denies ${toolName}`, source: "matrix:global" };
+    const shippedSeat = seatPolicy !== void 0;
+    const source = shippedSeat ? `seat:${String(input2.agent)}` : "matrix:global";
+    if (globalPolicy === "deny") return { kind: "deny", reason: shippedSeat ? `shipped seat policy denies ${toolName}` : `operator policy denies ${toolName}`, source };
     if (globalPolicy === "ask") {
       if (input2.delegated !== true && grantsShortCircuit(toolName, input2.agent, input2.config.grants, "tool", void 0)) {
         return { kind: "allow", source: "grant:tool" };
       }
-      return { kind: "ask", reason: `operator policy asks for ${toolName}`, source: "matrix:global", grantTier: "tool" };
+      return { kind: "ask", reason: shippedSeat ? `shipped seat policy asks for ${toolName}` : `operator policy asks for ${toolName}`, source, grantTier: "tool" };
     }
-    return { kind: "allow", source: "matrix:global" };
+    return { kind: "allow", source };
   }
   if (isMcpToolName(toolName)) {
     const ladder = mcpLadder(toolName, input2.config.tools, input2.mcpServerNames);
@@ -677,7 +681,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -708,6 +712,16 @@ var init_policy = __esm({
     SHIPPED_SEAT_TOOL_DENY = Object.freeze({
       orchestrator: Object.freeze(["plugin_manager", "cordis_inspect_list", "cordis_inspect_query"]),
       sysadmin: Object.freeze(["plugin_manager", "cordis_inspect_list", "cordis_inspect_query"])
+    });
+    SHIPPED_SEAT_TOOL_POLICY = Object.freeze({
+      orchestrator: Object.freeze({
+        peer_status: "allow",
+        peer_sessions: "allow",
+        peer_ask: "allow",
+        peer_asks: "allow",
+        peer_answer: "allow",
+        peer_cancel: "allow"
+      })
     });
     SHIPPED_TOOL_DEFAULTS = {
       read: "allow",
@@ -22546,7 +22560,8 @@ var OrchestrationSettingsSchema = Schema.object({
   // runtime-context snapshot. Declared so the namespace contract admits the
   // key rather than relying on unknown-key survival.
   whiteboard: live(Schema.dict(Schema.any()).default({})),
-  // Tool-group overrides (doc 80): `groups.<id>.enabled` and
+  // Tool-group overrides (doc 80): `groups.<id>.{enabled,members,mode,seats}`
+  // — an id outside the shipped set defines a custom group — and
   // `seats.<seat>.preAttach`. Declared so the namespace contract admits the
   // key; the shipped group catalog lives in dsh-enpoi-tool-groups.
   toolGroups: live(Schema.dict(Schema.any()).default({})),
@@ -22554,6 +22569,11 @@ var OrchestrationSettingsSchema = Schema.object({
   // { id, name, description, params, command } records. Declared so the
   // namespace contract admits the key; the runtime plugin owns the vocabulary.
   customTools: live(Schema.array(Schema.any()).default([])),
+  // Merge-mode edits over the compiled child tool lists (tool-subagent):
+  // `roles.<id>.{add,remove}` over a role's built-in allowlist and
+  // `sharedDeny`/`sharedKeep` over the shared floor. Declared so the namespace
+  // contract admits the key rather than relying on unknown-key survival.
+  extendBuiltins: live(Schema.dict(Schema.any()).default({})),
   // Per-seat execution deny lists (tool names a seat may not CALL). Declared so
   // the namespace contract admits the key; the shipped defaults live in
   // `policy.ts` (`SHIPPED_SEAT_TOOL_DENY`) and a seat key here replaces one.

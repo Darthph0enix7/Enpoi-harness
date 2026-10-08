@@ -29,25 +29,27 @@ Mount this package wherever agents are created without an explicit model route. 
 
 ### Configure the default
 
-The composition requires a provider and model. Consumers read the live references even when no configuration editor is mounted.
+The composition requires a provider and model. Consumers read the live references even when no configuration editor is mounted. A blank `provider` or `model` is an unset selection: under the shipped `baseline: kilo` policy it resolves to the keyless Kilo Gateway free tier (`kilo` / `kilo-auto/free`), the route the first-run seed also writes, so a deployment that configures nothing still starts. That is why a fresh install depends on the Kilo Gateway free tier even with no provider configuration in the profile. `baseline: off` keeps blank fields blank, so a deployment that deliberately runs no Kilo fallback (for example one whose sessions always carry their own route) owns the missing route instead. The mode is a live field editable from Settings, and saving a selection preserves it.
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-default-model'
   config:
     provider: deepseek
     model: deepseek-chat
+    baseline: off
 ```
 
 | Field | Default | Meaning |
 |---|---|---|
 | `provider` | required | Registered provider route for fresh agents |
 | `model` | required | Provider-owned model id for fresh agents |
+| `baseline` | `kilo` | Fallback for a blank provider or model: `kilo` resolves each blank to the keyless Kilo free tier; `off` keeps blanks blank |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-default-model) lists every accepted field. `reasoningEffort` is optional; saving a selection without it removes that field from the profile’s complete config override.
 
 ### Read and change the default
 
-`currentSelection()` returns a detached `{ provider, model, reasoningEffort? }` for a newly created agent; `saveSelection()` stores the complete selection for later agents. A `chain` the optional `modelChains` registry cannot route is dropped with a warning before the profile write, so a pick that echoes a retired group cannot persist the reference.
+`currentSelection()` returns a detached `{ provider, model, reasoningEffort? }` for a newly created agent; `saveSelection()` stores the complete selection for later agents. A `chain` the optional `modelChains` registry cannot route is dropped with a warning before the profile write, so a pick that echoes a retired group cannot persist the reference. The deployment’s `baseline` policy is not part of a selection: `saveSelection()` carries the live value over, so a model pick never silently re-enables the Kilo fallback an owner turned off.
 
 ```text
 const selection = ctx.agentDefaultModel.currentSelection()

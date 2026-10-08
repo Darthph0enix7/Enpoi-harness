@@ -31,6 +31,19 @@ it('resolves the keyless Kilo baseline when no provider or model is selected', a
   expect(half.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: 'kilo-auto/free' })
 })
 
+it('leaves blank fields blank when the deployment disables the baseline', async () => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  const live = await liveConfig(ctx, DefaultModel, { provider: '', model: '', baseline: 'off' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: '', model: '' })
+  // The policy is a live field: re-enabling it restores the Kilo fallback on
+  // the running fiber, and each blank field resolves alone.
+  await live.update({ baseline: 'kilo' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+  await live.update({ provider: 'acme', model: '', baseline: 'off' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: '' })
+})
+
 it('persists complete selections through its owning profile entry', async () => {
   const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
   const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')
@@ -44,6 +57,21 @@ it('persists complete selections through its owning profile entry', async () => 
   await standalone.plugin(DefaultModel, { provider: 'test', model: 'original' })
   await standalone.agentDefaultModel.saveSelection({ provider: 'test', model: 'ignored' })
   expect(standalone.agentDefaultModel.currentSelection().model).toBe('original')
+})
+
+it('keeps the profile baseline policy across a saved selection', async () => {
+  const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
+  const { ctx, profile } = await configurationFixture({ hmr: false })
+  await ctx.settings.update('default-model', { provider: 'test', model: 'original', baseline: 'kilo' })
+  await ctx.agentDefaultModel.saveSelection({ provider: 'next', model: 'm' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'next', model: 'm' })
+  expect(readFileSync(profile.patchPath, 'utf8')).toContain('baseline: kilo')
+  await ctx.settings.update('default-model', { provider: 'next', model: 'm', baseline: 'off' })
+  await ctx.agentDefaultModel.saveSelection({ provider: 'final', model: 'f' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'final', model: 'f' })
+  // The complete-selection write replaces the model fields but must not erase
+  // the deployment's baseline opt-out.
+  expect(readFileSync(profile.patchPath, 'utf8')).toContain('baseline: off')
 })
 
 it('drops a selection that echoes a group the runtime cannot route', async () => {

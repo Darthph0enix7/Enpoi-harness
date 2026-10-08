@@ -146,6 +146,13 @@ export interface OrchestrationConfig {
   /** Operator-authored command tools (enpoi-custom-tools): id → record. */
   customTools: Volatile<Array<Record<string, unknown>>>
   /**
+   * Merge-mode edits over the compiled child tool lists (tool-subagent):
+   * `roles.<id>.{add,remove}` over a role's built-in allowlist,
+   * `sharedDeny`/`sharedKeep` over the shared floor. Declared so the namespace
+   * contract admits the key; the delegation tool owns the vocabulary.
+   */
+  extendBuiltins: Volatile<Record<string, unknown>>
+  /**
    * Per-seat execution deny lists (tool names a seat may not CALL while the
    * tool stays advertised for prompt-prefix cache neutrality). A seat key
    * replaces its shipped list; absent = the shipped default.
@@ -192,6 +199,11 @@ export const OrchestrationSettingsSchema = Schema.object({
   // { id, name, description, params, command } records. Declared so the
   // namespace contract admits the key; the runtime plugin owns the vocabulary.
   customTools: live(Schema.array(Schema.any()).default([])),
+  // Merge-mode edits over the compiled child tool lists (tool-subagent):
+  // `roles.<id>.{add,remove}` over a role's built-in allowlist and
+  // `sharedDeny`/`sharedKeep` over the shared floor. Declared so the namespace
+  // contract admits the key rather than relying on unknown-key survival.
+  extendBuiltins: live(Schema.dict(Schema.any()).default({})),
   // Per-seat execution deny lists (tool names a seat may not CALL). Declared so
   // the namespace contract admits the key; the shipped defaults live in
   // `policy.ts` (`SHIPPED_SEAT_TOOL_DENY`) and a seat key here replaces one.

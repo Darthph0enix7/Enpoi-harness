@@ -71,6 +71,20 @@ enpoi-orchestration:
 
 `role` wins over inference. Without it the tool infers a role from the delegation text (explicit registry names first, then task heuristics). An unknown `role` fails the call with the available ids. A role's `tools.available` list replaces its surface and is always bounded by the shared child floor; the librarian and the Oracle ship built-in allowlists (`ROLE_CHILD_ALLOW`, the server's live permission surfaces as code defaults) that fill the same layer when neither the permissions nor the registry sets one. Model routing reads `enpoi-orchestration.personas[<role>]` fresh per spawn, so assigning or clearing a seat model applies to the next delegation without a restart. Because a stored list and a built-in allowlist are registry-dependent, each name is checked against the live registry at spawn: an unresolvable name is dropped with a `role "…" stores unavailable tool "…"` warning and the child starts with the known subset, so a missing profile tool rename cannot brick a role. The code-authored `toolFilter` config keeps the strict `tools.restrict()` contract, where an unknown allow name still throws.
 
+An operator can also edit a compiled list in place instead of replacing it: `enpoi-orchestration.extendBuiltins` carries `{ add?, remove? }` edits — per role under `roles.<id>` over that role's built-in allowlist, and `sharedDeny`/`sharedKeep` over the shared floor. The role edits apply only while the built-in list is the effective layer: an explicit `tools.available` or `permissions.agents[<role>].available` entry replaces the role's built-in surface and its extension wholesale. An added role-allowlist name is registry-audited like the built-in entries it joins; the shared edits always apply because every child surface unions the shared floor in.
+
+```yaml
+enpoi-orchestration:
+  extendBuiltins:
+    roles:
+      fixer:
+        remove: [web_fetch, web_search]
+    sharedDeny:
+      add: [custom_rare]
+    sharedKeep:
+      remove: [whiteboard_pin]
+```
+
 The shared child floor denies delegation, councils, oracle review, goals, workflows, `ask_user_question`, and the child-scoped `send_message` relay (the one-delivery rule). The background job controls (`job_output`, `job_list`, `job_kill`) stay available: a child's bash command that outlives the executor timeout is promoted to a job, and the bash contract tells the model to collect it. Job access is fenced by owning session id in the job registry, so a child reads and stops only its own jobs.
 
 ### Foreground and background modes
@@ -230,7 +244,7 @@ These limits define what this tool does not return or enforce; they are current 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries nonempty text from its final assistant output, but it is not this call's return value and cannot be awaited here.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
 - **Shipped fork tools cannot select a child LLM route** — they inherit the parent's provider and model to keep the copied conversation prefix eligible for KV Cache reuse. Re-enable selection only when route changes preserve reuse or expose a bounded recomputation cost.
-- **Stored and built-in role availability is advisory against renames** — the spawn drops a name in `tools.available`, `permissions.agents[<role>].available`, or the built-in `ROLE_CHILD_ALLOW` surface that the live registry does not resolve and warns once per name; the child starts without that tool. A code-authored `config.toolFilter` is not audited and still fails on an unknown allow name.
+- **Stored and built-in role availability is advisory against renames** — the spawn drops a name in `tools.available`, `permissions.agents[<role>].available`, or the built-in `ROLE_CHILD_ALLOW` surface (including `extendBuiltins.roles` additions) that the live registry does not resolve and warns once per name; the child starts without that tool. A code-authored `config.toolFilter` is not audited and still fails on an unknown allow name. A name added through `extendBuiltins.sharedKeep` joins every explicit allow surface verbatim, like the shipped whiteboard list, so the deployment must register it or the child's `tools.restrict()` rejects the unknown allow name.
 - **Non-routing child policy is fixed per instance** — another persona, tool filter, or depth cap requires another distinctly named tool. LLM selection requires an enabled per-Session preference and a provider that advertises `agentOptions`; both in-process providers and DSH SDK advertise it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
 <a id="dev-note"></a>

@@ -471,7 +471,8 @@ function unknownRoleMessage(requested: string, registry: Record<string, Resolved
  * stored role `available` allowlist or a seat label that resolves to a
  * seat-restricted group would surface them again; the shared floor is what
  * makes the catalog and the guards agree in every path. A delegated child is
- * a worker, never the creator or a reviewer seat.
+ * a worker, never the creator or a reviewer seat. An operator edits the list
+ * through `enpoi-orchestration.extendBuiltins.sharedDeny`.
  */
 export const SHARED_CHILD_DENY: readonly string[] = [
   'subagent',
@@ -510,7 +511,8 @@ export const SHARED_CHILD_DENY: readonly string[] = [
  * keep list is unioned into every explicit allow surface (operator-configured
  * or role-registry) and stripped from the built-in role deny maps. Only an
  * explicit operator `deny` entry can still remove them — deny is the
- * operator's voice and always wins in `tools.restrict()`.
+ * operator's voice and always wins in `tools.restrict()`. An operator edits
+ * the list through `enpoi-orchestration.extendBuiltins.sharedKeep`.
  */
 export const SHARED_CHILD_KEEP: readonly string[] = [
   'whiteboard_read',
@@ -708,6 +710,19 @@ export interface OrchestrationSettingsHandle {
   describe?: () => ReadonlyArray<{ ns: string; value?: unknown }>
 }
 
+/**
+ * One add/remove edit over a compiled child tool list
+ * (`enpoi-orchestration.extendBuiltins`). A name in both lists is added: the
+ * later, explicit instruction wins, and the result keeps the base order with
+ * additions appended.
+ */
+export interface BuiltinListEdit {
+  /** Names added to the compiled list. */
+  add?: readonly string[]
+  /** Names removed from the compiled list before additions. */
+  remove?: readonly string[]
+}
+
 /** Structural view of the `enpoi-orchestration` document this tool consumes. */
 export interface OrchestrationSettingsDocument {
   /** Per-role child model route, keyed by role id; a cleared seat stores null. */
@@ -722,6 +737,22 @@ export interface OrchestrationSettingsDocument {
   roles?: Record<string, RoleRegistryEntry>
   /** Operator permission overrides, including per-role tool availability. */
   permissions?: { agents?: Record<string, { available?: string[] }> }
+  /**
+   * Merge-mode edits over the compiled child tool lists. The role edits apply
+   * only while the built-in allowlist is the effective layer: an explicit
+   * `roles.<id>.tools.available` or `permissions.agents.<id>.available` entry
+   * replaces the role's built-in surface and its extension wholesale. The
+   * shared edits always apply, because every child surface unions the shared
+   * floor in.
+   */
+  extendBuiltins?: {
+    /** Per-role edits over `ROLE_CHILD_ALLOW`, keyed by role id. */
+    roles?: Record<string, BuiltinListEdit>
+    /** Edits over `SHARED_CHILD_DENY`. */
+    sharedDeny?: BuiltinListEdit
+    /** Edits over `SHARED_CHILD_KEEP`. */
+    sharedKeep?: BuiltinListEdit
+  }
 }
 
 /** The group values a {@link RoleRegistryEntry.group} may name. */
@@ -891,6 +922,22 @@ function auditStoredAvailability(
 }
 
 /**
+ * Apply one `extendBuiltins` add/remove edit to a compiled child tool list.
+ * The base keeps its order, removed names drop out, additions append in their
+ * authored order, an addition overrides a removal of the same name, and the
+ * result is de-duplicated.
+ * @param base - the compiled list (e.g. `ROLE_CHILD_ALLOW[role]`).
+ * @param edit - the operator's add/remove edit, or undefined for the base.
+ * @returns the edited list; the base itself when no edit applies.
+ */
+function applyBuiltinListEdit(base: readonly string[], edit: BuiltinListEdit | undefined): string[] {
+  if (edit === undefined) return [...base]
+  const removed = new Set((edit.remove ?? []).map(String))
+  const added = (edit.add ?? []).map(String)
+  return [...new Set([...base.filter(name => !removed.has(name)), ...added])]
+}
+
+/**
  * Compose the per-child tool filter: the configured filter merged with the
  * shared worker deny list and the selected role's surface. Configured deny
  * entries survive (first, de-duplicated), the configured `allow` list passes
@@ -898,7 +945,9 @@ function auditStoredAvailability(
  * Unknown deny names are no-ops there. A stored or built-in availability list
  * is audited against the live registry first (see
  * {@link StoredAvailabilityAudit}); configured code-authored names are never
- * audited.
+ * audited. `enpoi-orchestration.extendBuiltins` edits the compiled lists in
+ * place (see {@link applyBuiltinListEdit}) without replacing them; an explicit
+ * stored allowlist still replaces its role's built-in surface and extension.
  *
  * Composition is provider-independent: a provider without the `toolFilter`
  * capability still receives the composed floor in its start request, and the
@@ -921,39 +970,46 @@ export function childToolFilter(
   roleEntry: ResolvedRole,
   audit: StoredAvailabilityAudit,
 ): NonNullable<Config['toolFilter']> {
+  const builtinEdits = document?.extendBuiltins
+  const keep = applyBuiltinListEdit(SHARED_CHILD_KEEP, builtinEdits?.sharedKeep)
+  const keepTool = (name: string): boolean => keep.includes(name)
   // The Oracle and the Librarian are the children allowed to delegate
   // (operator design: the reviewer spawns its own researchers; the librarian's
   // deep research dial fans out to leaf readers). Every other role keeps the
   // shared subagent veto.
-  const keepTool = (name: string): boolean => SHARED_CHILD_KEEP.includes(name)
   const delegatingRole = role === 'oracle' || role === 'librarian'
-  const sharedDeny = (delegatingRole
-    ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
-    : SHARED_CHILD_DENY).filter(name => !keepTool(name))
+  const sharedDeny = applyBuiltinListEdit(
+    (delegatingRole
+      ? SHARED_CHILD_DENY.filter(name => name !== 'subagent')
+      : SHARED_CHILD_DENY).filter(name => !keepTool(name)),
+    builtinEdits?.sharedDeny,
+  )
   // Layer precedence (doc 61 WP-S6): the permission allowlist is the operator's
   // hard gate and wins; the role registry's `tools.available` (Dynamic → Roles)
   // is the fallback that gives a user-defined role a surface; then the built-in
   // allowlist (`ROLE_CHILD_ALLOW` for librarian/oracle/fixer/designer, the
-  // server's live surfaces as code defaults); absent all three, the registry
-  // entry's built-in deny extras apply. The shared anti-leak floor is always
-  // unioned in, and the whiteboard keep list survives every surface.
+  // server's live surfaces as code defaults), extended in place by an
+  // `extendBuiltins.roles` edit; absent all three, the registry entry's
+  // built-in deny extras apply. The shared anti-leak floor is always unioned
+  // in, and the whiteboard keep list survives every surface.
+  const builtinAllow = ROLE_CHILD_ALLOW[role]
   const stored = roleAvailableAllowlist(document, role)
     ?? roleEntry.available
-    ?? ROLE_CHILD_ALLOW[role]
+    ?? (builtinAllow === undefined ? undefined : applyBuiltinListEdit(builtinAllow, builtinEdits?.roles?.[role]))
   if (stored !== undefined) {
     // Explicit surface: allow the named tools plus the whiteboard keep list,
     // deny everything else except the shared anti-leak floor (never widen what
     // SHARED_CHILD_DENY already removes).
     return {
       ...configured,
-      allow: [...new Set([...configured?.allow ?? [], ...auditStoredAvailability(stored, role, audit), ...SHARED_CHILD_KEEP])],
+      allow: [...new Set([...configured?.allow ?? [], ...auditStoredAvailability(stored, role, audit), ...keep])],
       deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
   return {
     ...configured,
     ...configured?.allow !== undefined
-      ? { allow: [...new Set([...configured.allow, ...SHARED_CHILD_KEEP])] }
+      ? { allow: [...new Set([...configured.allow, ...keep])] }
       : {},
     deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleEntry.deny.filter(name => !keepTool(name))])],
   }

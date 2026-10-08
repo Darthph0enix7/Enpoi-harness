@@ -242,6 +242,90 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(request.toolFilter?.deny).toEqual(expect.arrayContaining(['roundtable', 'ask_user_question']))
   })
 
+  it('merges extendBuiltins role edits into the built-in allowlist', async () => {
+    const warnings: string[] = []
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      {
+        provider: 'mock',
+        settingsDocument: {
+          extendBuiltins: { roles: { librarian: { add: ['custom_probe'], remove: ['subagent'] } } },
+        },
+      },
+      { onStart: (request) => { seen = request } },
+    )
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    const result = await callSubagent(ctx, {
+      description: 'Librarian: research the API documentation',
+      prompt: 'work',
+      inferRole: true,
+    })
+    expect(result.isError).toBe(false)
+    // The removal applies to the built-in list; the addition is registry-audited
+    // like every built-in entry, so an unknown name warns and drops.
+    expect(seen?.toolFilter?.allow).toEqual([
+      ...auditedBuiltin('librarian').filter(name => name !== 'subagent'),
+      ...SHARED_CHILD_KEEP,
+    ])
+    expect(seen?.toolFilter?.allow).not.toContain('subagent')
+    expect(warnings.some(message => message.includes('"custom_probe"') && message.includes('role "librarian"'))).toBe(true)
+  })
+
+  it('merges extendBuiltins shared deny edits into the shared floor', async () => {
+    const request = await captureRequest('Explorer: map the delegation surface', {
+      settingsDocument: {
+        extendBuiltins: { roles: {}, sharedDeny: { remove: ['roundtable'] } },
+      },
+    })
+    const deny = request.toolFilter?.deny ?? []
+    expect(deny).not.toContain('roundtable')
+    expect(deny).toEqual([
+      ...SHARED_DENY.filter(name => name !== 'roundtable'),
+      ...EXPLORER_EXTRAS,
+    ])
+  })
+
+  it('appends extendBuiltins shared deny additions after the compiled floor', async () => {
+    const request = await captureRequest('Explorer: map the delegation surface', {
+      settingsDocument: {
+        extendBuiltins: { sharedDeny: { add: ['dangerous_probe'] } },
+      },
+    })
+    expect(request.toolFilter?.deny).toEqual([...SHARED_DENY, 'dangerous_probe', ...EXPLORER_EXTRAS])
+  })
+
+  it('applies extendBuiltins sharedKeep edits to the keep union', async () => {
+    const request = await captureRequest('Explorer: map the delegation surface', {
+      toolFilter: { allow: ['read'] },
+      settingsDocument: {
+        extendBuiltins: { sharedKeep: { remove: ['whiteboard_pin'] } },
+      },
+    })
+    expect(request.toolFilter?.allow).toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_unpin'])
+  })
+
+  it('appends extendBuiltins sharedKeep additions to the keep union', async () => {
+    const request = await captureRequest('Explorer: map the delegation surface', {
+      toolFilter: { allow: ['read'] },
+      settingsDocument: {
+        extendBuiltins: { sharedKeep: { add: ['custom_board'] } },
+      },
+    })
+    expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP, 'custom_board'])
+  })
+
+  it('lets a stored allowlist replace the built-in list and its extendBuiltins edit', async () => {
+    const request = await captureRequest('Fixer: patch the parser bug', {
+      settingsDocument: {
+        roles: { fixer: { tools: { available: ['read', 'grep'] } } },
+        extendBuiltins: { roles: { fixer: { add: ['write'], remove: ['read'] } } },
+      },
+    })
+    // The explicit layer wins wholesale: the extension edits the built-in
+    // surface it would have replaced, not the operator's stored list.
+    expect(request.toolFilter?.allow).toEqual(['read', 'grep', ...SHARED_CHILD_KEEP])
+  })
+
   it('drops stale names from the registry availability list with a warning and still spawns', async () => {
     // A stored list outlives tool renames: `todo_read`/`web_fetch` are not in
     // this deployment's live registry, and an allow name tools.restrict() does

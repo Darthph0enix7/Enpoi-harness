@@ -29,25 +29,27 @@ kind: "package-reference"
 
 ### 配置默认值
 
-组合要求提供 provider 和模型。即使没有挂载配置编辑器，消费者也可读取即时引用。
+组合要求提供 provider 和模型。即使没有挂载配置编辑器，消费者也可读取即时引用。空的 `provider` 或 `model` 表示未设置的选择：在随附的 `baseline: kilo` 策略下，它会解析为免密钥的 Kilo 网关免费层（`kilo` / `kilo-auto/free`），也就是首次运行种子写入的路由，因此未做任何配置的部署也能启动。正因如此，即使 profile 中没有提供方配置，全新安装仍依赖 Kilo 网关免费层。`baseline: off` 让空字段保持为空，因此刻意不使用 Kilo 回退的部署（例如每个会话始终自带路由的部署）需自行负责缺失的路由。该模式是可在 Settings 中编辑的即时字段，保存选择时会一并保留。
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-default-model'
   config:
     provider: deepseek
     model: deepseek-chat
+    baseline: off
 ```
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `provider` | 必填 | 新 agent 使用的已注册提供方路由 |
 | `model` | 必填 | 新 agent 使用的、由提供方持有的模型 id |
+| `baseline` | `kilo` | 空 provider 或 model 的回退策略：`kilo` 将每个空字段解析为免密钥的 Kilo 免费层；`off` 保持为空 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-default-model) 列出所有接受的字段。`reasoningEffort` 是可选的；保存不含此字段的选择，会从 profile 的完整配置覆盖中移除此字段。
 
 ### 读取与更改默认值
 
-`currentSelection()` 为新创建的 agent 返回一份独立的 `{ provider, model, reasoningEffort? }`；`saveSelection()` 为后续 agent 保存完整选择。
+`currentSelection()` 为新创建的 agent 返回一份独立的 `{ provider, model, reasoningEffort? }`；`saveSelection()` 为后续 agent 保存完整选择。可选 `modelChains` 注册表无法路由的 `chain` 会在写入 profile 前被丢弃并给出警告，因此回显已停用分组的挑选不会持久化该引用。部署的 `baseline` 策略不属于选择的一部分：`saveSelection()` 会沿用即时的值，因此挑选模型不会悄悄重新启用运维者已关闭的 Kilo 回退。
 
 ```text
 const selection = ctx.agentDefaultModel.currentSelection()

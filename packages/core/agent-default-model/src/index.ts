@@ -1,7 +1,8 @@
 /**
  * Default model selection for an Agent without a session-specific selection.
  * A configured pair that names no provider or model resolves to the keyless
- * Kilo Gateway free tier, so an Agent is never created without a provider.
+ * Kilo Gateway free tier by default, so an Agent is never created without a
+ * provider; the owning deployment can opt out with `baseline: off`.
  *
  * @module @deepseek-ai/dsh-agent-default-model
  */
@@ -22,6 +23,9 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Baseline policy for an unset provider or model. */
+export type BaselineMode = 'kilo' | 'off'
+
 /** Default model selection supplied by plugin configuration. */
 export interface Config {
   /** Registered provider route. */
@@ -32,6 +36,13 @@ export interface Config {
   chain?: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+  /**
+   * Fallback for an unset (blank) provider or model. `kilo` (default) resolves
+   * each blank field to the keyless Kilo Gateway free tier; `off` keeps blanks
+   * blank, so a deployment that configures no route creates Agents without the
+   * Kilo fallback.
+   */
+  baseline: Volatile<BaselineMode>
 }
 
 /**
@@ -43,13 +54,20 @@ export const BASELINE_PROVIDER = 'kilo'
 export const BASELINE_MODEL = 'kilo-auto/free'
 
 /**
- * Resolve a possibly unset provider/model pair against the keyless baseline.
- * A blank field is an unset selection, never a route or model id, so a
- * deployment that selects nothing still starts every Session on a provider.
+ * Resolve a possibly unset provider/model pair against the configured baseline.
+ * A blank field is an unset selection, never a route or model id. Under the
+ * default `kilo` baseline a deployment that selects nothing still starts every
+ * Session on a provider; under `off` the blanks stay blank and the consumer
+ * owns the missing route.
  * @param configured - provider and model as configured; blank means unset.
+ * @param baseline - baseline policy; omitted means the shipped `kilo` default.
  * @returns the configured pair, or the Kilo free-auto baseline per blank field.
  */
-export function resolveBaseline(configured: { provider: string; model: string }): { provider: string; model: string } {
+export function resolveBaseline(
+  configured: { provider: string; model: string },
+  baseline: BaselineMode = 'kilo',
+): { provider: string; model: string } {
+  if (baseline === 'off') return { provider: configured.provider, model: configured.model }
   return {
     provider: configured.provider === '' ? BASELINE_PROVIDER : configured.provider,
     model: configured.model === '' ? BASELINE_MODEL : configured.model,
@@ -85,6 +103,7 @@ export class AgentDefaultModelConfig extends Service {
     model: z.string().required().volatile(),
     chain: z.string().volatile(),
     reasoningEffort: z.string().volatile(),
+    baseline: z.union(['kilo', 'off'] as const).default('kilo').volatile(),
   })
 
   constructor(private readonly ownerContext: Context, private config: Config) {
@@ -104,7 +123,7 @@ export class AgentDefaultModelConfig extends Service {
       ...resolveBaseline({
         provider: this.config.provider.get(),
         model: this.config.model.get(),
-      }),
+      }, this.config.baseline.get()),
       ...chain === undefined ? {} : { chain },
       ...reasoningEffort === undefined ? {} : { reasoningEffort },
     })
@@ -115,6 +134,9 @@ export class AgentDefaultModelConfig extends Service {
    * editor keeps its composition entry. Saves commit in submission order; a failed
    * save rejects its caller without blocking later saves. A `chain` the optional
    * `modelChains` registry cannot route is dropped before the profile write.
+   * The deployment's `baseline` policy is not part of a selection and is carried
+   * over from the live entry, so a model pick never silently re-enables the Kilo
+   * fallback an owner turned off.
    * @param next - resolved selection accepted by an entry point.
    * @returns fulfillment after the optional profile write settles.
    */
@@ -137,7 +159,10 @@ export class AgentDefaultModelConfig extends Service {
         this.ctx.logger.warn(`agent-default-model: dropped unusable chain "${value}" at ${fieldPath}: the model group is disabled, unknown, or unregistered`)
       },
     )
-    const saved = this.saves.then(() => editor.edit(entry, () => config))
+    const saved = this.saves.then(() => editor.edit(entry, (current) => {
+      const baseline = current.baseline
+      return baseline === 'kilo' || baseline === 'off' ? { ...config, baseline } : config
+    }))
     this.saves = saved.catch(() => {})
     await saved
   }
