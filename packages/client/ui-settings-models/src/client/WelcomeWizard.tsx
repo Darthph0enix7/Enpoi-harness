@@ -17,6 +17,9 @@ import type { ModelsOperations } from './operations.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import { AddProviderModal } from './AddProviderModal.tsx'
 import { WelcomeWebStep } from './WelcomeWebStep.tsx'
+import { deriveDefaultRoute, type DefaultRouteFacts } from './default-route.ts'
+import { parseWebSearchPlanOverrides } from './web-search-plans.ts'
+import { ORCHESTRATION_NS } from './model-groups.ts'
 import {
   WIZARD_FREE_PROVIDER, WIZARD_STEPS, intelligenceWrites, sandboxWrite, skippedSteps,
   type IntelligenceChoice, type SandboxMode, type WizardStepId, type WizardWrite,
@@ -44,7 +47,7 @@ export interface WelcomeWizardInjected {
   /** Settings schema and immutable path callbacks. */
   schema: SettingsSchemaOperations
   /** Feature copy. */
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
 }
 
 /** Overlay owner props plus this feature's injected dependencies. */
@@ -55,11 +58,11 @@ export type WelcomeWizardProps = PropsRuntime<'settings.onboarding'> & InjectFac
  * where the tip reads relative to the spotlighted surface.
  */
 const TOUR_STOPS = [
-  { title: 'wizTourStopSidebar', body: 'wizTourStopSidebarBody', target: '[data-dsh-tour="rightbar"]', place: 'left' },
-  { title: 'wizTourStopSettings', body: 'wizTourStopSettingsBody', target: '[data-dsh-tour="settings"]', place: 'right' },
-  { title: 'wizTourStopPlugins', body: 'wizTourStopPluginsBody', target: '[data-dsh-tour="plugins"]', place: 'right' },
-  { title: 'wizTourStopComposer', body: 'wizTourStopComposerBody', target: '[data-dsh-tour="composer"]', place: 'top' },
-  { title: 'wizTourStopContext', body: 'wizTourStopContextBody', target: '[data-dsh-tour="context"]', place: 'right' },
+  { titleKey: 'wizTourStopSidebar', body: 'wizTourStopSidebarBody', target: '[data-dsh-tour="rightbar"]', place: 'left' },
+  { titleKey: 'wizTourStopSettings', body: 'wizTourStopSettingsBody', target: '[data-dsh-tour="settings"]', place: 'right' },
+  { titleKey: 'wizTourStopPlugins', body: 'wizTourStopPluginsBody', target: '[data-dsh-tour="plugins"]', place: 'right' },
+  { titleKey: 'wizTourStopComposer', body: 'wizTourStopComposerBody', target: '[data-dsh-tour="composer"]', place: 'top' },
+  { titleKey: 'wizTourStopContext', body: 'wizTourStopContextBody', target: '[data-dsh-tour="context"]', place: 'right' },
 ] as const
 
 /** One viewport rectangle the spotlight and tip position from. */
@@ -76,10 +79,10 @@ const TOUR_PAD = 8
 /** Distance between the spotlight edge and the tip card. */
 const TIP_MARGIN = 14
 
-const SANDBOX_OPTIONS: ReadonlyArray<{ mode: SandboxMode; title: keyof typeof en; body: keyof typeof en }> = [
-  { mode: 'read-only', title: 'wizSandboxReadOnly', body: 'wizSandboxReadOnlyBody' },
-  { mode: 'workspace-write', title: 'wizSandboxWrite', body: 'wizSandboxWriteBody' },
-  { mode: 'danger-full-access', title: 'wizSandboxFull', body: 'wizSandboxFullBody' },
+const SANDBOX_OPTIONS: ReadonlyArray<{ mode: SandboxMode; titleKey: keyof typeof en; body: keyof typeof en }> = [
+  { mode: 'read-only', titleKey: 'wizSandboxReadOnly', body: 'wizSandboxReadOnlyBody' },
+  { mode: 'workspace-write', titleKey: 'wizSandboxWrite', body: 'wizSandboxWriteBody' },
+  { mode: 'danger-full-access', titleKey: 'wizSandboxFull', body: 'wizSandboxFullBody' },
 ]
 
 /** Run one step's writes and return the first refusal message, or null. */
@@ -159,7 +162,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [store, state.visible, state.wizard, tourStarted])
 
-  const kilo = useMemo(
+  const defaultRow = useMemo(
     () => models.rows.find(row => row.entry.provider === WIZARD_FREE_PROVIDER),
     [models.rows],
   )
@@ -177,6 +180,23 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
     return [...byId.values()]
   }, [models.rows])
   const protocols = useMemo(() => protocolChoices(models.namespaces.get('llm-pi-ai'), schema), [models.namespaces, schema])
+  // The default-route facts come from the same join the Models page renders:
+  // the live row and its resolved profile, with the shipped preset as the
+  // pre-connection fallback. Nothing about the route is baked into prose.
+  const defaultRoute = useMemo(
+    () => deriveDefaultRoute({ rows: models.rows, namespaces: models.namespaces, schema }),
+    [models.rows, models.namespaces, schema],
+  )
+  // Operator overrides for the web-search plan rows ride the same settings
+  // record the provider-catalog overrides do.
+  const webPlans = useMemo(
+    () => parseWebSearchPlanOverrides(models.namespaces.get(ORCHESTRATION_NS)?.value),
+    [models.namespaces],
+  )
+  const helperRoute = useMemo(
+    () => `${defaultRoute.name} · ${defaultRoute.model}`,
+    [defaultRoute],
+  )
   // The web step's shared-key offer reuses the live DeepSeek credential state:
   // the row's resolved reference, or the conventional derived one, as the
   // Models join already described it.
@@ -298,9 +318,10 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {step === 'provider' && (
             <ProviderStep
               t={t}
+              route={defaultRoute}
               providers={configuredProviders}
-              installed={kilo !== undefined}
-              configured={kilo?.configured === true}
+              installed={defaultRow !== undefined}
+              configured={defaultRow?.configured === true}
               onAdd={() => { setAddOpen(true) }}
               onContinue={continueStep}
               onBack={() => { store.dispatch({ type: 'goto', step: 'security' }) }}
@@ -310,6 +331,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
             <WelcomeWebStep
               t={t}
               operations={operations}
+              planOverrides={webPlans}
               deepSeekConfigured={deepSeekConfigured}
               onApplied={(pendingRestart) => {
                 // The host accepted the writes; a reconcile that needs a
@@ -326,6 +348,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {step === 'intelligence' && (
             <IntelligenceStep
               t={t}
+              helperRoute={helperRoute}
               choice={choice}
               onChoice={setChoice}
               compactionLlm={compactionLlm}
@@ -354,6 +377,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           {step === 'done' && (
             <DoneStep
               t={t}
+              route={defaultRoute}
               skipped={skippedSteps(wizard)}
               analysis={state.analysis}
               error={state.error}
@@ -413,7 +437,7 @@ function stepNameKey(id: WizardStepId): keyof typeof en {
   }
 }
 
-type T = (key: keyof typeof en) => string
+type T = (key: keyof typeof en, params?: Record<string, unknown>) => string
 
 /**
  * One small key glyph beside a wizard action, matching the demo's key hints.
@@ -468,7 +492,7 @@ function SecurityStep({ t, mode, onMode, onContinue, onBack }: {
             data-active={mode === option.mode}
             onClick={() => { onMode(option.mode) }}
           >
-            <strong>{t(option.title)}</strong>
+            <strong>{t(option.titleKey)}</strong>
             <span>{t(option.body)}</span>
           </button>
         ))}
@@ -482,8 +506,10 @@ function SecurityStep({ t, mode, onMode, onContinue, onBack }: {
   )
 }
 
-function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, onBack }: {
+function ProviderStep({ t, route, providers, installed, configured, onAdd, onContinue, onBack }: {
   t: T
+  /** Live facts of the shipped default route, preset-backed before the join settles. */
+  route: DefaultRouteFacts
   /** Live routes the panel lists; the step's own add refreshes this list. */
   providers: readonly { id: string; name: string; configured: boolean }[]
   installed: boolean
@@ -497,9 +523,16 @@ function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, 
       <h2 className={styles.heading}>{t('wizProviderHeading')}</h2>
       <p className={styles.lead}>{t('wizProviderLead')}</p>
       <div className={styles.route} data-state={configured ? 'configured' : installed ? 'installed' : 'missing'}>
-        <strong>{configured ? t('wizProviderConfigured') : installed ? t('wizProviderInstalled') : t('wizProviderMissing')}</strong>
-        <span>{t('wizProviderRoute')}</span>
-        <span>{t('wizProviderFree')}</span>
+        <strong>{configured
+          ? t('wizProviderConfigured', { provider: route.name })
+          : installed
+            ? t('wizProviderInstalled', { provider: route.name })
+            : t('wizProviderMissing', { provider: route.name })}</strong>
+        <span>
+          {t('wizProviderRoute', { id: route.id, protocol: route.protocol, baseURL: route.baseURL })}
+          {route.free ? ` · ${t('wizProviderFreeTier')}` : ` · ${t('wizProviderKeyRequired')}`}
+        </span>
+        <span>{route.free ? t('wizProviderFree') : t('wizProviderDefaultHint')}</span>
       </div>
       <div className={styles.providerPanel} data-wiz-providers>
         {providers.map(provider => (
@@ -523,8 +556,10 @@ function ProviderStep({ t, providers, installed, configured, onAdd, onContinue, 
   )
 }
 
-function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm, onContinue, onBack }: {
+function IntelligenceStep({ t, helperRoute, choice, onChoice, compactionLlm, onCompactionLlm, onContinue, onBack }: {
   t: T
+  /** The seat route the helper writes point at, as data. */
+  helperRoute: string
   choice: IntelligenceChoice
   onChoice: (choice: IntelligenceChoice) => void
   compactionLlm: boolean
@@ -543,7 +578,7 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
           sub={t('wizCompactionSub')}
           on={choice.compaction}
           onToggle={() => { onChoice({ ...choice, compaction: !choice.compaction }) }}
-          chip={compactionLlm ? t('wizCompactionChipLlm') : t('wizCompactionChipMechanical')}
+          chip={compactionLlm ? t('wizCompactionChipLlm', { route: helperRoute }) : t('wizCompactionChipMechanical')}
           tone={compactionLlm ? 'llm' : 'off'}
         >
           <div className={styles.segments} role="radiogroup" aria-label={t('wizCompactionTitle')}>
@@ -556,7 +591,7 @@ function IntelligenceStep({ t, choice, onChoice, compactionLlm, onCompactionLlm,
           sub={t('wizKeeperSub')}
           on={choice.keeper}
           onToggle={() => { onChoice({ ...choice, keeper: !choice.keeper }) }}
-          chip={t('wizKeeperChip')}
+          chip={t('wizKeeperChip', { route: helperRoute })}
           tone="llm"
         />
         <Toggle
@@ -785,7 +820,7 @@ function TourOverlay({ t, stop, stepNumber, stepCount, onStop, onBack, onFinish,
         <p className={styles.tourCount} data-dsh-tour-count>
           {t('wizTourStop').replace('{n}', String(stop + 1)).replace('{total}', String(TOUR_STOPS.length))}
         </p>
-        <h2 className={styles.heading}>{t(current.title)}</h2>
+        <h2 className={styles.heading}>{t(current.titleKey)}</h2>
         <p className={styles.tourBody}>{t(current.body)}</p>
         <div className={styles.tourDots} aria-hidden="true">
           {TOUR_STOPS.map((entry, index) => (
@@ -855,8 +890,10 @@ function AgentsStep({ t, analysis, onAnalyse, onSkip, onContinue, onBack }: {
   )
 }
 
-function DoneStep({ t, skipped, analysis, error, saving, onFinish, onReplay }: {
+function DoneStep({ t, route, skipped, analysis, error, saving, onFinish, onReplay }: {
   t: T
+  /** Live facts of the shipped default route the skipped provider step keeps. */
+  route: DefaultRouteFacts
   skipped: readonly WizardStepId[]
   analysis: WelcomeWizardState['analysis']
   error: string | null
@@ -867,7 +904,7 @@ function DoneStep({ t, skipped, analysis, error, saving, onFinish, onReplay }: {
   const skippedLine = (id: WizardStepId): keyof typeof en => {
     switch (id) {
       case 'security': return 'wizSkippedSecurity'
-      case 'provider': return 'wizSkippedProvider'
+      case 'provider': return route.free ? 'wizSkippedProviderFree' : 'wizSkippedProviderPaid'
       case 'web': return 'wizSkippedWeb'
       case 'intelligence': return 'wizSkippedIntelligence'
       case 'tour': return 'wizSkippedTour'
@@ -882,8 +919,8 @@ function DoneStep({ t, skipped, analysis, error, saving, onFinish, onReplay }: {
       <p className={styles.lead}>{skipped.length === 0 ? t('wizDoneLeadNoSkips') : t('wizDoneLeadSkips')}</p>
       {skipped.length > 0 && (
         <div className={styles.card}>
-          <h3>{t('wizDoneSkippedCard').replace('{n}', String(skipped.length))}</h3>
-          <ul>{skipped.map(id => <li key={id}>{t(skippedLine(id))}</li>)}</ul>
+          <h3>{t('wizDoneSkippedCard', { n: skipped.length })}</h3>
+          <ul>{skipped.map(id => <li key={id}>{t(skippedLine(id), { provider: route.name })}</li>)}</ul>
         </div>
       )}
       <div className={styles.card}>

@@ -8,6 +8,7 @@ import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
 import { providerPreset } from '../src/client/provider-templates.ts'
 import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
+import { translateEn } from './translate.ts'
 
 afterEach(cleanup)
 
@@ -45,7 +46,7 @@ it('discovers and stores the new provider models before closing', async () => {
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -114,7 +115,7 @@ it('adopts every capability field a discovery discloses onto the stored route', 
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -160,7 +161,7 @@ it('closes with the provider created when discovery is refused', async () => {
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -183,7 +184,7 @@ it('closes with the provider created when discovery rejects', async () => {
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -218,7 +219,7 @@ it('offers /models discovery and the manual list when a config-only route resolv
         poolTestIdentity: vi.fn(),
       },
     } as unknown as ModelsWire}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -272,7 +273,7 @@ it('retries /models from the recovery panel and rewrites the full profile', asyn
         poolTestIdentity: vi.fn(),
       },
     } as unknown as ModelsWire}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -306,7 +307,7 @@ it('keeps a repairable recovery panel when the profile write itself names missin
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -341,7 +342,7 @@ it('closes without recovery when the installed catalog describes the route', asy
         poolTestIdentity: vi.fn(),
       },
     } as unknown as ModelsWire}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -360,7 +361,7 @@ it('names a required key plainly, and does not ask a keyless preset for one', ()
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={vi.fn()}
   />)
@@ -390,7 +391,7 @@ it('keeps the recovery panel usable when the retrying write rejects', async () =
     taken={[]}
     protocols={['openai-completions']}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -446,7 +447,7 @@ it('keeps the recovery panel when the route still carries a catalog diagnostic',
         poolTestIdentity: vi.fn(),
       },
     } as unknown as ModelsWire}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={onClose}
   />)
@@ -466,7 +467,7 @@ it('hides an operator-hidden preset from the picker while its configured route s
     protocols={['openai-completions']}
     overrides={{ anthropic: { hidden: true } }}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={vi.fn()}
   />)
@@ -489,7 +490,7 @@ it('honors a keyless override for a preset that ships with a key reference', () 
     protocols={['openai-completions']}
     overrides={{ openai: { keyless: true } }}
     api={wire(discoverModels, mutate)}
-    t={key => en[key]}
+    t={translateEn}
     readOnly={false}
     onClose={vi.fn()}
   />)

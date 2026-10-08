@@ -231,7 +231,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:96`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:130`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -536,6 +536,12 @@ export interface Config {
   registryProbeTimeoutMs: number
   /** Lifetime of a winning registry or unavailable result. */
   registryProbeCacheTtlMs: number
+  /**
+   * Registry ping endpoints raced by {@link PluginRegistryProbe.fastest}; each
+   * endpoint's `/`-origin is the candidate registry. Defaults to the official
+   * npm ping and the mainland China mirror ping.
+   */
+  registryPingUrls: string[]
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-client-ui-plugin-manager -->
@@ -1622,7 +1628,7 @@ export interface Config extends ProtocolConfig {
 ## `@deepseek-ai/dsh-llm-pi-ai`
 
 - `inject`: `llm`
-- `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
+- `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · [`ModelModality`](../packages/llm/llm/src/index.ts) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
 - `source`: [`packages/llm/llm-pi-ai/src/config.ts:273`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
@@ -1781,10 +1787,13 @@ export interface PiAiModelProfile {
    * installed catalog entry's modalities, then the route's `defaultInput`.
    * Declaring images is what makes a hand-declared vision model usable, and
    * declaring text alone corrects a catalog model whose gateway does not serve
-   * what the catalog records. This is a claim about the endpoint, not a check
-   * of it: nothing interrogates a gateway for what it accepts, so a model
-   * claiming images its endpoint refuses is refused by the provider instead,
-   * mid-turn.
+   * what the catalog records. The vocabulary also carries the disclosure-side
+   * tokens `audio`, `video`, and `pdf`, which provider catalogs report and
+   * pi-ai's request type cannot express: those stay stored here and in the
+   * discovered cache, while the materialized pi-ai model carries only the wire
+   * modalities. This is a claim about the endpoint, not a check of it: nothing
+   * interrogates a gateway for what it accepts, so a model claiming images its
+   * endpoint refuses is refused by the provider instead, mid-turn.
    */
   input?: PiAiModality[]
   /**
@@ -1900,8 +1909,15 @@ export interface PiAiCompatProfile {
   supportsStrictTools?: boolean
 }
 
-/** One request modality a pi-ai model may accept. */
-export type PiAiModality = Model<Api>['input'][number]
+/**
+ * Every request modality a profile may declare: pi-ai's wire modalities plus
+ * the disclosure-side tokens provider catalogs publish (`audio`, `video`,
+ * `pdf` — models.dev's vocabulary, carried by {@link ModelModality}). The
+ * `Record` key type is a drift gate: a pi-ai upgrade that adds or removes a
+ * wire modality fails compilation here naming the drifted key, instead of
+ * silently narrowing what a profile may declare.
+ */
+export type PiAiModality = Model<Api>['input'][number] | ModelModality
 
 /** How the pool picks among healthy identities. */
 export type PoolStrategy =
@@ -2670,7 +2686,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:90`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:97`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root and physical encoding. */
@@ -2724,7 +2740,7 @@ export interface Config {
 
 - `inject`: `sessions`
 - `refs`: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
-- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:117`](../packages/session-query/session-query-sqlite/src/index.ts)
+- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:122`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 ```ts config-catalog
 /** Combined session-query configuration backed by SQLite full-text search. */
@@ -2912,7 +2928,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-skill`
 
-- `source`: [`packages/skill/skill/src/index.ts:278`](../packages/skill/skill/src/index.ts)
+- `source`: [`packages/skill/skill/src/index.ts:283`](../packages/skill/skill/src/index.ts)
 
 ```ts config-catalog
 /** Skill registry configuration. */
@@ -3658,7 +3674,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-tool-jobs`
 
 - `inject`: `tools` · `jobs` · `systemPrompt`
-- `source`: [`packages/jobs/tool-jobs/src/index.ts:41`](../packages/jobs/tool-jobs/src/index.ts)
+- `source`: [`packages/jobs/tool-jobs/src/index.ts:44`](../packages/jobs/tool-jobs/src/index.ts)
 
 ```ts config-catalog
 /** Configures bounded `job_output` waits and completion-notice delivery. */
@@ -3865,7 +3881,7 @@ export interface Config {
 
 - `inject`: `tools` · `subagents` · `systemPrompt` · `sessionProjections`
 - `refs`: [`AgentOptions`](subsystems/core.md)
-- `source`: [`packages/subagent/tool-subagent/src/index.ts:49`](../packages/subagent/tool-subagent/src/index.ts)
+- `source`: [`packages/subagent/tool-subagent/src/index.ts:50`](../packages/subagent/tool-subagent/src/index.ts)
 
 ```ts config-catalog
 /** Config: which registered provider this tool delegates to, plus child defaults. */
@@ -4109,7 +4125,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-user-approval`
 
-- `source`: [`packages/interaction/user-approval/src/index.ts:128`](../packages/interaction/user-approval/src/index.ts)
+- `source`: [`packages/interaction/user-approval/src/index.ts:134`](../packages/interaction/user-approval/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config. All optional — `static Config` supplies the defaults. */
@@ -4175,7 +4191,7 @@ export interface WebRuntimeConfig {
 ## `@deepseek-ai/dsh-web-app`
 
 - `inject`: `webServer`
-- `source`: [`packages/bundle/web-app/src/index.ts:44`](../packages/bundle/web-app/src/index.ts)
+- `source`: [`packages/bundle/web-app/src/index.ts:45`](../packages/bundle/web-app/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: composed deployment settings plus per-invocation command-line values. */
@@ -4222,6 +4238,72 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-fetch-http -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-web-fetch-jina -->
+<a id="deepseek-aidsh-web-fetch-jina"></a>
+
+## `@deepseek-ai/dsh-web-fetch-jina`
+
+- `inject`: `web`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/web/web-fetch-jina/src/index.ts:40`](../packages/web/web-fetch-jina/src/index.ts)
+
+```ts config-catalog
+/** Plugin config (all optional — `apply` fills env-var and constant defaults). */
+export interface Config {
+  /** Literal Jina API key; prefer {@link apiKeyEnv} so no secret enters configuration files. Omitted = keyless. */
+  apiKey: Volatile<string | undefined>
+  /** Credential reference resolved for each fetch; defaults to `JINA_API_KEY`. A missing value keeps the keyless mode. */
+  apiKeyEnv: Volatile<string>
+  /** Endpoint base; the target URL is appended as a path. Defaults to the public Reader. */
+  baseURL: Volatile<string | undefined>
+  /** Browser engine sent as `X-Engine`; omitted = Jina's automatic choice. */
+  engine: Volatile<JinaEngine | undefined>
+  /** Page-load wait in seconds sent as `X-Timeout`, at most 180. */
+  timeoutSeconds: Volatile<number | undefined>
+  /** Output-token cap sent as `X-Max-Tokens`, at least 500; Jina trims rather than rejects. */
+  maxTokens: Volatile<number | undefined>
+}
+
+/** Browser engine sent as Jina's `X-Engine`; omitted = Jina's automatic choice. */
+export type JinaEngine = 'browser' | 'direct' | 'cf-browser-rendering'
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-fetch-jina -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-web-search-brave -->
+<a id="deepseek-aidsh-web-search-brave"></a>
+
+## `@deepseek-ai/dsh-web-search-brave`
+
+- `inject`: `web`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/web/web-search-brave/src/index.ts:43`](../packages/web/web-search-brave/src/index.ts)
+
+```ts config-catalog
+/** Plugin config (all optional — `apply` fills env-var and constant defaults). */
+export interface Config {
+  /** Literal Brave API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
+  apiKey: Volatile<string | undefined>
+  /** Credential reference resolved for each search; defaults to `BRAVE_API_KEY`. */
+  apiKeyEnv: Volatile<string>
+  /** Endpoint base; `/res/v1/web/search` is appended. Defaults to the public API. */
+  baseURL: Volatile<string | undefined>
+  /** Default result count when a request carries no `maxResults`; Brave caps a request at 20. */
+  count: Volatile<number>
+  /**
+   * Deployment-level freshness window: `pd` (past day), `pw` (past week), `pm`
+   * (past month), `py` (past year), or an ISO-8601 range
+   * `YYYY-MM-DDtoYYYY-MM-DD`. The seam's request has no recency field, so this
+   * cannot vary per query without a seam change.
+   */
+  freshness: Volatile<string | undefined>
+  /** Two-letter country code sent as Brave's `country`. */
+  country: Volatile<string | undefined>
+  /** Search-language code sent as Brave's `search_lang`. */
+  searchLang: Volatile<string | undefined>
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-search-brave -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-web-search-deepseek -->
 <a id="deepseek-aidsh-web-search-deepseek"></a>
 
@@ -4258,22 +4340,57 @@ export interface Config {
 ## `@deepseek-ai/dsh-web-search-exa`
 
 - `inject`: `web`
-- `source`: [`packages/web/web-search-exa/src/index.ts:35`](../packages/web/web-search-exa/src/index.ts)
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/web/web-search-exa/src/index.ts:46`](../packages/web/web-search-exa/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config (all optional — `apply` fills env-var and constant defaults). */
 export interface Config {
-  /** Exa API key. Falls back to `$EXA_API_KEY`. Empty → provider unavailable. */
-  apiKey?: string
+  /** Literal Exa API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
+  apiKey: Volatile<string | undefined>
+  /** Credential reference resolved for each search; defaults to `EXA_API_KEY`. */
+  apiKeyEnv: Volatile<string>
   /** Endpoint base; `/search` is appended. Defaults to the public API. */
-  baseURL?: string
+  baseURL: Volatile<string | undefined>
   /** Retrieval mode sent as Exa's `type`. Defaults to `auto`. */
-  searchType?: 'auto' | 'keyword' | 'neural'
+  searchType: Volatile<ExaSearchType>
   /** Default result count when a request carries no `maxResults`. Omitted = none. */
-  numResults?: number
-  /** Highlight sentences requested per result. Defaults to 1. */
-  highlightsPerResult?: number
+  numResults: Volatile<number | undefined>
+  /** Highlight excerpts requested per result. Defaults to 1. */
+  highlightsPerResult: Volatile<number>
+  /** Only results published after this ISO-8601 instant. */
+  startPublishedDate: Volatile<string | undefined>
+  /** Only results published before this ISO-8601 instant. */
+  endPublishedDate: Volatile<string | undefined>
+  /** Exa data-category focus. `company`/`people` reject date and exclusion filters. */
+  category: Volatile<ExaCategory | undefined>
+  /** Restrict results to these domains or domain paths. */
+  includeDomains: Volatile<string[] | undefined>
+  /** Drop results from these domains or domain paths. */
+  excludeDomains: Volatile<string[] | undefined>
+  /** Force a live fetch instead of cached page content. */
+  livecrawl: Volatile<boolean | undefined>
+  /**
+   * Request full page text. Set `maxCharacters` to enable it: a schemastery
+   * object node resolves to `{}` when unset, so an absent cap is
+   * indistinguishable from an unset field.
+   */
+  text: Volatile<{
+    /** Maximum characters of page text to request. */
+    maxCharacters: number
+  } | undefined>
+  /** Request a generated per-page summary. */
+  summary: Volatile<boolean | undefined>
 }
+
+/** Retrieval mode sent as Exa's `type`. */
+export type ExaSearchType = 'instant' | 'fast' | 'auto' | 'deep-lite' | 'deep' | 'deep-reasoning'
+
+/**
+ * Exa data-category focus. `company` and `people` support only a limited
+ * filter set and reject the date and domain-exclusion filters (HTTP 400).
+ */
+export type ExaCategory = 'company' | 'people' | 'publication' | 'news' | 'personal site' | 'financial report'
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-search-exa -->
 
@@ -4301,6 +4418,84 @@ export interface Config {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-search-perplexity -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-web-search-searxng -->
+<a id="deepseek-aidsh-web-search-searxng"></a>
+
+## `@deepseek-ai/dsh-web-search-searxng`
+
+- `inject`: `web`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/web/web-search-searxng/src/index.ts:36`](../packages/web/web-search-searxng/src/index.ts)
+
+```ts config-catalog
+/** Plugin config (all optional except the instance base — `apply` fills constant defaults). */
+export interface Config {
+  /** Instance base URL; `/search` is appended. Required — SearXNG has no public default instance. */
+  baseURL: Volatile<string>
+  /** Comma-separated SearXNG categories, e.g. `general,news`. */
+  categories: Volatile<string | undefined>
+  /** Language code sent as `language`; `auto` defers to the instance. */
+  language: Volatile<string | undefined>
+  /** Recency window sent as `time_range`. */
+  timeRange: Volatile<SearxngTimeRange | undefined>
+  /** Restrict results to these engine names; joined with commas as `engines`. Empty = every engine. */
+  engines: Volatile<string[]>
+  /** Safe-search level sent as `safesearch`: `0` none, `1` moderate, `2` strict. */
+  safesearch: Volatile<SearxngSafeSearch | undefined>
+}
+
+/** Recency window sent as SearXNG's `time_range`. */
+export type SearxngTimeRange = 'day' | 'week' | 'month' | 'year'
+
+/** Safe-search level sent as SearXNG's `safesearch`. */
+export type SearxngSafeSearch = 0 | 1 | 2
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-search-searxng -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-web-search-tavily -->
+<a id="deepseek-aidsh-web-search-tavily"></a>
+
+## `@deepseek-ai/dsh-web-search-tavily`
+
+- `inject`: `web`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/web/web-search-tavily/src/index.ts:45`](../packages/web/web-search-tavily/src/index.ts)
+
+```ts config-catalog
+/** Plugin config (all optional — `apply` fills env-var and constant defaults). */
+export interface Config {
+  /** Literal Tavily API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
+  apiKey: Volatile<string | undefined>
+  /** Credential reference resolved for each search; defaults to `TAVILY_API_KEY`. */
+  apiKeyEnv: Volatile<string>
+  /** Endpoint base; `/search` is appended. Defaults to the public API. */
+  baseURL: Volatile<string | undefined>
+  /** Retrieval depth sent as Tavily's `search_depth`. Defaults to `basic`. */
+  searchDepth: Volatile<TavilySearchDepth>
+  /** Default result count when a request carries no `maxResults`; Tavily caps a request at 20. */
+  maxResults: Volatile<number | undefined>
+  /** Request a generated answer (`true`/`basic` quick, `advanced` detailed). */
+  includeAnswer: Volatile<TavilyAnswerMode | undefined>
+  /** Recency window sent as Tavily's `time_range`. */
+  timeRange: Volatile<TavilyTimeRange | undefined>
+  /** Search category sent as Tavily's `topic`. */
+  topic: Volatile<TavilyTopic | undefined>
+}
+
+/** Retrieval depth sent as Tavily's `search_depth`. */
+export type TavilySearchDepth = 'basic' | 'advanced'
+
+/** Generated-answer request sent as Tavily's `include_answer`. */
+export type TavilyAnswerMode = boolean | 'basic' | 'advanced'
+
+/** Recency window sent as Tavily's `time_range`. */
+export type TavilyTimeRange = 'day' | 'week' | 'month' | 'year'
+
+/** Search category sent as Tavily's `topic`. */
+export type TavilyTopic = 'general' | 'news' | 'finance'
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-search-tavily -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-webhook-github -->
 <a id="deepseek-aidsh-webhook-github"></a>
@@ -4482,6 +4677,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 | `@deepseek-ai/dsh-tool-cordis` | `tools` · `cordisInspect` | [`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts) |
 | `@deepseek-ai/dsh-tool-subagent-control` | `tools` · `subagents` | [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |
+| `@deepseek-ai/dsh-web-setup` | `configEditor` | [`packages/web/web-setup/src/index.ts`](../packages/web/web-setup/src/index.ts) |
 | `@deepseek-ai/dsh-webhook` | `agents` · `agentDefaultModel` · `agentPresets` · `permissionPresets` · `sessionTitle` · `workspaceRegistry` | [`packages/webhook/webhook/src/index.ts`](../packages/webhook/webhook/src/index.ts) |
 | `@deepseek-ai/dsh-workspace` | `storageDomain` · `sessionPersistence` | [`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts) |
 <!-- END GENERATED config-catalog:no-config -->

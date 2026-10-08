@@ -10,6 +10,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -17,6 +18,24 @@ export const name = 'enpoi-runtime-probe'
 
 /** Optional-only seam reads: every capability is probed via `ctx.get`. */
 export const inject: string[] = []
+
+/** Probe scheduling, in milliseconds. */
+export interface Config {
+  /** Delay before the first pass; services register after the probe mounts. */
+  firstProbeDelayMs?: number
+  /** Delay before the second pass, once sessions may have mounted subagents. */
+  secondProbeDelayMs?: number
+}
+
+/** The unchanged default schedule: a 2 s settle pass, then a 30 s re-check. */
+const DEFAULT_FIRST_PROBE_DELAY_MS = 2000
+const DEFAULT_SECOND_PROBE_DELAY_MS = 30_000
+
+/** Schemastery validator for {@link Config}. */
+export const Config: Schema<Config> = Schema.object({
+  firstProbeDelayMs: Schema.natural().default(DEFAULT_FIRST_PROBE_DELAY_MS),
+  secondProbeDelayMs: Schema.natural().default(DEFAULT_SECOND_PROBE_DELAY_MS),
+})
 
 /** File diagnostics — the Cordis logger only buffers (no console sink). */
 function diag(line: string): void {
@@ -30,17 +49,17 @@ function diag(line: string): void {
   }
 }
 
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config = {}): void {
   // Defer the checks: services (llm, subagents, agents) register after the
   // probe mounts. A short delay makes the tripwire see the settled tree.
   setTimeout(() => {
     probe(ctx)
-  }, 2000)
+  }, config.firstProbeDelayMs ?? DEFAULT_FIRST_PROBE_DELAY_MS)
   // Second pass: `subagents` is session-lazy (created when a session mounts
   // the delegation group) — re-check after sessions have had time to exist.
   setTimeout(() => {
     probe(ctx)
-  }, 30_000)
+  }, config.secondProbeDelayMs ?? DEFAULT_SECOND_PROBE_DELAY_MS)
 }
 
 function probe(ctx: Context): void {

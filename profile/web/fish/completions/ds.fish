@@ -9,7 +9,7 @@ complete -c ds -n "__fish_use_subcommand" -a "restart" -d "Restart dsh-web.servi
 complete -c ds -n "__fish_use_subcommand" -a "status" -d "Show systemd service status"
 complete -c ds -n "__fish_use_subcommand" -a "web" -d "Open web UI in browser"
 complete -c ds -n "__fish_use_subcommand" -a "urls" -d "Show local & Tailscale endpoints"
-complete -c ds -n "__fish_use_subcommand" -a "serve" -d "Enable Tailscale HTTPS serve (:8443)"
+complete -c ds -n "__fish_use_subcommand" -a "serve" -d "Enable Tailscale HTTPS serve (DSH_TAILNET_PORT, default 8443)"
 complete -c ds -n "__fish_use_subcommand" -a "serve-off" -d "Reset Tailscale serve"
 complete -c ds -n "__fish_use_subcommand" -a "doctor" -d "Comprehensive system diagnostic"
 complete -c ds -n "__fish_use_subcommand" -a "heal" -d "Quick permissions & service repair"

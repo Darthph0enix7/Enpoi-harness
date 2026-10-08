@@ -63,6 +63,16 @@ it('performs no request when disabled', async () => {
   expect(fetch).not.toHaveBeenCalled()
 })
 
+it('races the configured ping endpoints instead of the shipped defaults', async () => {
+  const { fetch, request } = transport()
+  const { probe } = await mount({ registryPingUrls: ['https://mirror.example/-/ping'] })
+  const result = probe.fastest()
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch).toHaveBeenCalledWith('https://mirror.example/-/ping', expect.objectContaining({ redirect: 'error' }))
+  request('https://mirror.example/').resolve(new Response(null, { status: 204 }))
+  expect(await result).toBe('https://mirror.example/')
+})
+
 it('ignores a faster HTTP failure and releases both response bodies', async () => {
   const { request } = transport()
   const { probe } = await mount()

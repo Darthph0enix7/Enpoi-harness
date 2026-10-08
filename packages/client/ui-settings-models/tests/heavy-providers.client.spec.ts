@@ -5,6 +5,8 @@
  */
 import { expect, it } from 'vitest'
 import {
+  FALLBACK_HEAVY_PROVIDER_MANIFESTS,
+  FREELLMAPI_RELEASES_API,
   HEAVY_PRESET_IDS,
   fallbackHeavyManifest,
   heavyDashboardUrls,
@@ -112,6 +114,15 @@ it('the pre-connection fallback marks commandcode addable with the direct-vendor
   expect(quirks).not.toContain(':8899')
 })
 
+it('keeps the FreeLLMAPI release feed in the named default, not in the commands', () => {
+  expect(FREELLMAPI_RELEASES_API).toBe('https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest')
+  // The desktop-download steps resolve the feed from the exported default, so
+  // the fallback table carries no second copy that could drift from it.
+  const feeds = JSON.stringify(FALLBACK_HEAVY_PROVIDER_MANIFESTS).match(/https:\/\/api\.github\.com\/repos\/[^"\s\\]+/g) ?? []
+  expect(feeds.length).toBeGreaterThan(0)
+  for (const feed of feeds) expect(feed).toBe(FREELLMAPI_RELEASES_API)
+})
+
 it('freellmapi defaults to the loopback endpoint in both modes', () => {
   const manifest = fallbackHeavyManifest('freellmapi')
   expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:3002/v1')
@@ -147,11 +158,13 @@ it('selects platform-keyed installs and falls back to the Docker path', () => {
   expect(darwin.steps[0]!.command).toContain('.dmg')
   expect(darwin.steps[0]!.command).toContain('uname -m')
   expect(darwin.steps[0]!.command).toContain("+-'\"$arch\"'\\.dmg\"'")
+  expect(darwin.steps[0]!.command).toContain(FREELLMAPI_RELEASES_API)
   expect(darwin.steps.map(step => step.command).join('\n')).toContain('"port":3002')
   expect(darwin.steps.map(step => step.command).join('\n')).toContain('/tmp/freellmapi-dmg-$$')
   const win32 = resolveHeavyInstall(local, 'win32')
   expect(win32.deps).toEqual(['Windows 10+', 'Git Bash (the install steps run through bash)'])
   expect(win32.steps[0]!.command).toContain('.exe')
+  expect(win32.steps[0]!.command).toContain(FREELLMAPI_RELEASES_API)
   expect(win32.steps[0]!.command).toContain('test -s "{home}/Downloads/freellmapi-setup-url"')
   // Removal covers the desktop-app leftovers on both vendor-app platforms,
   // stopping a running app before its files are deleted.

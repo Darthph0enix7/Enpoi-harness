@@ -16,6 +16,7 @@ import { ModelsSection } from '../src/client/ModelsSection.tsx'
 import type { ModelsSectionProps } from '../src/client/ModelsSection.tsx'
 import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
 import { en } from '../src/client/locales.ts'
+import { translateEn } from './translate.ts'
 import {
   providerKeyConfigured, type ModelsSettingsState, type ModelsSettingsStore, type ModelsWire, type ProviderRow,
 } from '../src/client/store.ts'
@@ -23,7 +24,7 @@ import { settingsSchema } from './settings-schema.client.ts'
 
 afterEach(cleanup)
 
-const t = (key: keyof typeof en): string => en[key]
+const t = translateEn
 
 /** A credentials answer over the Remote carrier, which has no envelope. */
 function remoteOk<T>(value: T) {
@@ -136,7 +137,7 @@ it('shows a keyless provider without a key as not set in the detail panel', () =
   />)
 
   expect(screen.getByText('No Key')).toBeTruthy()
-  expect(screen.getByPlaceholderText('Enter API key')).toBeTruthy()
+  expect(screen.getByPlaceholderText(en.keyPlaceholder)).toBeTruthy()
 })
 
 it('shows an environment-set key and a stored key as configured in the detail panel', () => {

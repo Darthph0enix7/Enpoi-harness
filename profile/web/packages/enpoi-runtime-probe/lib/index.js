@@ -1,8 +1,15 @@
 // src/index.ts
+import Schema from "@deepseek-ai/schemastery";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 var name = "enpoi-runtime-probe";
 var inject = [];
+var DEFAULT_FIRST_PROBE_DELAY_MS = 2e3;
+var DEFAULT_SECOND_PROBE_DELAY_MS = 3e4;
+var Config = Schema.object({
+  firstProbeDelayMs: Schema.natural().default(DEFAULT_FIRST_PROBE_DELAY_MS),
+  secondProbeDelayMs: Schema.natural().default(DEFAULT_SECOND_PROBE_DELAY_MS)
+});
 function diag(line) {
   try {
     const home = process.env.DSH_HOME ?? process.env.HOME ?? "/tmp";
@@ -13,13 +20,13 @@ function diag(line) {
   } catch {
   }
 }
-function apply(ctx) {
+function apply(ctx, config = {}) {
   setTimeout(() => {
     probe(ctx);
-  }, 2e3);
+  }, config.firstProbeDelayMs ?? DEFAULT_FIRST_PROBE_DELAY_MS);
   setTimeout(() => {
     probe(ctx);
-  }, 3e4);
+  }, config.secondProbeDelayMs ?? DEFAULT_SECOND_PROBE_DELAY_MS);
 }
 function probe(ctx) {
   const results = [];
@@ -61,6 +68,7 @@ function probe(ctx) {
   diag(`seams: ${results.join(" \xB7 ")}`);
 }
 export {
+  Config,
   apply,
   inject,
   name

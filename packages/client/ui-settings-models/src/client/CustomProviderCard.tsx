@@ -36,6 +36,7 @@ import { deriveKeyRef } from './store.ts'
 import { protocolLabel } from './protocol-label.ts'
 import type { ModelsOperations } from './operations.ts'
 import type { en } from './locales.ts'
+import { CUSTOM_ANTHROPIC_BASE_URL_EXAMPLE, CUSTOM_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import styles from './ModelsSection.module.css'
 
 /** The settings namespace a hand-declared provider is written into. */
@@ -244,9 +245,9 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
           className={styles['input']}
           type="text"
           value={baseURL}
-          placeholder={t(protocol === 'anthropic-messages'
-            ? 'customAnthropicBaseUrlPlaceholder'
-            : 'customBaseUrlPlaceholder')}
+          placeholder={protocol === 'anthropic-messages'
+            ? CUSTOM_ANTHROPIC_BASE_URL_EXAMPLE
+            : CUSTOM_BASE_URL_EXAMPLE}
           aria-label={t('baseUrl')}
           aria-invalid={baseUrlInvalid}
           disabled={profileDisabled}

@@ -161,7 +161,7 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
             <p className={styles['heavyBlockedHint']}>
               {t('heavyBlockedHint').replace('{planned}', manifest.unsupported.plannedWith)}
               {' · '}
-              <a href={manifest.unsupported.reuseUrl} target="_blank" rel="noreferrer">reuse URL ↗</a>
+              <a href={manifest.unsupported.reuseUrl} target="_blank" rel="noreferrer">{t('heavyReuseUrl')} ↗</a>
             </p>
           </div>
         )}

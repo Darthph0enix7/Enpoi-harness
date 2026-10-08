@@ -16,9 +16,9 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PeerService } from '../src/host.ts'
+import { PeerService, PEER_CAPABILITIES, PEER_CAPABILITY_LEDGER, PLANNED_PEER_CAPABILITIES } from '../src/host.ts'
 import { PeerConfigError, PeerPairingsStore } from '../src/pairings.ts'
-import type { PeerFollowFrame, PeerTarget } from '../src/types.ts'
+import type { PeerCapability, PeerFollowFrame, PeerTarget } from '../src/types.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
@@ -406,6 +406,32 @@ describe('peer host service', () => {
       expect((error as RemoteError).code).toBe('gateway/bad-request')
       expect((error as RemoteError).message).toContain('handshake requires a request object')
     }
+  })
+
+  it('advertises only served capabilities and accounts for every contractual capability', async () => {
+    const { peer } = await setup()
+    const advertised = peer.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    }).capabilities
+    const ledger = Object.keys(PEER_CAPABILITY_LEDGER) as PeerCapability[]
+    // handshake.capabilities ⊆ the contractual union (the ledger keys are
+    // exactly the union: its Record type fails the build on drift).
+    for (const capability of advertised) expect(ledger).toContain(capability)
+    expect(new Set(advertised)).toEqual(new Set(PEER_CAPABILITIES))
+    // Every contractual capability is either served or explicitly planned,
+    // exactly once across the two lists.
+    const served = ledger.filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'served')
+    const planned = ledger.filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'planned')
+    expect(new Set(served)).toEqual(new Set(PEER_CAPABILITIES))
+    expect(new Set(planned)).toEqual(new Set(PLANNED_PEER_CAPABILITIES))
+    expect(new Set([...served, ...planned])).toEqual(new Set(ledger))
+    expect([...served, ...planned]).toHaveLength(ledger.length)
+    // `assistant-stream` is served by follow() under debug exposure; it must
+    // stay advertised or a debug caller cannot know the opt-in exists.
+    expect(advertised).toContain('assistant-stream')
   })
 
   it('lists pairings with bound sessions, latch summaries, and unbound rows', async () => {

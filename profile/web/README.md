@@ -198,6 +198,12 @@ sync with the installer's `copy_profile_tree`.
    ```
 5. **ds CLI** (fish users only): `cp ~/dotfiles/dsh-dotfiles/fish/ds.fish ~/.config/fish/functions/`
    and `cp ~/dotfiles/dsh-dotfiles/fish/completions/ds.fish ~/.config/fish/completions/`.
+   `ds serve` publishes the local web UI over Tailscale HTTPS on
+   `DSH_TAILNET_PORT` (default 8443); the derived
+   `https://<device>.<tailnet>.ts.net:<port>` URL honors the same variable, so a
+   second HTTPS service can take 8443 and this one move without a silent
+   collision. Any `--trusted-host <device>.<tailnet>.ts.net:<port>` entry in a
+   web unit must name the same port.
 6. Configure your own providers in Settings → Models, then `ds sync` to create your device patch.
 
 **Personal bits never shared**: `settings.yaml` (providers/personas),

@@ -173,7 +173,13 @@ export interface PeerEventRecord {
   readonly data: JsonValue
 }
 
-/** A capability the serving host advertises in its handshake. */
+/**
+ * A capability the serving host advertises in its handshake. The union is the
+ * full contract; a host advertises the subset it serves, and the serving
+ * package's capability ledger marks each member served or planned. A peer must
+ * not assume an unadvertised capability (for example `assistant-stream`, which
+ * `peer.follow` serves only under `debug` exposure and opt-in).
+ */
 export type PeerCapability =
   | 'state-latch'
   | 'derived-latch'

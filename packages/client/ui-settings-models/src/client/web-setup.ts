@@ -71,7 +71,6 @@ interface WebSearchOfferBase {
   /** Layout group from the approved design. */
   readonly group: 'keyless' | 'hosted' | 'premium'
   readonly nameKey: keyof typeof en
-  readonly bodyKey: keyof typeof en
   readonly recommended?: boolean
   /** Credential reference derived for this route; absent for keyless offers. */
   readonly keyRef?: string
@@ -100,12 +99,12 @@ export type WebSearchOffer = WebSearchProviderOffer | WebSearchOffOffer
  * hidden until then.
  */
 export const WEB_SEARCH_OFFERS: readonly WebSearchOffer[] = [
-  { id: 'exa', group: 'premium', nameKey: 'wizWebExa', bodyKey: 'wizWebExaBody', recommended: true, keyRef: 'EXA_API_KEY', dashboardUrl: 'https://dashboard.exa.ai' },
-  { id: 'brave', group: 'hosted', nameKey: 'wizWebBrave', bodyKey: 'wizWebBraveBody', keyRef: 'BRAVE_API_KEY', dashboardUrl: 'https://api-dashboard.search.brave.com' },
-  { id: 'tavily', group: 'hosted', nameKey: 'wizWebTavily', bodyKey: 'wizWebTavilyBody', keyRef: 'TAVILY_API_KEY', dashboardUrl: 'https://app.tavily.com' },
-  { id: 'searxng', group: 'keyless', nameKey: 'wizWebSearxng', bodyKey: 'wizWebSearxngBody', needsBaseURL: true },
-  { id: 'deepseek-official', group: 'keyless', nameKey: 'wizWebDeepSeek', bodyKey: 'wizWebDeepSeekBody' },
-  { id: 'none', group: 'keyless', nameKey: 'wizWebNone', bodyKey: 'wizWebNoneBody' },
+  { id: 'exa', group: 'premium', nameKey: 'wizWebExa', recommended: true, keyRef: 'EXA_API_KEY', dashboardUrl: 'https://dashboard.exa.ai' },
+  { id: 'brave', group: 'hosted', nameKey: 'wizWebBrave', keyRef: 'BRAVE_API_KEY', dashboardUrl: 'https://api-dashboard.search.brave.com' },
+  { id: 'tavily', group: 'hosted', nameKey: 'wizWebTavily', keyRef: 'TAVILY_API_KEY', dashboardUrl: 'https://app.tavily.com' },
+  { id: 'searxng', group: 'keyless', nameKey: 'wizWebSearxng', needsBaseURL: true },
+  { id: 'deepseek-official', group: 'keyless', nameKey: 'wizWebDeepSeek' },
+  { id: 'none', group: 'keyless', nameKey: 'wizWebNone' },
 ]
 
 /** The credential reference the DeepSeek native search provider resolves. */

@@ -38,6 +38,7 @@ import { protocolLabel } from './protocol-label.ts'
 import type { ModelsOperations } from './operations.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
+import { DEEPSEEK_DEFAULT_BASE_URL } from './endpoint-defaults.ts'
 import styles from './ModelsSection.module.css'
 
 /** Per-adapter-family curated field sets (unknown namespaces get the hint alone). */
@@ -430,7 +431,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
                 type="text"
                 value={stringAt(draft, 'baseURL') ?? ''}
                 placeholder={family === 'deepseek'
-                  ? t('deepSeekBaseUrl')
+                  ? DEEPSEEK_DEFAULT_BASE_URL
                   : stringAt(fallback, 'baseURL') ?? t('baseUrlDefault')}
                 aria-describedby={family === 'deepseek' ? `${props.provider}-endpoint-hint` : undefined}
                 aria-label={t('baseUrl')}

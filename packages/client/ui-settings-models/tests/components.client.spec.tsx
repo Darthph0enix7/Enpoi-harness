@@ -25,12 +25,13 @@ import { createModelsOperations } from '../src/client/operations.ts'
 import type { ModelsOperations } from '../src/client/operations.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
+import { translateEn } from './translate.ts'
 import { settingsSchema } from './settings-schema.client.ts'
 import styles from '../src/client/ModelsSection.module.css'
 
 afterEach(cleanup)
 
-const t: ModelsSectionInjected['t'] = key => en[key]
+const t: ModelsSectionInjected['t'] = translateEn
 const OPENAI_TARGET = { provider: 'openai', displayName: 'openai' }
 const openaiCopy = (template: string): string => providerCopy(template, OPENAI_TARGET)
 const DEEPSEEK_TARGET = { provider: 'deepseek-official', displayName: 'DeepSeek' }
@@ -397,7 +398,7 @@ describe('ModelsSection', () => {
     expect(heading).toBeTruthy()
     // The unkeyed route's detail panel asks for a key.
     fireEvent.click(providerRow('DeepSeek'))
-    expect(screen.getByPlaceholderText('Enter API key')).toBeTruthy()
+    expect(screen.getByPlaceholderText(en.keyPlaceholder)).toBeTruthy()
   })
 
   it('filters the provider list through the sidebar search box', async () => {

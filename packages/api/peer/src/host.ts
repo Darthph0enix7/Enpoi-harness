@@ -99,15 +99,40 @@ export const PEER_SCHEMA_DIGEST = createHash('sha256')
   .update(`${PEER_PROTOCOL_VERSION}:${PEER_METHODS.join(',')}`)
   .digest('hex')
 
-const PEER_CAPABILITIES: readonly PeerCapability[] = [
-  'state-latch',
-  'derived-latch',
-  'answer-routing',
-  'session-create',
-  'runaway-ceiling',
-]
-
 const FOLLOW_SNAPSHOT_MAX_MESSAGES = 50
+
+/**
+ * Capability ledger: every `PeerCapability` the contract names, marked with
+ * whether this build serves it. The `Record` key set is the union, so a new
+ * union member fails the build here until it is explicitly marked; the
+ * handshake advertises exactly the `served` entries.
+ *
+ * `assistant-stream` is served: `peer.follow` yields
+ * `assistant-stream` frames when the pairing's exposure is `debug` and the
+ * caller opts in, and refuses the opt-in otherwise with `peer/forbidden`.
+ */
+export const PEER_CAPABILITY_LEDGER: Readonly<Record<PeerCapability, 'served' | 'planned'>> = {
+  'state-latch': 'served',
+  'derived-latch': 'served',
+  'assistant-stream': 'served',
+  'answer-routing': 'served',
+  'runaway-ceiling': 'served',
+  'session-create': 'served',
+}
+
+/** Capabilities this build serves and the handshake advertises. */
+export const PEER_CAPABILITIES: readonly PeerCapability[] =
+  (Object.keys(PEER_CAPABILITY_LEDGER) as PeerCapability[])
+    .filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'served')
+
+/**
+ * Capabilities the contract defines but this build does not serve yet. The
+ * capability gate test requires every ledger entry to be served or planned,
+ * and exactly one of the two.
+ */
+export const PLANNED_PEER_CAPABILITIES: readonly PeerCapability[] =
+  (Object.keys(PEER_CAPABILITY_LEDGER) as PeerCapability[])
+    .filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'planned')
 
 /** Peer API deployment policy. */
 export interface Config {

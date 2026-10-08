@@ -7,6 +7,7 @@ import type { ProviderPresetOverrides } from './provider-overrides.ts'
 import { useHeavyManifestState } from './heavy-manifest-source.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
+import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
 import { HeavyPreflightNote } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
@@ -27,7 +28,7 @@ export interface AddProviderModalProps {
    */
   overrides?: ProviderPresetOverrides
   api: ModelsWire
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
   readOnly: boolean
   /**
    * Close the modal; `created` marks a route that was stored. The returned
@@ -271,7 +272,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     heavyModeTouched.current = false
     if (tpl === 'empty') {
       setProviderId(uniqueId('provider', taken))
-      setDisplayName('New Provider')
+      setDisplayName(t('emptyProviderName'))
       setProtocol(protocols.includes('openai-completions') ? 'openai-completions' : protocols[0] || 'openai-completions')
       setBaseURL('')
       setApiKey('')
@@ -578,7 +579,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     <Modal
       open={open}
       onClose={() => { void onClose(false) }}
-      title={selected === null ? t('add') : `Add ${displayName || 'Provider'}`}
+      title={selected === null ? t('add') : t('addProviderTitle', { provider: displayName || t('provider') })}
       closeLabel={t('close')}
       className={`${styles['addProviderDialog'] ?? ''} ${modalStyles.dialog ?? ''}`}
       contentClassName={modalStyles.content ?? ''}
@@ -590,7 +591,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         ) : (
           <>
             <Button variant="ghost" disabled={busy} onClick={handleBack}>
-              Back
+              {t('back')}
             </Button>
             <Button
               variant="primary"
@@ -613,25 +614,25 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               <input
                 className={styles['searchInput']}
                 type="text"
-                placeholder={t('addSearchPlaceholder').replace('{count}', String(templates.length))}
+                placeholder={t('addSearchPlaceholder', { count: templates.length })}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 autoFocus
               />
             </div>
             <Button variant="outline" className={styles['customBtn']} onClick={() => handleSelect('empty')}>
-              Empty Provider
+              {t('emptyProvider')}
             </Button>
           </div>
 
           <div className={styles['templateGrid']}>
             {search.trim() === '' ? (
               <>
-                <div className={styles['templateGroupLabel']}>Popular</div>
+                <div className={styles['templateGroupLabel']}>{t('popularGroup')}</div>
                 {popular.map(tpl => (
                   <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
                 ))}
-                <div className={styles['templateGroupLabel']}>All Providers</div>
+                <div className={styles['templateGroupLabel']}>{t('allProvidersGroup')}</div>
                 {filtered.filter(tpl => tpl.heavy === undefined).map(tpl => (
                   <TemplateCard key={tpl.id} tpl={tpl} onSelect={handleSelect} configured={taken.includes(tpl.id)} t={t} />
                 ))}
@@ -649,7 +650,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               ))
             )}
             {filtered.length === 0 && (
-              <div className={styles['emptySidebar']}>No providers match "{search}".</div>
+              <div className={styles['emptySidebar']}>{t('noProvidersMatch', { query: search })}</div>
             )}
           </div>
         </div>
@@ -681,12 +682,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
           )}
 
           <div className={styles['field']}>
-            <label className={styles['fieldLabel']}>Display Name</label>
+            <label className={styles['fieldLabel']}>{t('customDisplayName')}</label>
             <input
               className={styles['input']}
               type="text"
               value={displayName}
-              placeholder="e.g. OpenAI Official"
+              placeholder={t('customDisplayNamePlaceholder')}
               onChange={e => setDisplayName(e.target.value)}
               disabled={busy || readOnly || heavy !== undefined}
             />
@@ -694,19 +695,19 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
 
           <div className={styles['fieldGrid']}>
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Provider ID (slug)</label>
+              <label className={styles['fieldLabel']}>{t('providerIdLabel')}</label>
               <input
                 className={styles['input']}
                 type="text"
                 value={providerId}
-                placeholder="e.g. openai"
+                placeholder={t('customRoutePlaceholder')}
                 onChange={e => setProviderId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
                 disabled={busy || readOnly || heavy !== undefined}
               />
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>API Protocol</label>
+              <label className={styles['fieldLabel']}>{t('customApi')}</label>
               <select
                 className={`${styles['input']} ${styles['selectInput']}`}
                 value={protocol}
@@ -725,19 +726,19 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
           {heavy === undefined ? (
             <>
               <div className={styles['field']}>
-                <label className={styles['fieldLabel']}>Base URL / Endpoint</label>
+                <label className={styles['fieldLabel']}>{t('customBaseUrlLabel')}</label>
                 <input
                   className={styles['input']}
                   type="text"
                   value={baseURL}
-                  placeholder="https://api.openai.com/v1"
+                  placeholder={OPENAI_BASE_URL_EXAMPLE}
                   onChange={e => setBaseURL(e.target.value)}
                   disabled={busy || readOnly}
                 />
               </div>
 
               <div className={styles['field']}>
-                <label className={styles['fieldLabel']}>API Key</label>
+                <label className={styles['fieldLabel']}>{t('keyInput')}</label>
                 <input
                   className={styles['input']}
                   type="password"
@@ -745,9 +746,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
                   placeholder={keylessSelected
                     ? t('keylessApiKeyPlaceholder')
                     : presetEnvRef === undefined
-                      ? 'Enter API Key (optional for local/proxy endpoints)'
+                      ? t('keyPlaceholderOptional')
                       : envRefConfigured === undefined
-                        ? `Env ref: ${presetEnvRef}`
+                        ? t('addEnvRefPending', { ref: presetEnvRef })
                         : envRefConfigured
                           ? t('addEnvRefConfigured').replace('{ref}', presetEnvRef)
                           : t('addEnvRefMissing').replace('{ref}', presetEnvRef)}
@@ -793,14 +794,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
           {selected !== 'empty' && heavy === undefined && (
             <div className={styles['presetMeta']}>
               <span className={styles['presetMetaItem']}>
-                Env: {selected.env.length > 0 ? selected.env.join(', ') : 'none'}
+                {t('envLabel')} {selected.env.length > 0 ? selected.env.join(', ') : t('heavyNone')}
               </span>
               {keylessSelected && (
                 <span className={styles['presetMetaItem']}>{t('keylessProviderHint')}</span>
               )}
               {selected.doc && (
                 <a className={styles['presetMetaItem']} href={selected.doc} target="_blank" rel="noreferrer">
-                  Docs ↗
+                  {t('docsLink')}
                 </a>
               )}
             </div>
@@ -825,7 +826,7 @@ function HeavyProviderForm(props: {
   job: HeavyJobView | null
   readOnly: boolean
   busy: boolean
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
   onCheck: () => void
 }): ReactNode {
   const { manifest, mode, onMode, keyValue, onKey, customBase, onCustomBase, status, checking, job, readOnly, busy, t, onCheck } = props
@@ -1046,7 +1047,7 @@ function TemplateCard({
   onSelect: (tpl: ProviderTemplate) => void
   /** The provider already owns a route: its heavy row reads as configured. */
   configured: boolean
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
 }): ReactNode {
   return (
     <div

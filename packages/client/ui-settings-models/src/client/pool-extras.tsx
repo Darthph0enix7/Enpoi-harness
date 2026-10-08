@@ -32,7 +32,7 @@ export interface PoolExtrasInjected {
   /** Live pool status, test, and cooldown-reset operations. */
   llm: ModelsWire['llm']
   /** Models-page copy. */
-  t: (key: ModelsKey) => string
+  t: (key: ModelsKey, params?: Record<string, unknown>) => string
 }
 
 /** Owner props plus injected dependencies of the per-card pool editor. */
@@ -305,7 +305,7 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
         [identityId]: result.ok
           ? {
             state: 'success',
-            message: result.latencyMs === undefined ? t('poolTestOk') : `${t('poolTestOk')} (${result.latencyMs}ms)`,
+            message: result.latencyMs === undefined ? t('poolTestOk') : t('poolTestOkMs', { ms: result.latencyMs }),
           }
           : { state: 'error', message: result.error ?? t('poolTestFailed') },
       }))
@@ -447,7 +447,7 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
                           : styles['poolRow']
                     return (
                       <li key={identity.id} className={rowClass}>
-                        <span className={styles['poolPriority']} title={`P${index + 1}`}>P{index + 1}</span>
+                        <span className={styles['poolPriority']} title={t('poolPriorityTitle', { n: index + 1 })}>{t('poolPriorityBadge', { n: index + 1 })}</span>
                         <span className={styles['poolIdentity']}>
                           <span className={styles['poolNameRow']}>
                             <span className={styles['poolName']}>{identity.id}</span>
@@ -465,7 +465,7 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
                                 ? (
                                   <span className={`${styles['poolPill']} ${styles['poolPillCooling']}`}>
                                     <span className={`${styles['poolDot']} ${styles['poolDotCooling']}`} />
-                                    {cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`}
+                                    {cooldownSeconds > 60 ? t('poolCooldownMinutes', { minutes: Math.ceil(cooldownSeconds / 60) }) : t('poolCooldownSeconds', { seconds: cooldownSeconds })}
                                   </span>
                                 )
                                 : authFailed
@@ -598,7 +598,7 @@ interface AddIdentityDialogProps {
   open: boolean
   providerId: string
   defaultPriority: number
-  t: (key: ModelsKey) => string
+  t: (key: ModelsKey, params?: Record<string, unknown>) => string
   onClose: () => void
   onSubmit: (draft: { id: string; credentialRef: string; secret: string }) => Promise<string | undefined>
 }
@@ -853,7 +853,7 @@ export function ModelsFooterExtras(props: ModelsFooterExtrasProps): ReactNode {
                         ? (
                           <span className={`${styles['poolPill']} ${styles['poolPillCooling']}`}>
                             <span className={`${styles['poolDot']} ${styles['poolDotCooling']}`} />
-                            {cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`}
+                            {cooldownSeconds > 60 ? t('poolCooldownMinutes', { minutes: Math.ceil(cooldownSeconds / 60) }) : t('poolCooldownSeconds', { seconds: cooldownSeconds })}
                           </span>
                         )
                         : null}

@@ -20,10 +20,10 @@ import styles from './ModelsSection.module.css'
 
 type Translate = (key: keyof typeof en) => string
 
-/** One dashboard link with its role label. */
+/** One dashboard link with its role label key. */
 interface DashboardEntry {
   url: string
-  label: 'heavyDashboardLocal'
+  labelKey: 'heavyDashboardLocal'
 }
 
 /** Dashboard entries for a heavy provider, in display order (loopback-first). */
@@ -31,9 +31,9 @@ function dashboardEntries(manifest: HeavyProviderManifest, mode?: 'reuse' | 'loc
   const detectedUrl = manifest.dashboardUrl
   const localUrl = manifest.local.dashboardUrl ?? detectedUrl
   const entries: DashboardEntry[] = []
-  if (mode !== 'local' && detectedUrl !== undefined) entries.push({ url: detectedUrl, label: 'heavyDashboardLocal' })
+  if (mode !== 'local' && detectedUrl !== undefined) entries.push({ url: detectedUrl, labelKey: 'heavyDashboardLocal' })
   if (mode !== 'reuse' && localUrl !== undefined && localUrl !== detectedUrl) {
-    entries.push({ url: localUrl, label: 'heavyDashboardLocal' })
+    entries.push({ url: localUrl, labelKey: 'heavyDashboardLocal' })
   }
   return entries
 }
@@ -155,7 +155,7 @@ export function HeavyDashboardLinks({
           rel="noreferrer"
           onClick={(event) => { event.stopPropagation() }}
         >
-          {compact ? `${t('heavyDashboard')} ↗` : `${t(entry.label)}: ${entry.url} ↗`}
+          {compact ? `${t('heavyDashboard')} ↗` : `${t(entry.labelKey)}: ${entry.url} ↗`}
         </a>
       ))}
     </>

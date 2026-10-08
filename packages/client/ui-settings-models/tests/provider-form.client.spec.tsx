@@ -17,11 +17,13 @@ import type { ModelsWire } from '../src/client/store.ts'
 import { createModelsOperations } from '../src/client/operations.ts'
 import type { ModelsOperations } from '../src/client/operations.ts'
 import { en } from '../src/client/locales.ts'
+import { OPENAI_BASE_URL_EXAMPLE } from '../src/client/endpoint-defaults.ts'
+import { translateEn } from './translate.ts'
 import { settingsSchema } from './settings-schema.client.ts'
 
 afterEach(cleanup)
 
-const t: ModelsSectionInjected['t'] = key => en[key]
+const t: ModelsSectionInjected['t'] = translateEn
 
 const PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages']
 
@@ -1539,12 +1541,12 @@ describe('API key field', () => {
     const load = vi.spyOn(controller, 'load')
 
     fireEvent.click(screen.getByRole('button', { name: en.addProviderAction }))
-    await screen.findByRole('dialog', { name: en.add })
+    const dialog = await screen.findByRole('dialog', { name: en.add })
     // The dialog's empty-provider route asks for the id, endpoint, and nothing
     // else: the adapter sizes the placeholder model and no key is required.
-    fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
-    fireEvent.change(screen.getByPlaceholderText('e.g. openai'), { target: { value: 'acme' } })
-    fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), {
+    fireEvent.click(within(dialog).getByRole('button', { name: en.emptyProvider }))
+    fireEvent.change(within(dialog).getByPlaceholderText(en.customRoutePlaceholder), { target: { value: 'acme' } })
+    fireEvent.change(within(dialog).getByPlaceholderText(OPENAI_BASE_URL_EXAMPLE), {
       target: { value: 'https://acme.test/v1' },
     })
     fireEvent.click(screen.getByRole('button', { name: en.create }))

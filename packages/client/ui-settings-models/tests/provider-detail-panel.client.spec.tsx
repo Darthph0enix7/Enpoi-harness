@@ -9,6 +9,7 @@ import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '.
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
+import { translateEn } from './translate.ts'
 import { settingsSchema } from './settings-schema.client.ts'
 import styles from '../src/client/ModelsSection.module.css'
 
@@ -19,7 +20,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const t = (key: keyof typeof en): string => en[key]
+const t = translateEn
 
 const MODELS = [
   { id: 'free-a', name: 'Free A' },
@@ -208,7 +209,7 @@ it('renders a 501 identity-test answer as a disabled explanatory state, not a fa
     />,
   )
 
-  fireEvent.click(screen.getByTitle('Test this API key'))
+  fireEvent.click(screen.getByTitle(en.poolTest))
   // The host said "not implemented", not "credential failed": every identity's
   // test button is disabled and carries the explanation as its tooltip, and
   // the card shows the same explanation.

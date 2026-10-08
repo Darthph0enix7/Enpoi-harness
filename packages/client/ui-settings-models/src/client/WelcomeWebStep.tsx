@@ -18,10 +18,11 @@ import {
   type WebFetchProviderId, type WebSearchChoice, type WebSearchProviderOffer,
   type WebSetupApplyRequest, type WebSetupStatus, type WebSetupValidateRequest,
 } from './web-setup.ts'
+import { resolveWebSearchPlan, type WebSearchPlanOverrides } from './web-search-plans.ts'
 import type { en } from './locales.ts'
 import styles from './WelcomeWizard.module.css'
 
-type T = (key: keyof typeof en) => string
+type T = (key: keyof typeof en, params?: Record<string, unknown>) => string
 
 /** How the step renders one canary run. */
 type ValidationView =
@@ -45,6 +46,8 @@ export interface WelcomeWebStepProps {
   t: T
   /** Real settings and canary operations. */
   operations: ModelsOperations
+  /** Operator overrides for the shipped plan rows, keyed by provider id. */
+  planOverrides: WebSearchPlanOverrides
   /** Whether the shared Models join already reports a DeepSeek credential. */
   deepSeekConfigured: boolean
   /** The apply landed; a non-null `pendingRestart` is the host's restart diagnostic. */
@@ -58,15 +61,15 @@ function WebKeyHint({ glyph, side }: { glyph: string; side: 'before' | 'after' }
   return <kbd className={styles.keyHint} data-side={side} data-wiz-key={side} aria-hidden="true">{glyph}</kbd>
 }
 
-/** Clean provider display name without promotional suffix. */
-function providerDisplayName(id: WebSearchChoice): string {
+/** Locale key for one provider's display name, without promotional suffix. */
+function providerNameKey(id: WebSearchChoice): keyof typeof en {
   switch (id) {
-    case 'exa': return 'Exa'
-    case 'brave': return 'Brave Search'
-    case 'tavily': return 'Tavily'
-    case 'searxng': return 'SearXNG'
-    case 'deepseek-official': return 'DeepSeek'
-    default: return ''
+    case 'exa': return 'wizWebExaName'
+    case 'brave': return 'wizWebBraveName'
+    case 'tavily': return 'wizWebTavilyName'
+    case 'searxng': return 'wizWebSearxngName'
+    case 'deepseek-official': return 'wizWebDeepSeekName'
+    default: return 'wizWebNone'
   }
 }
 
@@ -83,7 +86,7 @@ function formatCredentialSource(source: string | undefined, t: T): string {
  * @returns the step panel.
  */
 export function WelcomeWebStep(props: WelcomeWebStepProps): ReactNode {
-  const { t, operations, deepSeekConfigured, onApplied, onSkip, onBack } = props
+  const { t, operations, planOverrides, deepSeekConfigured, onApplied, onSkip, onBack } = props
   const [load, setLoad] = useState<LoadView>({ phase: 'loading' })
   const [choice, setChoice] = useState<WebSearchChoice>('none')
   const [keyDraft, setKeyDraft] = useState('')
@@ -319,6 +322,11 @@ export function WelcomeWebStep(props: WelcomeWebStepProps): ReactNode {
   const keyFailure = selectedOffer === undefined ? undefined : apiKeyFailure(keyDraft)
   const keyConfigured = selectedOffer !== undefined && offerKeyConfigured(selectedOffer, status)
   const searchBadgeVisible = configuredSearch && (selectedOffer?.keyRef !== undefined ? keyConfigured : choice !== 'none')
+  // The selected provider's plan facts come from the shipped data table (with
+  // operator overrides), never from translated prose.
+  const plan = selectedOffer === undefined
+    ? undefined
+    : resolveWebSearchPlan(selectedOffer.id, planOverrides)
 
   return (
     <div className={styles.step}>
@@ -398,7 +406,7 @@ export function WelcomeWebStep(props: WelcomeWebStepProps): ReactNode {
                 type="password"
                 autoComplete="new-password"
                 value={keyDraft}
-                placeholder={keyConfigured ? t('keyStored') : t('wizWebKeyPlaceholder').replace('{provider}', providerDisplayName(selectedOffer.id))}
+                placeholder={keyConfigured ? t('keyStored') : t('wizWebKeyPlaceholder', { provider: t(providerNameKey(selectedOffer.id)) })}
                 aria-label={t('keyInput')}
                 aria-invalid={keyFailure !== undefined}
                 data-wiz-web-key
@@ -416,9 +424,16 @@ export function WelcomeWebStep(props: WelcomeWebStepProps): ReactNode {
                 rel="noreferrer"
                 data-wiz-web-dashboard
               >
-                {t('wizWebDashboard').replace('{provider}', providerDisplayName(selectedOffer.id))}
+                {t('wizWebDashboard', { provider: t(providerNameKey(selectedOffer.id)) })}
               </a>
             </div>
+            {plan !== undefined ? (
+              <p className={styles.fineprint} data-wiz-web-plan>
+                {t('wizWebPlanLine', { plan: plan.plan, price: plan.price, limits: plan.limits })}
+                {' · '}
+                <a className={styles.dashboardLink} href={plan.link} target="_blank" rel="noreferrer">{t('wizWebPlanLink')}</a>
+              </p>
+            ) : null}
             {keyFailure !== undefined ? <p className={styles.error}>{t(keyFailure)}</p> : null}
             {!keyConfigured && keyDraft.trim().length === 0 ? (
               <p className={styles.warningNote} data-wiz-web-warning>

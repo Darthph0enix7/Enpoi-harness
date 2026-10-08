@@ -30,6 +30,19 @@ which writes a unit generated for the local user (`dsh` refuses non-loopback
 binds by design; expose the port with your own reverse proxy / Tailscale serve
 if you need remote access).
 
+The generated unit never pins a Node version: it prefers the installer's
+version-independent link `<prefix>/runtime/node/current/bin/node` when that
+exists and otherwise uses the Node path the installer recorded in
+`install-state.json`, so a Node bump rides the `current` re-link instead of
+orphaning the service. These serverlocal copies still hardcode the machine's
+nvm Node (`~/.local/share/nvm/v22.22.2/bin/node`) — part of why they are
+operator-copy by design, not shipped input.
+
+The serverlocal web unit also carries
+`--trusted-host serverlocal.pike-acrux.ts.net:8443`; that port must match the
+`DSH_TAILNET_PORT` used by `ds serve` (default 8443), or the Host/Origin fence
+answers 403 for the served HTTPS origin.
+
 ## Sync guard
 
 `ds pull` skips any repo unit whose text references a `/home/<user>/` path that

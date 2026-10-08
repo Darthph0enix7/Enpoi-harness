@@ -19,7 +19,19 @@ export interface Config {
   registryProbeTimeoutMs: number
   /** Lifetime of a winning registry or unavailable result. */
   registryProbeCacheTtlMs: number
+  /**
+   * Registry ping endpoints raced by {@link PluginRegistryProbe.fastest}; each
+   * endpoint's `/`-origin is the candidate registry. Defaults to the official
+   * npm ping and the mainland China mirror ping.
+   */
+  registryPingUrls: string[]
 }
+
+/** The shipped default registry ping endpoints (official npm, npmmirror). */
+const DEFAULT_REGISTRY_PING_URLS = [
+  'https://registry.npmjs.org/-/ping',
+  'https://registry.npmmirror.com/-/ping',
+] as const
 
 /** Compares public registry responses on the Host; the Client owns the initial selection. */
 export default class PluginRegistryProbe extends TypertRemoteService {
@@ -27,6 +39,7 @@ export default class PluginRegistryProbe extends TypertRemoteService {
     registryProbeEnabled: z.boolean().default(true),
     registryProbeTimeoutMs: z.natural().min(1).max(MAX_TIMER_DELAY_MS).default(1500),
     registryProbeCacheTtlMs: z.natural().default(300000),
+    registryPingUrls: z.array(z.string()).default([...DEFAULT_REGISTRY_PING_URLS]),
   })
 
   private readonly lifetime = new AbortController()
@@ -42,9 +55,9 @@ export default class PluginRegistryProbe extends TypertRemoteService {
   }
 
   /**
-   * Race npm and npmmirror HTTPS ping responses through the Host's fetch proxy.
+   * Race the configured registry ping endpoints through the Host's fetch proxy.
    * Concurrent readers share a probe; a winner cancels and awaits the other request.
-   * @returns the first registry with a successful response, or null when disabled or neither responds successfully; results are cached.
+   * @returns the first registry with a successful response, or null when disabled or none responds successfully; results are cached.
    * @throws rejects when the service has been unloaded.
    */
   @Remote
@@ -59,7 +72,7 @@ export default class PluginRegistryProbe extends TypertRemoteService {
   private async probe(): Promise<string | null> {
     const finished = new AbortController()
     const signal = AbortSignal.any([this.lifetime.signal, finished.signal, AbortSignal.timeout(this.config.registryProbeTimeoutMs)])
-    const requests = ['https://registry.npmjs.org/-/ping', 'https://registry.npmmirror.com/-/ping'].map(async endpoint => ({
+    const requests = this.config.registryPingUrls.map(async endpoint => ({
       registry: new URL('/', endpoint).href,
       response: await fetch(endpoint, { signal, redirect: 'error' }),
     }))

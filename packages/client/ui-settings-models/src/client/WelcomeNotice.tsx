@@ -8,6 +8,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WelcomeNoticeState, WelcomeNoticeStore } from './welcome-store.ts'
 import type { en } from './locales.ts'
 import { OnboardingModal } from './OnboardingModal.tsx'
+import { productVersionLabel } from '../onboarding-copy.ts'
 import css from './WelcomeNotice.module.css'
 
 /** Registration-side dependencies of {@link WelcomeNotice}. */
@@ -19,7 +20,7 @@ export interface WelcomeNoticeInjected {
   /** Welcome acknowledgement controller. */
   controller: WelcomeNoticeStore
   /** Onboarding copy. */
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
 }
 
 /** Coordinator owner props plus this step's injected face. */
@@ -54,7 +55,11 @@ export function WelcomeNotice(props: WelcomeNoticeProps): ReactNode {
   const acknowledge = async (): Promise<void> => {
     if (await controller.acknowledge()) finish()
   }
-  const paragraphs = t('welcomeBody').split('\n\n')
+  // The noticed version is a build fact: the prose template carries a
+  // `{version}` placeholder the client build version fills here.
+  const paragraphs = t('welcomeBody', {
+    version: productVersionLabel(process.env.DSH_CLIENT_VERSION),
+  }).split('\n\n')
 
   return (
     <OnboardingModal title={t('welcomeTitle')} focusTitle>

@@ -7,6 +7,13 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
     # Tailnet endpoints are per-device: DSH_TAILNET_URL wins, otherwise derive
     # this node's MagicDNS name and IPv4 from Tailscale. No Tailscale on this
     # machine → both stay empty and the CLI falls back to the local URL.
+    # DSH_TAILNET_PORT (default 8443) is the HTTPS port for both the derived
+    # URL and `ds serve`, so a second HTTPS service can move this one instead
+    # of colliding silently.
+    set -g g_tailnet_port 8443
+    if set -q DSH_TAILNET_PORT; and test -n "$DSH_TAILNET_PORT"
+        set g_tailnet_port "$DSH_TAILNET_PORT"
+    end
     set -g g_tailnet_url "$DSH_TAILNET_URL"
     set -g g_tailnet_ip ""
     if command -v tailscale >/dev/null 2>&1
@@ -14,7 +21,7 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
         if test -z "$g_tailnet_url"
             set -l ts_dns (string match -r '"DNSName"\s*:\s*"([^"]+)"' (tailscale status --json 2>/dev/null))
             if test (count $ts_dns) -ge 2
-                set g_tailnet_url "https://"(string replace -r '\.$' '' -- $ts_dns[2])":8443"
+                set g_tailnet_url "https://"(string replace -r '\.$' '' -- $ts_dns[2])":$g_tailnet_port"
             end
         end
     end
@@ -161,8 +168,8 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             echo "═══════════════════════════════════════════════════════════════"
 
         case "serve"
-            echo "Configuring Tailscale HTTPS serve on port 8443..."
-            tailscale serve --https=8443 http://127.0.0.1:3080
+            echo "Configuring Tailscale HTTPS serve on port $g_tailnet_port..."
+            tailscale serve --https=$g_tailnet_port http://127.0.0.1:3080
 
         case "serve-off"
             echo "Resetting Tailscale serve..."
@@ -183,11 +190,25 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
                 return 1
             end
 
-            set -l node_bin ""
-            if test -x "$HOME/.local/share/nvm/v22.22.2/bin/node"
-                set node_bin "$HOME/.local/share/nvm/v22.22.2/bin/node"
-            else
-                set node_bin (command -v node 2>/dev/null)
+            # Node for the doctor script: PATH first, then the installer's
+            # version-independent runtime link ($PREFIX/runtime/node/current),
+            # then nvm. An explicit DSH_NODE_VERSION pins one; the descending
+            # version sort picks the newest install otherwise, so a Node bump
+            # cannot orphan this function behind a stale v-pin.
+            set -l node_bin (command -v node 2>/dev/null)
+            if test -z "$node_bin"
+                if test -x "$g_dsh_home/runtime/node/current/bin/node"
+                    set node_bin "$g_dsh_home/runtime/node/current/bin/node"
+                else if set -q DSH_NODE_VERSION; and test -x "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
+                    set node_bin "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
+                else
+                    for candidate in (ls -d "$HOME/.local/share/nvm/v"*/bin/node 2>/dev/null | sort -V -r)
+                        if test -x "$candidate"
+                            set node_bin "$candidate"
+                            break
+                        end
+                    end
+                end
             end
             if test -z "$node_bin"
                 echo "✖ No Node.js found (need >= 22.19); install it or add it to PATH"
@@ -729,7 +750,7 @@ case "pull"
             echo "  ds status           Show systemd service status"
             echo "  ds web              Open web UI in default browser"
             echo "  ds urls             Show local & Tailscale endpoints"
-            echo "  ds serve            Enable Tailscale HTTPS serve (:8443)"
+            echo "  ds serve            Enable Tailscale HTTPS serve (DSH_TAILNET_PORT, default 8443)"
             echo "  ds serve-off        Reset Tailscale serve"
             echo ""
             echo "Diagnostics & Health:"

@@ -21,6 +21,7 @@ import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type Models
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { providerDashboardUrls } from './provider-templates.ts'
+import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -30,7 +31,7 @@ export interface ProviderDetailPanelProps {
   namespace: SettingsNamespaceView
   schema: SettingsSchemaOperations
   api: ModelsWire
-  t: (key: keyof typeof en) => string
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
   readOnly: boolean
   onDelete: () => void
   onSaved: () => void
@@ -364,7 +365,7 @@ function readHiddenMap(): Record<string, string[]> {
 }
 
 export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode {
-  const { row, namespace, schema, api, t: _t, readOnly, onDelete, onSaved } = props
+  const { row, namespace, schema, api, t, readOnly, onDelete, onSaved } = props
   const providerId = row.entry.provider
   const isDeclared = row.entry.declared === true
 
@@ -604,7 +605,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         const count = (res.value as unknown[] | undefined)?.length ?? 0
         setTestStatus({
           state: 'success',
-          message: `Connected successfully (${count} models discovered)`,
+          message: t('connectedModels', { count }),
           latencyMs,
           modelCount: count,
         })
@@ -673,7 +674,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
         setRefreshState({
           isRefreshing: false,
-          message: `Refreshed ${merged.length} models!`,
+          message: t('refreshedModels', { count: merged.length }),
           isError: false,
         })
         setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)
@@ -687,7 +688,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       if (options.silent !== true) {
         setRefreshState({
           isRefreshing: false,
-          message: `Refresh failed: ${messageOf(err)}`,
+          message: t('refreshFailed', { message: messageOf(err) }),
           isError: true,
         })
         setTimeout(() => setRefreshState({ isRefreshing: false }), 5000)
@@ -742,7 +743,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       setTimeout(() => setSaveSuccess(false), 3000)
       onSaved()
     } catch (err) {
-      alert(`Save failed: ${messageOf(err)}`)
+      alert(t('saveFailedAlert', { message: messageOf(err) }))
     } finally {
       setBusy(false)
     }
@@ -763,11 +764,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         ? {
           state: 'success',
           ...answer.latencyMs === undefined ? {} : { latencyMs: answer.latencyMs },
-          message: answer.latencyMs === undefined ? 'OK' : `OK (${answer.latencyMs}ms)`,
+          message: answer.latencyMs === undefined ? t('poolTestOk') : t('poolTestOkMs', { ms: answer.latencyMs }),
         }
         : {
           state: unavailable ? 'unavailable' : 'error',
-          message: answer.error ?? 'Test failed',
+          message: answer.error ?? t('poolTestFailed'),
         },
     }))
   }
@@ -844,7 +845,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       }
       void fetchPoolStatus()
     } catch (err) {
-      alert(`Reset cooldown failed: ${messageOf(err)}`)
+      alert(t('resetCooldownFailedAlert', { message: messageOf(err) }))
     }
   }
 
@@ -873,7 +874,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
-      alert(`Update failed: ${messageOf(err)}`)
+      alert(t('updateFailedAlert', { message: messageOf(err) }))
     }
   }
 
@@ -895,7 +896,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       onSaved()
     } catch (err) {
       setLocalPool(prev)
-      alert(`Strategy change failed: ${messageOf(err)}`)
+      alert(t('strategyChangeFailedAlert', { message: messageOf(err) }))
     }
   }
 
@@ -927,13 +928,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
-      alert(`Reorder failed: ${messageOf(err)}`)
+      alert(t('reorderFailedAlert', { message: messageOf(err) }))
     }
   }
 
   const handleDeleteIdentity = async (identityId: string) => {
     if (!poolConfig?.identities || readOnly) return
-    if (!confirm(`Remove identity "${identityId}" from pool?`)) return
+    if (!confirm(t('removeIdentityConfirm', { id: identityId }))) return
     const prev = poolConfig
     const remaining = poolConfig.identities.filter(i => i.id !== identityId)
     const nextPool = remaining.length > 0 ? { ...poolConfig, identities: remaining } : undefined
@@ -958,7 +959,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
-      alert(`Delete failed: ${messageOf(err)}`)
+      alert(t('deleteFailedAlert', { message: messageOf(err) }))
     }
   }
 
@@ -967,7 +968,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     const ref = newKeyRef.trim() || `${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_KEY_${Date.now().toString().slice(-4)}`
     const val = newKeyValue.trim()
     if (!id || !val) {
-      alert('Identity Name and API Key are required.')
+      alert(t('identityRequiredAlert'))
       return
     }
     setBusy(true)
@@ -1014,7 +1015,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       void fetchPoolStatus()
     } catch (err) {
       setLocalPool(prev)
-      alert(`Failed to add identity: ${messageOf(err)}`)
+      alert(t('addIdentityFailedAlert', { message: messageOf(err) }))
     } finally {
       setBusy(false)
     }
@@ -1055,7 +1056,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       void fetchPoolStatus()
     } catch (err) {
       setLocalPool(undefined)
-      alert(`Convert to pool failed: ${messageOf(err)}`)
+      alert(t('convertToPoolFailedAlert', { message: messageOf(err) }))
     }
   }
 
@@ -1077,16 +1078,16 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             <div className={styles['detailTitleRow']}>
               <h2 className={styles['detailTitle']}>{displayName}</h2>
               <span className={styles['routeSlugBadge']}>{providerId}</span>
-              {isDeclared && <span className={styles['customBadge']}>Custom</span>}
+              {isDeclared && <span className={styles['customBadge']}>{t('customTag')}</span>}
             </div>
             <p className={styles['detailSub']}>
-              <span className={styles['protocolTag']}>{protocol}</span> • <span className={styles['countTag']}>{modelsList.length} models</span>
+              <span className={styles['protocolTag']}>{protocol}</span> • <span className={styles['countTag']}>{t('providerModelsCount', { count: modelsList.length })}</span>
             </p>
             {nonHeavyDashboards.length > 0 && (
               <p className={styles['detailSub']}>
                 {nonHeavyDashboards.map(url => (
                   <a key={url} className={styles['presetMetaItem']} href={url} target="_blank" rel="noreferrer">
-                    {_t('heavyDashboard')} ↗
+                    {t('heavyDashboard')} ↗
                   </a>
                 ))}
               </p>
@@ -1103,7 +1104,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
               disabled={readOnly || busy}
             >
               <IconTrash size={12} />
-              Delete
+              {t('remove')}
             </Button>
           )}
         </div>
@@ -1113,7 +1114,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           It renders only for the three manifest-backed routes. */}
       <HeavyProviderCard
         providerId={providerId}
-        t={_t}
+        t={t}
         modelIds={modelIdList}
         {...heavyProvider === undefined ? {} : { onAutoPopulate: autoPopulate }}
       />
@@ -1124,7 +1125,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['cardHead']}>
             <div className={styles['cardTitleRow']}>
               <IconLayers size={14} />
-              <h3 className={styles['cardTitle']}>Keys</h3>
+              <h3 className={styles['cardTitle']}>{t('poolKeysTitle')}</h3>
               <span className={styles['modelCountBadge']}>{poolConfig.identities.length}</span>
             </div>
 
@@ -1134,17 +1135,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 value={poolConfig.strategy ?? 'priority-sticky'}
                 onChange={(e) => { void handleStrategyChange(e.target.value) }}
                 disabled={readOnly || busy}
-                title="How the pool picks among healthy keys"
+                title={t('poolStrategyTitle')}
               >
-                <option value="priority-sticky">Priority</option>
-                <option value="balanced">Balanced</option>
+                <option value="priority-sticky">{t('poolStrategyPriority')}</option>
+                <option value="balanced">{t('poolStrategyBalanced')}</option>
               </select>
               <button
                 type="button"
                 className={styles['iconMiniBtn']}
                 onClick={() => void fetchPoolStatus()}
                 disabled={isPoolLoading}
-                title="Refresh pool status"
+                title={t('poolRefresh')}
               >
                 <IconRefresh size={13} />
               </button>
@@ -1153,8 +1154,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 className={styles['addKeyIconBtn']}
                 onClick={() => setShowAddKeyModal(true)}
                 disabled={readOnly || busy}
-                title="Add key"
-                aria-label="Add key"
+                title={t('poolAdd')}
+                aria-label={t('poolAdd')}
               >
                 <IconKey size={13} />
                 <IconPlus size={9} />
@@ -1179,8 +1180,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     className={`${styles['identityRow']} ${isDisabled ? styles['identityRowDisabled'] : ''} ${isCooling ? styles['identityRowCooling'] : ''} ${isError ? styles['identityRowError'] : ''}`}
                   >
                     <div className={styles['identityLeft']}>
-                      <span className={styles['priorityBadge']} title={`Priority ${idx + 1}`}>
-                        P{idx + 1}
+                      <span className={styles['priorityBadge']} title={t('poolPriorityTitle', { n: idx + 1 })}>
+                        {t('poolPriorityBadge', { n: idx + 1 })}
                       </span>
 
                       <div className={styles['identityInfo']}>
@@ -1193,27 +1194,27 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           {isDisabled ? (
                             <span className={`${styles['identityStatusPill']} ${styles['statusDisabled']}`}>
                               <span className={`${styles['statusDot']} ${styles['dotIdle']}`} />
-                              Off
+                              {t('poolOff')}
                             </span>
                           ) : isCooling ? (
-                            <span className={`${styles['identityStatusPill']} ${styles['statusCooling']}`} title="Cooling down">
+                            <span className={`${styles['identityStatusPill']} ${styles['statusCooling']}`} title={t('poolCoolingDown')}>
                               <span className={`${styles['statusDot']} ${styles['dotCooling']}`} />
-                              {cooldownSeconds > 60 ? `${Math.ceil(cooldownSeconds / 60)}m` : `${cooldownSeconds}s`}
+                              {cooldownSeconds > 60 ? t('poolCooldownMinutes', { minutes: Math.ceil(cooldownSeconds / 60) }) : t('poolCooldownSeconds', { seconds: cooldownSeconds })}
                             </span>
                           ) : isError ? (
-                            <span className={`${styles['identityStatusPill']} ${styles['statusError']}`} title="Authentication failed">
+                            <span className={`${styles['identityStatusPill']} ${styles['statusError']}`} title={t('poolAuthFailed')}>
                               <span className={`${styles['statusDot']} ${styles['dotError']}`} />
-                              Auth
+                              {t('poolAuth')}
                             </span>
                           ) : (
                             <span className={`${styles['identityStatusPill']} ${styles['statusReady']}`}>
                               <span className={`${styles['statusDot']} ${styles['dotReady']}`} />
-                              Ready
+                              {t('poolReady')}
                             </span>
                           )}
 
                           {status?.quota?.remainingFraction !== undefined && status.quota.remainingFraction !== null && (
-                            <div className={styles['quotaMiniWrap']} title={`Quota remaining: ${Math.round(status.quota.remainingFraction * 100)}%`}>
+                            <div className={styles['quotaMiniWrap']} title={t('poolQuotaRemaining', { percent: Math.round(status.quota.remainingFraction * 100) })}>
                               <div className={styles['quotaMiniBar']}>
                                 <div
                                   className={styles['quotaMiniBarFill']}
@@ -1226,7 +1227,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
                           {testResult && (
                             <span style={{ fontSize: '10px', color: testResult.state === 'success' ? '#34d399' : testResult.state === 'error' ? '#f87171' : 'inherit' }}>
-                              {testResult.state === 'testing' ? 'Testing...' : testResult.message}
+                              {testResult.state === 'testing' ? t('poolTesting') : testResult.message}
                             </span>
                           )}
                         </div>
@@ -1240,7 +1241,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         className={styles['iconMiniBtn']}
                         onClick={() => handleMoveIdentity(idx, -1)}
                         disabled={idx === 0 || readOnly || busy}
-                        title="Move Up (Higher Priority)"
+                        title={t('poolMoveUp')}
                       >
                         <IconArrowUp size={12} />
                       </button>
@@ -1251,7 +1252,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         className={styles['iconMiniBtn']}
                         onClick={() => handleMoveIdentity(idx, 1)}
                         disabled={idx === (poolConfig?.identities?.length ?? 1) - 1 || readOnly || busy}
-                        title="Move Down (Lower Priority)"
+                        title={t('poolMoveDown')}
                       >
                         <IconArrowDown size={12} />
                       </button>
@@ -1262,7 +1263,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           type="button"
                           className={styles['iconMiniBtn']}
                           onClick={() => handleResetCooldown(identity.id)}
-                          title="Reset Cooldown"
+                          title={t('poolReset')}
                         >
                           <IconRefresh size={12} />
                         </button>
@@ -1274,7 +1275,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         className={styles['iconMiniBtn']}
                         onClick={() => handleTestIdentity(identity.id, identity.credentialRef)}
                         disabled={testResult?.state === 'testing' || readOnly || identityTestUnavailable !== undefined}
-                        title={identityTestUnavailable?.message ?? 'Test this API key'}
+                        title={identityTestUnavailable?.message ?? t('poolTest')}
                       >
                         <IconBolt size={12} />
                       </button>
@@ -1285,7 +1286,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         className={styles['iconMiniBtn']}
                         onClick={() => handleToggleIdentityEnabled(identity.id)}
                         disabled={readOnly || busy}
-                        title={isDisabled ? 'Enable key' : 'Disable key'}
+                        title={isDisabled ? t('poolEnable') : t('poolDisable')}
                       >
                         {isDisabled ? <IconEyeOff size={12} /> : <IconEye size={12} />}
                       </button>
@@ -1296,7 +1297,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         className={`${styles['iconMiniBtn']} ${styles['deleteIdentityBtn']}`}
                         onClick={() => handleDeleteIdentity(identity.id)}
                         disabled={readOnly || busy}
-                        title="Delete key"
+                        title={t('poolDelete')}
                       >
                         <IconTrash size={12} />
                       </button>
@@ -1316,7 +1317,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['cardHead']}>
             <div className={styles['cardTitleRow']}>
               <IconKey size={14} />
-              <h3 className={styles['cardTitle']}>API Key</h3>
+              <h3 className={styles['cardTitle']}>{t('apiKeyCardTitle')}</h3>
             </div>
             <div className={styles['poolHeaderActions']}>
               <span
@@ -1325,17 +1326,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 }`}
               >
                 <span className={`${styles['statusDot']} ${isConfigured ? styles['dotReady'] : styles['dotCooling']}`} />
-                {isConfigured ? 'Connected' : 'No Key'}
+                {isConfigured ? t('providerConnected') : t('apiKeyNoKey')}
               </span>
               <Button
                 variant="outline"
                 className={styles['testBtn']}
                 onClick={handleConvertToPool}
                 disabled={readOnly || busy}
-                title="Multiple keys with automatic failover"
+                title={t('poolConvertHint')}
               >
                 <IconLayers size={12} />
-                Pool
+                {t('poolButtonLabel')}
               </Button>
             </div>
           </div>
@@ -1347,7 +1348,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                   className={styles['input']}
                   type={showKey ? 'text' : 'password'}
                   autoComplete="off"
-                  placeholder={isConfigured ? '•••••••••••••••• (Configured)' : 'Enter API key'}
+                  placeholder={isConfigured ? t('keyConfiguredPlaceholder') : t('keyPlaceholder')}
                   value={keyInput}
                   onChange={e => setKeyInput(e.target.value)}
                   disabled={readOnly || busy}
@@ -1356,7 +1357,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                   type="button"
                   className={styles['eyeBtn']}
                   onClick={() => setShowKey(!showKey)}
-                  title={showKey ? 'Hide key' : 'Show key'}
+                  title={showKey ? t('hideKey') : t('showKey')}
                 >
                   {showKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
                 </button>
@@ -1368,7 +1369,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 onClick={handleSave}
               >
                 <IconCheck size={12} />
-                Save
+                {t('save')}
               </Button>
             </div>
           </div>
@@ -1381,15 +1382,15 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <div className={styles['addKeyModal']} onClick={e => e.stopPropagation()}>
             <div className={styles['addKeyModalTitle']}>
               <IconPlus size={14} />
-              Add Key
+              {t('poolAddTitle')}
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Name</label>
+              <label className={styles['fieldLabel']}>{t('poolName')}</label>
               <input
                 className={styles['input']}
                 type="text"
-                placeholder="e.g. backup_key, personal_account"
+                placeholder={t('poolNamePlaceholder')}
                 value={newKeyId}
                 onChange={e => setNewKeyId(e.target.value)}
                 autoFocus
@@ -1397,23 +1398,23 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Credential Ref</label>
+              <label className={styles['fieldLabel']}>{t('poolRef')}</label>
               <input
                 className={styles['input']}
                 type="text"
-                placeholder={`e.g. ${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_KEY_2`}
+                placeholder={t('poolRefPlaceholderDynamic', { prefix: providerId.toUpperCase().replace(/[^A-Z0-9_]/g, '_') })}
                 value={newKeyRef}
                 onChange={e => setNewKeyRef(e.target.value)}
               />
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Secret</label>
+              <label className={styles['fieldLabel']}>{t('poolSecret')}</label>
               <div className={styles['passwordInputWrap']}>
                 <input
                   className={styles['input']}
                   type={newKeyShow ? 'text' : 'password'}
-                  placeholder="Paste API Key secret"
+                  placeholder={t('poolSecretPlaceholder')}
                   value={newKeyValue}
                   onChange={e => setNewKeyValue(e.target.value)}
                 />
@@ -1433,14 +1434,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                 onClick={() => setShowAddKeyModal(false)}
                 disabled={busy}
               >
-                Cancel
+                {t('cancel')}
               </Button>
               <Button
                 variant="primary"
                 onClick={handleAddIdentitySubmit}
                 disabled={busy || !newKeyId.trim() || !newKeyValue.trim()}
               >
-                {busy ? '…' : 'Add'}
+                {busy ? '…' : t('poolSave')}
               </Button>
             </div>
           </div>
@@ -1452,7 +1453,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         <div className={styles['cardHead']}>
           <div className={styles['cardTitleRow']}>
             <IconBolt size={14} />
-            <h3 className={styles['cardTitle']}>Endpoint</h3>
+            <h3 className={styles['cardTitle']}>{t('endpointTitle')}</h3>
           </div>
 
           <Button
@@ -1461,26 +1462,26 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
             disabled={busy || testStatus.state === 'testing'}
             onClick={handleTestConnection}
           >
-            {testStatus.state === 'testing' ? '…' : 'Test'}
+            {testStatus.state === 'testing' ? '…' : t('test')}
           </Button>
         </div>
 
         <div className={styles['cardBody']}>
           <div className={styles['fieldGrid']}>
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Base URL</label>
+              <label className={styles['fieldLabel']}>{t('baseUrl')}</label>
               <input
                 className={styles['input']}
                 type="text"
                 value={baseURL}
-                placeholder="e.g. https://api.openai.com/v1"
+                placeholder={OPENAI_BASE_URL_EXAMPLE}
                 onChange={e => setBaseURL(e.target.value)}
                 disabled={readOnly || busy}
               />
             </div>
 
             <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>Protocol</label>
+              <label className={styles['fieldLabel']}>{t('protocolLabel')}</label>
               <select
                 className={`${styles['input']} ${styles['selectInput']}`}
                 value={protocol}
@@ -1507,28 +1508,28 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     : styles['testResultPending']
               }`}
             >
-              {testStatus.state === 'testing' && 'Testing…'}
+              {testStatus.state === 'testing' && t('testingLabel')}
               {testStatus.state === 'success' && (
                 <span>
-                  <span className={`${styles['statusDot']} ${styles['dotReady']}`} /> <strong>{testStatus.latencyMs}ms</strong> — {testStatus.message}
+                  <span className={`${styles['statusDot']} ${styles['dotReady']}`} /> <strong>{testStatus.latencyMs}{t('unitMs')}</strong> — {testStatus.message}
                 </span>
               )}
               {testStatus.state === 'error' && (
                 <span>
-                  <span className={`${styles['statusDot']} ${styles['dotError']}`} /> <strong>Failed</strong> — {testStatus.message}
+                  <span className={`${styles['statusDot']} ${styles['dotError']}`} /> <strong>{t('testFailedLabel')}</strong> — {testStatus.message}
                 </span>
               )}
             </div>
           )}
 
           <div className={styles['saveRow']}>
-            {saveSuccess && <span className={styles['savedToast']}>Saved</span>}
+            {saveSuccess && <span className={styles['savedToast']}>{t('savedLabel')}</span>}
             <Button
               variant="outline"
               disabled={readOnly || busy}
               onClick={handleSave}
             >
-              Save
+              {t('save')}
             </Button>
           </div>
         </div>
@@ -1538,7 +1539,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       <div className={styles['settingsCard']}>
         <div className={styles['modelsHead']}>
           <div className={styles['modelsTitleRow']}>
-            <h3 className={styles['cardTitle']}>Models</h3>
+            <h3 className={styles['cardTitle']}>{t('models')}</h3>
             <span className={styles['modelCountBadge']}>{modelsList.length}</span>
           </div>
 
@@ -1548,17 +1549,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
               className={styles['iconMiniBtn']}
               onClick={handleRefreshModels}
               disabled={refreshState.isRefreshing || readOnly}
-              title="Refresh catalog from provider"
+              title={t('refreshCatalogTitle')}
             >
               <IconRefresh size={13} />
             </button>
             <span className={styles['dotSep']}>•</span>
             <button type="button" className={styles['textActionBtn']} onClick={handleShowAll}>
-              Show All
+              {t('showAll')}
             </button>
             <span className={styles['dotSep']}>•</span>
             <button type="button" className={styles['textActionBtn']} onClick={handleHideAll}>
-              Hide All
+              {t('hideAll')}
             </button>
           </div>
         </div>
@@ -1585,7 +1586,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <input
             className={styles['searchInput']}
             type="text"
-            placeholder={`Search ${modelsList.length} models...`}
+            placeholder={t('providerModelsSearchPlaceholder', { count: modelsList.length })}
             value={modelSearch}
             onChange={e => setModelSearch(e.target.value)}
           />
@@ -1604,7 +1605,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         <div className={styles['modelsGrid']}>
           {enrichedFilteredModels.length === 0 ? (
             <div className={styles['emptyModels']}>
-              {modelSearch ? `No models matching "${modelSearch}"` : 'No models found.'}
+              {modelSearch ? t('noModelsMatching', { query: modelSearch }) : t('noModelsFound')}
             </div>
           ) : (
             enrichedFilteredModels.map(({ model: m, visibility, caps, contextStr, maxTokStr }) => {
@@ -1623,8 +1624,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     <div className={styles['modelMetaRow']}>
                       {/* Capacities */}
                       {(contextStr || maxTokStr) && (
-                        <span className={styles['capacityBadge']} title="Context Window (in) / Max Output Tokens (out)">
-                          {contextStr ? `${contextStr} in` : ''}{contextStr && maxTokStr ? ' • ' : ''}{maxTokStr ? `${maxTokStr} out` : ''}
+                        <span className={styles['capacityBadge']} title={t('capacityTitle')}>
+                          {contextStr ? `${contextStr} ${t('unitIn')}` : ''}{contextStr && maxTokStr ? ' • ' : ''}{maxTokStr ? `${maxTokStr} ${t('unitOut')}` : ''}
                         </span>
                       )}
 
@@ -1637,7 +1638,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.tools ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.tools ? 'tools' : undefined}
-                            title="Tool Calling"
+                            title={t('capTools')}
                           >
                             <IconTools size={10} />
                           </span>
@@ -1646,7 +1647,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']} ${styles['capIconReasoning']}${caps.hinted.reasoning ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.reasoning ? 'reasoning' : undefined}
-                            title="Reasoning / Thinking"
+                            title={t('capReasoning')}
                           >
                             <IconBrain size={10} />
                           </span>
@@ -1655,7 +1656,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.vision ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.vision ? 'vision' : undefined}
-                            title="Vision / Image"
+                            title={t('capVision')}
                           >
                             <IconVision size={10} />
                           </span>
@@ -1664,7 +1665,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.audio ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.audio ? 'audio' : undefined}
-                            title="Audio Processing"
+                            title={t('capAudio')}
                           >
                             <IconAudio size={10} />
                           </span>
@@ -1673,7 +1674,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.video ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.video ? 'video' : undefined}
-                            title="Video Processing"
+                            title={t('capVideo')}
                           >
                             <IconVideo size={10} />
                           </span>
@@ -1682,7 +1683,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.files ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.files ? 'files' : undefined}
-                            title="Documents & Files"
+                            title={t('capFiles')}
                           >
                             <IconFile size={10} />
                           </span>
@@ -1700,10 +1701,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     onClick={() => handleToggleHide(m.id)}
                     title={visibility.hidden
                       ? visibility.locked
-                        ? visibility.reason === null ? 'Hidden in picker by provider or rule' : `Hidden in picker: ${visibility.reason}`
-                        : 'Hidden in picker (click to show)'
-                      : 'Visible in picker (click to hide)'}
-                    aria-label={visibility.hidden ? `Show ${m.id}` : `Hide ${m.id}`}
+                        ? visibility.reason === null ? t('hiddenByRule') : t('hiddenInPicker', { reason: visibility.reason })
+                        : t('hiddenClickShow')
+                      : t('visibleClickHide')}
+                    aria-label={visibility.hidden ? t('showModel', { id: m.id }) : t('hideModel', { id: m.id })}
                   >
                     {visibility.hidden ? <IconEyeOff size={13} /> : <IconEye size={13} />}
                   </button>

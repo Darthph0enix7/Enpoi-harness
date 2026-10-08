@@ -17,6 +17,7 @@ import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
 import type { ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
+import { translateEn } from './translate.ts'
 
 afterEach(() => {
   cleanup()
@@ -90,7 +91,7 @@ function stubHeavyFetch(answers: Record<string, unknown>): {
 
 it('lists the heavy presets with a Heavy badge and surfaces quirks and mode choice', async () => {
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   expect(screen.getByText(en.heavyGroup)).toBeTruthy()
   expect(screen.getByText('FreeLLMAPI')).toBeTruthy()
@@ -124,7 +125,7 @@ it('preselects the install path and names missing requirements when nothing answ
       requires: ['docker'],
     },
   } })
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -147,7 +148,7 @@ it('shows the refused platform reason in the heavy form instead of install steps
     runtime: { docker: false, podman: false },
     preflight: { path: 'unsupported', label: 'Not supported on Windows', missing: [], requires: [] },
   } })
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Antigravity Proxy'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -163,7 +164,7 @@ it('shows the refused platform reason in the heavy form instead of install steps
 
 it('a placeholder-auth provider offers no key field: the route stores the placeholder credential', async () => {
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Antigravity Proxy'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -175,7 +176,7 @@ it('a placeholder-auth provider offers no key field: the route stores the placeh
 
 it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and search still finds it', () => {
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   const popular = screen.getByText('Popular')
   const all = screen.getByText('All Providers')
@@ -198,7 +199,7 @@ it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and sear
 it('reuse mode writes the route through the host and closes', async () => {
   const { methods } = stubHeavyFetch({})
   const onClose = vi.fn()
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -211,7 +212,7 @@ it('reuse mode writes the route through the host and closes', async () => {
 it('offers a custom-instance URL on a service reuse and sends the typed address', async () => {
   const { requests } = stubHeavyFetch({})
   const onClose = vi.fn()
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -230,7 +231,7 @@ it('offers a custom-instance URL on a service reuse and sends the typed address'
 it('a direct vendor route gets no custom-instance field and sends no baseURL', async () => {
   const { requests } = stubHeavyFetch({})
   const onClose = vi.fn()
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
 
   fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -245,7 +246,7 @@ it('a direct vendor route gets no custom-instance field and sends no baseURL', a
 it('local mode starts the install job and polls it to success', async () => {
   const { methods } = stubHeavyFetch({})
   const onClose = vi.fn()
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -264,7 +265,7 @@ it('a preset-only heavy provider reads as listed — add to configure, health un
     if (body.method === 'enpoiHeavy.status') return errorEnvelope('host unreachable')
     return envelope({})
   }))
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   expect(screen.getAllByText(en.heavyListedBadge).length).toBeGreaterThan(0)
   fireEvent.click(screen.getByText('Command Code'))
@@ -289,7 +290,7 @@ it('shows the ordering note when the host reports the route namespace unmounted'
     runtime: { docker: true, podman: false },
     preflight: { path: 'node', label: 'Link the provider package, then use the vendor endpoint', missing: [], requires: [] },
   } })
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => {
@@ -304,7 +305,7 @@ it('a reuse click before the route namespace is mounted reports the restart orde
     pendingRestart: { ns: 'commandcode-provider', message },
   } })
   const onClose = vi.fn()
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={onClose} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
 
   fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -323,7 +324,7 @@ it('a malformed host manifest address falls back to its raw text in the origin p
     problems: [],
   })
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -334,7 +335,7 @@ it('a malformed host manifest address falls back to its raw text in the origin p
 
 it('contains modal dialog, content scroller, and documentation inside scrollable surfaces', async () => {
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Command Code'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -366,7 +367,7 @@ it('contains modal dialog, content scroller, and documentation inside scrollable
 
 it('contains local install steps list as a contained scrollable container', async () => {
   stubHeavyFetch({})
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
@@ -412,7 +413,7 @@ it('contains progress card and log tail as contained surfaces with ≤8 KB log w
       },
     },
   })
-  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={key => en[key]} readOnly={false} onClose={vi.fn()} />)
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('FreeLLMAPI'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
