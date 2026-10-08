@@ -37,7 +37,11 @@
 #   fetch -> install -> build -> migrations -> switch `current` -> service
 #   restart (only when a unit for this install exists) -> projection backfill
 #   (when present) -> self-check -> roll back to the previous versioned dir and
-#   restore backups on failure. Idempotent, re-runnable.
+#   restore backups on failure. Idempotent, re-runnable. When the update runs
+#   inside the managed unit (a session shell or a model tool call), every
+#   durable step completes first and the restart is delegated — the after-turn
+#   marker when a turn is in flight, a detached restart plus a detached
+#   verifier otherwise — so it never kills its own host.
 #
 # Build identity: every published release gets its own version — the tree's
 # package version plus the workflow run number (`0.1.7-enpoi.2.42`, tagged
@@ -55,7 +59,16 @@ set -o pipefail
 umask 022
 
 SCRIPT_NAME="dsh-install"
-SCRIPT_REVISION="3"
+SCRIPT_REVISION="4"
+
+# This script's own path: the detached service verifier runs a copy, so the copy
+# must not depend on the fetched remote installer surviving in $TMPDIR. Empty
+# when the script came from stdin (`curl | bash`).
+SELF="${BASH_SOURCE[0]:-}"
+case "$SELF" in
+  */*) SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd -P)/$(basename "$SELF")";;
+esac
+[ -f "$SELF" ] || SELF=""
 
 # ── Distribution parameters (the public repo fills these) ───────────────────
 DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/enpoi-harness}"
@@ -142,6 +155,11 @@ VERBOSE="${DSH_VERBOSE:-0}"
 LOG_FILE=""
 DISTRO_NAME=""
 CLEAN_MODE=0
+GUARD_MODE=0
+GUARD_BASELINE=""
+GUARD_TIMEOUT=""
+GUARD_EXPECT_RESTART=0
+GUARD_HOME=""
 
 # Terminal styling (disabled when piped, non-TTY, dumb terminal, or NO_COLOR set)
 if [ -t 1 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ "${NO_COLOR:-0}" = "0" ]; then
@@ -432,6 +450,14 @@ while [ "$#" -gt 0 ]; do
     --quiet|-q) QUIET=1; shift;;
     --no-open) NO_OPEN=1; shift;;
     --json) JSON_OUT=1; shift;;
+    --service-guard) GUARD_MODE=1; shift;;
+    --guard-baseline) need_value "$@"; GUARD_BASELINE="$2"; shift 2;;
+    --guard-baseline=*) GUARD_BASELINE="${arg#*=}"; shift;;
+    --guard-timeout) need_value "$@"; GUARD_TIMEOUT="$2"; shift 2;;
+    --guard-timeout=*) GUARD_TIMEOUT="${arg#*=}"; shift;;
+    --guard-expect-restart) GUARD_EXPECT_RESTART=1; shift;;
+    --guard-home) need_value "$@"; GUARD_HOME="$2"; shift 2;;
+    --guard-home=*) GUARD_HOME="${arg#*=}"; shift;;
     -h|--help) usage; exit 0;;
     --) shift; break;;
     *) die "unknown option: $arg (see --help)";;
@@ -2359,6 +2385,393 @@ ensure_service() {
   return 0
 }
 
+# ── Update self-restart safety ──────────────────────────────────────────────
+# A `dsh update` started from inside the managed unit (a session shell or a
+# model tool call) is a child of the unit's main process. Restarting the unit
+# directly stops that whole process tree: the update dies mid-flight and the
+# service stays down. The helpers below detect that position from observable
+# process state and delegate the restart instead:
+#   - a turn is in flight (a model shell call carries DSH_SESSION_ID but not
+#     DSH_PTY_SESSION_ID): write the after-turn marker consumed by the web
+#     watcher (apps/cli/src/restart-after-turn.ts), which restarts between
+#     turns and never inside one;
+#   - otherwise: restart from a detached process outside the unit's tree;
+# and either way a detached verifier confirms the unit comes back, starting or
+# bootstrapping it when it does not, and records the outcome in the install log.
+
+darwin_service_pid() { # unit -> live pid, empty when loaded-but-idle or unknown
+  command -v launchctl >/dev/null 2>&1 || return 0
+  launchctl print "gui/$(id -u)/$1" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*$/\1/p' | head -n 1
+}
+
+service_main_pid() { # unit -> main process, empty when the unit is down/unknown
+  local pid
+  case "$OS" in
+    linux)
+      command -v systemctl >/dev/null 2>&1 || return 0
+      pid="$(systemctl --user show -p MainPID --value "$1" 2>/dev/null || true)"
+      case "$pid" in ''|0|*[!0-9]*) return 0;; esac
+      # PID 1 is init, never a user unit's main process; refusing it also keeps
+      # a bogus answer from matching every ancestor chain.
+      [ "$pid" -gt 1 ] || return 0
+      printf '%s' "$pid"
+      ;;
+    darwin)
+      darwin_service_pid "$1"
+      ;;
+  esac
+}
+
+pid_is_ancestor() { # ancestor descendant -> 0 when ancestor is on the parent chain
+  local want="$1" cur="$2" parent hops=0
+  [ -n "$want" ] && [ -n "$cur" ] || return 1
+  while [ "$hops" -lt 256 ]; do
+    [ "$cur" = "$want" ] && return 0
+    case "$cur" in ''|*[!0-9]*) return 1;; esac
+    [ "$cur" -gt 1 ] || return 1
+    parent="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ')"
+    case "$parent" in ''|*[!0-9]*) return 1;; esac
+    [ "$parent" = "$cur" ] && return 1
+    cur="$parent"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+running_under_service() { # 0 when this process tree is inside the managed unit
+  [ -n "${SERVICE_UNIT:-}" ] || return 1
+  local pid
+  pid="$(service_main_pid "$SERVICE_UNIT")"
+  [ -n "$pid" ] || return 1
+  pid_is_ancestor "$pid" "$$"
+}
+
+unit_is_active() { # unit -> 0 when the service manager reports it running
+  case "$OS" in
+    linux)
+      command -v systemctl >/dev/null 2>&1 || return 1
+      systemctl --user is-active --quiet "$1" 2>/dev/null
+      ;;
+    darwin)
+      [ -n "$(darwin_service_pid "$1")" ]
+      ;;
+    *) return 1;;
+  esac
+}
+
+service_generation() { # unit -> token that changes on each activation
+  case "$OS" in
+    linux)
+      command -v systemctl >/dev/null 2>&1 || return 0
+      systemctl --user show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null | tr -d ' \n'
+      ;;
+    darwin)
+      darwin_service_pid "$1"
+      ;;
+  esac
+}
+
+guard_kick_service() { # unit -> 0 when the restart request was issued
+  case "$OS" in
+    linux)
+      systemctl --user restart "$1" >/dev/null 2>&1
+      ;;
+    darwin)
+      local uid plist
+      uid="$(id -u)"
+      plist="$HOME/Library/LaunchAgents/$1.plist"
+      if launchctl print "gui/$uid/$1" >/dev/null 2>&1; then
+        launchctl kickstart -k "gui/$uid/$1" >/dev/null 2>&1
+      elif [ -f "$plist" ]; then
+        launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1
+      else
+        return 1
+      fi
+      ;;
+    *) return 1;;
+  esac
+}
+
+start_or_bootstrap_service() { # 0 when the unit was started or loaded
+  case "$OS" in
+    linux)
+      systemctl --user reset-failed "$SERVICE_UNIT" >/dev/null 2>&1 || true
+      systemctl --user start "$SERVICE_UNIT" >/dev/null 2>&1
+      ;;
+    darwin)
+      local uid plist
+      uid="$(id -u)"
+      plist="$HOME/Library/LaunchAgents/$SERVICE_UNIT.plist"
+      if launchctl print "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1; then
+        launchctl kickstart "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1
+      elif [ -f "$plist" ]; then
+        launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1
+      else
+        return 1
+      fi
+      ;;
+    *) return 1;;
+  esac
+}
+
+# Write the after-turn marker consumed by the web watcher. The JSON matches
+# `RestartMarker` (apps/cli/src/restart-after-turn.ts); the scripts spec parses
+# this file with the module's own `parseRestartMarker`, so schema drift fails a
+# test. Atomic temp+rename, so a re-run overwrites instead of duplicating.
+write_restart_marker() { # session
+  local session="$1" dir="$DSH_HOME/state" path="$DSH_HOME/state/restart-after-turn.json" tmp
+  local now_ms max_wait deadline_ms marker_profile
+  # The watcher belongs to the profile the unit booted; a tool call carries
+  # that profile in DSH_PROFILE (packages/shell/shell-env), which outranks the
+  # recorded install profile when they differ.
+  marker_profile="${DSH_PROFILE:-$PROFILE}"
+  now_ms="$(( $(date +%s) * 1000 ))"
+  max_wait="${DSH_RESTART_MAX_WAIT:-600}"
+  case "$max_wait" in ''|*[!0-9]*) max_wait=600;; esac
+  max_wait="$((max_wait * 1000))"
+  deadline_ms="$(( now_ms + max_wait ))"
+  mkdir -p "$dir" 2>/dev/null || { warn "service: could not create $dir for the restart marker"; return 1; }
+  tmp="$path.$$.tmp"
+  if ! cat > "$tmp" <<EOF
+{
+  "version": 1,
+  "sessionId": "$(json_escape "$session")",
+  "unit": "$(json_escape "$SERVICE_UNIT")",
+  "profile": "$(json_escape "$marker_profile")",
+  "requestedAt": $now_ms,
+  "deadline": $deadline_ms,
+  "requestedBy": "pid $$ (dsh update)",
+  "waitAll": true
+}
+EOF
+  then
+    rm -f "$tmp" 2>/dev/null
+    warn "service: could not write the restart marker $path"
+    return 1
+  fi
+  if mv -f "$tmp" "$path" 2>/dev/null; then
+    log "service: after-turn restart of $SERVICE_UNIT scheduled for session $session ($path)"
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  warn "service: could not write the restart marker $path"
+  return 1
+}
+
+# The detached restart plan `fireDetachedRestart` uses
+# (apps/cli/src/restart-after-turn.ts): Linux prefers a transient user unit, so
+# the restart outlives this process's cgroup; macOS kickstarts the label.
+fire_detached_restart() { # unit
+  case "$OS" in
+    linux)
+      if command -v systemd-run >/dev/null 2>&1; then
+        systemd-run --user --collect --quiet -- systemctl --user restart "$1" >/dev/null 2>&1 && return 0
+      fi
+      if command -v setsid >/dev/null 2>&1; then
+        setsid systemctl --user restart "$1" >/dev/null 2>&1 < /dev/null &
+      else
+        systemctl --user restart "$1" >/dev/null 2>&1 < /dev/null &
+      fi
+      return 0
+      ;;
+    darwin)
+      command -v launchctl >/dev/null 2>&1 || return 1
+      launchctl kickstart -k "gui/$(id -u)/$1" >/dev/null 2>&1
+      ;;
+    *) return 1;;
+  esac
+}
+
+# Stage and start the detached verifier: a copy of this script running the
+# internal --service-guard mode outside the target unit's process tree. Linux
+# uses a transient user unit; macOS a transient submitted job; plain
+# setsid/nohup is the best-effort fallback when neither is available.
+spawn_service_guard() { # baseline expect_restart timeout
+  local baseline="$1" expect="$2" timeout="$3" script token label guard_log guard_src guard_tmp
+  local guard_args
+  script="$PREFIX/logs/dsh-service-guard.sh"
+  mkdir -p "$PREFIX/logs" 2>/dev/null || script=""
+  guard_src=""
+  if [ -n "$script" ]; then
+    if [ -f "$SELF" ]; then
+      guard_src="$SELF"
+    elif [ -f "$HARNESS/scripts/install.sh" ]; then
+      guard_src="$HARNESS/scripts/install.sh"
+    fi
+  fi
+  if [ -n "$guard_src" ]; then
+    # Stage beside the target and rename over it: a verifier from an earlier
+    # update may still be reading the old file, and cp truncation in place
+    # would corrupt its running script.
+    guard_tmp="$script.$$.tmp"
+    if cp "$guard_src" "$guard_tmp" 2>/dev/null && mv -f "$guard_tmp" "$script" 2>/dev/null; then
+      chmod +x "$script" 2>/dev/null || true
+    else
+      rm -f "$guard_tmp" 2>/dev/null
+      script=""
+    fi
+  else
+    script=""
+  fi
+  if [ -z "$script" ]; then
+    log "service-guard: could not stage a verifier under $PREFIX/logs; skipping post-restart verification"
+    return 0
+  fi
+  guard_log="$PREFIX/logs/service-guard.log"
+  guard_args=(--service-guard --service-unit "$SERVICE_UNIT" --prefix "$PREFIX" --dsh-home "$DSH_HOME" --guard-timeout "$timeout" --guard-home "${HOME:-}")
+  [ -n "$baseline" ] && guard_args+=(--guard-baseline "$baseline")
+  [ "$expect" = 1 ] && guard_args+=(--guard-expect-restart)
+  token="$(digest_hex "$PREFIX" | cut -c1-12)"
+  case "$OS" in
+    linux)
+      if command -v systemd-run >/dev/null 2>&1; then
+        if systemctl --user is-active --quiet "dsh-update-guard-$token" 2>/dev/null; then
+          log "service-guard: verifier dsh-update-guard-$token is already running; reusing it"
+          return 0
+        fi
+        if systemd-run --user --collect --quiet --unit "dsh-update-guard-$token" \
+          --setenv=XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+          -- env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1; then
+          log "service-guard: detached verifier scheduled (dsh-update-guard-$token)"
+          return 0
+        fi
+        log "service-guard: systemd-run could not schedule the verifier; falling back to a plain detached process"
+      fi
+      if command -v setsid >/dev/null 2>&1; then
+        setsid nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+      else
+        nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+      fi
+      log "service-guard: detached verifier started without systemd-run (best effort)"
+      ;;
+    darwin)
+      label="com.dsh.update-guard.$token.$$"
+      if command -v launchctl >/dev/null 2>&1; then
+        if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+          log "service-guard: verifier $label is already loaded; reusing it"
+          return 0
+        fi
+        if launchctl submit -l "$label" -o "$guard_log" -e "$guard_log" -- /usr/bin/env -u DSH_INSTALL_LIB_ONLY /bin/bash "$script" "${guard_args[@]}" >/dev/null 2>&1; then
+          log "service-guard: detached verifier submitted ($label)"
+          return 0
+        fi
+        log "service-guard: launchctl submit could not schedule the verifier; falling back to a plain detached process"
+      fi
+      nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+      log "service-guard: detached verifier started without launchd (best effort)"
+      ;;
+  esac
+  return 0
+}
+
+# The delegated restart. Called only when this process is inside the managed
+# unit, after every durable update step has completed and the result has been
+# reported: the caller may be killed by the restart, so nothing may follow that
+# the update still needs. Idempotent per call: the marker write is an atomic
+# overwrite, and a verifier already running for this delegation is reused
+# (Linux keys it to the prefix, macOS to the update process).
+delegate_service_restart() {
+  local baseline session
+  if [ -z "$SERVICE_UNIT" ]; then
+    log "service: no unit recorded for this install; nothing to delegate"
+    return 0
+  fi
+  baseline="$(service_generation "$SERVICE_UNIT")"
+  # A model shell call runs with a scrubbed environment that carries
+  # DSH_SESSION_ID but never DSH_PTY_SESSION_ID, which only a persistent
+  # terminal gets (packages/terminal/terminal-bash/src/index.ts); such a call
+  # is inside a turn by definition, so only the after-turn marker is safe.
+  session="${DSH_SESSION_ID:-}"
+  if [ -n "$session" ] && [ -z "${DSH_PTY_SESSION_ID:-}" ]; then
+    spawn_service_guard "$baseline" 0 900
+    if write_restart_marker "$session"; then
+      say "  ${C_CYAN}ℹ${C_RESET} Service restart scheduled for between turns (session ${session}): $SERVICE_UNIT"
+    else
+      warn "service: restart was NOT scheduled; run 'dsh restart --after-turn --session ${session}' after this turn"
+    fi
+    return 0
+  fi
+  spawn_service_guard "$baseline" 1 180
+  if fire_detached_restart "$SERVICE_UNIT"; then
+    say "  ${C_CYAN}ℹ${C_RESET} Service restart delegated to a detached process: $SERVICE_UNIT"
+  else
+    warn "service: no detached restart mechanism on this platform; run 'dsh service restart' after this command"
+  fi
+  return 0
+}
+
+# The detached verifier (internal --service-guard mode): wait for the delegated
+# restart to activate the unit, then confirm the unit is up; when it is down,
+# start or bootstrap it and record the outcome in the install log.
+do_service_guard() {
+  local unit="$SERVICE_UNIT" timeout interval recover kick baseline generation
+  local start now saw_outage=0
+  timeout="${GUARD_TIMEOUT:-${DSH_SERVICE_GUARD_TIMEOUT:-180}}"
+  case "$timeout" in ''|*[!0-9]*) timeout=180;; esac
+  [ "$timeout" -ge 1 ] || timeout=1
+  interval="${DSH_SERVICE_GUARD_INTERVAL:-2}"
+  case "$interval" in ''|*[!0-9]*) interval=2;; esac
+  [ "$interval" -ge 1 ] || interval=1
+  recover="${DSH_SERVICE_GUARD_RECOVER:-60}"
+  case "$recover" in ''|*[!0-9]*) recover=60;; esac
+  kick="${DSH_SERVICE_GUARD_KICK:-20}"
+  case "$kick" in ''|*[!0-9]*) kick=20;; esac
+  baseline="${GUARD_BASELINE:-}"
+  log "service-guard: watching $unit for up to ${timeout}s (baseline ${baseline:-unknown}, expect-restart $GUARD_EXPECT_RESTART)"
+  start="$(date +%s)"
+  while :; do
+    if unit_is_active "$unit"; then
+      generation="$(service_generation "$unit")"
+      if [ -z "$baseline" ] || [ "$saw_outage" = 1 ] \
+        || { [ -n "$generation" ] && [ "$generation" != "$baseline" ]; }; then
+        log "service-guard: $unit verified active after the delegated restart"
+        return 0
+      fi
+      if [ "$GUARD_EXPECT_RESTART" = 1 ]; then
+        now="$(date +%s)"
+        if [ $((now - start)) -ge "$kick" ]; then
+          log "service-guard: no restart observed within ${kick}s; restarting $unit from the detached verifier"
+          if guard_kick_service "$unit"; then
+            baseline=""
+            saw_outage=1
+            start="$(date +%s)"
+            continue
+          fi
+          log "service-guard: restart from the detached verifier failed; still watching $unit"
+        fi
+      fi
+    else
+      saw_outage=1
+    fi
+    now="$(date +%s)"
+    [ $((now - start)) -ge "$timeout" ] && break
+    sleep "$interval"
+  done
+  if unit_is_active "$unit"; then
+    log "service-guard: $unit is active but no delegated restart was observed within ${timeout}s; nothing to recover (a scheduled after-turn restart may still be pending)"
+    return 0
+  fi
+  log "service-guard: $unit is not active after ${timeout}s; starting it from the detached verifier"
+  if start_or_bootstrap_service; then
+    local recover_start recover_now
+    recover_start="$(date +%s)"
+    while :; do
+      if unit_is_active "$unit"; then
+        log "service-guard: recovered $unit after the failed restart"
+        return 0
+      fi
+      recover_now="$(date +%s)"
+      [ $((recover_now - recover_start)) -ge "$recover" ] && break
+      sleep "$interval"
+    done
+    log "service-guard: ERROR: $unit did not become active after the start/bootstrap attempt; run 'dsh doctor' for diagnostics"
+    return 1
+  fi
+  log "service-guard: ERROR: could not start or bootstrap $unit; run 'dsh service install'"
+  return 1
+}
+
 # ── Tailnet peer exposure ───────────────────────────────────────────────────
 # Reaching the loopback web service from another tailnet machine needs two
 # pieces, both wired here when the host has a Tailscale IPv4:
@@ -3215,12 +3628,19 @@ do_install() {
 # the profile merge and migrations ran); the late pre-switch backup is never
 # passed here. Called only after the switch.
 rollback() { # prev backup failed_version
-  local prev="$1" backup="$2" failed="$3" restore_rc=0
+  local prev="$1" backup="$2" failed="$3" restore_rc=0 in_session=0
   warn "rolling back to $prev"
   switch_current "$prev" || warn "could not repoint $PREFIX/harness/current"
-  # The update restarted the unit onto the failed tree before the self-check;
-  # restart it back so the live service runs the restored tree too.
-  restart_service
+  # The direct path restarted the unit onto the failed tree before the
+  # self-check; restart it back so the live service runs the restored tree too.
+  # A rollback running inside the managed unit must not restart it here: the
+  # delegated restart at the end runs after the user-file restore and the
+  # report, so the rollback can never be killed mid-flight.
+  if running_under_service; then
+    in_session=1
+  else
+    restart_service
+  fi
   restore_user_files "$backup" || restore_rc=1
   # Never archive the tree being restored, and never rename a pre-existing
   # reused tree away: a failed pin-back to a known-good build must leave it
@@ -3244,6 +3664,7 @@ rollback() { # prev backup failed_version
     say "  active:  $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
     say "  failed:  $PREFIX/harness/$failed.failed-*"
     say "  backups: $backup — restore the remaining files manually from $backup/root/ (paths there mirror /)"
+    if [ "$in_session" = 1 ]; then delegate_service_restart; fi
     return 1
   fi
   write_diagnostics rolled-back
@@ -3253,6 +3674,7 @@ rollback() { # prev backup failed_version
   say "  active:  $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
   say "  failed:  $PREFIX/harness/$failed.failed-*"
   say "  backups: $backup"
+  if [ "$in_session" = 1 ]; then delegate_service_restart; fi
   return 0
 }
 
@@ -3534,7 +3956,7 @@ acquire_update_lock() {
 }
 
 do_update() {
-  local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version
+  local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart
   STEP_TOTAL=8
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   acquire_update_lock
@@ -3772,7 +4194,14 @@ do_update() {
   # Past the switch, rollback owns restoration from the pristine snapshot.
   PRE_SWITCH_RESTORE=""
   log "switched current -> $TREE_DIR_NAME"
-  restart_service
+  # A process inside the managed unit cannot survive a direct restart: systemd
+  # stops the unit's whole process tree and launchd the job's. Such an update
+  # does every durable step first — backfill and self-check included — and
+  # delegates the restart only after the result is reported, so the caller
+  # always receives it. A plain out-of-session `dsh update` restarts as before.
+  deferred_restart=0
+  if running_under_service; then deferred_restart=1; fi
+  if [ "$deferred_restart" = 0 ]; then restart_service; fi
   ensure_service
   ensure_tailnet_exposure
   run_backfill
@@ -3793,6 +4222,7 @@ do_update() {
   prune_update_artifacts
   print_summary update
   emit_json update 1
+  if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
   return 0
 }
 
@@ -4449,6 +4879,19 @@ case "$BIN_DIR" in /*) :;; *) die "--bin-dir must be an absolute path: $BIN_DIR"
 if [ -z "$DSH_HOME" ]; then DSH_HOME="$HOME/.dsh"; fi
 case "$DSH_HOME" in /*) :;; *) die "\$DSH_HOME/--dsh-home must be an absolute path: $DSH_HOME";; esac
 export DSH_HOME
+
+# The internal --service-guard mode: the detached verifier spawned by
+# delegate_service_restart. Runs no install/update step; it waits for the
+# delegated restart, confirms the unit is up, starts or bootstraps it when it
+# is not, and records the outcome in <prefix>/logs/install.log.
+if [ "$GUARD_MODE" = 1 ]; then
+  [ -n "$SERVICE_UNIT" ] || die "--service-guard needs --service-unit"
+  [ -n "$GUARD_HOME" ] && export HOME="$GUARD_HOME"
+  detect_os_arch
+  init_log_file
+  do_service_guard
+  exit $?
+fi
 
 if [ "$DRY_RUN" = 1 ] && [ "$UPDATE_MODE" = 0 ] && [ "$REPAIR_MODE" = 0 ] && [ "$UNINSTALL_MODE" = 0 ]; then
   detect_os_arch
