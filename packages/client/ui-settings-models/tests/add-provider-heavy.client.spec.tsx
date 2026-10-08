@@ -17,7 +17,7 @@ import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
 import type { ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
-import { translateEn } from './translate.ts'
+import { translateEn } from './translate.client.ts'
 
 afterEach(() => {
   cleanup()

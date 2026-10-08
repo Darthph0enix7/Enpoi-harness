@@ -18,7 +18,7 @@ import { createModelsOperations } from '../src/client/operations.ts'
 import type { ModelsOperations } from '../src/client/operations.ts'
 import { en } from '../src/client/locales.ts'
 import { OPENAI_BASE_URL_EXAMPLE } from '../src/client/endpoint-defaults.ts'
-import { translateEn } from './translate.ts'
+import { translateEn } from './translate.client.ts'
 import { settingsSchema } from './settings-schema.client.ts'
 
 afterEach(cleanup)

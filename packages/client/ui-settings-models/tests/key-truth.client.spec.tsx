@@ -16,7 +16,7 @@ import { ModelsSection } from '../src/client/ModelsSection.tsx'
 import type { ModelsSectionProps } from '../src/client/ModelsSection.tsx'
 import { ProviderDetailPanel } from '../src/client/ProviderDetailPanel.tsx'
 import { en } from '../src/client/locales.ts'
-import { translateEn } from './translate.ts'
+import { translateEn } from './translate.client.ts'
 import {
   providerKeyConfigured, type ModelsSettingsState, type ModelsSettingsStore, type ModelsWire, type ProviderRow,
 } from '../src/client/store.ts'

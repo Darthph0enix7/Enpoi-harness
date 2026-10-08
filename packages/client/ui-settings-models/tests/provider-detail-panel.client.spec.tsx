@@ -9,7 +9,7 @@ import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '.
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
-import { translateEn } from './translate.ts'
+import { translateEn } from './translate.client.ts'
 import { settingsSchema } from './settings-schema.client.ts'
 import styles from '../src/client/ModelsSection.module.css'
 

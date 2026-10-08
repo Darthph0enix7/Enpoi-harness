@@ -19,7 +19,7 @@ import type { WelcomeNoticeProps } from '../src/client/WelcomeNotice.tsx'
 import { decodeWelcomeSection, WelcomeNoticeStore } from '../src/client/welcome-store.ts'
 import type { WelcomeSection } from '../src/client/welcome-store.ts'
 import { en, zh } from '../src/client/locales.ts'
-import { translateEn, translateZh } from './translate.ts'
+import { translateEn, translateZh } from './translate.client.ts'
 import {
   WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_SETTINGS_NAMESPACE,
   WELCOME_NOTICE_VERSION,

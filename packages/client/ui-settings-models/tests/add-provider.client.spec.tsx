@@ -8,7 +8,7 @@ import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
 import { providerPreset } from '../src/client/provider-templates.ts'
 import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
-import { translateEn } from './translate.ts'
+import { translateEn } from './translate.client.ts'
 
 afterEach(cleanup)
 
