@@ -18,6 +18,16 @@ overrides:
   'extract-zip>yauzl': '3.4.0'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+  # vite@8.0.16 pins rolldown exactly while tsdown pins 1.1.1; one 1.1.1 copy
+  # serves both and drops a duplicate ~22 MB native binding from the prebuilt
+  # asset. Both consumers only run at build/test time, never in the shipped
+  # runtime.
+  rolldown: '1.1.1'
+  # vite@6 (web/desktop builds) pins esbuild three minors behind vite@8/tsx;
+  # 0.28.1 serves it too and drops one native binary from the prebuilt asset.
+  # esbuild runs at build time only. vite@5 (the VitePress site) keeps its own
+  # pin: its esbuild-transpile call fails against 0.28 in website:build.
+  'vite@6>esbuild': '0.28.1'
 
 peerDependencyRules:
   allowedVersions:

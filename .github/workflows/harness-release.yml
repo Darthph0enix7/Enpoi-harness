@@ -31,8 +31,9 @@
 # and `pnpm prune --prod` were both measured and are unusable for this
 # workspace (runtime-relevant peer packages are pinned in devDependencies in
 # pnpm-lock.yaml, so a prod-only tree fails the smoke boot). Packing therefore
-# only drops VCS/build leftovers and the non-runtime trees that passed the
-# pruned-tree smoke (docs, snapshots, benchmarks, python, website).
+# stages the workspace, runs scripts/prune-release-tree.sh (VCS/build leftovers,
+# source maps, committed specs/tests, Agent Notes, node_modules docs), then
+# smoke-boots that pruned tree and tars exactly it.
 
 name: Harness Release
 
@@ -170,11 +171,41 @@ jobs:
           HARNESS_ROOT: ${{ github.workspace }}
         run: bash profile/web/build-plugins.sh profile/web
 
-      - name: Smoke test (CLI + web surface)
+      # The stage exists before the smoke so the gate boots the exact tree the
+      # tarball will carry: a prune that drops a runtime file fails here.
+      - name: Stage and prune the artifact tree
+        id: stage
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          TOP="dsh-harness-$VERSION"
+          STAGE="$RUNNER_TEMP/dsh-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          # Hardlinks keep the stage near-zero extra disk on the runner; fall
+          # back to a full copy when the filesystem cannot link ($RUNNER_TEMP
+          # and the workspace share one volume on GitHub-hosted runners).
+          if ! cp -al "$GITHUB_WORKSPACE" "$STAGE/$TOP"; then
+            rm -rf "$STAGE/$TOP"
+            cp -a "$GITHUB_WORKSPACE" "$STAGE/$TOP"
+          fi
+
+          bash "$GITHUB_WORKSPACE/scripts/prune-release-tree.sh" "$STAGE/$TOP"
+
+          # A no-op or partial prune must fail the release, not ship the weight.
+          test ! -e "$STAGE/$TOP/.agents/notes"
+          test -z "$(find "$STAGE/$TOP" -name '*.map' -print -quit)"
+          echo "tree=$STAGE/$TOP" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test (CLI + web surface, pruned tree)
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="$GITHUB_WORKSPACE"
+          ROOT="${{ steps.stage.outputs.tree }}"
           test -f "$ROOT/apps/cli/lib/bin.js"
           test -f "$ROOT/apps/web/dist/index.html"
           test -f "$ROOT/.dsh-build/client-build-environment.json"
@@ -204,7 +235,9 @@ jobs:
           # evidence line and terminates the (long-lived) server itself.
           export DEEPSEEK_API_KEY=keyless-smoke-no-call
           export SSH_CONNECTION= SSH_TTY=
-          node --import "$ROOT/apps/cli/tests/fixtures/web-browser-open/register.mjs" \
+          # The fixture is smoke instrumentation, not shipped product code, so
+          # it runs from the workspace: the pruned stage carries no tests.
+          node --import "$GITHUB_WORKSPACE/apps/cli/tests/fixtures/web-browser-open/register.mjs" \
             "$ROOT/apps/cli/lib/bin.js" web --port 0 > "$SCRATCH/web.log" 2>&1 &
           web_pid=$!
           deadline=$((SECONDS + 180))
@@ -232,24 +265,8 @@ jobs:
           # SHA-free: the release tag names the build, so the asset carries the
           # release version, OS, and architecture only.
           ASSET="dsh-harness-$VERSION-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          # The stage was pruned and smoke-booted above; pack exactly it.
           STAGE="$RUNNER_TEMP/dsh-stage"
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE"
-
-          # Stage the built tree under one top-level directory (install.sh
-          # expects exactly one). Hardlinks keep the stage near-zero extra disk
-          # on the runner; fall back to a full copy when the filesystem cannot
-          # link ($RUNNER_TEMP and the workspace share one volume on
-          # GitHub-hosted runners).
-          if ! cp -al "$GITHUB_WORKSPACE" "$STAGE/$TOP"; then
-            rm -rf "$STAGE/$TOP"
-            cp -a "$GITHUB_WORKSPACE" "$STAGE/$TOP"
-          fi
-          # `.git` is never shipped; the rest is the smoke-tested prune list.
-          rm -rf "$STAGE/$TOP/.git"
-          rm -rf "$STAGE/$TOP/docs" "$STAGE/$TOP/snapshots" "$STAGE/$TOP/benchmarks" \
-                 "$STAGE/$TOP/python" "$STAGE/$TOP/website" "$STAGE/$TOP/dist" "$STAGE/$TOP/coverage"
-          find "$STAGE/$TOP" -type f -name '*.tsbuildinfo' -delete
 
           tar -czf "$ASSET" -C "$STAGE" "$TOP"
           if command -v sha256sum >/dev/null 2>&1; then

@@ -1014,6 +1014,19 @@ describe('release-based prebuilt resolution', () => {
     expect(workflow).not.toMatch(/TOP=.*COMMIT/)
   })
 
+  it('smoke-boots the pruned stage and packs exactly that tree', () => {
+    // Staging and pruning run before the smoke, so the boot gate covers the
+    // bytes the tarball ships; the prune categories themselves are pinned by
+    // scripts/prune-release-tree.spec.ts.
+    expect(workflow).toContain('bash "$GITHUB_WORKSPACE/scripts/prune-release-tree.sh" "$STAGE/$TOP"')
+    expect(workflow).toContain('ROOT="${{ steps.stage.outputs.tree }}"')
+    expect(workflow).toContain('--import "$GITHUB_WORKSPACE/apps/cli/tests/fixtures/web-browser-open/register.mjs"')
+    expect(workflow).toContain('tar -czf "$ASSET" -C "$STAGE" "$TOP"')
+    // A no-op or partial prune must fail the release, not ship the weight.
+    expect(workflow).toContain('test ! -e "$STAGE/$TOP/.agents/notes"')
+    expect(workflow).toContain("test -z \"$(find \"$STAGE/$TOP\" -name '*.map' -print -quit)\"")
+  })
+
   it('publishes exactly one release per commit through a draft that only publish flips', () => {
     // One trigger branch: stable and beta are pushed with the same commit, so
     // the stable run is the single build and beta resolves the same stream.
