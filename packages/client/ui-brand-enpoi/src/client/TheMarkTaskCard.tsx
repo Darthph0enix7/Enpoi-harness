@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import type { BrandT } from './locales.ts'
 import styles from './TheMarkTaskCard.module.css'
 
 export interface TheMarkTaskCardProps {
@@ -15,6 +16,8 @@ export interface TheMarkTaskCardProps {
   outputSummary?: string | undefined
   subTools?: string[] | undefined
   onOpenSession?: ((sessionId: string) => void) | undefined
+  /** Package copy translate. */
+  t: BrandT
 }
 
 /** Minimalist monochrome icon — thin stroke, currentColor, matches FleetRouting. */
@@ -26,37 +29,80 @@ function MicroIcon({ d, size = 11 }: { d: string; size?: number }) {
   )
 }
 
+/** Icon path per persona keyword; the ordered list keeps the first matching keyword. */
+const PERSONA_ICON_PATHS = {
+  librarian: 'M3 4h4v9H3zM8 4h5v9H8zM3 13h10',
+  fixer: 'M10.5 2.5l3 3L6 13H3v-3z',
+  explorer: 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4',
+  designer: 'M8 3l1.8 3.6L13.5 8l-3.7 1.4L8 13l-1.8-3.6L2.5 8l3.7-1.4z',
+  oracle: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2',
+  roundtable: 'M3 3h10v2H3zM3 7h10v2H3zM3 11h10v2H3z',
+  chorus: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z',
+  visionary: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z',
+  experiencer: 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z',
+  integrator: 'M4 4h4v4H4zM8 8h4v4H8z',
+  curator: 'M8 3v10M3 8h10',
+  skeptic: 'M12 4l-8 8m0-8l8 8',
+  architect: 'M3 13V8m3 5V5m3 8V3m3 10V7',
+  pragmatist: 'M3 8h10M10 4l3 4-3 4',
+} as const
+
+/** Ordered persona keyword → icon path table. */
+const PERSONA_ICON_ORDER: ReadonlyArray<readonly [string, keyof typeof PERSONA_ICON_PATHS]> = [
+  ['librarian', 'librarian'],
+  ['fixer', 'fixer'],
+  ['explorer', 'explorer'],
+  ['designer', 'designer'],
+  ['oracle', 'oracle'],
+  ['roundtable', 'roundtable'],
+  ['chorus', 'chorus'],
+  ['visionary', 'visionary'],
+  ['experiencer', 'experiencer'],
+  ['integrator', 'integrator'],
+  ['curator', 'curator'],
+  ['skeptic', 'skeptic'],
+  ['architect', 'architect'],
+  ['pragmatist', 'pragmatist'],
+]
+
+const PERSONA_ICON_FALLBACK = 'M8 3l3 3-3 3M5 8h6'
+
 function personaIconD(persona: string): string {
   const p = persona.toLowerCase()
-  if (p.includes('librarian')) return 'M3 4h4v9H3zM8 4h5v9H8zM3 13h10'
-  if (p.includes('fixer')) return 'M10.5 2.5l3 3L6 13H3v-3z'
-  if (p.includes('explorer')) return 'M3 3h4v4H3zM9 9h4v4H9zM9 3h4M11 3v4M3 9h4M5 9v4'
-  if (p.includes('designer')) return 'M8 3l1.8 3.6L13.5 8l-3.7 1.4L8 13l-1.8-3.6L2.5 8l3.7-1.4z'
-  if (p.includes('oracle')) return 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2'
-  if (p.includes('roundtable')) return 'M3 3h10v2H3zM3 7h10v2H3zM3 11h10v2H3z'
-  if (p.includes('chorus')) return 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z'
-  if (p.includes('visionary')) return 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z'
-  if (p.includes('experiencer')) return 'M3 8a5 5 0 0110 0c0 3-5 6-5 6s-5-3-5-6z'
-  if (p.includes('integrator')) return 'M4 4h4v4H4zM8 8h4v4H8z'
-  if (p.includes('curator')) return 'M8 3v10M3 8h10'
-  if (p.includes('skeptic')) return 'M12 4l-8 8m0-8l8 8'
-  if (p.includes('architect')) return 'M3 13V8m3 5V5m3 8V3m3 10V7'
-  if (p.includes('pragmatist')) return 'M3 8h10M10 4l3 4-3 4'
-  return 'M8 3l3 3-3 3M5 8h6'
+  for (const [keyword, path] of PERSONA_ICON_ORDER) {
+    if (p.includes(keyword)) return PERSONA_ICON_PATHS[path]
+  }
+  return PERSONA_ICON_FALLBACK
 }
+
+/** Icon path per tool keyword; the ordered list keeps the first matching keyword. */
+const TOOL_ICON_PATHS = {
+  web: 'M8 2a6 6 0 100 12A6 6 0 008 2zM8 5v3l2 2',
+  read: 'M3 4h10v9H3zM3 7h10',
+  edit: 'M10.5 2.5l3 3L6 13H3v-3z',
+  terminal: 'M3 5l3 3-3 3M9 11h4',
+  search: 'M11 11l2 2M9.5 5a4.5 4.5 0 100 9A4.5 4.5 0 009.5 5z',
+  ast: 'M4 4h4v4H4zM8 8h4v4H8z',
+  plan: 'M3 4h10M3 8h10M3 12h10M3 4v8',
+  oracle: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2',
+  subagent: 'M8 3l3 3-3 3M5 8h6',
+} as const
+
+/** Ordered tool keyword → icon path table. */
+const TOOL_ICON_FALLBACK = 'M8 3v10M3 8h10'
 
 function toolIconD(name: string): string {
   const n = name.toLowerCase()
-  if (n.includes('web') || n.includes('fetch') || n.includes('search_exa')) return 'M8 2a6 6 0 100 12A6 6 0 008 2zM8 5v3l2 2'
-  if (n.includes('read')) return 'M3 4h10v9H3zM3 7h10'
-  if (n.includes('edit') || n.includes('write')) return 'M10.5 2.5l3 3L6 13H3v-3z'
-  if (n.includes('bash') || n.includes('terminal')) return 'M3 5l3 3-3 3M9 11h4'
-  if (n.includes('grep') || n.includes('glob') || n.includes('search')) return 'M11 11l2 2M9.5 5a4.5 4.5 0 100 9A4.5 4.5 0 009.5 5z'
-  if (n.includes('ast_grep')) return 'M4 4h4v4H4zM8 8h4v4H8z'
-  if (n.includes('todo') || n.includes('plan')) return 'M3 4h10M3 8h10M3 12h10M3 4v8'
-  if (n.includes('oracle')) return 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2'
-  if (n.includes('subagent')) return 'M8 3l3 3-3 3M5 8h6'
-  return 'M8 3v10M3 8h10'
+  if (n.includes('web') || n.includes('fetch') || n.includes('search_exa')) return TOOL_ICON_PATHS.web
+  if (n.includes('read')) return TOOL_ICON_PATHS.read
+  if (n.includes('edit') || n.includes('write')) return TOOL_ICON_PATHS.edit
+  if (n.includes('bash') || n.includes('terminal')) return TOOL_ICON_PATHS.terminal
+  if (n.includes('grep') || n.includes('glob') || n.includes('search')) return TOOL_ICON_PATHS.search
+  if (n.includes('ast_grep')) return TOOL_ICON_PATHS.ast
+  if (n.includes('todo') || n.includes('plan')) return TOOL_ICON_PATHS.plan
+  if (n.includes('oracle')) return TOOL_ICON_PATHS.oracle
+  if (n.includes('subagent')) return TOOL_ICON_PATHS.subagent
+  return TOOL_ICON_FALLBACK
 }
 
 export function TheMarkTaskCard({
@@ -72,6 +118,7 @@ export function TheMarkTaskCard({
   outputSummary,
   subTools,
   onOpenSession,
+  t,
 }: TheMarkTaskCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -95,12 +142,12 @@ export function TheMarkTaskCard({
 
   const statusLabel =
     status === 'running'
-      ? 'Running'
+      ? t('markStatusRunning')
       : status === 'settled'
-        ? 'Completed'
+        ? t('markStatusCompleted')
         : status === 'interrupted'
-          ? 'Interrupted'
-          : 'Failed'
+          ? t('markStatusInterrupted')
+          : t('markStatusFailed')
 
   const durationStr = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : ''
   const displayModel = model ? model.split('/').pop() : undefined
@@ -144,10 +191,10 @@ export function TheMarkTaskCard({
         <div className={styles.calligraphyStrip}>
           <span className={styles.calligraphyPrompt}>❯</span>
           {status === 'running' ? (
-            <span>Executing: {currentTool || 'Running subagent step...'}</span>
+            <span>{t('markExecuting', { tool: currentTool || t('markRunningStep') })}</span>
           ) : (
             <span className={styles.calligraphyFrozen}>
-              [Interrupted at: {latchedTool || 'unknown step'}]
+              {t('markInterruptedAt', { step: latchedTool || t('markUnknownStep') })}
             </span>
           )}
         </div>
@@ -159,7 +206,7 @@ export function TheMarkTaskCard({
           {/* Sub-tools Activity Timeline */}
           {subTools && subTools.length > 0 && (
             <div className={styles.toolsActivityContainer}>
-              <div className={styles.toolsActivityHeader}>Tools Executed ({subTools.length})</div>
+              <div className={styles.toolsActivityHeader}>{t('markToolsExecuted', { count: subTools.length })}</div>
               <div className={styles.toolsActivityPills}>
                 {subTools.map((t, idx) => (
                   <span key={`${t}-${idx}`} className={styles.toolActivityPill}>
@@ -174,8 +221,8 @@ export function TheMarkTaskCard({
           {outputSummary ? (
             <div className={styles.outputContainer}>
               <div className={styles.outputHeader}>
-                <span>Output & Findings</span>
-                {status === 'settled' && <span className={styles.badgeSuccess}>✓ Settled</span>}
+                <span>{t('markOutputFindings')}</span>
+                {status === 'settled' && <span className={styles.badgeSuccess}>{t('markSettled')}</span>}
               </div>
               <div className={styles.outputScroll}>
                 <pre className={styles.outputText}>{outputSummary}</pre>
@@ -184,8 +231,8 @@ export function TheMarkTaskCard({
           ) : (
             <div className={styles.emptyOutput}>
               {status === 'running'
-                ? 'Subagent is currently executing in its own context...'
-                : 'No textual output returned.'}
+                ? t('markStillRunning')
+                : t('markNoOutput')}
             </div>
           )}
 
@@ -199,7 +246,7 @@ export function TheMarkTaskCard({
                   onOpenSession(childSessionId)
                 }}
               >
-                <span>Open Subagent Session</span>
+                <span>{t('markOpenSession')}</span>
                 <span>↗</span>
               </button>
             )}
@@ -216,11 +263,11 @@ export function TheMarkTaskCard({
                 }
               }}
             >
-              {copied ? '✓ Copied' : 'Copy Output'}
+              {copied ? t('markCopied') : t('markCopyOutput')}
             </button>
             {childSessionId && (
-              <span className={styles.sessionIdPill} title={`Subagent Session: ${childSessionId}`}>
-                ID: {childSessionId.slice(0, 8)}...
+              <span className={styles.sessionIdPill} title={t('markSessionIdTitle', { id: childSessionId })}>
+                {t('markId', { id: childSessionId.slice(0, 8) })}
               </span>
             )}
           </div>

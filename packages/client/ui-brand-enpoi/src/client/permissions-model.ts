@@ -15,6 +15,7 @@
  * answering the published revision notifies nobody.
  */
 import type { RoleRegistryMap } from './role-registry.ts'
+import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import {
   OPERATOR_SURFACE,
   SHARED_CHILD_KEEP,
@@ -361,9 +362,9 @@ function commonPrefix(names: readonly string[]): string | undefined {
  */
 export const POLICY_FAMILIES: readonly PolicyFamilyOverlay[] = Object.freeze(buildPolicyFamilies())
 
-/** Curated label overrides where the mechanical humanizer reads wrong. */
-export const TOOL_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
-  mcp: 'MCP servers (mount / unmount)',
+/** Dictionary keys of the curated label overrides where the mechanical humanizer reads wrong. */
+export const TOOL_LABEL_OVERRIDES: Readonly<Record<string, BrandEnpoiKey>> = {
+  mcp: 'permToolMcpLabel',
 }
 
 /** One MCP server group: the server wildcard key plus its live public tools. */
@@ -429,12 +430,15 @@ export function groupMcpToolNames(
  * @param mcpServers - the enpoi-orchestration.mcpServers describe data.
  * @param mcpToolNames - live MCP names from `enpoiCapabilities.mcpTools` (empty when unavailable).
  * @param liveToolNames - every live name from `enpoiCapabilities.registeredTools`.
+ * @param t - the package dictionary translate for curated label overrides.
+ *   Data-shape callers may omit it; an override then falls back to the tool id.
  * @returns ordered rows, the `mcp__*` master last.
  */
 export function buildPermissionToolRows(
   mcpServers: Record<string, McpServerRef> | undefined,
   mcpToolNames: readonly string[] = [],
   liveToolNames: readonly string[] = [],
+  t?: BrandT,
 ): PermissionToolRow[] {
   // The matrix rows are REAL tools (doc 55 P2 redesign). Specialist names
   // (fixer/explorer/…) are ROLE SUBJECTS in the left rail, not tool rows;
@@ -457,17 +461,21 @@ export function buildPermissionToolRows(
     return { family, members }
   })
   const folded = new Set(families.flatMap(entry => entry.members))
+  const labelOf = (id: string): string => {
+    const key = TOOL_LABEL_OVERRIDES[id]
+    return key === undefined ? prettyToolName(id) : t === undefined ? id : t(key)
+  }
 
   for (const id of CORE_PERMISSION_TOOLS) {
     if (folded.has(id)) continue
-    rows.set(id, { id, name: TOOL_LABEL_OVERRIDES[id] ?? prettyToolName(id), kind: 'tool' })
+    rows.set(id, { id, name: labelOf(id), kind: 'tool' })
   }
   for (const { family, members } of families) {
     rows.set(family.id, { id: family.id, name: family.name, kind: 'family', members })
   }
   for (const id of nonMcp) {
     if (rows.has(id) || folded.has(id)) continue
-    rows.set(id, { id, name: TOOL_LABEL_OVERRIDES[id] ?? prettyToolName(id), kind: 'tool' })
+    rows.set(id, { id, name: labelOf(id), kind: 'tool' })
   }
 
   const groups = groupMcpToolNames(mcpServers, mcpNames)

@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
 import { WhiteboardCard } from '../src/client/WhiteboardCard.tsx'
+import { brandT } from './brand-i18n.client.ts'
 import {
   parseWhiteboardStore,
   renderWhiteboardBlock,
@@ -216,7 +217,7 @@ describe('Watchtower Whiteboard card', () => {
 
   it("shows this session's board as the primary surface, shared entries in closed disclosures", () => {
     const split = sessionSplit()
-    render(<WhiteboardCard board={split} phase="ready" />)
+    render(<WhiteboardCard t={brandT} board={split} phase="ready" />)
     const sessionBlock = renderWhiteboardBlock(split.session)
     const agentBlock = renderWhiteboardBlock(split.agent)
 
@@ -246,7 +247,7 @@ describe('Watchtower Whiteboard card', () => {
   it('degrades to the quiet state when the session board is empty, even with shared entries', () => {
     const split = splitWhiteboard(parseWhiteboardStore(STORE), { sessionId: 'session-empty', projectId: '/home/adam' })
     expect(split.session.entries).toHaveLength(0)
-    render(<WhiteboardCard board={split} phase="ready" />)
+    render(<WhiteboardCard t={brandT} board={split} phase="ready" />)
     expect(screen.getByText('no whiteboard entries')).toBeTruthy()
     expect(primaryBlock()).toBeNull()
     expect(screen.getByText(/Shared with all sessions/)).toBeTruthy()
@@ -255,18 +256,18 @@ describe('Watchtower Whiteboard card', () => {
 
   it('degrades to loading/error copy and stays quiet', () => {
     const empty = splitWhiteboard(parseWhiteboardStore({ version: 0, scope: 'global', entries: [], updatedAt: 0 }), {})
-    const { rerender } = render(<WhiteboardCard board={empty} phase="ready" />)
+    const { rerender } = render(<WhiteboardCard t={brandT} board={empty} phase="ready" />)
     expect(screen.getByText('no whiteboard entries')).toBeTruthy()
-    rerender(<WhiteboardCard board={null} phase="loading" />)
+    rerender(<WhiteboardCard t={brandT} board={null} phase="loading" />)
     expect(screen.getByText('reading the board…')).toBeTruthy()
-    rerender(<WhiteboardCard board={null} phase="error" />)
+    rerender(<WhiteboardCard t={brandT} board={null} phase="error" />)
     expect(screen.getByText('board unavailable')).toBeTruthy()
   })
 
   it('reads the live store under the Watchtower and shows this session board only', async () => {
     stubDescribe(STORE)
     render(
-      <WatchtowerView
+      <WatchtowerView t={brandT}
         sessionId="session-test-123"
         useSession={selector => selector({ sessionId: 'session-test-123', cwd: '/home/adam', subagent: null })}
       />,
@@ -284,7 +285,7 @@ describe('Watchtower Whiteboard card', () => {
   it('shows the quiet state for a session with no board of its own, keeping shared entries collapsed', async () => {
     stubDescribe(STORE)
     render(
-      <WatchtowerView
+      <WatchtowerView t={brandT}
         sessionId="session-empty"
         useSession={selector => selector({ sessionId: 'session-empty', cwd: '/home/adam' })}
       />,

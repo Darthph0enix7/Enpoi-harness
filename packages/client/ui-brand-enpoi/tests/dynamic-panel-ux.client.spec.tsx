@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { DynamicSettingsProps } from '../src/client/dynamic/DynamicSettings.tsx'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed request body, with the fields these specs read. */
 interface RequestBody {
@@ -70,7 +71,7 @@ describe('Fix 1 — a focused draft survives a pushed refresh', () => {
       return mutateOk(1)
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('Server One')
 
     fireEvent.click(screen.getByLabelText('Edit Server One'))
@@ -112,7 +113,7 @@ describe('Fix 2 — a hung write times out and releases the queue', () => {
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
     const { getStatus } = await import('../src/client/dynamic/status.ts')
     const { WRITE_TIMEOUT_MS } = await import('../src/client/dynamic/write-timeout.ts')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('The Oracle')
 
     vi.useFakeTimers()
@@ -147,7 +148,7 @@ describe('Fix 3 — a write failure survives a tab switch', () => {
     const mod = await import('../src/client/dynamic/DynamicSettings.tsx')
     const { setStatus } = await import('../src/client/dynamic/status.ts')
     setStatus(null)
-    render(<mod.DynamicSettings {...({} as DynamicSettingsProps)} />)
+    render(<mod.DynamicSettings {...({ t: brandT, skillsT: brandT } as unknown as DynamicSettingsProps)} />)
     await screen.findByText('The Oracle')
 
     fireEvent.click(screen.getByLabelText('Retire Fixer'))
@@ -181,7 +182,7 @@ describe('Fix 4 — unchanged pushes do not re-describe', () => {
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
     const registry = await import('../src/client/role-registry.ts')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('The Oracle')
     const before = panelDescribes
     expect(before).toBe(1)

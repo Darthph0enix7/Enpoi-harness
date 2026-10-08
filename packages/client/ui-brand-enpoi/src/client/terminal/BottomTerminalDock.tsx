@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { IconChevronDownOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { TerminalInjected } from './contract.ts'
 import { clampDockHeight } from './registry.ts'
@@ -35,6 +35,7 @@ const DOCK_RESIZE_MARKER = 'data-enpoi-bottom-dock-resizing'
 /** Composed props of the bottom terminal dock. */
 export type BottomTerminalDockProps =
   & PropsRuntime<'shell.overlay'>
+  & PropsLocale<'brandEnpoi'>
   & InjectFace<TerminalInjected>
 
 /**
@@ -44,7 +45,7 @@ export type BottomTerminalDockProps =
  */
 export function BottomTerminalDock({
   useSessions, useTerminals, openTerminal, closeTerminal, activateTerminal,
-  writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock, setTerminalDockHeight,
+  writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock, setTerminalDockHeight, t,
 }: BottomTerminalDockProps): ReactNode {
   const dock = useTerminals(state => state.dock)
   // The merged session list has no global "current" selection (navigation is
@@ -165,22 +166,23 @@ export function BottomTerminalDock({
       <div className={css.dockBar}>
         <span className={css.dockBarTitle}>
           <TerminalIcon size={14} />
-          Terminals
+          {t('terminalTitle')}
         </span>
         <TerminalTabStrip
           sessionId={sessionId}
           place="bottom"
           tabs={tabs}
           activeId={active?.id}
+          t={t}
           onOpen={() => { openTerminal(sessionId, 'bottom', cwd) }}
           onClose={(id) => { closeTerminal(sessionId, id) }}
           onActivate={(id) => { activateTerminal(sessionId, 'bottom', id) }}
         />
-        <Tooltip label="Collapse terminal panel" side="bottom" delayMs={400}>
+        <Tooltip label={t('terminalCollapse')} side="bottom" delayMs={400}>
           <button
             type="button"
             className={css.iconButton}
-            aria-label="Collapse terminal panel"
+            aria-label={t('terminalCollapse')}
             data-enpoi-bottom-dock-collapse
             onClick={toggleTerminalDock}
           >
@@ -195,14 +197,14 @@ export function BottomTerminalDock({
         <div className={css.dockBody}>
           {active === undefined ? (
             <div className={css.empty} data-enpoi-bottom-terminal-empty>
-              <p>No terminal in the bottom panel.</p>
+              <p>{t('terminalNoBottom')}</p>
               <button type="button" className={css.newButton} onClick={() => { openTerminal(sessionId, 'bottom', cwd) }}>
-                New terminal
+                {t('terminalNew')}
               </button>
             </div>
           ) : (
             <>
-              <TerminalStatusBanner tab={active} />
+              <TerminalStatusBanner tab={active} t={t} />
               <TerminalView
                 sessionId={sessionId}
                 tab={active}
@@ -223,6 +225,7 @@ export function BottomTerminalDock({
 /** Composed props of the header's dock toggle. */
 export type BottomDockToggleProps =
   & PropsRuntime<'conversation.session.header.actions'>
+  & PropsLocale<'brandEnpoi'>
   & InjectFace<TerminalInjected>
 
 /**
@@ -230,14 +233,14 @@ export type BottomDockToggleProps =
  * @param props - framework shares and the terminal inject face.
  * @returns the toggle button.
  */
-export function BottomDockToggle({ useTerminals, toggleTerminalDock }: BottomDockToggleProps): ReactNode {
+export function BottomDockToggle({ useTerminals, toggleTerminalDock, t }: BottomDockToggleProps): ReactNode {
   const open = useTerminals(state => state.dock.open)
   return (
-    <Tooltip label="Terminal panel" side="bottom" delayMs={500}>
+    <Tooltip label={t('terminalPanelLabel')} side="bottom" delayMs={500}>
       <button
         type="button"
         className={css.headerToggle}
-        aria-label="Terminal panel"
+        aria-label={t('terminalPanelLabel')}
         aria-pressed={open}
         data-enpoi-bottom-dock-toggle
         onClick={toggleTerminalDock}

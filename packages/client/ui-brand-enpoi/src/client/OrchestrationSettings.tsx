@@ -4,7 +4,7 @@
  * icons, 0ms optimistic updates, hot-swapped by the backend resolvers.
  */
 import { useEffect, useSyncExternalStore, useState } from 'react'
-import type { HostObservable, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   getOrchestrationParams,
   subscribeOrchestrationParams,
@@ -13,6 +13,7 @@ import {
   type OrchestrationParams,
 } from './params-store.ts'
 import type { CompactionPolicyReadout } from './compaction-policy.ts'
+import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import css from './OrchestrationSettings.module.css'
 
 /** Injected business face of the Orchestration settings section. */
@@ -23,7 +24,10 @@ export interface OrchestrationSettingsInjected {
   loadPolicyModels: () => void
 }
 
-export type OrchestrationSettingsProps = { close: () => void } & InjectFace<OrchestrationSettingsInjected>
+export type OrchestrationSettingsProps =
+  & { close: () => void }
+  & PropsLocale<'brandEnpoi'>
+  & InjectFace<OrchestrationSettingsInjected>
 
 /** Minimalistic monochrome stroke icons (currentColor, 1.2-1.3 stroke). */
 function Icon({ d, size = 13 }: { d: string; size?: number }) {
@@ -46,8 +50,8 @@ const ICONS = {
 
 interface ParamRow {
   key: string
-  label: string
-  hint: string
+  labelKey: BrandEnpoiKey
+  hintKey: BrandEnpoiKey
   /** Boolean toggle row (no min/max). */
   bool?: boolean
   min?: number
@@ -57,44 +61,44 @@ interface ParamRow {
 }
 
 const COUNCIL_ROWS: ParamRow[] = [
-  { key: 'maxDebateTokens', label: 'Token ceiling', hint: 'Cumulative debate safety cap', min: 20_000, max: 500_000, step: 10_000, format: v => `${(v / 1000).toLocaleString()}k` },
-  { key: 'defaultMaxRounds', label: 'Max rounds', hint: 'Default safety round cap', min: 1, max: 12 },
-  { key: 'defaultHideLimit', label: 'Hide round limits', hint: 'Anti-pacing: models never see the cap', bool: true },
-  { key: 'quorumFraction', label: 'Quorum', hint: 'Min fraction of debaters online', min: 0.5, max: 1, step: 0.05, format: v => `${Math.round(v * 100)}%` },
-  { key: 'debaterTimeoutMs', label: 'Debater timeout', hint: 'Per-turn timeout', min: 10_000, max: 180_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
-  { key: 'debaterRetryCount', label: 'Retries', hint: 'Immediate retries per debater', min: 0, max: 3 },
-  { key: 'consensusThreshold', label: 'Consensus', hint: 'Ratio that stops the debate', min: 0.5, max: 1, step: 0.05, format: v => v.toFixed(2) },
-  { key: 'plateauDeltaThreshold', label: 'Plateau delta', hint: 'Claim delta that stops the debate', min: 0.01, max: 0.2, step: 0.01, format: v => v.toFixed(2) },
+  { key: 'maxDebateTokens', labelKey: 'orchLabelMaxDebateTokens', hintKey: 'orchHintMaxDebateTokens', min: 20_000, max: 500_000, step: 10_000, format: v => `${(v / 1000).toLocaleString()}k` },
+  { key: 'defaultMaxRounds', labelKey: 'orchLabelMaxRounds', hintKey: 'orchHintMaxRounds', min: 1, max: 12 },
+  { key: 'defaultHideLimit', labelKey: 'orchLabelHideRoundLimits', hintKey: 'orchHintHideRoundLimits', bool: true },
+  { key: 'quorumFraction', labelKey: 'orchLabelQuorum', hintKey: 'orchHintQuorum', min: 0.5, max: 1, step: 0.05, format: v => `${Math.round(v * 100)}%` },
+  { key: 'debaterTimeoutMs', labelKey: 'orchLabelDebaterTimeout', hintKey: 'orchHintDebaterTimeout', min: 10_000, max: 180_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
+  { key: 'debaterRetryCount', labelKey: 'orchLabelRetries', hintKey: 'orchHintRetries', min: 0, max: 3 },
+  { key: 'consensusThreshold', labelKey: 'orchLabelConsensus', hintKey: 'orchHintConsensus', min: 0.5, max: 1, step: 0.05, format: v => v.toFixed(2) },
+  { key: 'plateauDeltaThreshold', labelKey: 'orchLabelPlateauDelta', hintKey: 'orchHintPlateauDelta', min: 0.01, max: 0.2, step: 0.01, format: v => v.toFixed(2) },
 ]
 
 const KEEPER_ROWS: ParamRow[] = [
-  { key: 'leaseMs', label: 'Lease', hint: 'Single-flight lock timeout', min: 15_000, max: 120_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
-  { key: 'maxInputEvents', label: 'Input events', hint: 'Sliding window of events', min: 20, max: 200 },
-  { key: 'maxOutputTokens', label: 'Output tokens', hint: 'Brief length budget', min: 512, max: 4096, step: 128 },
-  { key: 'structuralDistanceK', label: 'Freshness K', hint: 'Structural events before re-distill', min: 4, max: 200 },
-  { key: 'minRefreshMs', label: 'Min refresh', hint: 'Anti-thrash floor', min: 5_000, max: 300_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
-  { key: 'negativeCacheMs', label: 'Failure cache', hint: 'Negative-cache window', min: 5_000, max: 600_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
-  { key: 'claimsBatchSize', label: 'Claims batch', hint: 'Turns per extraction pass', min: 1, max: 50 },
-  { key: 'claimsBatchMinutes', label: 'Claims timer', hint: 'Max minutes between passes', min: 1, max: 60 },
+  { key: 'leaseMs', labelKey: 'orchLabelLease', hintKey: 'orchHintLease', min: 15_000, max: 120_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
+  { key: 'maxInputEvents', labelKey: 'orchLabelInputEvents', hintKey: 'orchHintInputEvents', min: 20, max: 200 },
+  { key: 'maxOutputTokens', labelKey: 'orchLabelOutputTokens', hintKey: 'orchHintOutputTokens', min: 512, max: 4096, step: 128 },
+  { key: 'structuralDistanceK', labelKey: 'orchLabelFreshnessK', hintKey: 'orchHintFreshnessK', min: 4, max: 200 },
+  { key: 'minRefreshMs', labelKey: 'orchLabelMinRefresh', hintKey: 'orchHintMinRefresh', min: 5_000, max: 300_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
+  { key: 'negativeCacheMs', labelKey: 'orchLabelFailureCache', hintKey: 'orchHintFailureCache', min: 5_000, max: 600_000, step: 5_000, format: v => `${Math.round(v / 1000)}s` },
+  { key: 'claimsBatchSize', labelKey: 'orchLabelClaimsBatch', hintKey: 'orchHintClaimsBatch', min: 1, max: 50 },
+  { key: 'claimsBatchMinutes', labelKey: 'orchLabelClaimsTimer', hintKey: 'orchHintClaimsTimer', min: 1, max: 60 },
 ]
 
 const COMPACTION_ROWS: ParamRow[] = [
-  { key: 'thresholdRatio', label: 'Fire at', hint: 'Window fraction that triggers summarization', min: 0.05, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-  { key: 'retainRatio', label: 'Keep tail', hint: 'Window fraction kept verbatim', min: 0.01, max: 0.99, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-  { key: 'headroomTokens', label: 'Headroom', hint: 'Safety margin beyond the output reserve', min: 1024, max: 500_000, step: 1024, format: v => `${v.toLocaleString()} tok` },
-  { key: 'retainTokens', label: 'Tail floor', hint: 'Absolute retained tail; 0 = use the fraction', min: 0, max: 500_000, step: 512, format: v => v === 0 ? 'off' : `${v.toLocaleString()} tok` },
-  { key: 'pruneThresholdChars', label: 'Prune above', hint: 'Tool-result characters that trigger head/tail pruning', min: 100, max: 200_000, step: 256, format: v => `${v.toLocaleString()} ch` },
-  { key: 'pruneHeadChars', label: 'Prune head', hint: 'Leading characters kept per pruned result', min: 0, max: 100_000, step: 128, format: v => `${v.toLocaleString()} ch` },
-  { key: 'pruneTailChars', label: 'Prune tail', hint: 'Trailing characters kept per pruned result', min: 0, max: 100_000, step: 128, format: v => `${v.toLocaleString()} ch` },
+  { key: 'thresholdRatio', labelKey: 'orchLabelFireAt', hintKey: 'orchHintFireAt', min: 0.05, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+  { key: 'retainRatio', labelKey: 'orchLabelKeepTail', hintKey: 'orchHintKeepTail', min: 0.01, max: 0.99, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+  { key: 'headroomTokens', labelKey: 'orchLabelHeadroom', hintKey: 'orchHintHeadroom', min: 1024, max: 500_000, step: 1024, format: v => `${v.toLocaleString()} tok` },
+  { key: 'retainTokens', labelKey: 'orchLabelTailFloor', hintKey: 'orchHintTailFloor', min: 0, max: 500_000, step: 512, format: v => v === 0 ? 'off' : `${v.toLocaleString()} tok` },
+  { key: 'pruneThresholdChars', labelKey: 'orchLabelPruneAbove', hintKey: 'orchHintPruneAbove', min: 100, max: 200_000, step: 256, format: v => `${v.toLocaleString()} ch` },
+  { key: 'pruneHeadChars', labelKey: 'orchLabelPruneHead', hintKey: 'orchHintPruneHead', min: 0, max: 100_000, step: 128, format: v => `${v.toLocaleString()} ch` },
+  { key: 'pruneTailChars', labelKey: 'orchLabelPruneTail', hintKey: 'orchHintPruneTail', min: 0, max: 100_000, step: 128, format: v => `${v.toLocaleString()} ch` },
 ]
 
 const MEMORY_ROWS: ParamRow[] = [
-  { key: 'retrieverTopK', label: 'Retriever top-K', hint: 'Max facts per search', min: 1, max: 20 },
-  { key: 'retrieverCharBudget', label: 'Char budget', hint: 'Max chars per injection', min: 200, max: 4000, step: 100 },
+  { key: 'retrieverTopK', labelKey: 'orchLabelRetrieverTopK', hintKey: 'orchHintRetrieverTopK', min: 1, max: 20 },
+  { key: 'retrieverCharBudget', labelKey: 'orchLabelCharBudget', hintKey: 'orchHintCharBudget', min: 200, max: 4000, step: 100 },
 ]
 
 const ORACLE_ROWS: ParamRow[] = [
-  { key: 'timeoutMs', label: 'Consultation timeout', hint: 'Max wait for a verdict', min: 30_000, max: 300_000, step: 10_000, format: v => `${Math.round(v / 1000)}s` },
+  { key: 'timeoutMs', labelKey: 'orchLabelConsultationTimeout', hintKey: 'orchHintConsultationTimeout', min: 30_000, max: 300_000, step: 10_000, format: v => `${Math.round(v / 1000)}s` },
 ]
 
 function Group({
@@ -106,6 +110,7 @@ function Group({
   onReset,
   note,
   footer,
+  t,
 }: {
   id: keyof OrchestrationParams
   title: string
@@ -117,6 +122,8 @@ function Group({
   note?: string
   /** Optional extra content under the rows. */
   footer?: React.ReactNode
+  /** Package copy translate for row labels, hints, and the toggle title. */
+  t: BrandT
 }) {
   const group = params[id] as Record<string, number | boolean>
   return (
@@ -124,7 +131,7 @@ function Group({
       <div className={css.groupHead}>
         <span className={css.groupIcon}><Icon d={icon} /></span>
         <span className={css.groupTitle}>{title}</span>
-        <button type="button" className={css.resetBtn} onClick={onReset} title="Reset to defaults">
+        <button type="button" className={css.resetBtn} onClick={onReset} title={t('orchResetTitle')}>
           <Icon d={ICONS.reset} size={11} />
         </button>
       </div>
@@ -136,8 +143,8 @@ function Group({
           return (
             <div className={css.row} key={row.key}>
               <div className={css.rowLabel}>
-                <span className={css.rowName}>{row.label}</span>
-                <span className={css.rowHint}>{row.hint}</span>
+                <span className={css.rowName}>{t(row.labelKey)}</span>
+                <span className={css.rowHint}>{t(row.hintKey)}</span>
               </div>
               {isBool ? (
                 <button
@@ -145,7 +152,7 @@ function Group({
                   className={`${css.toggle} ${value ? css.toggleOn : ''}`}
                   onClick={() => setOrchestrationParam(id, row.key, !value)}
                   aria-pressed={value === true}
-                  title={value === true ? 'On' : 'Off'}
+                  title={value === true ? t('orchToggleOn') : t('orchToggleOff')}
                 >
                   <span className={css.toggleKnob} />
                 </button>
@@ -162,26 +169,26 @@ function Group({
 }
 
 /** Effective-policy readout: exactly when compaction fires for the selected route. */
-function CompactionReadout({ readout }: { readout: CompactionPolicyReadout }) {
+function CompactionReadout({ readout, t }: { readout: CompactionPolicyReadout; t: BrandT }) {
   const thresholdTokens = readout.thresholdTokens
   const retainTokens = readout.retainTokens
   const numbers = thresholdTokens !== undefined && retainTokens !== undefined
   return (
     <div className={css.readout}>
       <div className={css.readoutRoute}>
-        <span className={css.readoutLabel}>Effective policy</span>
+        <span className={css.readoutLabel}>{t('orchEffectivePolicy')}</span>
         <span className={css.readoutValue}>{readout.route}</span>
       </div>
       {numbers ? (
         <div className={css.readoutLine}>
-          fires at <b>{thresholdTokens.toLocaleString()}</b> tok
-          {' · '}keeps <b>{retainTokens.toLocaleString()}</b> tok
+          {t('orchFiresAt', { tokens: thresholdTokens.toLocaleString() })}
+          {' · '}{t('orchKeeps', { tokens: retainTokens.toLocaleString() })}
           {readout.contextWindow !== undefined && (
-            <span className={css.readoutDim}>{` · window ${readout.contextWindow.toLocaleString()} tok`}</span>
+            <span className={css.readoutDim}>{t('orchWindow', { tokens: readout.contextWindow.toLocaleString() })}</span>
           )}
         </div>
       ) : (
-        <div className={css.readoutLine}>{readout.problem ?? 'window unknown'}</div>
+        <div className={css.readoutLine}>{readout.problem ?? t('orchWindowUnknown')}</div>
       )}
       {numbers && readout.problem !== undefined && (
         <div className={css.readoutProblem}>{readout.problem}</div>
@@ -229,6 +236,7 @@ function NumberRow({ id, row, value }: { id: keyof OrchestrationParams; row: Par
 export function OrchestrationSettings({
   useCompactionPolicy,
   loadPolicyModels,
+  t,
 }: OrchestrationSettingsProps): React.ReactNode {
   const params = useSyncExternalStore(subscribeOrchestrationParams, getOrchestrationParams)
   const policy = useCompactionPolicy(snapshot => snapshot)
@@ -237,25 +245,26 @@ export function OrchestrationSettings({
     <div className={css.container}>
       <div className={css.intro}>
         <span className={css.introIcon}><Icon d="M8 2l1.5 4.5H14l-3.5 2.8L11.8 14 8 11.2 4.2 14l1.3-4.7L2 6.5h4.5z" size={14} /></span>
-        <span>Orchestration parameters — hot-swapped on the next use, no restart needed.</span>
+        <span>{t('orchIntro')}</span>
       </div>
-      <Group id="council" title="High Council" icon={ICONS.council} rows={COUNCIL_ROWS} params={params}
+      <Group id="council" title={t('orchGroupCouncil')} icon={ICONS.council} rows={COUNCIL_ROWS} params={params} t={t}
         onReset={() => resetOrchestrationGroup('council')} />
-      <Group id="keeper" title="Context Keeper" icon={ICONS.keeper} rows={KEEPER_ROWS} params={params}
+      <Group id="keeper" title={t('orchGroupKeeper')} icon={ICONS.keeper} rows={KEEPER_ROWS} params={params} t={t}
         onReset={() => resetOrchestrationGroup('keeper')} />
       <Group
         id="compaction"
-        title="Context Summarizer"
+        title={t('orchGroupCompaction')}
         icon={ICONS.compaction}
         rows={COMPACTION_ROWS}
         params={params}
+        t={t}
         onReset={() => resetOrchestrationGroup('compaction')}
-        note="The defaults are the shipped behaviour; values apply on the next decision. A summarizer model other than the session's breaks the prompt-prefix cache and pays full input price for the whole region — only free/local routes are reliably cheaper."
-        footer={<CompactionReadout readout={policy} />}
+        note={t('orchNoteCompaction')}
+        footer={<CompactionReadout readout={policy} t={t} />}
       />
-      <Group id="memory" title="Memory" icon={ICONS.memory} rows={MEMORY_ROWS} params={params}
+      <Group id="memory" title={t('orchGroupMemory')} icon={ICONS.memory} rows={MEMORY_ROWS} params={params} t={t}
         onReset={() => resetOrchestrationGroup('memory')} />
-      <Group id="oracle" title="Oracle" icon={ICONS.oracle} rows={ORACLE_ROWS} params={params}
+      <Group id="oracle" title={t('orchGroupOracle')} icon={ICONS.oracle} rows={ORACLE_ROWS} params={params} t={t}
         onReset={() => resetOrchestrationGroup('oracle')} />
     </div>
   )

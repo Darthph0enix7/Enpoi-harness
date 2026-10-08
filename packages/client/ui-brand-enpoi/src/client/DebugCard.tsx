@@ -11,6 +11,7 @@
  */
 import { useState } from 'react'
 import { MicroIcon } from './MicroIcon.tsx'
+import type { BrandT } from './locales.ts'
 import type { DebugDigest, DebugIncidentList, DebugRead, DebugSnapshot } from './debug-view.ts'
 import css from './WatchtowerView.module.css'
 
@@ -40,6 +41,8 @@ export interface DebugCardProps {
   readonly pendingInteraction?: AnswerableInteraction | undefined
   /** Build and copy the same markdown `dsh-debug report` writes. */
   readonly onCopyReport?: () => Promise<'copied' | 'failed'>
+  /** Package copy translate. */
+  readonly t: BrandT
 }
 
 function statusState(status: string): string {
@@ -57,7 +60,7 @@ function ActionButton({ label, title, onClick }: { label: string; title: string;
   )
 }
 
-export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }: DebugCardProps) {
+export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport, t }: DebugCardProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   const digest = state.digest?.phase === 'ready' ? state.digest.value : null
@@ -83,21 +86,21 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
     <section className={css.card}>
       <div className={css.cardHead}>
         <MicroIcon d="M8 1v4M8 9v2M2 8h2M12 8h2M3.5 3.5l1.5 1.5M11 11l1.5 1.5M3.5 12.5L5 11M11 5l1.5-1.5" />
-        <span>Live Debug</span>
+        <span>{t('debugTitle')}</span>
         <span className={css.debugSpacer} />
-        {state.phase === 'loading' && <span className={css.debugMuted}>reading…</span>}
+        {state.phase === 'loading' && <span className={css.debugMuted}>{t('debugReading')}</span>}
         {onCopyReport !== undefined && (
-          <button type="button" className={css.debugCopy} onClick={copy} title="Copy the same markdown `dsh-debug report` writes">
-            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy debug report'}
+          <button type="button" className={css.debugCopy} onClick={copy} title={t('debugCopyTitle')}>
+            {copyState === 'copied' ? t('debugCopied') : copyState === 'failed' ? t('debugCopyFailed') : t('debugCopyReport')}
           </button>
         )}
       </div>
 
-      {state.phase === 'idle' && <div className={css.empty}>no session selected</div>}
+      {state.phase === 'idle' && <div className={css.empty}>{t('debugNoSession')}</div>}
 
       {error !== null && (
         <div className={css.debugUnavailable} title={error.message}>
-          debug unavailable — {error.code}
+          {t('debugUnavailable', { code: error.code })}
         </div>
       )}
 
@@ -105,24 +108,24 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
         <>
           <div className={css.debugRow}>
             <span className={css.debugLatch} data-state={digest.state.latch}>{digest.state.latch}</span>
-            <span className={css.debugMuted} title="Latch source: host-latch is exact; derived is folded from events">
+            <span className={css.debugMuted} title={t('debugLatchTitle')}>
               {digest.state.source}
             </span>
-            <span className={css.debugMuted}>since {new Date(digest.state.since).toISOString().slice(11, 19)}Z</span>
-            <span className={css.debugMuted} title="Active descendants (quiet children make it inexact)">
+            <span className={css.debugMuted}>{t('debugSince', { time: new Date(digest.state.since).toISOString().slice(11, 19) })}</span>
+            <span className={css.debugMuted} title={t('debugDescendantsTitle')}>
               ↓{digest.state.activeDescendants}{digest.state.descendantsExact ? '' : '?'}
             </span>
             {digest.model !== undefined && (
-              <span className={css.debugMuted} title="Current model selection">
+              <span className={css.debugMuted} title={t('debugModelTitle')}>
                 {digest.model.provider}/{digest.model.model}
               </span>
             )}
           </div>
 
           <div className={css.debugRow}>
-            <span className={css.debugLabel}>turn</span>
+            <span className={css.debugLabel}>{t('debugTurn')}</span>
             {digest.state.lastTurnEnd === undefined ? (
-              <span className={css.debugMuted}>none ended</span>
+              <span className={css.debugMuted}>{t('debugNoTurnEnded')}</span>
             ) : (
               <span className={css.debugMuted}>
                 #{digest.state.lastTurnEnd.turn} {digest.state.lastTurnEnd.reason}
@@ -138,10 +141,10 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
           <div className={css.section}>
             <div className={css.sectionHead}>
               <MicroIcon d="M8 3a5 5 0 100 10A5 5 0 008 3zM8 6v3l2 1" />
-              <span>Asks · {digest.pendingInteractions.length}</span>
+              <span>{t('debugAsks', { count: digest.pendingInteractions.length })}</span>
             </div>
             <div className={css.sectionBody}>
-              {digest.pendingInteractions.length === 0 && <span className={css.debugMuted}>none pending</span>}
+              {digest.pendingInteractions.length === 0 && <span className={css.debugMuted}>{t('debugNonePending')}</span>}
               {digest.pendingInteractions.map((ask) => {
                 const live = pendingInteraction !== undefined && pendingInteraction.kind === ask.kind
                 return (
@@ -154,10 +157,10 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
                     </span>
                     {live && ask.kind === 'approval' && (
                       <span className={css.debugActions}>
-                        <ActionButton label="Allow once"
-                          title="Answer via this client's approval path" onClick={() => { answerApproval('allowed-once') }} />
-                        <ActionButton label="Always" title="Allow always" onClick={() => { answerApproval('allowed-always') }} />
-                        <ActionButton label="Reject" title="Reject" onClick={() => { answerApproval('rejected') }} />
+                        <ActionButton label={t('debugAllowOnce')}
+                          title={t('debugAllowOnceTitle')} onClick={() => { answerApproval('allowed-once') }} />
+                        <ActionButton label={t('debugAlways')} title={t('debugAlwaysTitle')} onClick={() => { answerApproval('allowed-always') }} />
+                        <ActionButton label={t('debugReject')} title={t('debugRejectTitle')} onClick={() => { answerApproval('rejected') }} />
                       </span>
                     )}
                     {live && ask.kind === 'question' && (pendingInteraction?.questions ?? []).flatMap(question =>
@@ -165,12 +168,12 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
                         <ActionButton
                           key={`${question.id}:${option.label}`}
                           label={option.label}
-                          title={`Answer "${option.label}" for ${question.id}`}
+                          title={t('debugAnswerTitle', { answer: option.label, id: question.id })}
                           onClick={() => { answerQuestion(question.id, option.label) }}
                         />
                       )))}
                     {!live && <span className={css.debugMuted}
-                      title="No live answer card is mounted in this client">answer path elsewhere</span>}
+                      title={t('debugElsewhereTitle')}>{t('debugElsewhere')}</span>}
                   </div>
                 )
               })}
@@ -179,7 +182,7 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
 
           {digest.recentFailures !== undefined && digest.recentFailures.length > 0 && (
             <div className={css.debugRow}>
-              <span className={css.debugLabel}>failures</span>
+              <span className={css.debugLabel}>{t('debugFailures')}</span>
               <span className={css.debugMuted}
                 title={digest.recentFailures
                   .map(failure => `${failure.provider}/${failure.model} ${failure.code}: ${failure.message}`)
@@ -197,10 +200,10 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
           <div className={css.section}>
             <div className={css.sectionHead}>
               <MicroIcon d="M3 3h10v10H3zM6 3v10M3 6h3" />
-              <span>Tools · {digest.recentToolCalls.length}</span>
+              <span>{t('debugTools', { count: digest.recentToolCalls.length })}</span>
             </div>
             <div className={css.sectionBody}>
-              {digest.recentToolCalls.length === 0 && <span className={css.debugMuted}>no recent calls</span>}
+              {digest.recentToolCalls.length === 0 && <span className={css.debugMuted}>{t('debugNoRecentCalls')}</span>}
               {digest.recentToolCalls.map((call, index) => (
                 <div key={index} className={css.debugToolRow}
                   title={call.error === undefined
@@ -219,7 +222,7 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
           </div>
 
           <div className={css.debugRow}>
-            <span className={css.debugLabel}>injections</span>
+            <span className={css.debugLabel}>{t('debugInjections')}</span>
             <span
               className={css.debugMuted}
               title={digest.injectionIndex
@@ -229,7 +232,7 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
                 })
                 .join('\n')}
             >
-              {digest.injectionIndex.length} · {digest.injectionIndex.reduce((sum, entry) => sum + entry.chars, 0)} chars
+              {digest.injectionIndex.length} · {t('debugChars', { count: digest.injectionIndex.reduce((sum, entry) => sum + entry.chars, 0) })}
               {digest.injectionIndex.slice(0, 3).map(entry => ` · ${entry.kind}`).join('')}
               {digest.injectionIndex.length > 3 ? ' …' : ''}
             </span>
@@ -238,46 +241,48 @@ export function DebugCard({ state, sessionId, pendingInteraction, onCopyReport }
           <div className={css.section}>
             <div className={css.sectionHead}>
               <MicroIcon d="M2 11h3V8H2zM6.5 11h3V5h-3zM11 11h3V2h-3z" />
-              <span>Subagents · {digest.subagentTree.length}</span>
+              <span>{t('debugSubagents', { count: digest.subagentTree.length })}</span>
             </div>
             <div className={css.sectionBody}>
-              {digest.subagentTree.length === 0 && <span className={css.debugMuted}>none</span>}
+              {digest.subagentTree.length === 0 && <span className={css.debugMuted}>{t('debugNone')}</span>}
               {digest.subagentTree.map(child => (
                 <div key={child.childSessionId} className={css.debugToolRow} title={child.queryPreview}>
                   <span
                     className={css.debugDot}
                     data-state={child.status === 'running' ? 'live' : child.status === 'idle' ? 'cooling' : 'none'} />
                   <span className={css.debugToolName}>{shortId(child.childSessionId)}</span>
-                  <span className={css.debugToolDetail}>{child.mode}{child.quiet ? ' · quiet' : ''} · {child.status}</span>
+                  <span className={css.debugToolDetail}>{child.mode}{child.quiet ? t('debugQuiet') : ''} · {child.status}</span>
                 </div>
               ))}
             </div>
           </div>
 
           <div className={css.debugRow}>
-            <span className={css.debugLabel}>request</span>
+            <span className={css.debugLabel}>{t('debugRequest')}</span>
             {state.snapshot?.phase === 'ready' ? (
               <span className={css.debugMuted}>
                 {state.snapshot.value.provider}/{state.snapshot.value.model} ·{' '}
-                {state.snapshot.value.tools.length} tools · {state.snapshot.value.messages.length} messages
+                {t('debugRequestLine', { tools: state.snapshot.value.tools.length, messages: state.snapshot.value.messages.length })}
               </span>
             ) : state.snapshot?.phase === 'error' ? (
-              <span className={css.debugMuted} title={state.snapshot.message}>unavailable ({state.snapshot.code})</span>
+              <span className={css.debugMuted} title={state.snapshot.message}>{t('debugUnavailableCode', { code: state.snapshot.code })}</span>
             ) : (
               <span className={css.debugMuted}>…</span>
             )}
           </div>
 
           <div className={css.debugRow}>
-            <span className={css.debugLabel}>incidents</span>
+            <span className={css.debugLabel}>{t('debugIncidents')}</span>
             {state.incidents?.phase === 'ready' ? (
               <span className={css.debugMuted}
                 title={state.incidents.value.items.slice(0, 3).map(item => `${item.code} ${item.message}`).join('\n')}>
-                {state.incidents.value.items.filter(item => item.sessionId === sessionId).length}{' '}
-                this session / {state.incidents.value.items.length} recent
+                {t('debugIncidentCounts', {
+                  own: state.incidents.value.items.filter(item => item.sessionId === sessionId).length,
+                  total: state.incidents.value.items.length,
+                })}
               </span>
             ) : state.incidents?.phase === 'error' ? (
-              <span className={css.debugMuted} title={state.incidents.message}>unavailable ({state.incidents.code})</span>
+              <span className={css.debugMuted} title={state.incidents.message}>{t('debugUnavailableCode', { code: state.incidents.code })}</span>
             ) : (
               <span className={css.debugMuted}>…</span>
             )}

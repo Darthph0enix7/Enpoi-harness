@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { UseSessionStatus } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { MicroIcon } from './MicroIcon.tsx'
+import type { BrandT } from './locales.ts'
 import { WhiteboardCard, type WhiteboardPhase } from './WhiteboardCard.tsx'
 import { DebugCard, type AnswerableInteraction, type DebugState } from './DebugCard.tsx'
 import {
@@ -71,6 +72,8 @@ export interface WatchtowerViewProps {
   useWorkspaces?: <S>(selector: (w: WorkspaceLike) => S) => S
   /** Unified session UI status; supplies the live answer path for pending asks. */
   useSessionStatus?: UseSessionStatus
+  /** Package copy translate (the standard seat of the `conversation.view` entry). */
+  t: BrandT
 }
 
 /** Parsed sections of the keeper's structured prose brief (no invented data). */
@@ -150,7 +153,7 @@ function SectionBlock({ icon, label, lines }: { icon: string; label: string; lin
   )
 }
 
-export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, useSessionStatus }: WatchtowerViewProps) {
+export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, useSessionStatus, t }: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
 
@@ -313,9 +316,12 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
   const title = session?.displayTitle ?? session?.title
   const cwd = session?.cwd ?? workspaces?.activeWorkspace?.path
   const keeperState = freshness === 'live'
-    ? 'Live (synced)'
-    : freshness === 'cooling' ? 'Ready (recent)' : freshness === 'stale' ? 'Stale' : 'Idle'
-  const keeperTitle = `Context Keeper: ${keeperState} (as of seq ${livingBrief?.asOfSeq ?? 0})`
+    ? t('watchKeeperLive')
+    : freshness === 'cooling' ? t('watchKeeperReady') : freshness === 'stale' ? t('watchKeeperStale') : t('watchKeeperIdle')
+  const keeperShort = freshness === 'live'
+    ? t('watchKeeperShortLive')
+    : freshness === 'cooling' ? t('watchKeeperShortReady') : freshness === 'stale' ? t('watchKeeperStale') : t('watchKeeperIdle')
+  const keeperTitle = t('watchKeeperTitle', { state: keeperState, seq: livingBrief?.asOfSeq ?? 0 })
 
   return (
     <div className={css.container}>
@@ -328,33 +334,33 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
           >
             <span className={css.freshnessDot} data-state={freshness ?? 'none'} />
             <span className={css.freshnessText}>
-              Keeper · {freshness === 'live' ? 'Live' : freshness === 'cooling' ? 'Ready' : freshness === 'stale' ? 'Stale' : 'Idle'}
+              {t('watchKeeperText', { state: keeperShort })}
             </span>
           </div>
-          <span className={css.headTitle}>{title ?? 'Watchtower'}</span>
+          <span className={css.headTitle}>{title ?? t('watchTitle')}</span>
           {cwd !== undefined && <span className={css.headPath}>{cwd}</span>}
-          {livingBrief?.asOfSeq !== undefined && <span className={css.headSeq}>· seq {livingBrief.asOfSeq}</span>}
+          {livingBrief?.asOfSeq !== undefined && <span className={css.headSeq}>{t('watchSeq', { seq: livingBrief.asOfSeq })}</span>}
         </div>
         <div className={css.headRight}>
           {memory?.committedCount !== undefined && (
-            <span className={css.microStat} title="Durable memory facts">
+            <span className={css.microStat} title={t('watchMemoryTitle')}>
               <MicroIcon d="M3 3h2v2H3zM3 7h2v2H3zM3 11h2v2H3zM7 4h6M7 8h6M7 12h6" />
               {memory.committedCount}
             </span>
           )}
           {oracle?.status !== undefined && (
-            <span className={css.microStat} title={`Oracle: ${oracle.status}`}>
+            <span className={css.microStat} title={t('watchOracleTitle', { status: oracle.status })}>
               <MicroIcon d="M8 3a5 5 0 100 10A5 5 0 008 3z" />
               {oracle.status}
             </span>
           )}
           {council?.status !== undefined && (
-            <span className={css.microStat} title={`Council: ${council.status}`}>
+            <span className={css.microStat} title={t('watchCouncilTitle', { status: council.status })}>
               <MicroIcon d="M3 13V8m3 5V5m3 8V3m3 10V7" />
               {council.status}
             </span>
           )}
-          <button type="button" className={css.haltBtn} onClick={handleHalt} title="Emergency Halt">
+          <button type="button" className={css.haltBtn} onClick={handleHalt} title={t('watchHaltTitle')}>
             <MicroIcon d="M4 4h8v8H4z" size={9} />
           </button>
         </div>
@@ -365,25 +371,25 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
         <section className={css.card}>
           <div className={css.cardHead}>
             <MicroIcon d="M3 2h8l2 2v10H3zM6 6h4M6 9h4" />
-            <span>Brief</span>
+            <span>{t('watchBrief')}</span>
           </div>
           {hasBrief ? (
             <>
-              <SectionBlock icon="M8 2l1.5 4.5H14l-3.5 2.8L11.8 14 8 11.2 4.2 14l1.3-4.7L2 6.5h4.5z" label="Goal"
+              <SectionBlock icon="M8 2l1.5 4.5H14l-3.5 2.8L11.8 14 8 11.2 4.2 14l1.3-4.7L2 6.5h4.5z" label={t('watchGoal')}
                 lines={sections?.goal ?? (livingBrief?.goal !== undefined ? [livingBrief.goal] : [])} />
-              <SectionBlock icon="M3 3h2v2H3zM3 7h2v2H3zM3 11h2v2H3zM7 4h6M7 8h6M7 12h6" label="Docs"
+              <SectionBlock icon="M3 3h2v2H3zM3 7h2v2H3zM3 11h2v2H3zM7 4h6M7 8h6M7 12h6" label={t('watchDocs')}
                 lines={sections?.docs ?? []} />
-              <SectionBlock icon="M3 13V8m3 5V5m3 8V3m3 10V7" label="Decisions"
+              <SectionBlock icon="M3 13V8m3 5V5m3 8V3m3 10V7" label={t('watchDecisions')}
                 lines={sections?.invariants ?? (livingBrief?.decisions ?? []).map(d => d.text)} />
-              <SectionBlock icon="M3 3l10 10M13 3L3 13" label="Rejected"
+              <SectionBlock icon="M3 3l10 10M13 3L3 13" label={t('watchRejected')}
                 lines={sections?.rejected ?? []} />
-              <SectionBlock icon="M9 2L3 9h4l-1 5 6-7H8z" label="Blockers"
+              <SectionBlock icon="M9 2L3 9h4l-1 5 6-7H8z" label={t('watchBlockers')}
                 lines={sections?.blockers ?? (livingBrief?.blockers ?? []).map(b => b.text)} />
               {livingBrief?.filesTouched !== undefined && livingBrief.filesTouched.length > 0 && (
                 <div className={css.section}>
                   <div className={css.sectionHead}>
                     <MicroIcon d="M3 3h4l1 2h5v8H3z" />
-                    <span>Files · {livingBrief.filesTouched.length}</span>
+                    <span>{t('watchFiles', { count: livingBrief.filesTouched.length })}</span>
                   </div>
                   <div className={css.chipRow}>
                     {livingBrief.filesTouched.slice(0, 12).map((f, i) => (
@@ -395,19 +401,20 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
             </>
           ) : (
             <div className={css.empty}>
-              <span>keeper idle — no brief yet</span>
-              <span className={css.emptyHint}>Prose materializes on first Oracle or Council use (demand-driven)</span>
+              <span>{t('watchBriefEmpty')}</span>
+              <span className={css.emptyHint}>{t('watchBriefEmptyHint')}</span>
             </div>
           )}
         </section>
         {/* Whiteboard — this session's own board; shared entries behind a disclosure */}
-        <WhiteboardCard board={resolvedBoard} phase={whiteboard.phase} />
+        <WhiteboardCard board={resolvedBoard} phase={whiteboard.phase} t={t} />
         {/* Live Debug — latch, asks, tools, injections, subagents, request/incidents */}
         <DebugCard
           state={debug}
           sessionId={debugTarget}
           pendingInteraction={pendingInteraction}
           onCopyReport={copyDebugReport}
+          t={t}
         />
       </div>
     </div>

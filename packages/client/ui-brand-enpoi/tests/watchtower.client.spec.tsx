@@ -5,6 +5,7 @@ import { WatchtowerView } from '../src/client/WatchtowerView.tsx'
 import { TheMarkTaskCard } from '../src/client/TheMarkTaskCard.tsx'
 import { TheMarkTaskCardAdapter } from '../src/client/TheMarkTaskCardAdapter.tsx'
 import { useDisclosure } from '@deepseek-ai/dsh-client-ui-chat/src/client/chat/use-disclosure.ts'
+import { brandT } from './brand-i18n.client.ts'
 import type { ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 
 describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
@@ -44,7 +45,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
     }
 
     render(
-      <WatchtowerView
+      <WatchtowerView t={brandT}
         sessionId="session-test-123"
         useSession={selector => selector({ displayTitle: 'Test Session', sessionId: 'session-test-123' })}
         useProjection={<T,>(key: string): T => mockProjections[key] as T}
@@ -61,7 +62,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
 
   it('shows the idle keeper empty state when no brief exists — never invented copy', () => {
     render(
-      <WatchtowerView
+      <WatchtowerView t={brandT}
         sessionId="session-test-123"
         useSession={selector => selector({ displayTitle: 'Fresh', sessionId: 'session-test-123' })}
         useProjection={<T,>(): T => undefined as T}
@@ -72,7 +73,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
 
   it('TheMarkTaskCard freezes calligraphy on interrupt/park (UI-4)', () => {
     const { rerender } = render(
-      <TheMarkTaskCard
+      <TheMarkTaskCard t={brandT}
         taskId="task-1"
         persona="Fixer"
         title="Refactor auth module"
@@ -84,7 +85,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
     expect(screen.getByText(/Executing: ast_grep_search/i)).toBeTruthy()
 
     rerender(
-      <TheMarkTaskCard
+      <TheMarkTaskCard t={brandT}
         taskId="task-1"
         persona="Fixer"
         title="Refactor auth module"
@@ -98,7 +99,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
   it('TheMarkTaskCard renders model pill, sub-tools activity timeline, expandable output, and calls onOpenSession', () => {
     const onOpen = vi.fn()
     render(
-      <TheMarkTaskCard
+      <TheMarkTaskCard t={brandT}
         taskId="task-2"
         persona="📚 Librarian"
         title="Research WebSockets vs SSE"
@@ -165,7 +166,7 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
     }
 
     render(
-      <TheMarkTaskCardAdapter
+      <TheMarkTaskCardAdapter t={brandT}
         callId="call-sub-1"
         toolName="subagent"
         phase="result"

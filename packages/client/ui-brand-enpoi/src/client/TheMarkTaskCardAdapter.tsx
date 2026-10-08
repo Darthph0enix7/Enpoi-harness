@@ -2,14 +2,19 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { ToolCallOwnerProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { TheMarkTaskCard } from './TheMarkTaskCard.tsx'
+import type { BrandT } from './locales.ts'
 import { getPersonaAssignments } from './persona-store.ts'
 
 export interface TheMarkTaskCardInjected {
   openSession?: ((sessionId: SessionId) => void) | undefined
 }
 
-export type TheMarkTaskCardAdapterProps = ToolCallOwnerProps & TheMarkTaskCardInjected
+export type TheMarkTaskCardAdapterProps =
+  & ToolCallOwnerProps
+  & PropsLocale<'brandEnpoi'>
+  & TheMarkTaskCardInjected
 
 /** Flatten text out of settled result content blocks (best effort). */
 function textOfContent(content: readonly ContentBlock[]): string {
@@ -32,10 +37,10 @@ interface PersonaInfo {
 /**
  * Infer a human-friendly role name, icon, and roleKey from tool arguments, prompt keywords, and stems.
  */
-function inferPersona(toolName: string, args: Record<string, unknown>): PersonaInfo {
-  if (toolName === 'oracle_review') return { label: '🔮 Oracle', roleKey: 'oracle' }
-  if (toolName === 'roundtable') return { label: '🏛️ Roundtable' }
-  if (toolName === 'chorus') return { label: '🎨 Chorus' }
+function inferPersona(toolName: string, args: Record<string, unknown>, t: BrandT): PersonaInfo {
+  if (toolName === 'oracle_review') return { label: t('markPersonaOracle'), roleKey: 'oracle' }
+  if (toolName === 'roundtable') return { label: t('markPersonaRoundtable') }
+  if (toolName === 'chorus') return { label: t('markPersonaChorus') }
 
   const explicitRole = typeof args.role === 'string' ? args.role.toLowerCase() : ''
   const desc = typeof args.description === 'string' ? args.description.toLowerCase() : ''
@@ -45,40 +50,40 @@ function inferPersona(toolName: string, args: Record<string, unknown>): PersonaI
 
   // Check role stems and keywords
   if (/\b(librarian|research|docs?|web|lookup|fetch|api\s*reference)\b/i.test(combined)) {
-    return { label: '📚 Librarian', roleKey: 'librarian' }
+    return { label: t('markPersonaLibrarian'), roleKey: 'librarian' }
   }
   if (/\b(fixer|fix|bug|patch|repair|refactor|error|issue)\b/i.test(combined)) {
-    return { label: '🛠️ Fixer', roleKey: 'fixer' }
+    return { label: t('markPersonaFixer'), roleKey: 'fixer' }
   }
   if (/\b(explorer|explore|codebase|map|survey|find|grep|search)\b/i.test(combined)) {
-    return { label: '🔍 Explorer', roleKey: 'explorer' }
+    return { label: t('markPersonaExplorer'), roleKey: 'explorer' }
   }
   if (/\b(designer|design|ui|ux|style|css|theme|layout|visual)\b/i.test(combined)) {
-    return { label: '🎨 Designer', roleKey: 'designer' }
+    return { label: t('markPersonaDesigner'), roleKey: 'designer' }
   }
   if (/\b(oracle|review|architecture|audit)\b/i.test(combined)) {
-    return { label: '🔮 Oracle', roleKey: 'oracle' }
+    return { label: t('markPersonaOracle'), roleKey: 'oracle' }
   }
   if (/\b(referee|arbiter|adjudicat)\b/i.test(combined)) {
-    return { label: '⚖️ Referee', roleKey: 'referee' }
+    return { label: t('markPersonaReferee'), roleKey: 'referee' }
   }
   if (/\b(chair|synthesis|compil)\b/i.test(combined)) {
-    return { label: '🪑 Chair', roleKey: 'chair' }
+    return { label: t('markPersonaChair'), roleKey: 'chair' }
   }
   if (/\b(visionary|moonshot|horizon)\b/i.test(combined)) {
-    return { label: '🔭 Visionary', roleKey: 'visionary' }
+    return { label: t('markPersonaVisionary'), roleKey: 'visionary' }
   }
   if (/\b(architect|structure|topology)\b/i.test(combined)) {
-    return { label: '🏗️ Architect', roleKey: 'architect' }
+    return { label: t('markPersonaArchitect'), roleKey: 'architect' }
   }
   if (/\b(skeptic|adversarial)\b/i.test(combined)) {
-    return { label: '🧐 Skeptic', roleKey: 'skeptic' }
+    return { label: t('markPersonaSkeptic'), roleKey: 'skeptic' }
   }
   if (/\b(pragmatist|practical)\b/i.test(combined)) {
-    return { label: '⚡ Pragmatist', roleKey: 'pragmatist' }
+    return { label: t('markPersonaPragmatist'), roleKey: 'pragmatist' }
   }
 
-  return { label: '⚡ Subagent', roleKey: 'subagent' }
+  return { label: t('markPersonaSubagent'), roleKey: 'subagent' }
 }
 
 /** Recursively collect subcall tool names invoked during a subagent run. */
@@ -129,7 +134,7 @@ function extractChildSessionId(block: ToolCallOwnerProps['block']): string | und
  * and child session navigation.
  */
 export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
-  const { toolName, block, callId, openSession } = props
+  const { toolName, block, callId, openSession, t } = props
 
   // RunningToolCall has no `kind`; ToolResultNode is kind: 'tool-result'.
   const running = !('kind' in block)
@@ -146,7 +151,7 @@ export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
     // Non-JSON arguments fall back to defaults
   }
 
-  const { label: persona, roleKey } = inferPersona(toolName, parsedArgs)
+  const { label: persona, roleKey } = inferPersona(toolName, parsedArgs, t)
 
   const rawTitle =
     parsedArgs.description ??
@@ -200,6 +205,7 @@ export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
       outputSummary={outputSummary}
       subTools={subTools}
       onOpenSession={openSession ? id => openSession(id as SessionId) : undefined}
+      t={t}
     />
   )
 }

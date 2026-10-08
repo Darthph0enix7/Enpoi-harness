@@ -16,6 +16,7 @@
  * notifies nobody.
  */
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
+import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import { readEnpoiNamespace } from './settings-refresh.ts'
 
 /** Fleet group a registry role belongs to. */
@@ -46,12 +47,12 @@ export interface RoleEntry {
 /** Role id → registry entry. */
 export type RoleRegistryMap = Record<string, RoleEntry>
 
-/** Section title per group, in render order. */
-export const ROLE_GROUP_LABELS: Record<RoleGroup, string> = {
-  supervision: 'BACKGROUND & SUPERVISION',
-  specialists: 'SPECIALIST WORKERS',
-  council: 'COUNCIL',
-  custom: 'CUSTOM ROLES',
+/** Dictionary key of the section title per group, in render order. */
+export const ROLE_GROUP_LABEL_KEYS: Record<RoleGroup, BrandEnpoiKey> = {
+  supervision: 'roleGroupSupervision',
+  specialists: 'roleGroupSpecialists',
+  council: 'roleGroupCouncil',
+  custom: 'roleGroupCustom',
 }
 
 /** Fleet group render order. */
@@ -126,8 +127,8 @@ export interface FleetCouncil {
   arbiters?: readonly string[]
 }
 
-/** Title of the group for persona-only seats no registry or council claims. */
-export const UNGROUPED_GROUP_LABEL = 'UNGROUPED'
+/** Dictionary key of the title for persona-only seats no registry or council claims. */
+export const UNGROUPED_GROUP_KEY: BrandEnpoiKey = 'roleGroupUngrouped'
 
 /**
  * Shipped code-default roles: overridden per id by the settings registry.
@@ -150,8 +151,10 @@ interface LegacySeatMeta {
   name: string
   icon: string
   group: RoleGroup
-  defaultLabel?: string
-  defaultHint?: string
+  defaultLabelKey?: BrandEnpoiKey
+  /** Template params for {@link LegacySeatMeta.defaultLabelKey}. */
+  defaultLabelParams?: Record<string, unknown>
+  defaultHintKey?: BrandEnpoiKey
   defaultKind?: FleetSeatState
 }
 
@@ -160,16 +163,17 @@ const LEGACY_SEAT_META: Readonly<Record<string, LegacySeatMeta>> = {
     name: 'Context Keeper',
     icon: 'M8 2l2 4 4 1-3 3 1 4-4-2-4 2 1-4-3-3 4-1z',
     group: 'supervision',
-    defaultLabel: `built-in default: ${KEEPER_DEFAULT_ROUTE}`,
-    defaultHint: 'the keeper runs outside a conversation, so it cannot inherit — its own route is always used',
+    defaultLabelKey: 'seatKeeperDefaultLabel',
+    defaultLabelParams: { route: KEEPER_DEFAULT_ROUTE },
+    defaultHintKey: 'seatKeeperDefaultHint',
     defaultKind: 'builtin-default',
   },
   compaction: {
     name: 'CTX Summarizer',
     icon: 'M3 3h10v10H3zM3 6h10M3 10h4m2 2v3m0 0l-1.5-1.5M9 15l1.5-1.5',
     group: 'supervision',
-    defaultLabel: 'Inherit',
-    defaultHint: 'the session model — keeps the prefix cache',
+    defaultLabelKey: 'seatCompactionDefaultLabel',
+    defaultHintKey: 'seatCompactionDefaultHint',
     defaultKind: 'inherit',
   },
   oracle: { name: 'The Oracle', icon: 'M8 3a5 5 0 100 10A5 5 0 008 3zm0 2v2m0 3v2', group: 'supervision' },
@@ -288,12 +292,14 @@ export const DESIGNATED_SEATS: ReadonlySet<string> = new Set(['compaction'])
  * @param registry - the effective role registry.
  * @param personaKeys - keys of the persona assignment map.
  * @param councils - the live council registry (`enpoiCouncil.list`).
+ * @param t - the package dictionary translate for group and seat-fallback copy.
  * @returns non-empty groups in render order.
  */
 export function buildFleetCategories(
   registry: RoleRegistryMap,
   personaKeys: Iterable<string>,
   councils: readonly FleetCouncil[],
+  t: BrandT,
 ): FleetCategory[] {
   const byGroup = new Map<RoleGroup, FleetSeat[]>()
   const ungrouped: FleetSeat[] = []
@@ -342,8 +348,8 @@ export function buildFleetCategories(
       name: registryLabel ?? declaredSeats.get(id)?.label ?? legacy?.name ?? titleCaseRoleId(id),
       icon: legacy?.icon ?? DEFAULT_SEAT_ICON,
     }
-    if (legacy?.defaultLabel !== undefined) seat.defaultLabel = legacy.defaultLabel
-    if (legacy?.defaultHint !== undefined) seat.defaultHint = legacy.defaultHint
+    if (legacy?.defaultLabelKey !== undefined) seat.defaultLabel = t(legacy.defaultLabelKey, legacy.defaultLabelParams)
+    if (legacy?.defaultHintKey !== undefined) seat.defaultHint = t(legacy.defaultHintKey)
     if (legacy?.defaultKind !== undefined) seat.defaultKind = legacy.defaultKind
     return seat
   }
@@ -411,7 +417,7 @@ export function buildFleetCategories(
   for (const group of ROLE_GROUP_ORDER) {
     if (group === 'council') continue
     const seats = byGroup.get(group)
-    if (seats !== undefined && seats.length > 0) categories.push({ key: group, title: ROLE_GROUP_LABELS[group], seats })
+    if (seats !== undefined && seats.length > 0) categories.push({ key: group, title: t(ROLE_GROUP_LABEL_KEYS[group]), seats })
   }
   councils.forEach((council, index) => {
     const seats = councilRows.get(index)
@@ -424,10 +430,10 @@ export function buildFleetCategories(
   })
   const shared = byGroup.get('council')
   if (shared !== undefined && shared.length > 0) {
-    categories.push({ key: 'council', title: ROLE_GROUP_LABELS.council, seats: shared })
+    categories.push({ key: 'council', title: t(ROLE_GROUP_LABEL_KEYS.council), seats: shared })
   }
   if (ungrouped.length > 0) {
-    categories.push({ key: 'ungrouped', title: UNGROUPED_GROUP_LABEL, seats: ungrouped })
+    categories.push({ key: 'ungrouped', title: t(UNGROUPED_GROUP_KEY), seats: ungrouped })
   }
   return categories
 }

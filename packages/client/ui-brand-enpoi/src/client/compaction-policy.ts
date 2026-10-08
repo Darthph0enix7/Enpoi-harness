@@ -11,6 +11,7 @@
 import type { ModelCatalog, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PARAM_DEFAULTS } from './params-store.ts'
 import type { OrchestrationParams } from './params-store.ts'
+import type { BrandT } from './locales.ts'
 
 /** Catalog facts one route contributes to the derivation. */
 export interface CompactionModelInfo {
@@ -34,7 +35,8 @@ export interface CompactionPolicyReadout {
   problem?: string
 }
 
-const SESSION_MODEL_LABEL = 'session model'
+/** Placeholder translate used only for the pre-refresh module snapshot. */
+const identityT: BrandT = key => key
 
 /** Index one model catalog by `provider/model` for route lookups. */
 export function compactionModels(catalog: ModelCatalog | undefined): Map<string, CompactionModelInfo> {
@@ -69,6 +71,7 @@ function selectionKey(selection: Pick<ModelSelection, 'provider' | 'model'> | un
  * @param assignment - the `personas.compaction` assignment, when one exists.
  * @param fallback - the model a session with no assignment would use (the catalog default).
  * @param models - catalog facts by `provider/model`.
+ * @param t - the package dictionary translate for route labels.
  * @returns the readout; a `problem` string replaces the numbers when the
  *   combination cannot fire or the route's window is unknown.
  */
@@ -77,16 +80,18 @@ export function deriveCompactionPolicy(
   assignment: Pick<ModelSelection, 'provider' | 'model' | 'chain'> | null | undefined,
   fallback: Pick<ModelSelection, 'provider' | 'model'> | null | undefined,
   models: ReadonlyMap<string, CompactionModelInfo>,
+  t: BrandT = identityT,
 ): CompactionPolicyReadout {
   if (assignment?.chain !== undefined && assignment.chain !== '') {
-    return { route: `chain ${assignment.chain}`, problem: 'a chain resolves to its first link at run time' }
+    return { route: t('orchRouteChain', { chain: assignment.chain }), problem: 'a chain resolves to its first link at run time' }
   }
   const assignedKey = selectionKey(assignment ?? undefined)
   const fallbackKey = selectionKey(fallback ?? undefined)
   const key = assignedKey ?? fallbackKey
+  const sessionModel = t('orchSessionModel')
   const route = assignedKey !== undefined
     ? assignedKey
-    : fallbackKey === undefined ? SESSION_MODEL_LABEL : `${SESSION_MODEL_LABEL} ${fallbackKey}`
+    : fallbackKey === undefined ? sessionModel : `${sessionModel} ${fallbackKey}`
   if (key === undefined) {
     return { route, problem: 'no model window known until the session routes a request' }
   }
@@ -146,8 +151,9 @@ export function refreshCompactionPolicy(
   assignment: Pick<ModelSelection, 'provider' | 'model' | 'chain'> | null | undefined,
   fallback: Pick<ModelSelection, 'provider' | 'model'> | null | undefined,
   catalog: ModelCatalog | undefined,
+  t: BrandT,
 ): void {
-  current = deriveCompactionPolicy(params, assignment, fallback, compactionModels(catalog))
+  current = deriveCompactionPolicy(params, assignment, fallback, compactionModels(catalog), t)
   for (const listener of listeners) listener()
 }
 

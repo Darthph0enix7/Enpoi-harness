@@ -8,11 +8,13 @@
  * @module @deepseek-ai/dsh-client-ui-brand-enpoi/src/client/document-brand
  */
 
-/** Product title the fork shows in the browser tab. */
-export const ENPOI_PRODUCT_TITLE = 'Enpoi Harness'
+import { en } from './locales.ts'
 
-/** Product titles a non-fork build environment may embed in the shell. */
-const UPSTREAM_PRODUCT_TITLES = ['DeepSeek Harness', 'DSH Local Build'] as const
+/** Product title the fork shows in the browser tab. */
+export const ENPOI_PRODUCT_TITLE: string = en.productTitle
+
+/** Product-title markers a non-fork build environment may embed in the shell (matched, never rendered). */
+const UPSTREAM_PRODUCT_MARKERS = ['DeepSeek Harness', 'DSH Local Build'] as const
 
 /** Upstream dark-scheme favicon; the fork's monogram is its sibling. */
 const UPSTREAM_ICON_FILE = 'favicon-dark.svg'
@@ -28,7 +30,7 @@ const ENPOI_ICON_FILE = 'favicon.svg'
  * @returns The fork title, or the input when it carries no upstream product title.
  */
 export function brandedDocumentTitle(current: string): string {
-  for (const upstream of UPSTREAM_PRODUCT_TITLES) {
+  for (const upstream of UPSTREAM_PRODUCT_MARKERS) {
     if (current === upstream) return ENPOI_PRODUCT_TITLE
     const suffix = ` — ${upstream}`
     if (current.endsWith(suffix)) return `${current.slice(0, -suffix.length)} — ${ENPOI_PRODUCT_TITLE}`

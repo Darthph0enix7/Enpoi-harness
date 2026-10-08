@@ -5,6 +5,7 @@
  * the store primes from `settings.describe` and re-reads pushed changes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { brandT as t } from './brand-i18n.client.ts'
 
 /** One `settings.describe` envelope carrying the enpoi-orchestration namespace. */
 function describeResponse(value: unknown, revision = 1): Response {
@@ -66,7 +67,7 @@ describe('role registry helpers', () => {
       ghost: { label: 'Ghost', seat: false },
       muse: { label: 'The Muse', group: 'council' },
     })
-    const categories = buildFleetCategories(registry, ['keeper', 'unknown-role'], [])
+    const categories = buildFleetCategories(registry, ['keeper', 'unknown-role'], [], t)
     const seats = categories.flatMap(category => category.seats.map(seat => seat.id))
 
     expect(seats).not.toContain('ghost')
@@ -91,7 +92,7 @@ describe('role registry helpers', () => {
 
   it('renders the designated compaction seat before any assignment', async () => {
     const { buildFleetCategories, fleetSeatState, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
-    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [])
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [], t)
     const compaction = categories.find(category => category.key === 'supervision')
       ?.seats.find(seat => seat.id === 'compaction')
 
@@ -101,7 +102,7 @@ describe('role registry helpers', () => {
     expect(compaction?.defaultHint).toContain('prefix cache')
     expect(fleetSeatState(null, compaction!)).toBe('inherit')
     // A cleared assignment keeps its fleet row.
-    expect(buildFleetCategories(mergeRoleRegistry(undefined), ['compaction'], [])
+    expect(buildFleetCategories(mergeRoleRegistry(undefined), ['compaction'], [], t)
       .flatMap(category => category.seats.map(seat => seat.id))).toContain('compaction')
   })
 
@@ -114,7 +115,7 @@ describe('role registry helpers', () => {
     expect(registry['designer']).toBeUndefined()
     expect(registry['ghost']).toBeUndefined()
     expect(registry['librarian']).toBeDefined()
-    const seats = buildFleetCategories(registry, [], []).flatMap(category => category.seats.map(seat => seat.id))
+    const seats = buildFleetCategories(registry, [], [], t).flatMap(category => category.seats.map(seat => seat.id))
     expect(seats).not.toContain('designer')
     expect(seats).not.toContain('ghost')
   })
@@ -161,7 +162,7 @@ describe('fleet council grouping', () => {
       mergeRoleRegistry(undefined),
       ['skeptic', 'architect', 'pragmatist', 'visionary', 'experiencer', 'integrator', 'referee', 'chair'],
       LIVE_COUNCILS,
-    )
+      t)
 
     expect(categories.map(category => category.title)).toEqual([
       'BACKGROUND & SUPERVISION',
@@ -189,7 +190,7 @@ describe('fleet council grouping', () => {
 
   it('keeps a legacy council persona row in the shared group with no council registry', async () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
-    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['chair'], [])
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['chair'], [], t)
 
     // A leftover arbiter row survives on its persona key alone.
     expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['chair'])
@@ -197,7 +198,7 @@ describe('fleet council grouping', () => {
 
   it('renders declared arbiters from the council registry with no persona row at all', async () => {
     const { buildFleetCategories, fleetSeatState, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
-    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], LIVE_COUNCILS)
+    const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], LIVE_COUNCILS, t)
     const shared = categories.find(category => category.key === 'council')
 
     // The declaration itself owns the rows: a clear/refresh can never drop them.
@@ -205,7 +206,7 @@ describe('fleet council grouping', () => {
     expect(shared?.seats.find(seat => seat.id === 'referee')?.name).toBe('Referee')
     expect(fleetSeatState(null, shared!.seats[0]!)).toBe('inherit')
     // A hidden arbiter stays hidden.
-    const hidden = buildFleetCategories(mergeRoleRegistry({ referee: { seat: false } }), [], LIVE_COUNCILS)
+    const hidden = buildFleetCategories(mergeRoleRegistry({ referee: { seat: false } }), [], LIVE_COUNCILS, t)
     expect(hidden.flatMap(category => category.seats.map(seat => seat.id))).not.toContain('referee')
   })
 
@@ -214,7 +215,7 @@ describe('fleet council grouping', () => {
     const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['ops-auditor'], [
       ...LIVE_COUNCILS,
       { id: 'ops-review', label: 'Ops Review', seats: [{ id: 'ops-auditor', label: 'Ops Auditor' }], arbiters: [] },
-    ])
+    ], t)
 
     expect(categories.map(category => category.title)).toContain('Ops Review')
     expect(categories.find(category => category.key === 'council:ops-review')?.seats.map(seat => seat.id))
@@ -229,7 +230,7 @@ describe('fleet council grouping', () => {
     const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['shared-seat'], [
       { id: 'alpha', label: 'Alpha Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }] },
       { id: 'beta', label: 'Beta Council', seats: [{ id: 'shared-seat', label: 'Shared Seat' }, { id: 'beta-only', label: 'Beta Only' }] },
-    ])
+    ], t)
 
     const ids = categories.flatMap(category => category.seats.map(seat => seat.id))
     expect(ids.filter(id => id === 'shared-seat')).toHaveLength(1)
@@ -241,7 +242,7 @@ describe('fleet council grouping', () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const categories = buildFleetCategories(mergeRoleRegistry(undefined), [], [
       { id: 'empty', label: 'Empty Council', seats: [], arbiters: [] },
-    ])
+    ], t)
 
     expect(categories.map(category => category.key)).not.toContain('council:empty')
     expect(categories.map(category => category.title)).not.toContain('Empty Council')
@@ -251,7 +252,7 @@ describe('fleet council grouping', () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const categories = buildFleetCategories(mergeRoleRegistry(undefined), ['ops-auditor', 'stray-seat'], [
       { id: 'ops-review', label: 'Ops Review', seats: [{ id: 'ops-auditor', label: 'Ops Auditor' }] },
-    ])
+    ], t)
 
     expect(categories.find(category => category.key === 'council:ops-review')?.seats.map(seat => seat.id))
       .toEqual(['ops-auditor'])
@@ -267,7 +268,7 @@ describe('fleet council grouping', () => {
       { id: 'ops-review', seats: [{ id: 'ops-auditor' }, { id: '' }], arbiters: ['chair', ''] },
       // No seats array and no label: no group, no crash.
       { id: 'silent' },
-    ])
+    ], t)
 
     expect(categories.find(category => category.key === 'council')?.seats.map(seat => seat.id)).toEqual(['chair'])
     expect(categories.find(category => category.key === 'custom')?.seats.map(seat => seat.id)).toEqual(['scribe'])
@@ -282,7 +283,7 @@ describe('fleet council grouping', () => {
   it('hides a seat the operator marked seat:false even when a council lists it', async () => {
     const { buildFleetCategories, mergeRoleRegistry } = await import('../src/client/role-registry.ts')
     const registry = mergeRoleRegistry({ skeptic: { seat: false } })
-    const categories = buildFleetCategories(registry, [], LIVE_COUNCILS)
+    const categories = buildFleetCategories(registry, [], LIVE_COUNCILS, t)
 
     expect(categories.find(category => category.key === 'council:roundtable')?.seats.map(seat => seat.id))
       .toEqual(['architect', 'pragmatist'])

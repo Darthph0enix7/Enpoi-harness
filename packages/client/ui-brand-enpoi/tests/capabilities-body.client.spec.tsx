@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -88,6 +89,7 @@ async function mountBody(options: { blank?: boolean; projectionValues?: Record<s
   }
   const props = {
     sessionId: 'sess-1',
+    t: brandT,
     useSessions: (selector: (value: typeof state) => unknown) => selector(state),
     useTabInfo: () => ({ tab: { visible: true, actions: { openTab } } }),
   } as unknown as Parameters<typeof mod.CapabilitiesBody>[0]

@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -102,7 +103,7 @@ async function mountPanel(initial: Partial<PanelState>, atomicAnswer: AtomicAnsw
   })
   vi.stubGlobal('fetch', fetchMock)
   const mod = await import('../src/client/dynamic/McpPanel.tsx')
-  render(<mod.McpPanel />)
+  render(<mod.McpPanel t={brandT} />)
   return fetchMock
 }
 

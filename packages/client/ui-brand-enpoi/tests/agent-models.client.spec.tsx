@@ -10,6 +10,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { AgentModelsBody } from '../src/client/AgentModelsBody.tsx'
 import { mergeRoleRegistry, type FleetCouncil, type RoleRegistryMap } from '../src/client/role-registry.ts'
+import { brandT } from './brand-i18n.client.ts'
 import type { PersonaMap } from '../src/client/persona-store.ts'
 
 /** One live model directory face over a single-provider catalog. */
@@ -50,7 +51,8 @@ function mount(
     ensureCouncils: vi.fn(),
     assignPersona: vi.fn(),
     clearPersona: vi.fn(),
-    t,
+    t: brandT,
+    modelT: t,
   } as unknown as Parameters<typeof AgentModelsBody>[0]
   render(<AgentModelsBody {...props} />)
 }

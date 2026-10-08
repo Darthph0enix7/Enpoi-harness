@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 import { SubagentSessionsBody } from '../src/client/SubagentSessionsBody.tsx'
 import { mergeRoleRegistry, type RoleRegistryMap } from '../src/client/role-registry.ts'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One projection row the tree builder consumes (structural subset of SessionSummary). */
 interface Row {
@@ -52,6 +53,7 @@ function mount(
   // renderer would bind (session lifecycle, projections, tab info).
   const props = {
     sessionId,
+    t: brandT,
     useSessions,
     useRoleRegistry,
     useTabInfo: () => ({}),

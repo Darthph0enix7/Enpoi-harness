@@ -10,6 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -95,7 +96,7 @@ function installFakeSettings(initial: Record<string, unknown>, effective: unknow
 async function mountRoles(initial: Record<string, unknown>, waitForText = 'The Oracle'): Promise<{ mutations: MutateBody[] }> {
   const settings = installFakeSettings(initial)
   const mod = await import('../src/client/dynamic/RolesPanel.tsx')
-  render(<mod.RolesPanel />)
+  render(<mod.RolesPanel t={brandT} />)
   await screen.findByText(waitForText)
   return settings
 }
@@ -244,7 +245,7 @@ describe('RolesPanel', () => {
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
     const { getStatus } = await import('../src/client/dynamic/status.ts')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('The Oracle')
 
     fireEvent.click(screen.getByLabelText('Retire Fixer'))
@@ -281,7 +282,7 @@ describe('RolesPanel', () => {
       return mutateOk(revision)
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     // Wait for the settings entry (label "Old"), not the code-default first paint.
     await screen.findByText('Old')
 
@@ -338,7 +339,7 @@ describe('RolesPanel', () => {
       builtin: true,
     }])
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('The Oracle')
 
     fireEvent.click(screen.getByLabelText('Edit Fixer'))
@@ -358,7 +359,7 @@ describe('RolesPanel', () => {
       return jsonResponse({ result: { ok: false, error: { code: 'internal', message: 'nope' } } })
     }))
     const mod = await import('../src/client/dynamic/RolesPanel.tsx')
-    render(<mod.RolesPanel />)
+    render(<mod.RolesPanel t={brandT} />)
     await screen.findByText('The Oracle')
 
     fireEvent.click(screen.getByLabelText('Edit Fixer'))
@@ -417,7 +418,7 @@ describe('PromptsPanel', () => {
       },
     })
     const mod = await import('../src/client/dynamic/PromptsPanel.tsx')
-    render(<mod.PromptsPanel />)
+    render(<mod.PromptsPanel t={brandT} />)
 
     const persona = await screen.findByLabelText('Persona for The Oracle')
     fireEvent.change(persona, { target: { value: 'You are the oracle.' } })

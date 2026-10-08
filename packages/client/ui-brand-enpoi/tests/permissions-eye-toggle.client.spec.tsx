@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -90,7 +91,7 @@ async function mount(
 ): Promise<{ mutations: MutateBody[] }> {
   const settings = installFakeSettings(initial, tools)
   const mod = await import('../src/client/PermissionsSettings.tsx')
-  render(<mod.PermissionsSettings close={vi.fn()} />)
+  render(<mod.PermissionsSettings t={brandT} close={vi.fn()} />)
   await screen.findByText('Global (all agents)')
   fireEvent.click(screen.getByRole('button', { name: 'The Oracle' }))
   return settings

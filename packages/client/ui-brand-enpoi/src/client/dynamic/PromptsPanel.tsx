@@ -11,6 +11,7 @@
  */
 import { useMemo, useSyncExternalStore } from 'react'
 import { titleCaseRoleId } from '../role-registry.ts'
+import type { BrandT } from '../locales.ts'
 import {
   DraftTextarea,
   buildRoleRows,
@@ -35,6 +36,9 @@ interface CouncilRow {
   systemPrompt?: string
   userPromptTemplate?: string
 }
+
+/** Settings path the human-readable hint names; shown verbatim. */
+const PERSONA_SETTINGS_PATH = 'enpoi-orchestration.roles.<id>.persona'
 
 /** Read one seat's display name from a seat entry (string, or an object with a name-ish field). */
 function seatName(seat: unknown): string | undefined {
@@ -86,7 +90,7 @@ function buildCouncilRows(raw: unknown): CouncilRow[] {
 }
 
 /** Prompts tab: role personas (writable) over read-only council prompt locations. */
-export function PromptsPanel() {
+export function PromptsPanel({ t }: { t: BrandT }) {
   const snapshot = useSyncExternalStore(subscribeRoleSettings, getRoleSettings)
 
   const rows = useMemo(() => buildRoleRows(snapshot.roles).filter(row => !row.retired), [snapshot.roles])
@@ -103,11 +107,10 @@ export function PromptsPanel() {
   return (
     <div className={c('wrap')}>
       <p className={c('hint')}>
-        Role personas write <code>enpoi-orchestration.roles.&lt;id&gt;.persona</code>; a built-in role gets an
-        override entry on first save. Seat models are assigned in Agent Models.
+        {t('promptsHintLead')} <code>{PERSONA_SETTINGS_PATH}</code>{t('promptsHintTail')}
       </p>
       <section className={c('group')}>
-        <header className={c('groupHead')}>ROLE PERSONAS</header>
+        <header className={c('groupHead')}>{t('promptsRolePersonas')}</header>
         <div className={c('rows')}>
           {rows.map((row) => {
             const label = row.entry.label !== undefined && row.entry.label !== ''
@@ -122,8 +125,8 @@ export function PromptsPanel() {
                 </div>
                 <DraftTextarea
                   value={row.entry.persona ?? ''}
-                  label={`Persona for ${label}`}
-                  placeholder="Code default"
+                  label={t('promptsPersonaForAria', { name: label })}
+                  placeholder={t('promptsCodeDefault')}
                   onCommit={(next) => { commitPersona(row.id, next) }}
                 />
               </div>
@@ -133,11 +136,11 @@ export function PromptsPanel() {
       </section>
       <section className={c('group')}>
         <header className={c('groupHead')}>
-          COUNCIL PROMPTS
-          <span className={c('tag')}>Edited in Councils</span>
+          {t('promptsCouncilPrompts')}
+          <span className={c('tag')}>{t('promptsEditedInCouncils')}</span>
         </header>
         <div className={c('rows')}>
-          {councils.length === 0 && <p className={c('empty')}>No councils registered.</p>}
+          {councils.length === 0 && <p className={c('empty')}>{t('promptsNoCouncils')}</p>}
           {councils.map(council => (
             <div key={council.id} className={c('promptRow')}>
               <div className={c('promptHead')}>
@@ -145,13 +148,13 @@ export function PromptsPanel() {
                 <span className={c('rowId')}>{council.id}</span>
               </div>
               <p className={c('councilMeta')}>
-                Seats: {council.seats.length > 0 ? council.seats.join(', ') : 'none registered'}
+                {t('promptsSeats', { seats: council.seats.length > 0 ? council.seats.join(', ') : t('promptsNoneRegistered') })}
               </p>
               <p className={c('templateText')}>
-                Chair system prompt: {council.systemPrompt ?? 'none'}
+                {t('promptsChairSystem', { value: council.systemPrompt ?? t('promptsNone') })}
               </p>
               <p className={c('templateText')}>
-                Chair user template: {council.userPromptTemplate ?? 'none'}
+                {t('promptsChairUser', { value: council.userPromptTemplate ?? t('promptsNone') })}
               </p>
             </div>
           ))}

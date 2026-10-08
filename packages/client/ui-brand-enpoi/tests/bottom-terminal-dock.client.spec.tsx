@@ -8,12 +8,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { BottomTerminalDock } from '../src/client/terminal/BottomTerminalDock.tsx'
 import type { BottomTerminalDockProps } from '../src/client/terminal/BottomTerminalDock.tsx'
+import { brandT } from './brand-i18n.client.ts'
 
 const noop = (): void => { /* the spec only observes rendering */ }
 
 /** Props for one dock snapshot; the terminal surface is empty so no xterm mounts. */
 function dockProps(open: boolean, height = 260): BottomTerminalDockProps {
   return {
+    t: brandT,
     useSessions: (selector: (state: unknown) => unknown) => selector({
       ids: ['s1'], byId: { s1: { cwd: '/tmp' } },
     }),

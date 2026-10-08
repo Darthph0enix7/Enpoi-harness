@@ -12,6 +12,8 @@
  * the server view in without clobbering a path whose write is in flight.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import {
   AGENT_ROSTER,
   buildAgentSubjects,
@@ -86,6 +88,13 @@ function policyTint(policy: PolicyValue): string {
   return policy === 'allow' ? c('tintAllow') : policy === 'ask' ? c('tintAsk') : c('tintDeny')
 }
 
+/** Dictionary key of the displayed label per policy value. */
+const POLICY_LABEL_KEYS: Record<PolicyValue, BrandEnpoiKey> = {
+  allow: 'permPolicyAllow',
+  ask: 'permPolicyAsk',
+  deny: 'permPolicyDeny',
+}
+
 /** One glass section: icon + title header over row content, with an optional trailing action. */
 function Group({ title, icon, action, children }: { title: string; icon: string; action?: ReactNode; children: ReactNode }) {
   return (
@@ -101,7 +110,7 @@ function Group({ title, icon, action, children }: { title: string; icon: string;
 }
 
 /** One tool policy row: label + provenance, availability eye (agents), cycle chip. */
-function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, available, onToggleAvailable }: {
+function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, available, onToggleAvailable, t }: {
   row: PermissionToolRow
   provenance: string
   effective: PolicyValue
@@ -112,13 +121,15 @@ function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, av
   onCycle: (next: PolicyValue | undefined) => void
   available?: boolean
   onToggleAvailable?: (() => void) | undefined
+  /** Package copy translate. */
+  t: BrandT
 }) {
   const isGroup = isAggregateRow(row)
   return (
     <div className={isGroup ? `${c('row')} ${c('rowGroup')}` : c('row')}>
       <div className={c('rowLabel')}>
         <span className={c('rowName')}>{row.name}</span>
-        <span className={c('rowHint')}>{mixed === true ? `${provenance} — click to set every tool in this row` : provenance}</span>
+        <span className={c('rowHint')}>{mixed === true ? t('permMixedHint', { provenance }) : provenance}</span>
       </div>
       <div className={c('rowTools')}>
         {onToggleAvailable !== undefined && (
@@ -126,13 +137,13 @@ function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, av
             type="button"
             className={`${c('eyeBtn')} ${available ? c('eyeOn') : ''}`}
             onClick={onToggleAvailable}
-            title={available ? 'Remove from this role allowlist' : 'Add to this role allowlist'}
+            title={available ? t('permRemoveAllowlist') : t('permAddAllowlist')}
             aria-pressed={available === true}
           >
             <Icon d={available ? ICONS.eye : ICONS.eyeOff} size={12} />
           </button>
         )}
-        <div className={c('policySeg')} role="group" aria-label="Policy">
+        <div className={c('policySeg')} role="group" aria-label={t('permPolicyGroup')}>
           {(['allow', 'ask', 'deny'] as const).map(policy => (
             <button
               key={policy}
@@ -140,14 +151,14 @@ function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, av
               className={`${c('segBtn')} ${mixed !== true && ownOverride === policy ? c('segActive') : ''} ${mixed !== true && ownOverride === undefined && effective === policy ? c('segDefault') : ''}`}
               title={
                 mixed === true
-                  ? `Set ${policy} for every tool in this row (currently mixed)`
+                  ? t('permSetEveryMixed', { policy: t(POLICY_LABEL_KEYS[policy]) })
                   : ownOverride === policy
-                    ? `Clear this rule (return to ${effective === policy && provenance === 'inherit (default)' ? 'the shipped default' : 'inherit'})`
-                    : `Set ${policy} for this subject. Effective now: ${effective}`
+                    ? t('permClearRule', { target: effective === policy && provenance === 'inherit (default)' ? t('permTargetShipped') : t('permTargetInherit') })
+                    : t('permSetForSubject', { policy: t(POLICY_LABEL_KEYS[policy]), effective: t(POLICY_LABEL_KEYS[effective]) })
               }
               onClick={() => { onCycle(ownOverride === policy ? undefined : policy) }}
             >
-              {policy}
+              {t(POLICY_LABEL_KEYS[policy])}
             </button>
           ))}
         </div>
@@ -157,7 +168,7 @@ function PolicyRow({ row, provenance, effective, ownOverride, mixed, onCycle, av
 }
 
 /** One standing grant row: tool · pattern · scope, with revoke. */
-function GrantRow({ grant, onRevoke }: { grant: PermissionGrant; onRevoke: (grantId: string) => void }) {
+function GrantRow({ grant, onRevoke, t }: { grant: PermissionGrant; onRevoke: (grantId: string) => void; t: BrandT }) {
   return (
     <div className={c('row')}>
       <div className={c('rowLabel')}>
@@ -165,7 +176,7 @@ function GrantRow({ grant, onRevoke }: { grant: PermissionGrant; onRevoke: (gran
         <span className={c('rowHint')}>{grantScopeHint(grant)}</span>
       </div>
       <div className={c('rowTools')}>
-        <button type="button" className={c('revokeBtn')} title="Revoke this grant" onClick={() => { onRevoke(grant.id) }}>
+        <button type="button" className={c('revokeBtn')} title={t('permRevokeGrant')} onClick={() => { onRevoke(grant.id) }}>
           <Icon d={ICONS.remove} size={10} />
         </button>
       </div>
@@ -174,7 +185,7 @@ function GrantRow({ grant, onRevoke }: { grant: PermissionGrant; onRevoke: (gran
 }
 
 /** Global subject: unknown-tools default, tool policy, bash patterns, all grants. */
-function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPattern, onRemovePattern, onRevokeGrant }: {
+function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPattern, onRemovePattern, onRevokeGrant, t }: {
   perms: PermissionsConfig
   toolRows: readonly PermissionToolRow[]
   onCycleRow: (row: PermissionToolRow, next: PolicyValue | undefined) => void
@@ -182,6 +193,8 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
   onAddPattern: (pattern: string, policy: PolicyValue) => void
   onRemovePattern: (pattern: string) => void
   onRevokeGrant: (grantId: string) => void
+  /** Package copy translate. */
+  t: BrandT
 }) {
   const [draftPattern, setDraftPattern] = useState('')
   const [draftPolicy, setDraftPolicy] = useState<PolicyValue>('ask')
@@ -194,11 +207,11 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
   }
   return (
     <>
-      <Group title="Defaults" icon={ICONS.shield}>
+      <Group title={t('permGroupDefaults')} icon={ICONS.shield}>
         <div className={c('row')}>
           <div className={c('rowLabel')}>
-            <span className={c('rowName')}>Unknown tools</span>
-            <span className={c('rowHint')}>Policy for tools without an explicit rule</span>
+            <span className={c('rowName')}>{t('permUnknownTools')}</span>
+            <span className={c('rowHint')}>{t('permUnknownToolsHint')}</span>
           </div>
           <div className={c('segGroup')}>
             {(['allow', 'ask', 'deny'] as const).map(policy => (
@@ -209,13 +222,13 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
                 onClick={() => { onSetUnknownTools(policy) }}
                 aria-pressed={unknownTools === policy}
               >
-                {policy}
+                {t(POLICY_LABEL_KEYS[policy])}
               </button>
             ))}
           </div>
         </div>
       </Group>
-      <Group title="Tool policy" icon={ICONS.globe}>
+      <Group title={t('permGroupToolPolicy')} icon={ICONS.globe}>
         {toolRows.map((row) => {
           const state = rowPolicyState(perms, undefined, row)
           return (
@@ -227,21 +240,22 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
               ownOverride={state.ownOverride}
               mixed={state.mixed}
               onCycle={(next) => { onCycleRow(row, next) }}
+              t={t}
             />
           )
         })}
       </Group>
-      <Group title="Bash patterns" icon={ICONS.pattern}>
+      <Group title={t('permGroupBashPatterns')} icon={ICONS.pattern}>
         {patterns.length === 0 && (
-          <div className={c('empty')}>No pattern rules. Every bash command follows the tool policy.</div>
+          <div className={c('empty')}>{t('permNoPatternRules')}</div>
         )}
         <div className={c('patternList')}>
           {patterns.map(pat => (
             <span className={c('patternChip')} key={pat.pattern}>
               <span className={c('patternText')}>{pat.pattern}</span>
               <span className={c('patternArrow')}>→</span>
-              <span className={policyTint(pat.policy)}>{pat.policy}</span>
-              <button type="button" className={c('patternRemove')} title="Remove this pattern" onClick={() => { onRemovePattern(pat.pattern) }}>
+              <span className={policyTint(pat.policy)}>{t(POLICY_LABEL_KEYS[pat.policy])}</span>
+              <button type="button" className={c('patternRemove')} title={t('permRemovePattern')} onClick={() => { onRemovePattern(pat.pattern) }}>
                 <Icon d={ICONS.remove} size={9} />
               </button>
             </span>
@@ -251,7 +265,7 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
           <input
             type="text"
             className={c('addInput')}
-            placeholder="Command pattern, e.g. npm *"
+            placeholder={t('permCommandPatternPlaceholder')}
             value={draftPattern}
             onChange={(e) => { setDraftPattern(e.target.value) }}
             onKeyDown={(e) => {
@@ -259,21 +273,21 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
             }}
           />
           <select className={c('addSelect')} value={draftPolicy} onChange={(e) => { setDraftPolicy(e.target.value as PolicyValue) }}>
-            <option value="allow">allow</option>
-            <option value="ask">ask</option>
-            <option value="deny">deny</option>
+            <option value="allow">{t('permPolicyAllow')}</option>
+            <option value="ask">{t('permPolicyAsk')}</option>
+            <option value="deny">{t('permPolicyDeny')}</option>
           </select>
           <button type="button" className={c('addBtn')} onClick={submitDraft}>
             <Icon d={ICONS.add} size={10} />
           </button>
         </div>
       </Group>
-      <Group title="Standing grants" icon={ICONS.grant}>
+      <Group title={t('permGroupGrants')} icon={ICONS.grant}>
         {grants.length === 0 && (
-          <div className={c('empty')}>No standing grants. Allow-always grants the host writes appear here.</div>
+          <div className={c('empty')}>{t('permNoGrants')}</div>
         )}
         {grants.map(grant => (
-          <GrantRow key={grant.id} grant={grant} onRevoke={onRevokeGrant} />
+          <GrantRow key={grant.id} grant={grant} onRevoke={onRevokeGrant} t={t} />
         ))}
       </Group>
     </>
@@ -281,7 +295,7 @@ function GlobalPane({ perms, toolRows, onCycleRow, onSetUnknownTools, onAddPatte
 }
 
 /** One agent subject: overlay tool rules with provenance, allowlist eyes, agent-scoped grants. */
-function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubject, onCycleRow, onToggleRow, onRevokeGrant }: {
+function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubject, onCycleRow, onToggleRow, onRevokeGrant, t }: {
   agent: string
   registry: RoleRegistryMap
   perms: PermissionsConfig
@@ -292,6 +306,8 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
   onCycleRow: (agent: string, row: PermissionToolRow, next: PolicyValue | undefined) => void
   onToggleRow: (agent: string, row: PermissionToolRow) => void
   onRevokeGrant: (grantId: string) => void
+  /** Package copy translate. */
+  t: BrandT
 }) {
   const available = perms.agents?.[agent]?.available
   const agentGrants = Object.values(perms.grants ?? {}).filter(grant => grant.agent === agent)
@@ -315,14 +331,14 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
   return (
     <>
       <Group
-        title={`Agent rules — ${agent}`}
+        title={t('permAgentRulesTitle', { agent })}
         icon={ICONS.agent}
         action={removable ? (
           <button
             type="button"
             className={c('revokeBtn')}
-            title="Remove this subject (its rules and allowlist are deleted)"
-            aria-label={`Remove subject ${agent}`}
+            title={t('permRemoveSubjectTitle')}
+            aria-label={t('permRemoveSubjectAria', { agent })}
             onClick={() => { onRemoveSubject(agent) }}
           >
             <Icon d={ICONS.remove} size={10} />
@@ -330,12 +346,10 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
         ) : undefined}
       >
         <div className={c('paneHint')}>
-          Rules refine the global policy. The eye marks a tool in this role allowlist — the hard gate: it wins over the
-          role's Dynamic surface for the tools it names. MCP rows follow the live registry; their server and "All MCP
-          tools" rows set every tool below them at once.
+          {t('permAgentPaneHint')}
           {' '}
           <button type="button" className={c('crossLink')} onClick={() => { openSettingsSection('dynamic') }}>
-            Open Dynamic → Roles
+            {t('permOpenDynamicRoles')}
           </button>
         </div>
         {toolRows.map((row) => {
@@ -355,16 +369,17 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
               onCycle={(next) => { onCycleRow(agent, row, next) }}
               available={rowAvailable(row)}
               onToggleAvailable={toggleable ? () => { onToggleRow(agent, row) } : undefined}
+              t={t}
             />
           )
         })}
       </Group>
-      <Group title="Standing grants" icon={ICONS.grant}>
+      <Group title={t('permGroupGrants')} icon={ICONS.grant}>
         {agentGrants.length === 0 && (
-          <div className={c('empty')}>No standing grants for this agent.</div>
+          <div className={c('empty')}>{t('permNoAgentGrants')}</div>
         )}
         {agentGrants.map(grant => (
-          <GrantRow key={grant.id} grant={grant} onRevoke={onRevokeGrant} />
+          <GrantRow key={grant.id} grant={grant} onRevoke={onRevokeGrant} t={t} />
         ))}
       </Group>
     </>
@@ -372,7 +387,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
 }
 
 /** The Permissions settings section — registered as `settings.section` id 'permissions'. */
-export function PermissionsSettings(_props: { close: () => void }): React.ReactNode {
+export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'brandEnpoi'>): React.ReactNode {
   const [perms, setPerms] = useState<PermissionsConfig | null>(null)
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerRef>>({})
   const [liveToolNames, setLiveToolNames] = useState<readonly string[]>([])
@@ -439,7 +454,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
   // Rows are derived from the LIVE registry projection (every registered tool
   // plus the curated order/family overlay), so a new tool appears with no code
   // change. MCP names are routed into their server groups inside the builder.
-  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, [], liveToolNames), [mcpServers, liveToolNames])
+  const toolRows = useMemo(() => buildPermissionToolRows(mcpServers, [], liveToolNames, t), [mcpServers, liveToolNames, t])
   const subjects = useMemo(
     () => buildAgentSubjects(registry, AGENT_ROSTER, Object.keys(perms?.agents ?? {})),
     [registry, perms],
@@ -613,12 +628,12 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
         <div className={c('statusLine')}>
           {failed
             ? getEnpoiNamespacePresence() === 'missing'
-              ? 'Permission settings are not available in this profile — the enpoi-orchestration service is not mounted.'
-              : 'Permission policy unavailable — check the gateway connection.'
-            : 'Loading policy…'}
+              ? t('permUnavailableProfile')
+              : t('permUnavailableGateway')
+            : t('permLoading')}
         </div>
         {failed && (
-          <button type="button" className={c('retryBtn')} onClick={load}>Retry</button>
+          <button type="button" className={c('retryBtn')} onClick={load}>{t('commonRetry')}</button>
         )}
       </div>
     )
@@ -629,34 +644,31 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
       <div className={c('intro')}>
         <span className={c('introIcon')}><Icon d={ICONS.shield} size={14} /></span>
         <span>
-          <b>Global is the source of truth</b> — agent panes inherit it and override only where you set a rule.
-          Legend: <b>filled segment</b> = your rule · <b>dashed segment</b> = shipped default applying · the eye = whether the
-          role sees the tool at all (unavailable tools are stripped — their policy is irrelevant). Reads and web ship
-          allow; bash and unknown tools ship ask; mounted MCP servers default to allow. Rows grouped under <b>Whiteboard</b> are
-          derived: they set every tool they cover at once. Everything is
-          settings-backed and applies from the next dispatch.
+          <b>{t('permIntroSource')}</b>{t('permIntroInherit')}
+          <b>{t('permIntroFilled')}</b> {t('permIntroYourRule')}<b>{t('permIntroDashed')}</b> {t('permIntroShipped')}
+          <b>{t('permIntroWhiteboard')}</b>{t('permIntroDerived')}
         </span>
       </div>
       <div className={c('layout')}>
-        <nav className={c('rail')} aria-label="Permission subjects">
+        <nav className={c('rail')} aria-label={t('permRailAria')}>
           <button
             type="button"
             className={`${c('railCell')} ${selected === null ? c('railCellActive') : ''}`}
             onClick={() => { setSelected(null) }}
           >
-            Global (all agents)
+            {t('permGlobalAll')}
           </button>
           {subjects.map((subject, index) => (
             <span key={subject.id} className={c('railEntry')}>
               {subject.main !== true && subjects[index - 1]?.main === true && (
-                <span className={c('railDivider')} role="separator" aria-label="Sub-agents" />
+                <span className={c('railDivider')} role="separator" aria-label={t('permSubAgents')} />
               )}
               <button
                 type="button"
                 className={`${c('railCell')} ${selected === subject.id ? c('railCellActive') : ''} ${subject.main === true ? c('railCellMain') : ''}`}
                 onClick={() => { setSelected(subject.id) }}
               >
-                {subject.main === true && <span className={c('railMainTag')}>main</span>}
+                {subject.main === true && <span className={c('railMainTag')}>{t('permMain')}</span>}
                 {subject.label}
               </button>
             </span>
@@ -665,17 +677,17 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
             <input
               type="text"
               className={c('railAddInput')}
-              placeholder="New role id"
+              placeholder={t('permNewRoleId')}
               value={draftSubject}
               onChange={(e) => { setDraftSubject(e.target.value) }}
               onKeyDown={(e) => { if (e.key === 'Enter') addSubject(draftSubject) }}
-              aria-label="New permission subject id"
+              aria-label={t('permNewSubjectAria')}
             />
             <button
               type="button"
               className={c('railAddBtn')}
-              title="Add subject"
-              aria-label="Add subject"
+              title={t('permAddSubject')}
+              aria-label={t('permAddSubject')}
               onClick={() => { addSubject(draftSubject) }}
             >
               <Icon d={ICONS.add} size={11} />
@@ -692,6 +704,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
               onAddPattern={addBashPattern}
               onRemovePattern={removeBashPattern}
               onRevokeGrant={revokeGrant}
+              t={t}
             />
           ) : (
             <AgentPane
@@ -704,6 +717,7 @@ export function PermissionsSettings(_props: { close: () => void }): React.ReactN
               onCycleRow={cycleAgentRow}
               onToggleRow={toggleAgentRow}
               onRevokeGrant={revokeGrant}
+              t={t}
             />
           )}
         </div>

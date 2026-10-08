@@ -14,6 +14,7 @@
  */
 import { useState } from 'react'
 import { MicroIcon } from './MicroIcon.tsx'
+import type { BrandT } from './locales.ts'
 import {
   WHITEBOARD_BUDGET_TOKENS,
   renderWhiteboardBlock,
@@ -32,6 +33,8 @@ export interface WhiteboardCardProps {
   board: WhiteboardBoardSplit | null
   /** Whether the settings read is still in flight, settled, or failed. */
   phase: WhiteboardPhase
+  /** Package copy translate. */
+  t: BrandT
 }
 
 /** One micro glyph per entry kind (path, rule, fact, task). */
@@ -48,24 +51,24 @@ function updatedLabel(updatedAt: number): string | undefined {
 }
 
 /** One entry row, shared by the session list and the shared disclosures. */
-function EntryRow({ entry }: { entry: ResolvedWhiteboardEntryView }) {
+function EntryRow({ entry, t }: { entry: ResolvedWhiteboardEntryView; t: BrandT }) {
   return (
     <div className={css.wbEntry} data-stale={entry.stale === true ? 'true' : undefined}>
       <span className={css.wbKind} title={entry.kind}>
         <MicroIcon d={KIND_ICONS[entry.kind]} />
       </span>
       {entry.pinned && (
-        <span className={css.wbPin} title="pinned">
+        <span className={css.wbPin} title={t('wbPinnedTitle')}>
           <MicroIcon d="M9 2l5 5-2.5 1L10 13 8 11l-4.5 3.5L2 13l3.5-4.5L3.5 6.5 8.5 5z" />
         </span>
       )}
       <span className={css.wbText}>{entry.text}</span>
       <span className={css.wbEntryMeta}>
-        <span className={css.wbScope} data-scope={entry.scope} title={`authored by the ${entry.scope} board`}>
+        <span className={css.wbScope} data-scope={entry.scope} title={t('wbAuthoredBy', { scope: entry.scope })}>
           {entry.scope}
         </span>
-        v{entry.version}
-        {entry.stale === true && <span className={css.wbStale} title="path no longer resolves (stale)">stale</span>}
+        {t('wbVersion', { version: entry.version })}
+        {entry.stale === true && <span className={css.wbStale} title={t('wbStaleTitle')}>{t('wbStale')}</span>}
       </span>
     </div>
   )
@@ -75,7 +78,7 @@ function EntryRow({ entry }: { entry: ResolvedWhiteboardEntryView }) {
  * One collapsed disclosure of the entries this session shares with its peers.
  * Renders nothing when the group is empty.
  */
-function SharedEntries({ label, entries }: { label: string; entries: readonly ResolvedWhiteboardEntryView[] }) {
+function SharedEntries({ label, entries, t }: { label: string; entries: readonly ResolvedWhiteboardEntryView[]; t: BrandT }) {
   if (entries.length === 0) return null
   return (
     <details className={css.wbShared}>
@@ -83,8 +86,8 @@ function SharedEntries({ label, entries }: { label: string; entries: readonly Re
         <MicroIcon d="M3 3h4l1 2h5v8H3z" size={9} />
         {label} · {entries.length}
       </summary>
-      <div className={css.wbSharedNote}>the agent's injected view also carries these for this session</div>
-      {entries.map(entry => <EntryRow entry={entry} key={entry.id} />)}
+      <div className={css.wbSharedNote}>{t('wbSharedNote')}</div>
+      {entries.map(entry => <EntryRow entry={entry} t={t} key={entry.id} />)}
     </details>
   )
 }
@@ -94,7 +97,7 @@ function SharedEntries({ label, entries }: { label: string; entries: readonly Re
  * @param props - this session's board split and the read phase.
  * @returns the card, or its quiet empty state plus the shared disclosures.
  */
-export function WhiteboardCard({ board, phase }: WhiteboardCardProps) {
+export function WhiteboardCard({ board, phase, t }: WhiteboardCardProps) {
   const [copied, setCopied] = useState(false)
   const sessionBlock = board !== null ? renderWhiteboardBlock(board.session) : ''
   const agentBlock = board !== null ? renderWhiteboardBlock(board.agent) : ''
@@ -117,50 +120,50 @@ export function WhiteboardCard({ board, phase }: WhiteboardCardProps) {
   }
 
   const emptyCopy = phase === 'loading'
-    ? { text: 'reading the board…', hint: undefined }
+    ? { text: t('wbLoading'), hint: undefined }
     : phase === 'error'
-      ? { text: 'board unavailable', hint: 'settings.describe did not answer' }
-      : { text: 'no whiteboard entries', hint: "this session's board is empty — whiteboard_write authors here by default" }
+      ? { text: t('wbUnavailable'), hint: t('wbUnavailableHint') }
+      : { text: t('wbEmpty'), hint: t('wbEmptyHint') }
 
   return (
     <section className={css.card}>
       <div className={css.cardHead}>
         <MicroIcon d="M2 3h12v8H2zM6 13h4M8 11v2" />
-        <span>Whiteboard</span>
+        <span>{t('wbTitle')}</span>
       </div>
       {board !== null && sessionBlock !== '' ? (
         <>
           <div className={css.wbMetaRow}>
-            <span className={css.wbChip}>v{board.session.version}</span>
-            <span className={css.wbChip} title="this session's own board (own entries plus direct-parent inheritance)">session</span>
+            <span className={css.wbChip}>{t('wbVersion', { version: board.session.version })}</span>
+            <span className={css.wbChip} title={t('wbSessionTitle')}>{t('wbSession')}</span>
             {updatedLabel(board.session.updatedAt) !== undefined && (
-              <span className={css.wbMeta} title={`updated ${new Date(board.session.updatedAt).toISOString()}`}>
-                updated {updatedLabel(board.session.updatedAt)}
+              <span className={css.wbMeta} title={t('wbUpdatedTitle', { time: new Date(board.session.updatedAt).toISOString() })}>
+                {t('wbUpdated', { time: updatedLabel(board.session.updatedAt) ?? '' })}
               </span>
             )}
             <span
               className={css.wbMeta}
-              title={`agent injected view: ${agentTokens} of ${WHITEBOARD_BUDGET_TOKENS} rendered tokens (session + shared, 4 chars/token)`}
+              title={t('wbTokensTitle', { used: agentTokens, total: WHITEBOARD_BUDGET_TOKENS })}
             >
-              {agentTokens}/{WHITEBOARD_BUDGET_TOKENS} tok
+              {t('wbTokens', { used: agentTokens, total: WHITEBOARD_BUDGET_TOKENS })}
             </span>
             <button
               type="button"
               className={css.wbCopyBtn}
               onClick={copyBlock}
-              title="Copy the agent's injected block (this session's entries plus the shared ones)"
+              title={t('wbCopyTitle')}
             >
               <MicroIcon d="M5 5V3h8v8h-2M3 5h8v8H3z" size={9} />
-              {copied ? 'copied' : 'copy'}
+              {copied ? t('wbCopied') : t('wbCopy')}
             </button>
           </div>
           <pre className={css.wbBlock}>{sessionBlock}</pre>
           <div className={css.wbEntries}>
             <div className={css.sectionHead}>
               <MicroIcon d="M3 4h10M3 8h10M3 12h6" />
-              <span>Entries · {board.session.entries.length}</span>
+              <span>{t('wbEntries', { count: board.session.entries.length })}</span>
             </div>
-            {board.session.entries.map(entry => <EntryRow entry={entry} key={entry.id} />)}
+            {board.session.entries.map(entry => <EntryRow entry={entry} t={t} key={entry.id} />)}
           </div>
         </>
       ) : (
@@ -169,8 +172,8 @@ export function WhiteboardCard({ board, phase }: WhiteboardCardProps) {
           {emptyCopy.hint !== undefined && <span className={css.emptyHint}>{emptyCopy.hint}</span>}
         </div>
       )}
-      <SharedEntries label="Shared with all sessions" entries={sharedGlobal} />
-      <SharedEntries label="Shared in this project" entries={sharedProject} />
+      <SharedEntries label={t('wbSharedAll')} entries={sharedGlobal} t={t} />
+      <SharedEntries label={t('wbSharedProject')} entries={sharedProject} t={t} />
     </section>
   )
 }

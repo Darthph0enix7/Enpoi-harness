@@ -27,8 +27,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
-import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { registryRoleLabel, type RoleRegistryMap } from './role-registry.ts'
+import type { BrandT } from './locales.ts'
 import css from './SubagentSessionsBody.module.css'
 
 /** One session derived from the list projection. */
@@ -90,16 +91,17 @@ const CATALOG_WAIT_MS = 2_500
 
 export type SubagentSessionsBodyProps =
   & PropsRuntime<'sidebar.right.pane.tab'>
+  & PropsLocale<'brandEnpoi'>
   & InjectFace<SubagentSessionsInjected>
 
 /** Compact relative age (`2m`, `3h`, `5d`). */
-function ageLabel(updatedAt: number, now: number): string {
+function ageLabel(updatedAt: number, now: number, t: BrandT): string {
   const minutes = Math.floor(Math.max(0, now - updatedAt) / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return t('subagentAgeJustNow')
+  if (minutes < 60) return t('subagentAgeMinutes', { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
+  if (hours < 24) return t('subagentAgeHours', { count: hours })
+  return t('subagentAgeDays', { count: Math.floor(hours / 24) })
 }
 
 /** Generic role prefixes the host puts before a persona name in an identity label. */
@@ -154,7 +156,7 @@ function mentionedRole(registry: RoleRegistryMap, title: string): string | undef
  * @param registry - the effective role registry.
  * @returns the leading label and the remaining session title.
  */
-function nodeDisplay(node: TreeRow, registry: RoleRegistryMap): { label: string; cleanTitle: string } {
+function nodeDisplay(node: TreeRow, registry: RoleRegistryMap, t: BrandT): { label: string; cleanTitle: string } {
   const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
   const prefix = rolePrefixFromTitle(node.title)
   if (prefix !== undefined && registry[prefix.role] !== undefined) {
@@ -168,7 +170,7 @@ function nodeDisplay(node: TreeRow, registry: RoleRegistryMap): { label: string;
     return { label: registryRoleLabel(registry, role), cleanTitle: node.title }
   }
   return {
-    label: node.depth === 0 ? 'Main' : (node.origin === 'subagent' ? 'Subagent' : 'Session'),
+    label: node.depth === 0 ? t('subagentRowMain') : (node.origin === 'subagent' ? t('subagentRowSubagent') : t('subagentRowSession')),
     cleanTitle: node.title,
   }
 }
@@ -316,7 +318,7 @@ export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsI
 }
 
 export function SubagentSessionsBody({
-  sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions,
+  sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions, t,
 }: SubagentSessionsBodyProps) {
   const byId = useSessions(state => state.byId)
   const phase = useSessions(state => state.phase)
@@ -416,14 +418,16 @@ export function SubagentSessionsBody({
   return (
     <div className={css.container}>
       <header className={css.head}>
-        <span className={css.headTitle}>Subagent Sessions</span>
-        <span className={css.headCount}>{rows.length} {rows.length === 1 ? 'session' : 'sessions'}</span>
+        <span className={css.headTitle}>{t('subagentTitle')}</span>
+        <span className={css.headCount}>
+          {t('subagentCountOne', { count: rows.length })}
+        </span>
         <button
           type="button"
           className={`${css.refreshBtn}${refreshing ? ` ${css.refreshing}` : ''}`}
           onClick={onRefresh}
-          title="Refresh session list"
-          aria-label="Refresh session list"
+          title={t('subagentRefresh')}
+          aria-label={t('subagentRefresh')}
         >
           <MicroIcon d="M13 8a5 5 0 11-1.5-3.5M13 2.5V6h-3.5" size={11} />
         </button>
@@ -432,13 +436,13 @@ export function SubagentSessionsBody({
       {rows.length === 0 ? (
         <div className={css.empty}>
           <span className={css.emptyIcon}><SubagentSessionsIcon size={18} /></span>
-          <span>No subagent sessions yet</span>
+          <span>{t('subagentEmpty')}</span>
         </div>
       ) : (
-        <div className={css.list} aria-label="Session lineage">
+        <div className={css.list} aria-label={t('subagentLineageAria')}>
           {visibleRows.map((row) => {
             const state = statusOf(row)
-            const { label, cleanTitle } = nodeDisplay(row, registry)
+            const { label, cleanTitle } = nodeDisplay(row, registry, t)
             return (
               <button
                 key={row.id}
@@ -447,7 +451,7 @@ export function SubagentSessionsBody({
                 data-current={row.current ? 'true' : undefined}
                 style={row.depth > 0 ? { paddingLeft: 9 + row.depth * INDENT_STEP } : undefined}
                 onClick={() => { openRow(row.id, row.parentId) }}
-                title={`Open ${row.title}`}
+                title={t('subagentOpenTitle', { title: row.title })}
                 aria-current={row.current ? 'true' : undefined}
               >
                 {row.depth > 0 && <span className={css.branch} aria-hidden="true" />}
@@ -458,14 +462,14 @@ export function SubagentSessionsBody({
                 </span>
                 <span className={css.status} data-state={state}>
                   {state}
-                  <span className={css.age}>{ageLabel(row.updatedAt, now)}</span>
+                  <span className={css.age}>{ageLabel(row.updatedAt, now, t)}</span>
                 </span>
               </button>
             )
           })}
           {rows.length > visibleRows.length && (
             <div className={css.more}>
-              Showing {visibleRows.length} of {rows.length} — nearest first
+              {t('subagentShowing', { shown: visibleRows.length, total: rows.length })}
             </div>
           )}
         </div>

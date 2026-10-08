@@ -26,7 +26,7 @@ import { useEffect, useMemo } from 'react'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import type { HostObservable, InjectFace, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { HostObservable, InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PersonaMap } from './persona-store.ts'
 import { buildFleetCategories, fleetSeatState, KEEPER_DEFAULT_ROUTE, type FleetCouncil, type RoleRegistryMap } from './role-registry.ts'
 import { ensureSettingsFresh, SETTINGS_MOUNT_STALE_MS } from './settings-refresh.ts'
@@ -94,10 +94,13 @@ export interface AgentModelsInjected {
   /** Clear an explicit assignment, reverting the persona to its fallback route. */
   clearPersona: (personaId: string) => void
   /** Translator bound to the shared model namespace, for the embedded picker's chrome. */
-  t: TranslateNS<'model'>
+  modelT: TranslateNS<'model'>
 }
 
-export type AgentModelsBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & InjectFace<AgentModelsInjected>
+export type AgentModelsBodyProps =
+  & PropsRuntime<'sidebar.right.pane.tab'>
+  & PropsLocale<'brandEnpoi'>
+  & InjectFace<AgentModelsInjected>
 
 export function AgentModelsBody({
   sessionId,
@@ -109,6 +112,7 @@ export function AgentModelsBody({
   ensureCouncils,
   assignPersona,
   clearPersona,
+  modelT,
   t,
 }: AgentModelsBodyProps) {
   const { tab } = useTabInfo()
@@ -120,8 +124,8 @@ export function AgentModelsBody({
   // council renders its own seats under its own label, arbiters share their
   // group, and persona-assigned ids neither registry claims keep rows.
   const categories = useMemo(
-    () => buildFleetCategories(registry, Object.keys(assignments), councils),
-    [registry, assignments, councils],
+    () => buildFleetCategories(registry, Object.keys(assignments), councils, t),
+    [registry, assignments, councils, t],
   )
   const totalSeats = useMemo(
     () => categories.reduce((count, category) => count + category.seats.length, 0),
@@ -150,8 +154,8 @@ export function AgentModelsBody({
   return (
     <div className={css.container}>
       <header className={css.head}>
-        <span className={css.headTitle}>Fleet Routing</span>
-        <span className={css.headCount}>{totalSeats} seats</span>
+        <span className={css.headTitle}>{t('agentFleetRouting')}</span>
+        <span className={css.headCount}>{t('agentSeatCount', { count: totalSeats })}</span>
       </header>
       <div className={css.groups}>
         {categories.map(category => (
@@ -164,13 +168,15 @@ export function AgentModelsBody({
                 const isExplicitlyAssigned = state === 'assigned' && assigned !== null
                 const stateLabel = isExplicitlyAssigned
                   ? `${assigned.provider}/${assigned.model}`
-                  : seat.defaultLabel ?? 'Inherit'
+                  : seat.defaultLabel ?? t('agentInherit')
                 const stateHint = isExplicitlyAssigned
-                  ? `assigned: ${stateLabel}`
-                  : `${stateLabel}${seat.defaultHint !== undefined ? ` — ${seat.defaultHint}` : ''}`
+                  ? t('agentAssigned', { name: stateLabel })
+                  : seat.defaultHint !== undefined
+                    ? t('agentStateWithHint', { state: stateLabel, hint: seat.defaultHint })
+                    : stateLabel
                 const override: ModelSelectOverride = {
                   current: isExplicitlyAssigned ? assigned : null,
-                  placeholder: seat.defaultLabel ?? 'Inherit',
+                  placeholder: seat.defaultLabel ?? t('agentInherit'),
                   select: (selection) => {
                     assignPersona(seat.id, selection)
                     return Promise.resolve(true)
@@ -186,7 +192,7 @@ export function AgentModelsBody({
                           type="button"
                           className={css.unassignBtn}
                           onClick={() => { clearPersona(seat.id) }}
-                          title={`Reset ${seat.name} to ${seat.defaultLabel ?? 'Inherit'} (no explicit model)`}
+                          title={t('agentResetTitle', { name: seat.name, label: seat.defaultLabel ?? t('agentInherit') })}
                         >
                           <MicroIcon d="M4 8a4 4 0 118 0A4 4 0 014 8zm1 0h6" size={10} />
                         </button>
@@ -200,10 +206,10 @@ export function AgentModelsBody({
                           select={() => Promise.resolve(true)}
                           compact
                           override={override}
-                          t={t}
+                          t={modelT}
                         />
                       ) : (
-                        <span className={css.noDir}>no session</span>
+                        <span className={css.noDir}>{t('agentNoSession')}</span>
                       )}
                     </div>
                   </div>
@@ -214,13 +220,13 @@ export function AgentModelsBody({
         ))}
       </div>
       <footer className={css.foot}>
-        <span>{`Inherit follows the dispatching agent's model · The keeper has no conversation to inherit from, so it uses its built-in default: ${KEEPER_DEFAULT_ROUTE} · The context summarizer should stay on the session model (a different route loses the prefix cache and pays full input price for the region)`}</span>
+        <span>{t('agentFootHint', { route: KEEPER_DEFAULT_ROUTE })}</span>
         <button
           type="button"
           className={css.footLink}
           onClick={() => { tab.actions.openTab(CAPABILITIES_KIND) }}
         >
-          Capabilities
+          {t('agentCapabilities')}
         </button>
       </footer>
     </div>

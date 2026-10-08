@@ -10,8 +10,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { installDocumentBrand } from './document-brand.ts'
+import { en as brandEnpoiEn, zh as brandEnpoiZh, type BrandEnpoiKey } from './locales.ts'
 import { WatchtowerView } from './WatchtowerView.tsx'
 import {
   AgentModelsBody,
@@ -89,12 +91,17 @@ export const inject = ['slots', 'sidebarRightTabs', 'modelDirectories', 'session
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
+    /** Brand operator surfaces: right-sidebar tabs, Watchtower, settings sections, Dynamic panels, task cards. */
+    brandEnpoi: BrandEnpoiKey
     /** Skills & tools panel CRUD copy (Dynamic section). */
     'settings.dynamicSkills': DynamicSkillsKey
     /** Session header MCP mounts chip copy. */
     mcpMounts: McpMountsKey
   }
 }
+
+/** Dictionary namespace owned by this plugin for its operator surfaces. */
+const NS = 'brandEnpoi'
 
 /**
  * Cell priority for The Mark's keyed `tool.call.toolview` entries. Lower than
@@ -219,6 +226,11 @@ export function apply(ctx: Context): void {
   // keep the fork product title and monogram applied through later writes.
   ctx.effect(() => installDocumentBrand(), 'enpoi: document title and favicon')
 
+  // The package's operator-surface dictionaries; the registration-time labels
+  // below and every `locale:` entry seat share one bound translate.
+  ctx.effect(() => ctx.locale.register(NS, { zh: brandEnpoiZh, en: brandEnpoiEn }), 'enpoi: brand operator dictionaries')
+  const t: TranslateNS<typeof NS> = ctx.locale.bind(NS)
+
   // 1b. Brand marks in sidebar & conversation hero
   ctx.slots.inject('sidebar.brand.mark', () =>
     ctx.slots.inject('sidebar.brand.name', () =>
@@ -237,7 +249,8 @@ export function apply(ctx: Context): void {
       name: 'conversation.view',
       id: 'watchtower',
       order: 30,
-      label: () => 'Watchtower',
+      label: () => t('tabWatchtower'),
+      locale: NS,
     }, WatchtowerView)
   })
 
@@ -254,6 +267,7 @@ export function apply(ctx: Context): void {
         getPersonaAssignments()['compaction'] ?? null,
         catalog?.default ?? null,
         catalog,
+        t,
       )
     }
     recompute()
@@ -270,7 +284,8 @@ export function apply(ctx: Context): void {
     name: 'settings.section',
     id: 'orchestration',
     order: 20,
-    label: () => 'Orchestration',
+    label: () => t('tabOrchestration'),
+    locale: NS,
     inject: (): OrchestrationSettingsInjected => ({
       hooks: {
         compactionPolicy: {
@@ -304,8 +319,9 @@ export function apply(ctx: Context): void {
     name: 'settings.section',
     id: 'dynamic',
     order: 22,
-    label: () => 'Dynamic',
-    locale: 'settings.dynamicSkills',
+    label: () => t('tabDynamic'),
+    locale: NS,
+    inject: () => ({ skillsT: ctx.locale.bind('settings.dynamicSkills') }),
   }, DynamicSettings))
 
   // 2c. Permission policy settings section (doc 55)
@@ -313,7 +329,8 @@ export function apply(ctx: Context): void {
     name: 'settings.section',
     id: 'permissions',
     order: 21,
-    label: () => 'Permissions',
+    label: () => t('tabPermissions'),
+    locale: NS,
   }, PermissionsSettings))
 
   // 3. Global operator tabs: right-Sidebar tab types (guide-discoverable) with
@@ -322,12 +339,12 @@ export function apply(ctx: Context): void {
     id: CAPABILITIES_ID,
     kind: CAPABILITIES_KIND,
     priority: 'extension',
-    title: () => 'Capabilities',
+    title: () => t('tabCapabilities'),
     guide: [{
       id: CAPABILITIES_KIND,
       order: 55,
-      title: () => 'Capabilities',
-      description: () => 'Toggle MCP servers, skills, and subagents',
+      title: () => t('tabCapabilities'),
+      description: () => t('guideCapabilities'),
       icon: CapabilitiesIcon,
     }],
   }), 'enpoi: capabilities tab type')
@@ -335,12 +352,12 @@ export function apply(ctx: Context): void {
     id: AGENT_MODELS_ID,
     kind: AGENT_MODELS_KIND,
     priority: 'extension',
-    title: () => 'Agent Models',
+    title: () => t('tabAgentModels'),
     guide: [{
       id: AGENT_MODELS_KIND,
       order: 56,
-      title: () => 'Agent Models',
-      description: () => 'Assign a model to each fleet persona',
+      title: () => t('tabAgentModels'),
+      description: () => t('guideAgentModels'),
       icon: FleetRoutingIcon,
     }],
   }), 'enpoi: agent-models tab type')
@@ -348,12 +365,12 @@ export function apply(ctx: Context): void {
     id: SUBAGENT_SESSIONS_ID,
     kind: SUBAGENT_SESSIONS_KIND,
     priority: 'extension',
-    title: () => 'Subagent Sessions',
+    title: () => t('tabSubagentSessions'),
     guide: [{
       id: SUBAGENT_SESSIONS_KIND,
       order: 57,
-      title: () => 'Subagent Sessions',
-      description: () => 'Watch and open dispatched subagent sessions',
+      title: () => t('tabSubagentSessions'),
+      description: () => t('guideSubagentSessions'),
       icon: SubagentSessionsIcon,
     }],
   }), 'enpoi: subagent-sessions tab type')
@@ -361,12 +378,12 @@ export function apply(ctx: Context): void {
     id: GIT_ID,
     kind: GIT_KIND,
     priority: 'extension',
-    title: () => 'Git',
+    title: () => t('tabGit'),
     guide: [{
       id: GIT_KIND,
       order: 58,
-      title: () => 'Git',
-      description: () => 'Branches, changes, and diffs for the session workspace',
+      title: () => t('tabGit'),
+      description: () => t('guideGit'),
       icon: GitIcon,
     }],
   }), 'enpoi: git tab type')
@@ -374,12 +391,12 @@ export function apply(ctx: Context): void {
     id: TERMINAL_ID,
     kind: TERMINAL_KIND,
     priority: 'extension',
-    title: () => 'Terminal',
+    title: () => t('tabTerminal'),
     guide: [{
       id: TERMINAL_KIND,
       order: 59,
-      title: () => 'Terminal',
-      description: () => 'Interactive shells in the sidebar and the bottom panel',
+      title: () => t('tabTerminal'),
+      description: () => t('guideTerminal'),
       icon: TerminalIcon,
     }],
   }), 'enpoi: terminal tab type')
@@ -435,10 +452,12 @@ export function apply(ctx: Context): void {
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: CAPABILITIES_ID,
+      locale: NS,
     }, CapabilitiesBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: AGENT_MODELS_ID,
+      locale: NS,
       inject: (): AgentModelsInjected => ({
         hooks: {
           personaAssignments: {
@@ -460,12 +479,13 @@ export function apply(ctx: Context): void {
         clearPersona: (personaId) => { void clearPersonaAssignment(personaId) },
         // The embedded picker renders in the shared `model` namespace, so its
         // Groups title and "n models" rows resolve instead of echoing raw keys.
-        t: ctx.locale.bind('model'),
+        modelT: ctx.locale.bind('model'),
       }),
     }, AgentModelsBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: SUBAGENT_SESSIONS_ID,
+      locale: NS,
       inject: (): SubagentSessionsInjected => {
         const uiWorkspace = ctx.get('uiWorkspace')
         const sessions = ctx.get('sessions')
@@ -489,10 +509,12 @@ export function apply(ctx: Context): void {
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: GIT_ID,
+      locale: NS,
     }, GitBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: TERMINAL_ID,
+      locale: NS,
       inject: terminalInjected,
     }, TerminalPanel)
   })
@@ -504,6 +526,7 @@ export function apply(ctx: Context): void {
     name: 'shell.overlay',
     id: 'enpoi-bottom-terminal',
     order: 10,
+    locale: NS,
     inject: terminalInjected,
   }, BottomTerminalDock))
 
@@ -523,6 +546,7 @@ export function apply(ctx: Context): void {
         name: 'tool.call.toolview',
         key,
         priority: MARKS_SHADOW_PRIORITY,
+        locale: NS,
         inject: () => ({ openSession }),
       }, TheMarkTaskCardAdapter)
     }

@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   BUILT_IN_ROLES,
-  ROLE_GROUP_LABELS,
+  ROLE_GROUP_LABEL_KEYS,
   ROLE_GROUP_ORDER,
   coerceRoleRegistry,
   normalizeRoleId,
@@ -30,6 +30,7 @@ import {
   type RoleGroup,
   type RoleRegistryMap,
 } from '../role-registry.ts'
+import type { BrandT } from '../locales.ts'
 import {
   buildPermissionToolRows,
   BUILT_ROLE_SURFACE,
@@ -585,7 +586,7 @@ function RoleSwitch({ checked, caption, ariaLabel, title, onToggle }: {
 
 /** One role row: compact head plus the inline editor when expanded. */
 function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleExpanded, onEditLabel, onEditPersona,
-  onEditGroup, onToggleSeat, onToggleRetired, onToggleTool, onDelete }: {
+  onEditGroup, onToggleSeat, onToggleRetired, onToggleTool, onDelete, t }: {
   row: RoleRow
   toolRows: PermissionToolRow[]
   /** True when the effective-registry RPC is unavailable (settings-layer display only). */
@@ -600,6 +601,8 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
   /** Toggles the row: an aggregate flips every concrete member at once. */
   onToggleTool: (row: PermissionToolRow) => void
   onDelete: () => void
+  /** Package copy translate. */
+  t: BrandT
 }) {
   const label = row.entry.label ?? row.baseline.label ?? titleCaseRoleId(row.id)
   const available = row.entry.tools?.available ?? row.baseline.available ?? []
@@ -611,7 +614,7 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
         <button
           type="button"
           className={c('expandBtn')}
-          aria-label={`Edit ${label}`}
+          aria-label={t('roleEditAria', { name: label })}
           aria-expanded={expanded}
           onClick={onToggleExpanded}
         >
@@ -619,35 +622,35 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
         </button>
         <span className={c('rowName')}>{label}</span>
         <span className={c('rowId')}>{row.id}</span>
-        {row.builtIn && <span className={c('tag')}>built-in</span>}
-        {row.retired && <span className={`${c('tag')} ${c('tagRetired')}`}>retired</span>}
-        {seatOff && !row.retired && <span className={c('tag')}>no seat</span>}
+        {row.builtIn && <span className={c('tag')}>{t('roleBuiltIn')}</span>}
+        {row.retired && <span className={`${c('tag')} ${c('tagRetired')}`}>{t('roleRetired')}</span>}
+        {seatOff && !row.retired && <span className={c('tag')}>{t('roleNoSeat')}</span>}
         <span className={c('spacer')} />
         <RoleSwitch
           checked={!seatOff}
-          caption="Fleet seat"
-          ariaLabel={`Fleet seat for ${label}`}
+          caption={t('roleFleetSeat')}
+          ariaLabel={t('roleFleetSeatForAria', { name: label })}
           title={seatOff
-            ? 'Fleet seat off — hidden from Fleet Routing and Agent Models. The role still spawns and its permissions stay editable.'
-            : 'Fleet seat on — offerable for model assignment in Fleet Routing and Agent Models. Never removes the role.'}
+            ? t('roleFleetSeatOffTitle')
+            : t('roleFleetSeatOnTitle')}
           onToggle={onToggleSeat}
         />
         <RoleSwitch
           checked={row.retired}
-          caption="Retired"
-          ariaLabel={row.retired ? `Restore ${label}` : `Retire ${label}`}
+          caption={t('roleRetiredCaption')}
+          ariaLabel={row.retired ? t('roleRestoreAria', { name: label }) : t('roleRetireAria', { name: label })}
           title={row.retired
-            ? 'Retired on — removed from the effective registry everywhere (no spawn, no seat, no permissions row). Turn off to restore.'
-            : 'Retired off — the role is live everywhere. Turn on to remove it from the effective registry; delete restores the code default.'}
+            ? t('roleRetiredOnTitle')
+            : t('roleRetiredOffTitle')}
           onToggle={onToggleRetired}
         />
         <button
           type="button"
           className={c('iconBtn')}
-          aria-label={`Delete ${label}`}
+          aria-label={t('roleDeleteAria', { name: label })}
           title={row.builtIn
-            ? 'Deletes the settings entry so the code default returns; Retire removes the role everywhere'
-            : 'Deletes this role'}
+            ? t('roleDeleteBuiltInTitle')
+            : t('roleDeleteTitle')}
           onClick={onDelete}
         >
           <Icon d={ICONS.trash} />
@@ -657,47 +660,47 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
         <div className={c('editor')}>
           {effectiveUnavailable && (
             <p className={c('fieldHint')}>
-              Effective values are unavailable — showing the settings layer only.
+              {t('roleEffectiveUnavailable')}
             </p>
           )}
           <div className={c('editGrid')}>
             <label className={c('field')}>
               <span className={c('fieldLabel')}>
-                Label{!hasOverride('label') && <span className={c('fieldTag')}>built-in</span>}
+                {t('roleLabel')}{!hasOverride('label') && <span className={c('fieldTag')}>{t('roleBuiltIn')}</span>}
               </span>
-              <DraftInput value={row.entry.label ?? row.baseline.label ?? ''} label={`Label for ${label}`} onCommit={onEditLabel} />
+              <DraftInput value={row.entry.label ?? row.baseline.label ?? ''} label={t('roleLabelForAria', { name: label })} onCommit={onEditLabel} />
             </label>
             <label className={c('field')}>
               <span className={c('fieldLabel')}>
-                Group{!hasOverride('group') && <span className={c('fieldTag')}>built-in</span>}
+                {t('roleGroup')}{!hasOverride('group') && <span className={c('fieldTag')}>{t('roleBuiltIn')}</span>}
               </span>
               <select
                 className={c('select')}
-                aria-label={`Group for ${label}`}
+                aria-label={t('roleGroupForAria', { name: label })}
                 value={row.entry.group ?? row.baseline.group ?? 'custom'}
                 onChange={(event) => { onEditGroup(event.target.value as RoleGroup) }}
               >
                 {ROLE_GROUP_ORDER.map(group => (
-                  <option key={group} value={group}>{ROLE_GROUP_LABELS[group]}</option>
+                  <option key={group} value={group}>{t(ROLE_GROUP_LABEL_KEYS[group])}</option>
                 ))}
               </select>
             </label>
           </div>
           <label className={c('field')}>
             <span className={c('fieldLabel')}>
-              Persona{!hasOverride('persona') && <span className={c('fieldTag')}>built-in</span>}
+              {t('rolePersona')}{!hasOverride('persona') && <span className={c('fieldTag')}>{t('roleBuiltIn')}</span>}
             </span>
             <DraftTextarea
               value={row.entry.persona ?? row.baseline.persona ?? ''}
-              label={`Persona for ${label}`}
-              {...(row.baseline.persona === undefined ? { placeholder: 'Code default' } : {})}
+              label={t('rolePersonaForAria', { name: label })}
+              {...(row.baseline.persona === undefined ? { placeholder: t('roleCodeDefault') } : {})}
               onCommit={onEditPersona}
             />
           </label>
           <div className={c('field')}>
             <span className={c('fieldLabel')}>
-              Tools — this role's surface; empty keeps the effective default
-              {!hasOverride('tools') && <span className={c('fieldTag')}>built-in</span>}
+              {t('roleTools')}
+              {!hasOverride('tools') && <span className={c('fieldTag')}>{t('roleBuiltIn')}</span>}
             </span>
             <div className={c('toolGrid')}>
               {buildRoleToolRows(toolRows, row.entry, row.baseline.available ?? []).map(tool => (
@@ -705,7 +708,7 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
                   <input
                     type="checkbox"
                     checked={roleRowChecked(tool, available)}
-                    aria-label={`${tool.name} for ${label}`}
+                    aria-label={t('roleToolForAria', { tool: tool.name, name: label })}
                     onChange={() => { onToggleTool(tool) }}
                   />
                   <span>{tool.name}</span>
@@ -714,13 +717,12 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
             </div>
           </div>
           <p className={c('fieldHint')}>
-            This list is the role's fallback surface: the Permissions allowlist wins when it names tools; both are bounded
-            by the built-in deny floor.
+            {t('roleToolsHint')}
           </p>
           <p className={c('fieldHint')}>
             {row.builtIn
-              ? 'Delete restores the code default; Retire removes the role everywhere.'
-              : 'Delete removes this role from the registry.'}
+              ? t('roleDeleteRestores')
+              : t('roleDeleteRemoves')}
           </p>
         </div>
       )}
@@ -731,7 +733,7 @@ function RoleRowView({ row, toolRows, effectiveUnavailable, expanded, onToggleEx
 // --- panel ------------------------------------------------------------------
 
 /** Roles tab: registry list with inline editing of every operator-owned field. */
-export function RolesPanel() {
+export function RolesPanel({ t }: { t: BrandT }) {
   const snapshot = useSyncExternalStore(subscribeRoleSettings, getRoleSettings)
   const effectiveRoles = useSyncExternalStore(subscribeEffectiveRoles, getEffectiveRoles)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -744,10 +746,10 @@ export function RolesPanel() {
   const groups = useMemo(() => ROLE_GROUP_ORDER
     .map(group => ({
       group,
-      title: ROLE_GROUP_LABELS[group],
+      title: t(ROLE_GROUP_LABEL_KEYS[group]),
       rows: rows.filter(row => (row.entry.group ?? 'custom') === group),
     }))
-    .filter(entry => entry.rows.length > 0), [rows])
+    .filter(entry => entry.rows.length > 0), [rows, t])
   // The tool grid follows the LIVE registry projection (whiteboard, MCP, any
   // future plugin tool), refetched when the catalog slice moves.
   const [liveToolNames, setLiveToolNames] = useState<readonly string[]>([])
@@ -759,8 +761,8 @@ export function RolesPanel() {
     return () => { cancelled = true }
   }, [snapshot.mcpServers])
   const toolRows = useMemo(
-    () => buildPermissionToolRows(snapshot.mcpServers, [], liveToolNames),
-    [snapshot.mcpServers, liveToolNames],
+    () => buildPermissionToolRows(snapshot.mcpServers, [], liveToolNames, t),
+    [snapshot.mcpServers, liveToolNames, t],
   )
 
   /** Commit one field edit through the shared optimistic/fenced writer. */
@@ -839,18 +841,17 @@ export function RolesPanel() {
   return (
     <div className={c('wrap')}>
       <p className={c('hint')}>
-        Edits write <code>enpoi-orchestration.roles</code> and apply from the next spawn — no restart.
-        Seat models are assigned in Agent Models. Unset fields show their effective built-in value.
+        {t('rolePanelHintLead')} <code>enpoi-orchestration.roles</code> {t('rolePanelHintTail')}
       </p>
       <p className={c('hint')}>
-        Tool boxes here are the role's surface layer: used when Permissions sets no allowlist for the role.
+        {t('roleToolHintLead')}
         {' '}
         <button
           type="button"
           className={c('crossLink')}
           onClick={() => { openSettingsSection('permissions') }}
         >
-          Open Permissions
+          {t('roleOpenPermissions')}
         </button>
       </p>
       {groups.map(group => (
@@ -872,20 +873,21 @@ export function RolesPanel() {
                 onToggleRetired={() => { toggleRoleRetired(row.id) }}
                 onToggleTool={(toolRow) => { toggleRoleTool(row.id, toolRow, row.baseline.available ?? []) }}
                 onDelete={() => { deleteRole(row.id) }}
+                t={t}
               />
             ))}
           </div>
         </section>
       ))}
       <section className={c('group')}>
-        <header className={c('groupHead')}>ADD ROLE</header>
+        <header className={c('groupHead')}>{t('roleAddHeader')}</header>
         <div className={c('addForm')}>
           <label className={c('field')}>
-            <span className={c('fieldLabel')}>Id</span>
+            <span className={c('fieldLabel')}>{t('roleId')}</span>
             <input
               type="text"
               className={c('input')}
-              aria-label="New role id"
+              aria-label={t('roleNewIdAria')}
               placeholder="my-role"
               value={draftId}
               onChange={(event) => { setDraftId(event.target.value) }}
@@ -893,39 +895,39 @@ export function RolesPanel() {
             />
           </label>
           <label className={c('field')}>
-            <span className={c('fieldLabel')}>Label</span>
+            <span className={c('fieldLabel')}>{t('roleLabel')}</span>
             <input
               type="text"
               className={c('input')}
-              aria-label="New role label"
+              aria-label={t('roleNewLabelAria')}
               value={draftLabel}
               onChange={(event) => { setDraftLabel(event.target.value) }}
             />
           </label>
           <label className={c('field')}>
-            <span className={c('fieldLabel')}>Group</span>
+            <span className={c('fieldLabel')}>{t('roleGroup')}</span>
             <select
               className={c('select')}
-              aria-label="New role group"
+              aria-label={t('roleNewGroupAria')}
               value={draftGroup}
               onChange={(event) => { setDraftGroup(event.target.value as RoleGroup) }}
             >
               {ROLE_GROUP_ORDER.map(group => (
-                <option key={group} value={group}>{ROLE_GROUP_LABELS[group]}</option>
+                <option key={group} value={group}>{t(ROLE_GROUP_LABEL_KEYS[group])}</option>
               ))}
             </select>
           </label>
           <label className={`${c('field')} ${c('fieldWide')}`}>
-            <span className={c('fieldLabel')}>Persona (optional)</span>
+            <span className={c('fieldLabel')}>{t('rolePersonaOptional')}</span>
             <textarea
               className={c('textarea')}
-              aria-label="New role persona"
+              aria-label={t('roleNewPersonaAria')}
               rows={2}
               value={draftPersona}
               onChange={(event) => { setDraftPersona(event.target.value) }}
             />
           </label>
-          <button type="button" className={c('btnPrimary')} onClick={addRole}>Add role</button>
+          <button type="button" className={c('btnPrimary')} onClick={addRole}>{t('roleAdd')}</button>
         </div>
       </section>
     </div>

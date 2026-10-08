@@ -26,7 +26,7 @@
  *   registry that enumerates the core tool names, so stored keys are the live
  *   source for every other flag: a fresh home strips the stored capabilities
  *   section, and without the static supervision set the Oracle would have no
- *   row anywhere. {@link TOOL_FLAG_COPY} supplies their copy; a registry row
+ *   row anywhere. {@link TOOL_FLAG_KEYS} supplies their copy; a registry row
  *   with the same id always wins over a flag row.
  *
  * Each row carries an enable/disable switch (`ui-primitives` `Switch`) that
@@ -49,7 +49,8 @@
  */
 import { useState, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import { AGENT_MODELS_KIND } from './kinds.ts'
 import {
   countPermissionRules,
@@ -194,22 +195,22 @@ export interface LiveRoleEntry {
 }
 
 /**
- * Operator-facing copy for tool flags whose stored id is not self-describing.
- * Purely presentational: an unknown stored flag keeps the generic copy, and a
- * row the registries below already cover is never duplicated. The supervision
- * entries are also listed through {@link SUPERVISION_TOOL_FLAG_IDS} even when
- * no stored flag names them.
+ * Operator-facing dictionary keys for tool flags whose stored id is not
+ * self-describing. Purely presentational: an unknown stored flag keeps the
+ * generic copy, and a row the registries below already cover is never
+ * duplicated. The supervision entries are also listed through
+ * {@link SUPERVISION_TOOL_FLAG_IDS} even when no stored flag names them.
  */
-const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: string; badge?: string }>> = {
+const TOOL_FLAG_KEYS: Readonly<Record<string, { nameKey: BrandEnpoiKey; descriptionKey: BrandEnpoiKey; badgeKey?: BrandEnpoiKey }>> = {
   oracle_review: {
-    name: 'The Oracle',
-    description: 'Senior reviewer — consulted via oracle_review with source-verified verdicts',
-    badge: 'supervision · tool-only',
+    nameKey: 'capsToolFlagOracleName',
+    descriptionKey: 'capsToolFlagOracleDescription',
+    badgeKey: 'capsToolFlagOracleBadge',
   },
   keeper: {
-    name: 'Background Context Keeper',
-    description: "Keeps the session's state checkpoint and durable claims current",
-    badge: 'supervision',
+    nameKey: 'capsToolFlagKeeperName',
+    descriptionKey: 'capsToolFlagKeeperDescription',
+    badgeKey: 'capsToolFlagKeeperBadge',
   },
 }
 
@@ -222,7 +223,7 @@ const TOOL_FLAG_COPY: Readonly<Record<string, { name: string; description: strin
  */
 const SUPERVISION_TOOL_FLAG_IDS: readonly string[] = [
   ...new Set([
-    ...Object.keys(TOOL_FLAG_COPY),
+    ...Object.keys(TOOL_FLAG_KEYS),
     ...KNOWN_CAPABILITIES.filter(cap => cap.kind === 'tool' && cap.category === 'supervision').map(cap => cap.id),
   ]),
 ]
@@ -745,7 +746,7 @@ export async function toggleCapability(kind: 'tool' | 'skill' | 'mcp', id: strin
   }
 }
 
-export type CapabilitiesBodyProps = PropsRuntime<'sidebar.right.pane.tab'>
+export type CapabilitiesBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'brandEnpoi'>
 
 /** Outcome of one MCP catalog write: persisted, or the reason to show the operator. */
 export type McpWriteResult = { ok: true } | { ok: false; reason: string }
@@ -900,7 +901,7 @@ export async function removeMcpServer(id: string): Promise<McpWriteResult> {
  * lives in the Settings page's Permissions section; no cross-surface
  * settings-open action is exposed to tab components, so no link is offered.
  */
-function PermissionsSection() {
+function PermissionsSection({ t }: { t: BrandT }) {
   const [counts, setCounts] = useState<{ rules: number; grants: number } | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -929,11 +930,11 @@ function PermissionsSection() {
       <div className={c('groupHead')}>
         <div className={c('groupHeadLeft')}>
           <span className={c('groupIcon')}>{iconTerminal()}</span>
-          <span className={c('groupTitle')}>Permissions</span>
+          <span className={c('groupTitle')}>{t('capsGroupPermissions')}</span>
         </div>
         {counts !== null && (
           <span className={c('countBadge')}>
-            {counts.rules} {counts.rules === 1 ? 'rule' : 'rules'} · {counts.grants} {counts.grants === 1 ? 'grant' : 'grants'}
+            {counts.rules} {counts.rules === 1 ? t('capsRuleOne') : t('capsRuleMany')} · {counts.grants} {counts.grants === 1 ? t('capsGrantOne') : t('capsGrantMany')}
           </span>
         )}
       </div>
@@ -941,16 +942,16 @@ function PermissionsSection() {
         <div className={c('empty')}>
           {failed
             ? getEnpoiNamespacePresence() === 'missing'
-              ? 'Permission settings are not available in this profile.'
-              : 'Permission policy unavailable.'
-            : 'Loading policy…'}
+              ? t('capsPermUnavailableProfile')
+              : t('capsPermUnavailable')
+            : t('capsLoadingPolicy')}
         </div>
       ) : (
         <div className={c('permHint')}>
-          Unconfigured tools default to <b>ask</b>; bash commands match patterns first, then the tool policy.
+          {t('capsPermHint', { policy: 'ask' })}
           {' '}
           <button type="button" className={c('footLink')} onClick={() => { openSettings('permissions') }}>
-            Edit rules
+            {t('capsEditRules')}
           </button>
         </div>
       )}
@@ -975,7 +976,7 @@ function rowEnabled(row: LiveRow, caps: CapabilitiesState): boolean {
   return caps.tools[row.id] !== false
 }
 
-export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: CapabilitiesBodyProps) {
+export function CapabilitiesBody({ sessionId, useSessions, useTabInfo, t }: CapabilitiesBodyProps) {
   const { tab } = useTabInfo()
   const view = useSyncExternalStore(subscribe, () => snapshotCache)
   const caps = view.caps
@@ -1070,7 +1071,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     .map(r => ({
       id: r.id,
       name: r.label ?? titleCaseId(r.id),
-      description: 'Delegated subagent role',
+      description: t('capsDescDelegatedRole'),
       kind: 'tool' as const,
       ...(r.group !== undefined ? { badge: r.group } : {}),
     }))
@@ -1079,7 +1080,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     return {
       id: council.id,
       name: council.label ?? titleCaseId(council.id),
-      description: seatCount !== undefined ? `${seatCount} seats` : 'Debate council',
+      description: seatCount !== undefined ? t('capsCouncilSeatCount', { count: seatCount }) : t('capsDebateCouncil'),
       kind: 'tool' as const,
       badge: council.enabled === false ? 'retired' : 'council',
     }
@@ -1095,13 +1096,13 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   const toolFlagRows: LiveRow[] = [...toolFlagIds]
     .filter(id => !registryIds.has(id))
     .map((id) => {
-      const copy = TOOL_FLAG_COPY[id]
+      const keys = TOOL_FLAG_KEYS[id]
       return {
         id,
-        name: copy?.name ?? titleCaseId(id),
-        description: copy?.description ?? 'Stored tool flag — blocks this tool at the execution guard',
+        name: keys !== undefined ? t(keys.nameKey) : titleCaseId(id),
+        description: keys !== undefined ? t(keys.descriptionKey) : t('capsToolFlagDescription'),
         kind: 'tool' as const,
-        ...(copy?.badge !== undefined ? { badge: copy.badge } : {}),
+        ...(keys?.badgeKey !== undefined ? { badge: t(keys.badgeKey) } : {}),
       }
     })
 
@@ -1201,10 +1202,10 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     ? (
       <div className={c('skillError')}>
         <span className={c('errorLine')} title={view.skillsError}>
-          skill catalog unavailable: {view.skillsError}
+          {t('capsSkillUnavailable', { reason: view.skillsError })}
         </span>
         <button type="button" className={c('retryBtn')} onClick={() => { void refreshSkills(candidates) }}>
-          Retry
+          {t('commonRetry')}
         </button>
       </div>
     )
@@ -1214,7 +1215,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
     ? (
       <div className={c('skillError')}>
         <span className={c('errorLine')} title={reason}>{reason}</span>
-        <button type="button" className={c('retryBtn')} onClick={retry}>Retry</button>
+        <button type="button" className={c('retryBtn')} onClick={retry}>{t('commonRetry')}</button>
       </div>
     )
     : undefined
@@ -1250,19 +1251,19 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
             if (row.kind === 'mcp' && st !== undefined) {
               if (!stFresh) {
                 dotColor = '#475569'; dotGlow = 'none'
-                connTitle = 'Checking availability…'
+                connTitle = t('capsConnChecking')
               } else if (st.error !== undefined) {
                 dotColor = '#e5716f'; dotGlow = '0 0 4px rgba(229, 113, 111, 0.35)'
-                connTitle = `Mount failed — ${st.error}`
+                connTitle = t('capsConnMountFailed', { reason: st.error })
               } else if (st.state === 'down') {
                 dotColor = '#e5716f'; dotGlow = '0 0 4px rgba(229, 113, 111, 0.35)'
-                connTitle = 'Not reachable — server not running'
+                connTitle = t('capsConnDown')
               } else if (st.mounted) {
                 dotColor = '#34d399'; dotGlow = '0 0 5px rgba(52, 211, 153, 0.6)'
-                connTitle = 'Connected & mounted — tools active'
+                connTitle = t('capsConnMounted')
               } else {
                 dotColor = '#67dce7'; dotGlow = '0 0 5px rgba(103, 220, 231, 0.45)'
-                connTitle = st.authError === true ? 'Server running · auth rejected' : 'Server running · toggled off'
+                connTitle = st.authError === true ? t('capsConnAuthRejected') : t('capsConnOff')
               }
             }
 
@@ -1280,25 +1281,25 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                       }}
                     />
                     <span>{row.name}</span>
-                    {isProtected && <span className={c('coreBadge')}>Core</span>}
+                    {isProtected && <span className={c('coreBadge')}>{t('capsCore')}</span>}
                     {row.badge !== undefined && <span className={c('coreBadge')}>{row.badge}</span>}
                     {sessionMounted
                       ? (
                         <span
                           className={c('mountBadge')}
                           data-capability-mount={row.id}
-                          title="Mounted for this session — the profile default is untouched"
+                          title={t('capsMountTitle')}
                         >
-                          mounted
+                          {t('capsMounted')}
                         </span>
                       )
                       : overridden && (
-                        <span className={c('overrideBadge')} data-capability-override={row.id}>session</span>
+                        <span className={c('overrideBadge')} data-capability-override={row.id}>{t('capsSession')}</span>
                       )}
                   </div>
                   <div className={c('rowDesc')}>{row.description}</div>
                   {row.kind === 'mcp' && stFresh && st.error !== undefined && (
-                    <div className={c('rowError')} title={st.error}>mount failed: {st.error}</div>
+                    <div className={c('rowError')} title={st.error}>{t('capsMountFailed', { reason: st.error })}</div>
                   )}
                 </div>
                 <div className={c('rowActions')}>
@@ -1307,20 +1308,20 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
                       type="button"
                       className={c('resetBtn')}
                       data-capability-reset={row.id}
-                      title="Reset to the profile default"
-                      aria-label={`Reset ${row.name} to the profile default`}
+                      title={t('capsResetTitle')}
+                      aria-label={t('capsResetAria', { name: row.name })}
                       disabled={pending[key] === true}
                       onClick={() => { onReset(row.kind, row.id) }}
                     >
-                      Reset
+                      {t('capsReset')}
                     </button>
                   )}
                   <Switch
                     checked={enabled}
                     onChange={(next) => { onToggle(row.kind, row.id, next) }}
-                    label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
+                    label={enabled ? t('capsSwitchDisable', { name: row.name }) : t('capsSwitchEnable', { name: row.name })}
                     disabled={isProtected || pending[key] === true}
-                    title={isProtected ? 'Protected infrastructure capability' : undefined}
+                    title={isProtected ? t('capsProtectedTitle') : undefined}
                   />
                 </div>
               </div>
@@ -1332,17 +1333,17 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   }
 
   const skillsSection = renderGroup(
-    'Specialist Skills',
+    t('capsGroupSkills'),
     iconSparkle(),
     skillRows,
     view.skillsError !== null
       ? errorBanner
       : view.skillsLoading && skillRows.length === 0
-        ? <div className={c('empty')}>Loading skill catalog…</div>
+        ? <div className={c('empty')}>{t('capsLoadingSkillCatalog')}</div>
         : skillRows.length === 0
           ? (
             <div className={c('empty')}>
-              No skills discovered yet. Drop a folder with a SKILL.md into ~/.dsh/skills/ to add one.
+              {t('capsSkillsEmpty')}
             </div>
           )
           : undefined,
@@ -1351,20 +1352,20 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
   return (
     <div className={c('container')}>
       <header className={c('head')}>
-        <h3 className={c('headTitle')}>Capabilities Control Center</h3>
+        <h3 className={c('headTitle')}>{t('capsTitle')}</h3>
         <p className={c('headSub')}>
-          Live toggles for MCP servers, Skills, Subagents &amp; Councils
+          {t('capsSubtitle')}
           {' · '}
           <button type="button" className={c('footLink')} onClick={() => { openSettings('dynamic') }}>
-            Manage in Settings
+            {t('capsManageInSettings')}
           </button>
         </p>
         <div className={c('modeBar')} data-capability-mode={mode}>
-          <span className={c('modeBadge')}>{mode === 'session' ? 'This session' : 'Editing defaults'}</span>
+          <span className={c('modeBadge')}>{mode === 'session' ? t('capsModeSession') : t('capsModeDefaults')}</span>
           <span className={c('modeHint')}>
             {mode === 'session'
-              ? 'Changes apply to this session only; the profile default is untouched. Reset a row to inherit again.'
-              : 'Changes persist as the profile default and every future session inherits them.'}
+              ? t('capsModeHintSession')
+              : t('capsModeHintDefaults')}
           </span>
         </div>
       </header>
@@ -1376,31 +1377,31 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo }: Capabil
       )}
 
       <div className={c('groups')}>
-        <PermissionsSection />
-        {renderGroup('MCP Tool Suites', iconPlug(12, 1.3), mcpRows,
+        <PermissionsSection t={t} />
+        {renderGroup(t('capsGroupMcp'), iconPlug(12, 1.3), mcpRows,
           mcpRows.length === 0
-            ? <div className={c('empty')}>No MCP servers configured. Add one in Settings → Dynamic.</div>
+            ? <div className={c('empty')}>{t('capsMcpEmpty')}</div>
             : undefined)}
         {skillsSection}
-        {renderGroup('Subagents', iconCouncil(), roleRows,
+        {renderGroup(t('capsGroupSubagents'), iconCouncil(), roleRows,
           registryError(view.rolesError, () => { void refreshRoles() }))}
-        {renderGroup('Councils', iconCouncil(), councilRows,
+        {renderGroup(t('capsGroupCouncils'), iconCouncil(), councilRows,
           registryError(view.councilsError, () => { void refreshCouncils() }))}
-        {renderGroup('Tool Flags', iconTerminal(), toolFlagRows)}
+        {renderGroup(t('capsGroupToolFlags'), iconTerminal(), toolFlagRows)}
       </div>
 
       <footer className={c('foot')}>
         <span>
           {mode === 'session'
-            ? 'Switches write session overrides (durable, logged) and apply from the next query. Add, remove, and edit live in Settings → Dynamic.'
-            : 'Switches write the profile defaults and apply from the next query. Add, remove, and edit live in Settings → Dynamic.'}
+            ? t('capsFootSession')
+            : t('capsFootDefaults')}
         </span>
         <button
           type="button"
           className={c('footLink')}
           onClick={() => { tab.actions.openTab(AGENT_MODELS_KIND) }}
         >
-          Agent Models
+          {t('tabAgentModels')}
         </button>
       </footer>
     </div>

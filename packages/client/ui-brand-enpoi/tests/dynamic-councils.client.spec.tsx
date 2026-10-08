@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { brandT } from './brand-i18n.client.ts'
 
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
@@ -58,7 +59,7 @@ async function mountPanel(councils: unknown[], value: Record<string, unknown>) {
   })
   vi.stubGlobal('fetch', fetchMock)
   const mod = await import('../src/client/dynamic/CouncilsPanel.tsx')
-  render(<mod.CouncilsPanel />)
+  render(<mod.CouncilsPanel t={brandT} />)
   return fetchMock
 }
 

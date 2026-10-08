@@ -14,6 +14,7 @@ import {
 import type { CompactionPolicyReadout } from '../src/client/compaction-policy.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PARAM_DEFAULTS } from '../src/client/params-store.ts'
+import { brandT as t } from './brand-i18n.client.ts'
 
 const PARAMS = PARAM_DEFAULTS.compaction
 
@@ -49,7 +50,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'big' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     // 1M window: reserve min(65536, 500000) = 65536; threshold min(800000, 868928).
     expect(readout).toMatchObject({
       route: 'alpha/big',
@@ -67,11 +68,11 @@ describe('effective compaction policy derivation', () => {
       null,
       CATALOG.default,
       compactionModels(CATALOG),
-    )
+      t)
     expect(readout.route).toBe('session model alpha/big')
     expect(readout.thresholdTokens).toBe(800_000)
 
-    const unknown = deriveCompactionPolicy(PARAMS, null, null, new Map())
+    const unknown = deriveCompactionPolicy(PARAMS, null, null, new Map(), t)
     expect(unknown.route).toBe('session model')
     expect(unknown.problem).toContain('no model window known')
   })
@@ -82,7 +83,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'big', chain: 'fast' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(chain.route).toBe('chain fast')
     expect(chain.thresholdTokens).toBeUndefined()
 
@@ -91,7 +92,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'mystery' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(windowless.problem).toContain('no context window')
   })
 
@@ -101,7 +102,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'big' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(absolute.retainTokens).toBe(20_000)
 
     const conflict = deriveCompactionPolicy(
@@ -109,7 +110,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'big' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(conflict.problem).toContain('must stay below the 800000-token threshold')
 
     // The shipped 65,536 headroom exceeds a 32k window's pressure budget.
@@ -118,7 +119,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'small' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(headroom.problem).toContain('no pressure budget')
 
     // A non-positive headroom is ignored by the backend, so it must not read out.
@@ -127,7 +128,7 @@ describe('effective compaction policy derivation', () => {
       { provider: 'alpha', model: 'big' },
       null,
       compactionModels(CATALOG),
-    )
+      t)
     expect(ignoredHeadroom.problem).toContain('positive integer')
   })
 })
@@ -141,11 +142,11 @@ describe('compaction policy store', () => {
       { provider: 'alpha', model: 'big' },
       null,
       CATALOG,
-    )
+      t)
     expect(getCompactionPolicy().route).toBe('alpha/big')
     expect(seen.at(-1)?.thresholdTokens).toBe(800_000)
     unsubscribe()
-    refreshCompactionPolicy(PARAMS, null, CATALOG.default, CATALOG)
+    refreshCompactionPolicy(PARAMS, null, CATALOG.default, CATALOG, t)
     expect(getCompactionPolicy().route).toBe('session model alpha/big')
     expect(seen).toHaveLength(1)
   })

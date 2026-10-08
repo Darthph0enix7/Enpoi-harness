@@ -24,6 +24,7 @@ import {
   type McpStatusEntry,
 } from '../CapabilitiesBody.tsx'
 import css from './McpPanel.module.css'
+import type { BrandT } from '../locales.ts'
 import { setStatus } from './status.ts'
 import { withWriteTimeout } from './write-timeout.ts'
 
@@ -223,7 +224,7 @@ interface StatusFace {
 }
 
 /** The MCP catalog editor. */
-export function McpPanel() {
+export function McpPanel({ t }: { t: BrandT }) {
   const [servers, setServers] = useState<Record<string, McpServerEntry> | null>(null)
   const [mcpStatus, setMcpStatus] = useState<Record<string, McpStatusEntry>>({})
   const [caps, setCaps] = useState<Record<string, boolean>>({})
@@ -436,17 +437,17 @@ export function McpPanel() {
   /** Connection dot of one row from the host heartbeat. */
   const statusFace = (id: string): StatusFace => {
     const entry = mcpStatus[id]
-    if (entry === undefined) return { color: '#475569', glow: 'none', title: 'No heartbeat yet' }
-    if (Date.now() - entry.checkedAt > 45_000) return { color: '#475569', glow: 'none', title: 'Checking availability…' }
+    if (entry === undefined) return { color: '#475569', glow: 'none', title: t('mcpStatusNoHeartbeat') }
+    if (Date.now() - entry.checkedAt > 45_000) return { color: '#475569', glow: 'none', title: t('mcpStatusChecking') }
     if (entry.error !== undefined) {
-      return { color: '#e5716f', glow: '0 0 4px rgba(229, 113, 111, 0.35)', title: `Mount failed — ${entry.error}`, error: entry.error }
+      return { color: '#e5716f', glow: '0 0 4px rgba(229, 113, 111, 0.35)', title: t('mcpStatusMountFailed', { reason: entry.error }), error: entry.error }
     }
-    if (entry.state === 'down') return { color: '#e5716f', glow: '0 0 4px rgba(229, 113, 111, 0.35)', title: 'Not reachable — server not running' }
-    if (entry.mounted) return { color: '#34d399', glow: '0 0 5px rgba(52, 211, 153, 0.6)', title: 'Connected & mounted — tools active' }
+    if (entry.state === 'down') return { color: '#e5716f', glow: '0 0 4px rgba(229, 113, 111, 0.35)', title: t('mcpStatusDown') }
+    if (entry.mounted) return { color: '#34d399', glow: '0 0 5px rgba(52, 211, 153, 0.6)', title: t('mcpStatusMounted') }
     return {
       color: '#67dce7',
       glow: '0 0 5px rgba(103, 220, 231, 0.45)',
-      title: entry.authError === true ? 'Server running · auth rejected' : 'Server running · toggled off',
+      title: entry.authError === true ? t('mcpStatusAuthRejected') : t('mcpStatusOff'),
     }
   }
 
@@ -467,16 +468,16 @@ export function McpPanel() {
   return (
     <div className={css.container}>
       <p className={css.hint}>
-        Catalog lives in <code>enpoi-orchestration.mcpServers</code>; the host heartbeat reports mount state.
+        {t('mcpHintLead')} <code>enpoi-orchestration.mcpServers</code>{t('mcpHintTail')}
       </p>
       {loadError !== null && (
         <div className={css.errorRow}>
           <span className={css.errorLine} title={loadError}>{loadError}</span>
-          <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>Retry</button>
+          <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>{t('commonRetry')}</button>
         </div>
       )}
       <div className={css.list}>
-        {servers === null && <div className={css.empty}>Loading MCP catalog…</div>}
+        {servers === null && <div className={css.empty}>{t('mcpLoading')}</div>}
         {servers !== null && rows.map((row) => {
           const entry = servers[row.id]
           const face = statusFace(row.id)
@@ -492,14 +493,14 @@ export function McpPanel() {
                     {!row.known && <span className={css.rowId}>{row.id}</span>}
                   </div>
                   <div className={css.rowDesc} title={entry?.url ?? row.description}>{entry?.url ?? row.description}</div>
-                  {face.error !== undefined && <div className={css.rowError} title={face.error}>mount failed: {face.error}</div>}
+                  {face.error !== undefined && <div className={css.rowError} title={face.error}>{t('mcpMountFailed', { reason: face.error })}</div>}
                 </div>
                 <div className={css.rowActions}>
-                  <label className={css.switch} title={enabled ? 'Disable server' : 'Enable server'}>
+                  <label className={css.switch} title={enabled ? t('mcpDisableServer') : t('mcpEnableServer')}>
                     <input
                       className={css.switchInput}
                       type="checkbox"
-                      aria-label={`Enable ${row.name}`}
+                      aria-label={t('mcpEnableAria', { name: row.name })}
                       checked={enabled}
                       onChange={(e) => { onToggle(row.id, e.target.checked) }}
                     />
@@ -510,29 +511,29 @@ export function McpPanel() {
                   <button
                     type="button"
                     className={css.btn}
-                    aria-label={`Edit ${row.name}`}
+                    aria-label={t('mcpEditAria', { name: row.name })}
                     onClick={() => {
                       if (editing) setEditId(null)
                       else startEdit(row.id, entry)
                     }}
                   >
-                    {editing ? 'Close' : 'Edit'}
+                    {editing ? t('commonClose') : t('commonEdit')}
                   </button>
                   {/* A catalog row with no stored record has nothing to unset. */}
                   {entry !== undefined && (confirmRemove === row.id ? (
                     <>
-                      <span className={css.confirmText}>Remove?</span>
-                      <button type="button" className={css.confirmBtn} aria-label={`Confirm remove ${row.name}`} onClick={() => { void submitRemove(row.id) }}>
-                        Remove
+                      <span className={css.confirmText}>{t('mcpRemoveConfirm')}</span>
+                      <button type="button" className={css.confirmBtn} aria-label={t('mcpConfirmRemoveAria', { name: row.name })} onClick={() => { void submitRemove(row.id) }}>
+                        {t('commonRemove')}
                       </button>
-                      <button type="button" className={css.btn} onClick={() => { setConfirmRemove(null) }}>Cancel</button>
+                      <button type="button" className={css.btn} onClick={() => { setConfirmRemove(null) }}>{t('commonCancel')}</button>
                     </>
                   ) : (
                     <button
                       type="button"
                       className={css.removeBtn}
-                      aria-label={`Remove ${row.name}`}
-                      title={`Unset mcpServers.${row.id}`}
+                      aria-label={t('mcpRemoveAria', { name: row.name })}
+                      title={t('mcpUnsetTitle', { id: row.id })}
                       onClick={() => { setStatus(null); setConfirmRemove(row.id) }}
                     >
                       ×
@@ -543,20 +544,20 @@ export function McpPanel() {
               {editing && (
                 <div className={css.editor}>
                   <label className={css.field}>
-                    <span className={css.fieldLabel}>URL</span>
-                    <input className={css.addInput} aria-label={`${row.name} url`} placeholder="https://host/mcp" value={editUrl} onChange={(e) => { setEditUrl(e.target.value) }} />
+                    <span className={css.fieldLabel}>{t('mcpUrl')}</span>
+                    <input className={css.addInput} aria-label={t('mcpEditUrlAria', { name: row.name })} placeholder={t('mcpServerUrlPlaceholder')} value={editUrl} onChange={(e) => { setEditUrl(e.target.value) }} />
                   </label>
                   <label className={css.field}>
-                    <span className={css.fieldLabel}>API key env (optional)</span>
-                    <input className={css.addInput} aria-label={`${row.name} API key env`} placeholder="MCP_API_KEY" value={editApiKeyEnv} onChange={(e) => { setEditApiKeyEnv(e.target.value) }} />
+                    <span className={css.fieldLabel}>{t('mcpApiKeyEnv')}</span>
+                    <input className={css.addInput} aria-label={t('mcpEditApiKeyAria', { name: row.name })} placeholder={t('mcpApiKeyPlaceholder')} value={editApiKeyEnv} onChange={(e) => { setEditApiKeyEnv(e.target.value) }} />
                   </label>
                   <label className={css.field}>
-                    <span className={css.fieldLabel}>Headers JSON (optional)</span>
-                    <textarea className={css.addInput} rows={2} aria-label={`${row.name} headers JSON`} placeholder='{"x-workspace-slug":"main"}' value={editHeaders} onChange={(e) => { setEditHeaders(e.target.value) }} />
+                    <span className={css.fieldLabel}>{t('mcpHeadersJson')}</span>
+                    <textarea className={css.addInput} rows={2} aria-label={t('mcpEditHeadersAria', { name: row.name })} placeholder={t('mcpHeadersPlaceholder')} value={editHeaders} onChange={(e) => { setEditHeaders(e.target.value) }} />
                   </label>
                   <div className={css.addActions}>
                     <button type="button" className={css.addBtn} disabled={editBusy} onClick={() => { void saveEdit(row.id) }}>
-                      {editBusy ? 'Saving…' : 'Save server'}
+                      {editBusy ? t('commonSaving') : t('mcpSaveServer')}
                     </button>
                   </div>
                 </div>
@@ -568,20 +569,20 @@ export function McpPanel() {
       <div className={css.addWrap}>
         {addOpen ? (
           <div className={css.addForm}>
-            <input className={css.addInput} aria-label="MCP server id" placeholder="server-id" value={addName} onChange={(e) => { setAddName(e.target.value) }} />
-            <input className={css.addInput} aria-label="MCP server URL" placeholder="https://host/mcp" value={addUrl} onChange={(e) => { setAddUrl(e.target.value) }} />
-            <input className={css.addInput} aria-label="MCP server API key env" placeholder="API key env (optional)" value={addApiKeyEnv} onChange={(e) => { setAddApiKeyEnv(e.target.value) }} />
-            <textarea className={css.addInput} rows={2} aria-label="MCP server headers JSON" placeholder='Headers JSON (optional), e.g. {"x-workspace-slug":"main"}' value={addHeaders} onChange={(e) => { setAddHeaders(e.target.value) }} />
+            <input className={css.addInput} aria-label={t('mcpServerIdAria')} placeholder="server-id" value={addName} onChange={(e) => { setAddName(e.target.value) }} />
+            <input className={css.addInput} aria-label={t('mcpServerUrlAria')} placeholder={t('mcpServerUrlPlaceholder')} value={addUrl} onChange={(e) => { setAddUrl(e.target.value) }} />
+            <input className={css.addInput} aria-label={t('mcpServerApiKeyAria')} placeholder={t('mcpApiKeyEnv')} value={addApiKeyEnv} onChange={(e) => { setAddApiKeyEnv(e.target.value) }} />
+            <textarea className={css.addInput} rows={2} aria-label={t('mcpServerHeadersAria')} placeholder={t('mcpAddHeadersPlaceholder')} value={addHeaders} onChange={(e) => { setAddHeaders(e.target.value) }} />
             <div className={css.addActions}>
               <button type="button" className={css.addBtn} disabled={addBusy} onClick={() => { void submitAdd() }}>
-                {addBusy ? 'Adding…' : 'Add server'}
+                {addBusy ? t('commonAdding') : t('mcpAddServer')}
               </button>
-              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>Cancel</button>
+              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>{t('commonCancel')}</button>
             </div>
           </div>
         ) : (
           <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setStatus(null) }}>
-            + Add MCP server
+            {t('mcpAddServerCta')}
           </button>
         )}
       </div>

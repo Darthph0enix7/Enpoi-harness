@@ -15,7 +15,8 @@
  * envelope (`/api/enpoiGit.*`), matching the Capabilities tab's RPC pattern.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { BrandT } from './locales.ts'
 import css from './GitBody.module.css'
 
 /** `enpoiGit.status` value. */
@@ -85,9 +86,10 @@ function nextRpcId(prefix: string): string {
  * One `enpoiGit.*` call over the shared client-request envelope.
  * @param method - Remote endpoint name (`enpoiGit.status`, ...).
  * @param args - exact named wire arguments.
+ * @param t - the package dictionary translate for failure copy.
  * @returns the business value or a displayable failure message.
  */
-async function gitRpc<T>(method: string, args: Record<string, unknown>): Promise<GitRpcResult<T>> {
+async function gitRpc<T>(method: string, args: Record<string, unknown>, t: BrandT): Promise<GitRpcResult<T>> {
   try {
     const response = await fetch(`/api/${method}`, {
       method: 'POST',
@@ -99,14 +101,14 @@ async function gitRpc<T>(method: string, args: Record<string, unknown>): Promise
         payload: { args },
       }),
     })
-    if (!response.ok) return { ok: false, message: `gateway responded ${response.status}` }
+    if (!response.ok) return { ok: false, message: t('gitGatewayResponded', { status: response.status }) }
     const json = await response.json() as {
       result?: { ok?: boolean; value?: unknown; error?: { message?: unknown } }
     }
     const result = json?.result
     if (result?.ok !== true) {
       const message = result?.error?.message
-      return { ok: false, message: typeof message === 'string' && message !== '' ? message : 'git request was rejected' }
+      return { ok: false, message: typeof message === 'string' && message !== '' ? message : t('gitRequestRejected') }
     }
     return { ok: true, value: result.value as T }
   } catch (error: unknown) {
@@ -115,13 +117,13 @@ async function gitRpc<T>(method: string, args: Record<string, unknown>): Promise
 }
 
 /** Compact relative age (`2m`, `3h`, `5d`). */
-function ageLabel(at: number, now: number): string {
+function ageLabel(at: number, now: number, t: BrandT): string {
   const minutes = Math.floor(Math.max(0, now - at) / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m`
+  if (minutes < 1) return t('gitAgeJustNow')
+  if (minutes < 60) return t('gitAgeMinutes', { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h`
-  return `${Math.floor(hours / 24)}d`
+  if (hours < 24) return t('gitAgeHours', { count: hours })
+  return t('gitAgeDays', { count: Math.floor(hours / 24) })
 }
 
 /** Monochrome micro icon (stroke currentColor). */
@@ -134,7 +136,9 @@ function MicroIcon({ d, size = 11 }: { d: string; size?: number }): ReactNode {
 }
 
 /** Monochrome tab glyph for Git (thin stroke, currentColor), also the guide capsule icon. */
-export function GitIcon({ size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined }) {
+export function GitIcon(
+  { size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined },
+) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
       <circle cx="4.6" cy="3.6" r="1.7" stroke="currentColor" strokeWidth="1.3" />
@@ -145,9 +149,9 @@ export function GitIcon({ size = 16, className }: { size?: number | undefined; a
   )
 }
 
-export type GitBodyProps = PropsRuntime<'sidebar.right.pane.tab'>
+export type GitBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'brandEnpoi'>
 
-export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
+export function GitBody({ sessionId, useSessions, useTabInfo, t }: GitBodyProps) {
   const { tab } = useTabInfo()
   const visible = tab.visible
   const cwd = useSessions(state => (typeof sessionId === 'string' ? state.byId[sessionId]?.cwd : undefined))
@@ -184,10 +188,10 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
     setLoad(current => (current.phase === 'ready' ? current : { phase: 'loading' }))
     void (async () => {
       const [statusResult, branchesResult, logResult, changesResult] = await Promise.all([
-        gitRpc<GitStatus>('enpoiGit.status', { cwd }),
-        gitRpc<GitBranches>('enpoiGit.branches', { cwd }),
-        gitRpc<{ entries: GitLogEntry[] }>('enpoiGit.log', { cwd, limit: 20 }),
-        gitRpc<{ files: GitChange[] }>('enpoiGit.changes', { cwd }),
+        gitRpc<GitStatus>('enpoiGit.status', { cwd }, t),
+        gitRpc<GitBranches>('enpoiGit.branches', { cwd }, t),
+        gitRpc<{ entries: GitLogEntry[] }>('enpoiGit.log', { cwd, limit: 20 }, t),
+        gitRpc<{ files: GitChange[] }>('enpoiGit.changes', { cwd }, t),
       ])
       if (cancelled) return
       if (!statusResult.ok) {
@@ -207,20 +211,20 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
       })
     })()
     return () => { cancelled = true }
-  }, [visible, cwd, reloadSeq])
+  }, [visible, cwd, reloadSeq, t])
 
   // The selected file's diff (re-read on refresh and cwd switch).
   useEffect(() => {
     if (!visible || selected === null || cwd === undefined || cwd === '') return undefined
     let cancelled = false
     setDiffLoading(true)
-    void gitRpc<GitDiff>('enpoiGit.diff', { cwd, path: selected }).then((result) => {
+    void gitRpc<GitDiff>('enpoiGit.diff', { cwd, path: selected }, t).then((result) => {
       if (cancelled) return
       setDiffLoading(false)
-      setDiff(result.ok ? result.value : { text: `diff unavailable: ${result.message}`, truncated: false })
+      setDiff(result.ok ? result.value : { text: t('gitDiffUnavailable', { reason: result.message }), truncated: false })
     })
     return () => { cancelled = true }
-  }, [visible, cwd, selected, reloadSeq])
+  }, [visible, cwd, selected, reloadSeq, t])
 
   const refresh = (): void => { setReloadSeq(seq => seq + 1) }
 
@@ -230,15 +234,15 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
 
   const body = useMemo((): ReactNode => {
     if (load.phase === 'loading') {
-      return <div className={css.state}><span className={css.stateDim}>Reading repository…</span></div>
+      return <div className={css.state}><span className={css.stateDim}>{t('gitReading')}</span></div>
     }
     if (load.phase === 'no-cwd') {
-      return <div className={css.state}><span className={css.stateTitle}>No workspace</span><span className={css.stateDim}>This session has no working directory.</span></div>
+      return <div className={css.state}><span className={css.stateTitle}>{t('gitNoWorkspace')}</span><span className={css.stateDim}>{t('gitNoWorkspaceHint')}</span></div>
     }
     if (load.phase === 'non-repo') {
       return (
         <div className={css.state}>
-          <span className={css.stateTitle}>Not a git repository</span>
+          <span className={css.stateTitle}>{t('gitNotRepo')}</span>
           <code className={css.statePath}>{cwd ?? ''}</code>
         </div>
       )
@@ -246,9 +250,9 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
     if (load.phase === 'error') {
       return (
         <div className={css.state}>
-          <span className={css.stateTitle}>Git unavailable</span>
+          <span className={css.stateTitle}>{t('gitUnavailable')}</span>
           <span className={css.stateDim}>{load.message}</span>
-          <button type="button" className={css.retryBtn} onClick={refresh}>Retry</button>
+          <button type="button" className={css.retryBtn} onClick={refresh}>{t('commonRetry')}</button>
         </div>
       )
     }
@@ -258,11 +262,11 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
       <div className={css.scroll}>
         <section className={css.section}>
           <div className={css.sectionHead}>
-            <span className={css.sectionTitle}>Branches</span>
+            <span className={css.sectionTitle}>{t('gitBranches')}</span>
             <span className={css.sectionCount}>{branches.names.length}</span>
           </div>
           <div className={css.rows}>
-            {branches.names.length === 0 && <div className={css.none}>No local branches</div>}
+            {branches.names.length === 0 && <div className={css.none}>{t('gitNoLocalBranches')}</div>}
             {branches.names.map(name => (
               <div key={name} className={css.branchRow} data-current={name === branches.current || name === status.branch ? '' : undefined}>
                 <span className={css.branchDot} />
@@ -274,11 +278,11 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
 
         <section className={css.section}>
           <div className={css.sectionHead}>
-            <span className={css.sectionTitle}>Changes</span>
+            <span className={css.sectionTitle}>{t('gitChanges')}</span>
             <span className={css.sectionCount}>{changes.length}</span>
           </div>
           <div className={css.rows}>
-            {changes.length === 0 && <div className={css.none}>Working tree clean</div>}
+            {changes.length === 0 && <div className={css.none}>{t('gitWorkingTreeClean')}</div>}
             {changes.map(change => (
               <button
                 key={`${change.code}:${change.path}`}
@@ -302,19 +306,19 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
             <div className={css.diffBlock}>
               <div className={css.diffHead}>
                 <span className={css.diffPath} title={selected}>{selected}</span>
-                {diff !== null && diff.truncated && <span className={css.truncBadge}>truncated</span>}
+                {diff !== null && diff.truncated && <span className={css.truncBadge}>{t('gitTruncated')}</span>}
                 <button
                   type="button"
                   className={css.wrapBtn}
                   data-on={wrap ? '' : undefined}
                   onClick={() => { setWrap(value => !value) }}
-                  title={wrap ? 'Disable line wrap' : 'Wrap long lines'}
+                  title={wrap ? t('gitDisableWrap') : t('gitWrapLongLines')}
                 >
-                  {wrap ? 'No wrap' : 'Wrap'}
+                  {wrap ? t('gitNoWrap') : t('gitWrap')}
                 </button>
               </div>
               <pre className={wrap ? css.diffWrap : css.diffNowrap}>
-                {diffLoading ? 'Loading diff…' : diff !== null && diff.text !== '' ? diff.text : 'No changes to show'}
+                {diffLoading ? t('gitLoadingDiff') : diff !== null && diff.text !== '' ? diff.text : t('gitNoChanges')}
               </pre>
             </div>
           )}
@@ -322,17 +326,17 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
 
         <section className={css.section}>
           <div className={css.sectionHead}>
-            <span className={css.sectionTitle}>Commits</span>
+            <span className={css.sectionTitle}>{t('gitCommits')}</span>
             <span className={css.sectionCount}>{entries.length}</span>
           </div>
           <div className={css.rows}>
-            {entries.length === 0 && <div className={css.none}>No commits yet</div>}
+            {entries.length === 0 && <div className={css.none}>{t('gitNoCommits')}</div>}
             {entries.map(entry => (
               <div key={entry.sha} className={css.commitRow} title={`${entry.sha}\n${entry.subject}\n${entry.author}`}>
                 <span className={css.commitSha}>{entry.sha.slice(0, 7)}</span>
                 <span className={css.commitMain}>
                   <span className={css.commitSubject}>{entry.subject}</span>
-                  <span className={css.commitMeta}>{entry.author} · {ageLabel(Date.parse(entry.date) || 0, now)}</span>
+                  <span className={css.commitMeta}>{entry.author} · {ageLabel(Date.parse(entry.date) || 0, now, t)}</span>
                 </span>
               </div>
             ))}
@@ -340,7 +344,7 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
         </section>
       </div>
     )
-  }, [load, cwd, selected, diff, diffLoading, wrap, now])
+  }, [load, cwd, selected, diff, diffLoading, wrap, now, t])
 
   return (
     <div className={css.container}>
@@ -360,18 +364,18 @@ export function GitBody({ sessionId, useSessions, useTabInfo }: GitBodyProps) {
             type="button"
             className={css.refreshBtn}
             onClick={refresh}
-            title="Refresh git status"
-            aria-label="Refresh git status"
+            title={t('gitRefresh')}
+            aria-label={t('gitRefresh')}
           >
             <MicroIcon d="M13 8a5 5 0 11-1.5-3.5M13 2.5V6h-3.5" size={11} />
           </button>
         </div>
         {load.phase === 'ready' && (
           <div className={css.counts}>
-            <span className={css.countChip} data-kind="staged">{load.status.staged} staged</span>
-            <span className={css.countChip} data-kind="unstaged">{load.status.unstaged} unstaged</span>
-            <span className={css.countChip} data-kind="untracked">{load.status.untracked} untracked</span>
-            {dirtyCount === 0 && <span className={css.cleanChip}>clean</span>}
+            <span className={css.countChip} data-kind="staged">{load.status.staged} {t('gitStaged')}</span>
+            <span className={css.countChip} data-kind="unstaged">{load.status.unstaged} {t('gitUnstaged')}</span>
+            <span className={css.countChip} data-kind="untracked">{load.status.untracked} {t('gitUntracked')}</span>
+            {dirtyCount === 0 && <span className={css.cleanChip}>{t('gitClean')}</span>}
           </div>
         )}
       </header>

@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import { WatchtowerView, type WatchtowerViewProps } from '../src/client/WatchtowerView.tsx'
 import { buildDebugReportMarkdown } from '../src/client/debug-view.ts'
+import { brandT } from './brand-i18n.client.ts'
 
 const DIGEST = {
   sessionId: 'session-debug-1',
@@ -64,6 +65,7 @@ function viewProps(extra: { useSessionStatus?: unknown } = {}): WatchtowerViewPr
     useSession: <S,>(selector: (s: { sessionId: string; displayTitle: string }) => S): S => selector({ sessionId: 'session-debug-1', displayTitle: 'Debug session' }),
     useProjection: <T,>(): T => undefined as T,
     ...extra as WatchtowerViewProps,
+    t: brandT,
   }
 }
 

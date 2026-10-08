@@ -14,6 +14,7 @@
  */
 import { useEffect, useState } from 'react'
 import css from './CouncilsPanel.module.css'
+import type { BrandT } from '../locales.ts'
 import { setStatus } from './status.ts'
 import { withWriteTimeout } from './write-timeout.ts'
 
@@ -308,7 +309,7 @@ function draftFromSpec(spec: CouncilSpec | undefined): PromptDraft {
 }
 
 /** The council registry editor. */
-export function CouncilsPanel() {
+export function CouncilsPanel({ t }: { t: BrandT }) {
   const [rows, setRows] = useState<CouncilRow[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
@@ -320,7 +321,7 @@ export function CouncilsPanel() {
   const [addOpen, setAddOpen] = useState(false)
   const [addId, setAddId] = useState('')
   const [addLabel, setAddLabel] = useState('')
-  const [addSeats, setAddSeats] = useState<CouncilSeat[]>([{ id: 'seat-1', label: 'Seat 1', persona: 'You are a rigorous council seat.' }])
+  const [addSeats, setAddSeats] = useState<CouncilSeat[]>([{ id: 'seat-1', label: t('councilDefaultSeatLabel', { index: 1 }), persona: t('councilDefaultSeatPersona') }])
   const [addActions, setAddActions] = useState('PROPOSE, ATTACK')
   const [addSections, setAddSections] = useState('FINDINGS, OPEN QUESTIONS')
   const [addStopping, setAddStopping] = useState<StoppingPolicy['type']>('ledger_convergence')
@@ -508,17 +509,17 @@ export function CouncilsPanel() {
   return (
     <div className={css.container}>
       <p className={css.hint}>
-        Councils are declarative specs in <code>enpoi-orchestration.councils</code>; edits apply on the next debate.
+        {t('councilHintLead')} <code>enpoi-orchestration.councils</code>{t('councilHintTail')}
       </p>
       {listError !== null && (
         <div className={css.errorRow}>
-          <span className={css.errorLine} title={listError}>council registry unavailable: {listError}</span>
-          <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>Retry</button>
+          <span className={css.errorLine} title={listError}>{t('councilUnavailable', { reason: listError })}</span>
+          <button type="button" className={css.retryBtn} onClick={() => { void refresh() }}>{t('commonRetry')}</button>
         </div>
       )}
       <div className={css.list}>
-        {rows === null && <div className={css.empty}>Loading councils…</div>}
-        {rows !== null && rows.length === 0 && <div className={css.empty}>No councils registered yet.</div>}
+        {rows === null && <div className={css.empty}>{t('councilLoading')}</div>}
+        {rows !== null && rows.length === 0 && <div className={css.empty}>{t('councilEmpty')}</div>}
         {rows?.map((row) => {
           const expanded = expandedId === row.id
           const draft = drafts[row.id]
@@ -527,7 +528,7 @@ export function CouncilsPanel() {
               <div className={css.row}>
                 <span
                   className={css.dot}
-                  title={row.enabled ? 'Enabled' : 'Disabled — tool retired'}
+                  title={row.enabled ? t('councilEnabledTitle') : t('councilDisabledTitle')}
                   style={{
                     background: row.enabled ? '#34d399' : '#64748b',
                     boxShadow: row.enabled ? '0 0 5px rgba(52, 211, 153, 0.6)' : 'none',
@@ -539,33 +540,33 @@ export function CouncilsPanel() {
                     <span className={css.rowId}>{row.id}</span>
                   </div>
                   <div className={css.rowDesc}>
-                    {row.seatCount} {row.seatCount === 1 ? 'seat' : 'seats'}{row.enabled ? '' : ' · disabled'}
+                    {row.seatCount === 1 ? t('councilSeatOne', { count: row.seatCount }) : t('councilSeatMany', { count: row.seatCount })}{row.enabled ? '' : t('councilDisabledSuffix')}
                   </div>
-                  {row.error !== undefined && <div className={css.rowError} title={row.error}>invalid: {row.error}</div>}
+                  {row.error !== undefined && <div className={css.rowError} title={row.error}>{t('councilInvalid', { reason: row.error })}</div>}
                 </div>
                 <div className={css.rowActions}>
                   <button
                     type="button"
                     className={css.btn}
-                    aria-label={`${row.enabled ? 'Disable' : 'Enable'} ${row.label}`}
+                    aria-label={row.enabled ? t('councilDisableAria', { label: row.label }) : t('councilEnableAria', { label: row.label })}
                     onClick={() => { void toggleEnabled(row) }}
                   >
-                    {row.enabled ? 'Disable' : 'Enable'}
+                    {row.enabled ? t('commonDisable') : t('commonEnable')}
                   </button>
                   {confirmRemove === row.id ? (
                     <>
-                      <span className={css.confirmText}>Delete?</span>
-                      <button type="button" className={css.confirmBtn} aria-label={`Confirm delete ${row.label}`} onClick={() => { void removeCouncil(row) }}>
-                        Delete
+                      <span className={css.confirmText}>{t('councilConfirmText')}</span>
+                      <button type="button" className={css.confirmBtn} aria-label={t('councilConfirmDeleteAria', { label: row.label })} onClick={() => { void removeCouncil(row) }}>
+                        {t('commonDelete')}
                       </button>
-                      <button type="button" className={css.btn} onClick={() => { setConfirmRemove(null) }}>Cancel</button>
+                      <button type="button" className={css.btn} onClick={() => { setConfirmRemove(null) }}>{t('commonCancel')}</button>
                     </>
                   ) : (
                     <button
                       type="button"
                       className={css.removeBtn}
-                      aria-label={`Delete ${row.label}`}
-                      title={`Unset councils.${row.id} — a built-in falls back to its code default`}
+                      aria-label={t('councilDeleteAria', { label: row.label })}
+                      title={t('councilUnsetTitle', { id: row.id })}
                       onClick={() => { setStatus(null); setConfirmRemove(row.id) }}
                     >
                       ×
@@ -574,7 +575,7 @@ export function CouncilsPanel() {
                   <button
                     type="button"
                     className={css.expandBtn}
-                    aria-label={`${expanded ? 'Collapse' : 'Expand'} ${row.label}`}
+                    aria-label={expanded ? t('councilCollapseAria', { label: row.label }) : t('councilExpandAria', { label: row.label })}
                     aria-expanded={expanded}
                     onClick={() => { toggleExpand(row) }}
                   >
@@ -585,49 +586,49 @@ export function CouncilsPanel() {
               {expanded && (
                 row.spec === undefined || draft === undefined ? (
                   <div className={css.editHint}>
-                    No stored spec for this council (code default); its prompts are not editable until an override exists.
+                    {t('councilNoStoredSpec')}
                   </div>
                 ) : (
                   <div className={css.editor}>
-                    <div className={css.editorLabel}>Seat personas</div>
+                    <div className={css.editorLabel}>{t('councilSeatPersonas')}</div>
                     {draft.seats.map(seat => (
                       <label key={seat.id} className={css.field}>
                         <span className={css.fieldLabel}>{seat.label} <span className={css.rowId}>{seat.id}</span></span>
                         <textarea
                           className={css.textarea}
                           rows={2}
-                          aria-label={`${row.label} seat ${seat.id} persona`}
+                          aria-label={t('councilSeatPersonaAria', { council: row.label, seat: seat.id })}
                           value={seat.persona ?? ''}
                           onChange={(e) => { updateSeatPersona(row.id, seat.id, e.target.value) }}
                         />
                       </label>
                     ))}
-                    {draft.seats.length === 0 && <div className={css.editHint}>No seats stored in this spec.</div>}
+                    {draft.seats.length === 0 && <div className={css.editHint}>{t('councilNoSeats')}</div>}
                     <label className={css.field}>
-                      <span className={css.fieldLabel}>Chair system prompt</span>
+                      <span className={css.fieldLabel}>{t('councilChairSystem')}</span>
                       <textarea
                         className={css.textarea}
                         rows={3}
-                        aria-label={`${row.label} chair system prompt`}
+                        aria-label={t('councilChairSystemAria', { council: row.label })}
                         value={draft.systemPrompt}
                         onChange={(e) => { setDrafts(prev => ({ ...prev, [row.id]: { ...draft, systemPrompt: e.target.value } })) }}
                       />
                     </label>
                     <label className={css.field}>
-                      <span className={css.fieldLabel}>Chair user prompt template</span>
+                      <span className={css.fieldLabel}>{t('councilChairUser')}</span>
                       <textarea
                         className={css.textarea}
                         rows={3}
-                        aria-label={`${row.label} chair user prompt template`}
+                        aria-label={t('councilChairUserAria', { council: row.label })}
                         value={draft.userPromptTemplate}
                         onChange={(e) => { setDrafts(prev => ({ ...prev, [row.id]: { ...draft, userPromptTemplate: e.target.value } })) }}
                       />
                     </label>
                     <div className={css.addActions}>
                       <button type="button" className={css.addBtn} disabled={editBusyId === row.id} onClick={() => { void savePrompts(row) }}>
-                        {editBusyId === row.id ? 'Saving…' : 'Save prompts'}
+                        {editBusyId === row.id ? t('commonSaving') : t('councilSavePrompts')}
                       </button>
-                      <button type="button" className={css.btn} onClick={() => { setExpandedId(null) }}>Close</button>
+                      <button type="button" className={css.btn} onClick={() => { setExpandedId(null) }}>{t('commonClose')}</button>
                     </div>
                   </div>
                 )
@@ -641,46 +642,46 @@ export function CouncilsPanel() {
           <div className={css.addForm}>
             <div className={css.formGrid}>
               <label className={css.field}>
-                <span className={css.fieldLabel}>Council id</span>
-                <input className={css.addInput} aria-label="Council id" placeholder="my-council" value={addId} onChange={(e) => { setAddId(e.target.value) }} />
+                <span className={css.fieldLabel}>{t('councilId')}</span>
+                <input className={css.addInput} aria-label={t('councilId')} placeholder="my-council" value={addId} onChange={(e) => { setAddId(e.target.value) }} />
               </label>
               <label className={css.field}>
-                <span className={css.fieldLabel}>Label</span>
-                <input className={css.addInput} aria-label="Council label" placeholder="My Council" value={addLabel} onChange={(e) => { setAddLabel(e.target.value) }} />
+                <span className={css.fieldLabel}>{t('councilLabel')}</span>
+                <input className={css.addInput} aria-label={t('councilLabelAria')} placeholder={t('councilLabelPlaceholder')} value={addLabel} onChange={(e) => { setAddLabel(e.target.value) }} />
               </label>
             </div>
-            <div className={css.editorLabel}>Seats</div>
+            <div className={css.editorLabel}>{t('councilSeats')}</div>
             {addSeats.map((seat, index) => (
               <div className={css.seatRow} key={index}>
-                <input className={css.addInput} aria-label={`New council seat ${index + 1} id`} placeholder="seat-id" value={seat.id} onChange={(e) => { updateAddSeat(index, { id: e.target.value }) }} />
-                <input className={css.addInput} aria-label={`New council seat ${index + 1} label`} placeholder="Seat label" value={seat.label} onChange={(e) => { updateAddSeat(index, { label: e.target.value }) }} />
-                <textarea className={css.addInput} rows={2} aria-label={`New council seat ${index + 1} persona`} placeholder="Seat persona" value={seat.persona ?? ''} onChange={(e) => { updateAddSeat(index, { persona: e.target.value }) }} />
+                <input className={css.addInput} aria-label={t('councilSeatIdAria', { index: index + 1 })} placeholder="seat-id" value={seat.id} onChange={(e) => { updateAddSeat(index, { id: e.target.value }) }} />
+                <input className={css.addInput} aria-label={t('councilSeatLabelAria', { index: index + 1 })} placeholder={t('councilSeatLabelPlaceholder')} value={seat.label} onChange={(e) => { updateAddSeat(index, { label: e.target.value }) }} />
+                <textarea className={css.addInput} rows={2} aria-label={t('councilNewSeatPersonaAria', { index: index + 1 })} placeholder={t('councilSeatPersonaPlaceholder')} value={seat.persona ?? ''} onChange={(e) => { updateAddSeat(index, { persona: e.target.value }) }} />
                 {addSeats.length > 1 && (
-                  <button type="button" className={css.removeBtn} aria-label={`Remove new council seat ${index + 1}`} onClick={() => { setAddSeats(list => list.filter((_, i) => i !== index)) }}>×</button>
+                  <button type="button" className={css.removeBtn} aria-label={t('councilRemoveSeatAria', { index: index + 1 })} onClick={() => { setAddSeats(list => list.filter((_, i) => i !== index)) }}>×</button>
                 )}
               </div>
             ))}
             <button
               type="button"
               className={css.btn}
-              onClick={() => { setAddSeats(list => [...list, { id: `seat-${list.length + 1}`, label: `Seat ${list.length + 1}`, persona: '' }]) }}
+              onClick={() => { setAddSeats(list => [...list, { id: `seat-${list.length + 1}`, label: t('councilDefaultSeatLabel', { index: list.length + 1 }), persona: '' }]) }}
             >
-              + Seat
+              {t('councilAddSeat')}
             </button>
             <label className={css.field}>
-              <span className={css.fieldLabel}>Actions (comma list)</span>
-              <input className={css.addInput} aria-label="Council actions" placeholder="PROPOSE, ATTACK" value={addActions} onChange={(e) => { setAddActions(e.target.value) }} />
+              <span className={css.fieldLabel}>{t('councilActions')}</span>
+              <input className={css.addInput} aria-label={t('councilActionsAria')} placeholder={t('councilActionsPlaceholder')} value={addActions} onChange={(e) => { setAddActions(e.target.value) }} />
             </label>
             <label className={css.field}>
-              <span className={css.fieldLabel}>Deliverable sections (comma list)</span>
-              <input className={css.addInput} aria-label="Council deliverable sections" placeholder="FINDINGS, OPEN QUESTIONS" value={addSections} onChange={(e) => { setAddSections(e.target.value) }} />
+              <span className={css.fieldLabel}>{t('councilSections')}</span>
+              <input className={css.addInput} aria-label={t('councilSectionsAria')} placeholder={t('councilSectionsPlaceholder')} value={addSections} onChange={(e) => { setAddSections(e.target.value) }} />
             </label>
             <div className={css.formGrid}>
               <label className={css.field}>
-                <span className={css.fieldLabel}>Stopping policy</span>
+                <span className={css.fieldLabel}>{t('councilStopping')}</span>
                 <select
                   className={css.addInput}
-                  aria-label="Council stopping policy"
+                  aria-label={t('councilStoppingAria')}
                   value={addStopping}
                   onChange={(e) => { setAddStopping(e.target.value as StoppingPolicy['type']) }}
                 >
@@ -691,29 +692,29 @@ export function CouncilsPanel() {
               </label>
               {addStopping === 'fixed_epochs' && (
                 <label className={css.field}>
-                  <span className={css.fieldLabel}>maxEpochs</span>
-                  <input className={css.addInput} aria-label="Council max epochs" inputMode="numeric" value={addMaxEpochs} onChange={(e) => { setAddMaxEpochs(e.target.value) }} />
+                  <span className={css.fieldLabel}>{t('councilMaxEpochs')}</span>
+                  <input className={css.addInput} aria-label={t('councilMaxEpochsAria')} inputMode="numeric" value={addMaxEpochs} onChange={(e) => { setAddMaxEpochs(e.target.value) }} />
                 </label>
               )}
             </div>
             <label className={css.field}>
-              <span className={css.fieldLabel}>Chair system prompt</span>
-              <textarea className={css.addInput} rows={2} aria-label="Council chair system prompt" value={addSystemPrompt} onChange={(e) => { setAddSystemPrompt(e.target.value) }} />
+              <span className={css.fieldLabel}>{t('councilChairSystem')}</span>
+              <textarea className={css.addInput} rows={2} aria-label={t('councilNewChairSystemAria')} value={addSystemPrompt} onChange={(e) => { setAddSystemPrompt(e.target.value) }} />
             </label>
             <label className={css.field}>
-              <span className={css.fieldLabel}>Chair user prompt template</span>
-              <textarea className={css.addInput} rows={2} aria-label="Council chair user prompt template" value={addUserTemplate} onChange={(e) => { setAddUserTemplate(e.target.value) }} />
+              <span className={css.fieldLabel}>{t('councilChairUser')}</span>
+              <textarea className={css.addInput} rows={2} aria-label={t('councilNewChairUserAria')} value={addUserTemplate} onChange={(e) => { setAddUserTemplate(e.target.value) }} />
             </label>
             <div className={css.addActions}>
               <button type="button" className={css.addBtn} disabled={addBusy} onClick={() => { void submitAdd() }}>
-                {addBusy ? 'Adding…' : 'Add council'}
+                {addBusy ? t('commonAdding') : t('councilAdd')}
               </button>
-              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>Cancel</button>
+              <button type="button" className={css.btn} onClick={() => { setAddOpen(false); setStatus(null) }}>{t('commonCancel')}</button>
             </div>
           </div>
         ) : (
           <button type="button" className={css.addBtn} onClick={() => { setAddOpen(true); setStatus(null) }}>
-            + Add council
+            {t('councilAddCta')}
           </button>
         )}
       </div>

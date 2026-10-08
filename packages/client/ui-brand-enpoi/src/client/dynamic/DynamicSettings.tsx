@@ -7,7 +7,8 @@
  * namespace.
  */
 import { useState } from 'react'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { BrandEnpoiKey } from '../locales.ts'
 import css from './DynamicSettings.module.css'
 import { RolesPanel } from './RolesPanel.tsx'
 import { PromptsPanel } from './PromptsPanel.tsx'
@@ -18,28 +19,36 @@ import { useStatus } from './status.ts'
 
 type TabId = 'roles' | 'councils' | 'mcp' | 'skills' | 'prompts'
 
-const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
-  { id: 'roles', label: 'Roles' },
-  { id: 'councils', label: 'Councils' },
-  { id: 'mcp', label: 'MCP servers' },
-  { id: 'skills', label: 'Skills & tools' },
-  { id: 'prompts', label: 'Prompts' },
+const TABS: ReadonlyArray<{ id: TabId; labelKey: BrandEnpoiKey }> = [
+  { id: 'roles', labelKey: 'dynTabRoles' },
+  { id: 'councils', labelKey: 'dynTabCouncils' },
+  { id: 'mcp', labelKey: 'dynTabMcp' },
+  { id: 'skills', labelKey: 'dynTabSkills' },
+  { id: 'prompts', labelKey: 'dynTabPrompts' },
 ]
 
-/** Props of {@link DynamicSettings}: the settings-section owner share plus the skills CRUD copy. */
-export type DynamicSettingsProps = PropsRuntime<'settings.section'> & PropsLocale<'settings.dynamicSkills'>
+/** Injected business face of the Dynamic settings section. */
+export interface DynamicSettingsInjected {
+  /** Translator bound to the Skills & tools panel's own namespace. */
+  skillsT: TranslateNS<'settings.dynamicSkills'>
+}
+
+/** Props of {@link DynamicSettings}: the settings-section owner share, the package copy seat, and the skills CRUD copy. */
+export type DynamicSettingsProps =
+  & PropsRuntime<'settings.section'>
+  & PropsLocale<'brandEnpoi'>
+  & InjectFace<DynamicSettingsInjected>
 
 /** Render the dynamic-entities page with its panel tabs. */
-export function DynamicSettings({ t }: DynamicSettingsProps) {
+export function DynamicSettings({ skillsT, t }: DynamicSettingsProps) {
   const [tab, setTab] = useState<TabId>('roles')
   const status = useStatus()
   return (
     <div className={css.container}>
       <p className={css.hint}>
-        Everything here is data in <code>enpoi-orchestration</code> — edits apply on the next spawn,
-        turn, or mount, with no restart.
+        {t('dynHintLead')} <code>enpoi-orchestration</code> {t('dynHintTail')}
       </p>
-      <nav className={css.tabs} aria-label="Dynamic entity panels">
+      <nav className={css.tabs} aria-label={t('dynAria')}>
         {TABS.map(entry => (
           <button
             key={entry.id}
@@ -48,17 +57,17 @@ export function DynamicSettings({ t }: DynamicSettingsProps) {
             aria-pressed={tab === entry.id}
             onClick={() => { setTab(entry.id) }}
           >
-            {entry.label}
+            {t(entry.labelKey)}
           </button>
         ))}
       </nav>
       <section className={css.panel}>
         {status !== null && <p className={css.status} role="alert">{status}</p>}
-        {tab === 'roles' && <RolesPanel />}
-        {tab === 'councils' && <CouncilsPanel />}
-        {tab === 'mcp' && <McpPanel />}
-        {tab === 'skills' && <SkillsPanel t={t} />}
-        {tab === 'prompts' && <PromptsPanel />}
+        {tab === 'roles' && <RolesPanel t={t} />}
+        {tab === 'councils' && <CouncilsPanel t={t} />}
+        {tab === 'mcp' && <McpPanel t={t} />}
+        {tab === 'skills' && <SkillsPanel t={skillsT} />}
+        {tab === 'prompts' && <PromptsPanel t={t} />}
       </section>
     </div>
   )

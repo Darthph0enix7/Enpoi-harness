@@ -6,8 +6,9 @@
 import type { ReactNode } from 'react'
 import { useEffect, useMemo, useRef } from 'react'
 import { IconCloseFillRegular, IconPlusOutlineMedium, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { BrandT } from '../locales.ts'
 import type { TerminalInjected } from './contract.ts'
 import type { TerminalPlace, TerminalTabState } from './registry.ts'
 import { TerminalIcon } from './icons.tsx'
@@ -23,13 +24,15 @@ export interface TerminalTabStripProps {
   readonly onOpen: () => void
   readonly onClose: (id: string) => void
   readonly onActivate: (id: string) => void
+  /** Package copy translate. */
+  readonly t: BrandT
   /** Surface-specific controls after the add button. */
   readonly extra?: ReactNode
 }
 
 /** The tab row every terminal surface draws above its emulator. */
 export function TerminalTabStrip({
-  place, tabs, activeId, onOpen, onClose, onActivate, extra,
+  place, tabs, activeId, onOpen, onClose, onActivate, t, extra,
 }: TerminalTabStripProps): ReactNode {
   return (
     <div className={css.tabBar} data-enpoi-terminal-tabbar={place}>
@@ -51,7 +54,7 @@ export function TerminalTabStrip({
               <button
                 type="button"
                 className={css.tabClose}
-                aria-label={`Close ${tab.title}`}
+                aria-label={t('terminalCloseTab', { title: tab.title })}
                 data-enpoi-terminal-close={tab.id}
                 onClick={() => { onClose(tab.id) }}
               >
@@ -61,11 +64,11 @@ export function TerminalTabStrip({
           )
         })}
       </div>
-      <Tooltip label="New terminal" side="bottom" delayMs={400}>
+      <Tooltip label={t('terminalNew')} side="bottom" delayMs={400}>
         <button
           type="button"
           className={css.iconButton}
-          aria-label="New terminal"
+          aria-label={t('terminalNew')}
           data-enpoi-terminal-new={place}
           onClick={onOpen}
         >
@@ -78,13 +81,13 @@ export function TerminalTabStrip({
 }
 
 /** The status line an exited or failed terminal shows above its output. */
-export function TerminalStatusBanner({ tab }: { readonly tab: TerminalTabState }): ReactNode {
+export function TerminalStatusBanner({ tab, t }: { readonly tab: TerminalTabState; readonly t: BrandT }): ReactNode {
   if (tab.status === 'exited') {
-    const code = tab.exitCode === null ? 'signal' : `code ${tab.exitCode}`
-    return <div className={css.banner} data-enpoi-terminal-banner="exited">Process exited ({code}).</div>
+    const code = tab.exitCode === null ? t('terminalExitSignal') : t('terminalExitCode', { code: tab.exitCode })
+    return <div className={css.banner} data-enpoi-terminal-banner="exited">{t('terminalProcessExited', { code })}</div>
   }
   if (tab.status === 'error') {
-    return <div className={css.banner} data-enpoi-terminal-banner="error">{tab.error ?? 'The terminal failed.'}</div>
+    return <div className={css.banner} data-enpoi-terminal-banner="error">{tab.error ?? t('terminalFailed')}</div>
   }
   return null
 }
@@ -92,6 +95,7 @@ export function TerminalStatusBanner({ tab }: { readonly tab: TerminalTabState }
 /** Composed props of the right sidebar's terminal page. */
 export type TerminalPanelProps =
   & PropsRuntime<'sidebar.right.pane.tab'>
+  & PropsLocale<'brandEnpoi'>
   & InjectFace<TerminalInjected>
 
 /**
@@ -101,7 +105,7 @@ export type TerminalPanelProps =
  */
 export function TerminalPanel({
   sessionId, useSessions, useTerminals, openTerminal, closeTerminal, activateTerminal,
-  writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock,
+  writeTerminal, resizeTerminal, subscribeTerminal, readTerminal, toggleTerminalDock, t,
 }: TerminalPanelProps): ReactNode {
   const session = useTerminals(state => state.bySession[sessionId])
   const cwd = useSessions(state => state.byId[sessionId]?.cwd)
@@ -128,15 +132,16 @@ export function TerminalPanel({
         place="panel"
         tabs={tabs}
         activeId={active?.id}
+        t={t}
         onOpen={() => { openTerminal(sessionId, 'panel', cwd) }}
         onClose={(id) => { closeTerminal(sessionId, id) }}
         onActivate={(id) => { activateTerminal(sessionId, 'panel', id) }}
         extra={(
-          <Tooltip label="Toggle terminal panel" side="bottom" delayMs={400}>
+          <Tooltip label={t('terminalTogglePanel')} side="bottom" delayMs={400}>
             <button
               type="button"
               className={css.iconButton}
-              aria-label="Toggle terminal panel"
+              aria-label={t('terminalTogglePanel')}
               data-enpoi-terminal-dock-toggle
               onClick={toggleTerminalDock}
             >
@@ -149,14 +154,14 @@ export function TerminalPanel({
         {active === undefined ? (
           <div className={css.empty} data-enpoi-terminal-empty>
             <TerminalIcon size={22} />
-            <p>No terminal open.</p>
+            <p>{t('terminalNoOpen')}</p>
             <button type="button" className={css.newButton} onClick={() => { openTerminal(sessionId, 'panel', cwd) }}>
-              New terminal
+              {t('terminalNew')}
             </button>
           </div>
         ) : (
           <>
-            <TerminalStatusBanner tab={active} />
+            <TerminalStatusBanner tab={active} t={t} />
             <TerminalView
               sessionId={sessionId}
               tab={active}
