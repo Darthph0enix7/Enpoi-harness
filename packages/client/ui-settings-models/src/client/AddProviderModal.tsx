@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { liveProviderTemplates, POPULAR_PROVIDERS, type ProviderTemplate } from './provider-templates.ts'
+import { liveProviderTemplates, applyProviderPresetOverrides, type ProviderTemplate } from './provider-templates.ts'
+import type { ProviderPresetOverrides } from './provider-overrides.ts'
 import { useHeavyManifestState } from './heavy-manifest-source.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
@@ -18,6 +19,13 @@ export interface AddProviderModalProps {
   open: boolean
   taken: readonly string[]
   protocols: readonly string[]
+  /**
+   * Operator overrides for the preset catalog
+   * (`enpoi-orchestration.uiPreferences.providerCatalog`): a hidden preset is
+   * absent from every list here, and keyless/popular verdicts are replaced.
+   * The Models page keeps a configured route's own row regardless.
+   */
+  overrides?: ProviderPresetOverrides
   api: ModelsWire
   t: (key: keyof typeof en) => string
   readOnly: boolean
@@ -110,7 +118,7 @@ function adoptedModel(model: DiscoveredModel): Record<string, unknown> {
 }
 
 export function AddProviderModal(props: AddProviderModalProps): ReactNode {
-  const { open, taken, protocols, api, t, readOnly, onClose } = props
+  const { open, taken, protocols, overrides, api, t, readOnly, onClose } = props
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<ProviderTemplate | 'empty' | null>(null)
 
@@ -144,9 +152,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
 
   // The listing is rebuilt from the current manifest table: the host reply
-  // replaces the labelled fallback heavy rows without a page copy.
+  // replaces the labelled fallback heavy rows without a page copy. Operator
+  // overrides apply on top: hidden presets leave every list here, while the
+  // Models page's own configured rows are unaffected.
   const manifestState = useHeavyManifestState()
-  const templates = useMemo(() => liveProviderTemplates(), [manifestState])
+  const templates = useMemo(
+    () => applyProviderPresetOverrides(liveProviderTemplates(), overrides ?? {}),
+    [manifestState, overrides],
+  )
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
@@ -161,10 +174,15 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     [templates],
   )
 
-  const popular = useMemo(() => {
-    const byId = new Map(templates.map(p => [p.id, p]))
-    return POPULAR_PROVIDERS.map(id => byId.get(id)).filter((p): p is ProviderTemplate => p !== undefined)
-  }, [templates])
+  // The Popular group follows the generated `popular` rank, so the shipped
+  // order lives in the data; an override-administered provider sorts after
+  // every ranked row (stable sort keeps catalog order among equals).
+  const popular = useMemo(
+    () => templates
+      .filter(tpl => tpl.popular !== undefined)
+      .toSorted((left, right) => (left.popular ?? 0) - (right.popular ?? 0)),
+    [templates],
+  )
 
   const keylessSelected = selected !== 'empty' && selected !== null && selected.keyless === true
   // The convention reference the selected preset names, when it names one:
@@ -595,7 +613,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               <input
                 className={styles['searchInput']}
                 type="text"
-                placeholder="Search 212 providers (OpenAI, Anthropic, Gemini, Ollama...)"
+                placeholder={t('addSearchPlaceholder').replace('{count}', String(templates.length))}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 autoFocus

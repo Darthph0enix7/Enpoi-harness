@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { LlmDiscoveredModel } from '@deepseek-ai/dsh-llm'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
+import { providerPreset } from '../src/client/provider-templates.ts'
 import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 
@@ -454,4 +455,49 @@ it('keeps the recovery panel when the route still carries a catalog diagnostic',
   fireEvent.click(screen.getByRole('button', { name: en.create }))
   await waitFor(() => { expect(document.querySelector('[data-add-recovery]')).not.toBeNull() })
   expect(onClose).not.toHaveBeenCalled()
+})
+
+it('hides an operator-hidden preset from the picker while its configured route still resolves', () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>()
+  render(<AddProviderModal
+    open
+    taken={['anthropic']}
+    protocols={['openai-completions']}
+    overrides={{ anthropic: { hidden: true } }}
+    api={wire(discoverModels, mutate)}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={vi.fn()}
+  />)
+
+  // Absent from the grouped listing...
+  expect(screen.queryByText('Anthropic')).toBeNull()
+  // ...and from search results.
+  fireEvent.change(screen.getByPlaceholderText(/Search \d+ providers/), { target: { value: 'anthropic' } })
+  expect(screen.queryByText('Anthropic')).toBeNull()
+  // The configured route's own preset metadata never disappears from lookups.
+  expect(providerPreset('anthropic')).toBeDefined()
+})
+
+it('honors a keyless override for a preset that ships with a key reference', () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    overrides={{ openai: { keyless: true } }}
+    api={wire(discoverModels, mutate)}
+    t={key => en[key]}
+    readOnly={false}
+    onClose={vi.fn()}
+  />)
+
+  fireEvent.click(screen.getAllByText('OpenAI')[0]!)
+  // The shipped row carries a key reference; the override switches the form
+  // to the anonymous path.
+  expect(providerPreset('openai')?.keyless).toBeUndefined()
+  expect(screen.queryByText(en.addNeedsKeyHint)).toBeNull()
+  expect(screen.getByPlaceholderText(en.keylessApiKeyPlaceholder)).toBeTruthy()
 })

@@ -420,3 +420,30 @@ it('removes the account row after sign-out and restores it after sign-in', async
   await store.load()
   expect(store.store.getSnapshot().rows[0]?.entry.provider).toBe('deepseek-account')
 })
+
+it('hides an overridden preset from the listing but keeps a configured hidden route', async () => {
+  const orchestration = {
+    ns: 'enpoi-orchestration',
+    schema: {},
+    value: { uiPreferences: { providerCatalog: { anthropic: { hidden: true }, openai: { hidden: true } } } },
+    autoGenerate: true, applies: 'live' as const,
+    secrets: [],
+    revision: 0,
+  }
+  const { ctx, mirror } = api({
+    describeSettings: () => Promise.resolve(remoteOk({
+      writable: true,
+      hasDocument: false,
+      namespaces: [...NAMESPACES, orchestration] as never,
+    })),
+  })
+  const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+  await store.load()
+  const state = store.store.getSnapshot()
+  expect(state.providerOverrides).toEqual({ anthropic: { hidden: true }, openai: { hidden: true } })
+  const providers = state.rows.map(row => row.entry.provider)
+  // anthropic is hidden and unconfigured: it leaves the listing.
+  expect(providers).not.toContain('anthropic')
+  // openai is hidden but configured: never silently dropped.
+  expect(providers).toContain('openai')
+})

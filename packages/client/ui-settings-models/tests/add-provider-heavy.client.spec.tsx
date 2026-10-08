@@ -190,7 +190,7 @@ it('renders the Self-hosted / heavy group AFTER the mainstream catalog, and sear
   expect(follows(all, screen.getByText('FreeLLMAPI'))).toBe(true)
 
   // Search still finds heavy providers through the flat filtered list.
-  fireEvent.change(screen.getByPlaceholderText(/Search 212 providers/), { target: { value: 'freellmapi' } })
+  fireEvent.change(screen.getByPlaceholderText(/Search \d+ providers/), { target: { value: 'freellmapi' } })
   expect(screen.getByText('FreeLLMAPI')).toBeTruthy()
   expect(screen.queryByText(en.heavyGroup)).toBeNull()
 })

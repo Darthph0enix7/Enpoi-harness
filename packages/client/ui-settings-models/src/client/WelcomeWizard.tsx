@@ -377,6 +377,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): ReactNode {
           open={addOpen}
           taken={taken}
           protocols={protocols}
+          overrides={models.providerOverrides}
           api={api}
           t={t}
           readOnly={false}

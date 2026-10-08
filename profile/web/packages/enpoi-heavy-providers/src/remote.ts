@@ -21,6 +21,7 @@ import {
   detectInstance,
   detectRuntimes,
   discoverServiceModels,
+  effectiveHeavyManifests,
   healthForBase,
   instanceBaseURLFromInput,
   modeBaseURL,
@@ -193,17 +194,30 @@ export class HeavyProvidersService extends TypertRemoteService {
     return value
   }
 
-  /** The manifest with the operator's private overlay applied (read per call). */
-  private effectiveManifest(manifest: HeavyProviderManifest): HeavyProviderManifest {
-    return overlayManifest(manifest, readServerOverlay(this.options.deps().dshHome)[manifest.id])
+  /**
+   * Resolve one wire id to its effective manifest, refusing a provider the
+   * operator disabled. `remove`/`job` keep the plain resolution: an operator
+   * who disables a provider must still be able to clean up its state.
+   */
+  private requireEnabledManifest(value: unknown): HeavyProviderManifest {
+    const manifest = requireManifest(value)
+    const entry = readServerOverlay(this.options.deps().dshHome)[manifest.id]
+    if (entry?.disabled === true) {
+      throw new RemoteError(
+        'gateway/bad-request',
+        `enpoiHeavy: provider "${manifest.id}" is disabled by $DSH_HOME/heavy-server-overlay.json`,
+        {},
+      )
+    }
+    return overlayManifest(manifest, entry)
   }
 
-  /** The declared manifest table (overlay applied) plus any structural problems. */
+  /** The declared manifest table (overlay applied, disabled entries dropped) plus any structural problems. */
   @Remote
   manifests(): ManifestsValue {
     const overlay = readServerOverlay(this.options.deps().dshHome)
     return {
-      items: HEAVY_MANIFESTS.map(manifest => overlayManifest(manifest, overlay[manifest.id])),
+      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay),
       problems: manifestProblems(),
       platform: process.platform,
     }
@@ -218,7 +232,7 @@ export class HeavyProvidersService extends TypertRemoteService {
    */
   @Remote
   async status(request: { id?: unknown }): Promise<StatusValue> {
-    const manifest = this.effectiveManifest(requireManifest(request?.id))
+    const manifest = this.requireEnabledManifest(request?.id)
     const deps = this.options.deps()
     const settingsNs = routeSettingsNs(manifest)
     const profile = configuredProfile(deps, manifest.id, settingsNs)
@@ -276,7 +290,7 @@ export class HeavyProvidersService extends TypertRemoteService {
    */
   @Remote
   async reuse(request: { id?: unknown; key?: unknown; baseURL?: unknown }): Promise<ReuseValue> {
-    const manifest = this.effectiveManifest(requireManifest(request?.id))
+    const manifest = this.requireEnabledManifest(request?.id)
     const key = optionalKey(request?.key)
     const baseURL = optionalBaseURL(request?.baseURL)
     if (baseURL !== undefined && manifest.delivery === 'direct') {
@@ -313,7 +327,7 @@ export class HeavyProvidersService extends TypertRemoteService {
    */
   @Remote
   install(request: { id?: unknown; key?: unknown }): InstallValue {
-    const manifest = requireManifest(request?.id)
+    const manifest = this.requireEnabledManifest(request?.id)
     const key = optionalKey(request?.key)
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }

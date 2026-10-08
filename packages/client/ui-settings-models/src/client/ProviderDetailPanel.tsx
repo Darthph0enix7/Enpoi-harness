@@ -16,6 +16,7 @@ import {
 import {
   CATALOG_DECISIONS_CHANGED_EVENT, modelVisibility, readCatalogDecisions,
 } from './model-visibility.ts'
+import { idCapabilityHints } from './capability-hints.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
@@ -58,6 +59,21 @@ interface ModelItem {
   isFree?: boolean
   /** Picker-facing reason for a gated model; rendered in the eye's tooltip. */
   gateReason?: string
+  /**
+   * The sync's labeled id-hint claim (the shared table plus any owner
+   * override); present only when hints were evaluated for this row. Never a
+   * disclosed fact.
+   */
+  capabilityHints?: {
+    input?: string[]
+    reasoning?: boolean
+    source?: string
+  }
+  /**
+   * The sync marked the capability row as resting on the schema floor rather
+   * than a disclosure.
+   */
+  unverified?: boolean
 }
 
 /**
@@ -176,14 +192,38 @@ export function mergeRefreshedModels(
   return merged
 }
 
-/** Detect capabilities based on model ID, name, modalities, or provider metadata.
+/** Which badges rest on the shared id-hint table rather than a disclosure. */
+interface HintedBadges {
+  reasoning: boolean
+  vision: boolean
+  audio: boolean
+  video: boolean
+  files: boolean
+  tools: boolean
+}
+
+/** One model row's capability badges plus each badge's provenance. */
+interface CapabilityView {
+  hasReasoning: boolean
+  hasVision: boolean
+  hasAudio: boolean
+  hasVideo: boolean
+  hasFiles: boolean
+  hasTools: boolean
+  hinted: HintedBadges
+}
+
+/**
+ * Detect the capability badges one model row renders.
  *
- * Data-first: when the model carries structured modality data (`input` /
- * `architecture.input_modalities`), it is AUTHORITATIVE — id heuristics are
- * never OR-ed on top (that produced false vision/audio/files claims). Id
- * heuristics run only when no structured data exists (custom/alias models).
+ * Data-first: `input` / `architecture.input_modalities` is authoritative, and
+ * an explicit `vision`/`audio`/`video`/`files`/`tools` flag or a boolean
+ * `reasoning` is a disclosed fact the hints never override. For a capability
+ * nothing disclosed, the shared id table (or the sync's override-applied
+ * `capabilityHints` field, which wins when present) supplies a HINT: the
+ * badge renders with the hint treatment and is never read as truth.
  */
-function detectCapabilities(model: ModelItem) {
+function detectCapabilities(model: ModelItem): CapabilityView {
   const id = (model.id || '').toLowerCase()
   const inputs: string[] = Array.isArray(model.input)
     ? model.input
@@ -192,149 +232,81 @@ function detectCapabilities(model: ModelItem) {
       : []
   const hasStructured = inputs.length > 0
 
-  // 1. REASONING / THINKING — structured flags win; heuristics only when absent.
-  const hasReasoning = Boolean(
-    model.reasoningEfforts ||
-    (typeof model.reasoning === 'boolean' && model.reasoning) ||
-    (typeof model.reasoning === 'object' && model.reasoning !== null) ||
-    model.supported_parameters?.includes('reasoning') ||
-    model.supported_parameters?.includes('reasoning_effort') ||
-    model.supported_parameters?.includes('include_reasoning') ||
-    (!hasStructured && (
-      id.includes('think') ||
-      id.includes('reason') ||
-      id.includes('luna') ||
-      id.includes('sol') ||
-      id.includes('terra') ||
-      id.includes('deepseek-v4') ||
-      id.includes('deepseek-r') ||
-      id.includes('r1') ||
-      id.includes('o1') ||
-      id.includes('o3') ||
-      id.includes('o4') ||
-      id.includes('flash-tiered') ||
-      id.includes('pro-agent') ||
-      id.includes('pro-high') ||
-      id.includes('k3') ||
-      id.includes('m3') ||
-      id.includes('glm-5') ||
-      id.includes('fable-5') ||
-      id.includes('opus-5') ||
-      id.includes('opus-4-8') ||
-      id.includes('opus-4-7') ||
-      id.includes('opus-4-6') ||
-      id.includes('muse-spark') ||
-      id.includes('astra') ||
-      id.includes('mimo-v2') ||
-      id.includes('grok-4') ||
-      id.includes('kimi-k2') ||
-      id.includes('qwen3.8') ||
-      id.includes('glm-4.7') ||
-      id.includes('longcat') ||
-      id.includes('hy3') ||
-      id.includes('hy4') ||
-      id.includes('m2.7') ||
-      id.includes('omen-alpha')
-    )),
-  )
+  // The persisted `capabilityHints` field is the sync's override-applied hint
+  // set and wins over the shipped table. Client inference runs only when the
+  // row carries no structured input and the sync left no labeled hints; stored
+  // hints also apply beside the sync's floor `input: ['text']`, because that
+  // floor is not a disclosure of absence. The id-level exclusion list stays
+  // shipped: the owner override does not carry a tools family.
+  const stored = model.capabilityHints
+  const idHints = idCapabilityHints(id)
+  const computed = stored === undefined && !hasStructured ? idHints : undefined
+  const hintInputs: readonly string[] = stored?.input ?? computed?.input ?? []
+  const hintedReasoning = stored?.reasoning ?? computed?.reasoning ?? false
+  const hintedVision = hintInputs.includes('image')
+  const hintedAudio = hintInputs.includes('audio')
+  const hintedVideo = hintInputs.includes('video')
+  const hintedFiles = hintInputs.includes('pdf')
+
+  // 1. REASONING / THINKING — an explicit boolean/object/efforts/parameters
+  // fact wins. `false` beside a stored hint set is the sync's schema floor,
+  // not a disclosure of absence, so it yields to the hint; without stored
+  // hints it is a disclosure and blocks the heuristics.
+  const reasoningFact: boolean | undefined =
+    typeof model.reasoning === 'boolean' ? model.reasoning
+      : typeof model.reasoning === 'object' && model.reasoning !== null ? true
+        : model.reasoningEfforts !== undefined ? true
+          : model.supported_parameters?.includes('reasoning')
+            || model.supported_parameters?.includes('reasoning_effort')
+            || model.supported_parameters?.includes('include_reasoning')
+            ? true
+            : undefined
+  const disclosedReasoningFact = reasoningFact === false && stored !== undefined ? undefined : reasoningFact
+  const hasReasoning = disclosedReasoningFact ?? hintedReasoning
+  const reasoningHinted = disclosedReasoningFact === undefined && hintedReasoning
 
   // 2. VISION / IMAGE INPUT
-  const hasVision = Boolean(
-    model.vision ??
-    (hasStructured
-      ? inputs.includes('image') || inputs.includes('vision')
-      : (
-        id.includes('vision') ||
-        id.includes('vl') ||
-        id.includes('minimax') ||
-        id.includes('gemini') ||
-        id.includes('claude') ||
-        id.includes('gpt-4') ||
-        id.includes('gpt-5') ||
-        id.includes('luna') ||
-        id.includes('k3') ||
-        id.includes('qwen-vl') ||
-        id.includes('qwen2.5-vl') ||
-        id.includes('qwen3-vl') ||
-        id.includes('qwen3.8-vl') ||
-        id.includes('pixtral') ||
-        id.includes('grok-2') ||
-        id.includes('internvl') ||
-        id.includes('llava') ||
-        id.includes('glm-4v') ||
-        id.includes('glm-5v') ||
-        id.includes('mimo')
-      )),
-  )
+  const visionFact = model.vision ?? (hasStructured && (inputs.includes('image') || inputs.includes('vision')) ? true : undefined)
+  const hasVision = visionFact ?? hintedVision
+  const visionHinted = visionFact === undefined && hintedVision
 
   // 3. AUDIO INPUT
-  const hasAudio = Boolean(
-    model.audio ??
-    (hasStructured
-      ? inputs.includes('audio') || inputs.includes('voice')
-      : (
-        id.includes('audio') ||
-        id.includes('voice') ||
-        id.includes('whisper') ||
-        id.includes('gemini-3.7') ||
-        id.includes('gemini-3.6') ||
-        id.includes('gemini-2.5') ||
-        id.includes('gemini-1.5') ||
-        id.includes('minimax-m3') ||
-        id.includes('minimax-m2.7') ||
-        id.includes('minimax-m2.5') ||
-        id.includes('gpt-4o-audio') ||
-        id.includes('gpt-4o-realtime') ||
-        id.includes('mimo-v2.6') ||
-        id.includes('mimo-v2.5') ||
-        id.includes('muse-spark-1.2') ||
-        id.includes('muse-spark-1.3')
-      )),
-  )
+  const audioFact = model.audio ?? (hasStructured && (inputs.includes('audio') || inputs.includes('voice')) ? true : undefined)
+  const hasAudio = audioFact ?? hintedAudio
+  const audioHinted = audioFact === undefined && hintedAudio
 
   // 4. VIDEO INPUT
-  const hasVideo = Boolean(
-    model.video ??
-    (hasStructured
-      ? inputs.includes('video')
-      : (
-        id.includes('gemini-3.7') ||
-        id.includes('gemini-3.6') ||
-        id.includes('gemini-3.1') ||
-        id.includes('gemini-2.5') ||
-        id.includes('gemini-1.5') ||
-        id.includes('minimax-m3') ||
-        id.includes('minimax-m2.7') ||
-        id.includes('qwen-vl') ||
-        id.includes('qwen2.5-vl') ||
-        id.includes('space-bunny')
-      )),
-  )
+  const videoFact = model.video ?? (hasStructured && inputs.includes('video') ? true : undefined)
+  const hasVideo = videoFact ?? hintedVideo
+  const videoHinted = videoFact === undefined && hintedVideo
 
-  // 5. TOOL CALLING
-  const hasTools = Boolean(
-    model.tools ??
-    (model.supported_parameters?.includes('tools') ||
-      (!id.includes('embed') && !id.includes('reward') && !id.includes('rerank') && !id.includes('flux') && !id.includes('dall-e') && !id.includes('text-01'))),
-  )
+  // 5. TOOL CALLING — a disclosed tools flag wins; otherwise the badge is the
+  // shared list's default (on, minus the exclusion operands), and a hint.
+  const toolsFact = model.tools ?? (model.supported_parameters?.includes('tools') ? true : undefined)
+  const hasTools = toolsFact ?? !idHints.toolsExcluded
+  const toolsHinted = toolsFact === undefined
 
-  // 6. DOCUMENTS & FILES (Genuine native document parsing, NOT just general text context)
-  const hasFiles = Boolean(
-    model.files ??
-    (hasStructured
-      ? inputs.includes('file') || inputs.includes('pdf') || inputs.includes('document')
-      : (
-        id.includes('claude') ||
-        id.includes('gemini') ||
-        id.includes('gpt-4') ||
-        id.includes('gpt-5') ||
-        id.includes('luna') ||
-        id.includes('pdf') ||
-        id.includes('document')
-      )),
-  )
+  // 6. DOCUMENTS & FILES (native document parsing, not general text context)
+  const filesFact = model.files ?? (hasStructured && (inputs.includes('file') || inputs.includes('pdf') || inputs.includes('document')) ? true : undefined)
+  const hasFiles = filesFact ?? hintedFiles
+  const filesHinted = filesFact === undefined && hintedFiles
 
-  return { hasReasoning, hasVision, hasAudio, hasVideo, hasTools, hasFiles }
+  return {
+    hasReasoning,
+    hasVision,
+    hasAudio,
+    hasVideo,
+    hasFiles,
+    hasTools,
+    hinted: {
+      reasoning: reasoningHinted,
+      vision: visionHinted,
+      audio: audioHinted,
+      video: videoHinted,
+      files: filesHinted,
+      tools: toolsHinted,
+    },
+  }
 }
 
 function formatTokens(count?: number): string {
@@ -1656,35 +1628,62 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         </span>
                       )}
 
-                      {/* Capabilities Icons */}
+                      {/* Capabilities Icons — a badge whose capability came from
+                          the shared id-hint table (or the sync's labeled
+                          capabilityHints) carries data-hint and the hint
+                          treatment, so a guess never reads as a disclosure. */}
                       <div className={styles['capIconsList']}>
                         {caps.hasTools && (
-                          <span className={styles['capIcon']} title="Tool Calling">
+                          <span
+                            className={`${styles['capIcon']}${caps.hinted.tools ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.tools ? 'tools' : undefined}
+                            title="Tool Calling"
+                          >
                             <IconTools size={10} />
                           </span>
                         )}
                         {caps.hasReasoning && (
-                          <span className={`${styles['capIcon']} ${styles['capIconReasoning']}`} title="Reasoning / Thinking">
+                          <span
+                            className={`${styles['capIcon']} ${styles['capIconReasoning']}${caps.hinted.reasoning ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.reasoning ? 'reasoning' : undefined}
+                            title="Reasoning / Thinking"
+                          >
                             <IconBrain size={10} />
                           </span>
                         )}
                         {caps.hasVision && (
-                          <span className={styles['capIcon']} title="Vision / Image">
+                          <span
+                            className={`${styles['capIcon']}${caps.hinted.vision ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.vision ? 'vision' : undefined}
+                            title="Vision / Image"
+                          >
                             <IconVision size={10} />
                           </span>
                         )}
                         {caps.hasAudio && (
-                          <span className={styles['capIcon']} title="Audio Processing">
+                          <span
+                            className={`${styles['capIcon']}${caps.hinted.audio ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.audio ? 'audio' : undefined}
+                            title="Audio Processing"
+                          >
                             <IconAudio size={10} />
                           </span>
                         )}
                         {caps.hasVideo && (
-                          <span className={styles['capIcon']} title="Video Processing">
+                          <span
+                            className={`${styles['capIcon']}${caps.hinted.video ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.video ? 'video' : undefined}
+                            title="Video Processing"
+                          >
                             <IconVideo size={10} />
                           </span>
                         )}
                         {caps.hasFiles && (
-                          <span className={styles['capIcon']} title="Documents & Files">
+                          <span
+                            className={`${styles['capIcon']}${caps.hinted.files ? ` ${styles['capIconHint']}` : ''}`}
+                            data-hint={caps.hinted.files ? 'files' : undefined}
+                            title="Documents & Files"
+                          >
                             <IconFile size={10} />
                           </span>
                         )}

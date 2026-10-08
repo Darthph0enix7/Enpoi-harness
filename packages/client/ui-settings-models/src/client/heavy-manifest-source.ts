@@ -4,10 +4,12 @@
  * The running profile plugin executes the manifests it owns, so rendering a
  * page copy is how commandcode's stale "unsupported" row survived the host
  * flip. This module starts on {@link FALLBACK_HEAVY_PROVIDER_MANIFESTS} — the
- * small, labelled pre-connection copy — and replaces it wholesale with the
- * host's `enpoiHeavy.manifests` reply, so the client cannot drift once
- * connected. A failed or empty reply keeps the previous table; a host reply
- * is never merged field-by-field.
+ * small, labelled pre-connection copy, with the operator overlay published by
+ * the Host half applied ({@link applyHeavyOverlay}) — and replaces it
+ * wholesale with the host's `enpoiHeavy.manifests` reply, so the client cannot
+ * drift once connected. A failed or empty reply keeps the previous table; a
+ * host reply is never merged field-by-field, so the pre-connection overlay
+ * stops applying the moment host truth arrives.
  *
  * @module ui-settings-models/heavy-manifest-source
  */
@@ -15,6 +17,7 @@
 import { useSyncExternalStore } from 'react'
 import { FALLBACK_HEAVY_PROVIDER_MANIFESTS, type HeavyProviderManifest } from './heavy-providers.ts'
 import { heavyApi } from './heavy-rpc.ts'
+import { applyHeavyOverlay, readHeavyOverlayGlobal } from '../heavy-overlay.ts'
 
 /** The table the client currently renders from. */
 export interface HeavyManifestState {
@@ -29,8 +32,17 @@ export interface HeavyManifestState {
 }
 
 const listeners = new Set<() => void>()
-let state: HeavyManifestState = { manifests: FALLBACK_HEAVY_PROVIDER_MANIFESTS, live: false, problems: [] }
+let state: HeavyManifestState = { manifests: fallbackTable(), live: false, problems: [] }
 let loading: Promise<HeavyManifestState> | undefined
+
+/**
+ * The compiled fallback with the operator overlay applied. Read per use so a
+ * reset after the page bootstrap (or a test-stubbed global) sees the current
+ * document; the host reply path never calls this.
+ */
+function fallbackTable(): readonly HeavyProviderManifest[] {
+  return applyHeavyOverlay(FALLBACK_HEAVY_PROVIDER_MANIFESTS, readHeavyOverlayGlobal())
+}
 
 function publish(next: HeavyManifestState): void {
   state = next
@@ -84,7 +96,7 @@ export function loadHostHeavyManifests(): Promise<HeavyManifestState> {
 /** Restore the pre-connection fallback (tests and an explicit disconnect). */
 export function resetHeavyManifestSource(): void {
   loading = undefined
-  publish({ manifests: FALLBACK_HEAVY_PROVIDER_MANIFESTS, live: false, problems: [] })
+  publish({ manifests: fallbackTable(), live: false, problems: [] })
 }
 
 /**

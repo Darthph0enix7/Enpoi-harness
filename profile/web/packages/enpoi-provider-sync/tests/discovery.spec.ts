@@ -27,6 +27,7 @@ import {
   resolveDshHome,
   writeDiscoveredRoute,
 } from '../src/index.ts'
+import { loadCapabilityHints } from '../src/capability-hints.ts'
 
 const servers: Server[] = []
 const directories: string[] = []
@@ -162,6 +163,78 @@ describe('discovered-cache records', () => {
     writeDiscoveredRoute('kilo', mergeDiscoveredRoute(record, 'https://kilo.test', mergeDiscoveredModels('kilo', [{ id: 'a' }], undefined), 9999))
     expect(readFileSync(discoveredCachePath(), 'utf8')).toBe(first)
     expect(JSON.parse(first).routes.kilo).toMatchObject({ fetchedAt: 1234, models: [{ id: 'a', source: 'discovered', discoveredAt: 1234 }] })
+  })
+})
+
+describe('capability provenance', () => {
+  it('persists a heuristic-only model at the floor, marked unverified, with the guess in capabilityHints', () => {
+    const [discovered] = mergeDiscoveredModels('kilo', [{ id: 'zzz-gpt-5-mini-alias' }], undefined)
+    // The cache carries the floor and the marker; the hint claim never becomes
+    // a modality there.
+    expect(discovered).toMatchObject({ id: 'zzz-gpt-5-mini-alias', unverified: true })
+    expect(discovered?.input).toBeUndefined()
+
+    const merge = mergeConfiguredModels('kilo', undefined, [{ id: 'zzz-gpt-5-mini-alias' }], undefined)
+    expect(merge.models[0]).toMatchObject({
+      id: 'zzz-gpt-5-mini-alias',
+      input: ['text'],
+      reasoning: false,
+      unverified: true,
+      capabilityHints: { input: ['image', 'pdf'], reasoning: true, source: 'shipped-hints' },
+    })
+  })
+
+  it('leaves a fully disclosed model untouched, with no hint claim', () => {
+    const merge = mergeConfiguredModels('kilo', undefined, [{
+      id: 'vendor/model:free', input: ['text', 'image'], reasoning: true, tools: true,
+    }], undefined)
+    expect(merge.models[0]).toMatchObject({ input: ['text', 'image'], reasoning: true, tools: true })
+    expect(merge.models[0]!.unverified).toBeUndefined()
+    expect(merge.models[0]!.capabilityHints).toBeUndefined()
+  })
+
+  it('keeps a disclosed modality a fact and its unhinted discovered input when reasoning was only hinted', () => {
+    const live = [{ id: 'zzz-gpt-5-mini-alias', input: ['text'] as Array<'text'> }]
+    const merge = mergeConfiguredModels('kilo', undefined, live, undefined)
+    expect(merge.models[0]).toMatchObject({
+      input: ['text'],
+      reasoning: false,
+      unverified: true,
+      capabilityHints: { reasoning: true, source: 'shipped-hints' },
+    })
+    expect((merge.models[0]!.capabilityHints as { input?: unknown }).input).toBeUndefined()
+
+    const [discovered] = mergeDiscoveredModels('kilo', live, undefined)
+    expect(discovered).toMatchObject({ input: ['text'], unverified: true })
+  })
+
+  it('treats an explicit reasoning:false as a disclosure that blocks the reasoning hint', () => {
+    const merge = mergeConfiguredModels('kilo', undefined, [{ id: 'zzz-gpt-5-mini-alias', reasoning: false }], undefined)
+    expect(merge.models[0]).toMatchObject({ reasoning: false, unverified: true })
+    // The modality hint still applies (image was never disclosed), but no
+    // reasoning hint contradicts the disclosure of absence.
+    expect(merge.models[0]!.capabilityHints).toEqual({ input: ['image', 'pdf'], source: 'shipped-hints' })
+  })
+
+  it('lets a per-model owner override win over the shipped hints', () => {
+    const context = {
+      table: loadCapabilityHints(),
+      override: { routes: { kilo: { models: { 'zzz-whisper-clone': { input: ['image'] } } } } },
+    }
+    const overridden = mergeConfiguredModels('kilo', undefined, [{ id: 'zzz-whisper-clone' }], undefined, context)
+    expect(overridden.models[0]).toMatchObject({
+      input: ['text'],
+      reasoning: false,
+      capabilityHints: { input: ['image'], source: 'owner-override' },
+    })
+    const shipped = mergeConfiguredModels('kilo', undefined, [{ id: 'zzz-whisper-clone' }], undefined)
+    expect(shipped.models[0]).toMatchObject({ capabilityHints: { input: ['audio'], source: 'shipped-hints' } })
+  })
+
+  it('lets a route family replacement suppress a shipped operand', () => {
+    const context = { table: loadCapabilityHints(), override: { routes: { kilo: { hints: { audio: [] } } } } }
+    const merge = mergeConfiguredModels('kilo', undefined, [{ id: 'zzz-whisper-clone' }], undefined, context)
+    expect(merge.models[0]!.capabilityHints).toEqual({ source: 'owner-override' })
   })
 })
 

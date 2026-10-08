@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /** The detail panel's local picker state survives settings echoes. */
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { ProviderDetailPanel, mergeRefreshedModels } from '../src/client/ProviderDetailPanel.tsx'
@@ -51,6 +51,8 @@ type TestModel = {
   isFree?: boolean
   gated?: boolean
   gateReason?: string
+  capabilityHints?: { input?: string[]; reasoning?: boolean; source?: string }
+  unverified?: boolean
 }
 
 /** One pi-ai namespace view; a fresh object is the store's settings echo. */
@@ -512,6 +514,70 @@ it('recognizes the current audio, video, and reasoning families by id when no st
   expect(screen.getAllByTitle('Video Processing')).toHaveLength(2)
   // Reasoning: every listed family but space-bunny (14 of 15 rows).
   expect(screen.getAllByTitle('Reasoning / Thinking')).toHaveLength(14)
+})
+
+it('renders disclosed capability badges as facts and id-hinted badges distinctly', () => {
+  // The model cards render both a name and an id tag; name the rows so the id
+  // tag is a unique anchor for scoping assertions to one card.
+  const { container } = render(panel('gateway', [
+    // Disclosed: structured modalities and explicit flags are facts.
+    { id: 'vendor/solid-model', name: 'Solid', input: ['text', 'image'], reasoning: true, tools: true },
+    // Nothing disclosed: every badge is a hint from the shared table.
+    { id: 'openai/gpt-5-mini', name: 'Hinted Mini' },
+    // The sync's labeled, override-applied hints suppress the shipped claims.
+    { id: 'claude-sonnet-owner', name: 'Owner Hidden', capabilityHints: { input: [], source: 'owner-override' } },
+    // A persisted owner pin renders even where the shipped table matches nothing.
+    { id: 'zzz-pinned-model', name: 'Pinned', capabilityHints: { input: ['audio'], reasoning: true, source: 'owner-override' } },
+    // The sync's own row shape: floor input/reasoning plus the labeled hints
+    // (the floor is not a disclosure of absence).
+    {
+      id: 'zzz-synced-hinted',
+      name: 'Synced',
+      input: ['text'],
+      reasoning: false,
+      unverified: true,
+      capabilityHints: { input: ['image', 'pdf'], reasoning: true, source: 'shipped-hints' },
+    },
+  ]))
+  const cardFor = (id: string): Element => {
+    const tag = screen.getByText(id)
+    const card = tag.closest(`.${styles['modelCard']}`)
+    expect(card).not.toBeNull()
+    return card as Element
+  }
+  const badge = (id: string, title: string): HTMLElement | null => within(cardFor(id) as HTMLElement).queryByTitle(title)
+  expect(container.querySelectorAll(`.${styles['modelCard']}`)).toHaveLength(5)
+
+  // Disclosed facts render without the hint marker.
+  expect(badge('vendor/solid-model', 'Vision / Image')?.getAttribute('data-hint')).toBeNull()
+  expect(badge('vendor/solid-model', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBeNull()
+  expect(badge('vendor/solid-model', 'Tool Calling')?.getAttribute('data-hint')).toBeNull()
+
+  // Nothing-disclosed badges carry the hint marker (gpt-5 and its pdf operand).
+  expect(badge('openai/gpt-5-mini', 'Vision / Image')?.getAttribute('data-hint')).toBe('vision')
+  expect(badge('openai/gpt-5-mini', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
+  expect(badge('openai/gpt-5-mini', 'Documents & Files')?.getAttribute('data-hint')).toBe('files')
+  expect(badge('openai/gpt-5-mini', 'Audio Processing')).toBeNull()
+
+  // The persisted hint set is authoritative: the shipped `claude` claims do
+  // not leak back in, and an owner pin renders without a shipped match.
+  expect(badge('claude-sonnet-owner', 'Vision / Image')).toBeNull()
+  expect(badge('claude-sonnet-owner', 'Documents & Files')).toBeNull()
+  expect(badge('claude-sonnet-owner', 'Reasoning / Thinking')).toBeNull()
+  expect(badge('zzz-pinned-model', 'Audio Processing')?.getAttribute('data-hint')).toBe('audio')
+  expect(badge('zzz-pinned-model', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
+
+  // The sync's floor values yield to its own labeled hints.
+  expect(badge('zzz-synced-hinted', 'Vision / Image')?.getAttribute('data-hint')).toBe('vision')
+  expect(badge('zzz-synced-hinted', 'Documents & Files')?.getAttribute('data-hint')).toBe('files')
+  expect(badge('zzz-synced-hinted', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
+})
+
+it('treats an explicit reasoning:false as a fact that blocks the reasoning hint', () => {
+  render(panel('gateway', [{ id: 'openai/gpt-5-api', name: 'No Think', reasoning: false }]))
+  expect(screen.queryByTitle('Reasoning / Thinking')).toBeNull()
+  // The undisclosed modality is still a labeled hint.
+  expect(screen.getByTitle('Vision / Image').getAttribute('data-hint')).toBe('vision')
 })
 
 describe('mergeRefreshedModels', () => {

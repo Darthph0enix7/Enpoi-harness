@@ -116,3 +116,85 @@ it('the bundled snapshot is real catalog data (not hardcoded capabilities)', asy
   expect(snapshot.some(entry => entry.reasoningEfforts !== undefined)).toBe(true)
   expect(snapshot.every(entry => typeof entry.name === 'string' && entry.name.length > 0)).toBe(true)
 })
+
+it('the bundled snapshot carries a version/fetchedAt stamp in its sidecar', async () => {
+  const { readFileSync } = await import('node:fs')
+  const entries = parseCatalog(JSON.parse(readFileSync(new URL('../catalog.snapshot.json', import.meta.url), 'utf8')))
+  const stamp = JSON.parse(readFileSync(new URL('../catalog.snapshot.meta.json', import.meta.url), 'utf8')) as {
+    version: number
+    fetchedAt: string
+    entryCount: number
+  }
+  expect(stamp.version).toBe(1)
+  expect(Number.isNaN(Date.parse(stamp.fetchedAt))).toBe(false)
+  expect(stamp.entryCount).toBe(entries.length)
+})
+
+it('pins the bundled snapshot without fetching under the pin policy', async () => {
+  const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
+  const store = new CatalogStore({
+    baseURL: 'http://127.0.0.1:8899/commandcode',
+    snapshot: FIXTURE,
+    mode: 'pin',
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+  })
+  store.start()
+  expect((await store.entries()).map(entry => entry.id)).toEqual(['deepseek/deepseek-v4-pro', 'vision/model'])
+  expect(store.source()).toBe('snapshot')
+  expect(store.error()).toBeUndefined()
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+it('refuses the fallback under the off policy when no live catalog answers', async () => {
+  const fetchImpl = vi.fn(async () => { throw new Error('ECONNREFUSED') })
+  const store = new CatalogStore({
+    baseURL: 'http://127.0.0.1:8899/commandcode',
+    snapshot: FIXTURE,
+    mode: 'off',
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+  })
+  store.start()
+  expect(await store.entries()).toEqual([])
+  expect(store.source()).toBe('none')
+  expect(store.error()).toContain('ECONNREFUSED')
+})
+
+it('serves the live catalog under the off policy when the keypool answers', async () => {
+  const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
+  const store = new CatalogStore({
+    baseURL: 'http://127.0.0.1:8899/commandcode',
+    snapshot: FIXTURE,
+    mode: 'off',
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+  })
+  store.start()
+  expect((await store.entries()).map(entry => entry.id)).toEqual(['live/model'])
+  expect(store.source()).toBe('live')
+  expect(store.error()).toBeUndefined()
+})
+
+it('refuses the fallback for a direct vendor route under the off policy', async () => {
+  const fetchImpl = vi.fn(async () => new Response('[]'))
+  const store = new CatalogStore({
+    baseURL: 'https://api.commandcode.ai',
+    snapshot: FIXTURE,
+    mode: 'off',
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+  })
+  expect(await store.entries()).toEqual([])
+  expect(store.source()).toBe('none')
+  expect(store.error()).toContain('no live catalog endpoint')
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+it('reports the bundled snapshot stamp when the loader supplied one', async () => {
+  const stamp = {
+    version: 3,
+    fetchedAt: '2026-10-04T15:05:11.000Z',
+    entryCount: 2,
+    source: 'http://127.0.0.1:8899/commandcode/catalog.json',
+  }
+  const store = new CatalogStore({ baseURL: 'https://api.commandcode.ai', snapshot: FIXTURE, stamp })
+  expect(store.stamp()).toEqual(stamp)
+  expect(await store.entries()).toHaveLength(2)
+})

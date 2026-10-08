@@ -31,7 +31,11 @@
  * route's catalog resolves on first use: a loopback baseURL (a legacy keypool
  * deployment) may serve `{baseURL}/catalog.json` and falls back to the bundled
  * snapshot; a non-loopback (direct-vendor) route resolves the bundled snapshot
- * without fetching, because the vendor exposes no catalog endpoint.
+ * without fetching, because the vendor exposes no catalog endpoint. The
+ * bundled snapshot is stamped (`catalog.snapshot.meta.json`) and the operator
+ * `catalog.snapshot` policy (`auto`/`pin`/`off`) can pin it or refuse the
+ * fallback; `scripts/refresh-catalog.mjs` re-fetches it from a reachable
+ * keypool with validation and a backup of the previous file.
  *
  * The shipped route is the direct vendor endpoint with a native credential
  * pool: the route profile carries the identities ({ id, credentialRef,
@@ -72,8 +76,9 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { PoolEngine } from '@deepseek-ai/dsh-llm-pi-ai'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
-import type { CatalogEntry } from './catalog.js'
+import type { CatalogEntry, CatalogSnapshotMode, CatalogSnapshotStamp } from './catalog.js'
 import { CatalogStore, contextWindowOf, maxOutputTokensOf, modalitiesOf, parseCatalog } from './catalog.js'
+import { readSnapshotStamp } from './catalog-refresh.js'
 import type { CommandCodePoolConfig, CommandCodePoolIdentity, CommandCodeRouteModel, CommandCodeRouteProfile } from './adapter.js'
 import { CommandCodeAdapter, DEFAULT_USER_IMAGE_MAX_BYTES, DEFAULT_USER_IMAGE_MAX_PIXELS } from './adapter.js'
 
@@ -120,6 +125,14 @@ export interface CommandCodeRouteConfig {
 export interface Config {
   /** Provider routes keyed by route name; settings edits reach the next request without a remount. */
   providers?: Volatile<Record<string, CommandCodeRouteConfig>>
+  /**
+   * Bundled-snapshot policy for every route's catalog, read at mount:
+   * `auto` (default) fetches the live keypool catalog when the baseURL is
+   * loopback and falls back to the bundled snapshot; `pin` always serves the
+   * bundled snapshot; `off` refuses the fallback (an empty model list) when
+   * no live catalog answers.
+   */
+  catalog?: { snapshot?: CatalogSnapshotMode }
 }
 
 const poolIdentitySchema = Schema.object({
@@ -168,20 +181,41 @@ const routeProfileSchema = Schema.object({
 /**
  * Schemastery validator for {@link Config}. `providers` is `.volatile()`, so
  * the merged settings service derives live forms from this schema and persists
- * edits through the active profile patch without remounting the plugin.
+ * edits through the active profile patch without remounting the plugin. The
+ * `catalog` policy is static: a change reaches the next mount.
  */
 export const Config = Schema.object({
   providers: live(Schema.dict(routeProfileSchema).default({})),
+  catalog: Schema.object({
+    snapshot: Schema.union(['auto', 'pin', 'off'] as const).default('auto'),
+  }).default({ snapshot: 'auto' }),
 })
 
+/** The bundled catalog snapshot and its sidecar stamp. */
+interface LoadedSnapshot {
+  entries: CatalogEntry[]
+  stamp?: CatalogSnapshotStamp
+}
+
 /** Bundled catalog snapshot used when the keypool is unreachable. */
-function loadSnapshot(): CatalogEntry[] {
+function loadSnapshot(): LoadedSnapshot {
   try {
     const path = fileURLToPath(new URL('../catalog.snapshot.json', import.meta.url))
-    return parseCatalog(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+    const entries = parseCatalog(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+    if (entries.length === 0) return { entries }
+    const stamp = readSnapshotStamp(path)
+    return { entries, ...stamp === undefined ? {} : { stamp } }
   } catch {
-    return []
+    return { entries: [] }
   }
+}
+
+/** The configured snapshot policy; anything unrecognized means `auto`. */
+function catalogModeOf(config: Config): CatalogSnapshotMode {
+  const catalog: unknown = plainConfig(config).catalog
+  if (typeof catalog !== 'object' || catalog === null || Array.isArray(catalog)) return 'auto'
+  const snapshot = (catalog as { snapshot?: unknown }).snapshot
+  return snapshot === 'pin' || snapshot === 'off' ? snapshot : 'auto'
 }
 
 /**
@@ -352,6 +386,14 @@ function parseProfiles(providers: unknown): Map<string, CommandCodeRouteProfile>
 export function apply(ctx: Context, config: Config = {}): void {
   const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS
   const snapshot = loadSnapshot()
+  const catalogMode = catalogModeOf(config)
+  if (snapshot.stamp !== undefined) {
+    ctx.logger.info(
+      `commandcode-provider: catalog snapshot v${String(snapshot.stamp.version)}`
+      + ` fetched ${snapshot.stamp.fetchedAt} (${String(snapshot.stamp.entryCount)} entries)`,
+    )
+  }
+  if (catalogMode !== 'auto') ctx.logger.info(`commandcode-provider: catalog snapshot mode "${catalogMode}"`)
 
   // Profiles resolve per operation from the live config, memoized by the raw
   // snapshot's identity so an unchanged config costs one identity check. A
@@ -381,7 +423,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     // A route's baseURL is editable: a changed one resolves a fresh store
     // instead of serving the previous endpoint's catalog.
     if (cached !== undefined && cached.baseURL === profile.baseURL) return cached.store
-    const store = new CatalogStore({ baseURL: profile.baseURL, snapshot })
+    const store = new CatalogStore({
+      baseURL: profile.baseURL,
+      snapshot: snapshot.entries,
+      mode: catalogMode,
+      ...snapshot.stamp === undefined ? {} : { stamp: snapshot.stamp },
+    })
     catalogs.set(profile.route, { baseURL: profile.baseURL, store })
     store.start()
     return store
@@ -395,7 +442,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // — the caller owns the write.
   ctx.llm.registerModelDiscovery(settingsNs, async (request) => {
     const profile = request.provider === undefined ? undefined : profiles().get(request.provider)
-    const entries = profile === undefined ? snapshot : await catalogFor(profile).entries()
+    const entries = profile === undefined ? snapshot.entries : await catalogFor(profile).entries()
     return entries.map((entry) => {
       const contextWindow = contextWindowOf(entry)
       const maxTokens = maxOutputTokensOf(entry)

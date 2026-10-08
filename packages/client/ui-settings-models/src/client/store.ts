@@ -15,6 +15,8 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SettingsDescribeFace } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
+import { ORCHESTRATION_NS } from './model-groups.ts'
+import { parseProviderPresetOverrides, type ProviderPresetOverrides } from './provider-overrides.ts'
 
 /**
  * Any route key walks a dict schema to the same profile node, so the lookup
@@ -157,6 +159,11 @@ export interface ModelsSettingsState {
   rows: readonly ProviderRow[]
   /** Namespace views by ns, for the editor's schema/layers/secrets. */
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
+  /**
+   * Operator overrides for the Add-Provider preset catalog, read from
+   * `enpoi-orchestration.uiPreferences.providerCatalog` on each load.
+   */
+  providerOverrides: ProviderPresetOverrides
 }
 
 /**
@@ -208,6 +215,7 @@ export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<ModelsSettingsState> = createSnapshotStore<ModelsSettingsState>({
     status: 'idle', error: null, credentialError: null, writable: false, rows: [], namespaces: new Map(),
+    providerOverrides: {},
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -252,6 +260,7 @@ export class ModelsSettingsStore {
     const writable = mirrored.view.writable
     const views: readonly SettingsNamespaceView[] = mirrored.view.namespaces
     const namespaces = new Map(views.map(view => [view.ns, view]))
+    const providerOverrides = parseProviderPresetOverrides(namespaces.get(ORCHESTRATION_NS)?.value)
     const rows: ProviderRow[] = providers.map((entry) => {
       const namespace = namespaces.get(entry.settingsNs)
       const configured = namespace !== undefined
@@ -293,16 +302,23 @@ export class ModelsSettingsStore {
       s.error = null
       s.credentialError = credentialError
       s.writable = writable
-      s.rows = rows.filter(row => row.entry.provider !== 'deepseek-account' || row.accountAvailable === true).map((row) => {
-        if (row.entry.provider === 'deepseek-account') return row
-        const named = row.apiKeyEnv === undefined ? undefined : credentials[row.apiKeyEnv]
-        const derived = row.apiKeyEnv !== undefined ? undefined : credentials[deriveKeyRef(row.entry.provider)]
-        return {
-          ...row,
-          ...named === undefined ? {} : { credential: named },
-          ...derived === undefined ? {} : { derivedCredential: derived },
-        }
-      })
+      s.providerOverrides = providerOverrides
+      // A hidden preset leaves the unconfigured listing, but a route the
+      // operator already configured (or one currently registered) is never
+      // silently dropped: it keeps its row and stays editable.
+      s.rows = rows
+        .filter(row => row.entry.provider !== 'deepseek-account' || row.accountAvailable === true)
+        .filter(row => row.configured || row.entry.active || providerOverrides[row.entry.provider]?.hidden !== true)
+        .map((row) => {
+          if (row.entry.provider === 'deepseek-account') return row
+          const named = row.apiKeyEnv === undefined ? undefined : credentials[row.apiKeyEnv]
+          const derived = row.apiKeyEnv !== undefined ? undefined : credentials[deriveKeyRef(row.entry.provider)]
+          return {
+            ...row,
+            ...named === undefined ? {} : { credential: named },
+            ...derived === undefined ? {} : { derivedCredential: derived },
+          }
+        })
       s.namespaces = namespaces
     })
   }

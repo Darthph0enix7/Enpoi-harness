@@ -1520,6 +1520,13 @@ select.input {
   background: rgba(139, 92, 246, 0.15);
 }
 
+/* An id-hint badge, not a disclosure: dashed outline and muted fill so a
+   guess never reads as a stated capability. */
+.capIconHint {
+  border: 1px dashed var(--dsw-alias-border-l3);
+  opacity: 0.75;
+}
+
 .modelEyeBtn {
   width: 26px;
   height: 26px;

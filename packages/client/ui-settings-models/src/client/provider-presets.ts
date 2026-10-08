@@ -214,6 +214,7 @@ export default [
     'protocol': 'anthropic-messages',
     'baseURL': 'https://api.anthropic.com',
     'doc': 'https://docs.anthropic.com/en/docs/about-claude/models',
+    'popular': 3,
   },
   {
     'id': 'anyapi',
@@ -670,6 +671,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://api.githubcopilot.com',
     'doc': 'https://docs.github.com/en/copilot',
+    'popular': 4,
   },
   {
     'id': 'gitlab',
@@ -702,6 +704,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://generativelanguage.googleapis.com/v1beta',
     'doc': 'https://ai.google.dev/gemini-api/docs/models',
+    'popular': 6,
   },
   {
     'id': 'greenpt',
@@ -893,6 +896,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://api.kilo.ai/api/gateway',
     'doc': 'https://kilo.ai',
+    'keyless': true,
   },
   {
     'id': 'kimi-for-coding',
@@ -993,6 +997,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'http://127.0.0.1:1234/v1',
     'doc': 'https://lmstudio.ai/models',
+    'keyless': true,
   },
   {
     'id': 'longcat',
@@ -1304,6 +1309,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'http://127.0.0.1:11434/v1',
     'doc': 'https://ollama.com',
+    'keyless': true,
   },
   {
     'id': 'ollama-cloud',
@@ -1324,6 +1330,7 @@ export default [
     'protocol': 'openai-responses',
     'baseURL': 'https://api.openai.com/v1',
     'doc': 'https://platform.openai.com/docs/models',
+    'popular': 5,
   },
   {
     'id': 'opencode-go',
@@ -1334,6 +1341,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://opencode.ai/zen/go/v1',
     'doc': 'https://opencode.ai/docs/zen',
+    'popular': 2,
   },
   {
     'id': 'opencode',
@@ -1344,6 +1352,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://opencode.ai/zen/v1',
     'doc': 'https://opencode.ai/docs/zen',
+    'popular': 1,
   },
   {
     'id': 'openreason',
@@ -1364,6 +1373,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': 'https://openrouter.ai/api/v1',
     'doc': 'https://openrouter.ai/models',
+    'popular': 7,
   },
   {
     'id': 'opper',
@@ -1916,6 +1926,7 @@ export default [
     'protocol': 'openai-completions',
     'baseURL': '',
     'doc': 'https://github.com/vercel/ai/tree/5eb85cc45a259553501f535b8ac79a77d0e79223/packages/gateway',
+    'popular': 8,
   },
   {
     'id': 'google-vertex',

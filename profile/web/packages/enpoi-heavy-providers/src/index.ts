@@ -17,10 +17,12 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+// Type-only: the webserver event map for the page-bootstrap injection below.
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { HeavyJobManager } from './jobs.js'
 import { manifestProblems } from './manifests.js'
-import { substitute, type CredentialsSeam, type FetchLike, type ModelDiscoverySeam, type SettingsSeam, type StepOutcome } from './planner.js'
+import { overlayInjectionRow, substitute, type CredentialsSeam, type FetchLike, type ModelDiscoverySeam, type SettingsSeam, type StepOutcome } from './planner.js'
 import { HeavyProvidersService } from './remote.js'
 import type { HeavyStep } from './manifests.js'
 
@@ -86,6 +88,14 @@ export function apply(ctx: Context): void {
   const jobs = new HeavyJobManager({
     dir: join(dshHome, 'cache', 'heavy-jobs'),
     run: step => runStep(ctx, step, home, dshHome),
+  })
+  // The client's compiled fallback honors the same operator overlay the host
+  // table uses: publish it as a page bootstrap global so the pre-connection
+  // listing is operator-controllable before the first `enpoiHeavy.manifests`
+  // reply. A profile without a webserver never emits this event.
+  ctx.on('webserver/index-inject', (table) => {
+    const row = overlayInjectionRow(dshHome)
+    if (row !== undefined) table.push(row)
   })
   new HeavyProvidersService(ctx, {
     deps: () => ({

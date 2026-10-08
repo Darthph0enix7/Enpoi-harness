@@ -118,8 +118,29 @@ export function planBadgeOf(entry: CatalogEntry | undefined): string | undefined
   return match?.[0]
 }
 
-/** One catalog source: the live keypool endpoint or the bundled snapshot. */
-export type CatalogSource = 'live' | 'snapshot'
+/** One catalog source: the live keypool endpoint, the bundled snapshot, or none. */
+export type CatalogSource = 'live' | 'snapshot' | 'none'
+
+/**
+ * Operator control over the bundled snapshot. `auto` fetches the live keypool
+ * catalog when the baseURL is loopback and falls back to the snapshot; `pin`
+ * always serves the bundled snapshot without fetching; `off` refuses the
+ * fallback — a route whose live catalog cannot answer resolves no models
+ * instead of silently serving a possibly stale snapshot.
+ */
+export type CatalogSnapshotMode = 'auto' | 'pin' | 'off'
+
+/** The stamp of the bundled snapshot file (`catalog.snapshot.meta.json`). */
+export interface CatalogSnapshotStamp {
+  /** Monotonic refresh counter; the shipped snapshot is version 1. */
+  version: number
+  /** ISO timestamp of the fetch that produced this snapshot. */
+  fetchedAt: string
+  /** Entries the snapshot holds. */
+  entryCount: number
+  /** Where the snapshot was fetched from; absent for the shipped snapshot. */
+  source?: string
+}
 
 /**
  * Whether one base URL addresses the local machine. Only the keypool proxy
@@ -149,6 +170,10 @@ export interface CatalogStoreOptions {
   baseURL: string
   /** Bundled snapshot entries used when the live fetch fails. */
   snapshot: readonly CatalogEntry[]
+  /** Snapshot policy; defaults to `auto`. */
+  mode?: CatalogSnapshotMode
+  /** Stamp of the bundled snapshot, when the snapshot file carried one. */
+  stamp?: CatalogSnapshotStamp
   /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch
   /** Live-fetch timeout; defaults to 5 s. */
@@ -158,12 +183,14 @@ export interface CatalogStoreOptions {
 /**
  * Startup catalog loader: one fetch per route, cached. `start()` is fire and
  * forget (the plugin's apply does not block the boot); readers await
- * `entries()`, which resolves from the live catalog or the snapshot.
+ * `entries()`, which resolves from the live catalog, the bundled snapshot, or
+ * an empty list under the `off` policy.
  */
 export class CatalogStore {
   private pending: Promise<CatalogEntry[]> | undefined
   private resolved: CatalogEntry[] | undefined
   private origin: CatalogSource = 'snapshot'
+  private failure: string | undefined
 
   constructor(private readonly options: CatalogStoreOptions) {}
 
@@ -172,7 +199,7 @@ export class CatalogStore {
     void this.load().catch(() => undefined)
   }
 
-  /** The catalog entries, fetching once on first demand. */
+  /** The catalog entries, resolving once on first demand. */
   async entries(): Promise<readonly CatalogEntry[]> {
     return await this.load()
   }
@@ -182,25 +209,48 @@ export class CatalogStore {
     return this.origin
   }
 
+  /** Why the fallback was refused or the live fetch failed, when it did. */
+  error(): string | undefined {
+    return this.failure
+  }
+
+  /** The bundled snapshot's stamp, when the snapshot file carried one. */
+  stamp(): CatalogSnapshotStamp | undefined {
+    return this.options.stamp
+  }
+
   private load(): Promise<CatalogEntry[]> {
     if (this.resolved !== undefined) return Promise.resolve(this.resolved)
-    // The catalog endpoint lives on the keypool. A direct-vendor baseURL has
-    // none, so resolve the bundled snapshot immediately rather than 404 on
-    // every startup and only then fall back. Built inside the assignment so a
-    // concurrent caller cannot start a second fetch.
-    this.pending ??= (isLoopbackBaseURL(this.options.baseURL)
-      ? this.fetchLive().then(entries => ({ entries, source: 'live' as const }))
-      : Promise.resolve({ entries: [...this.options.snapshot], source: 'snapshot' as const })
-    ).then(({ entries, source }) => {
+    // Built inside the assignment so a concurrent caller cannot start a second
+    // fetch. `resolveEntries` never rejects: every path settles an entry list
+    // and its source, including the `off` policy's empty refusal.
+    this.pending ??= this.resolveEntries().then(({ entries, source }) => {
       this.resolved = entries
       this.origin = source
       return entries
-    }).catch(() => {
-      this.resolved = [...this.options.snapshot]
-      this.origin = 'snapshot'
-      return this.resolved
     })
     return this.pending
+  }
+
+  private async resolveEntries(): Promise<{ entries: CatalogEntry[]; source: CatalogSource }> {
+    const mode = this.options.mode ?? 'auto'
+    if (mode === 'pin') return { entries: [...this.options.snapshot], source: 'snapshot' }
+    // The catalog endpoint lives on the keypool. A direct-vendor baseURL has
+    // none, so a loopback probe is the only live path.
+    if (isLoopbackBaseURL(this.options.baseURL)) {
+      try {
+        return { entries: await this.fetchLive(), source: 'live' }
+      } catch (error) {
+        this.failure = error instanceof Error ? error.message : String(error)
+        if (mode === 'off') return { entries: [], source: 'none' }
+        return { entries: [...this.options.snapshot], source: 'snapshot' }
+      }
+    }
+    if (mode === 'off') {
+      this.failure = `no live catalog endpoint for ${this.options.baseURL} and the snapshot fallback is off`
+      return { entries: [], source: 'none' }
+    }
+    return { entries: [...this.options.snapshot], source: 'snapshot' }
   }
 
   private async fetchLive(): Promise<CatalogEntry[]> {

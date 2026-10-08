@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import * as CommandCode from '../src/index.js'
 import { contextWindowOf, maxOutputTokensOf, modalitiesOf, parseCatalog } from '../src/catalog.js'
 import { manifestById } from '../../enpoi-heavy-providers/src/manifests.js'
@@ -104,6 +104,47 @@ it('model discovery answers the whole bundled catalog with capacities and modali
   expect(discovered.contextWindow).toBe(contextWindowOf(entry))
   expect(discovered.maxTokens).toBe(maxOutputTokensOf(entry))
   expect(discovered.inputModalities).toEqual(modalitiesOf(entry))
+})
+
+it('defaults the catalog snapshot policy to auto and accepts pin/off', () => {
+  const defaults = CommandCode.Config({ providers: {} }) as unknown as { catalog?: { snapshot?: string } }
+  expect(defaults.catalog?.snapshot).toBe('auto')
+  const explicit = CommandCode.Config({ catalog: { snapshot: 'off' } } as never) as unknown as { catalog?: { snapshot?: string } }
+  expect(explicit.catalog?.snapshot).toBe('off')
+})
+
+it('the catalog snapshot policy pins the bundled catalog and refuses the fallback when off', async () => {
+  const snapshot = bundledCatalog()
+
+  // pin: a live keypool answer is ignored, the stamped snapshot serves.
+  const pinnedFetch = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live' }])))
+  vi.stubGlobal('fetch', pinnedFetch)
+  try {
+    const pinned = await mount({
+      catalog: { snapshot: 'pin' },
+      providers: { commandcode: { baseURL: 'http://127.0.0.1:8899/commandcode', keyless: true } },
+    })
+    const models = await pinned.llm.discoverModels('commandcode-provider', {
+      provider: 'commandcode',
+      baseURL: 'http://127.0.0.1:8899/commandcode',
+    })
+    expect(models.map(model => model.id)).toEqual(snapshot.map(entry => entry.id))
+    expect(pinnedFetch).not.toHaveBeenCalled()
+
+    // off: no live keypool answer means no models, never the bundled fallback.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED') }))
+    const refused = await mount({
+      catalog: { snapshot: 'off' },
+      providers: { commandcode: { baseURL: 'http://127.0.0.1:8899/commandcode', keyless: true } },
+    })
+    const none = await refused.llm.discoverModels('commandcode-provider', {
+      provider: 'commandcode',
+      baseURL: 'http://127.0.0.1:8899/commandcode',
+    })
+    expect(none).toEqual([])
+  } finally {
+    vi.unstubAllGlobals()
+  }
 })
 
 it('a fresh direct-route install writes every catalog model into the route', async () => {

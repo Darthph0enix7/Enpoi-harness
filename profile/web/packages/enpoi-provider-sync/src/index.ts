@@ -36,6 +36,14 @@ import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@
 import { readSettingsDocument } from 'dsh-enpoi-contracts'
 import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
+import {
+  claimCapabilityHints,
+  loadCapabilityHints,
+  parseCapabilityHintsOverride,
+  type CapabilityHintClaim,
+  type CapabilityHints,
+  type CapabilityHintsOverrideDocument,
+} from './capability-hints.ts'
 
 export const name = 'enpoi-provider-sync'
 
@@ -798,9 +806,9 @@ export function applyCatalogOverlay(
       applied.push(entry)
     } else {
       // The overlay record is maintained truth: its fields win, and the
-      // "nothing described this model" marker the merge may have stamped is
-      // cleared because the overlay does describe it.
-      applied.push({ ...entry, ...upsert, unverified: undefined })
+      // "nothing described this model" marker and the id-hint claim the merge
+      // may have stamped are cleared because the overlay does describe it.
+      applied.push({ ...entry, ...upsert, unverified: undefined, capabilityHints: undefined })
     }
     if (id !== undefined) seen.add(id)
   }
@@ -835,7 +843,11 @@ export interface DiscoveredFileModel {
   releaseDate?: string
   /** Request-wide price tiers above an input-token threshold, when models.dev disclosed any. */
   costTiers?: LiveCostTier[]
-  /** True only when neither models.dev, the installed catalog, nor the listing disclosed a capability. */
+  /**
+   * True when a capability rests on the schema floor instead of a disclosure:
+   * nothing at all described the model, or its modality/reasoning row was
+   * left to the id hints (which are persisted only in `capabilityHints`).
+   */
   unverified?: boolean
   source: 'discovered'
   discoveredAt: number
@@ -880,6 +892,49 @@ export function discoveredCachePath(): string {
   const override = process.env.DSH_DISCOVERED_MODELS
   if (override !== undefined && override.length > 0) return override
   return join(resolveDshHome(), 'cache', 'discovered-models.json')
+}
+
+/**
+ * The deployment owner's capability-hints override path:
+ * `$DSH_HOME/model-capability-hints.json`, overridable for tests. The file's
+ * per-route/per-model hints win over the shipped id table
+ * (`model-capability-hints.json`); an absent file is no override.
+ * @param env - environment to read (tests inject one).
+ * @param platform - OS key to branch on (tests inject one).
+ * @returns the override file path.
+ */
+export function capabilityHintsOverridePath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const override = firstNonEmpty(env.DSH_CAPABILITY_HINTS_OVERRIDE)
+  if (override !== undefined) return override
+  return join(resolveDshHome(env, platform), 'model-capability-hints.json')
+}
+
+/**
+ * Read the owner's capability-hints override. An absent file is no override;
+ * a present but malformed one throws so the caller reports it instead of
+ * silently dropping maintained hints.
+ * @param path - override path; defaults to `$DSH_HOME/model-capability-hints.json`.
+ * @returns the parsed document; `{}` when the file is absent.
+ */
+export function loadCapabilityHintsOverride(path: string = capabilityHintsOverridePath()): CapabilityHintsOverrideDocument {
+  if (!existsSync(path)) return {}
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    throw new Error(`capability-hints override ${path}: unreadable — ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return parseCapabilityHintsOverride(raw, path)
+}
+
+/**
+ * The hint evaluation one sync pass uses: the shipped table plus the owner
+ * override (when one loaded). Callers that omit it get the shipped table and
+ * no override, which keeps unit merges deterministic.
+ */
+export interface CapabilityHintContext {
+  table: CapabilityHints
+  override: CapabilityHintsOverrideDocument
 }
 
 /** Read the cache tolerantly: a corrupt file is replaced, never fatal to a sync pass. */
@@ -1006,102 +1061,6 @@ function fallbackFor(capacities: Record<string, RouteCapacity> | undefined, rout
   return routeCaps.default === undefined ? undefined : { ...routeCaps.default, matched: 'default' }
 }
 
-/** Detect the declared input modalities of one model.
- *
- * Data-first: when models.dev / catalog / the live listing carry modalities,
- * they are AUTHORITATIVE — id heuristics never add image on top (that produced
- * false vision claims for text-only models). Heuristics run only when no
- * structured data exists at all (custom/alias models). The disclosed tokens
- * are mapped faithfully, including the disclosure-side `audio`, `video`, and
- * `pdf`; text is the floor every model carries.
- * @param id - the model id.
- * @param mDev - the models.dev entry, when one exists.
- * @param cat - the installed pi-ai catalog entry, when one exists.
- * @param live - modalities the listing disclosed, when it disclosed any.
- * @returns the accepted input types; `['text']` is the schema floor.
- */
-function detectModalities(
-  id: string,
-  mDev: ModelsDevModel | undefined,
-  cat: Model<Api> | undefined,
-  live?: readonly LiveModality[],
-): LiveModality[] {
-  const rawInputs: readonly unknown[] = mDev?.modalities?.input ?? cat?.input ?? live ?? []
-  const lower = id.toLowerCase()
-
-  if (rawInputs.length > 0) {
-    return ['text', ...liveModalities(rawInputs).filter(modality => modality !== 'text')]
-  }
-
-  if (
-    lower.includes('vision') ||
-    lower.includes('vl') ||
-    lower.includes('minimax') ||
-    lower.includes('gemini') ||
-    lower.includes('claude') ||
-    lower.includes('gpt-4') ||
-    lower.includes('gpt-5') ||
-    lower.includes('luna') ||
-    lower.includes('k3') ||
-    lower.includes('qwen-vl') ||
-    lower.includes('qwen2.5-vl') ||
-    lower.includes('qwen3-vl') ||
-    lower.includes('qwen3.8-vl') ||
-    lower.includes('pixtral') ||
-    lower.includes('grok-2') ||
-    lower.includes('mimo')
-  ) {
-    return ['text', 'image']
-  }
-
-  return ['text']
-}
-
-/**
- * Determines if a model has reasoning capabilities.
- * @param id - the model id.
- * @param mDev - the models.dev entry, when one exists.
- * @param cat - the installed pi-ai catalog entry, when one exists.
- * @param live - whether the listing advertised reasoning; a boolean disclosure
- *   wins over id heuristics and is never assumed when absent.
- * @returns whether the model reasons.
- */
-function isReasoningModel(
-  id: string,
-  mDev: ModelsDevModel | undefined,
-  cat: Model<Api> | undefined,
-  live?: boolean,
-): boolean {
-  if (mDev?.reasoning === true) return true
-  if (Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0) return true
-  if (cat?.reasoning === true) return true
-  if (cat?.thinkingLevelMap !== undefined) {
-    const nonOff = Object.keys(cat.thinkingLevelMap).filter(k => k !== 'off')
-    if (nonOff.length > 0) return true
-  }
-  if (live !== undefined) return live
-  const lower = id.toLowerCase()
-  return (
-    lower.includes('think') ||
-    lower.includes('reason') ||
-    lower.includes('luna') ||
-    lower.includes('sol') ||
-    lower.includes('terra') ||
-    lower.includes('flash-tiered') ||
-    lower.includes('pro-agent') ||
-    lower.includes('pro-high') ||
-    lower.includes('opus-4-6') ||
-    lower.includes('r1') ||
-    lower.includes('o1') ||
-    lower.includes('o3') ||
-    lower.includes('o4') ||
-    lower.includes('gpt-5') ||
-    lower.includes('k3') ||
-    lower.includes('m3') ||
-    lower.includes('glm-5')
-  )
-}
-
 /**
  * models.dev's `release_date`, when it carries the `YYYY-MM-DD` spelling the
  * catalogue publishes and parses as an ISO date. Anything else is the absence
@@ -1161,9 +1120,10 @@ export function modelsDevCostTiers(value: unknown): LiveCostTier[] | undefined {
 /** One model's two renderings: what settings stores and what the discovery cache keeps. */
 interface AnalyzedModel {
   /**
-   * The settings-model record. Exactly the fields this sync has always
-   * written, plus `unverified: true` when nothing at all disclosed the
-   * model's capabilities.
+   * The settings-model record. Capabilities are disclosed facts or the schema
+   * floor; a guess from the shared id table rides only in the labeled
+   * `capabilityHints` field, and `unverified: true` marks a floor that no
+   * disclosure justified.
    */
   settings: Record<string, unknown>
   /** The discovered-cache record, minus the provenance stamps the writer adds. */
@@ -1172,32 +1132,30 @@ interface AnalyzedModel {
 
 /**
  * Analyze a live model with canonical naming, reasoning efforts, capacity
- * metadata, and honest provenance.
+ * metadata, and honest capability provenance.
  *
- * A model that neither models.dev, the installed catalog, nor the listing
- * itself describes carries `unverified: true` and is rendered with the
- * schema's floor (`text` input, no reasoning, no tools claim): the sync
- * publishes what it knows, which here is nothing beyond the id.
+ * Capabilities are persisted only when a source disclosed them: models.dev,
+ * the installed catalog, or the listing itself. The shared id table's
+ * operands never become facts — a capability nothing disclosed keeps the
+ * schema floor (`text` input, no reasoning) and is marked `unverified`, with
+ * the id guess kept only in the labeled `capabilityHints` field. The rules
+ * engine and the panel therefore read vectors, not guesses.
  * @param route - the provider route key, for models.dev scoping.
  * @param model - the normalized listing entry.
  * @param fallback - the route's capacity fallback for ids nothing sizes.
+ * @param hints - the shipped hint table plus the owner override.
  * @returns the settings record and the cache record.
  */
 function analyzeModel(
   route: string,
   model: LiveModel,
   fallback: CapacityFallback | undefined,
+  hints: CapabilityHintContext,
 ): AnalyzedModel {
   const mDev = resolveFromModelsDev(route, model.id)
   const catalog = getCatalogIndex()
   const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
   const cat = catalog.get(model.id) ?? catalog.get(shortId)
-
-  // Nothing described this model: not models.dev, not the installed catalog,
-  // and not the listing beyond an id. Capabilities stay at the schema floor
-  // and the record is marked unverified rather than guessed at.
-  const unverified = mDev === undefined && cat === undefined
-    && model.input === undefined && model.reasoning === undefined && model.tools === undefined
 
   // 1. Resolve Name — models.dev is AUTHORITATIVE; the live proxy's
   // description is often mislabeled (e.g. gemini-2.5-flash-thinking described
@@ -1224,10 +1182,40 @@ function analyzeModel(
   const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262_144
   const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32_768
 
-  // 3. Resolve Modalities & Capabilities. An unverified model gets the floor,
-  // not the heuristics: "no metadata" must not read as "probably vision".
-  const inputModalities: LiveModality[] = unverified ? ['text'] : detectModalities(model.id, mDev, cat, model.input)
-  const isReasoning = unverified ? false : isReasoningModel(model.id, mDev, cat, model.reasoning)
+  // 3. Resolve Modalities, Reasoning, and their provenance. `input` and
+  // `reasoning` are facts only when a disclosure stated them; the shared id
+  // table's operands are hints. An explicit `reasoning: false` from any
+  // source is a disclosure of absence and blocks the heuristics that used to
+  // override it.
+  const disclosed = [mDev?.modalities?.input, cat?.input, model.input]
+    .find(value => Array.isArray(value) && liveModalities(value).length > 0)
+  const modalityDisclosed = disclosed !== undefined
+  const inputModalities: LiveModality[] = modalityDisclosed
+    ? ['text', ...liveModalities(disclosed).filter(modality => modality !== 'text')]
+    : ['text']
+  const reasoningSources = [mDev?.reasoning, cat?.reasoning, model.reasoning]
+    .filter((value): value is boolean => typeof value === 'boolean')
+  const reasoningOptions = Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0
+  const thinkingLevels = cat?.thinkingLevelMap !== undefined && Object.keys(cat.thinkingLevelMap).some(key => key !== 'off')
+  const reasoningDisclosed = reasoningSources.length > 0 || reasoningOptions || thinkingLevels
+  const isReasoning = reasoningSources.some(value => value === true) || reasoningOptions || thinkingLevels
+
+  // The shared table's guess (and any owner override) never becomes a fact:
+  // it is kept only under `capabilityHints`, and a claim for a capability
+  // nothing disclosed marks the record unverified.
+  const claim: CapabilityHintClaim | undefined = claimCapabilityHints(route, model.id, hints.table, hints.override)
+  const hintedInput = !modalityDisclosed && claim !== undefined && claim.input.length > 0
+  const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true
+  const nothingDescribed = mDev === undefined && cat === undefined
+    && model.input === undefined && model.reasoning === undefined && model.tools === undefined
+  const unverified = nothingDescribed || hintedInput || hintedReasoning
+  // A disclosed capability keeps its fact; the labeled hint field carries only
+  // the claims a disclosure did not cover.
+  const capabilityHints: Record<string, unknown> | undefined = claim === undefined ? undefined : {
+    ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
+    ...claim.reasoning && !reasoningDisclosed ? { reasoning: true } : {},
+    source: claim.source,
+  }
 
   // 4. Resolve Reasoning Efforts
   // NOTE: the `off` level is deliberately NOT written as a key — `off` is a
@@ -1316,6 +1304,7 @@ function analyzeModel(
       ...(releaseDate === undefined ? {} : { releaseDate }),
       ...(costTiers === undefined ? {} : { costTiers }),
       ...(reasoningEfforts ? { reasoningEfforts } : {}),
+      ...(capabilityHints === undefined ? {} : { capabilityHints }),
       ...gate,
       ...(unverified ? { unverified: true } : {}),
     },
@@ -1324,7 +1313,7 @@ function analyzeModel(
       name,
       contextWindow,
       maxTokens,
-      ...(unverified ? {} : { input: inputModalities }),
+      ...(modalityDisclosed ? { input: inputModalities } : {}),
       ...(tools === undefined ? {} : { tools }),
       ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
@@ -1355,6 +1344,8 @@ export interface ConfiguredMerge {
  * @param configured - the route's current `models` array, when any.
  * @param live - normalized live listing entries.
  * @param capacities - the route's capacity fallbacks.
+ * @param hints - the shipped hint table plus the owner override; defaults to
+ *   the shipped table with no override.
  * @returns the merged list and the configured ids nothing advertised.
  */
 export function mergeConfiguredModels(
@@ -1362,11 +1353,12 @@ export function mergeConfiguredModels(
   configured: Array<Record<string, unknown>> | undefined,
   live: LiveModel[],
   capacities: Record<string, RouteCapacity> | undefined,
+  hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
 ): ConfiguredMerge {
   const advertised = new Map<string, Record<string, unknown>>()
   for (const model of live) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id)).settings)
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints).settings)
   }
   const models: Array<Record<string, unknown>> = []
   const unadvertised: string[] = []
@@ -1400,10 +1392,11 @@ export function mergeDiscoveredModels(
   route: string,
   live: LiveModel[],
   capacities: Record<string, RouteCapacity> | undefined,
+  hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
 ): Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>> {
   return live.map((model) => {
     const fallback = fallbackFor(capacities, route, model.id)
-    return analyzeModel(route, model, fallback).discovered
+    return analyzeModel(route, model, fallback, hints).discovered
   })
 }
 
@@ -1422,6 +1415,7 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       costTiers: m.costTiers ?? null,
       gated: m.gated ?? null,
       gateReason: m.gateReason ?? null,
+      capabilityHints: m.capabilityHints ?? null,
       unverified: m.unverified ?? null,
       source: m.source ?? null,
     })),
@@ -1467,6 +1461,17 @@ export function apply(ctx: Context, config: Config): void {
     } catch (error) {
       reportSyncDiagnostic('provider-sync/catalog-overlays', error instanceof Error ? error.message : String(error))
     }
+    // The shared capability-hint table and the owner's per-route/per-model
+    // override: read once per pass. A malformed override (or packaging
+    // mistake in the shipped table) is reported and the pass continues with
+    // hints disabled, so the floor — never a guess — is what gets persisted.
+    let hints: CapabilityHintContext
+    try {
+      hints = { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() }
+    } catch (error) {
+      reportSyncDiagnostic('provider-sync/capability-hints', error instanceof Error ? error.message : String(error))
+      hints = { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} }
+    }
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) {
       logger.warn('settings seam absent — skipping sync pass')
@@ -1509,7 +1514,7 @@ export function apply(ctx: Context, config: Config): void {
       // A failed fetch must not stamp every configured entry `source:
       // configured`, so the merge is skipped and the overlay applies to the
       // configuration exactly as stored.
-      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities)
+      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities, hints)
       const merged = merge?.models ?? profile.models ?? []
       const models = applyCatalogOverlay(merged, overlay)
       const before = stringifyComparable(profile.models)
@@ -1610,7 +1615,7 @@ export function apply(ctx: Context, config: Config): void {
           const record = mergeDiscoveredRoute(
             previous,
             baseURL,
-            mergeDiscoveredModels(route, live, capacities),
+            mergeDiscoveredModels(route, live, capacities, hints),
             Date.now(),
           )
           if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {

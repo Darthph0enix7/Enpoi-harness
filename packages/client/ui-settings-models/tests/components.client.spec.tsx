@@ -374,7 +374,7 @@ describe('ModelsSection', () => {
     await mountSection()
     fireEvent.click(screen.getByRole('button', { name: en.addProviderAction }))
     const modal = document.querySelector('[class*="addProviderDialog"]') as HTMLElement
-    const search = within(modal).getByPlaceholderText(/Search 212 providers/)
+    const search = within(modal).getByPlaceholderText(/Search \d+ providers/)
     // 'anthropic' is listed by the directory but owns no profile yet: the add
     // reuses the catalog id, which is what makes its models resolve.
     fireEvent.change(search, { target: { value: 'anthropic' } })
@@ -383,7 +383,7 @@ describe('ModelsSection', () => {
 
     // 'openai' already owns a profile: the add creates a suffixed duplicate.
     fireEvent.click(within(modal).getByRole('button', { name: 'Back' }))
-    fireEvent.change(within(modal).getByPlaceholderText(/Search 212 providers/), { target: { value: 'openai' } })
+    fireEvent.change(within(modal).getByPlaceholderText(/Search \d+ providers/), { target: { value: 'openai' } })
     fireEvent.click(within(modal).getAllByText('OpenAI')[0]!)
     expect(within(modal).getByPlaceholderText<HTMLInputElement>('e.g. openai').value).toBe('openai-1')
   })

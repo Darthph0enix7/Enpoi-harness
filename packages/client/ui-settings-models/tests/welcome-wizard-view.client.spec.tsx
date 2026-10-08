@@ -106,6 +106,7 @@ function mount(options: MountOptions = {}) {
   }
   const modelsStore = createSnapshotStore<ModelsSettingsState>({
     status: 'ready', error: null, credentialError: null, writable: true, rows: options.rows ?? [], namespaces: new Map(),
+    providerOverrides: {},
   })
   const analysis = {
     start: vi.fn(async () => ({ ok: true as const, value: { state: 'idle' as const, stage: '', stageIndex: 0, stageCount: 6, pct: 0 } })),

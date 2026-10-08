@@ -467,27 +467,158 @@ export function chooseLocalPath(
 
 /** One operator-owned override from `$DSH_HOME/heavy-server-overlay.json`. */
 export interface ServerOverlayEntry {
+  /** Remove the provider from every host reply; its status/reuse/install calls are refused. */
+  disabled?: boolean
+  label?: string
+  summary?: string
+  /** Replacement dashboard link; null removes the shipped one. */
+  dashboardUrl?: string | null
+  /** Replacement docs link; null removes the shipped one. */
+  docsUrl?: string | null
   reuseBaseURL?: string
   reuseHealthURL?: string
-  dashboardUrl?: string
+  /** Replacement local install steps for every supported platform variant. */
+  installSteps?: readonly HeavyStep[]
+  /** Replacement fallback model; null removes the shipped one. */
+  fallbackModel?: string | null
+  /** Replacement credential pool; null removes the shipped one. */
+  pool?: HeavyManifestPool | null
+}
+
+/** Whether a wire value is a plain JSON object. */
+function isOverlayRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** A non-empty string overlay field, or undefined when absent/blank/mistyped. */
+function overlayString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/** An optional string overlay field: null (or empty) removes, a string sets. */
+function overlayNullableString(record: Record<string, unknown>, key: string): string | null | undefined {
+  const value = record[key]
+  if (value === null) return null
+  if (typeof value !== 'string') return undefined
+  return value === '' ? null : value
+}
+
+/** Sanitize an install-step list; a malformed list is ignored whole. */
+function overlaySteps(value: unknown): readonly HeavyStep[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const steps: HeavyStep[] = []
+  for (const raw of value) {
+    if (!isOverlayRecord(raw)) return undefined
+    const label = overlayString(raw, 'label')
+    const command = overlayString(raw, 'command')
+    if (label === undefined || command === undefined) return undefined
+    const cwd = overlayString(raw, 'cwd')
+    // A malformed weight only drops the progress weight; the step still runs.
+    const weight = typeof raw.weight === 'number' && Number.isFinite(raw.weight) && raw.weight > 0 ? raw.weight : undefined
+    steps.push({
+      label,
+      command,
+      ...cwd === undefined ? {} : { cwd },
+      ...raw.optional === true ? { optional: true } : {},
+      ...weight === undefined ? {} : { weight },
+    })
+  }
+  return steps
+}
+
+/** Sanitize a pool override: null removes, a valid pool replaces, anything else is ignored. */
+function overlayPool(value: unknown): HeavyManifestPool | null | undefined {
+  if (value === null) return null
+  if (!isOverlayRecord(value)) return undefined
+  const strategy = value.strategy
+  if (strategy !== undefined && strategy !== 'priority-sticky' && strategy !== 'balanced') return undefined
+  if (!Array.isArray(value.identities) || value.identities.length === 0) return undefined
+  const identities: HeavyManifestPool['identities'] = []
+  const seen = new Set<string>()
+  for (const raw of value.identities) {
+    if (!isOverlayRecord(raw)) return undefined
+    const id = overlayString(raw, 'id')
+    const credentialRef = overlayString(raw, 'credentialRef')
+    if (id === undefined || credentialRef === undefined || !/^[A-Z_][A-Z0-9_]*$/.test(credentialRef) || seen.has(id)) {
+      return undefined
+    }
+    seen.add(id)
+    const priority = raw.priority
+    if (priority !== undefined && (typeof priority !== 'number' || !Number.isSafeInteger(priority) || priority < 0)) {
+      return undefined
+    }
+    if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') return undefined
+    identities.push({
+      id,
+      credentialRef,
+      ...typeof priority === 'number' ? { priority } : {},
+      ...typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {},
+    })
+  }
+  return { ...strategy === undefined ? {} : { strategy }, identities }
+}
+
+/** Sanitize one overlay entry; undefined when it carries no usable override. */
+function sanitizeOverlayEntry(raw: unknown): ServerOverlayEntry | undefined {
+  if (!isOverlayRecord(raw)) return undefined
+  const entry: ServerOverlayEntry = {}
+  if (raw.disabled === true) entry.disabled = true
+  const label = overlayString(raw, 'label')
+  if (label !== undefined) entry.label = label
+  const summary = overlayString(raw, 'summary')
+  if (summary !== undefined) entry.summary = summary
+  const dashboardUrl = overlayNullableString(raw, 'dashboardUrl')
+  if (dashboardUrl !== undefined) entry.dashboardUrl = dashboardUrl
+  const docsUrl = overlayNullableString(raw, 'docsUrl')
+  if (docsUrl !== undefined) entry.docsUrl = docsUrl
+  const reuseBaseURL = overlayString(raw, 'reuseBaseURL')
+  if (reuseBaseURL !== undefined) entry.reuseBaseURL = reuseBaseURL
+  const reuseHealthURL = overlayString(raw, 'reuseHealthURL')
+  if (reuseHealthURL !== undefined) entry.reuseHealthURL = reuseHealthURL
+  const installSteps = overlaySteps(raw.installSteps)
+  if (installSteps !== undefined) entry.installSteps = installSteps
+  const fallbackModel = overlayNullableString(raw, 'fallbackModel')
+  if (fallbackModel !== undefined) entry.fallbackModel = fallbackModel
+  const pool = overlayPool(raw.pool)
+  if (pool !== undefined) entry.pool = pool
+  return Object.keys(entry).length === 0 ? undefined : entry
 }
 
 /**
  * Read the private deployment overlay. The file is operator-owned data, never
- * shipped; an absent or malformed file means "no override" (fail-soft).
+ * shipped; an absent or malformed file means "no override" (fail-soft), and a
+ * malformed field is dropped rather than reaching execution.
  * @param dshHome - the DSH home directory.
- * @returns provider id → override entry.
+ * @returns provider id → sanitized override entry.
  */
 export function readServerOverlay(dshHome: string): Record<string, ServerOverlayEntry> {
   try {
-    const document = JSON.parse(readFileSync(join(dshHome, 'heavy-server-overlay.json'), 'utf8')) as unknown
-    if (document === null || typeof document !== 'object' || Array.isArray(document)) return {}
-    const entries = (document as { providers?: unknown }).providers
-    if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) return {}
-    return entries as Record<string, ServerOverlayEntry>
+    const document: unknown = JSON.parse(readFileSync(join(dshHome, 'heavy-server-overlay.json'), 'utf8'))
+    if (!isOverlayRecord(document) || !isOverlayRecord(document.providers)) return {}
+    const overlay: Record<string, ServerOverlayEntry> = {}
+    for (const [id, raw] of Object.entries(document.providers)) {
+      const entry = sanitizeOverlayEntry(raw)
+      if (id !== '' && entry !== undefined) overlay[id] = entry
+    }
+    return overlay
   } catch {
     return {}
   }
+}
+
+/** Replace the steps of every supported platform variant, keeping refusals. */
+function replaceInstallSteps(
+  local: HeavyProviderManifest['local'],
+  steps: readonly HeavyStep[],
+): HeavyProviderManifest['local'] {
+  const install = { ...local.install }
+  for (const platform of ['default', 'linux', 'darwin', 'win32'] as const) {
+    const variant = install[platform]
+    if (variant === undefined || variant.unsupported !== undefined) continue
+    install[platform] = { ...variant, steps }
+  }
+  return { ...local, install }
 }
 
 /** Apply one overlay entry; the shipped table is returned untouched without one. */
@@ -496,15 +627,75 @@ export function overlayManifest(
   entry: ServerOverlayEntry | undefined,
 ): HeavyProviderManifest {
   if (entry === undefined) return manifest
-  return {
+  const next: HeavyProviderManifest = {
     ...manifest,
-    ...entry.dashboardUrl === undefined ? {} : { dashboardUrl: entry.dashboardUrl },
+    ...entry.label === undefined ? {} : { label: entry.label },
+    ...entry.summary === undefined ? {} : { summary: entry.summary },
     reuse: {
       ...manifest.reuse,
       ...entry.reuseBaseURL === undefined ? {} : { baseURL: entry.reuseBaseURL },
       ...entry.reuseHealthURL === undefined ? {} : { health: { ...manifest.reuse.health, url: entry.reuseHealthURL } },
     },
+    local: entry.installSteps === undefined ? manifest.local : replaceInstallSteps(manifest.local, entry.installSteps),
   }
+  if (entry.dashboardUrl === null) delete next.dashboardUrl
+  else if (entry.dashboardUrl !== undefined) next.dashboardUrl = entry.dashboardUrl
+  if (entry.docsUrl === null) delete next.docsUrl
+  else if (entry.docsUrl !== undefined) next.docsUrl = entry.docsUrl
+  if (entry.fallbackModel === null) delete next.fallbackModel
+  else if (entry.fallbackModel !== undefined) next.fallbackModel = entry.fallbackModel
+  if (entry.pool === null) delete next.pool
+  else if (entry.pool !== undefined) next.pool = entry.pool
+  return next
+}
+
+/**
+ * The host table with the overlay applied: disabled providers are dropped and
+ * every other entry keeps its order with its overrides merged.
+ * @param manifests - the shipped host table.
+ * @param overlay - the sanitized operator overlay.
+ * @returns the effective table the host replies with and executes.
+ */
+export function effectiveHeavyManifests(
+  manifests: readonly HeavyProviderManifest[],
+  overlay: Record<string, ServerOverlayEntry>,
+): HeavyProviderManifest[] {
+  const effective: HeavyProviderManifest[] = []
+  for (const manifest of manifests) {
+    const entry = overlay[manifest.id]
+    if (entry?.disabled === true) continue
+    effective.push(overlayManifest(manifest, entry))
+  }
+  return effective
+}
+
+/**
+ * Page-global key carrying the operator overlay to the browser. The client
+ * package names the same literal
+ * (`packages/client/ui-settings-models/src/heavy-overlay.ts`); the browser
+ * half sanitizes the document again and applies it to the compiled fallback,
+ * so the pre-connection table honors the overlay before the first
+ * `enpoiHeavy.manifests` reply.
+ */
+export const HEAVY_OVERLAY_GLOBAL = '__DSH_HEAVY_OVERLAY__'
+
+/** One `webserver/index-inject` row publishing the overlay to the page. */
+export interface HeavyOverlayInjectionRow {
+  kind: 'global'
+  name: string
+  value: { providers: Record<string, ServerOverlayEntry> }
+}
+
+/**
+ * Build the page-bootstrap row for the operator overlay, when the file
+ * overrides at least one provider.
+ * @param dshHome - the DSH home directory.
+ * @returns the injection row, or undefined when there is no overlay.
+ */
+export function overlayInjectionRow(dshHome: string): HeavyOverlayInjectionRow | undefined {
+  const providers = readServerOverlay(dshHome)
+  if (Object.keys(providers).length === 0) return undefined
+  return { kind: 'global', name: HEAVY_OVERLAY_GLOBAL, value: { providers } }
 }
 
 /**

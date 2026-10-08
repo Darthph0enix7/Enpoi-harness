@@ -13,12 +13,13 @@ import {
   resolveHeavyManifest,
   subscribeHeavyManifests,
 } from '../src/client/heavy-manifest-source.ts'
-import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
+import { FALLBACK_HEAVY_PROVIDER_MANIFESTS, fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
+import { HEAVY_OVERLAY_GLOBAL } from '../src/heavy-overlay.ts'
 import { liveProviderTemplates, PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
 
 afterEach(() => {
-  resetHeavyManifestSource()
   vi.unstubAllGlobals()
+  resetHeavyManifestSource()
 })
 
 it('renders the labelled fallback before any host reply', () => {
@@ -99,4 +100,44 @@ it('concurrent loads share one in-flight request', async () => {
   await first
   expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(heavyManifestState().live).toBe(true)
+})
+
+it('the operator overlay disables and overrides fallback rows before any host reply', () => {
+  vi.stubGlobal(HEAVY_OVERLAY_GLOBAL, {
+    providers: {
+      freellmapi: { disabled: true },
+      antigravity: { label: 'Antigravity (operator)', fallbackModel: 'operator/model' },
+    },
+  })
+  resetHeavyManifestSource()
+
+  const state = heavyManifestState()
+  expect(state.live).toBe(false)
+  expect(resolveHeavyManifest('freellmapi')).toBeUndefined()
+  expect(resolveHeavyManifest('antigravity')?.label).toBe('Antigravity (operator)')
+  expect(resolveHeavyManifest('antigravity')?.fallbackModel).toBe('operator/model')
+  // Rows without an overlay entry keep their shipped facts.
+  expect(resolveHeavyManifest('commandcode')).toEqual(fallbackHeavyManifest('commandcode'))
+  // The listing renders the overlaid table, not the compiled copy.
+  expect(liveProviderTemplates().filter(template => template.heavy !== undefined).map(template => template.id))
+    .toEqual(['antigravity', 'commandcode'])
+})
+
+it('a host reply replaces the overlay-applied fallback wholesale', () => {
+  vi.stubGlobal(HEAVY_OVERLAY_GLOBAL, { providers: { freellmapi: { disabled: true } } })
+  resetHeavyManifestSource()
+  expect(resolveHeavyManifest('freellmapi')).toBeUndefined()
+
+  bindHostHeavyManifests({ items: [fallbackHeavyManifest('freellmapi')!], platform: 'linux' })
+
+  // Host truth wins: the pre-connection overlay does not re-disable or re-add.
+  expect(resolveHeavyManifest('freellmapi')).toBeDefined()
+  expect(resolveHeavyManifest('antigravity')).toBeUndefined()
+  expect(heavyManifestState().live).toBe(true)
+})
+
+it('keeps the shipped fallback when no overlay is published', () => {
+  resetHeavyManifestSource()
+  expect(heavyManifestState().manifests).toEqual([...FALLBACK_HEAVY_PROVIDER_MANIFESTS])
+  expect(heavyManifestState().manifests.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode'])
 })

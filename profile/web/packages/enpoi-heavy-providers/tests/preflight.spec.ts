@@ -8,12 +8,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { manifestById } from '../src/manifests.js'
+import { manifestById, HEAVY_MANIFESTS } from '../src/manifests.js'
 import {
   chooseLocalPath,
   detectInstance,
   detectRuntimes,
+  effectiveHeavyManifests,
+  HEAVY_OVERLAY_GLOBAL,
   instanceCandidates,
+  overlayInjectionRow,
   overlayManifest,
   readServerOverlay,
   type FetchLike,
@@ -214,4 +217,90 @@ it('the private overlay retargets reuse endpoints and dashboards; absent or malf
   expect(overlaid.dashboardUrl).toBe('http://example.internal:9000')
   // The shipped table is never mutated.
   expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3002/v1')
+})
+
+it('the overlay disables a provider and overrides label, summary, links, steps, fallbackModel, and pool', () => {
+  const dir = scratchDir()
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), JSON.stringify({
+    providers: {
+      freellmapi: {
+        disabled: true,
+        label: 'FreeLLMAPI (operator)',
+        summary: 'Operator summary',
+        docsUrl: 'https://docs.internal/freellmapi',
+        installSteps: [{ label: 'Operator step', command: 'echo operator', weight: 2 }],
+        fallbackModel: 'operator/model',
+        pool: { strategy: 'balanced', identities: [{ id: 'key-1', credentialRef: 'OPERATOR_KEY', priority: 2 }] },
+      },
+      commandcode: { fallbackModel: null, pool: null, dashboardUrl: null },
+    },
+  }), 'utf8')
+  const overlay = readServerOverlay(dir)
+
+  const freellmapi = overlayManifest(manifestById('freellmapi')!, overlay['freellmapi'])
+  expect(freellmapi.label).toBe('FreeLLMAPI (operator)')
+  expect(freellmapi.summary).toBe('Operator summary')
+  expect(freellmapi.docsUrl).toBe('https://docs.internal/freellmapi')
+  expect(freellmapi.fallbackModel).toBe('operator/model')
+  expect(freellmapi.pool).toEqual({
+    strategy: 'balanced',
+    identities: [{ id: 'key-1', credentialRef: 'OPERATOR_KEY', priority: 2 }],
+  })
+  // Steps replace every supported platform variant; a refused variant keeps
+  // its reason and never runs the operator steps.
+  const steps = [{ label: 'Operator step', command: 'echo operator', weight: 2 }]
+  expect(freellmapi.local.install.default.steps).toEqual(steps)
+  expect(freellmapi.local.install.darwin?.steps).toEqual(steps)
+  expect(freellmapi.local.install.win32?.steps).toEqual(steps)
+  const antigravity = overlayManifest(manifestById('antigravity')!, {
+    installSteps: steps,
+  })
+  expect(antigravity.local.install.win32?.steps).toEqual([])
+  expect(antigravity.local.install.win32?.unsupported).toBeDefined()
+
+  // null removes an optional field the shipped manifest declares.
+  const commandcode = overlayManifest(manifestById('commandcode')!, overlay['commandcode'])
+  expect(commandcode.fallbackModel).toBeUndefined()
+  expect(commandcode.pool).toBeUndefined()
+  expect(commandcode.dashboardUrl).toBeUndefined()
+  expect(manifestById('commandcode')!.fallbackModel).toBe('deepseek/deepseek-v4.1-flash')
+
+  // The effective host table drops disabled providers and applies the rest.
+  const effective = effectiveHeavyManifests(HEAVY_MANIFESTS, overlay)
+  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode'])
+  expect(effective[1]?.fallbackModel).toBeUndefined()
+})
+
+it('a malformed overlay field is dropped instead of reaching execution', () => {
+  const dir = scratchDir()
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), JSON.stringify({
+    providers: {
+      freellmapi: {
+        installSteps: [{ label: 'no command' }],
+        fallbackModel: 7,
+        pool: { identities: [{ id: 'key-1', credentialRef: 'lower-case' }] },
+        label: '',
+      },
+      commandcode: 'not-an-entry',
+    },
+  }), 'utf8')
+  const overlay = readServerOverlay(dir)
+  // Every invalid field was dropped; the entry itself carried nothing usable.
+  expect(overlay.freellmapi).toBeUndefined()
+  expect(overlay.commandcode).toBeUndefined()
+  expect(effectiveHeavyManifests(HEAVY_MANIFESTS, overlay)).toEqual([...HEAVY_MANIFESTS])
+})
+
+it('publishes the overlay as a page-bootstrap row only when providers are overridden', () => {
+  const dir = scratchDir()
+  expect(overlayInjectionRow(dir)).toBeUndefined()
+
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), JSON.stringify({
+    providers: { freellmapi: { disabled: true }, antigravity: { label: 'Overlaid' } },
+  }), 'utf8')
+  expect(overlayInjectionRow(dir)).toEqual({
+    kind: 'global',
+    name: HEAVY_OVERLAY_GLOBAL,
+    value: { providers: { freellmapi: { disabled: true }, antigravity: { label: 'Overlaid' } } },
+  })
 })

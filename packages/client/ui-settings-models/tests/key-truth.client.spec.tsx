@@ -101,6 +101,7 @@ it('shows a keyless provider without a key as not set in the list', () => {
   ]
   const state: ModelsSettingsState = {
     status: 'ready', error: null, credentialError: null, writable: true, rows, namespaces: new Map(),
+    providerOverrides: {},
   }
   const store = createSnapshotStore<ModelsSettingsState>(state)
   const controller = { store, load: vi.fn(async () => {}) } as unknown as ModelsSettingsStore

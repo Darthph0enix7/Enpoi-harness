@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { HEAVY_MANIFESTS } from '../src/manifests.js'
+import { HEAVY_OVERLAY_GLOBAL } from '../src/planner.js'
 
 const fixture = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -30,4 +31,12 @@ it('the committed client mirror fixture equals the host manifest projection', ()
   const committed: unknown = JSON.parse(readFileSync(fixture, 'utf8'))
   const projection: unknown = JSON.parse(JSON.stringify(HEAVY_MANIFESTS, stripHostOnly))
   expect(committed).toEqual(projection)
+})
+
+it('the page-global overlay key matches the client package constant', () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../../../../packages/client/ui-settings-models/src/heavy-overlay.ts'),
+    'utf8',
+  )
+  expect(source).toContain(`export const HEAVY_OVERLAY_GLOBAL = '${HEAVY_OVERLAY_GLOBAL}'`)
 })

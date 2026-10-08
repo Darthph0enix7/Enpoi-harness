@@ -62,10 +62,10 @@ Env: `DSH_GITHUB_REPO`/`DSH_GITHUB_URL` (repo slug/URL), `DSH_NODE_VERSION` (22.
 
 ## 3. Device overlay — `$DSH_HOME/heavy-server-overlay.json`
 
-- Operator-owned JSON, never shipped, never synced; absent or malformed reads as "no override" (fail-soft, per read) (`$DSH_HOME/profiles/<name>/packages/enpoi-heavy-providers/src/planner.ts:299-315`).
-- Shape: `{ "providers": { "<manifest-id>": { "reuseBaseURL"?: string, "reuseHealthURL"?: string, "dashboardUrl"?: string } } }` (`planner.ts:292-297,321-332`).
-- Use it when a provider instance lives on another host/port or behind a tunnel: `reuseBaseURL`/`reuseHealthURL` retarget the "detected instance" path and `dashboardUrl` the card's link. Everything else stays as shipped.
-- The client table is a pre-connection fallback only; the host's manifest reply is authoritative and replaces it wholesale, so no operator URL belongs in code (`packages/client/ui-settings-models/src/client/heavy-providers.ts:1-13`).
+- Operator-owned JSON, never shipped, never synced; absent or malformed reads as "no override" (fail-soft, per read) (`$DSH_HOME/profiles/<name>/packages/enpoi-heavy-providers/src/planner.ts`).
+- Shape: `{ "providers": { "<manifest-id>": { "disabled"?: boolean, "label"?: string, "summary"?: string, "reuseBaseURL"?: string, "reuseHealthURL"?: string, "dashboardUrl"?: string|null, "docsUrl"?: string|null, "installSteps"?: [{ "label": string, "command": string, "cwd"?: string, "optional"?: boolean, "weight"?: number }], "fallbackModel"?: string|null, "pool"?: { "strategy"?: "priority-sticky"|"balanced", "identities": [{ "id": string, "credentialRef": string, "priority"?: number, "enabled"?: boolean }] }|null } } }`.
+- Use it when a provider instance lives on another host/port or behind a tunnel: `reuseBaseURL`/`reuseHealthURL` retarget the "detected instance" path, `dashboardUrl` the card's link, and `installSteps` the platform install commands. `disabled` removes the provider from every host reply and refuses status/reuse/install (removal still works); `label`/`summary`/`docsUrl`/`fallbackModel`/`pool` override shipped fields; `null` on an optional field removes it. Everything else stays as shipped.
+- The client table is a pre-connection fallback only; the profile plugin publishes the same document as the `__DSH_HEAVY_OVERLAY__` page global, so the fallback honors `disabled`/overrides before the first host reply, while the host's manifest reply stays authoritative and replaces the table wholesale (`packages/client/ui-settings-models/src/heavy-overlay.ts`).
 - Failure mode: a JSON typo makes the overlay silently ignored — the symptom is a provider card still pointing at the shipped loopback URL. Fix: validate with `jq . $DSH_HOME/heavy-server-overlay.json` and confirm `providers` is an object.
 
 ## 4. Updating

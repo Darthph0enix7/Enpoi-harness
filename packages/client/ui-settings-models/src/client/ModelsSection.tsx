@@ -400,6 +400,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           open={addModalOpen}
           taken={takenProviderIds}
           protocols={protocols}
+          overrides={state.providerOverrides}
           api={api}
           t={t}
           readOnly={!state.writable}

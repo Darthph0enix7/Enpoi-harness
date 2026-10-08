@@ -11872,8 +11872,8 @@ function getBunSandboxEnvValue(name2) {
   if (procEnvCache === null) {
     procEnvCache = /* @__PURE__ */ new Map();
     try {
-      const { readFileSync: readFileSync2 } = __require("node:fs");
-      const data = readFileSync2("/proc/self/environ", "utf-8");
+      const { readFileSync: readFileSync3 } = __require("node:fs");
+      const data = readFileSync3("/proc/self/environ", "utf-8");
       for (const entry of data.split("\0")) {
         const idx = entry.indexOf("=");
         if (idx > 0) {
@@ -76023,10 +76023,10 @@ var init_pi_messages = __esm({
 });
 
 // src/index.ts
-import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 import Schema from "@deepseek-ai/schemastery";
 import { readSettingsDocument } from "dsh-enpoi-contracts";
 
@@ -77501,6 +77501,167 @@ function builtinProviders() {
   ];
 }
 
+// src/capability-hints.ts
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+var HINT_FAMILIES = ["reasoning", "image", "audio", "video", "files", "toolsExclude"];
+var OVERRIDABLE_HINT_FAMILIES = ["reasoning", "image", "audio", "video", "files"];
+function capabilityHintsPath() {
+  const override = process.env.DSH_CAPABILITY_HINTS;
+  if (override !== void 0 && override.length > 0) return override;
+  return fileURLToPath(new URL("../model-capability-hints.json", import.meta.url));
+}
+function hintString(value2) {
+  return typeof value2 === "string" && value2.length > 0 ? value2 : void 0;
+}
+function hintList(raw, path6, field) {
+  if (!Array.isArray(raw)) throw new Error(`capability hints ${path6}: "${field}" must be a list of id substrings`);
+  const list = [];
+  for (const value2 of raw) {
+    const operand = hintString(value2);
+    if (operand === void 0) throw new Error(`capability hints ${path6}: "${field}" has an entry that is not an id substring`);
+    if (!list.includes(operand)) list.push(operand);
+  }
+  return list;
+}
+function parseCapabilityHints(raw, path6) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`capability hints ${path6}: document must be an object`);
+  }
+  const document2 = raw;
+  return {
+    reasoning: hintList(document2.reasoning, path6, "reasoning"),
+    image: hintList(document2.image, path6, "image"),
+    audio: hintList(document2.audio, path6, "audio"),
+    video: hintList(document2.video, path6, "video"),
+    files: hintList(document2.files, path6, "files"),
+    toolsExclude: hintList(document2.toolsExclude, path6, "toolsExclude")
+  };
+}
+function loadCapabilityHints(path6 = capabilityHintsPath()) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(path6, "utf8"));
+  } catch (error) {
+    throw new Error(`capability hints ${path6}: unreadable \u2014 ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return parseCapabilityHints(raw, path6);
+}
+function parseCapabilityHintsOverride(raw, path6) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`capability-hints override ${path6}: document must be an object`);
+  }
+  const document2 = raw;
+  const rawRoutes = document2.routes;
+  if (rawRoutes === void 0) return {};
+  if (rawRoutes === null || typeof rawRoutes !== "object" || Array.isArray(rawRoutes)) {
+    throw new Error(`capability-hints override ${path6}: "routes" must be an object keyed by route id`);
+  }
+  const routes = {};
+  for (const [route, value2] of Object.entries(rawRoutes)) {
+    if (value2 === null || typeof value2 !== "object" || Array.isArray(value2)) {
+      throw new Error(`capability-hints override ${path6}: route "${route}" must be an object`);
+    }
+    const entry = value2;
+    const override = {};
+    if (entry.hints !== void 0) {
+      if (entry.hints === null || typeof entry.hints !== "object" || Array.isArray(entry.hints)) {
+        throw new Error(`capability-hints override ${path6}: route "${route}" has a "hints" that is not an object`);
+      }
+      const hints = {};
+      for (const [family, list] of Object.entries(entry.hints)) {
+        if (!OVERRIDABLE_HINT_FAMILIES.includes(family)) {
+          throw new Error(`capability-hints override ${path6}: route "${route}" names unknown or non-overridable hint family "${family}"`);
+        }
+        hints[family] = hintList(list, path6, `routes.${route}.hints.${family}`);
+      }
+      override.hints = hints;
+    }
+    if (entry.models !== void 0) {
+      if (entry.models === null || typeof entry.models !== "object" || Array.isArray(entry.models)) {
+        throw new Error(`capability-hints override ${path6}: route "${route}" has a "models" that is not an object`);
+      }
+      const models = {};
+      for (const [id, pin] of Object.entries(entry.models)) {
+        if (hintString(id) === void 0) {
+          throw new Error(`capability-hints override ${path6}: route "${route}" has an empty model id`);
+        }
+        if (pin === null || typeof pin !== "object" || Array.isArray(pin)) {
+          throw new Error(`capability-hints override ${path6}: route "${route}" model "${id}" must be an object`);
+        }
+        const fields = pin;
+        const parsed = {};
+        if (fields.input !== void 0) {
+          if (!Array.isArray(fields.input)) {
+            throw new Error(`capability-hints override ${path6}: route "${route}" model "${id}" has an "input" that is not a list`);
+          }
+          const input = [];
+          for (const value3 of fields.input) {
+            const token = hintString(value3);
+            if (token === void 0 || token !== "text" && token !== "image" && token !== "audio" && token !== "video" && token !== "pdf") {
+              throw new Error(`capability-hints override ${path6}: route "${route}" model "${id}" names unknown input modality "${String(value3)}"`);
+            }
+            if (!input.includes(token)) input.push(token);
+          }
+          parsed.input = input;
+        }
+        if (fields.reasoning !== void 0) {
+          if (typeof fields.reasoning !== "boolean") {
+            throw new Error(`capability-hints override ${path6}: route "${route}" model "${id}" has a non-boolean "reasoning"`);
+          }
+          parsed.reasoning = fields.reasoning;
+        }
+        models[id] = parsed;
+      }
+      override.models = models;
+    }
+    routes[route] = override;
+  }
+  return { routes };
+}
+function matchesAnyOperand(lowerId, operands) {
+  return operands.some((operand) => operand.length > 0 && lowerId.includes(operand));
+}
+function routeFamilies(hints, route, override) {
+  const replacements = override?.routes?.[route]?.hints;
+  if (replacements === void 0) return hints;
+  const families = { ...hints };
+  for (const family of HINT_FAMILIES) {
+    const replacement = replacements[family];
+    if (replacement !== void 0) families[family] = replacement;
+  }
+  return families;
+}
+function pinModalities(input) {
+  const modalities = [];
+  for (const token of input ?? []) {
+    if (token === "image" || token === "audio" || token === "video" || token === "pdf") {
+      if (!modalities.includes(token)) modalities.push(token);
+    }
+  }
+  return modalities;
+}
+function claimCapabilityHints(route, id, hints, override) {
+  const routeOverride = override?.routes?.[route];
+  const pin = routeOverride?.models?.[id];
+  if (pin !== void 0) {
+    return { input: pinModalities(pin.input), reasoning: pin.reasoning === true, source: "owner-override" };
+  }
+  const families = routeFamilies(hints, route, override);
+  const lowerId = id.toLowerCase();
+  const input = [];
+  if (matchesAnyOperand(lowerId, families.image)) input.push("image");
+  if (matchesAnyOperand(lowerId, families.audio)) input.push("audio");
+  if (matchesAnyOperand(lowerId, families.video)) input.push("video");
+  if (matchesAnyOperand(lowerId, families.files)) input.push("pdf");
+  const reasoning = matchesAnyOperand(lowerId, families.reasoning);
+  if (input.length > 0 || reasoning) {
+    return { input, reasoning, source: routeOverride?.hints === void 0 ? "shipped-hints" : "owner-override" };
+  }
+  if (routeOverride !== void 0) return { input: [], reasoning: false, source: "owner-override" };
+  return void 0;
+}
+
 // src/index.ts
 var name = "enpoi-provider-sync";
 var inject = [];
@@ -77548,7 +77709,7 @@ function loadModelsDev() {
   const path6 = modelsDevCachePath();
   try {
     if (path6 !== void 0 && existsSync(path6)) {
-      const raw = readFileSync(path6, "utf8");
+      const raw = readFileSync2(path6, "utf8");
       modelsDevCache = JSON.parse(raw);
       return modelsDevCache;
     }
@@ -77678,15 +77839,23 @@ function listingString(...candidates) {
   }
   return void 0;
 }
+function liveModality(value2) {
+  if (value2 === "text" || value2 === "image" || value2 === "audio" || value2 === "video" || value2 === "pdf") return value2;
+  return value2 === "vision" ? "image" : void 0;
+}
+function liveModalities(raw) {
+  const inputs = [];
+  for (const value2 of raw) {
+    const modality = liveModality(value2);
+    if (modality !== void 0 && !inputs.includes(modality)) inputs.push(modality);
+  }
+  return inputs;
+}
 function listingModalities(entry) {
   const architecture = entry.architecture;
   const raw = Array.isArray(entry.input_modalities) ? entry.input_modalities : Array.isArray(entry.modalities) ? entry.modalities : Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : void 0;
   if (raw === void 0) return void 0;
-  const inputs = [];
-  for (const value2 of raw) {
-    if (value2 === "text" && !inputs.includes("text")) inputs.push("text");
-    if ((value2 === "image" || value2 === "vision") && !inputs.includes("image")) inputs.push("image");
-  }
+  const inputs = liveModalities(raw);
   return inputs.length === 0 ? void 0 : inputs;
 }
 function listingSupported(entry) {
@@ -77781,10 +77950,10 @@ var COMMANDCODE_NS = "commandcode-provider";
 function commandCodeCatalogPath() {
   const override = process.env.DSH_COMMANDCODE_CATALOG;
   if (override !== void 0 && override.length > 0) return override;
-  return fileURLToPath(new URL("../../enpoi-commandcode-provider/catalog.snapshot.json", import.meta.url));
+  return fileURLToPath2(new URL("../../enpoi-commandcode-provider/catalog.snapshot.json", import.meta.url));
 }
 function loadCommandCodeCatalog(path6 = commandCodeCatalogPath()) {
-  const raw = JSON.parse(readFileSync(path6, "utf8"));
+  const raw = JSON.parse(readFileSync2(path6, "utf8"));
   const rows = Array.isArray(raw) ? raw : Object.values(raw ?? {});
   const seen = /* @__PURE__ */ new Set();
   const models = [];
@@ -77821,11 +77990,11 @@ function loadCommandCodeCatalog(path6 = commandCodeCatalogPath()) {
 function catalogOverlaysPath() {
   const override = process.env.DSH_CATALOG_OVERLAYS;
   if (override !== void 0 && override.length > 0) return override;
-  return fileURLToPath(new URL("../catalog-overlays.json", import.meta.url));
+  return fileURLToPath2(new URL("../catalog-overlays.json", import.meta.url));
 }
 function loadCatalogOverlays(path6 = catalogOverlaysPath()) {
   if (!existsSync(path6)) return {};
-  const raw = JSON.parse(readFileSync(path6, "utf8"));
+  const raw = JSON.parse(readFileSync2(path6, "utf8"));
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`catalog overlays ${path6}: document must be an object`);
   }
@@ -77876,7 +78045,7 @@ function applyCatalogOverlay(models, overlay) {
     if (upsert === void 0) {
       applied.push(entry);
     } else {
-      applied.push({ ...entry, ...upsert, unverified: void 0 });
+      applied.push({ ...entry, ...upsert, unverified: void 0, capabilityHints: void 0 });
     }
     if (id !== void 0) seen.add(id);
   }
@@ -77901,10 +78070,25 @@ function discoveredCachePath() {
   if (override !== void 0 && override.length > 0) return override;
   return join2(resolveDshHome(), "cache", "discovered-models.json");
 }
+function capabilityHintsOverridePath(env = process.env, platform = process.platform) {
+  const override = firstNonEmpty(env.DSH_CAPABILITY_HINTS_OVERRIDE);
+  if (override !== void 0) return override;
+  return join2(resolveDshHome(env, platform), "model-capability-hints.json");
+}
+function loadCapabilityHintsOverride(path6 = capabilityHintsOverridePath()) {
+  if (!existsSync(path6)) return {};
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync2(path6, "utf8"));
+  } catch (error) {
+    throw new Error(`capability-hints override ${path6}: unreadable \u2014 ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return parseCapabilityHintsOverride(raw, path6);
+}
 function readDiscoveredFile(path6) {
   try {
     if (!existsSync(path6)) return { version: DISCOVERED_CACHE_VERSION, routes: {} };
-    const raw = JSON.parse(readFileSync(path6, "utf8"));
+    const raw = JSON.parse(readFileSync2(path6, "utf8"));
     const routes = raw.routes;
     if (routes === null || typeof routes !== "object" || Array.isArray(routes)) {
       return { version: DISCOVERED_CACHE_VERSION, routes: {} };
@@ -77968,37 +78152,48 @@ function fallbackFor(capacities, route, modelId) {
   }
   return routeCaps.default === void 0 ? void 0 : { ...routeCaps.default, matched: "default" };
 }
-function detectModalities(id, mDev, cat, live2) {
-  const rawInputs = mDev?.modalities?.input ?? cat?.input ?? live2 ?? [];
-  const lower2 = id.toLowerCase();
-  if (rawInputs.length > 0) {
-    const inputs = ["text"];
-    if (rawInputs.includes("image") || rawInputs.includes("vision")) inputs.push("image");
-    return inputs;
-  }
-  if (lower2.includes("vision") || lower2.includes("vl") || lower2.includes("minimax") || lower2.includes("gemini") || lower2.includes("claude") || lower2.includes("gpt-4") || lower2.includes("gpt-5") || lower2.includes("luna") || lower2.includes("k3") || lower2.includes("qwen-vl") || lower2.includes("qwen2.5-vl") || lower2.includes("qwen3-vl") || lower2.includes("qwen3.8-vl") || lower2.includes("pixtral") || lower2.includes("grok-2") || lower2.includes("mimo")) {
-    return ["text", "image"];
-  }
-  return ["text"];
+function modelsDevReleaseDate(value2) {
+  if (typeof value2 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value2)) return void 0;
+  return Number.isNaN(Date.parse(`${value2}T00:00:00Z`)) ? void 0 : value2;
 }
-function isReasoningModel(id, mDev, cat, live2) {
-  if (mDev?.reasoning === true) return true;
-  if (Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0) return true;
-  if (cat?.reasoning === true) return true;
-  if (cat?.thinkingLevelMap !== void 0) {
-    const nonOff = Object.keys(cat.thinkingLevelMap).filter((k) => k !== "off");
-    if (nonOff.length > 0) return true;
-  }
-  if (live2 !== void 0) return live2;
-  const lower2 = id.toLowerCase();
-  return lower2.includes("think") || lower2.includes("reason") || lower2.includes("luna") || lower2.includes("sol") || lower2.includes("terra") || lower2.includes("flash-tiered") || lower2.includes("pro-agent") || lower2.includes("pro-high") || lower2.includes("opus-4-6") || lower2.includes("r1") || lower2.includes("o1") || lower2.includes("o3") || lower2.includes("o4") || lower2.includes("gpt-5") || lower2.includes("k3") || lower2.includes("m3") || lower2.includes("glm-5");
+function finitePrice(value2) {
+  return typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? value2 : void 0;
 }
-function analyzeModel(route, model, fallback) {
+function modelsDevCostTiers(value2) {
+  if (value2 === null || typeof value2 !== "object" || Array.isArray(value2)) return void 0;
+  const cost = value2;
+  const tiers = [];
+  const add = (rawThreshold, input, output) => {
+    if (typeof rawThreshold !== "number" || !Number.isInteger(rawThreshold) || rawThreshold <= 0) return;
+    const priceIn = finitePrice(input);
+    const priceOut = finitePrice(output);
+    if (priceIn === void 0 && priceOut === void 0) return;
+    if (tiers.some((tier) => tier.inputTokensAbove === rawThreshold)) return;
+    tiers.push({
+      inputTokensAbove: rawThreshold,
+      ...priceIn === void 0 ? {} : { input: priceIn },
+      ...priceOut === void 0 ? {} : { output: priceOut }
+    });
+  };
+  if (Array.isArray(cost.tiers)) {
+    for (const raw of cost.tiers) {
+      if (raw === null || typeof raw !== "object") continue;
+      const tier = raw;
+      add(tier.tier?.size, tier.input, tier.output);
+    }
+  }
+  const over = cost.context_over_200k;
+  if (over !== null && typeof over === "object") {
+    const rates = over;
+    add(2e5, rates.input, rates.output);
+  }
+  return tiers.length === 0 ? void 0 : tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove);
+}
+function analyzeModel(route, model, fallback, hints) {
   const mDev = resolveFromModelsDev(route, model.id);
   const catalog = getCatalogIndex();
   const shortId = model.id.includes("/") ? model.id.split("/").pop() : model.id;
   const cat = catalog.get(model.id) ?? catalog.get(shortId);
-  const unverified = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0;
   let name2 = mDev?.name;
   if (name2 === void 0 || name2.length === 0) {
     const liveName = model.name;
@@ -78014,8 +78209,24 @@ function analyzeModel(route, model, fallback) {
   const prefixMax = fallback?.matched === "prefix" ? fallback.maxTokens : void 0;
   const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262144;
   const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32768;
-  const inputModalities = unverified ? ["text"] : detectModalities(model.id, mDev, cat, model.input);
-  const isReasoning = unverified ? false : isReasoningModel(model.id, mDev, cat, model.reasoning);
+  const disclosed = [mDev?.modalities?.input, cat?.input, model.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
+  const modalityDisclosed = disclosed !== void 0;
+  const inputModalities = modalityDisclosed ? ["text", ...liveModalities(disclosed).filter((modality) => modality !== "text")] : ["text"];
+  const reasoningSources = [mDev?.reasoning, cat?.reasoning, model.reasoning].filter((value2) => typeof value2 === "boolean");
+  const reasoningOptions = Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0;
+  const thinkingLevels = cat?.thinkingLevelMap !== void 0 && Object.keys(cat.thinkingLevelMap).some((key) => key !== "off");
+  const reasoningDisclosed = reasoningSources.length > 0 || reasoningOptions || thinkingLevels;
+  const isReasoning = reasoningSources.some((value2) => value2 === true) || reasoningOptions || thinkingLevels;
+  const claim = claimCapabilityHints(route, model.id, hints.table, hints.override);
+  const hintedInput = !modalityDisclosed && claim !== void 0 && claim.input.length > 0;
+  const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true;
+  const nothingDescribed = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0;
+  const unverified = nothingDescribed || hintedInput || hintedReasoning;
+  const capabilityHints = claim === void 0 ? void 0 : {
+    ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
+    ...claim.reasoning && !reasoningDisclosed ? { reasoning: true } : {},
+    source: claim.source
+  };
   let reasoningEfforts;
   if (isReasoning) {
     const levels = {};
@@ -78053,6 +78264,8 @@ function analyzeModel(route, model, fallback) {
   const costInput = typeof mDev?.cost?.input === "number" && Number.isFinite(mDev.cost.input) ? mDev.cost.input : void 0;
   const costOutput = typeof mDev?.cost?.output === "number" && Number.isFinite(mDev.cost.output) ? mDev.cost.output : void 0;
   const cost = costInput !== void 0 || costOutput !== void 0 ? { ...costInput !== void 0 ? { input: costInput } : {}, ...costOutput !== void 0 ? { output: costOutput } : {} } : void 0;
+  const releaseDate = modelsDevReleaseDate(mDev?.release_date);
+  const costTiers = modelsDevCostTiers(mDev?.cost);
   const gated = model.gated === true || model.isFree === false;
   const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {};
   return {
@@ -78065,7 +78278,10 @@ function analyzeModel(route, model, fallback) {
       reasoning: isReasoning,
       ...tools !== void 0 ? { tools } : {},
       ...cost !== void 0 ? { cost } : {},
+      ...releaseDate === void 0 ? {} : { releaseDate },
+      ...costTiers === void 0 ? {} : { costTiers },
       ...reasoningEfforts ? { reasoningEfforts } : {},
+      ...capabilityHints === void 0 ? {} : { capabilityHints },
       ...gate,
       ...unverified ? { unverified: true } : {}
     },
@@ -78074,21 +78290,23 @@ function analyzeModel(route, model, fallback) {
       name: name2,
       contextWindow,
       maxTokens,
-      ...unverified ? {} : { input: inputModalities },
+      ...modalityDisclosed ? { input: inputModalities } : {},
       ...tools === void 0 ? {} : { tools },
       ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
       ...model.pricing === void 0 ? {} : { pricing: model.pricing },
       ...model.isFree === void 0 ? {} : { isFree: model.isFree },
+      ...releaseDate === void 0 ? {} : { releaseDate },
+      ...costTiers === void 0 ? {} : { costTiers },
       ...gate,
       ...unverified ? { unverified: true } : {}
     }
   };
 }
-function mergeConfiguredModels(route, configured, live2, capacities) {
+function mergeConfiguredModels(route, configured, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id)).settings);
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints).settings);
   }
   const models = [];
   const unadvertised = [];
@@ -78116,10 +78334,10 @@ function mergeConfiguredModels(route, configured, live2, capacities) {
   }
   return { models, unadvertised };
 }
-function mergeDiscoveredModels(route, live2, capacities) {
+function mergeDiscoveredModels(route, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }) {
   return live2.map((model) => {
     const fallback = fallbackFor(capacities, route, model.id);
-    return analyzeModel(route, model, fallback).discovered;
+    return analyzeModel(route, model, fallback, hints).discovered;
   });
 }
 function stringifyComparable(models) {
@@ -78129,11 +78347,15 @@ function stringifyComparable(models) {
       name: m2.name,
       contextWindow: m2.contextWindow,
       maxTokens: m2.maxTokens,
+      input: m2.input ?? null,
       reasoning: m2.reasoningEfforts ? Object.keys(m2.reasoningEfforts).sort() : null,
       tools: m2.tools ?? null,
       cost: m2.cost ?? null,
+      releaseDate: m2.releaseDate ?? null,
+      costTiers: m2.costTiers ?? null,
       gated: m2.gated ?? null,
       gateReason: m2.gateReason ?? null,
+      capabilityHints: m2.capabilityHints ?? null,
       unverified: m2.unverified ?? null,
       source: m2.source ?? null
     }))
@@ -78162,6 +78384,13 @@ function apply(ctx, config) {
     } catch (error) {
       reportSyncDiagnostic("provider-sync/catalog-overlays", error instanceof Error ? error.message : String(error));
     }
+    let hints;
+    try {
+      hints = { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() };
+    } catch (error) {
+      reportSyncDiagnostic("provider-sync/capability-hints", error instanceof Error ? error.message : String(error));
+      hints = { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} };
+    }
     const settings = ctx.get("settings");
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
@@ -78177,7 +78406,7 @@ function apply(ctx, config) {
     const credentials = ctx.get("credentials");
     const revisionOf = (ns) => settings.describe().find((entry) => entry.ns === ns)?.revision;
     const persistRouteModels = async (ns, route, profile, live2, source, overlay) => {
-      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities);
+      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities, hints);
       const merged = merge?.models ?? profile.models ?? [];
       const models = applyCatalogOverlay(merged, overlay);
       const before = stringifyComparable(profile.models);
@@ -78244,7 +78473,7 @@ function apply(ctx, config) {
           const record = mergeDiscoveredRoute(
             previous,
             baseURL,
-            mergeDiscoveredModels(route, live2, capacities),
+            mergeDiscoveredModels(route, live2, capacities, hints),
             Date.now()
           );
           if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
@@ -78306,6 +78535,7 @@ export {
   Config,
   apply,
   applyCatalogOverlay,
+  capabilityHintsOverridePath,
   catalogOverlaysPath,
   commandCodeCatalogPath,
   describeSyncFailure,
@@ -78313,6 +78543,7 @@ export {
   fetchModels,
   inject,
   isCatalogRoute,
+  loadCapabilityHintsOverride,
   loadCatalogOverlays,
   loadCommandCodeCatalog,
   mergeConfiguredModels,
@@ -78320,6 +78551,8 @@ export {
   mergeDiscoveredRoute,
   modelListingRequest,
   modelsDevCachePath,
+  modelsDevCostTiers,
+  modelsDevReleaseDate,
   name,
   normalizeListingEntry,
   osCacheDir,
