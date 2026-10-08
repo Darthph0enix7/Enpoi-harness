@@ -25,9 +25,12 @@ const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
 // execa deadline, its error text, the outer vitest case budget, and waitForFile all
 // share this value so a widening cannot leave a stale 25s diagnostic behind.
 const SPAWN_TIMEOUT_MS = 60_000
-// The release version, including a prerelease such as 0.0.1-rc.1: `--version`
-// prints what this manifest carries, so no test may pin it to a literal.
+// The release version, including a prerelease such as 0.0.1-rc.1: a source
+// checkout prints this manifest's version, so no test may pin it to a literal.
 const cliVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
+// The built bin runs from the repository, outside any managed harness tree, so
+// `--version` marks it as a source checkout (with the commit when git is present).
+const sourceVersion = new RegExp(`^${cliVersion.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')} \\(source checkout(?:, commit [0-9a-f]{7,40})?\\)$`)
 const dshBin = join(repoRoot, 'apps/cli/lib/bin.js')
 const invalidProvider = fileURLToPath(new URL('./fixtures/invalid-provider.cordis.yml', import.meta.url))
 const webReadyExitHook = new URL('./fixtures/web-browser-open/register.mjs', import.meta.url).href
@@ -629,7 +632,9 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     writeFileSync(join(project, '.env'), 'PATH=/project-only-path\n')
     try {
       const result = await runBuiltBin(['--version'], {}, project)
-      expect(result).toEqual({ code: 0, stdout: cliVersion, stderr: '' })
+      expect(result.code).toBe(0)
+      expect(result.stdout).toMatch(sourceVersion)
+      expect(result.stderr).toBe('')
     } finally {
       rmSync(project, { recursive: true, force: true })
     }
@@ -647,7 +652,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         reject: false,
       })
       expect(result.exitCode).toBe(0)
-      expect(result.stdout).toBe(cliVersion)
+      expect(result.stdout).toMatch(sourceVersion)
       expect(result.stderr).toBe('')
     } finally {
       rmSync(installation, { recursive: true, force: true })

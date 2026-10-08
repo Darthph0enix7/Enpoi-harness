@@ -12,6 +12,7 @@ import { getDshRuntimeVersion, loadLayeredEnv, StartupError } from '@deepseek-ai
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { parseDshArgs } from './args.ts'
 import { reportStartupFailure } from './startup-diagnostics.ts'
+import { resolveDshVersionLine } from './version-identity.ts'
 
 /**
  * Run the standalone `scripts/doctor.mjs` diagnostic with this process's Node
@@ -39,7 +40,9 @@ export async function runCli(): Promise<void> {
   const [command, ...commandArgs] = process.argv.slice(2)
   if (command === 'doctor') await runDoctor(commandArgs)
   const version = getDshRuntimeVersion()
-  const invocation = parseDshArgs(process.argv.slice(2), version)
+  // The launcher flag prints the installed release identity; the package
+  // version alone cannot distinguish rolling installs from a source checkout.
+  const invocation = parseDshArgs(process.argv.slice(2), resolveDshVersionLine({ packageVersion: version }))
 
   switch (invocation.mode) {
     case 'profile': {
