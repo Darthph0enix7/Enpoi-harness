@@ -5,10 +5,10 @@
  * tables. The Permissions page resolves every row against this data, so a
  * stale mirror would show a wrong decision/provenance.
  *
- * Sources: /home/adam/.dsh/profiles/web/packages/enpoi-capabilities/src/policy.ts
- *          /home/adam/.dsh/profiles/web/packages/enpoi-tool-groups/src/catalog.ts
- *          /home/adam/deepseek-harness/packages/subagent/tool-subagent/src/index.ts
- *          /home/adam/deepseek-harness/scripts/tool-inventory/expected-orchestrator.json
+ * Sources: $PROFILE/packages/enpoi-capabilities/src/policy.ts
+ *          $PROFILE/packages/enpoi-tool-groups/src/catalog.ts
+ *          $REPO/packages/subagent/tool-subagent/src/index.ts
+ *          $REPO/scripts/tool-inventory/expected-orchestrator.json
  *
  * Regenerate:
  *   pnpm exec tsx packages/client/ui-brand-enpoi/scripts/generate-permissions-mirror.ts --write

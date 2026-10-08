@@ -2,8 +2,8 @@
 // client-mermaid.js) from src/client/chunks/*.tsx, mirroring the tsdown
 // chunkBundle contract: globalThis.__dshChunks__["<name>"] = (require) => {...}
 // with the platform externals left for the chunk loader's require.
-const esbuild = require('/home/adam/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild')
-const { transform } = require('/home/adam/deepseek-harness/node_modules/.pnpm/lightningcss@1.32.0/node_modules/lightningcss')
+const esbuild = require('esbuild')
+const { transform } = require('lightningcss')
 const fs = require('node:fs')
 const path = require('node:path')
 

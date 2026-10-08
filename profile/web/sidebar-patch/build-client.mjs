@@ -1,6 +1,10 @@
-import { build } from '/home/adam/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js'
-import { transform } from '/home/adam/deepseek-harness/node_modules/.pnpm/lightningcss@1.32.0/node_modules/lightningcss/node/index.js'
+import { build } from 'esbuild'
+import { transform } from 'lightningcss'
 import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 const id = 'dsh-better-sidebar'
 
@@ -42,8 +46,8 @@ const cssPlugin = {
 
 async function run() {
   await build({
-    entryPoints: ['src/client/index.tsx'],
-    outfile: 'lib/client.js',
+    entryPoints: [join(HERE, 'src/client/index.tsx')],
+    outfile: join(HERE, 'lib/client.js'),
     bundle: true,
     format: 'cjs',
     platform: 'browser',
