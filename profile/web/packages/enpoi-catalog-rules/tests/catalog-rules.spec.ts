@@ -33,6 +33,39 @@ describe('enpoi-catalog-rules privacy', () => {
     expect(resolvePrivacy('google', 'gemini-x', overrides)).toBe('trains')
   })
 
+  it('deletes a seeded entry with a null marker, falling through to the next level', () => {
+    // A provider delete drops the seeded policy; the model then reads `unknown`.
+    expect(resolvePrivacy('google', 'gemini-x', { providers: { google: null } })).toBe('unknown')
+    // A model delete falls through to the surviving provider entry.
+    expect(resolvePrivacy('mistral', 'mistral-small-latest', { models: { 'mistral/mistral-small-latest': null } })).toBe('trains')
+    // Deleting both levels reaches `unknown` rather than the deleted seed.
+    expect(resolvePrivacy('mistral', 'mistral-small-latest', {
+      providers: { mistral: null },
+      models: { 'mistral/mistral-small-latest': null },
+    })).toBe('unknown')
+    // An absent key is not a delete: the seed still answers.
+    expect(resolvePrivacy('groq', 'llama-3.3-70b', { providers: { google: null } })).toBe('no-train')
+  })
+
+  it('drops the whole seed with useSeed: false and answers only from the document', () => {
+    const overrides = { useSeed: false, providers: { google: 'no-train' } }
+    expect(resolvePrivacy('google', 'gemini-x', overrides)).toBe('no-train')
+    expect(resolvePrivacy('groq', 'llama-3.3-70b', overrides)).toBe('unknown')
+    expect(resolvePrivacy('mistral', 'mistral-small-latest', overrides)).toBe('unknown')
+    // The document's own model entries still beat its provider entries.
+    expect(resolvePrivacy('google', 'gemini-x', { ...overrides, models: { 'google/gemini-x': 'trains' } })).toBe('trains')
+    // `useSeed: true` keeps the default behavior.
+    expect(resolvePrivacy('groq', 'llama-3.3-70b', { useSeed: true })).toBe('no-train')
+  })
+
+  it('keeps the delete marker and seed switch through a parsed document', () => {
+    const rules = rulesOf({
+      privacy: { useSeed: false, providers: { google: 'trains' }, models: { 'google/gemini-x': null } },
+    })
+    expect(resolvePrivacy('google', 'gemini-x', rules.privacy)).toBe('trains')
+    expect(resolvePrivacy('groq', 'llama-3.3-70b', rules.privacy)).toBe('unknown')
+  })
+
   it('never reports unknown as safe for a noTraining predicate in either direction', () => {
     const unknown = entry({ provider: 'mystery-route', id: 'model-x' })
     expect(evaluatePredicate(unknown, { noTraining: true }, resolvePrivacy(unknown.provider, unknown.id))).toEqual({ matched: false, failed: 'no-training' })

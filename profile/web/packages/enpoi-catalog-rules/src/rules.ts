@@ -58,18 +58,25 @@ export type PrivacyPolicy = 'trains' | 'no-train'
 /** Effective training policy, or `unknown` when no curated fact covers it. */
 export type PrivacyVerdict = PrivacyPolicy | 'unknown'
 
-/** Privacy overrides, provider-level plus exact per-model entries. */
+/**
+ * Privacy overrides, provider-level plus exact per-model entries. A `null`
+ * value deletes that one seeded entry; `useSeed: false` disables the curated
+ * seed entirely. Either way, whatever is left unanswered stays `unknown`.
+ */
 export interface PrivacyOverrides {
-  /** Provider route id → policy. */
+  /** Provider route id → policy, or `null` to delete the seeded entry. */
   providers?: Record<string, unknown>
-  /** `provider/model` (or bare model id) → policy; beats the provider entry. */
+  /** `provider/model` (or bare model id) → policy, or `null` to delete the seeded entry; beats the provider entry. */
   models?: Record<string, unknown>
+  /** When false, the curated seed is not applied at all; only this document's entries answer. */
+  useSeed?: boolean
 }
 
 /**
  * Curated privacy seed. Google/Kilo/Mistral free tiers train on content; Groq
  * and paid Mistral models do not. Anything absent stays `unknown` (never
- * treated as safe). The settings document may override every entry.
+ * treated as safe). The settings document may override every entry, delete one
+ * with a `null` value, or disable the seed entirely with `useSeed: false`.
  */
 export const SEED_PRIVACY: { providers: Record<string, PrivacyPolicy>; models: Record<string, PrivacyPolicy> } = Object.freeze({
   providers: Object.freeze({
@@ -113,21 +120,33 @@ function privacyPolicy(value: unknown): PrivacyPolicy | undefined {
 
 /**
  * Merge the curated seed with one document's privacy section (document wins
- * per key, invalid values are ignored rather than trusted).
+ * per key, invalid values are ignored rather than trusted). A `null` document
+ * value deletes that key from the effective maps — the entry then falls back
+ * to the next lookup level, and to `unknown` when none answers. `useSeed:
+ * false` starts from empty maps, so only the document's own entries answer.
  * @param overrides - the `catalogRules.privacy` document section, if any.
  * @returns effective provider and model policy maps.
  */
 export function effectivePrivacy(overrides: PrivacyOverrides | undefined): { providers: Record<string, PrivacyPolicy>; models: Record<string, PrivacyPolicy> } {
-  const providers: Record<string, PrivacyPolicy> = { ...SEED_PRIVACY.providers }
-  const models: Record<string, PrivacyPolicy> = { ...SEED_PRIVACY.models }
+  const useSeed = overrides?.useSeed !== false
+  const providers: Record<string, PrivacyPolicy> = useSeed ? { ...SEED_PRIVACY.providers } : {}
+  const models: Record<string, PrivacyPolicy> = useSeed ? { ...SEED_PRIVACY.models } : {}
   if (overrides?.providers !== undefined && isRecord(overrides.providers)) {
     for (const [key, value] of Object.entries(overrides.providers)) {
+      if (value === null) {
+        delete providers[key]
+        continue
+      }
       const policy = privacyPolicy(value)
       if (policy !== undefined) providers[key] = policy
     }
   }
   if (overrides?.models !== undefined && isRecord(overrides.models)) {
     for (const [key, value] of Object.entries(overrides.models)) {
+      if (value === null) {
+        delete models[key]
+        continue
+      }
       const policy = privacyPolicy(value)
       if (policy !== undefined) models[key] = policy
     }

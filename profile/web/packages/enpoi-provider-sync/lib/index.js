@@ -77501,6 +77501,9 @@ function builtinProviders() {
   ];
 }
 
+// src/index.ts
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "@deepseek-ai/dsh-llm-pi-ai/src/config.ts";
+
 // src/capability-hints.ts
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -77671,12 +77674,15 @@ function live(schema) {
 function value(field) {
   return typeof field?.get === "function" ? field.get() : field;
 }
+var DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json";
 var Config = Schema.object({
   intervalMs: live(Schema.number().default(36e5)),
   syncOnStart: live(Schema.boolean().default(true)),
   syncDelayMs: live(Schema.number().default(2e3)),
   endpoints: live(Schema.dict(String).default({})),
-  capacityDefaults: live(Schema.any().default({}))
+  capacityDefaults: live(Schema.any().default({})),
+  modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
+  routeProviderMap: live(Schema.dict(Schema.array(String)).default({}))
 });
 var SIGN_IN_REQUIRED = "sign-in required";
 var LLM_NS = "llm-pi-ai";
@@ -77701,6 +77707,8 @@ function osCacheDir(env = process.env, platform = process.platform) {
   return platform === "darwin" ? join2(home, "Library", "Caches") : join2(home, ".cache");
 }
 function modelsDevCachePath(env = process.env, platform = process.platform) {
+  const override = firstNonEmpty(env.DSH_MODELS_DEV_PATH);
+  if (override !== void 0) return override;
   const base = osCacheDir(env, platform);
   return base === void 0 ? void 0 : join2(base, "opencode", "models.json");
 }
@@ -77717,11 +77725,11 @@ function loadModelsDev() {
   }
   return {};
 }
-async function refreshModelsDevOnline(report) {
+async function refreshModelsDevOnline(report, url = DEFAULT_MODELS_DEV_URL) {
   try {
-    const res = await fetch("https://models.dev/api.json", { signal: AbortSignal.timeout(1e4) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(1e4) });
     if (!res.ok) {
-      report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 GET https://models.dev/api.json -> HTTP ${String(res.status)}; local cache kept`);
+      report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 GET ${url} -> HTTP ${String(res.status)}; local cache kept`);
       return;
     }
     const data = await res.json();
@@ -77745,7 +77753,7 @@ async function refreshModelsDevOnline(report) {
     report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 ${error instanceof Error ? error.message : String(error)}; local cache kept`);
   }
 }
-var ROUTE_PROVIDER_MAP = {
+var DEFAULT_ROUTE_PROVIDER_MAP = Object.freeze({
   "opencode-go": ["opencode-go", "opencode"],
   "opencode": ["opencode", "opencode-go"],
   "antigravity": ["anthropic", "google", "openai", "deepseek", "minimax"],
@@ -77754,8 +77762,8 @@ var ROUTE_PROVIDER_MAP = {
   "deepseek-official": ["deepseek"],
   "openrouter": ["openrouter"],
   "huggingface": ["huggingface"]
-};
-function resolveFromModelsDev(route, modelId) {
+});
+function resolveFromModelsDev(route, modelId, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   const db = loadModelsDev();
   const cleanId = modelId.toLowerCase().trim();
   const SUFFIXES = ["-thinking", "-tiered", "-preview", "-exp", "-high", "-low", "-medium", "-agent", "-latest", "-image"];
@@ -77767,7 +77775,7 @@ function resolveFromModelsDev(route, modelId) {
       candidates.push(base);
     }
   }
-  const candidateProviders = ROUTE_PROVIDER_MAP[route] ?? [route];
+  const candidateProviders = routeProviderMap[route] ?? [route];
   const find = (pModels) => {
     if (!pModels) return void 0;
     for (const c of candidates) {
@@ -78189,8 +78197,8 @@ function modelsDevCostTiers(value2) {
   }
   return tiers.length === 0 ? void 0 : tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove);
 }
-function analyzeModel(route, model, fallback, hints) {
-  const mDev = resolveFromModelsDev(route, model.id);
+function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
+  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap);
   const catalog = getCatalogIndex();
   const shortId = model.id.includes("/") ? model.id.split("/").pop() : model.id;
   const cat = catalog.get(model.id) ?? catalog.get(shortId);
@@ -78207,8 +78215,8 @@ function analyzeModel(route, model, fallback, hints) {
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens;
   const prefixContext = fallback?.matched === "prefix" ? fallback.contextWindow : void 0;
   const prefixMax = fallback?.matched === "prefix" ? fallback.maxTokens : void 0;
-  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262144;
-  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32768;
+  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? DEFAULT_MAX_TOKENS;
   const disclosed = [mDev?.modalities?.input, cat?.input, model.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
   const modalityDisclosed = disclosed !== void 0;
   const inputModalities = modalityDisclosed ? ["text", ...liveModalities(disclosed).filter((modality) => modality !== "text")] : ["text"];
@@ -78302,11 +78310,11 @@ function analyzeModel(route, model, fallback, hints) {
     }
   };
 }
-function mergeConfiguredModels(route, configured, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }) {
+function mergeConfiguredModels(route, configured, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints).settings);
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints, routeProviderMap).settings);
   }
   const models = [];
   const unadvertised = [];
@@ -78334,10 +78342,10 @@ function mergeConfiguredModels(route, configured, live2, capacities, hints = { t
   }
   return { models, unadvertised };
 }
-function mergeDiscoveredModels(route, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }) {
+function mergeDiscoveredModels(route, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   return live2.map((model) => {
     const fallback = fallbackFor(capacities, route, model.id);
-    return analyzeModel(route, model, fallback, hints).discovered;
+    return analyzeModel(route, model, fallback, hints, routeProviderMap).discovered;
   });
 }
 function stringifyComparable(models) {
@@ -78365,6 +78373,8 @@ function apply(ctx, config) {
   const logger = ctx.logger("enpoi-provider-sync");
   const endpoints = value(config.endpoints) ?? {};
   const capacities = value(config.capacityDefaults) ?? {};
+  const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL;
+  const routeProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) };
   function reportSyncDiagnostic(kind, message) {
     let code;
     try {
@@ -78375,9 +78385,9 @@ function apply(ctx, config) {
     logger.warn(code === void 0 ? message : `${message} (diagnostics ${code})`);
   }
   loadModelsDev();
-  void refreshModelsDevOnline(reportSyncDiagnostic);
+  void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
   async function syncOnce() {
-    await refreshModelsDevOnline(reportSyncDiagnostic);
+    await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
     let overlays = {};
     try {
       overlays = loadCatalogOverlays();
@@ -78406,7 +78416,7 @@ function apply(ctx, config) {
     const credentials = ctx.get("credentials");
     const revisionOf = (ns) => settings.describe().find((entry) => entry.ns === ns)?.revision;
     const persistRouteModels = async (ns, route, profile, live2, source, overlay) => {
-      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities, hints);
+      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities, hints, routeProviderMap);
       const merged = merge?.models ?? profile.models ?? [];
       const models = applyCatalogOverlay(merged, overlay);
       const before = stringifyComparable(profile.models);
@@ -78473,7 +78483,7 @@ function apply(ctx, config) {
           const record = mergeDiscoveredRoute(
             previous,
             baseURL,
-            mergeDiscoveredModels(route, live2, capacities, hints),
+            mergeDiscoveredModels(route, live2, capacities, hints, routeProviderMap),
             Date.now()
           );
           if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
@@ -78533,6 +78543,8 @@ function apply(ctx, config) {
 }
 export {
   Config,
+  DEFAULT_MODELS_DEV_URL,
+  DEFAULT_ROUTE_PROVIDER_MAP,
   apply,
   applyCatalogOverlay,
   capabilityHintsOverridePath,

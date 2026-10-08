@@ -4,11 +4,13 @@ import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Config } from '../src/index.ts'
 import {
   apply,
   commandCodeCatalogPath,
+  DEFAULT_MODELS_DEV_URL,
   describeSyncFailure,
   discoveredCachePath,
   fetchModels,
@@ -36,6 +38,7 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   Reflect.deleteProperty(process.env, 'DSH_DISCOVERED_MODELS')
   Reflect.deleteProperty(process.env, 'DSH_COMMANDCODE_CATALOG')
+  Reflect.deleteProperty(process.env, 'DSH_MODELS_DEV_PATH')
   await Promise.all(servers.splice(0).map(server => new Promise(resolve => server.close(resolve))))
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
@@ -119,9 +122,10 @@ describe('listing normalization', () => {
 })
 
 describe('discovered-cache records', () => {
-  it('marks a model nothing described as unverified and keeps it at the capability floor', () => {
+  it('marks a model nothing described as unverified and keeps it at the shared llm-pi-ai floor', () => {
     const [record] = mergeDiscoveredModels('kilo', [{ id: 'zzz-mystery-endpoint-model-77' }], undefined)
-    expect(record).toEqual({ id: 'zzz-mystery-endpoint-model-77', name: 'Zzz Mystery Endpoint Model 77', contextWindow: 262_144, maxTokens: 32_768, unverified: true })
+    // The floor is llm-pi-ai's own resolution default, not a second literal here.
+    expect(record).toEqual({ id: 'zzz-mystery-endpoint-model-77', name: 'Zzz Mystery Endpoint Model 77', contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS, unverified: true })
     const [known] = mergeDiscoveredModels('kilo', [{ id: 'vendor/model:free', input: ['text', 'image'], tools: true }], undefined)
     expect(known).toMatchObject({ input: ['text', 'image'], tools: true })
     expect(known?.unverified).toBeUndefined()
@@ -302,6 +306,30 @@ describe('portable paths and refresh diagnostics', () => {
     expect(JSON.stringify(modelsDevCachePath({ HOME: '/users/jo' }, 'linux'))).not.toContain('/home/')
   })
 
+  it('honors DSH_MODELS_DEV_PATH over the OS cache path, and falls through when empty', () => {
+    expect(modelsDevCachePath({ DSH_MODELS_DEV_PATH: '/srv/models.json', XDG_CACHE_HOME: '/xdg/cache' }, 'linux')).toBe('/srv/models.json')
+    expect(modelsDevCachePath({ DSH_MODELS_DEV_PATH: '', HOME: '/users/jo' }, 'linux')).toBe(join('/users/jo', '.cache', 'opencode', 'models.json'))
+  })
+
+  it('refreshes from the configured catalogue URL and persists to DSH_MODELS_DEV_PATH', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-models-dev-'))
+    directories.push(directory)
+    const target = join(directory, 'mirror', 'models.json')
+    process.env.DSH_MODELS_DEV_PATH = target
+    const catalogue = Object.fromEntries(Array.from({ length: 51 }, (_, index) => [`provider-${String(index)}`, { models: {} }]))
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      urls.push(String(input))
+      return { ok: true, json: async () => catalogue }
+    })
+    vi.resetModules()
+    const fresh = await import('../src/index.ts')
+    expect(fresh.DEFAULT_MODELS_DEV_URL).toBe('https://models.dev/api.json')
+    await fresh.refreshModelsDevOnline(undefined, 'https://mirror.test/api.json')
+    expect(urls).toEqual(['https://mirror.test/api.json'])
+    expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual(catalogue)
+  })
+
   it('resolves DSH home from DSH_HOME, then the real home, without assuming a user name', () => {
     expect(resolveDshHome({ DSH_HOME: '/srv/dsh', HOME: '/users/jo' }, 'linux')).toBe('/srv/dsh')
     expect(resolveDshHome({ HOME: '/users/jo' }, 'linux')).toBe(join('/users/jo', '.dsh'))
@@ -424,7 +452,12 @@ interface SyncHarness {
 function syncHarness(
   llm: Record<string, HarnessRoute> | undefined,
   commandcode: Record<string, HarnessRoute> = {},
-  options: { conflicts?: number } = {},
+  options: {
+    conflicts?: number
+    modelsDevUrl?: string
+    routeProviderMap?: Record<string, string[]>
+    applyFn?: typeof apply
+  } = {},
 ): SyncHarness {
   const mutations: SyncHarness['mutations'] = []
   const warnings: string[] = []
@@ -456,12 +489,14 @@ function syncHarness(
       return () => { cleanup?.() }
     },
   }
-  apply(ctx as unknown as Context, {
+  ;(options.applyFn ?? apply)(ctx as unknown as Context, {
     intervalMs: { get: () => 3_600_000 },
     syncOnStart: { get: () => true },
     syncDelayMs: { get: () => 0 },
     endpoints: { get: () => ({}) },
     capacityDefaults: { get: () => ({}) },
+    modelsDevUrl: { get: () => options.modelsDevUrl ?? DEFAULT_MODELS_DEV_URL },
+    routeProviderMap: { get: () => options.routeProviderMap ?? ({}) },
   })
   return {
     mutations,
@@ -602,6 +637,54 @@ describe('route passes', () => {
       await vi.waitFor(() => { expect(harness.mutations).toHaveLength(2) })
       expect(harness.mutations.map(mutation => mutation.revision)).toEqual([3, 3])
       expect(harness.mutations[1]!.ops[0]!.value.map(model => model.id)).toEqual(['zzz-commandcode-model-c'])
+    } finally {
+      harness.dispose()
+    }
+  })
+})
+
+describe('route provider mapping', () => {
+  /** One models.dev cache with the same model id under two providers. */
+  function writeSharedIdCatalogue(directory: string): string {
+    const cache = join(directory, 'models.json')
+    writeFileSync(cache, JSON.stringify({
+      'aaa-first': { models: { 'mapped-model': { name: 'From First' } } },
+      'zzz-second': { models: { 'mapped-model': { name: 'From Second' } } },
+    }))
+    return cache
+  }
+
+  it('resolves a route through its mapped provider list instead of the global fallback', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-route-map-'))
+    directories.push(directory)
+    process.env.DSH_MODELS_DEV_PATH = writeSharedIdCatalogue(directory)
+    vi.resetModules()
+    const fresh = await import('../src/index.ts')
+    // Unmapped, the global search answers with the first provider carrying the id.
+    const unmapped = fresh.mergeConfiguredModels('zzz-route', undefined, [{ id: 'mapped-model' }], undefined)
+    expect(unmapped.models[0]).toMatchObject({ id: 'mapped-model', name: 'From First' })
+    // Mapped, the route's own provider list wins over the global order.
+    const mapped = fresh.mergeConfiguredModels('zzz-route', undefined, [{ id: 'mapped-model' }], undefined, undefined, { 'zzz-route': ['zzz-second'] })
+    expect(mapped.models[0]).toMatchObject({ id: 'mapped-model', name: 'From Second' })
+  })
+
+  it('threads the configured routeProviderMap through the mounted pass', async () => {
+    const { url } = await listingServer(200, JSON.stringify({ data: [{ id: 'mapped-model' }] }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-route-map-'))
+    directories.push(directory)
+    process.env.DSH_MODELS_DEV_PATH = writeSharedIdCatalogue(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    stubProviderNetwork()
+    vi.resetModules()
+    const fresh = await import('../src/index.ts')
+    const harness = syncHarness(
+      { 'zzz-route': { baseURL: url, api: 'openai-completions', models: [] } },
+      {},
+      { routeProviderMap: { 'zzz-route': ['zzz-second'] }, applyFn: fresh.apply },
+    )
+    try {
+      await vi.waitFor(() => { expect(harness.mutations).toHaveLength(1) })
+      expect(harness.mutations[0]!.ops[0]!.value[0]).toMatchObject({ id: 'mapped-model', name: 'From Second' })
     } finally {
       harness.dispose()
     }

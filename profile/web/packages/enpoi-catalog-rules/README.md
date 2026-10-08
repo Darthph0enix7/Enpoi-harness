@@ -18,8 +18,9 @@ enpoi-orchestration:
   catalogRules:
     version: 1
     privacy:
-      providers: { mistral: trains, groq: no-train }   # route id → trains | no-train
+      providers: { mistral: trains, groq: no-train }   # route id → trains | no-train | null (delete seed)
       models: { mistral/mistral-large-latest: no-train } # provider/model or bare id; beats provider
+      # useSeed: false                                  # drop the curated seed entirely
     visibility:
       hide:
         - id: zero-price
@@ -36,7 +37,10 @@ Predicates (all present clauses ANDed): `zeroPrice`, `maxPrice`, `tools`,
 `providerGlob`, `idGlob`, `nameGlob`, `noTraining`, `gated`. Unknown
 price/context/name fails the clause rather than guessing; **unknown privacy
 fails `noTraining` in both directions** — never treated as safe. The curated
-privacy seed lives in `src/rules.ts` and the profile settings document.
+privacy seed lives in `src/rules.ts` and the profile settings document: a
+document value wins over the seed, `null` deletes one seeded entry (the lookup
+then falls through to the next level, `unknown` last), and `useSeed: false`
+drops the seed so only the document answers.
 
 ## Precedence
 

@@ -36,6 +36,10 @@ import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@
 import { readSettingsDocument } from 'dsh-enpoi-contracts'
 import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
+// The schema floor is llm-pi-ai's own resolution default: the sync writes it
+// explicitly so a discovered record is complete, but the one authoritative
+// value stays in the adapter's config module.
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
 import {
   claimCapabilityHints,
   loadCapabilityHints,
@@ -58,7 +62,7 @@ function live<T extends object>(schema: T): T {
 /** Read one effective Config field (Volatile ref on 0.1.7+, plain value before it). */
 function value<T>(field: T | Volatile<T>): T {
   return typeof (field as Volatile<T> | undefined)?.get === 'function'
-    ? (field as Volatile<T>).get()
+    ? (field as Volatile<T>).get() as T
     : field as T
 }
 
@@ -66,6 +70,9 @@ export interface RouteCapacity {
   prefixes?: Record<string, { contextWindow?: number; maxTokens?: number }>
   default?: { contextWindow?: number; maxTokens?: number }
 }
+
+/** The authoritative models.dev catalogue URL; the `modelsDevUrl` config may point at a mirror. */
+export const DEFAULT_MODELS_DEV_URL = 'https://models.dev/api.json'
 
 /** Live-editable sync schedule and enrichment configuration. */
 export interface Config {
@@ -79,6 +86,13 @@ export interface Config {
   endpoints: Volatile<Record<string, string>>
   /** Capacity fallbacks for models the live endpoint does not describe. */
   capacityDefaults: Volatile<Record<string, RouteCapacity>>
+  /** models.dev catalogue URL; a deployment may point it at a mirror. */
+  modelsDevUrl: Volatile<string>
+  /**
+   * Route → models.dev provider keys, merged over {@link DEFAULT_ROUTE_PROVIDER_MAP}
+   * per key. Mapping a route this deployment serves does not require a code change.
+   */
+  routeProviderMap: Volatile<Record<string, string[]>>
 }
 
 export const Config = Schema.object({
@@ -87,6 +101,8 @@ export const Config = Schema.object({
   syncDelayMs: live(Schema.number().default(2000)),
   endpoints: live(Schema.dict(String).default({})),
   capacityDefaults: live(Schema.any().default({})),
+  modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
+  routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
 })
 
 /** One request-modality token a listing or catalog may disclose. */
@@ -247,13 +263,17 @@ export function osCacheDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJ
  * layout inside {@link osCacheDir} (`%LOCALAPPDATA%\opencode\models.json` on
  * Windows, `~/Library/Caches/opencode/models.json` on macOS,
  * `$XDG_CACHE_HOME/opencode/models.json` or `~/.cache/opencode/models.json` on
- * Linux). `undefined` when no cache dir resolves: the online refresh and the
- * in-memory copy then serve alone, and no guessed path is ever written.
+ * Linux). `DSH_MODELS_DEV_PATH` overrides the whole path for a deployment
+ * whose catalogue cache is not the OS one. `undefined` when no cache dir
+ * resolves: the online refresh and the in-memory copy then serve alone, and no
+ * guessed path is ever written.
  * @param env - environment to read (tests inject one).
  * @param platform - OS key to branch on (tests inject one).
  * @returns the cache file path, or undefined when unresolvable.
  */
 export function modelsDevCachePath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  const override = firstNonEmpty(env.DSH_MODELS_DEV_PATH)
+  if (override !== undefined) return override
   const base = osCacheDir(env, platform)
   return base === undefined ? undefined : join(base, 'opencode', 'models.json')
 }
@@ -282,12 +302,13 @@ export type SyncDiagnosticSink = (kind: string, message: string) => void
  * reported through the sink with a coded message and a plain sentence, so a
  * stale or missing cache is visible instead of swallowed.
  * @param report - optional diagnostics sink.
+ * @param url - the catalogue URL; defaults to {@link DEFAULT_MODELS_DEV_URL}.
  */
-export async function refreshModelsDevOnline(report?: SyncDiagnosticSink): Promise<void> {
+export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: string = DEFAULT_MODELS_DEV_URL): Promise<void> {
   try {
-    const res = await fetch('https://models.dev/api.json', { signal: AbortSignal.timeout(10_000) })
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) })
     if (!res.ok) {
-      report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — GET https://models.dev/api.json -> HTTP ${String(res.status)}; local cache kept`)
+      report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — GET ${url} -> HTTP ${String(res.status)}; local cache kept`)
       return
     }
     const data = (await res.json()) as ModelsDevDatabase
@@ -314,8 +335,16 @@ export async function refreshModelsDevOnline(report?: SyncDiagnosticSink): Promi
   }
 }
 
-/** Provider route mapping to models.dev provider keys. */
-const ROUTE_PROVIDER_MAP: Record<string, string[]> = {
+/** Route → models.dev provider keys, most specific first. */
+export type RouteProviderMap = Record<string, readonly string[]>
+
+/**
+ * Shipped route mapping to models.dev provider keys. The configured
+ * `routeProviderMap` merges over these keys, so a route this table does not
+ * carry can be mapped without a code change; a route no table carries resolves
+ * against its own key alone.
+ */
+export const DEFAULT_ROUTE_PROVIDER_MAP: RouteProviderMap = Object.freeze({
   'opencode-go': ['opencode-go', 'opencode'],
   'opencode': ['opencode', 'opencode-go'],
   'antigravity': ['anthropic', 'google', 'openai', 'deepseek', 'minimax'],
@@ -324,10 +353,14 @@ const ROUTE_PROVIDER_MAP: Record<string, string[]> = {
   'deepseek-official': ['deepseek'],
   'openrouter': ['openrouter'],
   'huggingface': ['huggingface'],
-}
+})
 
 /** Resolve a model from models.dev with provider scoping and fallback. */
-function resolveFromModelsDev(route: string, modelId: string): ModelsDevModel | undefined {
+function resolveFromModelsDev(
+  route: string,
+  modelId: string,
+  routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
+): ModelsDevModel | undefined {
   const db = loadModelsDev()
   const cleanId = modelId.toLowerCase().trim()
 
@@ -347,7 +380,7 @@ function resolveFromModelsDev(route: string, modelId: string): ModelsDevModel | 
     }
   }
 
-  const candidateProviders = ROUTE_PROVIDER_MAP[route] ?? [route]
+  const candidateProviders = routeProviderMap[route] ?? [route]
 
   const find = (pModels: Record<string, unknown> | undefined): ModelsDevModel | undefined => {
     if (!pModels) return undefined
@@ -391,7 +424,7 @@ function getCatalogIndex(): Map<string, Model<Api>> {
   const index = new Map<string, Model<Api>>()
   for (const provider of builtinProviders()) {
     try {
-      const models = getBuiltinModels(provider.id)
+      const models = getBuiltinModels(provider.id as Parameters<typeof getBuiltinModels>[0])
       for (const m of models) {
         if (!index.has(m.id)) index.set(m.id, m)
         const short = m.id.includes('/') ? m.id.split('/').pop()! : m.id
@@ -1144,6 +1177,7 @@ interface AnalyzedModel {
  * @param model - the normalized listing entry.
  * @param fallback - the route's capacity fallback for ids nothing sizes.
  * @param hints - the shipped hint table plus the owner override.
+ * @param routeProviderMap - the effective route → models.dev provider keys.
  * @returns the settings record and the cache record.
  */
 function analyzeModel(
@@ -1151,8 +1185,9 @@ function analyzeModel(
   model: LiveModel,
   fallback: CapacityFallback | undefined,
   hints: CapabilityHintContext,
+  routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
 ): AnalyzedModel {
-  const mDev = resolveFromModelsDev(route, model.id)
+  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap)
   const catalog = getCatalogIndex()
   const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
   const cat = catalog.get(model.id) ?? catalog.get(shortId)
@@ -1179,8 +1214,8 @@ function analyzeModel(
   const prefixContext = fallback?.matched === 'prefix' ? fallback.contextWindow : undefined
   const prefixMax = fallback?.matched === 'prefix' ? fallback.maxTokens : undefined
 
-  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? 262_144
-  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? 32_768
+  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? DEFAULT_MAX_TOKENS
 
   // 3. Resolve Modalities, Reasoning, and their provenance. `input` and
   // `reasoning` are facts only when a disclosure stated them; the shared id
@@ -1346,6 +1381,8 @@ export interface ConfiguredMerge {
  * @param capacities - the route's capacity fallbacks.
  * @param hints - the shipped hint table plus the owner override; defaults to
  *   the shipped table with no override.
+ * @param routeProviderMap - the effective route → models.dev provider keys;
+ *   defaults to the shipped table.
  * @returns the merged list and the configured ids nothing advertised.
  */
 export function mergeConfiguredModels(
@@ -1354,11 +1391,12 @@ export function mergeConfiguredModels(
   live: LiveModel[],
   capacities: Record<string, RouteCapacity> | undefined,
   hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
+  routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
 ): ConfiguredMerge {
   const advertised = new Map<string, Record<string, unknown>>()
   for (const model of live) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints).settings)
+    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints, routeProviderMap).settings)
   }
   const models: Array<Record<string, unknown>> = []
   const unadvertised: string[] = []
@@ -1387,16 +1425,27 @@ export function mergeConfiguredModels(
   return { models, unadvertised }
 }
 
-/** Merge a live listing into the discovered-cache records, without provenance stamps. */
+/**
+ * Merge a live listing into the discovered-cache records, without provenance stamps.
+ * @param route - provider route key, for models.dev scoping.
+ * @param live - normalized live listing entries.
+ * @param capacities - the route's capacity fallbacks.
+ * @param hints - the shipped hint table plus the owner override; defaults to
+ *   the shipped table with no override.
+ * @param routeProviderMap - the effective route → models.dev provider keys;
+ *   defaults to the shipped table.
+ * @returns the discovered records, minus the provenance stamps the writer adds.
+ */
 export function mergeDiscoveredModels(
   route: string,
   live: LiveModel[],
   capacities: Record<string, RouteCapacity> | undefined,
   hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
+  routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
 ): Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>> {
   return live.map((model) => {
     const fallback = fallbackFor(capacities, route, model.id)
-    return analyzeModel(route, model, fallback, hints).discovered
+    return analyzeModel(route, model, fallback, hints, routeProviderMap).discovered
   })
 }
 
@@ -1426,6 +1475,10 @@ export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('enpoi-provider-sync')
   const endpoints = value(config.endpoints) ?? {}
   const capacities = (value(config.capacityDefaults) ?? {}) as Record<string, RouteCapacity>
+  const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL
+  // The configured route map extends the shipped table key by key: a route the
+  // deployment newly serves is mapped from configuration alone.
+  const routeProviderMap: RouteProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) }
 
   /**
    * Record one coded incident (kind `provider-sync/...`) and log it. The
@@ -1446,13 +1499,13 @@ export function apply(ctx: Context, config: Config): void {
 
   // Load models.dev database on startup and refresh online in background
   loadModelsDev()
-  void refreshModelsDevOnline(reportSyncDiagnostic)
+  void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
 
   async function syncOnce(): Promise<void> {
     // Refresh models.dev metadata on every pass (not just startup) so new
     // models and corrected limits appear within one interval; the pass cadence
     // itself is the configured interval (hourly in the shipped profile).
-    await refreshModelsDevOnline(reportSyncDiagnostic)
+    await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
     // The overlays are a maintained deployment correction: read once per pass,
     // report a malformed file, and carry on with the live merge alone.
     let overlays: CatalogOverlayDocument = {}
@@ -1514,7 +1567,7 @@ export function apply(ctx: Context, config: Config): void {
       // A failed fetch must not stamp every configured entry `source:
       // configured`, so the merge is skipped and the overlay applies to the
       // configuration exactly as stored.
-      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities, hints)
+      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities, hints, routeProviderMap)
       const merged = merge?.models ?? profile.models ?? []
       const models = applyCatalogOverlay(merged, overlay)
       const before = stringifyComparable(profile.models)
@@ -1615,7 +1668,7 @@ export function apply(ctx: Context, config: Config): void {
           const record = mergeDiscoveredRoute(
             previous,
             baseURL,
-            mergeDiscoveredModels(route, live, capacities, hints),
+            mergeDiscoveredModels(route, live, capacities, hints, routeProviderMap),
             Date.now(),
           )
           if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
