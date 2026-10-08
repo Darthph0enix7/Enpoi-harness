@@ -866,6 +866,20 @@ describe('mapStopReason / mapUsage', () => {
       .toEqual({ kind: 'error', failure: { message: 'Provider returned an empty response', code: EMPTY_RESPONSE_CODE } })
   })
 
+  it('classifies an upstream capacity overload as the retryable SERVER family', () => {
+    // The Nvidia relay's exact wording, as ~20 live attempts on the Mac/PC
+    // routes received it: previously the catch-all PI_AI_ERROR, which no retry
+    // policy accepts, so the turn died with the prompt lost.
+    const overload = 'Upstream error from Nvidia: Service temporarily overloaded'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: overload })))
+      .toEqual({ kind: 'error', failure: { message: overload, code: 'SERVER' } })
+    // The same transient capacity family in sibling provider wordings.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'Service temporarily unavailable' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'model_capacity: server is busy' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+  })
+
   it('keeps a thinking-only stop successful (any block counts as content)', () => {
     expect(mapStopReason(assistant({ stopReason: 'stop', content: [{ type: 'thinking', thinking: 'mull' }] })))
       .toEqual({ kind: 'stop' })

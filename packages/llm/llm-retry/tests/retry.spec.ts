@@ -174,6 +174,24 @@ afterEach(async () => {
   context = undefined
 })
 
+/** The Nvidia-relayed capacity overload, exactly as pi-ai flattened it. */
+const OVERLOAD_MESSAGE = 'Upstream error from Nvidia: Service temporarily overloaded'
+
+/**
+ * An upstream overload as a pi-ai error finish chunk (the adapter's in-band
+ * error delivery). The code is SERVER because the pi-ai classifier maps the
+ * prose capacity wording to the retryable family.
+ */
+function overloadFailure(): StreamChunk[] {
+  return [
+    { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
+    {
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: OVERLOAD_MESSAGE, code: 'SERVER' } },
+    },
+  ]
+}
+
 describe('provider-routed retry policy', () => {
   it('records the scheduled delay before retrying the request', async () => {
     vi.useFakeTimers()
@@ -264,6 +282,100 @@ describe('provider-routed retry policy', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'recovered' }],
     })
+  })
+
+  it('retries an upstream capacity overload under the default retryable codes and completes the turn', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      overloadFailure(),
+      textResponse('recovered after overload'),
+    ])
+    // No retryableCodes override: SERVER is in the resolved default set, so the
+    // overload's classification alone recovers the turn.
+    ;({ ctx: context } = await harness(adapter))
+    const agent = await context.agentLoop.create(SessionId('retry-overload'), { provider: 'mock', model: 'mock' })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    const event = await scheduled
+    expect(event.data).toMatchObject({
+      mode: 'normal',
+      retry: 1,
+      maxRetries: 2,
+      delayMs: 500,
+      failure: { message: OVERLOAD_MESSAGE, code: 'SERVER' },
+    })
+
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(500)
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered after overload' }],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    })
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('stops overload retries at the configured budget and surfaces the terminal error', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      overloadFailure(),
+      overloadFailure(),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      maxRetries: 1,
+      backoff: { initialDelayMs: 1, maxDelayMs: 1 },
+    }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-overload-exhausted'), { provider: 'mock', model: 'mock' })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await scheduled
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(1)
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { message: OVERLOAD_MESSAGE, code: 'SERVER' } } },
+    })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves a non-retryable in-band failure terminal', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([[
+      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
+      {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: { message: 'HTTP 400: invalid input', code: 'INVALID_REQUEST' },
+        },
+      },
+    ]])
+    ;({ ctx: context } = await harness(adapter))
+    const agent = await context.agentLoop.create(SessionId('retry-invalid-request'), { provider: 'mock', model: 'mock' })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'INVALID_REQUEST' } } },
+    })
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('leaves partial failed chunks on their step without committing a message or tool side effect', async () => {

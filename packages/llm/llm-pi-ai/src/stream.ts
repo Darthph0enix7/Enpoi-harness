@@ -70,6 +70,14 @@ function classifyPiAiError(message: string): string {
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
+  // A provider or gateway reporting a capacity rejection in prose ("Upstream
+  // error from Nvidia: Service temporarily overloaded") is the same transient
+  // overload the credential pool classifies as CAPACITY and rotates over.
+  // Without a pool there is nothing to rotate, so the failure must carry the
+  // retryable SERVER family; the catch-all PI_AI_ERROR below is accepted by no
+  // retry policy, and the live Mac/PC routes lost ~20 turns to exactly this
+  // wording arriving without a status code.
+  if (/\boverloaded\b|temporarily\s+unavailable\b|\bserver\s+is\s+busy\b|model_capacity/i.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
