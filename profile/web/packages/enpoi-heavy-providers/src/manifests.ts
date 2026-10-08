@@ -229,6 +229,14 @@ export interface HeavyProviderManifest {
   }
   dashboardUrl?: string
   docsUrl?: string
+  /**
+   * GitHub releases API feed whose newest release carries this provider's
+   * desktop installers. Deployment-varying: a fork or mirror repoints the
+   * module default and this field together, never a command string. The
+   * platform download steps interpolate the same default, so the field and
+   * the rendered commands always name one feed.
+   */
+  releasesApi?: string
   /** Loopback port the service listens on by default (detection's first candidate). */
   defaultPort: number
   /** Account flows that need a browser; rendered as badges. */
@@ -286,6 +294,15 @@ const RUNTIME_TOOL_RE: Readonly<Partial<Record<HeavyLocalRuntime, RegExp>>> = {
   podman: /\bpodman\b/,
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/,
 }
+
+/**
+ * FreeLLMAPI's GitHub releases API feed: the macOS and Windows desktop-download
+ * steps resolve the newest installer asset from it. Named once (and carried as
+ * the manifest's `releasesApi` field) so a fork or mirror repoints the feed in
+ * one place instead of editing shell command strings; the shipped default keeps
+ * every rendered command byte-identical.
+ */
+const FREELLMAPI_RELEASES_API = 'https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest'
 
 /** launchd label for the antigravity user agent (macOS). */
 const ANTIGRAVITY_LAUNCHD_LABEL = 'dev.enpoi.antigravity-proxy'
@@ -407,6 +424,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     auth: { kind: 'unified', apiKeyEnv: 'FREELLMAPI_API_KEY', keyless: false },
     dashboardUrl: 'http://127.0.0.1:3002',
     docsUrl: 'https://freellmapi.co',
+    releasesApi: FREELLMAPI_RELEASES_API,
     defaultPort: 3002,
     // Browser badges belong only to account flows that cannot complete without
     // a browser (antigravity's Google OAuth); FreeLLMAPI's dashboard steps are
@@ -483,7 +501,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
               // ends `-<arch>.dmg`, so the pattern must carry that hyphen (a
               // `"arm64` pattern can never match). A re-run keeps the image
               // already in ~/Downloads.
-              command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+-\'"$arch"\'\\.dmg"\' | head -1 | cut -d\'"\' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"',
+              command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL ' + FREELLMAPI_RELEASES_API + ' | grep -oE \'"browser_download_url": *"[^"]+-\'"$arch"\'\\.dmg"\' | head -1 | cut -d\'"\' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"',
               weight: 2,
             },
             {
@@ -514,7 +532,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
               label: 'Download the latest installer',
               // The matched URL lands in a file first: an empty match has to
               // fail the step instead of feeding xargs an empty string.
-              command: 'mkdir -p "{home}/Downloads" && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE \'"browser_download_url": *"[^"]+\\.exe"\' | head -1 | cut -d\'"\' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"',
+              command: 'mkdir -p "{home}/Downloads" && curl -fsSL ' + FREELLMAPI_RELEASES_API + ' | grep -oE \'"browser_download_url": *"[^"]+\\.exe"\' | head -1 | cut -d\'"\' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"',
               weight: 2,
             },
             { label: 'Install silently', command: 'cmd //c start //wait "" "$HOME/Downloads/FreeLLMAPI-Setup.exe" /S' },

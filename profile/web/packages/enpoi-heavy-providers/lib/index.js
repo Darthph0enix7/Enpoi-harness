@@ -246,6 +246,7 @@ var RUNTIME_TOOL_RE = {
   podman: /\bpodman\b/,
   node: /\b(?:node|npm|npx|pnpm|yarn)\b/
 };
+var FREELLMAPI_RELEASES_API = "https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest";
 var ANTIGRAVITY_LAUNCHD_LABEL = "dev.enpoi.antigravity-proxy";
 var ANTIGRAVITY_PACKAGE = "antigravity-claude-proxy";
 var ANTIGRAVITY_NPM_STEP = {
@@ -364,6 +365,7 @@ var HEAVY_MANIFESTS = [
     auth: { kind: "unified", apiKeyEnv: "FREELLMAPI_API_KEY", keyless: false },
     dashboardUrl: "http://127.0.0.1:3002",
     docsUrl: "https://freellmapi.co",
+    releasesApi: FREELLMAPI_RELEASES_API,
     defaultPort: 3002,
     // Browser badges belong only to account flows that cannot complete without
     // a browser (antigravity's Google OAuth); FreeLLMAPI's dashboard steps are
@@ -440,7 +442,7 @@ var HEAVY_MANIFESTS = [
               // ends `-<arch>.dmg`, so the pattern must carry that hyphen (a
               // `"arm64` pattern can never match). A re-run keeps the image
               // already in ~/Downloads.
-              command: `arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+-'"$arch"'\\.dmg"' | head -1 | cut -d'"' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"`,
+              command: 'arch="$(uname -m)"; test "$arch" = arm64 || arch=x64; url="$(curl -fsSL ' + FREELLMAPI_RELEASES_API + ` | grep -oE '"browser_download_url": *"[^"]+-'"$arch"'\\.dmg"' | head -1 | cut -d'"' -f4)"; test -n "$url" || { echo "no FreeLLMAPI $arch .dmg in the latest release"; exit 1; }; mkdir -p "{home}/Downloads"; test -f "{home}/Downloads/FreeLLMAPI.dmg" || curl -fsSL -o "{home}/Downloads/FreeLLMAPI.dmg" "$url"`,
               weight: 2
             },
             {
@@ -471,7 +473,7 @@ var HEAVY_MANIFESTS = [
               label: "Download the latest installer",
               // The matched URL lands in a file first: an empty match has to
               // fail the step instead of feeding xargs an empty string.
-              command: `mkdir -p "{home}/Downloads" && curl -fsSL https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest | grep -oE '"browser_download_url": *"[^"]+\\.exe"' | head -1 | cut -d'"' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"`,
+              command: 'mkdir -p "{home}/Downloads" && curl -fsSL ' + FREELLMAPI_RELEASES_API + ` | grep -oE '"browser_download_url": *"[^"]+\\.exe"' | head -1 | cut -d'"' -f4 > "{home}/Downloads/freellmapi-setup-url"; test -s "{home}/Downloads/freellmapi-setup-url" || { echo "no .exe in the latest release"; exit 1; }; xargs -I{} curl -fsSL -o "{home}/Downloads/FreeLLMAPI-Setup.exe" {} < "{home}/Downloads/freellmapi-setup-url"`,
               weight: 2
             },
             { label: "Install silently", command: 'cmd //c start //wait "" "$HOME/Downloads/FreeLLMAPI-Setup.exe" /S' },
@@ -1000,28 +1002,153 @@ function chooseLocalPath(manifest, platform, runtime, detectedPort, context) {
     }
   }
 }
+function isOverlayRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function overlayString(record, key) {
+  const value = record[key];
+  return typeof value === "string" && value !== "" ? value : void 0;
+}
+function overlayNullableString(record, key) {
+  const value = record[key];
+  if (value === null) return null;
+  if (typeof value !== "string") return void 0;
+  return value === "" ? null : value;
+}
+function overlaySteps(value) {
+  if (!Array.isArray(value) || value.length === 0) return void 0;
+  const steps = [];
+  for (const raw of value) {
+    if (!isOverlayRecord(raw)) return void 0;
+    const label = overlayString(raw, "label");
+    const command = overlayString(raw, "command");
+    if (label === void 0 || command === void 0) return void 0;
+    const cwd = overlayString(raw, "cwd");
+    const weight = typeof raw.weight === "number" && Number.isFinite(raw.weight) && raw.weight > 0 ? raw.weight : void 0;
+    steps.push({
+      label,
+      command,
+      ...cwd === void 0 ? {} : { cwd },
+      ...raw.optional === true ? { optional: true } : {},
+      ...weight === void 0 ? {} : { weight }
+    });
+  }
+  return steps;
+}
+function overlayPool(value) {
+  if (value === null) return null;
+  if (!isOverlayRecord(value)) return void 0;
+  const strategy = value.strategy;
+  if (strategy !== void 0 && strategy !== "priority-sticky" && strategy !== "balanced") return void 0;
+  if (!Array.isArray(value.identities) || value.identities.length === 0) return void 0;
+  const identities = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of value.identities) {
+    if (!isOverlayRecord(raw)) return void 0;
+    const id = overlayString(raw, "id");
+    const credentialRef = overlayString(raw, "credentialRef");
+    if (id === void 0 || credentialRef === void 0 || !/^[A-Z_][A-Z0-9_]*$/.test(credentialRef) || seen.has(id)) {
+      return void 0;
+    }
+    seen.add(id);
+    const priority = raw.priority;
+    if (priority !== void 0 && (typeof priority !== "number" || !Number.isSafeInteger(priority) || priority < 0)) {
+      return void 0;
+    }
+    if (raw.enabled !== void 0 && typeof raw.enabled !== "boolean") return void 0;
+    identities.push({
+      id,
+      credentialRef,
+      ...typeof priority === "number" ? { priority } : {},
+      ...typeof raw.enabled === "boolean" ? { enabled: raw.enabled } : {}
+    });
+  }
+  return { ...strategy === void 0 ? {} : { strategy }, identities };
+}
+function sanitizeOverlayEntry(raw) {
+  if (!isOverlayRecord(raw)) return void 0;
+  const entry = {};
+  if (raw.disabled === true) entry.disabled = true;
+  const label = overlayString(raw, "label");
+  if (label !== void 0) entry.label = label;
+  const summary = overlayString(raw, "summary");
+  if (summary !== void 0) entry.summary = summary;
+  const dashboardUrl = overlayNullableString(raw, "dashboardUrl");
+  if (dashboardUrl !== void 0) entry.dashboardUrl = dashboardUrl;
+  const docsUrl = overlayNullableString(raw, "docsUrl");
+  if (docsUrl !== void 0) entry.docsUrl = docsUrl;
+  const reuseBaseURL = overlayString(raw, "reuseBaseURL");
+  if (reuseBaseURL !== void 0) entry.reuseBaseURL = reuseBaseURL;
+  const reuseHealthURL = overlayString(raw, "reuseHealthURL");
+  if (reuseHealthURL !== void 0) entry.reuseHealthURL = reuseHealthURL;
+  const installSteps = overlaySteps(raw.installSteps);
+  if (installSteps !== void 0) entry.installSteps = installSteps;
+  const fallbackModel = overlayNullableString(raw, "fallbackModel");
+  if (fallbackModel !== void 0) entry.fallbackModel = fallbackModel;
+  const pool = overlayPool(raw.pool);
+  if (pool !== void 0) entry.pool = pool;
+  return Object.keys(entry).length === 0 ? void 0 : entry;
+}
 function readServerOverlay(dshHome) {
   try {
     const document = JSON.parse(readFileSync2(join2(dshHome, "heavy-server-overlay.json"), "utf8"));
-    if (document === null || typeof document !== "object" || Array.isArray(document)) return {};
-    const entries = document.providers;
-    if (entries === null || typeof entries !== "object" || Array.isArray(entries)) return {};
-    return entries;
+    if (!isOverlayRecord(document) || !isOverlayRecord(document.providers)) return {};
+    const overlay = {};
+    for (const [id, raw] of Object.entries(document.providers)) {
+      const entry = sanitizeOverlayEntry(raw);
+      if (id !== "" && entry !== void 0) overlay[id] = entry;
+    }
+    return overlay;
   } catch {
     return {};
   }
 }
+function replaceInstallSteps(local, steps) {
+  const install = { ...local.install };
+  for (const platform of ["default", "linux", "darwin", "win32"]) {
+    const variant = install[platform];
+    if (variant === void 0 || variant.unsupported !== void 0) continue;
+    install[platform] = { ...variant, steps };
+  }
+  return { ...local, install };
+}
 function overlayManifest(manifest, entry) {
   if (entry === void 0) return manifest;
-  return {
+  const next = {
     ...manifest,
-    ...entry.dashboardUrl === void 0 ? {} : { dashboardUrl: entry.dashboardUrl },
+    ...entry.label === void 0 ? {} : { label: entry.label },
+    ...entry.summary === void 0 ? {} : { summary: entry.summary },
     reuse: {
       ...manifest.reuse,
       ...entry.reuseBaseURL === void 0 ? {} : { baseURL: entry.reuseBaseURL },
       ...entry.reuseHealthURL === void 0 ? {} : { health: { ...manifest.reuse.health, url: entry.reuseHealthURL } }
-    }
+    },
+    local: entry.installSteps === void 0 ? manifest.local : replaceInstallSteps(manifest.local, entry.installSteps)
   };
+  if (entry.dashboardUrl === null) delete next.dashboardUrl;
+  else if (entry.dashboardUrl !== void 0) next.dashboardUrl = entry.dashboardUrl;
+  if (entry.docsUrl === null) delete next.docsUrl;
+  else if (entry.docsUrl !== void 0) next.docsUrl = entry.docsUrl;
+  if (entry.fallbackModel === null) delete next.fallbackModel;
+  else if (entry.fallbackModel !== void 0) next.fallbackModel = entry.fallbackModel;
+  if (entry.pool === null) delete next.pool;
+  else if (entry.pool !== void 0) next.pool = entry.pool;
+  return next;
+}
+function effectiveHeavyManifests(manifests, overlay) {
+  const effective = [];
+  for (const manifest of manifests) {
+    const entry = overlay[manifest.id];
+    if (entry?.disabled === true) continue;
+    effective.push(overlayManifest(manifest, entry));
+  }
+  return effective;
+}
+var HEAVY_OVERLAY_GLOBAL = "__DSH_HEAVY_OVERLAY__";
+function overlayInjectionRow(dshHome) {
+  const providers = readServerOverlay(dshHome);
+  if (Object.keys(providers).length === 0) return void 0;
+  return { kind: "global", name: HEAVY_OVERLAY_GLOBAL, value: { providers } };
 }
 function routeProfile(manifest, mode, models, overrides = {}) {
   const list = models.length > 0 ? models.map((model) => ({
@@ -1497,20 +1624,33 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     this.runtimeCache = { at: now, value };
     return value;
   }
-  /** The manifest with the operator's private overlay applied (read per call). */
-  effectiveManifest(manifest) {
-    return overlayManifest(manifest, readServerOverlay(this.options.deps().dshHome)[manifest.id]);
+  /**
+   * Resolve one wire id to its effective manifest, refusing a provider the
+   * operator disabled. `remove`/`job` keep the plain resolution: an operator
+   * who disables a provider must still be able to clean up its state.
+   */
+  requireEnabledManifest(value) {
+    const manifest = requireManifest(value);
+    const entry = readServerOverlay(this.options.deps().dshHome)[manifest.id];
+    if (entry?.disabled === true) {
+      throw new RemoteError(
+        "gateway/bad-request",
+        `enpoiHeavy: provider "${manifest.id}" is disabled by $DSH_HOME/heavy-server-overlay.json`,
+        {}
+      );
+    }
+    return overlayManifest(manifest, entry);
   }
   manifests() {
     const overlay = readServerOverlay(this.options.deps().dshHome);
     return {
-      items: HEAVY_MANIFESTS.map((manifest) => overlayManifest(manifest, overlay[manifest.id])),
+      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay),
       problems: manifestProblems(),
       platform: process.platform
     };
   }
   async status(request) {
-    const manifest = this.effectiveManifest(requireManifest(request?.id));
+    const manifest = this.requireEnabledManifest(request?.id);
     const deps = this.options.deps();
     const settingsNs = routeSettingsNs(manifest);
     const profile = configuredProfile(deps, manifest.id, settingsNs);
@@ -1548,7 +1688,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     };
   }
   async reuse(request) {
-    const manifest = this.effectiveManifest(requireManifest(request?.id));
+    const manifest = this.requireEnabledManifest(request?.id);
     const key = optionalKey(request?.key);
     const baseURL = optionalBaseURL(request?.baseURL);
     if (baseURL !== void 0 && manifest.delivery === "direct") {
@@ -1572,7 +1712,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     return { ok: true, ...outcome };
   }
   install(request) {
-    const manifest = requireManifest(request?.id);
+    const manifest = this.requireEnabledManifest(request?.id);
     const key = optionalKey(request?.key);
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
@@ -1661,6 +1801,10 @@ function apply(ctx) {
   const jobs = new HeavyJobManager({
     dir: join3(dshHome, "cache", "heavy-jobs"),
     run: (step) => runStep(ctx, step, home, dshHome)
+  });
+  ctx.on("webserver/index-inject", (table) => {
+    const row = overlayInjectionRow(dshHome);
+    if (row !== void 0) table.push(row);
   });
   new HeavyProvidersService(ctx, {
     deps: () => ({

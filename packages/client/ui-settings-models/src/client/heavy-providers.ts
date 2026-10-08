@@ -209,6 +209,13 @@ export interface HeavyProviderManifest {
   dashboardUrl?: string
   docsUrl?: string
   /**
+   * GitHub releases API feed whose newest release carries this provider's
+   * desktop installers; the platform download steps interpolate the same
+   * default. Mirrors the host manifest field so a repointed feed stays one
+   * value across both tables.
+   */
+  releasesApi?: string
+  /**
    * Port the service listens on by default (detection's first candidate); a
    * `delivery: 'direct'` entry declares the vendor port (443).
    */
@@ -280,8 +287,9 @@ const COMMANDCODE_INSTALL_STEP: HeavyProviderStep = {
  * FreeLLMAPI's GitHub releases feed, the shipped default the macOS and Windows
  * desktop-download steps resolve the latest asset from. Kept as one named
  * setting-like constant so an operator or fork repoints it in one place
- * instead of editing shell command strings; the host manifest table is
- * authoritative once the Add Provider page is connected.
+ * instead of editing shell command strings, and it fills the fallback
+ * manifest's `releasesApi` field (pinned to the host manifest table by the
+ * client-mirror fixture) so both halves carry the same feed.
  */
 export const FREELLMAPI_RELEASES_API = 'https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest'
 
@@ -348,6 +356,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     auth: { kind: 'unified', apiKeyEnv: 'FREELLMAPI_API_KEY', keyless: false },
     dashboardUrl: 'http://127.0.0.1:3002',
     docsUrl: 'https://freellmapi.co',
+    releasesApi: FREELLMAPI_RELEASES_API,
     defaultPort: 3002,
     // Browser badges belong only to account flows that cannot complete without
     // a browser (antigravity's Google OAuth); FreeLLMAPI's dashboard steps are

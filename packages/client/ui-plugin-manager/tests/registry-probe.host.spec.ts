@@ -144,3 +144,26 @@ it.each([
 ])('rejects invalid probe limits %j', (config) => {
   expect(() => PluginRegistryProbe.Config(config)).toThrow()
 })
+
+it.each([
+  { registryPingUrls: [] },
+  { registryPingUrls: ['not-a-url'] },
+  { registryPingUrls: ['ftp://registry.example/-/ping'] },
+  { registryPingUrls: ['https://registry.example/-/ping', ''] },
+])('rejects an empty or non-http(s) registryPingUrls list %j at config load', (config) => {
+  expect(() => PluginRegistryProbe.Config(config)).toThrow(/registryPingUrls/)
+})
+
+it.each([[[]], [['not-a-url']]] as const)('degrades to null when a directly constructed probe never ran the schema %j', async (registryPingUrls) => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  // Bypasses PluginRegistryProbe.Config deliberately: schema validation cannot
+  // run here, and the probe must keep its null degrade instead of throwing.
+  const probe = new PluginRegistryProbe(ctx, {
+    registryProbeEnabled: true,
+    registryProbeTimeoutMs: 1500,
+    registryProbeCacheTtlMs: 300_000,
+    registryPingUrls,
+  })
+  expect(await probe.fastest()).toBeNull()
+})

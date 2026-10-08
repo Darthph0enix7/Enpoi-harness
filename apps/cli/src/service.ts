@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -194,7 +194,28 @@ export function readInstallState(override?: string): InstallState | undefined {
 }
 
 /**
+ * Whether a candidate Node path names an executable regular file right now.
+ * @param path - candidate binary path.
+ * @returns true when the path can be executed.
+ */
+function executableNode(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Build the unit description for this machine.
+ *
+ * Node is re-resolved at generation time: the installer records the binary it
+ * built with, which may be a version-manager path a later Node bump removes, so
+ * a recorded path is templated only while it still executes. A dead path falls
+ * back to {@link process.execPath} — the binary running this command — instead
+ * of orphaning the unit behind a stale absolute path.
  * @param state - installer state (prefix, node, unit).
  * @param deps - platform, home, and unit overrides.
  * @returns the resolved unit, its file path, and its rendered content.
@@ -206,7 +227,8 @@ export function resolveUnit(state: InstallState, deps: ServiceDeps = {}): Resolv
   const prefix = state.prefix ?? join(home, '.dsh')
   const binDir = state.binDir ?? join(home, '.local', 'bin')
   const runtimeNode = join(prefix, 'runtime', 'node', 'current', 'bin', 'node')
-  const node = existsSync(runtimeNode) ? runtimeNode : state.node ?? process.execPath
+  const recordedNode = state.node !== undefined && executableNode(state.node) ? state.node : undefined
+  const node = executableNode(runtimeNode) ? runtimeNode : recordedNode ?? process.execPath
   const bin = join(prefix, 'harness', 'current', 'apps', 'cli', 'lib', 'bin.js')
   const spec = { prefix, node, bin, dshHome, port: MANAGED_PORT, binDir }
   const unitOverride = recordedUnitName(process.env.DSH_SERVICE_UNIT)

@@ -172,6 +172,15 @@ it('commandcode descriptions keep the vendor gate, adapter, migration, and quota
   expect(manifestById('commandcode')?.reuse.note).toContain('provider package')
 })
 
+it('the freellmapi desktop-download steps resolve the one named release feed the manifest declares', () => {
+  const manifest = manifestById('freellmapi')!
+  expect(manifest.releasesApi).toBe('https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest')
+  for (const platform of ['darwin', 'win32'] as const) {
+    const download = resolveHeavyInstall(manifest.local, platform).steps[0]!
+    expect(download.command, platform).toContain(`curl -fsSL ${manifest.releasesApi!}`)
+  }
+})
+
 it('freellmapi installs are platform-keyed and fall back to the Docker path', () => {
   const local = manifestById('freellmapi')!.local
   const linux = resolveHeavyInstall(local, 'linux')

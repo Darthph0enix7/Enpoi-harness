@@ -107,6 +107,41 @@ describe('state and unit resolution', () => {
     expect(darwin.path).toBe(join(home, 'Library', 'LaunchAgents', 'com.example.dsh.plist'))
   })
 
+  it('re-resolves a recorded node at generation time instead of templating a dead path', () => {
+    const home = tempDir()
+    const deadNode = join(tempDir(), 'removed-node-version', 'bin', 'node')
+    const linux = resolveUnit({ prefix: '/tmp/prefix', node: deadNode, dshHome: '/tmp/dshhome' }, { platform: 'linux', home })
+    // The recorded path no longer executes: the running binary is the durable
+    // fallback, so a Node bump cannot orphan the generated unit.
+    expect(linux.spec.node).toBe(process.execPath)
+    expect(linux.content).not.toContain(deadNode)
+  })
+
+  it('treats a recorded node path that is a directory as unusable', () => {
+    const home = tempDir()
+    const asDirectory = tempDir()
+    const linux = resolveUnit({ prefix: '/tmp/prefix', node: asDirectory, dshHome: '/tmp/dshhome' }, { platform: 'linux', home })
+    // An executable directory bit must never be templated as a Node binary.
+    expect(linux.spec.node).toBe(process.execPath)
+  })
+
+  it('prefers the runtime link, then an executable recorded node, over the running binary', () => {
+    const home = tempDir()
+    const prefix = tempDir()
+    const recorded = join(tempDir(), 'node')
+    writeFileSync(recorded, '#!/bin/sh\n')
+    chmodSync(recorded, 0o755)
+    const fromRecorded = resolveUnit({ prefix, node: recorded, dshHome: '/tmp/dshhome' }, { platform: 'linux', home })
+    expect(fromRecorded.spec.node).toBe(recorded)
+    // The version-independent runtime link wins over the recorded path.
+    const runtimeBin = join(prefix, 'runtime', 'node', 'current', 'bin')
+    mkdirSync(runtimeBin, { recursive: true })
+    writeFileSync(join(runtimeBin, 'node'), '#!/bin/sh\n')
+    chmodSync(join(runtimeBin, 'node'), 0o755)
+    const fromRuntime = resolveUnit({ prefix, node: recorded, dshHome: '/tmp/dshhome' }, { platform: 'linux', home })
+    expect(fromRuntime.spec.node).toBe(join(runtimeBin, 'node'))
+  })
+
   it('treats a blank recorded unit as absent and uses the default', () => {
     const home = tempDir()
     const linux = resolveUnit({ prefix: '/tmp/prefix', serviceUnit: '' }, { platform: 'linux', home })

@@ -11,6 +11,7 @@
     },
     "dashboardUrl": "http://127.0.0.1:3002",
     "docsUrl": "https://freellmapi.co",
+    "releasesApi": "https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest",
     "defaultPort": 3002,
     "requiresBrowser": [],
     "quirks": [

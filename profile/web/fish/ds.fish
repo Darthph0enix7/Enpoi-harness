@@ -77,6 +77,54 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
         end
     end
 
+    # Node for every JS CLI: PATH first, then the installer's version-independent
+    # runtime link ($PREFIX/runtime/node/current), then nvm. An explicit
+    # DSH_NODE_VERSION pins one; the descending version sort picks the newest
+    # install otherwise, so a Node bump cannot orphan a subcommand behind a
+    # stale v-pin. Prints the path; non-zero when no usable Node exists.
+    function __ds_resolve_node
+        set -l node_bin (command -v node 2>/dev/null)
+        if test -n "$node_bin"
+            printf '%s\n' "$node_bin"
+            return 0
+        end
+        if test -x "$g_dsh_home/runtime/node/current/bin/node"
+            printf '%s\n' "$g_dsh_home/runtime/node/current/bin/node"
+            return 0
+        end
+        if set -q DSH_NODE_VERSION; and test -x "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
+            printf '%s\n' "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
+            return 0
+        end
+        set -l nvm_root "$HOME/.local/share/nvm"
+        if test -d "$nvm_root"
+            # `ls` + `string match`, not a `v*` glob: fish aborts an unmatched
+            # glob with a "No matches for wildcard" error, which would leak to
+            # the terminal on every host without version-manager installs.
+            for version_dir in (ls -1 "$nvm_root" 2>/dev/null | string match 'v*' | sort -V -r)
+                set -l candidate "$nvm_root/$version_dir/bin/node"
+                if test -x "$candidate"
+                    printf '%s\n' "$candidate"
+                    return 0
+                end
+            end
+        end
+        return 1
+    end
+
+    # Run one JS CLI with the resolved Node: $argv[1] is the script, the rest
+    # are its arguments. $HOME/.local/bin, PATH resolution, and the exit status
+    # match a direct `node <script>` call; only the binary resolution differs.
+    function __ds_run_node_cli
+        set -l script "$argv[1]"
+        set -l node_bin (__ds_resolve_node)
+        if test -z "$node_bin"
+            echo "✖ No Node.js found (need >= 22.19); install it or add it to PATH"
+            return 1
+        end
+        command $node_bin "$script" $argv[2..-1]
+    end
+
     # ── Subcommand Dispatch ──────────────────────────────────────────────────
 
     set -l cmd $argv[1]
@@ -190,26 +238,9 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
                 return 1
             end
 
-            # Node for the doctor script: PATH first, then the installer's
-            # version-independent runtime link ($PREFIX/runtime/node/current),
-            # then nvm. An explicit DSH_NODE_VERSION pins one; the descending
-            # version sort picks the newest install otherwise, so a Node bump
-            # cannot orphan this function behind a stale v-pin.
-            set -l node_bin (command -v node 2>/dev/null)
-            if test -z "$node_bin"
-                if test -x "$g_dsh_home/runtime/node/current/bin/node"
-                    set node_bin "$g_dsh_home/runtime/node/current/bin/node"
-                else if set -q DSH_NODE_VERSION; and test -x "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
-                    set node_bin "$HOME/.local/share/nvm/v$DSH_NODE_VERSION/bin/node"
-                else
-                    for candidate in (ls -d "$HOME/.local/share/nvm/v"*/bin/node 2>/dev/null | sort -V -r)
-                        if test -x "$candidate"
-                            set node_bin "$candidate"
-                            break
-                        end
-                    end
-                end
-            end
+            # The shared resolver: PATH → runtime/current → DSH_NODE_VERSION →
+            # newest nvm.
+            set -l node_bin (__ds_resolve_node)
             if test -z "$node_bin"
                 echo "✖ No Node.js found (need >= 22.19); install it or add it to PATH"
                 return 1
@@ -800,7 +831,7 @@ case "pull"
         case "keeper"
             # Context Keeper activity (last prose, claimed facts, raw output)
             if test -x "$HOME/.local/bin/dsh-keeper.mjs"
-                node "$HOME/.local/bin/dsh-keeper.mjs" $argv[2..-1]
+                __ds_run_node_cli "$HOME/.local/bin/dsh-keeper.mjs" $argv[2..-1]
             else
                 echo "Error: dsh-keeper.mjs not found"
             end
@@ -808,7 +839,7 @@ case "pull"
         case "brief"
             # View active/newest session Living Brief
             if test -x "$HOME/.local/bin/dsh-brief.mjs"
-                node "$HOME/.local/bin/dsh-brief.mjs" $argv[2..-1]
+                __ds_run_node_cli "$HOME/.local/bin/dsh-brief.mjs" $argv[2..-1]
             else
                 echo "Error: dsh-brief.mjs not found"
             end
@@ -818,7 +849,7 @@ case "pull"
             set -l sub $argv[2]
             set -l rest $argv[3..-1]
             if test -x "$HOME/.local/bin/dsh-memory.mjs"
-                node "$HOME/.local/bin/dsh-memory.mjs" $sub $rest
+                __ds_run_node_cli "$HOME/.local/bin/dsh-memory.mjs" $sub $rest
             else
                 echo "Error: dsh-memory.mjs not found"
             end
@@ -826,9 +857,9 @@ case "pull"
         case "backfill"
             # Projection-cache reindex CLI (status/run) — context insights data layer
             if test -x "$HOME/.local/bin/dsh-projections-backfill.mjs"
-                node "$HOME/.local/bin/dsh-projections-backfill.mjs" $argv[2..-1]
+                __ds_run_node_cli "$HOME/.local/bin/dsh-projections-backfill.mjs" $argv[2..-1]
             else if test -f "$g_dsh_home/profiles/web/scripts/dsh-projections-backfill.mjs"
-                node "$g_dsh_home/profiles/web/scripts/dsh-projections-backfill.mjs" $argv[2..-1]
+                __ds_run_node_cli "$g_dsh_home/profiles/web/scripts/dsh-projections-backfill.mjs" $argv[2..-1]
             else
                 echo "Error: dsh-projections-backfill.mjs not found"
             end

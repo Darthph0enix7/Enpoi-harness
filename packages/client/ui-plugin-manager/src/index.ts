@@ -33,13 +33,21 @@ const DEFAULT_REGISTRY_PING_URLS = [
   'https://registry.npmmirror.com/-/ping',
 ] as const
 
+/** A configured ping endpoint: an absolute http(s) URL. */
+const REGISTRY_PING_URL = /^https?:\/\/\S+$/
+
 /** Compares public registry responses on the Host; the Client owns the initial selection. */
 export default class PluginRegistryProbe extends TypertRemoteService {
   static Config: z<Partial<Config>, Config> = z.object({
     registryProbeEnabled: z.boolean().default(true),
     registryProbeTimeoutMs: z.natural().min(1).max(MAX_TIMER_DELAY_MS).default(1500),
     registryProbeCacheTtlMs: z.natural().default(300000),
-    registryPingUrls: z.array(z.string()).default([...DEFAULT_REGISTRY_PING_URLS]),
+    // An empty list can only answer null and an unparseable URL rejects its
+    // own candidate, so both would silently degrade the registry comparison;
+    // the schema refuses them at load with the field's path in the message.
+    // `fastest` still degrades to null when a directly constructed service
+    // never ran the schema.
+    registryPingUrls: z.array(z.string().pattern(REGISTRY_PING_URL)).min(1).default([...DEFAULT_REGISTRY_PING_URLS]),
   })
 
   private readonly lifetime = new AbortController()
