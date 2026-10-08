@@ -169,17 +169,91 @@ function asStringList(value) {
   }
   return [...seen];
 }
-function resolveToolGroups(document) {
+function asMode(value) {
+  return value === "static" || value === "on-demand" ? value : void 0;
+}
+function validateMembers(groupId, members2, options) {
+  const roster = options.roster;
+  if (roster === void 0 || roster.size === 0) return [...members2];
+  const kept = [];
+  for (const member of members2) {
+    if (roster.has(member)) kept.push(member);
+    else options.warn?.(`tool group "${groupId}": dropping unknown tool "${member}" (not in the live tool registry roster)`);
+  }
+  return kept;
+}
+function resolveSeats(record2, fallback) {
+  if (record2 === void 0 || !("seats" in record2)) return fallback;
+  const seats = asStringList(record2["seats"]);
+  if (seats === void 0) return fallback;
+  return seats.length === 0 ? void 0 : seats;
+}
+function warnMalformed(record2, groupId, options) {
+  if ("members" in record2 && asStringList(record2["members"]) === void 0) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed members (must be a string list)`);
+  }
+  if ("mode" in record2 && asMode(record2["mode"]) === void 0) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed mode (must be "static" or "on-demand")`);
+  }
+  if ("seats" in record2 && asStringList(record2["seats"]) === void 0) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed seats (must be a string list)`);
+  }
+  if ("enabled" in record2 && typeof record2["enabled"] !== "boolean") {
+    options.warn?.(`tool group "${groupId}": ignoring malformed enabled (must be a boolean)`);
+  }
+}
+function resolveToolGroups(document, options = {}) {
   const doc = asRecord(document);
   const toolGroups = asRecord(doc?.["toolGroups"]);
   const groupOverrides = asRecord(toolGroups?.["groups"]);
   const groups = SHIPPED_TOOL_GROUPS.map((group) => {
     const override = asRecord(groupOverrides?.[group.id]);
+    if (override !== void 0) warnMalformed(override, group.id, options);
+    const members2 = asStringList(override?.["members"]);
+    const mode = asMode(override?.["mode"]) ?? group.mode;
+    const seats2 = resolveSeats(override, group.seats);
     return {
-      ...group,
+      id: group.id,
+      label: group.label,
+      purpose: group.purpose,
+      members: members2 === void 0 ? group.members : validateMembers(group.id, members2, options),
+      mode,
+      preAttach: group.preAttach,
+      ...seats2 === void 0 ? {} : { seats: seats2 },
       enabled: typeof override?.["enabled"] === "boolean" ? override["enabled"] : group.enabled
     };
   });
+  const shippedIds = new Set(SHIPPED_TOOL_GROUPS.map((group) => group.id));
+  const customIds = Object.keys(groupOverrides ?? {}).filter((id) => id.length > 0 && !shippedIds.has(id)).sort((left, right) => left.localeCompare(right));
+  for (const id of customIds) {
+    const record2 = asRecord(groupOverrides?.[id]);
+    if (record2 === void 0) {
+      options.warn?.(`tool group "${id}": ignored (its definition must be a record)`);
+      continue;
+    }
+    const declared = asStringList(record2["members"]);
+    if (declared === void 0 || declared.length === 0) {
+      options.warn?.(`tool group "${id}": ignored (members must be a non-empty string list)`);
+      continue;
+    }
+    const members2 = validateMembers(id, declared, options);
+    if (members2.length === 0) {
+      options.warn?.(`tool group "${id}": ignored (no declared member is in the live tool registry roster)`);
+      continue;
+    }
+    warnMalformed(record2, id, options);
+    const seats2 = resolveSeats(record2, void 0);
+    groups.push({
+      id,
+      label: typeof record2["label"] === "string" && record2["label"].length > 0 ? record2["label"] : id,
+      purpose: typeof record2["purpose"] === "string" && record2["purpose"].length > 0 ? record2["purpose"] : "operator-defined group",
+      members: members2,
+      mode: asMode(record2["mode"]) ?? "on-demand",
+      preAttach: [],
+      ...seats2 === void 0 ? {} : { seats: seats2 },
+      enabled: typeof record2["enabled"] === "boolean" ? record2["enabled"] : true
+    });
+  }
   const byId = new Map(groups.map((group) => [group.id, group]));
   const seats = /* @__PURE__ */ new Map();
   const seatOverrides = asRecord(toolGroups?.["seats"]);
@@ -20089,7 +20163,29 @@ function mount(ctx, config2, seams) {
   const settings = seams.settings ?? ctx.get("settings");
   const states = /* @__PURE__ */ new Map();
   const reportedInert = /* @__PURE__ */ new Set();
-  const catalog = () => resolveToolGroups(readOrchestrationDocument(settings));
+  const warnedMembers = /* @__PURE__ */ new Set();
+  let toolRoster = null;
+  const knownToolNames = () => {
+    if (toolRoster !== null) return toolRoster;
+    try {
+      const names = ctx.tools.schemas(scopeOf(ctx)).map((tool) => tool.name);
+      toolRoster = names.length === 0 ? void 0 : new Set(names);
+    } catch {
+      toolRoster = void 0;
+    }
+    return toolRoster;
+  };
+  ctx.on("tools/change", () => {
+    toolRoster = null;
+  });
+  const catalog = () => resolveToolGroups(readOrchestrationDocument(settings), {
+    roster: knownToolNames(),
+    warn: (message) => {
+      if (warnedMembers.has(message)) return;
+      warnedMembers.add(message);
+      ctx.logger?.warn(`enpoi-tool-groups: ${message}`);
+    }
+  });
   const seatOfAgent = (agent) => {
     try {
       const events = agent.session.ownEvents?.() ?? [];
@@ -20189,7 +20285,7 @@ function mount(ctx, config2, seams) {
   });
   ctx.tools.register({
     name: TOOL_GROUPS_TOOL,
-    description: "List, attach, or detach on-demand tool groups. On-demand groups (peer interconnect, debug/observability) stay out of the tool list until attached; after `attach` the group's tools become callable only FROM THE NEXT TURN, so end the turn after attaching before calling them. Static groups are always on and cannot be attached or detached.",
+    description: "List, attach, or detach on-demand tool groups. On-demand groups (shipped families and operator-defined custom groups) stay out of the tool list until attached; after `attach` the group's tools become callable only FROM THE NEXT TURN, so end the turn after attaching before calling them. Static groups are always on and cannot be attached or detached.",
     parameters: {
       type: "object",
       properties: {
@@ -20250,6 +20346,9 @@ function mount(ctx, config2, seams) {
     process.stderr.write(line);
   });
   log(`[enpoi-tool-groups] mounted (seat=${seat}, ${String(resolved.groups.length)} groups, on-demand: ${onDemand.join(", ") || "none"})
+`);
+  const membership = resolved.groups.map((group) => `${group.id}${group.enabled ? "" : "(disabled)"}=${group.members.join("|") || "(none)"}`).join(" ");
+  log(`[enpoi-tool-groups] effective membership (seat=${seat}): ${membership}
 `);
   ctx.on("agent/created", ({ agent }) => {
     safeEnsure(agent);

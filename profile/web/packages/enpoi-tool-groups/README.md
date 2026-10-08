@@ -23,12 +23,40 @@ pre-execute backstop).
   where other seats show the seat-only notice, so a switch from the creator to another main agent
   also rebuilds the prefix once; turns within one seat stay cached.
 
-Operator document: `enpoi-orchestration.toolGroups` (`groups.<id>.enabled`,
-`seats.<seat>.preAttach`). Missing or malformed document, missing projection registry, or a
-restriction that cannot install all fail **open**: nothing is hidden.
+Operator document: `enpoi-orchestration.toolGroups`.
+
+- `groups.<id>.enabled` (boolean) — `false` hides the group and denies its members everywhere.
+- `groups.<id>.members` (string[]) — **replaces** the group's membership wholesale. Omitted
+  shipped members become ungrouped and are therefore never denied (fail open); an empty list
+  clears membership. Operator-provided names are validated against the live tool registry
+  roster (global plus preset-scope registrations): a name the roster does not know is dropped
+  with an `enpoi-tool-groups:` warning and never becomes a deny. Shipped default membership is
+  never validated, so an early resolve cannot shrink it. A malformed override value (a wrong
+  type for `members`, `mode`, `seats`, or `enabled`) is ignored with a warning, leaving the
+  shipped value in force.
+- `groups.<id>.mode` (`static` | `on-demand`) — overrides the shipped mode.
+- `groups.<id>.seats` (string[]) — overrides the seat restriction; an empty list clears it so
+  the group becomes shared.
+- `groups.<id>` with an id outside the shipped set defines an operator-defined custom group:
+  `members` is required (a non-empty string list), `label` defaults to the id, `purpose` to
+  `operator-defined group`, `mode` to `on-demand`, `enabled` to `true`, and it never
+  pre-attaches.
+- `seats.<seat>.preAttach` (string[]) — replaces the group-level pre-attach union, as before.
+
+Effective (post-override) membership is visible two ways: `tool_groups` action `list` shows
+every enabled on-demand family with its member names, and the boot witness logs one
+`effective membership` line naming every group's members (disabled groups marked).
+
+Missing or malformed document, missing projection registry, or a restriction that cannot install
+all fail **open**: nothing is hidden.
 
 ## Known Limitations and Deferred Work
 
+- Operator member validation sees the live registry view of the global and preset scopes; a tool
+  registered only in an agent-key scope cannot be enumerated and would be dropped from an
+  operator override (with the usual warning).
+- Membership is deny-driven: a custom on-demand group that names a tool a static group also owns
+  hides that tool while detached. Keep custom groups to tools no shipped group owns.
 - Only `peer`, `debug`, and `creator` ship as on-demand; the other families stay static until the
   pilot's measurement clears them (doc 80 §7).
 - The menu section uses a literal order (`2950`); a named `SECTION_ORDERS` entry in

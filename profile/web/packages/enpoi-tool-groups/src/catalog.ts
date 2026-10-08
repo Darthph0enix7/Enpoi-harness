@@ -8,9 +8,13 @@
  * 50/50/53 @ 2026-10-02: orchestrator and sysadmin drop the Creator group's
  * three harness-authoring tools) and frozen here; no shipped group
  * pre-attaches, so every on-demand family starts detached on a fresh session.
- * The operator document `enpoi-orchestration.toolGroups` overrides `enabled`
- * per group and `preAttach` per seat. Everything not named by a group is never
- * denied — the presentation filter fails open.
+ * The operator document `enpoi-orchestration.toolGroups` overrides `enabled`,
+ * `members`, `mode`, and `seats` per group, defines custom groups for ids
+ * outside the shipped set, and overrides `preAttach` per seat. Operator member
+ * names are validated against the live tool registry roster: a name the roster
+ * does not know is dropped with a warning and never becomes a deny (fail
+ * open). Everything not named by a group is never denied — the presentation
+ * filter fails open.
  *
  * @module dsh-enpoi-tool-groups/catalog
  */
@@ -54,6 +58,20 @@ export interface ResolvedToolGroups {
   readonly byId: ReadonlyMap<string, ToolGroupDefinition>
   /** Seat overrides read from `toolGroups.seats.<seat>.preAttach`. */
   readonly seats: ReadonlyMap<string, readonly string[]>
+}
+
+/** Options for {@link resolveToolGroups}: live-roster validation and warning routing. */
+export interface ResolveToolGroupsOptions {
+  /**
+   * Known tool names (the live registry roster). When present and non-empty, an
+   * operator-provided member missing from it is dropped with a warning.
+   * Omitted or empty means no roster is available: operator members pass
+   * through unvalidated (fail open). Shipped default membership is never
+   * validated, so a resolve before late plugins register cannot shrink it.
+   */
+  readonly roster?: ReadonlySet<string>
+  /** Receives one line per dropped member, ignored custom group, or malformed override value; omitted = silent. */
+  readonly warn?: (message: string) => void
 }
 
 /** Shipped defaults, frozen against the live registry roster. */
@@ -209,24 +227,139 @@ function asStringList(value: unknown): string[] | undefined {
   return [...seen]
 }
 
+/** Read one group mode, accepting only the two literals. */
+function asMode(value: unknown): ToolGroupMode | undefined {
+  return value === 'static' || value === 'on-demand' ? value : undefined
+}
+
+/**
+ * Keep only members the live roster knows; every dropped name warns. No roster
+ * (omitted or empty) keeps the list untouched — fail open.
+ */
+function validateMembers(
+  groupId: string,
+  members: readonly string[],
+  options: ResolveToolGroupsOptions,
+): string[] {
+  const roster = options.roster
+  if (roster === undefined || roster.size === 0) return [...members]
+  const kept: string[] = []
+  for (const member of members) {
+    if (roster.has(member)) kept.push(member)
+    else options.warn?.(`tool group "${groupId}": dropping unknown tool "${member}" (not in the live tool registry roster)`)
+  }
+  return kept
+}
+
+/**
+ * Resolve the `seats` override: absent or malformed keeps the fallback; an
+ * empty list clears the restriction (the group becomes shared).
+ */
+function resolveSeats(
+  record: Record<string, unknown> | undefined,
+  fallback: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (record === undefined || !('seats' in record)) return fallback
+  const seats = asStringList(record['seats'])
+  if (seats === undefined) return fallback
+  return seats.length === 0 ? undefined : seats
+}
+
+/** Warn once per override key whose malformed value leaves the shipped value in force. */
+function warnMalformed(
+  record: Record<string, unknown>,
+  groupId: string,
+  options: ResolveToolGroupsOptions,
+): void {
+  if ('members' in record && asStringList(record['members']) === undefined) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed members (must be a string list)`)
+  }
+  if ('mode' in record && asMode(record['mode']) === undefined) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed mode (must be "static" or "on-demand")`)
+  }
+  if ('seats' in record && asStringList(record['seats']) === undefined) {
+    options.warn?.(`tool group "${groupId}": ignoring malformed seats (must be a string list)`)
+  }
+  if ('enabled' in record && typeof record['enabled'] !== 'boolean') {
+    options.warn?.(`tool group "${groupId}": ignoring malformed enabled (must be a boolean)`)
+  }
+}
+
 /**
  * Resolve the effective catalog from the operator document. Never throws and
  * never removes a shipped group: a malformed or missing document leaves the
  * shipped defaults in force (fail open).
+ *
+ * Per-group overrides: `enabled` (boolean), `members` (string list, REPLACES
+ * the shipped membership wholesale — omitted shipped members become ungrouped
+ * and are therefore never denied), `mode` (`static` | `on-demand`), and
+ * `seats` (string list; an empty list clears the shipped restriction). An id
+ * outside the shipped set defines a custom group: `members` must be a
+ * non-empty string list, `label` defaults to the id, `purpose` to
+ * `operator-defined group`, `mode` defaults to `on-demand`, `enabled` to
+ * `true`, and it never pre-attaches.
+ *
  * @param document - the `enpoi-orchestration` document, or undefined.
- * @returns groups in stable order plus per-seat pre-attach overrides.
+ * @param options - live-roster validation and warning routing; empty = no validation.
+ * @returns groups in stable order (shipped order, then custom groups lexical) plus per-seat pre-attach overrides.
  */
-export function resolveToolGroups(document: unknown): ResolvedToolGroups {
+export function resolveToolGroups(
+  document: unknown,
+  options: ResolveToolGroupsOptions = {},
+): ResolvedToolGroups {
   const doc = asRecord(document)
   const toolGroups = asRecord(doc?.['toolGroups'])
   const groupOverrides = asRecord(toolGroups?.['groups'])
-  const groups = SHIPPED_TOOL_GROUPS.map((group): ToolGroupDefinition => {
+  const groups: ToolGroupDefinition[] = SHIPPED_TOOL_GROUPS.map((group): ToolGroupDefinition => {
     const override = asRecord(groupOverrides?.[group.id])
+    if (override !== undefined) warnMalformed(override, group.id, options)
+    const members = asStringList(override?.['members'])
+    const mode = asMode(override?.['mode']) ?? group.mode
+    const seats = resolveSeats(override, group.seats)
     return {
-      ...group,
+      id: group.id,
+      label: group.label,
+      purpose: group.purpose,
+      members: members === undefined ? group.members : validateMembers(group.id, members, options),
+      mode,
+      preAttach: group.preAttach,
+      ...(seats === undefined ? {} : { seats }),
       enabled: typeof override?.['enabled'] === 'boolean' ? override['enabled'] : group.enabled,
     }
   })
+  const shippedIds = new Set(SHIPPED_TOOL_GROUPS.map(group => group.id))
+  const customIds = Object.keys(groupOverrides ?? {})
+    .filter(id => id.length > 0 && !shippedIds.has(id))
+    .sort((left, right) => left.localeCompare(right))
+  for (const id of customIds) {
+    const record = asRecord(groupOverrides?.[id])
+    if (record === undefined) {
+      options.warn?.(`tool group "${id}": ignored (its definition must be a record)`)
+      continue
+    }
+    const declared = asStringList(record['members'])
+    if (declared === undefined || declared.length === 0) {
+      options.warn?.(`tool group "${id}": ignored (members must be a non-empty string list)`)
+      continue
+    }
+    const members = validateMembers(id, declared, options)
+    if (members.length === 0) {
+      options.warn?.(`tool group "${id}": ignored (no declared member is in the live tool registry roster)`)
+      continue
+    }
+    warnMalformed(record, id, options)
+    const seats = resolveSeats(record, undefined)
+    groups.push({
+      id,
+      label: typeof record['label'] === 'string' && record['label'].length > 0 ? record['label'] : id,
+      purpose: typeof record['purpose'] === 'string' && record['purpose'].length > 0 ? record['purpose'] : 'operator-defined group',
+      members,
+      mode: asMode(record['mode']) ?? 'on-demand',
+      preAttach: [],
+      ...(seats === undefined ? {} : { seats }),
+      enabled: typeof record['enabled'] === 'boolean' ? record['enabled'] : true,
+    })
+  }
   const byId = new Map(groups.map(group => [group.id, group] as const))
   const seats = new Map<string, readonly string[]>()
   const seatOverrides = asRecord(toolGroups?.['seats'])

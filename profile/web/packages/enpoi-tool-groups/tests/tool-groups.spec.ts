@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  denyNames, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS,
+  denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS,
 } from '../src/catalog.js'
 import { applyToolGroupsProjection, toolGroupsProjection } from '../src/projection.js'
 import { apply, TOOL_GROUPS_TOOL } from '../src/index.js'
@@ -12,6 +12,10 @@ const DEBUG = [
 ]
 const CORE = ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'subagent']
 const CREATOR = ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']
+/** A live-registry roster covering every shipped member plus two ungrouped tools. */
+const ROSTER: ReadonlySet<string> = new Set([
+  ...SHIPPED_TOOL_GROUPS.flatMap(group => [...group.members]), 'house_tool', 'synthetic_ungrouped',
+])
 
 function catalogWith(document: unknown = undefined) {
   return resolveToolGroups(document)
@@ -72,15 +76,17 @@ function fakeAgent(id = 'session-1', onAppend?: (type: string, data: any) => voi
 }
 
 /** Fake preset ctx capturing handlers, sections, and registered tools. */
-function fakeCtx(gets: Record<string, unknown> = {}, options: { toolVisible?: boolean } = {}) {
+function fakeCtx(gets: Record<string, unknown> = {}, options: { toolVisible?: boolean; roster?: readonly string[] } = {}) {
   const handlers = new Map<string, Array<(...args: any[]) => any>>()
   const sections: any[] = []
   const registeredTools: any[] = []
+  const warnings: string[] = []
   return {
     handlers,
     sections,
     registeredTools,
-    logger: { warn: () => {}, error: () => {} },
+    warnings,
+    logger: { warn: (line: string) => { warnings.push(line) }, error: () => {} },
     get: (name: string) => gets[name],
     on(name: string, handler: (...args: any[]) => any) {
       const list = handlers.get(name) ?? []
@@ -93,6 +99,11 @@ function fakeCtx(gets: Record<string, unknown> = {}, options: { toolVisible?: bo
       get: (name: string) => (options.toolVisible === false
         ? undefined
         : registeredTools.find(candidate => candidate.name === name)),
+      // Only a fake with an explicit roster exposes `schemas`: every other
+      // mount keeps the roster undefined and thus validation off (fail open).
+      ...(options.roster === undefined
+        ? {}
+        : { schemas: () => (options.roster ?? []).map(name => ({ name })) }),
     },
     systemPrompt: { section: (section: any) => { sections.push(section); return () => {} } },
     fire(name: string, ...args: any[]) {
@@ -120,13 +131,14 @@ function mount(options: {
   gets?: Record<string, unknown>
   toolVisible?: boolean
   registerThrows?: boolean
+  roster?: readonly string[]
 } = {}) {
   const incidents: Array<{ kind?: string; message?: string }> = []
   const gets: Record<string, unknown> = {
     diagnostics: { report: (request: { kind?: string; message?: string }) => { incidents.push(request); return { code: 'T1' } } },
     ...options.gets,
   }
-  const ctx = fakeCtx(gets, { toolVisible: options.toolVisible })
+  const ctx = fakeCtx(gets, { toolVisible: options.toolVisible, roster: options.roster })
   if (options.registerThrows === true) {
     ctx.tools.register = () => { throw new Error('register exploded') }
   }
@@ -302,6 +314,216 @@ describe('tool-group catalog', () => {
       catalogWith({ toolGroups: { groups: { creator: { enabled: false } } } }), new Set(), [], 'orchestrator',
     )
     expect(disabled).not.toContain('creator')
+  })
+})
+
+describe('tool-group operator overrides', () => {
+  it('replaces shipped membership wholesale when groups.<id>.members is set', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups(
+      { toolGroups: { groups: { peer: { members: ['peer_ask', 'house_tool'] } } } },
+      { roster: ROSTER, warn: message => warnings.push(message) },
+    )
+    const peer = catalog.byId.get('peer')
+    expect(peer?.members).toEqual(['peer_ask', 'house_tool'])
+    expect(peer?.mode).toBe('on-demand')
+    expect(warnings).toEqual([])
+    // Every omitted shipped member is ungrouped now: the filter never denies a
+    // tool no group owns (fail open), and the other groups keep their defaults.
+    const denied = denyNames(catalog, new Set())
+    expect(denied).toContain('peer_ask')
+    expect(denied).not.toContain('peer_status')
+    expect(denied).toContain('session_debug')
+    expect(catalog.byId.get('core')?.members).toEqual(SHIPPED_TOOL_GROUPS.find(group => group.id === 'core')?.members)
+  })
+
+  it('warns and drops a member the live roster does not know, keeping the rest', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups(
+      { toolGroups: { groups: { peer: { members: ['peer_ask', 'ghost_tool'] } } } },
+      { roster: ROSTER, warn: message => warnings.push(message) },
+    )
+    expect(catalog.byId.get('peer')?.members).toEqual(['peer_ask'])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('ghost_tool')
+    expect(warnings[0]).toContain('peer')
+  })
+
+  it('passes operator members through unvalidated when no roster is available (fail open)', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups(
+      { toolGroups: { groups: { peer: { members: ['ghost_tool'] } } } },
+      { warn: message => warnings.push(message) },
+    )
+    expect(catalog.byId.get('peer')?.members).toEqual(['ghost_tool'])
+    expect(warnings).toEqual([])
+  })
+
+  it('leaves a shipped group empty when every declared member is unknown, denying no real tool', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups(
+      { toolGroups: { groups: { peer: { members: ['ghost_one', 'ghost_two'] } } } },
+      { roster: ROSTER, warn: message => warnings.push(message) },
+    )
+    expect(catalog.byId.get('peer')?.members).toEqual([])
+    expect(warnings).toHaveLength(2)
+    const denied = denyNames(catalog, new Set())
+    expect(denied).not.toContain('peer_ask')
+    expect(denied).not.toContain('ghost_one')
+  })
+
+  it('keeps every shipped group untouched without an override, roster or not', () => {
+    expect(resolveToolGroups(undefined, { roster: ROSTER }).groups).toEqual(SHIPPED_TOOL_GROUPS)
+    expect(resolveToolGroups({}, { roster: ROSTER }).groups).toEqual(SHIPPED_TOOL_GROUPS)
+    expect(resolveToolGroups(undefined).groups).toEqual(SHIPPED_TOOL_GROUPS)
+  })
+
+  it('never mutates the frozen shipped defaults when overrides resolve', () => {
+    resolveToolGroups({
+      toolGroups: { groups: { peer: { members: ['house_tool'], mode: 'static' }, creator: { seats: [] } } },
+    }, { roster: ROSTER })
+    const peer = SHIPPED_TOOL_GROUPS.find(group => group.id === 'peer')
+    expect(peer?.members).toEqual(PEER)
+    expect(peer?.mode).toBe('on-demand')
+    expect(SHIPPED_TOOL_GROUPS.find(group => group.id === 'creator')?.seats).toEqual(['creator'])
+  })
+
+  it('overrides mode and enabled, and clears a seat restriction with an empty seats list', () => {
+    const catalog = resolveToolGroups({
+      toolGroups: {
+        groups: {
+          peer: { mode: 'static' },
+          debug: { enabled: false },
+          creator: { seats: [] },
+        },
+      },
+    })
+    expect(catalog.byId.get('peer')?.mode).toBe('static')
+    expect(catalog.byId.get('debug')?.enabled).toBe(false)
+    expect(catalog.byId.get('creator')?.seats).toBeUndefined()
+    expect(groupVisibleTo(catalog.byId.get('creator')!, 'orchestrator')).toBe(true)
+    // A static override makes attach/detach meaningless for the group.
+    expect(planGroupAction(catalog, new Set(), 'attach', 'peer').ok).toBe(false)
+    // A disabled override hides the members everywhere.
+    expect(denyNames(catalog, new Set(['debug']))).toContain('session_debug')
+  })
+
+  it('resolves an operator-defined custom group as an attachable on-demand family', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups({
+      toolGroups: {
+        groups: {
+          house: { label: 'House rules', purpose: 'owner-authored surface', members: ['house_tool'] },
+        },
+      },
+    }, { roster: ROSTER, warn: message => warnings.push(message) })
+    const house = catalog.byId.get('house')
+    expect(house).toMatchObject({
+      id: 'house', label: 'House rules', purpose: 'owner-authored surface',
+      members: ['house_tool'], mode: 'on-demand', preAttach: [], enabled: true,
+    })
+    expect(warnings).toEqual([])
+    expect(denyNames(catalog, new Set())).toContain('house_tool')
+    expect(denyNames(catalog, new Set(['house']))).not.toContain('house_tool')
+    expect(planGroupAction(catalog, new Set(), 'attach', 'house')).toEqual({ ok: true, attached: ['house'] })
+    expect(renderMenuText(catalog, new Set(), [], 'orchestrator'))
+      .toContain('- house — owner-authored surface (1 tools, not attached)')
+
+    // A seat pre-attach override names custom groups exactly like shipped ones.
+    const seated = resolveToolGroups({
+      toolGroups: {
+        groups: { house: { members: ['house_tool'] } },
+        seats: { creator: { preAttach: ['house'] } },
+      },
+    }, { roster: ROSTER })
+    expect(preAttachFor(seated, 'creator')).toEqual(['house'])
+    expect(preAttachFor(seated, 'orchestrator')).toEqual([])
+  })
+
+  it('supports a static custom group and a seat-restricted custom group', () => {
+    const catalog = resolveToolGroups({
+      toolGroups: {
+        groups: {
+          always: { members: ['house_tool'], mode: 'static' },
+          locked: { members: ['synthetic_ungrouped'], seats: ['creator'] },
+        },
+      },
+    }, { roster: ROSTER })
+    expect(denyNames(catalog, new Set())).not.toContain('house_tool')
+    expect(planGroupAction(catalog, new Set(), 'attach', 'always').ok).toBe(false)
+    const locked = catalog.byId.get('locked')!
+    expect(groupVisibleTo(locked, 'creator')).toBe(true)
+    expect(groupVisibleTo(locked, 'orchestrator')).toBe(false)
+    expect(preAttachFor(catalog, 'creator')).toEqual([])
+  })
+
+  it('ignores a malformed custom group with a warning instead of half-applying it', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups({
+      toolGroups: {
+        groups: {
+          noMembers: { purpose: 'nothing' },
+          empty: { members: [] },
+          unknownOnly: { members: ['ghost_tool'] },
+          notARecord: 42,
+        },
+      },
+    }, { roster: ROSTER, warn: message => warnings.push(message) })
+    for (const id of ['noMembers', 'empty', 'unknownOnly', 'notARecord']) {
+      expect(catalog.byId.has(id), id).toBe(false)
+    }
+    // `unknownOnly` warns twice: the dropped unknown member, then the ignored
+    // group; every other malformed record warns once.
+    expect(warnings).toHaveLength(5)
+    expect(warnings.join('\n')).toContain('unknownOnly')
+    expect(denyNames(catalog, new Set())).not.toContain('ghost_tool')
+  })
+
+  it('warns about malformed override values and falls back to the shipped value', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups({
+      toolGroups: {
+        groups: {
+          peer: { members: 'peer_ask', mode: 'quick', seats: 'orchestrator', enabled: 'yes' },
+        },
+      },
+    }, { roster: ROSTER, warn: message => warnings.push(message) })
+    const peer = catalog.byId.get('peer')
+    expect(peer?.members).toEqual(PEER)
+    expect(peer?.mode).toBe('on-demand')
+    expect(peer?.seats).toBeUndefined()
+    expect(peer?.enabled).toBe(true)
+    expect(warnings).toHaveLength(4)
+    expect(warnings.join('\n')).toContain('malformed members')
+    expect(warnings.join('\n')).toContain('malformed mode')
+    expect(warnings.join('\n')).toContain('malformed seats')
+    expect(warnings.join('\n')).toContain('malformed enabled')
+  })
+
+  it('warns about a malformed custom mode and seats, keeping the defaults', () => {
+    const warnings: string[] = []
+    const catalog = resolveToolGroups({
+      toolGroups: { groups: { house: { members: ['house_tool'], mode: 'sometimes', seats: 'creator' } } },
+    }, { roster: ROSTER, warn: message => warnings.push(message) })
+    expect(catalog.byId.get('house')?.mode).toBe('on-demand')
+    expect(catalog.byId.get('house')?.seats).toBeUndefined()
+    expect(warnings).toHaveLength(2)
+  })
+
+  it('defaults a custom group label to its id and purpose to a descriptive placeholder', () => {
+    const catalog = resolveToolGroups({
+      toolGroups: { groups: { plain: { members: ['house_tool'] } } },
+    }, { roster: ROSTER })
+    expect(catalog.byId.get('plain')).toMatchObject({ label: 'plain', purpose: 'operator-defined group' })
+  })
+
+  it('orders custom groups after the shipped catalog and keeps duplicate ids out', () => {
+    const catalog = resolveToolGroups({
+      toolGroups: { groups: { zeta: { members: ['house_tool'] }, alpha: { members: ['synthetic_ungrouped'] } } },
+    }, { roster: ROSTER })
+    expect(catalog.groups.map(group => group.id)).toEqual([
+      ...SHIPPED_TOOL_GROUPS.map(group => group.id), 'alpha', 'zeta',
+    ])
   })
 })
 
@@ -535,6 +757,78 @@ describe('tool_groups plugin', () => {
     expect(logs.some(line => line.includes('[enpoi-tool-groups] mounted')
       && line.includes('seat=orchestrator')
       && line.includes('on-demand: peer, debug, creator'))).toBe(true)
+  })
+
+  it('applies an operator membership override through the mount, warning once for the unknown name', async () => {
+    const projections = fakeProjections()
+    const { ctx, installer, tool } = mount({
+      projections,
+      roster: ['peer_ask', 'read'],
+      document: { toolGroups: { groups: { peer: { members: ['peer_ask', 'ghost_tool'] } } } },
+    })
+    const agent = fakeAgent('s-member')
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    // The override replaced peer's shipped membership; the unknown name is
+    // dropped, so the deny set carries only the surviving member.
+    expect(installer.live()).toContain('peer_ask')
+    expect(installer.live()).not.toContain('peer_status')
+    const warnings = ctx.warnings.filter((line: string) => line.includes('ghost_tool'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('enpoi-tool-groups:')
+
+    // The console surface shows the effective (post-override) membership.
+    const listed = await tool.execute({ action: 'list' }, EXEC(agent))
+    expect(listed.groups.find((group: any) => group.id === 'peer')?.members).toEqual(['peer_ask'])
+  })
+
+  it('attaches an operator-defined custom group end to end', async () => {
+    const projections = fakeProjections()
+    const { ctx, installer, tool } = mount({
+      projections,
+      roster: ['house_tool', 'read'],
+      document: { toolGroups: { groups: { house: { purpose: 'house tools', members: ['house_tool'] } } } },
+    })
+    const agent = fakeAgent('s-house', (type, data) => {
+      if (type === 'tool-groups/change') projections.set('s-house', data.attached)
+    })
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    expect(installer.live()).toContain('house_tool')
+
+    const listed = await tool.execute({ action: 'list' }, EXEC(agent))
+    expect(listed.groups.find((group: any) => group.id === 'house')).toMatchObject({
+      mode: 'on-demand', enabled: true, attached: false, members: ['house_tool'],
+    })
+    expect(tool.output.render({}, listed)[0].text).toContain('house_tool')
+
+    const attached = await tool.execute({ action: 'attach', group: 'house' }, EXEC(agent))
+    expect(attached.ok).toBe(true)
+    expect(attached.attached).toEqual(['house'])
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    expect(installer.live()).not.toContain('house_tool')
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
+
+    const detached = await tool.execute({ action: 'detach', group: 'house' }, EXEC(agent))
+    expect(detached.ok).toBe(true)
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
+    expect(installer.live()).toContain('house_tool')
+  })
+
+  it('writes the effective membership to the boot witness, overrides and custom groups included', () => {
+    const { logs } = mount({
+      roster: ['house_tool', 'peer_ask'],
+      document: {
+        toolGroups: {
+          groups: {
+            peer: { members: ['peer_ask'] },
+            house: { members: ['house_tool'] },
+          },
+        },
+      },
+    })
+    const witness = logs.find(line => line.includes('effective membership'))
+    expect(witness).toContain('peer=peer_ask')
+    expect(witness).toContain('house=house_tool')
+    expect(witness).toContain('core=ask_user_question|bash')
   })
 
   it('tells the model to end the turn after attach (tools are next-turn only)', async () => {

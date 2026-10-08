@@ -273,9 +273,39 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   const states = new Map<string, AgentState>()
   /** Session ids whose fail-open restriction failure was already reported. */
   const reportedInert = new Set<string>()
+  /** Membership warnings already logged (one line per distinct drop). */
+  const warnedMembers = new Set<string>()
+  /** Cached live tool roster; `null` means "rebuild on the next resolve". */
+  let toolRoster: ReadonlySet<string> | undefined | null = null
+
+  /**
+   * The live registry roster used to validate operator-provided member names.
+   * Built from this preset scope's view (global plus scoped registrations) and
+   * rebuilt on `tools/change`, so a tool registered later is known to the next
+   * resolve. Undefined (no roster, or an empty registry view) disables
+   * validation entirely — fail open.
+   */
+  const knownToolNames = (): ReadonlySet<string> | undefined => {
+    if (toolRoster !== null) return toolRoster
+    try {
+      const names = ctx.tools.schemas(scopeOf(ctx)).map(tool => tool.name)
+      toolRoster = names.length === 0 ? undefined : new Set(names)
+    } catch {
+      toolRoster = undefined
+    }
+    return toolRoster
+  }
+  ctx.on('tools/change', () => { toolRoster = null })
 
   /** Resolve the catalog hot: operator edits apply to the next ensure. */
-  const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings))
+  const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings), {
+    roster: knownToolNames(),
+    warn: (message) => {
+      if (warnedMembers.has(message)) return
+      warnedMembers.add(message)
+      ctx.logger?.warn(`enpoi-tool-groups: ${message}`)
+    },
+  })
 
   /**
    * The seat identity that governs one agent. A delegated child inherits the
@@ -414,7 +444,7 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   // The meta-tool: visible to every agent of this preset, never group-filtered.
   ctx.tools.register({
     name: TOOL_GROUPS_TOOL,
-    description: 'List, attach, or detach on-demand tool groups. On-demand groups (peer interconnect, debug/observability) stay out of the tool list until attached; after `attach` the group\'s tools become callable only FROM THE NEXT TURN, so end the turn after attaching before calling them. Static groups are always on and cannot be attached or detached.',
+    description: 'List, attach, or detach on-demand tool groups. On-demand groups (shipped families and operator-defined custom groups) stay out of the tool list until attached; after `attach` the group\'s tools become callable only FROM THE NEXT TURN, so end the turn after attaching before calling them. Static groups are always on and cannot be attached or detached.',
     parameters: {
       type: 'object',
       properties: {
@@ -478,11 +508,17 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
     throw new Error(`tool "${TOOL_GROUPS_TOOL}" did not register into this preset scope`)
   }
 
-  // One boot witness line: the preset row is otherwise silent on success.
+  // Boot witness lines: the preset row is otherwise silent on success; the
+  // membership line carries the EFFECTIVE (post-override) members, so an
+  // operator edit is verifiable from the boot log alone.
   const resolved = catalog()
   const onDemand = resolved.groups.filter(group => group.mode === 'on-demand' && group.enabled).map(group => group.id)
   const log = seams.log ?? ((line: string) => { process.stderr.write(line) })
   log(`[enpoi-tool-groups] mounted (seat=${seat}, ${String(resolved.groups.length)} groups, on-demand: ${onDemand.join(', ') || 'none'})\n`)
+  const membership = resolved.groups
+    .map(group => `${group.id}${group.enabled ? '' : '(disabled)'}=${group.members.join('|') || '(none)'}`)
+    .join(' ')
+  log(`[enpoi-tool-groups] effective membership (seat=${seat}): ${membership}\n`)
 
   // Lifecycle: base surface at creation, turn-boundary commit, release on disposal.
   ctx.on('agent/created', ({ agent }) => { safeEnsure(agent) })
@@ -588,4 +624,4 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
 
 export { resolveToolGroups, denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS } from './catalog.js'
 export { toolGroupsProjection, applyToolGroupsProjection } from './projection.js'
-export type { ResolvedToolGroups, ToolGroupDefinition, ToolGroupMode } from './catalog.js'
+export type { ResolvedToolGroups, ResolveToolGroupsOptions, ToolGroupDefinition, ToolGroupMode } from './catalog.js'

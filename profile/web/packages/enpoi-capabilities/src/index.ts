@@ -140,7 +140,8 @@ export interface OrchestrationConfig {
   permissions: Volatile<PermissionPolicyConfig>
   /** Pinned whiteboard store (doc 66 §3c / doc 67 §B). */
   whiteboard: Volatile<Record<string, unknown>>
-  /** Tool-group overrides (doc 80): per-group `enabled`, per-seat `preAttach`. */
+  /** Tool-group overrides (doc 80): per-group `enabled`/`members`/`mode`/`seats`,
+   * operator-defined custom groups, and per-seat `preAttach`. */
   toolGroups: Volatile<Record<string, unknown>>
   /** Operator-authored command tools (enpoi-custom-tools): id → record. */
   customTools: Volatile<Array<Record<string, unknown>>>
@@ -182,7 +183,8 @@ export const OrchestrationSettingsSchema = Schema.object({
   // runtime-context snapshot. Declared so the namespace contract admits the
   // key rather than relying on unknown-key survival.
   whiteboard: live(Schema.dict(Schema.any()).default({})),
-  // Tool-group overrides (doc 80): `groups.<id>.enabled` and
+  // Tool-group overrides (doc 80): `groups.<id>.{enabled,members,mode,seats}`
+  // — an id outside the shipped set defines a custom group — and
   // `seats.<seat>.preAttach`. Declared so the namespace contract admits the
   // key; the shipped group catalog lives in dsh-enpoi-tool-groups.
   toolGroups: live(Schema.dict(Schema.any()).default({})),

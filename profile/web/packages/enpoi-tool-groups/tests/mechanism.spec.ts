@@ -128,6 +128,53 @@ describe('real composition: scope filter + plugin', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('applies an operator-defined custom group through the real registry', async () => {
+    const ctx = await setup()
+    try {
+      const appended: Array<{ type: string; data: any }> = []
+      const projected = { attached: null as string[] | null }
+      const agent = {
+        id: 'agent-custom',
+        session: {
+          id: 'session-custom',
+          append: (type: string, data: any) => {
+            appended.push({ type, data })
+            if (type === 'tool-groups/change') projected.attached = data.attached
+          },
+        },
+      }
+      const projections = { stateOf: () => ({ attached: projected.attached }) }
+      const settings = {
+        get: (ns: string) => (ns === 'enpoi-orchestration'
+          ? { toolGroups: { groups: { house: { purpose: 'owner tools', members: ['synthetic_ungrouped'] } } } }
+          : undefined),
+      }
+      await ctx.plugin({
+        name: 'tool-groups-custom-probe',
+        inject: ['tools', 'systemPrompt'],
+        apply(probeCtx: any) { apply(probeCtx, { seat: 'orchestrator' }, { projections, settings, log: () => {} }) },
+      } as never)
+
+      // The custom on-demand group owns the previously ungrouped fixture tool:
+      // detached, it is denied like any other on-demand member. The `list`
+      // call drives the plugin's ensure for this agent (no `agent/created`
+      // event exists in this harness).
+      const definition = ctx.tools.get('tool_groups')
+      await definition!.execute({ action: 'list' }, { agent } as never)
+      const base = ctx.tools.schemas(agent).map(tool => tool.name)
+      expect(base).not.toContain('synthetic_ungrouped')
+
+      const attached = await definition!.execute({ action: 'attach', group: 'house' }, { agent } as never) as { ok: boolean }
+      expect(attached.ok).toBe(true)
+      expect(appended.at(-1)).toEqual({ type: 'tool-groups/change', data: { attached: ['house'] } })
+
+      ctx.emit('session/event', agent.session as never, { type: 'turn/end', data: { turn: 1 } } as never)
+      expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('synthetic_ungrouped')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('real composition: per-action meta-tool policy ordering', () => {
