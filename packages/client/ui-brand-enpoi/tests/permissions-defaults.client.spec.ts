@@ -6,8 +6,9 @@
  * `src/client/permissions-defaults.generated.ts` and this spec fails whenever
  * that mirror drifts from the sources it was generated from:
  *
- *   - host policy defaults/exemptions (`$DSH_HOST_POLICY_FILE` or the local
- *     profile path);
+ *   - host policy defaults/exemptions (`$DSH_HOST_POLICY_FILE` or the profile
+ *     bundled with this checkout, `profile/web`; an install without the bundle
+ *     falls back to `$DSH_HOME/profiles/web`);
  *   - the fork's child role tables (`packages/subagent/tool-subagent`);
  *   - the shipped preset inventory
  *     (`scripts/tool-inventory/expected-orchestrator.json`).
@@ -16,8 +17,8 @@
  * embedded `HOST_DEFAULTS_DIGEST` from the other side, so a host default
  * change fails there until the mirror is regenerated too.
  *
- * When the canonical host file is absent (a checkout without the deployment
- * profile), the source-derived comparisons are skipped and the committed
+ * When the canonical profile file is absent (a checkout without a profile
+ * tree), the source-derived comparisons are skipped and the committed
  * data's internal contract is asserted instead — mirroring the host
  * completeness guard's "when the canonical directory exists" posture.
  */

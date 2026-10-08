@@ -587,29 +587,32 @@ export function toolGrantApplies(perms: PermissionsConfig, agent: string | undef
 /**
  * The operator-level shipped surface. The generated `OPERATOR_SURFACE` is the
  * host's advertised inventory — the shared main-agent surface WITHOUT the
- * creator tool group, because that group pre-attaches to the creator seat
- * alone (orchestrator and sysadmin never see its three tools; the host's seat
- * guard is the execution backstop). MCP server tools are deliberately absent
- * from the inventory: MCP availability is a sidebar capability toggle
- * (per-server, hot-swappable), not a per-role surface decision.
+ * creator tool group, because that group belongs to the creator seat alone
+ * (`seats`; orchestrator and sysadmin never see its three tools, and the
+ * host's seat guard is the execution backstop). MCP server tools are
+ * deliberately absent from the inventory: MCP availability is a sidebar
+ * capability toggle (per-server, hot-swappable), not a per-role surface
+ * decision.
  */
 const SHARED_OPERATOR_SURFACE: readonly string[] = OPERATOR_SURFACE
 
 /**
- * The shipped advertised surface for one operator seat: the shared inventory
- * plus the members of every enabled catalog group the seat pre-attaches that
- * the shared inventory does not already name, minus the seat's execution deny
- * backstop. The creator seat therefore holds the shared surface plus the
- * creator tool group; orchestrator and sysadmin hold the shared surface alone.
+ * The shipped availability surface for one operator seat: the shared inventory
+ * plus the members of every enabled catalog group the seat reaches — the
+ * group's `seats` owner list or its `preAttach` default (an empty shipped
+ * `preAttach` only means a fresh session starts detached; the seat still owns
+ * the group) — that the shared inventory does not already name, minus the
+ * seat's execution deny backstop. The creator seat therefore holds the shared
+ * surface plus the creator tool group; orchestrator and sysadmin hold the
+ * shared surface alone.
  * @param seat - the operator seat id (preset identity).
  * @returns the seat's shipped surface, in shared-inventory order.
  */
 export function operatorSurfaceFor(seat: string): readonly string[] {
   const extra: string[] = []
   for (const group of SHIPPED_TOOL_GROUP_CATALOG) {
-    if (!group.enabled || !group.preAttach.includes(seat)) continue
-    // A group the shared inventory already reflects (debug) adds nothing.
-    if (group.preAttach.includes('orchestrator')) continue
+    const owners = [...(group.seats ?? []), ...group.preAttach]
+    if (!group.enabled || !owners.includes(seat)) continue
     for (const member of group.members) {
       if (!extra.includes(member)) extra.push(member)
     }

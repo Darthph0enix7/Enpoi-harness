@@ -20,7 +20,7 @@
 
 export const HOST_DEFAULTS_DIGEST = '8d93d6e784cad7141f24344b872b100023c7dcb82abc17bf0bdf241e99a019d7'
 
-export const MIRROR_SOURCE_DIGEST = 'da4d4ab349c0f6f379b954eb7bc949b94c8c2dc0612c10f48285a3a5fa88899a'
+export const MIRROR_SOURCE_DIGEST = 'c735d388c9de9f09813ac002a8a80b9fa6bffbb630d84ec3e1772dba00b06d92'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -202,7 +202,7 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
     purpose: 'session log, event trace, and diagnostics inspection',
     mode: 'on-demand',
     members: Object.freeze(['diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace']),
-    preAttach: Object.freeze(['orchestrator', 'sysadmin', 'creator', 'broker']),
+    preAttach: Object.freeze([]),
     enabled: true,
   }),
   Object.freeze({
@@ -211,7 +211,7 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
     purpose: 'inspect and manage the harness plugin composition',
     mode: 'on-demand',
     members: Object.freeze(['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']),
-    preAttach: Object.freeze(['creator']),
+    preAttach: Object.freeze([]),
     seats: Object.freeze(['creator']),
     enabled: true,
   }),
@@ -232,7 +232,6 @@ export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', '
 /** Extra per-role child denials (host role table). */
 export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'explorer': Object.freeze(['edit', 'write', 'str_replace_editor']),
-  'librarian': Object.freeze(['str_replace_editor']),
 })
 
 /** The main-agent advertised surface (shipped preset inventory). */

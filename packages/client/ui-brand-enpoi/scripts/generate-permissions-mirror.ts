@@ -4,13 +4,16 @@
  *
  * Sources (all read-only):
  *   - host policy defaults + seat guard: `$DSH_HOST_POLICY_FILE` or
- *     `~/.dsh/profiles/web/packages/enpoi-capabilities/src/policy.ts`
+ *     `profile/web/packages/enpoi-capabilities/src/policy.ts` — the profile
+ *     bundled in this checkout, which is what the installer deploys; an
+ *     installed harness without the bundle falls back to
+ *     `$DSH_HOME/profiles/web/packages/enpoi-capabilities/src/policy.ts`
  *     (`SHIPPED_TOOL_DEFAULTS`, `SHIPPED_TOOL_DEFAULT_EXEMPTIONS`,
  *     `SHIPPED_SEAT_TOOL_DENY`);
  *   - tool-group catalog: `$DSH_TOOL_GROUPS_FILE` or
- *     `~/.dsh/profiles/web/packages/enpoi-tool-groups/src/catalog.ts`
- *     (`SHIPPED_TOOL_GROUPS`) — the Permissions page derives its family rows
- *     from this list so the two systems cannot drift;
+ *     `profile/web/packages/enpoi-tool-groups/src/catalog.ts` (same profile
+ *     root fallback; `SHIPPED_TOOL_GROUPS`) — the Permissions page derives its
+ *     family rows from this list so the two systems cannot drift;
  *   - child role tables: `packages/subagent/tool-subagent/src/index.ts`
  *     (`SHARED_CHILD_KEEP`, `SHARED_CHILD_DENY`, `ROLE_CHILD_DENY`);
  *   - main-agent advertised surface: `$DSH_TOOL_INVENTORY_DIR` or
@@ -23,15 +26,16 @@
  *   pnpm exec tsx packages/client/ui-brand-enpoi/scripts/generate-permissions-mirror.ts --check
  *
  * `--check` exits 1 and prints the first differing lines when the committed
- * mirror drifts from the sources. A missing host policy file is reported and
- * treated as a skip (exit 0): machines without the deployment profile can
- * still run the client suite, and the host repo's own completeness spec
- * verifies the digest from the other side.
+ * mirror drifts from the sources. A missing profile source is reported and
+ * treated as a skip (exit 0): machines without a profile tree can still run
+ * the client suite, and the profile's own completeness spec verifies the
+ * digest from the other side. The header names the sources with the
+ * machine-independent `$PROFILE`/`$REPO` labels and is part of the check.
  */
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
@@ -40,6 +44,8 @@ const REPO_ROOT = resolve(HERE, '..', '..', '..', '..')
 
 /** Filesystem locations the mirror is built from and written to. */
 export interface MirrorPaths {
+  /** The profile tree the host-owned sources live in (`$PROFILE`). */
+  profileRoot: string
   hostPolicy: string
   toolGroups: string
   roleSource: string
@@ -71,13 +77,27 @@ export interface MirrorData {
   operatorSurface: string[]
 }
 
+/**
+ * Resolve the profile tree holding the host-owned sources: the profile bundled
+ * with this checkout (`profile/web`), else the deployment profile under
+ * `$DSH_HOME`.
+ * @returns the profile root directory.
+ */
+function resolveProfileRoot(): string {
+  const bundled = join(REPO_ROOT, 'profile', 'web')
+  if (existsSync(join(bundled, 'packages'))) return bundled
+  return join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'profiles', 'web')
+}
+
 /** Resolve the default source/output locations (environment overridable). */
 export function mirrorPaths(): MirrorPaths {
+  const profileRoot = resolveProfileRoot()
   return {
+    profileRoot,
     hostPolicy: process.env.DSH_HOST_POLICY_FILE
-      ?? join(homedir(), '.dsh', 'profiles', 'web', 'packages', 'enpoi-capabilities', 'src', 'policy.ts'),
+      ?? join(profileRoot, 'packages', 'enpoi-capabilities', 'src', 'policy.ts'),
     toolGroups: process.env.DSH_TOOL_GROUPS_FILE
-      ?? join(homedir(), '.dsh', 'profiles', 'web', 'packages', 'enpoi-tool-groups', 'src', 'catalog.ts'),
+      ?? join(profileRoot, 'packages', 'enpoi-tool-groups', 'src', 'catalog.ts'),
     roleSource: join(REPO_ROOT, 'packages', 'subagent', 'tool-subagent', 'src', 'index.ts'),
     operatorFixture: join(
       process.env.DSH_TOOL_INVENTORY_DIR ?? join(REPO_ROOT, 'scripts', 'tool-inventory'),
@@ -85,6 +105,22 @@ export function mirrorPaths(): MirrorPaths {
     ),
     output: join(HERE, '..', 'src', 'client', 'permissions-defaults.generated.ts'),
   }
+}
+
+/**
+ * Name one source file relative to its logical root, so the generated header
+ * is identical on every checkout: `$PROFILE/...` for profile sources,
+ * `$REPO/...` for harness sources. A path outside its root (an operator
+ * override) keeps its absolute form.
+ * @param root - the root directory the label stands for.
+ * @param label - the literal root label (`$PROFILE` or `$REPO`).
+ * @param file - the source path to label.
+ * @returns the labeled path.
+ */
+function labeledPath(root: string, label: string, file: string): string {
+  const relativePath = relative(root, file)
+  if (relativePath === '' || relativePath.startsWith('..') || isAbsolute(relativePath)) return file
+  return `${label}/${relativePath}`
 }
 
 /** Parse one TS source file (comments preserved; the AST ignores them). */
@@ -329,10 +365,10 @@ export function renderMirror(
   lines.push(' * tables. The Permissions page resolves every row against this data, so a')
   lines.push(' * stale mirror would show a wrong decision/provenance.')
   lines.push(' *')
-  lines.push(` * Sources: ${paths.hostPolicy}`)
-  lines.push(` *          ${paths.toolGroups}`)
-  lines.push(` *          ${paths.roleSource}`)
-  lines.push(` *          ${paths.operatorFixture}`)
+  lines.push(` * Sources: ${labeledPath(paths.profileRoot, '$PROFILE', paths.hostPolicy)}`)
+  lines.push(` *          ${labeledPath(paths.profileRoot, '$PROFILE', paths.toolGroups)}`)
+  lines.push(` *          ${labeledPath(REPO_ROOT, '$REPO', paths.roleSource)}`)
+  lines.push(` *          ${labeledPath(REPO_ROOT, '$REPO', paths.operatorFixture)}`)
   lines.push(' *')
   lines.push(' * Regenerate:')
   lines.push(' *   pnpm exec tsx packages/client/ui-brand-enpoi/scripts/generate-permissions-mirror.ts --write')
@@ -457,16 +493,10 @@ export function checkMirror(paths: MirrorPaths = mirrorPaths()): {
   const { data, hostDefaultsDigest, mirrorSourceDigest } = buildMirrorData(paths)
   const rendered = renderMirror(data, hostDefaultsDigest, mirrorSourceDigest, paths)
   const committed = existsSync(paths.output) ? readFileSync(paths.output, 'utf8') : ''
-  // The generated header names the absolute source paths this machine used;
-  // that line is informational, so the check compares the payload body only —
-  // a different checkout location must not read as drift.
-  return { ok: bodyOf(committed) === bodyOf(rendered), skipped: false, reason: '', data, rendered, committed }
-}
-
-/** The generated module below its header comment. */
-function bodyOf(moduleText: string): string {
-  const end = moduleText.indexOf('*/')
-  return end === -1 ? moduleText : moduleText.slice(end + 2)
+  // The rendered header carries the machine-independent `$PROFILE`/`$REPO`
+  // labels, so the whole module — header included — is comparable across
+  // checkouts and a header edit reads as drift.
+  return { ok: committed === rendered, skipped: false, reason: '', data, rendered, committed }
 }
 
 /** First differing line pair, for a readable drift report. */
@@ -498,7 +528,7 @@ function main(): void {
   }
   if (!result.ok) {
     process.stderr.write(
-      `DRIFT: ${paths.output}\n${firstDiff(bodyOf(result.rendered ?? ''), bodyOf(result.committed ?? ''))}\n`,
+      `DRIFT: ${paths.output}\n${firstDiff(result.rendered ?? '', result.committed ?? '')}\n`,
     )
     process.exitCode = 1
     return
