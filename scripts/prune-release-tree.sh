@@ -64,3 +64,35 @@ find "$TREE" -path '*/node_modules/*' -type f \( \
   -iname 'history.md' -o -iname 'history.markdown' -o \
   -iname 'changes.md' -o -iname 'changes.markdown' \
   \) -delete
+
+# Optional native vendor binaries for uninstalled/optional subagent providers.
+# Codex and Claude-Code are optional plugins with heavy platform CLIs; pruning
+# them from the prebuilt release asset frees ~526 MB of uncompressed binaries.
+# Users who explicitly install those bundles in a profile can install them on demand.
+find "$TREE" -path '*/node_modules/*' -type d \( \
+  -name '@openai+codex*' -o \
+  -name '@anthropic-ai+claude-agent-sdk*' -o \
+  -name 'codex-linux-*' -o \
+  -name 'codex-darwin-*' -o \
+  -name 'codex-win32-*' \
+\) -prune -exec rm -rf {} +
+
+# Documentation generation dependencies (Mermaid) not needed by the runtime (~117 MB).
+find "$TREE" -path '*/node_modules/*' -type d \( \
+  -name 'mermaid*' -o \
+  -name '@mermaid-js*' -o \
+  -name 'vitepress-plugin-mermaid*' \
+\) -prune -exec rm -rf {} +
+
+# Optional LibreOffice kit wasm engine (~146 MB uncompressed).
+# Office-to-PDF conversion can be installed or downloaded on demand.
+find "$TREE" -path '*/node_modules/*' -type d \( \
+  -name '@deepseek-ai+libreoffice-kit-wasm*' \
+\) -prune -exec rm -rf {} +
+
+# Clean up broken symlinks in node_modules left by pruned packages.
+if [ -d "$TREE/node_modules" ]; then
+  find "$TREE/node_modules" -type l | while read -r link; do
+    [ -e "$link" ] || rm -f "$link"
+  done
+fi

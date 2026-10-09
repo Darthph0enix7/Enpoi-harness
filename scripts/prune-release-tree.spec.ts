@@ -79,6 +79,14 @@ beforeAll(() => {
   write('profile/web/node_modules/openai/README.md', '# readme\n')
   write('profile/web/node_modules/openai/LICENSE', 'MIT\n')
 
+  // Removed: optional native vendor binaries, documentation generators, and wasm engines.
+  write('node_modules/.pnpm/@openai+codex@0.153.4-linux-x64/bin/codex', 'binary\n')
+  write('node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64@0.3.263/bin/claude', 'binary\n')
+  write('node_modules/.pnpm/@deepseek-ai+libreoffice-kit-wasm@0.1.1/assets/soffice.wasm', 'wasm\n')
+  write('node_modules/.pnpm/mermaid@11.16.0/dist/mermaid.js', 'doc\n')
+  write('node_modules/.pnpm/@mermaid-js+parser@1.2.0/dist/parser.js', 'doc\n')
+  write('node_modules/.pnpm/vitepress-plugin-mermaid@2.0.17/index.js', 'doc\n')
+
   // Kept: the updater tree, the unresolved desktop consumers, and product files.
   write('scripts/install.sh', '#!/usr/bin/env bash\n')
   write('scripts/tests/install.spec.ts', 'test\n')
@@ -140,6 +148,19 @@ describe('prune-release-tree.sh', () => {
     }
     for (const path of ['node_modules/dep/LICENSE', 'node_modules/dep/license.txt', 'node_modules/dep/History.js', 'node_modules/dep/History.d.ts', 'node_modules/dep/index.js', 'profile/web/node_modules/openai/LICENSE']) {
       expect(exists(path), path).toBe(true)
+    }
+  })
+
+  it('removes optional native vendor binaries, documentation generators, and wasm engines from node_modules', () => {
+    for (const path of [
+      'node_modules/.pnpm/@openai+codex@0.153.4-linux-x64',
+      'node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64@0.3.263',
+      'node_modules/.pnpm/@deepseek-ai+libreoffice-kit-wasm@0.1.1',
+      'node_modules/.pnpm/mermaid@11.16.0',
+      'node_modules/.pnpm/@mermaid-js+parser@1.2.0',
+      'node_modules/.pnpm/vitepress-plugin-mermaid@2.0.17',
+    ]) {
+      expect(exists(path), path).toBe(false)
     }
   })
 
