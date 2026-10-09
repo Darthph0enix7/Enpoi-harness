@@ -56,7 +56,7 @@ const selection = ctx.agentDefaultModel.currentSelection()
 await ctx.agentDefaultModel.saveSelection({ provider, model, reasoningEffort: 'high' })
 ```
 
-没有配置编辑器时，`saveSelection()` 不执行写入。此服务不验证目录成员资格；发起模型请求的消费者负责可用性诊断。
+没有配置编辑器时，`saveSelection()` 不执行写入。所选 provider 若未在实时 `llm` 注册表中注册，会按 provider 记录一条警告：Models 页面删除路由时会重置每个操作者引用，但经其他路径移除的路由（手工编辑的设置文档、组合变更）没有客户端写入者，因此该诊断只点名悬空的默认值而不改动它。除此以外，此服务不验证目录成员资格；发起模型请求的消费者负责可用性失败。
 
 -----
 
@@ -117,6 +117,7 @@ await ctx.agentDefaultModel.saveSelection({ provider, model, reasoningEffort: 'h
 
 - **单一的进程级默认值**——该服务只拥有一个默认值；按会话的模型选择仍由入口负责。
 - **持久化需要 profile 配置编辑器**——没有编辑器时，保存默认值不会保留选择。
+- **经 Models 页面之外移除的路由只被诊断，不被修复**——该服务从不改写已存的选择；重置引用是执行删除的写入者的职责。其他设置消费者（keeper、摘要器、席位、分组、收藏）实时读取各自的引用，请求会失败而不是替换为默认值。
 
 <a id="dev-note"></a>
 ### 开发备注

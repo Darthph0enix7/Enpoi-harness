@@ -91,12 +91,19 @@ function selection(settings: {
   }
 }
 
+/** Structural view of the live provider registry the diagnostic reads. */
+interface ProviderRouteRegistry {
+  listProviders(): readonly { id: string }[]
+}
+
 /**
  * Owns the default model selection independently of any Host or transport.
  * Each operation reads the owning Config references.
  */
 export class AgentDefaultModelConfig extends Service {
   private saves: Promise<void> = Promise.resolve()
+  /** Providers already warned about, so one dangling route warns once. */
+  private readonly warnedMissing = new Set<string>()
 
   static Config = z.object({
     provider: z.string().required().volatile(),
@@ -113,13 +120,35 @@ export class AgentDefaultModelConfig extends Service {
   }
 
   /**
+   * Warn once when a selected provider route is not registered with the live
+   * adapter registry. A route that disappeared from the settings document
+   * without the Models page's removal cleanup (a hand edit, a composition
+   * change, or a host-side teardown) leaves every consumer reading a route the
+   * next request cannot reach; this diagnostic names the dangling selection
+   * without changing it. Settings are always live, so a later registration of
+   * the same provider simply stops the warning.
+   * @param provider - the resolved provider route id.
+   */
+  private diagnoseMissingRoute(provider: string): void {
+    if (provider === '') return
+    const registry = this.ownerContext.get('llm') as ProviderRouteRegistry | undefined
+    if (registry === undefined) return
+    if (registry.listProviders().some(candidate => candidate.id === provider)) return
+    if (this.warnedMissing.has(provider)) return
+    this.warnedMissing.add(provider)
+    this.ownerContext.logger.warn(
+      `agent-default-model: selected provider "${provider}" is not registered; sessions created now will fail until it is re-added or the default model is reset`,
+    )
+  }
+
+  /**
    * Read the current default model selection.
    * @returns a detached provider, model, and optional reasoning selection.
    */
   currentSelection(): ModelSelection {
     const reasoningEffort = this.config.reasoningEffort.get()
     const chain = this.config.chain?.get()
-    return selection({
+    const resolved = selection({
       ...resolveBaseline({
         provider: this.config.provider.get(),
         model: this.config.model.get(),
@@ -127,6 +156,8 @@ export class AgentDefaultModelConfig extends Service {
       ...chain === undefined ? {} : { chain },
       ...reasoningEffort === undefined ? {} : { reasoningEffort },
     })
+    this.diagnoseMissingRoute(resolved.provider)
+    return resolved
   }
 
   /**

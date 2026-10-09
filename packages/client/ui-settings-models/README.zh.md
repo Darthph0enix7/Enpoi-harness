@@ -77,6 +77,8 @@ Models 页面包含 **DeepSeek 账号**（`deepseek-account`，英文为 **DeepS
 
 页面只持有脱敏后的描述符，从不持有完整设置分区：因此每次编辑都以 `settings.mutate` 路径操作落到已存分区上——每个改动字段一次 set、每个清除字段一次 unset、删除提供商行则一次 unset（shipped 路由为一次 set `disabled`）。
 
+**移除引用清理。** 两条移除路径（profile unset、shipped namespace 的 `disabled` 标记，或 heavy 清单的宿主侧拆除）任一提交后，都会执行一次清理，把指向被删路由的所有操作者引用改回默认值：`agent-default-model` 重置为内置的 keyless Kilo 组合（`baseline: off` 时置空），`enpoi-orchestration.personas.<seat>` 清为其继承状态，`chains` 中指名该路由的链接被丢弃（只剩零链接且无 selectors 的组会被删除），`uiPreferences` 修剪收藏、隐藏固定与排序项，`subagent-model-selection` 修剪其允许路由（列表清空时把 `enabled` 重置回关闭，因为宿主拒绝已启用但为空的选择）。各 namespace 写入按序执行，带 revision 围栏与有界冲突重试；清理失败会让确认对话框保持打开并给出原因，而不是留下已删除的路由与悬空的选用。选择器的 `localStorage` 镜像也在同一趟中被修剪。探测记录（`uiPreferences.providerCatalog`、`webSearchPlans`）、目录规则及其派生决策映射，以及按会话记录的选用均被有意保留。
+
 ### 校验
 
 键入的 API 密钥按其自身字段判定：去除首尾空白后必须非空，且每个字符都必须是可打印 ASCII（`[\x21-\x7E]`），这正是 HTTP 头值能够携带的字符集——与 `@deepseek-ai/dsh-llm` 中的 `normalizeApiKey` 互为镜像，此处复刻是因为源平面拆分禁止导入它。与粘贴的 `NAME=value` 环境行一致或包裹在匹配引号内的值，会作为同样的格式失败被拒绝。空 id、重复 id、空显式名称以及不可读、非正数或小数的容量都会在任何写入之前失败。DeepSeek 的 `models` 是一个按值整体替换的数组：编辑器先显示继承的有效行，直到第一次模型编辑把完整数组物化进用户层，重置则取消该覆盖。
@@ -126,6 +128,7 @@ Models 页面包含 **DeepSeek 账号**（`deepseek-account`，英文为 **DeepS
 
 - **卡片上只有 API 密钥与精选折叠字段可编辑**：手写编辑器以 schema 通用字段覆盖换取了 mockup 布局。重试策略、超时、DeepSeek 模型说明及其他进阶字段仍留在 `cordis.patch.yml` 中；编辑器未展示的现有模型字段会予以保留。
 - **凭据清理范围刻意保持狭窄**：删除一行时，仅当其引用与页面派生的 `<ROUTE>_API_KEY` 目标完全一致，才会清除已配置且可写的凭据。自定义引用、环境凭据与无法识别的目标会保留，因为该行无法证明自己拥有它们；shipped 路由的删除完全不触碰凭据，因为同一引用可能被另一条路由共用。
+- **引用清理只在执行删除的客户端内运行**：未经本页删除路径而消失的路由（手工编辑的设置文档、组合变更，或 UI 之外调用的宿主侧 heavy 拆除）没有客户端写入者可重置这些引用；宿主会实时读取每个引用，请求失败而不是替换为默认值。按会话记录的选用属于历史，也不在范围内：既有会话保留其创建时所用的路由。
 - **只有 pi-ai 路由可以手工声明**：自定义模型 API 表单写入 `llm-pi-ai`——唯一一个其 profile 描述整个提供商的 namespace。`llm-deepseek` 路由是组合面的事实，不是本页能创建的东西。
 - **目录选择框列出的是路由标识符**：`moonshotai`、`zai` 等 pi-ai catalog id 原样显示，没有产品名、别名或搜索。一个把自定义表单作为置顶项的可搜索选择器可以取代方式切换；前提是目录先携带显示名称。
 - **询问覆盖 OpenAI 兼容与 Anthropic Messages 端点**：OpenAI 协议接受标准 `data` 数组或富信息 `models` 对象，Anthropic 则使用原生模型列表路由；其余协议会报告自己无法被询问，其模型需手工填写。

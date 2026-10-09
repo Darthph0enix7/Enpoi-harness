@@ -1416,6 +1416,42 @@ describe('ModelsSection', () => {
     })
   })
 
+  it('keeps the reference-cleanup failure in the dialog after the route was deleted', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(remoteOk(wireNamespaces()[2]!))
+      .mockResolvedValueOnce(remoteFail('cleanup refused', 'settings/rejected'))
+    const { face } = await mountSection({ mutate })
+    // The cleanup pass reads the references from the same describe the page
+    // already mirrors; the keeper seat names the route being deleted.
+    face.settings.describe.mockResolvedValue(remoteOk({
+      writable: true,
+      hasDocument: false,
+      namespaces: [
+        ...wireNamespaces(),
+        {
+          ns: 'enpoi-orchestration',
+          schema: {} as JsonValue,
+          value: { personas: { keeper: { provider: 'openai', model: 'gpt' } } },
+          autoGenerate: true,
+          applies: 'live',
+          secrets: [],
+          revision: 0,
+        },
+      ],
+    }))
+    fireEvent.click(providerRow('openai'))
+    fireEvent.click(screen.getByRole('button', { name: en.remove }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+    await within(dialog).findByText(t('deleteCleanupFailed', {
+      provider: providerTargetLabel({ provider: 'openai', displayName: 'openai' }),
+      reason: 'cleanup refused',
+    }))
+    // The delete committed; the cleanup write is the refused second call.
+    expect(mutate).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBe(dialog)
+  })
+
   it('retains credentials that are not identified as page-managed', async () => {
     const { unset, mutate } = await mountSection()
     const target = { provider: 'zombie', displayName: 'zombie' }

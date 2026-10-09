@@ -26,6 +26,7 @@ import { ProviderDetailPanel } from './ProviderDetailPanel.tsx'
 import { AddProviderModal } from './AddProviderModal.tsx'
 import { ModelGroupsRow } from './ModelGroupsRow.tsx'
 import { ORCHESTRATION_NS } from './model-groups.ts'
+import { cleanupFailureText, cleanupRemovedRoute } from './route-references.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, providerKeyConfigured, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
@@ -211,33 +212,45 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           await controller.load()
           return
         }
-        setDeleteTarget(null)
-        await controller.load()
-        return
-      }
-      // A shipped route addresses the whole section: its removal is the
-      // namespace's own `disabled` flag, and its credential may be shared with
-      // another route (the fork's llm-pi-ai deepseek profile names the same
-      // DEEPSEEK_API_KEY), so a route removal never unsets the credential.
-      const shipped = deleteTarget.entry.settingsPath.length === 0
-      if (!shipped && deleteTarget.apiKeyEnv) {
-        const credRes = await api.credentials.unset(deleteTarget.apiKeyEnv)
-        if (!credRes.ok) {
-          setDeleteError(credRes.error.message)
+      } else {
+        // A shipped route addresses the whole section: its removal is the
+        // namespace's own `disabled` flag, and its credential may be shared with
+        // another route (the fork's llm-pi-ai deepseek profile names the same
+        // DEEPSEEK_API_KEY), so a route removal never unsets the credential.
+        const shipped = deleteTarget.entry.settingsPath.length === 0
+        if (!shipped && deleteTarget.apiKeyEnv) {
+          const credRes = await api.credentials.unset(deleteTarget.apiKeyEnv)
+          if (!credRes.ok) {
+            setDeleteError(credRes.error.message)
+            setDeleting(false)
+            return
+          }
+        }
+        const res = await api.settings.mutate(
+          deleteTarget.entry.settingsNs,
+          shipped
+            ? [{ op: 'set', path: ['disabled'], value: true }]
+            : [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }],
+          undefined,
+        )
+        if (!res.ok) {
+          setDeleteError(res.error.message)
           setDeleting(false)
           return
         }
       }
-      const res = await api.settings.mutate(
-        deleteTarget.entry.settingsNs,
-        shipped
-          ? [{ op: 'set', path: ['disabled'], value: true }]
-          : [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }],
-        undefined,
-      )
-      if (!res.ok) {
-        setDeleteError(res.error.message)
+      // The route is gone; reset every operator reference that named it. Done
+      // after the removal so a refused delete never rewrites selections for a
+      // route that still exists. A failed cleanup keeps the dialog up with the
+      // reason instead of leaving dangling selections silently.
+      const cleanup = await cleanupRemovedRoute(api, deleteTarget.entry.provider)
+      if (cleanup.error !== null) {
+        setDeleteError(t('deleteCleanupFailed', {
+          provider: providerTargetLabel(deleteTarget.entry),
+          reason: cleanupFailureText(t, cleanup.error),
+        }))
         setDeleting(false)
+        await controller.load()
         return
       }
       setDeleteTarget(null)
@@ -512,7 +525,7 @@ export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boo
 export async function removeProviderProfile(
   face: { api: Pick<ModelsWire, 'settings' | 'credentials'>; t?: (key: keyof typeof en) => string },
   _controller: ModelsSettingsStore,
-  target: { settingsNs: string; settingsPath: string[]; credentialRef?: string },
+  target: { settingsNs: string; settingsPath: string[]; credentialRef?: string; provider?: string },
 ): Promise<string | null> {
   // An empty settings path means the shipped route's address is its whole
   // namespace: removal is the namespace's own `disabled` flag, and a
@@ -535,6 +548,13 @@ export async function removeProviderProfile(
   )
   if (!settingsRes.ok) {
     return settingsRes.error.message
+  }
+  // The profile path ends in the route id by construction; an explicit provider
+  // wins for a shipped namespace whose address carries no id.
+  const removedProvider = target.provider ?? target.settingsPath[target.settingsPath.length - 1]
+  if (removedProvider !== undefined && removedProvider !== '') {
+    const cleanup = await cleanupRemovedRoute(face.api, removedProvider)
+    if (cleanup.error !== null) return cleanupFailureText(face.t, cleanup.error)
   }
   return null
 }

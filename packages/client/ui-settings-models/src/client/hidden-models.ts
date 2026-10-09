@@ -98,10 +98,13 @@ export async function refreshFromServer(): Promise<void> {
     const serverHidden = view.value?.uiPreferences?.hiddenModels ?? view.user?.uiPreferences?.hiddenModels
     if (serverHidden === undefined || typeof serverHidden !== 'object') return
     const local = readStore()
-    const merged: HiddenMap = { ...local, ...serverHidden }
+    let merged: HiddenMap = { ...local, ...serverHidden }
     for (const provider of pendingProviders) {
       if (Object.hasOwn(local, provider)) merged[provider] = local[provider] as string[]
-      else delete merged[provider]
+      else {
+        const { [provider]: _forgotten, ...rest } = merged
+        merged = rest
+      }
     }
     publishLocal(merged)
   } catch {
@@ -248,6 +251,20 @@ export function showAllModels(provider: string): void {
     const { [provider]: _dropped, ...others } = fresh
     return others
   })
+}
+
+/**
+ * Drop one provider's hidden pins from the local mirror without a server write.
+ * The route-removal cleanup has already pruned the server document in its own
+ * mutation; this keeps the picker's synchronous local read in step without a
+ * second write racing that mutation.
+ * @param provider - the removed provider id.
+ */
+export function forgetHiddenProvider(provider: string): void {
+  const map = readStore()
+  if (!Object.hasOwn(map, provider)) return
+  const { [provider]: _removed, ...rest } = map
+  writeStore(rest, provider)
 }
 
 /** Subscribe to hidden model changes. Returns cleanup function. */

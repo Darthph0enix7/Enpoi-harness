@@ -44,6 +44,31 @@ it('leaves blank fields blank when the deployment disables the baseline', async 
   expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: '' })
 })
 
+it('warns once when the selected provider is not registered, without changing it', async () => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  ctx.provide('llm', { listProviders: () => [{ id: 'other', name: 'Other' }] })
+  const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+  await ctx.plugin(DefaultModel, { provider: 'ghost', model: 'm' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).toHaveBeenCalledTimes(1)
+  // Settings are read live: a repeated read does not warn again.
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).toHaveBeenCalledTimes(1)
+  warn.mockRestore()
+})
+
+it('stays silent while the selected provider is registered', async () => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  ctx.provide('llm', { listProviders: () => [{ id: 'acme', name: 'Acme' }] })
+  const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+  await ctx.plugin(DefaultModel, { provider: 'acme', model: 'm' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: 'm' })
+  expect(warn).not.toHaveBeenCalled()
+  warn.mockRestore()
+})
+
 it('persists complete selections through its owning profile entry', async () => {
   const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
   const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')

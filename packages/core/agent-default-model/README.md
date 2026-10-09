@@ -56,7 +56,7 @@ const selection = ctx.agentDefaultModel.currentSelection()
 await ctx.agentDefaultModel.saveSelection({ provider, model, reasoningEffort: 'high' })
 ```
 
-Without a configuration editor, `saveSelection()` is a no-op. The service does not validate catalog membership; the consumer opening a model request owns availability diagnostics.
+Without a configuration editor, `saveSelection()` is a no-op. A selected provider that is not registered with the live `llm` registry logs one warning per provider: the Models page resets every operator reference when it deletes a route, but a route removed outside that path (a hand-edited settings document, a composition change) has no client-side writer, so this diagnostic names the dangling default without changing it. The service does not otherwise validate catalog membership; the consumer opening a model request owns availability failures.
 
 -----
 
@@ -117,6 +117,7 @@ These limits define the service's scope. They are current package constraints, n
 
 - **One process-wide default** — the service owns a single default; per-session model selection remains the entry point's responsibility.
 - **Persistence requires a profile configuration editor** — without it, saving a default does not retain the selection.
+- **A route removed outside the Models page is only diagnosed, not repaired** — the service never rewrites the stored selection; resetting references is the deleting writer's job. Other settings consumers (keeper, summariser, seats, groups, favorites) read their references live and fail the request instead of substituting a default.
 
 <a id="dev-note"></a>
 ### Dev Note

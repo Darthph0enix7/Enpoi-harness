@@ -132,3 +132,34 @@ describe('hidden-models fenced whole-map writes', () => {
     expect(mutations[1]?.payload.args.ops[0]?.value).toEqual({ alpha: ['m1', 'm2'], beta: ['b1'] })
   })
 })
+
+describe('forgetHiddenProvider', () => {
+  it('drops the provider from the local mirror without a server write', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const method = (JSON.parse(String(init.body)) as { method: string }).method
+      return method === 'settings.describe' ? describeResponse({ alpha: ['m1'], beta: ['b1'] }, 1) : mutateOk()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = await import('../src/client/hidden-models.ts')
+    await vi.waitFor(() => {
+      expect(store.isModelHidden('alpha', 'm1')).toBe(true)
+    })
+    const mutationsBefore = mutateBodies(fetchMock).length
+
+    store.forgetHiddenProvider('alpha')
+    expect(store.isModelHidden('alpha', 'm1')).toBe(false)
+    expect(store.isModelHidden('beta', 'b1')).toBe(true)
+    // A local-only prune never touches the server map.
+    expect(mutateBodies(fetchMock)).toHaveLength(mutationsBefore)
+  })
+
+  it('is a no-op for a provider the mirror does not carry', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => describeResponse({ beta: ['b1'] }, 1)))
+    const store = await import('../src/client/hidden-models.ts')
+    await vi.waitFor(() => {
+      expect(store.isModelHidden('beta', 'b1')).toBe(true)
+    })
+    store.forgetHiddenProvider('alpha')
+    expect(store.isModelHidden('beta', 'b1')).toBe(true)
+  })
+})

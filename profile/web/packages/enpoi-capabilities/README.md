@@ -5,6 +5,25 @@ settings document (capabilities, MCP catalog, permissions, roles, councils,
 chains, custom tools), the monotonic pre-dispatch guard, the model-facing
 surface filters, the permission policy engine, and the MCP mount supervisor.
 
+## Settings-editable document fields
+
+Every operator-editable field of the document is declared volatile, so the
+settings service projects it into the live form and the Dynamic panels edit it
+through `settings.mutate` — an owner never edits the profile patch by hand:
+
+- `customTools` — operator-authored command tools, added/removed in
+  Settings → Dynamic → Skills & tools. `enpoi-custom-tools` re-registers the
+  tool set on each `settings/document-updated`. The shipped
+  `research-fetch`/`research-verify` rows are seed state like any other record:
+  deleting them in the panel persists the edited array, and the running plugin
+  drops the corresponding `custom_<id>` tool. `custom-tools-model.ts` in the
+  client package parses the same records for the panel.
+- `extendBuiltins` — merge-mode `{ add?, remove? }` edits over the delegation
+  tool's compiled child surfaces (`roles.<id>`, `sharedDeny`, `sharedKeep`), so
+  one entry changes without replacing the whole list. An explicit
+  `roles.<id>.tools.available` or `permissions.agents.<id>.available` entry
+  still replaces the built-in surface and its extension wholesale.
+
 ## MCP default world, pulls, and on-demand mounting (V1)
 
 Persistent config says what a server IS; the Capabilities switch sets the
