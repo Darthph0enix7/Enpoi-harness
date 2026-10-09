@@ -4,7 +4,7 @@ import type { ReactElement } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
-import { ProviderDetailPanel, mergeRefreshedModels } from '../src/client/ProviderDetailPanel.tsx'
+import { ProviderDetailPanel, mergeRefreshedModels, applyRefreshedModels } from '../src/client/ProviderDetailPanel.tsx'
 import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '../src/client/model-visibility.ts'
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
 import type { ModelsWire, ProviderRow } from '../src/client/store.ts'
@@ -54,6 +54,8 @@ type TestModel = {
   gateReason?: string
   capabilityHints?: { input?: string[]; reasoning?: boolean; source?: string }
   unverified?: boolean
+  source?: string
+  deprecated?: boolean
 }
 
 /** One pi-ai namespace view; a fresh object is the store's settings echo. */
@@ -705,4 +707,192 @@ describe('mergeRefreshedModels', () => {
       { id: 'i', name: 'i', contextWindow: 9_000, maxTokens: 900 },
     ])
   })
+})
+
+it('manual Refresh uses the removal-aware host pipeline when providerSync answers', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).includes('providerSync.refreshRoute')) {
+      return {
+        ok: true,
+        json: async () => ({
+          result: {
+            ok: true,
+            value: {
+              route: 'gateway',
+              models: [{ id: 'kept-server', name: 'Kept Fresh' }],
+              removed: ['removed-server'],
+              deprecated: [],
+              degraded: false,
+              source: 'live',
+              authority: 'catalog',
+              fetchedAt: 5,
+            },
+          },
+        }),
+      } as unknown as Response
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const discoverModels = vi.fn()
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [
+        { id: 'kept-server' },
+        { id: 'removed-server' },
+        { id: 'hand', source: 'manual' },
+      ])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  expect(ops[0]?.path).toEqual(['providers', 'gateway', 'models'])
+  // Replace semantics: the host answer wins, a manually added row survives,
+  // and the discovery path was not consulted.
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['kept-server', 'hand'])
+  expect(discoverModels).not.toHaveBeenCalled()
+})
+
+it('manual Refresh falls back to the non-deleting discovery merge when the RPC is unavailable', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'advertised', name: 'Advertised' }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [{ id: 'configured' }])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalled() })
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  // The fallback merges and never deletes.
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['configured', 'advertised'])
+})
+
+describe('applyRefreshedModels', () => {
+  it('takes the answer as the base and keeps only manual rows it omits', () => {
+    const current: TestModel[] = [
+      { id: 'kept-server', name: 'Kept' },
+      { id: 'removed-server', name: 'Gone' },
+      { id: 'hand', name: 'Hand', source: 'manual' },
+      { id: 'hand-in-answer', source: 'manual' },
+      { id: '', source: 'manual' },
+    ]
+    const answer = [
+      { id: 'kept-server', name: 'Kept Fresh' },
+      { id: 'new-from-server' },
+      { id: 'hand-in-answer', source: 'manual' },
+      { name: 'no-id' },
+    ]
+    expect(applyRefreshedModels(current, answer)).toEqual([
+      { id: 'kept-server', name: 'Kept Fresh' },
+      { id: 'new-from-server' },
+      { id: 'hand-in-answer', source: 'manual' },
+      { name: 'no-id' },
+      { id: 'hand', name: 'Hand', source: 'manual' },
+    ])
+  })
+})
+
+it('renders the deprecated-upstream badge on a pinned-in-use model row', () => {
+  render(panel('gateway', [
+    { id: 'active', name: 'Active' },
+    { id: 'retired', name: 'Retired', deprecated: true, source: 'pinned-in-use' },
+  ]))
+  const badge = document.querySelector('[data-model-badge="deprecated"]')
+  expect(badge?.textContent).toBe(en.modelDeprecatedBadge)
+  expect(badge?.getAttribute('title')).toBe(en.modelDeprecatedHint)
+  expect(document.querySelectorAll('[data-model-badge="deprecated"]')).toHaveLength(1)
+})
+
+it('manual Refresh reports a failed settings write after the host refresh answers', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      result: {
+        ok: true,
+        value: {
+          route: 'gateway', models: [{ id: 'kept-server' }], removed: [], deprecated: [],
+          degraded: false, source: 'live', authority: 'catalog', fetchedAt: 5,
+        },
+      },
+    }),
+  } as unknown as Response)))
+  const mutate = vi.fn(async () => ({ ok: false as const, error: { message: 'write refused' } }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [{ id: 'kept-server' }])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(screen.getByText(/Refresh failed: write refused/)).toBeTruthy() })
+})
+
+it('manual Refresh treats an unusable RPC payload as unavailable and falls back to discovery', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ result: { ok: true, value: { route: 'gateway' } } }),
+  } as unknown as Response)))
+  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'advertised' }] }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const wireFace = {
+    ...wire(),
+    settings: { ...wire().settings, mutate },
+    llm: { ...wire().llm, discoverModels },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={namespace('gateway', [{ id: 'configured' }])}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalled() })
 })

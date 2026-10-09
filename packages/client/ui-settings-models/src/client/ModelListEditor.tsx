@@ -397,7 +397,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         type="button"
         className={styles['addModelButton']}
         disabled={disabled}
-        onClick={() => { onChange([...models, { id: '' }]) }}
+        onClick={() => { onChange([...models, { id: '', source: 'manual' }]) }}
       >
         <IconPlusOutlineRegular size={14} />
         {t('addModel')}

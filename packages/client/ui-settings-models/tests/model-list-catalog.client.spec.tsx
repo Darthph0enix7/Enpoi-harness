@@ -110,3 +110,14 @@ it('restores inherited image input after a failed catalog read is retried manual
   expect(discover).toHaveBeenCalledTimes(2)
   expect(onChange).not.toHaveBeenCalled()
 })
+
+it('stamps a hand-added row source: manual so catalog removals never drop it', () => {
+  const onChange = vi.fn()
+  render(<ModelListEditor
+    models={[{ id: 'existing' }]} onChange={onChange}
+    probe={{ settingsNs: 'llm-pi-ai', provider: 'openai' }} disabled={false} t={key => en[key]} onBusyChange={() => {}}
+    operations={operations(vi.fn())}
+  />)
+  fireEvent.click(screen.getByRole('button', { name: en.addModel }))
+  expect(onChange).toHaveBeenCalledExactlyOnceWith([{ id: 'existing' }, { id: '', source: 'manual' }])
+})

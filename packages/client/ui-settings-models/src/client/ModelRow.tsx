@@ -106,6 +106,17 @@ export function ModelRow(props: ModelRowProps): ReactNode {
           />
         ))}
         <span className={styles['modelBadges']}>
+          {model['deprecated'] === true
+            ? (
+              <span
+                className={styles['modelBadge']}
+                data-model-badge="deprecated"
+                title={t('modelDeprecatedHint')}
+              >
+                {t('modelDeprecatedBadge')}
+              </span>
+            )
+            : null}
           {isNewModel(model)
             ? <span className={styles['modelBadge']} data-model-badge="new">{t('modelNewBadge')}</span>
             : null}

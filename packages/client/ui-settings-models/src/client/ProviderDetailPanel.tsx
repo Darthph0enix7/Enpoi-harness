@@ -18,6 +18,7 @@ import {
 } from './model-visibility.ts'
 import { idCapabilityHints } from './capability-hints.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
+import { refreshRouteViaPlugin } from './provider-sync-rpc.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { providerDashboardUrls } from './provider-templates.ts'
@@ -37,7 +38,7 @@ export interface ProviderDetailPanelProps {
   onSaved: () => void
 }
 
-interface ModelItem {
+type ModelItem = {
   id: string
   name?: string
   contextWindow?: number
@@ -75,6 +76,12 @@ interface ModelItem {
    * than a disclosure.
    */
   unverified?: boolean
+  /** The sync's provenance stamp (`manual` survives catalog removal). */
+  source?: string
+  /** The sync kept this row only because something references it; upstream retired it. */
+  deprecated?: boolean
+  /** When the sync first saw an endpoint-only id, for the 14-day grace. */
+  firstSeenAt?: number
 }
 
 /**
@@ -191,6 +198,28 @@ export function mergeRefreshedModels(
     })
   }
   return merged
+}
+
+/**
+ * Apply one host refresh answer to the route's current models with replace
+ * semantics: the answer is the base (the host already kept every protected,
+ * grace-listed, and referenced member), provider-sourced entries absent from
+ * it are removed, and any hand-added `source: 'manual'` row the answer omits
+ * survives. The panel's own draft is the merge side, so a row the user just
+ * typed is never discarded by a refresh.
+ * @param current - the route's models as the panel currently holds them.
+ * @param answer - the host pipeline's planned records.
+ * @returns the list to persist (the answer, plus surviving manual rows).
+ */
+export function applyRefreshedModels(
+  current: readonly ModelItem[],
+  answer: readonly Record<string, unknown>[],
+): Array<Record<string, unknown>> {
+  const answerIds = new Set(answer.map(model => (typeof model.id === 'string' ? model.id : '')))
+  const keptManual = current.filter(
+    model => model.source === 'manual' && model.id !== '' && !answerIds.has(model.id),
+  )
+  return [...answer, ...keptManual]
 }
 
 /** Which badges rest on the shared id-hint table rather than a disclosure. */
@@ -631,21 +660,47 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const catalogRefreshInFlight = useRef(false)
 
   /**
-   * Discover the route's models and merge them into its settings profile. The
-   * merge never deletes: configured ids the answer omits stay untouched,
-   * advertised ids refresh in place, and ids configuration does not name are
-   * appended. Returns whether the write left the route with any model at all;
-   * an in-flight refresh, a read-only surface, an empty route with an empty
+   * Refresh the route's models through the removal-aware host pipeline when
+   * the provider-sync plugin is mounted: the answer replaces the route's
+   * provider-sourced models (an id the host removed disappears) while
+   * `source: 'manual'` rows survive. The normal settings write persists it.
+   * When the RPC is unavailable (plugin not mounted, offline) the surface
+   * falls back to discovery with the legacy merge, which never deletes.
+   * Returns whether the write left the route with any model at all; an
+   * in-flight refresh, a read-only surface, an empty route with an empty
    * listing, or any discovery/write failure answers false, so the automatic
    * caller may try again on the next health snapshot. The automatic path
-   * passes `silent`, which suppresses the failure message but keeps the
-   * success message and the settings reload.
+   * passes `silent`, which keeps the plain discovery merge (no removals) and
+   * suppresses the failure message.
    */
   const runCatalogRefresh = useCallback(async (options: { silent?: boolean } = {}): Promise<boolean> => {
     if (catalogRefreshInFlight.current || readOnly) return false
     catalogRefreshInFlight.current = true
     if (options.silent !== true) setRefreshState({ isRefreshing: true })
     try {
+      const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
+      if (options.silent !== true) {
+        const hosted = await refreshRouteViaPlugin(providerId)
+        if (hosted.ok) {
+          const merged = applyRefreshedModels(currentModels, hosted.value.models)
+          const hostedRes = await api.settings.mutate(
+            namespace.ns,
+            [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
+            undefined,
+          )
+          if (!hostedRes.ok) {
+            throw new Error(hostedRes.error.message)
+          }
+          setRefreshState({
+            isRefreshing: false,
+            message: t('refreshedModels', { count: merged.length }),
+            isError: false,
+          })
+          setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)
+          onSaved()
+          return merged.length > 0
+        }
+      }
       const res = await api.llm.discoverModels(namespace.ns, {
         provider: providerId,
         ...(baseURL.trim() ? { baseURL: baseURL.trim() } : {}),
@@ -654,7 +709,6 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       })
       if (res.ok) {
         const discovered = (res.value as DiscoveredModel[] | undefined) || []
-        const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
         // Merge, never replace: a Refresh may add and update models, but
         // deleting one is the operator's decision, not a listing's.
         const merged = mergeRefreshedModels(currentModels, discovered, {
@@ -1618,6 +1672,17 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                   <div className={styles['modelCardMain']}>
                     <div className={styles['modelTitleRow']}>
                       <span className={styles['modelName']}>{m.name || m.id}</span>
+                      {m.deprecated === true
+                        ? (
+                          <span
+                            className={styles['modelBadge']}
+                            data-model-badge="deprecated"
+                            title={t('modelDeprecatedHint')}
+                          >
+                            {t('modelDeprecatedBadge')}
+                          </span>
+                        )
+                        : null}
                       <span className={styles['modelIdTag']}>{m.id}</span>
                     </div>
 

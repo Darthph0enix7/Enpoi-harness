@@ -445,6 +445,8 @@ interface SyncHarness {
   mutations: Array<{ ns: string; ops: Array<{ op: string; path: string[]; value: Array<Record<string, unknown>> }>; revision: number | undefined }>
   warnings: string[]
   infos: string[]
+  /** Every coded incident the plugin reported through the diagnostics seam. */
+  diagnostics: Array<{ kind: string; message: string }>
   dispose: () => void
 }
 
@@ -456,17 +458,27 @@ function syncHarness(
     conflicts?: number
     modelsDevUrl?: string
     routeProviderMap?: Record<string, string[]>
+    pinnedModels?: Record<string, string[]>
+    /** The `agent-default-model` settings document, when the test sets one. */
+    defaultModel?: Record<string, unknown>
+    /** The `enpoi-orchestration` settings document, when the test sets one. */
+    orchestration?: Record<string, unknown>
+    /** The `enpoi-orchestration` revision the cleanup write is fenced with. */
+    orchestrationRevision?: number
     applyFn?: typeof apply
   } = {},
 ): SyncHarness {
   const mutations: SyncHarness['mutations'] = []
   const warnings: string[] = []
   const infos: string[] = []
+  const diagnostics: SyncHarness['diagnostics'] = []
   let conflicts = options.conflicts ?? 0
   const settings = {
     describe: () => [
       ...(llm === undefined ? [] : [{ ns: 'llm-pi-ai', revision: 7, value: { providers: llm } }]),
       ...(Object.keys(commandcode).length === 0 ? [] : [{ ns: 'commandcode-provider', revision: 3, value: { providers: commandcode } }]),
+      ...(options.defaultModel === undefined ? [] : [{ ns: 'agent-default-model', revision: 2, value: options.defaultModel }]),
+      ...(options.orchestration === undefined ? [] : [{ ns: 'enpoi-orchestration', revision: options.orchestrationRevision ?? 9, value: options.orchestration }]),
     ],
     mutate: async (ns: string, ops: SyncHarness['mutations'][number]['ops'], revision: number | undefined) => {
       mutations.push({ ns, ops, revision })
@@ -483,7 +495,11 @@ function syncHarness(
       info: (message: string) => { infos.push(message) },
       warn: (message: string) => { warnings.push(message) },
     }),
-    get: (service: string) => service === 'settings' ? settings : undefined,
+    get: (service: string) => service === 'settings'
+      ? settings
+      : service === 'diagnostics'
+        ? { report: (request: { kind: string, message: string }) => { diagnostics.push(request); return {} } }
+        : undefined,
     effect: (callback: () => () => void) => {
       cleanup = callback()
       return () => { cleanup?.() }
@@ -497,11 +513,13 @@ function syncHarness(
     capacityDefaults: { get: () => ({}) },
     modelsDevUrl: { get: () => options.modelsDevUrl ?? DEFAULT_MODELS_DEV_URL },
     routeProviderMap: { get: () => options.routeProviderMap ?? ({}) },
+    pinnedModels: { get: () => options.pinnedModels ?? ({}) },
   })
   return {
     mutations,
     warnings,
     infos,
+    diagnostics,
     dispose: () => { cleanup?.() },
   }
 }
@@ -517,6 +535,23 @@ function stubProviderNetwork(): { probes: string[] } {
     return await realFetch(input, init)
   })
   return { probes }
+}
+
+/**
+ * Write a fresh models.dev cache fixture and return its path. The file's
+ * mtime clears the 48 h cache-age gate; the provider map is whatever the test
+ * needs (route authority only consults it for catalog routes).
+ */
+function writeFreshCatalog(directory: string, providers: Record<string, unknown>): string {
+  const path = join(directory, 'models.dev.json')
+  writeFileSync(path, JSON.stringify(providers))
+  return path
+}
+
+/** Import a fresh module instance bound to the environment paths set by the test. */
+async function freshSyncModule(): Promise<typeof import('../src/index.ts')> {
+  vi.resetModules()
+  return await import('../src/index.ts')
 }
 
 describe('route passes', () => {
@@ -600,6 +635,8 @@ describe('route passes', () => {
     ]))
     process.env.DSH_COMMANDCODE_CATALOG = snapshot
     process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    // The two-key gate needs a fresh catalogue cache; a fresh fixture file is one.
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
     const { probes } = stubProviderNetwork()
     const harness = syncHarness({}, {
       commandcode: { baseURL: 'https://api.commandcode.ai', api: 'commandcode/alpha-generate', models: [{ id: 'hand-model' }] },
@@ -611,8 +648,12 @@ describe('route passes', () => {
       expect(harness.mutations[0]!.ns).toBe('commandcode-provider')
       expect(harness.mutations[0]!.ops[0]!.path).toEqual(['providers', 'commandcode', 'models'])
       const written = harness.mutations[0]!.ops[0]!.value
+      // The only stored id is not in the snapshot: removing it would drop
+      // 100% of the route, so the shrink guard keeps it with a degraded
+      // diagnostic instead.
       expect(written.map(model => model.id)).toEqual(['hand-model', 'zzz-commandcode-model-a'])
       expect(written[0]).toMatchObject({ id: 'hand-model', source: 'configured' })
+      expect(harness.diagnostics.some(entry => entry.kind === 'provider-sync/removals-degraded')).toBe(true)
       expect(written[1]).toMatchObject({
         id: 'zzz-commandcode-model-a', name: 'Model A [Go+]',
         contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'],
@@ -637,6 +678,88 @@ describe('route passes', () => {
       await vi.waitFor(() => { expect(harness.mutations).toHaveLength(2) })
       expect(harness.mutations.map(mutation => mutation.revision)).toEqual([3, 3])
       expect(harness.mutations[1]!.ops[0]!.value.map(model => model.id)).toEqual(['zzz-commandcode-model-c'])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('prunes a catalog route to the endpoint ∩ models.dev set, pins referenced ids, and cleans hidden models', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      object: 'list',
+      data: [{ id: 'kept-model' }, { id: 'retired-old' }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {
+      deepseek: { models: { 'kept-model': { name: 'Kept Model' } } },
+    })
+    const fresh = await freshSyncModule()
+    stubProviderNetwork()
+    const harness = syncHarness({
+      deepseek: {
+        baseURL: url,
+        api: 'openai-completions',
+        models: [{ id: 'kept-model' }, { id: 'retired-old' }, { id: 'retired-long-ago' }],
+      },
+    }, {}, {
+      applyFn: fresh.apply,
+      orchestration: {
+        uiPreferences: {
+          hiddenModels: { deepseek: ['retired-old', 'still-listed'], opencode: ['x'] },
+          favorites: [{ provider: 'deepseek', modelId: 'retired-long-ago' }, { provider: 'opencode', modelId: 'x' }],
+        },
+      },
+    })
+    try {
+      await vi.waitFor(() => { expect(harness.mutations.some(mutation => mutation.ns === 'enpoi-orchestration')).toBe(true) })
+      const modelsMutation = harness.mutations.find(mutation => mutation.ns === 'llm-pi-ai')
+      const written = modelsMutation!.ops[0]!.value
+      // The advertised id models.dev dropped is pruned; the referenced
+      // long-retired favorite is kept, stamped deprecated.
+      expect(written.map(model => model.id)).toEqual(['kept-model', 'retired-long-ago'])
+      expect(written[1]).toMatchObject({ source: 'pinned-in-use', deprecated: true })
+      // Hidden entries for pruned ids are cleaned; untouched providers and
+      // still-kept favorites stay.
+      const cleanup = harness.mutations.find(mutation => mutation.ns === 'enpoi-orchestration')
+      expect(cleanup!.ops).toEqual([
+        { op: 'set', path: ['uiPreferences', 'hiddenModels'], value: { deepseek: ['still-listed'], opencode: ['x'] } },
+      ])
+      expect(cleanup!.revision).toBe(9)
+      expect(harness.diagnostics.map(entry => entry.kind)).toEqual(expect.arrayContaining([
+        'provider-sync/model-pruned',
+        'provider-sync/active-model-deprecated',
+        'provider-sync/pass-summary',
+      ]))
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('removes ids a discovery route no longer advertises and refreshes its discovered cache', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      object: 'list',
+      data: [{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    const fresh = await freshSyncModule()
+    stubProviderNetwork()
+    const harness = syncHarness({
+      antigravity: {
+        baseURL: url,
+        api: 'anthropic-messages',
+        models: [{ id: 'gemini-3.1-pro-high' }, { id: 'gemini-2.5-flash' }],
+      },
+    }, {}, { applyFn: fresh.apply })
+    try {
+      await vi.waitFor(() => { expect(harness.mutations).toHaveLength(1) })
+      expect(harness.mutations[0]!.ops[0]!.value.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
+      const discovered = JSON.parse(readFileSync(join(directory, 'discovered-models.json'), 'utf8')) as {
+        routes: Record<string, { models: Array<{ id: string }> }>
+      }
+      expect(discovered.routes.antigravity?.models.map(model => model.id)).toEqual(['gemini-3.1-pro-high'])
     } finally {
       harness.dispose()
     }

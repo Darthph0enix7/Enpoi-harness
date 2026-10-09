@@ -64,3 +64,8 @@
               gemini: { contextWindow: 1048576, maxTokens: 65536 }
               claude: { contextWindow: 1000000, maxTokens: 64000 }
             default: { contextWindow: 1048576, maxTokens: 65536 }
+        # Route-level ids this deployment pins against catalog-driven removal:
+        # a pinned id survives every refresh even when neither the endpoint
+        # nor models.dev advertises it (a hand-added model is protected by its
+        # own `source: "manual"` stamp instead). Empty: nothing pinned.
+        pinnedModels: {}

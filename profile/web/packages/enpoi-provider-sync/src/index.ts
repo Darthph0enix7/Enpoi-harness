@@ -20,20 +20,25 @@
  * - Tool-calling and price metadata (models.dev `tool_call` / `cost`) consumed
  *   by the dynamic catalogue rules (dsh-enpoi-catalog-rules predicates).
  * - Live hot-swap into runtime memory without restarting the server.
- * - A configured model the endpoint does not advertise is KEPT, stamped
- *   `source: 'configured'`, instead of being dropped on the next pass.
+ * - Catalog-authoritative membership: on a route with a declared models.dev
+ *   mapping, the route converges to the endpoint-advertised models the fresh
+ *   catalog confirms, so ids the provider retired are removed. Hand-added
+ *   (`source: 'manual'`), pinned (`pinnedModels`), overlay-`upsert`, recently
+ *   first-seen endpoint-only, and referenced models survive; a removal pass
+ *   runs only when both the endpoint listing and the models.dev catalogue are
+ *   fresh, and aborts on the shrink guards.
  *
  * @module dsh-enpoi-provider-sync
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
-import { readSettingsDocument } from 'dsh-enpoi-contracts'
+import { readSettingsDocument, ORCHESTRATION_NAMESPACE } from 'dsh-enpoi-contracts'
 import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
 // The schema floor is llm-pi-ai's own resolution default: the sync writes it
@@ -93,6 +98,13 @@ export interface Config {
    * per key. Mapping a route this deployment serves does not require a code change.
    */
   routeProviderMap: Volatile<Record<string, string[]>>
+  /**
+   * Route → model ids this deployment pins against catalog-driven removal. A
+   * pinned id survives every refresh even when neither the endpoint nor
+   * models.dev advertises it, like an overlay `upsert` but without a record.
+   * An empty map is the shipped default: nothing is pinned.
+   */
+  pinnedModels: Volatile<Record<string, string[]>>
 }
 
 export const Config = Schema.object({
@@ -103,6 +115,7 @@ export const Config = Schema.object({
   capacityDefaults: live(Schema.any().default({})),
   modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
   routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
+  pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
 })
 
 /** One request-modality token a listing or catalog may disclose. */
@@ -150,6 +163,9 @@ const SIGN_IN_REQUIRED = 'sign-in required'
 
 /** The llm-pi-ai namespace (branded through the settings seam). */
 const LLM_NS = 'llm-pi-ai'
+
+/** The default-model selection's Config namespace (the `agent-default-model` profile entry). */
+const AGENT_DEFAULT_MODEL_NS = 'agent-default-model'
 
 interface CredentialsSeam {
   resolve(ref: string): Promise<{ value?: string } | undefined>
@@ -303,18 +319,21 @@ export type SyncDiagnosticSink = (kind: string, message: string) => void
  * stale or missing cache is visible instead of swallowed.
  * @param report - optional diagnostics sink.
  * @param url - the catalogue URL; defaults to {@link DEFAULT_MODELS_DEV_URL}.
+ * @returns whether the online refresh landed; `false` leaves the local cache
+ *   and the in-memory copy serving (the removal gate then falls back to the
+ *   cache's own age).
  */
-export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: string = DEFAULT_MODELS_DEV_URL): Promise<void> {
+export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: string = DEFAULT_MODELS_DEV_URL): Promise<boolean> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) })
     if (!res.ok) {
       report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — GET ${url} -> HTTP ${String(res.status)}; local cache kept`)
-      return
+      return false
     }
     const data = (await res.json()) as ModelsDevDatabase
     if (!data || typeof data !== 'object' || Object.keys(data).length <= 50) {
       report?.('provider-sync/models-dev-fetch', 'models.dev refresh ignored — response did not look like the catalogue (>50 providers); local cache kept')
-      return
+      return false
     }
     modelsDevCache = data
     // Persist the fresh catalog to the shared cache so OpenCode and every
@@ -323,15 +342,45 @@ export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: s
     try {
       if (path === undefined) {
         report?.('provider-sync/models-dev-cache', 'models.dev catalogue refreshed in memory, but no OS cache dir resolved — not persisted')
-        return
+        return true
       }
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, JSON.stringify(data), 'utf8')
     } catch (error) {
       report?.('provider-sync/models-dev-cache', `models.dev catalogue refreshed in memory, but the cache write failed — ${error instanceof Error ? error.message : String(error)}`)
     }
+    return true
   } catch (error) {
     report?.('provider-sync/models-dev-fetch', `models.dev refresh failed — ${error instanceof Error ? error.message : String(error)}; local cache kept`)
+    return false
+  }
+}
+
+/** How long an endpoint-only model survives before pruning while models.dev has not indexed it yet. */
+export const ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1000
+
+/** Freshness window for the on-disk models.dev cache when the online refresh fails. */
+export const CATALOG_FRESH_MS = 48 * 60 * 60 * 1000
+
+/**
+ * Age of the on-disk models.dev cache at `now`, or `undefined` when no path
+ * resolves or the file is absent. Read-only: nothing is refreshed here.
+ * @param now - the epoch milliseconds to measure against.
+ * @param env - environment to read (tests inject one).
+ * @param platform - OS key to branch on (tests inject one).
+ * @returns the cache age in milliseconds, or undefined when unknown.
+ */
+export function catalogCacheAgeMs(
+  now: number,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): number | undefined {
+  const path = modelsDevCachePath(env, platform)
+  if (path === undefined) return undefined
+  try {
+    return Math.max(0, now - statSync(path).mtimeMs)
+  } catch {
+    return undefined
   }
 }
 
@@ -1373,8 +1422,11 @@ export interface ConfiguredMerge {
  * Merge a live listing into a route's configured `models` instead of
  * replacing them wholesale: an advertised id is refreshed from the listing,
  * an id the listing omits is kept exactly as configured and stamped
- * `source: 'configured'` so a hand-added model survives every pass, and a
- * live id the configuration does not name is appended.
+ * `source: 'configured'` so it survives a degraded pass (a hand-added
+ * `source: 'manual'` entry keeps its own stamp), and a live id the
+ * configuration does not name is appended. This is the degraded-pass merge:
+ * the removal-aware membership planner ({@link planRouteModels}) is the path a
+ * healthy pass takes.
  * @param route - provider route key, for models.dev scoping.
  * @param configured - the route's current `models` array, when any.
  * @param live - normalized live listing entries.
@@ -1411,10 +1463,11 @@ export function mergeConfiguredModels(
     seen.add(id)
     const fresh = advertised.get(id)
     if (fresh !== undefined) {
-      models.push(fresh)
+      models.push(entry.source === 'manual' ? { ...fresh, source: 'manual' } : fresh)
       continue
     }
-    models.push({ ...entry, source: 'configured' })
+    const keptSource = entry.source === 'manual' || entry.source === 'pinned-in-use' ? entry.source : 'configured'
+    models.push({ ...entry, source: keptSource })
     unadvertised.push(id)
   }
   for (const [id, entry] of advertised) {
@@ -1423,6 +1476,93 @@ export function mergeConfiguredModels(
     models.push(entry)
   }
   return { models, unadvertised }
+}
+
+/** Whether one entry carries a usable `firstSeenAt` stamp. */
+function firstSeenAtOf(entry: Record<string, unknown>): number | undefined {
+  const value = entry.firstSeenAt
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * The model ids one models.dev provider carries, as an exact set (the
+ * published key and its lowercase spelling). `undefined` when the fresh
+ * snapshot does not carry the provider at all — membership then has no
+ * catalog authority for the route.
+ * @param providerKey - the exact models.dev provider key.
+ * @returns the id set, or undefined when the provider is absent.
+ */
+function modelsDevProviderModelIds(providerKey: string): Set<string> | undefined {
+  const provider = loadModelsDev()[providerKey]
+  if (provider?.models === undefined) return undefined
+  const ids = new Set<string>()
+  for (const key of Object.keys(provider.models)) {
+    ids.add(key)
+    ids.add(key.toLowerCase())
+  }
+  return ids
+}
+
+/** One route-local model reference that must never be pruned silently. */
+export interface RouteModelReference {
+  /** The referenced model id on this route. */
+  id: string
+  /** Why it is referenced (`agent-default-model`, `chain:<id>`, `favorite`). */
+  reason: string
+}
+
+/**
+ * Collect every model of `route` referenced by the default model selection,
+ * the `enpoi-orchestration.chains` links, and the picker favorites. Malformed
+ * entries are ignored: a reference nothing can express is no reference.
+ * @param defaultModel - the `agent-default-model` settings document, when read.
+ * @param orchestration - the `enpoi-orchestration` settings document, when read.
+ * @param route - the provider route key whose models are collected.
+ * @returns the route-local references with their reasons.
+ */
+export function referencedRouteModels(
+  defaultModel: unknown,
+  orchestration: unknown,
+  route: string,
+): RouteModelReference[] {
+  const found: RouteModelReference[] = []
+  if (defaultModel !== null && typeof defaultModel === 'object' && !Array.isArray(defaultModel)) {
+    const selection = defaultModel as { provider?: unknown, model?: unknown }
+    if (selection.provider === route && typeof selection.model === 'string' && selection.model !== '') {
+      found.push({ id: selection.model, reason: 'agent-default-model' })
+    }
+  }
+  if (orchestration === null || typeof orchestration !== 'object' || Array.isArray(orchestration)) return found
+  const document = orchestration as { chains?: unknown, uiPreferences?: unknown }
+  const chains = document.chains
+  if (chains !== null && typeof chains === 'object' && !Array.isArray(chains)) {
+    for (const [chainId, raw] of Object.entries(chains as Record<string, unknown>)) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+      const links = (raw as { links?: unknown }).links
+      if (!Array.isArray(links)) continue
+      for (const link of links) {
+        if (link === null || typeof link !== 'object' || Array.isArray(link)) continue
+        const entry = link as { provider?: unknown, model?: unknown }
+        if (entry.provider === route && typeof entry.model === 'string' && entry.model !== '') {
+          found.push({ id: entry.model, reason: `chain:${chainId}` })
+        }
+      }
+    }
+  }
+  const preferences = document.uiPreferences
+  if (preferences !== null && typeof preferences === 'object' && !Array.isArray(preferences)) {
+    const favorites = (preferences as { favorites?: unknown }).favorites
+    if (Array.isArray(favorites)) {
+      for (const favorite of favorites) {
+        if (favorite === null || typeof favorite !== 'object' || Array.isArray(favorite)) continue
+        const entry = favorite as { provider?: unknown, modelId?: unknown }
+        if (entry.provider === route && typeof entry.modelId === 'string' && entry.modelId !== '') {
+          found.push({ id: entry.modelId, reason: 'favorite' })
+        }
+      }
+    }
+  }
+  return found
 }
 
 /**
@@ -1449,6 +1589,308 @@ export function mergeDiscoveredModels(
   })
 }
 
+/** The `uiPreferences` fields one prune cleaned; a field nothing changed in is absent. */
+export interface PrunedReferenceCleanup {
+  /** The full `hiddenModels` map, when this route's entry lost ids. */
+  hiddenModels?: Record<string, string[]>
+  /** The full `favorites` array, when this route lost entries. */
+  favorites?: Array<Record<string, unknown>>
+}
+
+/**
+ * Drop pruned ids from `enpoi-orchestration.uiPreferences`: the route's
+ * `hiddenModels` entry and any `favorites` reference to the route. Fields
+ * nothing changed in are omitted, so an unchanged document is never rewritten.
+ * @param orchestration - the `enpoi-orchestration` settings document, when read.
+ * @param route - the provider route whose ids were pruned.
+ * @param removed - the pruned model ids.
+ * @returns the cleaned fields; `{}` when nothing referenced them.
+ */
+export function pruneRouteReferences(
+  orchestration: unknown,
+  route: string,
+  removed: readonly string[],
+): PrunedReferenceCleanup {
+  const cleanup: PrunedReferenceCleanup = {}
+  if (removed.length === 0) return cleanup
+  if (orchestration === null || typeof orchestration !== 'object' || Array.isArray(orchestration)) return cleanup
+  const preferences = (orchestration as { uiPreferences?: unknown }).uiPreferences
+  if (preferences === null || typeof preferences !== 'object' || Array.isArray(preferences)) return cleanup
+  const removedSet = new Set(removed)
+  const hidden = (preferences as { hiddenModels?: unknown }).hiddenModels
+  if (hidden !== null && typeof hidden === 'object' && !Array.isArray(hidden)) {
+    const map = hidden as Record<string, unknown>
+    const list = map[route]
+    if (Array.isArray(list)) {
+      const next = list.filter(id => typeof id !== 'string' || !removedSet.has(id))
+      if (next.length !== list.length) {
+        cleanup.hiddenModels = { ...(map as Record<string, string[]>), [route]: next as string[] }
+      }
+    }
+  }
+  const favorites = (preferences as { favorites?: unknown }).favorites
+  if (Array.isArray(favorites)) {
+    const next = favorites.filter((entry) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return true
+      const reference = entry as { provider?: unknown, modelId?: unknown }
+      return reference.provider !== route || typeof reference.modelId !== 'string' || !removedSet.has(reference.modelId)
+    })
+    if (next.length !== favorites.length) cleanup.favorites = next as Array<Record<string, unknown>>
+  }
+  return cleanup
+}
+
+/** Which listing answered a route's membership question this pass. */
+export type RouteAuthority = 'catalog' | 'endpoint' | 'none'
+
+/** The audit of one route's membership decision. */
+export interface RouteRefreshReport {
+  /** Ids dropped from the route this pass. */
+  removed: string[]
+  /** Ids kept only because they are referenced and no longer a member. */
+  deprecated: string[]
+  /** Whether removals were withheld (gate, guard, or no authority). */
+  degraded: boolean
+  /** Why removals were withheld, when they were. */
+  degradedReason?: string
+  /** Membership authority applied this pass. */
+  authority: RouteAuthority
+  /** Which listing answered: the live endpoint, the bundled catalog, or neither. */
+  source: 'live' | 'catalog' | 'none'
+}
+
+/** One route's planned settings records plus the removal audit. */
+export interface PlannedRouteModels {
+  models: Array<Record<string, unknown>>
+  report: RouteRefreshReport
+}
+
+/** The inputs of one route's membership decision. */
+export interface PlanRouteInput {
+  /** Provider route key, for models.dev scoping and analysis. */
+  route: string
+  /** The route's current `models` array, when any. */
+  configured: Array<Record<string, unknown>> | undefined
+  /** The normalized endpoint listing, or `undefined` when the fetch failed. */
+  live: LiveModel[] | undefined
+  /** Whether the installed pi-ai catalog describes the route. */
+  catalogRoute: boolean
+  /** The exact primary models.dev provider key this route declares, when one does. */
+  catalogProviderKey?: string | undefined
+  /** Whether the endpoint listing fetch succeeded this pass. */
+  endpointFresh: boolean
+  /** Whether the models.dev catalogue is fresh (online refresh, or cache younger than 48 h). */
+  catalogFresh: boolean
+  /** Route-level ids the deployment pins against removal. */
+  pinnedModels?: readonly string[] | undefined
+  /** The route's maintained catalog overlay, when the file names one. */
+  overlay?: RouteCatalogOverlay | undefined
+  /** Route-local references that must never be pruned silently. */
+  references?: readonly RouteModelReference[] | undefined
+  /** The pass clock; injected by tests. */
+  now: number
+  /** Capacity fallbacks for models the live endpoint does not describe. */
+  capacities?: Record<string, RouteCapacity> | undefined
+  /** The shipped hint table plus the owner override. */
+  hints?: CapabilityHintContext | undefined
+  /** The effective route → models.dev provider keys. */
+  routeProviderMap?: RouteProviderMap | undefined
+  /** Which listing answered the endpoint authority question. */
+  source?: 'live' | 'catalog' | undefined
+}
+
+/**
+ * Plan one route's settings records under the authoritative-membership rules.
+ *
+ * On a catalog route whose declared primary models.dev provider carries a
+ * model set in the fresh snapshot, membership is the endpoint-advertised ids
+ * that set confirms, plus protected entries (`source: 'manual'`, pinned ids,
+ * overlay `upsert` ids), plus endpoint-only ids first seen inside the 14-day
+ * grace, minus the overlay's `remove` ids. On any other route with a
+ * successful listing fetch the advertised list itself is the authority.
+ * Removals run only when the endpoint listing and the catalogue are both
+ * fresh in the same pass, and abort when the effective set would be empty or
+ * would drop more than half of the route's stored models. A referenced model
+ * that would be pruned is kept, stamped `deprecated: true` and
+ * `source: 'pinned-in-use'`, and named in the report. A degraded pass is the
+ * legacy merge: nothing is removed.
+ * @param input - the route, its stored records, the listing, and the gate facts.
+ * @returns the records to persist and the removal audit.
+ */
+export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
+  const configured = input.configured ?? []
+  const live = input.live
+  const hints = input.hints ?? { table: loadCapabilityHints(), override: {} }
+  const routeProviderMap = input.routeProviderMap ?? DEFAULT_ROUTE_PROVIDER_MAP
+  const advertised = new Map<string, Record<string, unknown>>()
+  for (const model of live ?? []) {
+    if (advertised.has(model.id)) continue
+    advertised.set(model.id, analyzeModel(input.route, model, fallbackFor(input.capacities, input.route, model.id), hints, routeProviderMap).settings)
+  }
+
+  const catalogIds = input.catalogRoute && input.catalogProviderKey !== undefined
+    ? modelsDevProviderModelIds(input.catalogProviderKey)
+    : undefined
+  const authority: RouteAuthority = live === undefined
+    ? 'none'
+    : catalogIds !== undefined
+      ? 'catalog'
+      : input.catalogRoute ? 'none' : 'endpoint'
+  const report: RouteRefreshReport = {
+    removed: [],
+    deprecated: [],
+    degraded: false,
+    authority,
+    source: live === undefined ? 'none' : input.source ?? 'live',
+  }
+
+  const configuredById = new Map<string, Record<string, unknown>>()
+  for (const entry of configured) {
+    const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined
+    if (id !== undefined && !configuredById.has(id)) configuredById.set(id, entry)
+  }
+
+  // Grace: endpoint-advertised ids models.dev does not carry yet. An id already
+  // stored without a `firstSeenAt` is long-standing, so the first pass under
+  // this logic prunes it; an id first advertised by this pass is stamped now.
+  const grace = new Set<string>()
+  if (authority === 'catalog' && catalogIds !== undefined) {
+    for (const id of advertised.keys()) {
+      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) continue
+      const prior = configuredById.get(id)
+      const firstSeen = prior === undefined ? input.now : firstSeenAtOf(prior)
+      if (firstSeen !== undefined && input.now - firstSeen < ENDPOINT_ONLY_GRACE_MS) grace.add(id)
+    }
+  }
+
+  const pinned = new Set(input.pinnedModels ?? [])
+  const overlayUpserts = new Set<string>()
+  for (const entry of input.overlay?.upsert ?? []) {
+    const id = listingString(entry.id)
+    if (id !== undefined) overlayUpserts.add(id)
+  }
+  const protectedIds = new Set<string>()
+  for (const [id, entry] of configuredById) {
+    if (entry.source === 'manual' || pinned.has(id) || overlayUpserts.has(id)) protectedIds.add(id)
+  }
+  // A pinned or upsert id that the endpoint advertises but the configuration
+  // does not name is protected too; upserts without a listing record are
+  // appended by the overlay after this plan.
+  for (const id of pinned) if (advertised.has(id)) protectedIds.add(id)
+  for (const id of overlayUpserts) if (advertised.has(id)) protectedIds.add(id)
+
+  const references = new Map<string, string[]>()
+  for (const reference of input.references ?? []) {
+    const reasons = references.get(reference.id) ?? []
+    if (!reasons.includes(reference.reason)) reasons.push(reference.reason)
+    references.set(reference.id, reasons)
+  }
+
+  const memberBase = new Set<string>()
+  if (authority === 'catalog' && catalogIds !== undefined) {
+    for (const id of advertised.keys()) {
+      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) memberBase.add(id)
+    }
+  } else if (authority === 'endpoint') {
+    for (const id of advertised.keys()) memberBase.add(id)
+  }
+  const isMember = (id: string): boolean => memberBase.has(id) || protectedIds.has(id) || grace.has(id)
+
+  const removalsAllowed = authority !== 'none' && input.endpointFresh && input.catalogFresh
+  let keepAll = !removalsAllowed
+  if (keepAll) {
+    report.degraded = true
+    report.degradedReason = live === undefined
+      ? 'the endpoint listing could not be fetched'
+      : !input.endpointFresh
+        ? 'the endpoint listing fetch did not succeed'
+        : !input.catalogFresh
+          ? 'the models.dev catalogue is stale (no online refresh and the cache is 48 h or older)'
+          : input.catalogRoute
+            ? 'the route has no declared models.dev catalog mapping'
+            : 'no membership authority'
+  } else {
+    const currentIds = [...configuredById.keys()]
+    const wouldRemove = currentIds.filter(id => !isMember(id) && !references.has(id))
+    if (memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0) {
+      keepAll = true
+      report.degraded = true
+      report.degradedReason = 'the effective model set would be empty'
+    } else if (currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
+      keepAll = true
+      report.degraded = true
+      report.degradedReason = `removals would drop ${String(wouldRemove.length)} of ${String(currentIds.length)} stored models (more than half)`
+    }
+  }
+
+  const models: Array<Record<string, unknown>> = []
+  if (keepAll) {
+    models.push(...(live === undefined ? configured : mergeConfiguredModels(input.route, configured, live, input.capacities, hints, routeProviderMap).models))
+  } else {
+    const seen = new Set<string>()
+    for (const entry of configured) {
+      const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined
+      if (id === undefined) {
+        models.push(entry)
+        continue
+      }
+      if (seen.has(id)) continue
+      seen.add(id)
+      const fresh = advertised.get(id)
+      const isGrace = grace.has(id)
+      if (!isMember(id)) {
+        const reasons = references.get(id)
+        if (reasons !== undefined) {
+          models.push({ ...entry, source: 'pinned-in-use', deprecated: true })
+          report.deprecated.push(id)
+        } else {
+          report.removed.push(id)
+        }
+        continue
+      }
+      if (fresh !== undefined) {
+        models.push({
+          ...fresh,
+          ...entry.source === 'manual' ? { source: 'manual' } : {},
+          ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {},
+        })
+      } else if (isGrace) {
+        models.push({ ...entry, firstSeenAt: firstSeenAtOf(entry) ?? input.now })
+      } else {
+        models.push(entry)
+      }
+    }
+    for (const [id, fresh] of advertised) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      if (!isMember(id)) continue
+      models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh)
+    }
+  }
+  return { models: applyCatalogOverlay(models, input.overlay), report }
+}
+
+/** The value `providerSync.refreshRoute` returns to the client. */
+export interface ProviderSyncRouteRefreshValue {
+  route: string
+  /** The route's planned settings records; the caller persists them. */
+  models: Array<Record<string, unknown>>
+  /** Ids the plan removed (the caller's replace must drop them). */
+  removed: string[]
+  /** Ids kept only for a reference (deprecated upstream). */
+  deprecated: string[]
+  /** Whether removals were withheld this refresh. */
+  degraded: boolean
+  /** Why removals were withheld, when they were. */
+  degradedReason?: string
+  /** Which listing answered. */
+  source: 'live' | 'catalog' | 'none'
+  /** The membership authority the plan applied. */
+  authority: RouteAuthority
+  /** The epoch milliseconds the plan ran at. */
+  fetchedAt: number
+}
+
 function stringifyComparable(models: Array<Record<string, unknown>> | undefined): string {
   return JSON.stringify(
     (models ?? []).map(m => ({
@@ -1467,6 +1909,8 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       capabilityHints: m.capabilityHints ?? null,
       unverified: m.unverified ?? null,
       source: m.source ?? null,
+      deprecated: m.deprecated ?? null,
+      firstSeenAt: m.firstSeenAt ?? null,
     })),
   )
 }
@@ -1479,6 +1923,8 @@ export function apply(ctx: Context, config: Config): void {
   // The configured route map extends the shipped table key by key: a route the
   // deployment newly serves is mapped from configuration alone.
   const routeProviderMap: RouteProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) }
+  // Route-level ids the deployment pins against catalog-driven removal.
+  const pinnedModels = value(config.pinnedModels) ?? {}
 
   /**
    * Record one coded incident (kind `provider-sync/...`) and log it. The
@@ -1501,95 +1947,340 @@ export function apply(ctx: Context, config: Config): void {
   loadModelsDev()
   void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
 
-  async function syncOnce(): Promise<void> {
-    // Refresh models.dev metadata on every pass (not just startup) so new
-    // models and corrected limits appear within one interval; the pass cadence
-    // itself is the configured interval (hourly in the shipped profile).
-    await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
-    // The overlays are a maintained deployment correction: read once per pass,
-    // report a malformed file, and carry on with the live merge alone.
-    let overlays: CatalogOverlayDocument = {}
+  /** Read the maintained overlays once per pass; a malformed file is reported and yields none. */
+  function loadOverlays(): CatalogOverlayDocument {
     try {
-      overlays = loadCatalogOverlays()
+      return loadCatalogOverlays()
     } catch (error) {
       reportSyncDiagnostic('provider-sync/catalog-overlays', error instanceof Error ? error.message : String(error))
+      return {}
     }
-    // The shared capability-hint table and the owner's per-route/per-model
-    // override: read once per pass. A malformed override (or packaging
-    // mistake in the shipped table) is reported and the pass continues with
-    // hints disabled, so the floor — never a guess — is what gets persisted.
-    let hints: CapabilityHintContext
+  }
+
+  /**
+   * Read the shipped hint table and the owner's override once per pass. A
+   * malformed override (or packaging mistake in the shipped table) is reported
+   * and the pass continues with hints disabled, so the floor — never a guess —
+   * is what gets persisted.
+   */
+  function loadHints(): CapabilityHintContext {
     try {
-      hints = { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() }
+      return { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() }
     } catch (error) {
       reportSyncDiagnostic('provider-sync/capability-hints', error instanceof Error ? error.message : String(error))
-      hints = { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} }
+      return { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} }
     }
-    const settings = ctx.get('settings') as SettingsSeam | undefined
-    if (settings === undefined) {
-      logger.warn('settings seam absent — skipping sync pass')
-      return
+  }
+
+  const credentials = ctx.get('credentials') as CredentialsSeam | undefined
+
+  /**
+   * Resolve the credential one route's listing probe presents. A keyless
+   * route fetches anonymously; a pooled route uses its highest-priority
+   * enabled identity's credential.
+   * @param profile - the route's configured profile, when it has one.
+   * @returns the credential value, or undefined when none resolves.
+   */
+  async function resolveListingKey(profile: ProviderProfile | undefined): Promise<string | undefined> {
+    if (profile?.keyless === true) return undefined
+    if (profile?.apiKeyEnv !== undefined) {
+      const hit = credentials === undefined ? undefined : await credentials.resolve(profile.apiKeyEnv)
+      return hit?.value
     }
-    const section = sectionOf(settings, LLM_NS)
-    // Command Code lives in its own adapter settings namespace: a deployment
-    // that configures only that namespace still syncs its catalog snapshot.
-    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers
-    if ((section === undefined || section.providers === undefined) && commandCode === undefined) {
-      logger.warn('llm-pi-ai section absent — nothing to sync')
-      return
+    if (profile?.pool?.identities !== undefined && profile.pool.identities.length > 0) {
+      const primary = [...profile.pool.identities]
+        .filter(identity => identity.enabled !== false)
+        .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0]
+      if (primary !== undefined) {
+        const hit = credentials === undefined ? undefined : await credentials.resolve(primary.credentialRef)
+        return hit?.value
+      }
     }
-    const llmProviders = section?.providers ?? {}
-    const credentials = ctx.get('credentials') as CredentialsSeam | undefined
-    const revisionOf = (ns: string) => settings.describe().find(entry => entry.ns === ns)?.revision
+    return undefined
+  }
+
+  /** Revision fence for one namespace; `undefined` when the namespace is not described. */
+  function revisionOf(settings: SettingsSeam, ns: string): number | undefined {
+    return settings.describe().find(entry => entry.ns === ns)?.revision
+  }
+
+    interface RouteComputeOutcome {
+      route: string
+      /** The settings namespace that owns the route. */
+      ns: string
+      /** Whether the route has a settings profile (a write is skipped otherwise). */
+      hasProfile: boolean
+      /** The route's stored records, when it has a profile. */
+      configured: Array<Record<string, unknown>>
+      overlay: RouteCatalogOverlay | undefined
+      live: LiveModel[] | undefined
+      baseURL: string
+      models: Array<Record<string, unknown>>
+      report: RouteRefreshReport
+      /**
+       * Ids the route lost this pass — membership removals plus ids the
+       * overlay dropped — for visibility cleanup. Distinct from
+       * `report.removed`, which audits membership decisions only.
+       */
+      cleanup: string[]
+      /** Configured ids the listing did not advertise this pass. */
+      unadvertised: string[]
+      advertisedCount?: number
+    }
+
+    /** The human label of the membership authority behind a removal decision. */
+    function authorityLabel(report: RouteRefreshReport): string {
+      if (report.authority === 'catalog') return 'live endpoint ∩ models.dev'
+      if (report.authority === 'endpoint') return report.source === 'catalog' ? 'bundled catalog snapshot' : 'live endpoint'
+      return 'no authority'
+    }
 
     /**
-     * Merge one route's live listing into its configured `models`, apply the
-     * route's catalog overlay, and persist the result under the settings
-     * revision-retry, keeping the sync's fail-soft semantics: a merge that
-     * changes nothing skips the write, and a concurrent settings edit
-     * elsewhere is retried rather than lost.
-     * @param ns - the settings namespace that owns the route.
+     * Compute one route's refresh: fetch its listing (or the bundled Command
+     * Code snapshot), resolve the deployment references, and plan the records
+     * under the authoritative-membership rules. Diagnostics for pruning,
+     * deprecation, and degraded removals are emitted here so the hourly pass
+     * and the manual RPC report identically; persistence stays with the
+     * caller.
      * @param route - the provider route key.
-     * @param profile - the route's configured profile; its models are the merge base.
-     * @param live - the normalized listing to merge; `undefined` when the fetch failed.
-     * @param source - the listing's origin for the log line (`live` or `catalog`).
-     * @param overlay - the route's maintained catalog correction, when the file names one.
-     * @returns the configured ids this pass did not advertise.
+     * @param options - the pass's catalogue verdict, overlays, hints, and settings seam.
+     * @returns the computed outcome, or undefined when the route is unknown or has no endpoint.
      */
-    const persistRouteModels = async (
-      ns: string,
-      route: string,
-      profile: ProviderProfile,
-      live: LiveModel[] | undefined,
-      source: string,
-      overlay: RouteCatalogOverlay | undefined,
-    ): Promise<string[]> => {
-      // A failed fetch must not stamp every configured entry `source:
-      // configured`, so the merge is skipped and the overlay applies to the
-      // configuration exactly as stored.
-      const merge = live === undefined ? undefined : mergeConfiguredModels(route, profile.models, live, capacities, hints, routeProviderMap)
-      const merged = merge?.models ?? profile.models ?? []
-      const models = applyCatalogOverlay(merged, overlay)
-      const before = stringifyComparable(profile.models)
-      const after = stringifyComparable(models)
+    async function computeRouteRefresh(route: string, options: {
+      catalogOnlineOk: boolean
+      overlays: CatalogOverlayDocument
+      hints: CapabilityHintContext
+      settings: SettingsSeam
+    }): Promise<RouteComputeOutcome | undefined> {
+      const llmProfiles = sectionOf(options.settings, LLM_NS)?.providers
+      const commandCodeProfiles = sectionOf(options.settings, COMMANDCODE_NS)?.providers
+      const profile: ProviderProfile | undefined = llmProfiles?.[route] ?? commandCodeProfiles?.[route]
+      const ns = llmProfiles?.[route] !== undefined ? LLM_NS : commandCodeProfiles?.[route] !== undefined ? COMMANDCODE_NS : LLM_NS
+      const knownEndpoint = endpoints[route]
+      if (profile === undefined && knownEndpoint === undefined) return undefined
+      // A route the installed catalog already describes and nothing configured
+      // has its answer; the discovered cache would only shadow a better one.
+      const catalogRoute = isCatalogRoute(route)
+      if (profile === undefined && catalogRoute) return undefined
+      const baseURL = knownEndpoint ?? profile?.baseURL
+      if (baseURL === undefined) {
+        logger.debug(`route ${route}: no baseURL and no known endpoint — skipped`)
+        return undefined
+      }
+      const overlay = options.overlays.routes?.[route]
+      const key = await resolveListingKey(profile)
+      let live: LiveModel[] | undefined
+      try {
+        // Command Code serves no model listing; its bundled snapshot is the listing.
+        live = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api)
+      } catch (error) {
+        logger.warn(describeSyncFailure(route, error, ns))
+      }
+      const catalogFresh = options.catalogOnlineOk
+        || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < CATALOG_FRESH_MS
+      const references = referencedRouteModels(
+        readSettingsDocument(options.settings, AGENT_DEFAULT_MODEL_NS),
+        readSettingsDocument(options.settings, ORCHESTRATION_NAMESPACE),
+        route,
+      )
+      const planned = planRouteModels({
+        route,
+        configured: profile?.models,
+        live,
+        catalogRoute,
+        catalogProviderKey: routeProviderMap[route]?.[0],
+        endpointFresh: live !== undefined,
+        catalogFresh,
+        pinnedModels: pinnedModels[route],
+        overlay,
+        references,
+        now: Date.now(),
+        capacities,
+        hints: options.hints,
+        routeProviderMap,
+        source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
+      })
+      const advertised = new Set((live ?? []).map(model => model.id))
+      const unadvertised = (profile?.models ?? [])
+        .map(entry => typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined)
+        .filter((id): id is string => id !== undefined && !advertised.has(id))
+      // Every configured id the plan no longer carries (membership removals
+      // and overlay removals alike) is a dangling visibility reference.
+      const plannedIds = new Set(planned.models.map(model => (typeof model.id === 'string' ? model.id : '')))
+      const cleanup = [...new Set((profile?.models ?? [])
+        .map(entry => (typeof entry.id === 'string' ? entry.id : ''))
+        .filter(id => id !== '' && !plannedIds.has(id)))]
+      if (planned.report.removed.length > 0) {
+        reportSyncDiagnostic(
+          'provider-sync/model-pruned',
+          `route ${route}: pruned ${String(planned.report.removed.length)} outdated model(s) (source: ${authorityLabel(planned.report)}): ${planned.report.removed.join(', ')}`,
+        )
+      }
+      for (const id of planned.report.deprecated) {
+        const reasons = references.filter(reference => reference.id === id).map(reference => reference.reason)
+        reportSyncDiagnostic(
+          'provider-sync/active-model-deprecated',
+          `route ${route}: model "${id}" is no longer a member but is referenced by ${reasons.join(', ')}; kept as deprecated (source: pinned-in-use)`,
+        )
+      }
+      if (planned.report.degraded && live !== undefined && (profile?.models?.length ?? 0) > 0) {
+        reportSyncDiagnostic(
+          'provider-sync/removals-degraded',
+          `route ${route}: model removals skipped — ${planned.report.degradedReason ?? 'unknown reason'}; keeping all ${String(profile?.models?.length ?? 0)} stored model(s)`,
+        )
+      }
+      return {
+        route,
+        ns,
+        hasProfile: profile !== undefined,
+        configured: profile?.models ?? [],
+        overlay,
+        live,
+        baseURL,
+        models: planned.models,
+        report: planned.report,
+        cleanup,
+        unadvertised,
+        ...live === undefined ? {} : { advertisedCount: live.length },
+      }
+    }
+
+    /**
+     * Persist one computed route's records under the settings revision-retry,
+     * keeping the sync's fail-soft semantics: a result that changes nothing
+     * skips the write, and a concurrent settings edit elsewhere is retried
+     * rather than lost.
+     * @param outcome - the computed route refresh.
+     */
+    async function persistRouteModels(settings: SettingsSeam, outcome: RouteComputeOutcome): Promise<void> {
+      const before = stringifyComparable(outcome.configured)
+      const after = stringifyComparable(outcome.models)
       if (before === after) {
-        logger.debug(`route ${route}: ${live === undefined ? 'overlay' : `${String(live.length)} ${source} models`}, no change`)
-      } else {
+        logger.debug(`route ${outcome.route}: ${outcome.live === undefined ? 'overlay' : `${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models`}, no change`)
+        return
+      }
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await settings.mutate(
+            outcome.ns as SettingsNamespace,
+            [{ op: 'set', path: ['providers', outcome.route, 'models'], value: outcome.models }],
+            revisionOf(settings, outcome.ns),
+          )
+          const removed = outcome.report.removed.length
+          logger.info(removed > 0
+            ? `route ${outcome.route}: catalog refresh — ${String(outcome.models.length)} models (${String(removed)} outdated pruned)`
+            : outcome.live === undefined
+              ? `route ${outcome.route}: catalog overlay applied — ${String(outcome.models.length)} models`
+              : `route ${outcome.route}: catalog merged & enriched from models.dev — ${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models (${String(outcome.unadvertised.length)} kept)`)
+          return
+        } catch (error) {
+          const conflict = error as Partial<SettingsConflictError>
+          if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
+          throw error
+        }
+      }
+    }
+
+    /**
+     * Drop pruned ids from `enpoi-orchestration.uiPreferences` after a route
+     * write: a hidden entry for a model the route no longer carries, and any
+     * favorite referencing it, would otherwise dangle. Fail-soft: a cleanup
+     * failure is reported and never fails the pass.
+     * @param route - the provider route whose ids were pruned.
+     * @param removed - the pruned model ids.
+     */
+    async function cleanupPrunedReferences(settings: SettingsSeam, route: string, removed: readonly string[]): Promise<void> {
+      if (removed.length === 0) return
+      try {
+        const deleteDocument = readSettingsDocument(settings, ORCHESTRATION_NAMESPACE)
+        const cleanup = pruneRouteReferences(deleteDocument, route, removed)
+        const settingsOps: SettingsPathOp[] = []
+        if (cleanup.hiddenModels !== undefined) {
+          settingsOps.push({ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: cleanup.hiddenModels })
+        }
+        if (cleanup.favorites !== undefined) {
+          settingsOps.push({ op: 'set', path: ['uiPreferences', 'favorites'], value: cleanup.favorites })
+        }
+        if (settingsOps.length === 0) return
         for (let attempt = 0; ; attempt++) {
           try {
-            await settings.mutate(ns as SettingsNamespace, [{ op: 'set', path: ['providers', route, 'models'], value: models }], revisionOf(ns))
-            logger.info(live === undefined
-              ? `route ${route}: catalog overlay applied — ${String(models.length)} models`
-              : `route ${route}: catalog merged & enriched from models.dev — ${String(live.length)} ${source} models (${String(merge?.unadvertised.length ?? 0)} configured kept)`)
-            break
+            await settings.mutate(ORCHESTRATION_NAMESPACE as SettingsNamespace, settingsOps, revisionOf(settings, ORCHESTRATION_NAMESPACE))
+            logger.info(`route ${route}: pruned ids cleaned from hidden models/favorites (${String(removed.length)} id(s))`)
+            return
           } catch (error) {
             const conflict = error as Partial<SettingsConflictError>
             if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
             throw error
           }
         }
+      } catch (error) {
+        reportSyncDiagnostic(
+          'provider-sync/visibility-cleanup',
+          `route ${route}: pruned ids could not be cleaned from visibility preferences — ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
-      return merge?.unadvertised ?? []
+    }
+
+    /**
+     * Write one discovery route's endpoint listing to the shared discovered
+     * cache, which is the llm-pi-ai resolution layer's source while the route
+     * has no configured models. Idempotent: an unchanged listing leaves the
+     * file (and every `discoveredAt`) exactly as it was. An empty listing is
+     * never written, so a route that answers nothing keeps its last good
+     * cache instead of silently falling back to the installed catalog.
+     * @param outcome - the computed route refresh (its live listing is the cache source).
+     */
+    function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): void {
+      if (outcome.live === undefined) return
+      if (outcome.live.length === 0) {
+        logger.warn(`route ${outcome.route}: endpoint advertised no models — discovered cache kept`)
+        return
+      }
+      try {
+        // Everything the endpoint advertised, provenanced and timestamped,
+        // for the llm-pi-ai resolution layer to serve while this route has
+        // no configured models.
+        const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route]
+        const record = mergeDiscoveredRoute(
+          previous,
+          outcome.baseURL,
+          mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
+          Date.now(),
+        )
+        if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
+          logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`)
+        } else {
+          try {
+            writeDiscoveredRoute(outcome.route, record)
+            logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`)
+          } catch (error) {
+            logger.warn(`route ${outcome.route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      } catch (error) {
+        logger.warn(describeSyncFailure(outcome.route, error))
+      }
+    }
+
+  async function syncOnce(): Promise<void> {
+    // Refresh models.dev metadata on every pass (not just startup) so new
+    // models and corrected limits appear within one interval; the pass cadence
+    // itself is the configured interval (hourly in the shipped profile).
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    const overlays = loadOverlays()
+    const hints = loadHints()
+    const settings = ctx.get('settings') as SettingsSeam | undefined
+    if (settings === undefined) {
+      logger.warn('settings seam absent — skipping sync pass')
+      return
+    }
+    const llmProviders = sectionOf(settings, LLM_NS)?.providers
+    // Command Code lives in its own adapter settings namespace: a deployment
+    // that configures only that namespace still syncs its catalog snapshot.
+    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers
+    if (llmProviders === undefined && commandCode === undefined) {
+      logger.warn('llm-pi-ai section absent — nothing to sync')
+      return
     }
 
     // Configured routes plus every endpoint this deployment knows about. The
@@ -1598,126 +2289,105 @@ export function apply(ctx: Context, config: Config): void {
     // before the config write that would otherwise refuse it for resolving no
     // models. A catalog-less route is never written to settings unless it is
     // configured; the cache is its only home.
-    const routes = [...new Set([...Object.keys(llmProviders), ...Object.keys(endpoints)])]
-    /** Configured ids no endpoint advertised this pass, warned once at the end. */
+    const routes = [...new Set([
+      ...Object.keys(llmProviders ?? {}),
+      ...Object.keys(commandCode ?? {}),
+      ...Object.keys(endpoints),
+    ])]
+    /** Configured ids no endpoint advertised this pass, reported once at the end. */
     const unadvertised: string[] = []
+    const stats = { routes: 0, pruned: 0, deprecated: 0, degraded: 0 }
 
     for (const route of routes) {
-      const profile: ProviderProfile | undefined = llmProviders[route]
-      const baseURL = endpoints[route] ?? profile?.baseURL
-      if (baseURL === undefined) {
-        logger.debug(`route ${route}: no baseURL and no known endpoint — skipped`)
-        continue
-      }
-      // A route the installed catalog already describes has its answer; the
-      // discovered cache would only shadow a better one, so it is neither
-      // fetched nor written here.
-      const catalogRoute = isCatalogRoute(route)
-      if (profile === undefined && catalogRoute) continue
-      const overlay = overlays.routes?.[route]
-      let key: string | undefined
-      // A keyless route's listing is fetched anonymously: a stored, ambient, or
-      // env-provided key is never attached, exactly as its requests never send
-      // one (a gateway may reject any Authorization header on an anonymous
-      // route). BYOK on such a gateway drops `keyless` and keeps `apiKeyEnv`.
-      if (profile?.keyless === true) {
-        key = undefined
-      } else if (profile?.apiKeyEnv !== undefined) {
-        const hit = credentials === undefined ? undefined : await credentials.resolve(profile.apiKeyEnv)
-        key = hit?.value
-      } else if (profile?.pool?.identities !== undefined && profile.pool.identities.length > 0) {
-        // Pooled routes carry no single apiKeyEnv: discover with the
-        // highest-priority enabled identity's credential.
-        const primary = [...profile.pool.identities]
-          .filter(identity => identity.enabled !== false)
-          .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0]
-        if (primary !== undefined) {
-          const hit = credentials === undefined ? undefined : await credentials.resolve(primary.credentialRef)
-          key = hit?.value
-        }
-      }
-      // The listing is best-effort: a failed fetch is reported and never
-      // blocks the overlay, which is the route's maintained truth independent
-      // of what the endpoint advertises this pass.
-      let live: LiveModel[] | undefined
-      try {
-        live = await fetchModels(baseURL, key, profile?.api)
-      } catch (error) {
-        logger.warn(describeSyncFailure(route, error))
-      }
-      // A route with nothing configured and no listing has nothing to persist:
-      // its models stay the installed catalog plus anything discovered below.
-      // A route without configured models is also never materialized from the
-      // overlay alone, which would replace the installed catalog with the
-      // overlay's few records.
-      if (profile !== undefined && (live !== undefined || (overlay !== undefined && (profile.models?.length ?? 0) > 0))) {
+      const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings })
+      if (outcome === undefined) continue
+      stats.routes += 1
+      stats.pruned += outcome.report.removed.length
+      stats.deprecated += outcome.report.deprecated.length
+      if (outcome.report.degraded) stats.degraded += 1
+      unadvertised.push(...outcome.unadvertised.map(id => `${route}/${id}`))
+      // A route with nothing configured and no listing has nothing to
+      // persist: its models stay the installed catalog plus anything
+      // discovered below. A route without configured models is also never
+      // materialized from the overlay alone, which would replace the
+      // installed catalog with the overlay's few records.
+      if (outcome.hasProfile && (outcome.live !== undefined || (outcome.overlay !== undefined && outcome.configured.length > 0))) {
         try {
-          const kept = await persistRouteModels(LLM_NS, route, profile, live, live === undefined ? 'overlay' : 'live', overlay)
-          unadvertised.push(...kept.map(id => `${route}/${id}`))
+          await persistRouteModels(settings, outcome)
+          await cleanupPrunedReferences(settings, route, outcome.cleanup)
         } catch (error) {
-          logger.warn(describeSyncFailure(route, error))
+          logger.warn(describeSyncFailure(route, error, outcome.ns))
         }
       }
-      if (live !== undefined && !catalogRoute) {
-        try {
-          // Everything the endpoint advertised, provenanced and timestamped,
-          // for the llm-pi-ai resolution layer to serve while this route has
-          // no configured models. Idempotent: an unchanged listing leaves the
-          // file (and every discoveredAt) exactly as it was.
-          const previous = readDiscoveredFile(discoveredCachePath()).routes[route]
-          const record = mergeDiscoveredRoute(
-            previous,
-            baseURL,
-            mergeDiscoveredModels(route, live, capacities, hints, routeProviderMap),
-            Date.now(),
-          )
-          if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
-            logger.debug(`route ${route}: ${String(live.length)} discovered models, no change`)
-          } else {
-            try {
-              writeDiscoveredRoute(route, record)
-              logger.info(`route ${route}: discovered ${String(live.length)} models from ${baseURL} (source: discovered)`)
-            } catch (error) {
-              logger.warn(`route ${route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
-            }
-          }
-        } catch (error) {
-          logger.warn(describeSyncFailure(route, error))
-        }
-      }
+      // The discovered cache is llm-pi-ai's resolution source; Command Code
+      // resolves its own adapter catalog, and a catalog route's answer is the
+      // installed catalog itself.
+      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints)
     }
 
-    // Command Code lives in its own adapter namespace, not `llm-pi-ai`: the
-    // heavy flow writes `providers.commandcode` into the
-    // `commandcode-provider` settings section. The vendor serves no
-    // model-listing endpoint, so the pass merges the provider package's
-    // bundled catalog snapshot instead of probing a `/models` address that
-    // does not exist. No discovered-cache write follows: that file is
-    // llm-pi-ai's resolution source, while Command Code resolves its own
-    // adapter catalog.
-    if (commandCode !== undefined) {
-      let catalog: LiveModel[] | undefined
-      for (const route of Object.keys(commandCode)) {
-        const profile: ProviderProfile | undefined = commandCode[route]
-        if (profile === undefined) continue
-        try {
-          catalog ??= loadCommandCodeCatalog()
-          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, 'catalog', undefined)
-          unadvertised.push(...kept.map(id => `${route}/${id}`))
-        } catch (error) {
-          logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS))
-        }
-      }
+    if (stats.pruned > 0 || stats.deprecated > 0 || stats.degraded > 0) {
+      reportSyncDiagnostic(
+        'provider-sync/pass-summary',
+        `pass summary over ${String(stats.routes)} route(s): ${String(stats.pruned)} pruned, ${String(stats.deprecated)} deprecated, ${String(stats.degraded)} degraded`,
+      )
     }
 
     // One line per pass, not one per entry: the operator needs to know the
-    // working set is no longer purely endpoint-derived, without a wall of lines.
+    // working set contains ids their listing source did not advertise.
     if (unadvertised.length > 0) {
       process.stderr.write(
-        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their listing source this pass — kept with source: "configured": ${unadvertised.join(', ')}\n`,
+        `[enpoi-provider-sync] ${String(unadvertised.length)} stored model(s) not advertised by their listing source this pass — kept (protected, in grace, referenced, or removals degraded): ${unadvertised.join(', ')}\n`,
       )
     }
   }
+
+  /**
+   * Run the manual-refresh pipeline for one route: refresh the catalogue,
+   * fetch the listing, compute the same membership the hourly pass computes,
+   * emit the same diagnostics, and clean pruned ids from the visibility
+   * preferences. The computed records are returned; the caller (the Models
+   * page) owns the settings write, so a manual refresh and an open editor
+   * never write behind each other.
+   * @param route - the provider route key.
+   * @returns the planned records and the removal report.
+   * @throws when the settings seam is absent or the route is not configured.
+   */
+  async function refreshRouteForClient(route: string): Promise<ProviderSyncRouteRefreshValue> {
+    const settings = ctx.get('settings') as SettingsSeam | undefined
+    if (settings === undefined) throw new Error('settings seam absent — cannot refresh a route')
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    const overlays = loadOverlays()
+    const hints = loadHints()
+    const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings })
+    if (outcome === undefined) throw new Error(`route "${route}" is not configured (no profile and no known endpoint)`)
+    await cleanupPrunedReferences(settings, route, outcome.cleanup)
+    // Same cache side effect as the hourly pass for a discovery route; the
+    // settings records themselves are the caller's write.
+    if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints)
+    return {
+      route,
+      models: outcome.models,
+      removed: outcome.report.removed,
+      deprecated: outcome.report.deprecated,
+      degraded: outcome.report.degraded,
+      ...outcome.report.degradedReason === undefined ? {} : { degradedReason: outcome.report.degradedReason },
+      source: outcome.report.source,
+      authority: outcome.report.authority,
+      fetchedAt: Date.now(),
+    }
+  }
+
+  // The manual-refresh RPC is imported lazily, like the other profile
+  // plugins: the @Remote decorator stays out of the unit-test import graph.
+  void import('./remote.ts').then(({ mountProviderSyncRemote }) => {
+    try {
+      mountProviderSyncRemote(ctx, refreshRouteForClient)
+    } catch (error) {
+      process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}\n`)
+    }
+  }).catch((error: unknown) => {
+    process.stderr.write(`[enpoi-provider-sync] providerSync remote import failed: ${String(error)}\n`)
+  })
 
   const delay = value(config.syncDelayMs) ?? 2000
   const interval = value(config.intervalMs) ?? 3_600_000

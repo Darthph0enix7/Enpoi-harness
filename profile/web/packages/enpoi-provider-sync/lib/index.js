@@ -4,6 +4,12 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __knownSymbol = (name2, symbol) => (symbol = Symbol[name2]) ? symbol : Symbol.for("Symbol." + name2);
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
+var __defNormalProp = (obj, key, value2) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value: value2 }) : obj[key] = value2;
+var __name = (target, value2) => __defProp(target, "name", { value: value2, configurable: true });
 var __require = /* @__PURE__ */ ((x2) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x2, {
   get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
 }) : x2)(function(x2) {
@@ -36,6 +42,45 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+var __decoratorStart = (base) => [, , , __create(base?.[__knownSymbol("metadata")] ?? null)];
+var __decoratorStrings = ["class", "method", "getter", "setter", "accessor", "field", "value", "get", "set"];
+var __expectFn = (fn) => fn !== void 0 && typeof fn !== "function" ? __typeError("Function expected") : fn;
+var __decoratorContext = (kind, name2, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name: name2, metadata, addInitializer: (fn) => done._ ? __typeError("Already initialized") : fns.push(__expectFn(fn || null)) });
+var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol("metadata"), array[3]);
+var __runInitializers = (array, flags, self2, value2) => {
+  for (var i2 = 0, fns = array[flags >> 1], n = fns && fns.length; i2 < n; i2++) flags & 1 ? fns[i2].call(self2) : value2 = fns[i2].call(self2, value2);
+  return value2;
+};
+var __decorateElement = (array, flags, name2, decorators, target, extra) => {
+  var fn, it, done, ctx, access2, k = flags & 7, s2 = !!(flags & 8), p = !!(flags & 16);
+  var j = k > 3 ? array.length + 1 : k ? s2 ? 1 : 2 : 0, key = __decoratorStrings[k + 5];
+  var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = []);
+  var desc = k && (!p && !s2 && (target = target.prototype), k < 5 && (k > 3 || !p) && __getOwnPropDesc(k < 4 ? target : { get [name2]() {
+    return __privateGet(this, extra);
+  }, set [name2](x2) {
+    return __privateSet(this, extra, x2);
+  } }, name2));
+  k ? p && k < 4 && __name(extra, (k > 2 ? "set " : k > 1 ? "get " : "") + name2) : __name(target, name2);
+  for (var i2 = decorators.length - 1; i2 >= 0; i2--) {
+    ctx = __decoratorContext(k, name2, done = {}, array[3], extraInitializers);
+    if (k) {
+      ctx.static = s2, ctx.private = p, access2 = ctx.access = { has: p ? (x2) => __privateIn(target, x2) : (x2) => name2 in x2 };
+      if (k ^ 3) access2.get = p ? (x2) => (k ^ 1 ? __privateGet : __privateMethod)(x2, target, k ^ 4 ? extra : desc.get) : (x2) => x2[name2];
+      if (k > 2) access2.set = p ? (x2, y) => __privateSet(x2, target, y, k ^ 4 ? extra : desc.set) : (x2, y) => x2[name2] = y;
+    }
+    it = (0, decorators[i2])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1;
+    if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it);
+    else if (typeof it !== "object" || it === null) __typeError("Object expected");
+    else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn);
+  }
+  return k || __decoratorMetadata(array, target), desc && __defProp(target, name2, desc), p ? k ^ 4 ? extra : desc : target;
+};
+var __publicField = (obj, key, value2) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value2);
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') : member.has(obj);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateSet = (obj, member, value2, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value2) : member.set(obj, value2), value2);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // ../../node_modules/@earendil-works/pi-ai/dist/utils/diagnostics.js
 function formatThrownValue(value2) {
@@ -3569,7 +3614,7 @@ var init_ChatCompletionStream = __esm({
         }
         return null;
       }, _ChatCompletionStream_accumulateChatCompletion = function _ChatCompletionStream_accumulateChatCompletion2(chunk) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let snapshot = __classPrivateFieldGet(this, _ChatCompletionStream_currentChatCompletionSnapshot, "f");
         const { choices, ...rest } = chunk;
         if (!snapshot) {
@@ -3593,7 +3638,7 @@ var init_ChatCompletionStream = __esm({
               assertIsEmpty(rest3);
               Object.assign(choice.logprobs, rest3);
               if (content2) {
-                (_a5 = choice.logprobs).content ?? (_a5.content = []);
+                (_a6 = choice.logprobs).content ?? (_a6.content = []);
                 choice.logprobs.content.push(...content2);
               }
               if (refusal2) {
@@ -15173,7 +15218,7 @@ var init_credentials = __esm({
     CREDENTIALS_FILE_VERSION = "1.0";
     PROFILE_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
     loadConfigWithSource = async (profile) => {
-      var _a5, _b;
+      var _a6, _b;
       const rootConfigPath = await getRootConfigPath();
       if (rootConfigPath === null) {
         return null;
@@ -15237,7 +15282,7 @@ var init_credentials = __esm({
       config.organization_id ?? (config.organization_id = readEnv2("ANTHROPIC_ORGANIZATION_ID"));
       config.workspace_id ?? (config.workspace_id = readEnv2("ANTHROPIC_WORKSPACE_ID"));
       config.base_url ?? (config.base_url = readEnv2("ANTHROPIC_BASE_URL"));
-      (_a5 = config.authentication).scope ?? (_a5.scope = readEnv2("ANTHROPIC_SCOPE"));
+      (_a6 = config.authentication).scope ?? (_a6.scope = readEnv2("ANTHROPIC_SCOPE"));
       if (config.authentication.type === "oidc_federation") {
         if (!config.authentication.identity_token) {
           const identityTokenFile = readEnv2("ANTHROPIC_IDENTITY_TOKEN_FILE");
@@ -18185,8 +18230,8 @@ var require_dist2 = __commonJS({
         }
       }
       verify(payload, headers, options) {
-        var _a5;
-        const jsonParse = (_a5 = options === null || options === void 0 ? void 0 : options.jsonParse) !== null && _a5 !== void 0 ? _a5 : true;
+        var _a6;
+        const jsonParse = (_a6 = options === null || options === void 0 ? void 0 : options.jsonParse) !== null && _a6 !== void 0 ? _a6 : true;
         const normalizedHeaders = {};
         for (const key of Object.keys(headers)) {
           normalizedHeaders[key.toLowerCase()] = headers[key];
@@ -19229,7 +19274,7 @@ var init_SessionToolRunner = __esm({
       __classPrivateFieldGet2(this, _SessionToolRunner_results, "f").push(call);
     }, _SessionToolRunner_execute = // ===== tool execution =====
     async function _SessionToolRunner_execute2(ev, confirmation) {
-      var _a5, _b;
+      var _a6, _b;
       if (__classPrivateFieldGet2(this, _SessionToolRunner_answered, "f").has(ev.id))
         return;
       __classPrivateFieldGet2(this, _SessionToolRunner_logger, "f").info("executing tool", {
@@ -19238,7 +19283,7 @@ var init_SessionToolRunner = __esm({
         tool: ev.name,
         tool_use_id: ev.id
       });
-      __classPrivateFieldSet2(this, _SessionToolRunner_inFlightCount, (_a5 = __classPrivateFieldGet2(this, _SessionToolRunner_inFlightCount, "f"), _a5++, _a5), "f");
+      __classPrivateFieldSet2(this, _SessionToolRunner_inFlightCount, (_a6 = __classPrivateFieldGet2(this, _SessionToolRunner_inFlightCount, "f"), _a6++, _a6), "f");
       try {
         const tool = __classPrivateFieldGet2(this, _SessionToolRunner_toolByName, "f").get(ev.name);
         if (!tool) {
@@ -21547,7 +21592,7 @@ ${out}`;
         return __classPrivateFieldGet2(this, _LineRangeCollector_line, "f") >= __classPrivateFieldGet2(this, _LineRangeCollector_end, "f");
       }
       collectFrom(chunk) {
-        var _a5;
+        var _a6;
         let lineStart = 0;
         while (lineStart < chunk.length && !this.rangeIsCollected()) {
           const newline = chunk.indexOf(10, lineStart);
@@ -21557,7 +21602,7 @@ ${out}`;
           }
           if (newline < 0)
             break;
-          __classPrivateFieldSet2(this, _LineRangeCollector_line, (_a5 = __classPrivateFieldGet2(this, _LineRangeCollector_line, "f"), _a5++, _a5), "f");
+          __classPrivateFieldSet2(this, _LineRangeCollector_line, (_a6 = __classPrivateFieldGet2(this, _LineRangeCollector_line, "f"), _a6++, _a6), "f");
           lineStart = newline + 1;
         }
       }
@@ -24262,7 +24307,7 @@ var init_BetaToolRunner = __esm({
         ];
         return true;
       }, Symbol.asyncIterator)]() {
-        var _a5;
+        var _a6;
         if (__classPrivateFieldGet2(this, _BetaToolRunner_consumed, "f")) {
           throw new AnthropicError("Cannot iterate over a consumed stream");
         }
@@ -24278,7 +24323,7 @@ var init_BetaToolRunner = __esm({
               }
               __classPrivateFieldSet2(this, _BetaToolRunner_mutated, false, "f");
               __classPrivateFieldSet2(this, _BetaToolRunner_toolResponse, void 0, "f");
-              __classPrivateFieldSet2(this, _BetaToolRunner_iterationCount, (_a5 = __classPrivateFieldGet2(this, _BetaToolRunner_iterationCount, "f"), _a5++, _a5), "f");
+              __classPrivateFieldSet2(this, _BetaToolRunner_iterationCount, (_a6 = __classPrivateFieldGet2(this, _BetaToolRunner_iterationCount, "f"), _a6++, _a6), "f");
               __classPrivateFieldSet2(this, _BetaToolRunner_message, void 0, "f");
               const { max_iterations, compactionControl, ...params } = __classPrivateFieldGet2(this, _BetaToolRunner_state, "f").params;
               if (params.stream) {
@@ -34122,7 +34167,7 @@ var require_ponyfill_es2018 = __commonJS({
             value: name2,
             configurable: true
           });
-        } catch (_a6) {
+        } catch (_a7) {
         }
       }
       const originalPromise = Promise;
@@ -34654,7 +34699,7 @@ var require_ponyfill_es2018 = __commonJS({
         }
         try {
           return x2._asyncIteratorImpl instanceof ReadableStreamAsyncIteratorImpl;
-        } catch (_a6) {
+        } catch (_a7) {
           return false;
         }
       }
@@ -34664,7 +34709,7 @@ var require_ponyfill_es2018 = __commonJS({
       const NumberIsNaN = Number.isNaN || function(x2) {
         return x2 !== x2;
       };
-      var _a5, _b, _c;
+      var _a6, _b, _c;
       function CreateArrayFromList(elements) {
         return elements.slice();
       }
@@ -34718,7 +34763,7 @@ var require_ponyfill_es2018 = __commonJS({
         const nextMethod = asyncIterator.next;
         return { iterator: asyncIterator, nextMethod, done: false };
       }
-      const SymbolAsyncIterator = (_c = (_a5 = Symbol.asyncIterator) !== null && _a5 !== void 0 ? _a5 : (_b = Symbol.for) === null || _b === void 0 ? void 0 : _b.call(Symbol, "Symbol.asyncIterator")) !== null && _c !== void 0 ? _c : "@@asyncIterator";
+      const SymbolAsyncIterator = (_c = (_a6 = Symbol.asyncIterator) !== null && _a6 !== void 0 ? _a6 : (_b = Symbol.for) === null || _b === void 0 ? void 0 : _b.call(Symbol, "Symbol.asyncIterator")) !== null && _c !== void 0 ? _c : "@@asyncIterator";
       function GetIterator(obj, hint = "sync", method) {
         if (method === void 0) {
           if (hint === "async") {
@@ -35495,9 +35540,9 @@ var require_ponyfill_es2018 = __commonJS({
         return mode;
       }
       function convertByobReadOptions(options, context) {
-        var _a6;
+        var _a7;
         assertDictionary(options, context);
-        const min = (_a6 = options === null || options === void 0 ? void 0 : options.min) !== null && _a6 !== void 0 ? _a6 : 1;
+        const min = (_a7 = options === null || options === void 0 ? void 0 : options.min) !== null && _a7 !== void 0 ? _a7 : 1;
         return {
           min: convertUnsignedLongLongWithEnforceRange(min, `${context} has member 'min' that`)
         };
@@ -35754,7 +35799,7 @@ var require_ponyfill_es2018 = __commonJS({
         }
         try {
           return typeof value2.aborted === "boolean";
-        } catch (_a6) {
+        } catch (_a7) {
           return false;
         }
       }
@@ -35898,12 +35943,12 @@ var require_ponyfill_es2018 = __commonJS({
         return true;
       }
       function WritableStreamAbort(stream11, reason) {
-        var _a6;
+        var _a7;
         if (stream11._state === "closed" || stream11._state === "errored") {
           return promiseResolvedWith(void 0);
         }
         stream11._writableStreamController._abortReason = reason;
-        (_a6 = stream11._writableStreamController._abortController) === null || _a6 === void 0 ? void 0 : _a6.abort(reason);
+        (_a7 = stream11._writableStreamController._abortController) === null || _a7 === void 0 ? void 0 : _a7.abort(reason);
         const state = stream11._state;
         if (state === "closed" || state === "errored") {
           return promiseResolvedWith(void 0);
@@ -36666,7 +36711,7 @@ var require_ponyfill_es2018 = __commonJS({
         try {
           new ctor();
           return true;
-        } catch (_a6) {
+        } catch (_a7) {
           return false;
         }
       }
@@ -40552,7 +40597,7 @@ var require_gaxios = __commonJS({
     var __importDefault = exports && exports.__importDefault || function(mod) {
       return mod && mod.__esModule ? mod : { "default": mod };
     };
-    var _a5;
+    var _a6;
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Gaxios = void 0;
     var extend_1 = __importDefault(require_extend());
@@ -40615,10 +40660,10 @@ var require_gaxios = __commonJS({
           url = new URL(input.url);
         }
         if (input && typeof input === "object" && "headers" in input) {
-          _a5.mergeHeaders(headers, input.headers);
+          _a6.mergeHeaders(headers, input.headers);
         }
         if (init) {
-          _a5.mergeHeaders(headers, new Headers(init.headers));
+          _a6.mergeHeaders(headers, new Headers(init.headers));
         }
         if (typeof input === "object" && !(input instanceof URL)) {
           return this.request({ ...init, ...input, headers, url });
@@ -40636,7 +40681,7 @@ var require_gaxios = __commonJS({
         return this.#applyResponseInterceptors(this._request(prepared));
       }
       async _defaultAdapter(config) {
-        const fetchImpl = config.fetchImplementation || this.defaults.fetchImplementation || await _a5.#getFetch();
+        const fetchImpl = config.fetchImplementation || this.defaults.fetchImplementation || await _a6.#getFetch();
         const preparedOpts = { ...config };
         delete preparedOpts.data;
         const res = await fetchImpl(config.url, preparedOpts);
@@ -40796,7 +40841,7 @@ var require_gaxios = __commonJS({
        */
       async #prepareRequest(options) {
         const preparedHeaders = new Headers(this.defaults.headers);
-        _a5.mergeHeaders(preparedHeaders, options.headers);
+        _a6.mergeHeaders(preparedHeaders, options.headers);
         const opts = (0, extend_1.default)(true, {}, this.defaults, options);
         if (!opts.url) {
           throw new Error("URL is required.");
@@ -40859,7 +40904,7 @@ var require_gaxios = __commonJS({
         const proxy = opts.proxy || process?.env?.HTTPS_PROXY || process?.env?.https_proxy || process?.env?.HTTP_PROXY || process?.env?.http_proxy;
         if (opts.agent) {
         } else if (proxy && this.#urlMayUseProxy(opts.url, opts.noProxy)) {
-          const HttpsProxyAgent = await _a5.#getProxyAgent();
+          const HttpsProxyAgent = await _a6.#getProxyAgent();
           if (this.agentCache.has(proxy)) {
             opts.agent = this.agentCache.get(proxy);
           } else {
@@ -41015,7 +41060,7 @@ Content-Type: ${partContentType}\r
       }
     };
     exports.Gaxios = Gaxios;
-    _a5 = Gaxios;
+    _a6 = Gaxios;
   }
 });
 
@@ -43036,11 +43081,11 @@ var require_logging_utils = __commonJS({
     }).func;
     var DebugLogBackendBase = class {
       constructor() {
-        var _a5;
+        var _a6;
         this.cached = /* @__PURE__ */ new Map();
         this.filters = [];
         this.filtersSet = false;
-        let nodeFlag = (_a5 = process2.env[exports.env.nodeEnables]) !== null && _a5 !== void 0 ? _a5 : "*";
+        let nodeFlag = (_a6 = process2.env[exports.env.nodeEnables]) !== null && _a6 !== void 0 ? _a6 : "*";
         if (nodeFlag === "all") {
           nodeFlag = "*";
         }
@@ -43078,7 +43123,7 @@ var require_logging_utils = __commonJS({
           };
         }
         return (fields, ...args) => {
-          var _a5;
+          var _a6;
           const nscolour = `${colours_1.Colours.green}${namespace}${colours_1.Colours.reset}`;
           const pid = `${colours_1.Colours.yellow}${process2.pid}${colours_1.Colours.reset}`;
           let level;
@@ -43093,7 +43138,7 @@ var require_logging_utils = __commonJS({
               level = `${colours_1.Colours.yellow}${fields.severity}${colours_1.Colours.reset}`;
               break;
             default:
-              level = (_a5 = fields.severity) !== null && _a5 !== void 0 ? _a5 : LogSeverity.DEFAULT;
+              level = (_a6 = fields.severity) !== null && _a6 !== void 0 ? _a6 : LogSeverity.DEFAULT;
               break;
           }
           const msg = util2.formatWithOptions({ colors: colours_1.Colours.enabled }, ...args);
@@ -43127,8 +43172,8 @@ var require_logging_utils = __commonJS({
         };
       }
       setFilters() {
-        var _a5;
-        const existingFilters = (_a5 = process2.env["NODE_DEBUG"]) !== null && _a5 !== void 0 ? _a5 : "";
+        var _a6;
+        const existingFilters = (_a6 = process2.env["NODE_DEBUG"]) !== null && _a6 !== void 0 ? _a6 : "";
         process2.env["NODE_DEBUG"] = `${existingFilters}${existingFilters ? "," : ""}${this.filters.join(",")}`;
       }
     };
@@ -43137,16 +43182,16 @@ var require_logging_utils = __commonJS({
     }
     var StructuredBackend = class extends DebugLogBackendBase {
       constructor(upstream) {
-        var _a5;
+        var _a6;
         super();
-        this.upstream = (_a5 = upstream) !== null && _a5 !== void 0 ? _a5 : void 0;
+        this.upstream = (_a6 = upstream) !== null && _a6 !== void 0 ? _a6 : void 0;
       }
       makeLogger(namespace) {
-        var _a5;
-        const debugLogger = (_a5 = this.upstream) === null || _a5 === void 0 ? void 0 : _a5.makeLogger(namespace);
+        var _a6;
+        const debugLogger = (_a6 = this.upstream) === null || _a6 === void 0 ? void 0 : _a6.makeLogger(namespace);
         return (fields, ...args) => {
-          var _a6;
-          const severity = (_a6 = fields.severity) !== null && _a6 !== void 0 ? _a6 : LogSeverity.INFO;
+          var _a7;
+          const severity = (_a7 = fields.severity) !== null && _a7 !== void 0 ? _a7 : LogSeverity.INFO;
           const json = Object.assign({
             severity,
             message: util2.format(...args)
@@ -43160,8 +43205,8 @@ var require_logging_utils = __commonJS({
         };
       }
       setFilters() {
-        var _a5;
-        (_a5 = this.upstream) === null || _a5 === void 0 ? void 0 : _a5.setFilters();
+        var _a6;
+        (_a6 = this.upstream) === null || _a6 === void 0 ? void 0 : _a6.setFilters();
       }
     };
     function getStructuredBackend(upstream) {
@@ -54450,11 +54495,11 @@ function getDefaultBaseUrls() {
   };
 }
 function getBaseUrl(httpOptions, vertexai, vertexBaseUrlFromEnv, geminiBaseUrlFromEnv) {
-  var _a5, _b;
+  var _a6, _b;
   if (!(httpOptions === null || httpOptions === void 0 ? void 0 : httpOptions.baseUrl)) {
     const defaultBaseUrls = getDefaultBaseUrls();
     if (vertexai) {
-      return (_a5 = defaultBaseUrls.vertexUrl) !== null && _a5 !== void 0 ? _a5 : vertexBaseUrlFromEnv;
+      return (_a6 = defaultBaseUrls.vertexUrl) !== null && _a6 !== void 0 ? _a6 : vertexBaseUrlFromEnv;
     } else {
       return (_b = defaultBaseUrls.geminiUrl) !== null && _b !== void 0 ? _b : geminiBaseUrlFromEnv;
     }
@@ -55270,7 +55315,7 @@ function isVideo(origin) {
   return origin !== null && origin !== void 0 && typeof origin === "object" && "uri" in origin;
 }
 function tFileName(fromName) {
-  var _a5;
+  var _a6;
   let name2;
   if (_isFile(fromName)) {
     name2 = fromName.name;
@@ -55282,7 +55327,7 @@ function tFileName(fromName) {
     }
   }
   if (isGeneratedVideo(fromName)) {
-    name2 = (_a5 = fromName.video) === null || _a5 === void 0 ? void 0 : _a5.uri;
+    name2 = (_a6 = fromName.video) === null || _a6 === void 0 ? void 0 : _a6.uri;
     if (name2 === void 0) {
       return void 0;
     }
@@ -57753,11 +57798,11 @@ function __asyncValues(o) {
   }
 }
 function isValidResponse(response) {
-  var _a5;
+  var _a6;
   if (response.candidates == void 0 || response.candidates.length === 0) {
     return false;
   }
-  const content = (_a5 = response.candidates[0]) === null || _a5 === void 0 ? void 0 : _a5.content;
+  const content = (_a6 = response.candidates[0]) === null || _a6 === void 0 ? void 0 : _a6.content;
   if (content === void 0) {
     return false;
   }
@@ -62928,14 +62973,14 @@ function uploadToFileSearchStoreResumableResponseFromMldev(fromObject) {
   return toObject;
 }
 async function throwErrorIfNotOK(response) {
-  var _a5;
+  var _a6;
   if (response === void 0) {
     throw new Error("response is undefined");
   }
   if (!response.ok) {
     const status = response.status;
     let errorBody;
-    if ((_a5 = response.headers.get("content-type")) === null || _a5 === void 0 ? void 0 : _a5.includes("application/json")) {
+    if ((_a6 = response.headers.get("content-type")) === null || _a6 === void 0 ? void 0 : _a6.includes("application/json")) {
       errorBody = await response.json();
     } else {
       errorBody = {
@@ -63013,8 +63058,8 @@ function hasMcpToolUsage(tools) {
   return hasMcpToolUsageFromMcpToTool;
 }
 function setMcpUsageHeader(headers) {
-  var _a5;
-  const existingHeader = (_a5 = headers[GOOGLE_API_CLIENT_HEADER]) !== null && _a5 !== void 0 ? _a5 : "";
+  var _a6;
+  const existingHeader = (_a6 = headers[GOOGLE_API_CLIENT_HEADER]) !== null && _a6 !== void 0 ? _a6 : "";
   headers[GOOGLE_API_CLIENT_HEADER] = (existingHeader + ` ${MCP_LABEL}`).trimStart();
 }
 function isMcpCallableTool(object) {
@@ -63097,8 +63142,8 @@ function mapToHeaders(map) {
   return headers;
 }
 function shouldDisableAfc(config) {
-  var _a5, _b, _c;
-  if ((_a5 = config === null || config === void 0 ? void 0 : config.automaticFunctionCalling) === null || _a5 === void 0 ? void 0 : _a5.disable) {
+  var _a6, _b, _c;
+  if ((_a6 = config === null || config === void 0 ? void 0 : config.automaticFunctionCalling) === null || _a6 === void 0 ? void 0 : _a6.disable) {
     return true;
   }
   let callableToolsPresent = false;
@@ -63122,13 +63167,13 @@ function isCallableTool(tool) {
   return "callTool" in tool && typeof tool.callTool === "function";
 }
 function hasCallableTools(params) {
-  var _a5, _b, _c;
-  return (_c = (_b = (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.tools) === null || _b === void 0 ? void 0 : _b.some((tool) => isCallableTool(tool))) !== null && _c !== void 0 ? _c : false;
+  var _a6, _b, _c;
+  return (_c = (_b = (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.tools) === null || _b === void 0 ? void 0 : _b.some((tool) => isCallableTool(tool))) !== null && _c !== void 0 ? _c : false;
 }
 function findAfcIncompatibleToolIndexes(params) {
-  var _a5;
+  var _a6;
   const afcIncompatibleToolIndexes = [];
-  if (!((_a5 = params === null || params === void 0 ? void 0 : params.config) === null || _a5 === void 0 ? void 0 : _a5.tools)) {
+  if (!((_a6 = params === null || params === void 0 ? void 0 : params.config) === null || _a6 === void 0 ? void 0 : _a6.tools)) {
     return afcIncompatibleToolIndexes;
   }
   params.config.tools.forEach((tool, index) => {
@@ -63143,8 +63188,8 @@ function findAfcIncompatibleToolIndexes(params) {
   return afcIncompatibleToolIndexes;
 }
 function shouldAppendAfcHistory(config) {
-  var _a5;
-  return !((_a5 = config === null || config === void 0 ? void 0 : config.automaticFunctionCalling) === null || _a5 === void 0 ? void 0 : _a5.ignoreCallHistory);
+  var _a6;
+  return !((_a6 = config === null || config === void 0 ? void 0 : config.automaticFunctionCalling) === null || _a6 === void 0 ? void 0 : _a6.ignoreCallHistory);
 }
 function audioTranscriptionConfigToMldev(fromObject) {
   const toObject = {};
@@ -63826,8 +63871,8 @@ function ReadableStreamFrom3(iterable) {
       }
     },
     async cancel() {
-      var _a5;
-      await ((_a5 = iter.return) === null || _a5 === void 0 ? void 0 : _a5.call(iter));
+      var _a6;
+      await ((_a6 = iter.return) === null || _a6 === void 0 ? void 0 : _a6.call(iter));
     }
   });
 }
@@ -63859,11 +63904,11 @@ function ReadableStreamToAsyncIterable3(stream11) {
   };
 }
 async function CancelReadableStream3(stream11) {
-  var _a5, _b;
+  var _a6, _b;
   if (stream11 === null || typeof stream11 !== "object")
     return;
   if (stream11[Symbol.asyncIterator]) {
-    await ((_b = (_a5 = stream11[Symbol.asyncIterator]()).return) === null || _b === void 0 ? void 0 : _b.call(_a5));
+    await ((_b = (_a6 = stream11[Symbol.asyncIterator]()).return) === null || _b === void 0 ? void 0 : _b.call(_a6));
     return;
   }
   const reader = stream11.getReader();
@@ -63914,7 +63959,7 @@ async function toFile3(value2, name2, options) {
   return makeFile3(parts, name2, options);
 }
 async function getBytes3(value2) {
-  var _a5, e_1, _b, _c;
+  var _a6, e_1, _b, _c;
   var _d;
   let parts = [];
   if (typeof value2 === "string" || ArrayBuffer.isView(value2) || // includes Uint8Array, Buffer, etc.
@@ -63924,7 +63969,7 @@ async function getBytes3(value2) {
     parts.push(value2 instanceof Blob ? value2 : await value2.arrayBuffer());
   } else if (isAsyncIterable3(value2)) {
     try {
-      for (var _e = true, value_1 = __asyncValues(value2), value_1_1; value_1_1 = await value_1.next(), _a5 = value_1_1.done, !_a5; _e = true) {
+      for (var _e = true, value_1 = __asyncValues(value2), value_1_1; value_1_1 = await value_1.next(), _a6 = value_1_1.done, !_a6; _e = true) {
         _c = value_1_1.value;
         _e = false;
         const chunk = _c;
@@ -63934,7 +63979,7 @@ async function getBytes3(value2) {
       e_1 = { error: e_1_1 };
     } finally {
       try {
-        if (!_e && !_a5 && (_b = value_1.return)) await _b.call(value_1);
+        if (!_e && !_a6 && (_b = value_1.return)) await _b.call(value_1);
       } finally {
         if (e_1) throw e_1.error;
       }
@@ -64005,9 +64050,9 @@ function makeLogFn3(fnLevel, logger, logLevel) {
   }
 }
 function loggerFor3(client) {
-  var _a5;
+  var _a6;
   const logger = client.logger;
-  const logLevel = (_a5 = client.logLevel) !== null && _a5 !== void 0 ? _a5 : "off";
+  const logLevel = (_a6 = client.logLevel) !== null && _a6 !== void 0 ? _a6 : "off";
   if (!logger) {
     return noopLogger3;
   }
@@ -64026,7 +64071,7 @@ function loggerFor3(client) {
 }
 function _iterSSEMessages3(response, controller) {
   return __asyncGenerator(this, arguments, function* _iterSSEMessages_1() {
-    var _a5, e_4, _b, _c;
+    var _a6, e_4, _b, _c;
     if (!response.body) {
       controller.abort();
       if (typeof globalThis.navigator !== "undefined" && globalThis.navigator.product === "ReactNative") {
@@ -64038,7 +64083,7 @@ function _iterSSEMessages3(response, controller) {
     const lineDecoder = new LineDecoder3();
     const iter = ReadableStreamToAsyncIterable3(response.body);
     try {
-      for (var _d = true, _e = __asyncValues(iterBinaryChunks(iter)), _f; _f = yield __await(_e.next()), _a5 = _f.done, !_a5; _d = true) {
+      for (var _d = true, _e = __asyncValues(iterBinaryChunks(iter)), _f; _f = yield __await(_e.next()), _a6 = _f.done, !_a6; _d = true) {
         _c = _f.value;
         _d = false;
         const sseChunk = _c;
@@ -64052,7 +64097,7 @@ function _iterSSEMessages3(response, controller) {
       e_4 = { error: e_4_1 };
     } finally {
       try {
-        if (!_d && !_a5 && (_b = _e.return)) yield __await(_b.call(_e));
+        if (!_d && !_a6 && (_b = _e.return)) yield __await(_b.call(_e));
       } finally {
         if (e_4) throw e_4.error;
       }
@@ -64066,9 +64111,9 @@ function _iterSSEMessages3(response, controller) {
 }
 function iterBinaryChunks(iterator) {
   return __asyncGenerator(this, arguments, function* iterBinaryChunks_1() {
-    var _a5, e_5, _b, _c;
+    var _a6, e_5, _b, _c;
     try {
-      for (var _d = true, iterator_3 = __asyncValues(iterator), iterator_3_1; iterator_3_1 = yield __await(iterator_3.next()), _a5 = iterator_3_1.done, !_a5; _d = true) {
+      for (var _d = true, iterator_3 = __asyncValues(iterator), iterator_3_1; iterator_3_1 = yield __await(iterator_3.next()), _a6 = iterator_3_1.done, !_a6; _d = true) {
         _c = iterator_3_1.value;
         _d = false;
         const chunk = _c;
@@ -64082,7 +64127,7 @@ function iterBinaryChunks(iterator) {
       e_5 = { error: e_5_1 };
     } finally {
       try {
-        if (!_d && !_a5 && (_b = iterator_3.return)) yield __await(_b.call(iterator_3));
+        if (!_d && !_a6 && (_b = iterator_3.return)) yield __await(_b.call(iterator_3));
       } finally {
         if (e_5) throw e_5.error;
       }
@@ -64099,7 +64144,7 @@ function partition3(str2, delimiter2) {
 async function defaultParseResponse3(client, props) {
   const { response, requestLogID, retryOfRequestLogID, startTime } = props;
   const body = await (async () => {
-    var _a5;
+    var _a6;
     if (props.options.stream) {
       loggerFor3(client).debug("response", response.status, response.url, response.headers, response.body);
       if (props.options.__streamClass) {
@@ -64114,7 +64159,7 @@ async function defaultParseResponse3(client, props) {
       return response;
     }
     const contentType = response.headers.get("content-type");
-    const mediaType = (_a5 = contentType === null || contentType === void 0 ? void 0 : contentType.split(";")[0]) === null || _a5 === void 0 ? void 0 : _a5.trim();
+    const mediaType = (_a6 = contentType === null || contentType === void 0 ? void 0 : contentType.split(";")[0]) === null || _a6 === void 0 ? void 0 : _a6.trim();
     const isJSON = (mediaType === null || mediaType === void 0 ? void 0 : mediaType.includes("application/json")) || (mediaType === null || mediaType === void 0 ? void 0 : mediaType.endsWith("+json"));
     if (isJSON) {
       const contentLength = response.headers.get("content-length");
@@ -64193,7 +64238,7 @@ function buildGoogleAuthOptions(googleAuthOptions) {
   }
 }
 async function downloadFile(params, apiClient) {
-  var _a5, _b, _c;
+  var _a6, _b, _c;
   const name2 = tFileName(params.file);
   if (name2 !== void 0) {
     return await apiClient.request({
@@ -64202,7 +64247,7 @@ async function downloadFile(params, apiClient) {
       queryParams: {
         "alt": "media"
       },
-      httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+      httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
       abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
     });
   } else if (isGeneratedVideo(params.file)) {
@@ -65043,19 +65088,19 @@ function tuningValidationDatasetToVertex(fromObject, _rootObject) {
   return toObject;
 }
 async function uploadBlob(file, uploadUrl, apiClient, httpOptions) {
-  var _a5;
+  var _a6;
   const response = await uploadBlobInternal(file, uploadUrl, apiClient, httpOptions);
   const responseJson = await (response === null || response === void 0 ? void 0 : response.json());
-  if (((_a5 = response === null || response === void 0 ? void 0 : response.headers) === null || _a5 === void 0 ? void 0 : _a5[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
+  if (((_a6 = response === null || response === void 0 ? void 0 : response.headers) === null || _a6 === void 0 ? void 0 : _a6[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
     throw new Error("Failed to upload file: Upload status is not finalized.");
   }
   return responseJson["file"];
 }
 async function uploadBlobToFileSearchStore(file, uploadUrl, apiClient, httpOptions) {
-  var _a5;
+  var _a6;
   const response = await uploadBlobInternal(file, uploadUrl, apiClient, httpOptions);
   const responseJson = await (response === null || response === void 0 ? void 0 : response.json());
-  if (((_a5 = response === null || response === void 0 ? void 0 : response.headers) === null || _a5 === void 0 ? void 0 : _a5[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
+  if (((_a6 = response === null || response === void 0 ? void 0 : response.headers) === null || _a6 === void 0 ? void 0 : _a6[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
     throw new Error("Failed to upload file: Upload status is not finalized.");
   }
   const resp = uploadToFileSearchStoreOperationFromMldev(responseJson);
@@ -65064,9 +65109,9 @@ async function uploadBlobToFileSearchStore(file, uploadUrl, apiClient, httpOptio
   return typedResp;
 }
 async function uploadBlobInternal(file, uploadUrl, apiClient, httpOptions) {
-  var _a5, _b, _c;
+  var _a6, _b, _c;
   let finalUrl = uploadUrl;
-  const effectiveBaseUrl = (httpOptions === null || httpOptions === void 0 ? void 0 : httpOptions.baseUrl) || ((_a5 = apiClient.clientOptions.httpOptions) === null || _a5 === void 0 ? void 0 : _a5.baseUrl);
+  const effectiveBaseUrl = (httpOptions === null || httpOptions === void 0 ? void 0 : httpOptions.baseUrl) || ((_a6 = apiClient.clientOptions.httpOptions) === null || _a6 === void 0 ? void 0 : _a6.baseUrl);
   if (effectiveBaseUrl) {
     const baseUri = new URL(effectiveBaseUrl);
     const uploadUri = new URL(uploadUrl);
@@ -65121,12 +65166,12 @@ function sleep3(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 function resolveCloudFlag(options) {
-  var _a5;
+  var _a6;
   if (options.enterprise !== void 0 || options.vertexai !== void 0) {
     if (options.enterprise !== void 0 && options.vertexai !== void 0 && options.enterprise !== options.vertexai) {
       throw new Error("enterprise and vertexAI flags have conflicting values, please set enterprise value only.");
     }
-    return (_a5 = options.enterprise) !== null && _a5 !== void 0 ? _a5 : options.vertexai;
+    return (_a6 = options.enterprise) !== null && _a6 !== void 0 ? _a6 : options.vertexai;
   }
   const envEnterpriseStr = getEnv("GOOGLE_GENAI_USE_ENTERPRISE");
   const envVertexaiStr = getEnv("GOOGLE_GENAI_USE_VERTEXAI");
@@ -65144,8 +65189,8 @@ function resolveCloudFlag(options) {
   return false;
 }
 function getEnv(env) {
-  var _a5, _b, _c;
-  return (_c = (_b = (_a5 = process === null || process === void 0 ? void 0 : process.env) === null || _a5 === void 0 ? void 0 : _a5[env]) === null || _b === void 0 ? void 0 : _b.trim()) !== null && _c !== void 0 ? _c : void 0;
+  var _a6, _b, _c;
+  return (_c = (_b = (_a6 = process === null || process === void 0 ? void 0 : process.env) === null || _a6 === void 0 ? void 0 : _a6[env]) === null || _b === void 0 ? void 0 : _b.trim()) !== null && _c !== void 0 ? _c : void 0;
 }
 function stringToBoolean(str2) {
   if (str2 === void 0) {
@@ -65693,8 +65738,8 @@ var init_node3 = __esm({
        * ```
        */
       get text() {
-        var _a5, _b, _c, _d, _e, _f, _g, _h;
-        if (((_d = (_c = (_b = (_a5 = this.candidates) === null || _a5 === void 0 ? void 0 : _a5[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
+        var _a6, _b, _c, _d, _e, _f, _g, _h;
+        if (((_d = (_c = (_b = (_a6 = this.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
           return void 0;
         }
         if (this.candidates && this.candidates.length > 1) {
@@ -65733,8 +65778,8 @@ var init_node3 = __esm({
        * a warning will be logged.
        */
       get data() {
-        var _a5, _b, _c, _d, _e, _f, _g, _h;
-        if (((_d = (_c = (_b = (_a5 = this.candidates) === null || _a5 === void 0 ? void 0 : _a5[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
+        var _a6, _b, _c, _d, _e, _f, _g, _h;
+        if (((_d = (_c = (_b = (_a6 = this.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
           return void 0;
         }
         if (this.candidates && this.candidates.length > 1) {
@@ -65803,8 +65848,8 @@ var init_node3 = __esm({
        * ```
        */
       get functionCalls() {
-        var _a5, _b, _c, _d, _e, _f, _g, _h;
-        if (((_d = (_c = (_b = (_a5 = this.candidates) === null || _a5 === void 0 ? void 0 : _a5[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
+        var _a6, _b, _c, _d, _e, _f, _g, _h;
+        if (((_d = (_c = (_b = (_a6 = this.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
           return void 0;
         }
         if (this.candidates && this.candidates.length > 1) {
@@ -65840,8 +65885,8 @@ var init_node3 = __esm({
        * ```
        */
       get executableCode() {
-        var _a5, _b, _c, _d, _e, _f, _g, _h, _j;
-        if (((_d = (_c = (_b = (_a5 = this.candidates) === null || _a5 === void 0 ? void 0 : _a5[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
+        var _a6, _b, _c, _d, _e, _f, _g, _h, _j;
+        if (((_d = (_c = (_b = (_a6 = this.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
           return void 0;
         }
         if (this.candidates && this.candidates.length > 1) {
@@ -65876,8 +65921,8 @@ var init_node3 = __esm({
        * ```
        */
       get codeExecutionResult() {
-        var _a5, _b, _c, _d, _e, _f, _g, _h, _j;
-        if (((_d = (_c = (_b = (_a5 = this.candidates) === null || _a5 === void 0 ? void 0 : _a5[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
+        var _a6, _b, _c, _d, _e, _f, _g, _h, _j;
+        if (((_d = (_c = (_b = (_a6 = this.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content) === null || _c === void 0 ? void 0 : _c.parts) === null || _d === void 0 ? void 0 : _d.length) === 0) {
           return void 0;
         }
         if (this.candidates && this.candidates.length > 1) {
@@ -65972,11 +66017,11 @@ var init_node3 = __esm({
        * parts will be returned, and a warning will be logged.
        */
       get text() {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         let text = "";
         let anyTextPartFound = false;
         const nonTextParts = [];
-        for (const part of (_c = (_b = (_a5 = this.serverContent) === null || _a5 === void 0 ? void 0 : _a5.modelTurn) === null || _b === void 0 ? void 0 : _b.parts) !== null && _c !== void 0 ? _c : []) {
+        for (const part of (_c = (_b = (_a6 = this.serverContent) === null || _a6 === void 0 ? void 0 : _a6.modelTurn) === null || _b === void 0 ? void 0 : _b.parts) !== null && _c !== void 0 ? _c : []) {
           for (const [fieldName, fieldValue] of Object.entries(part)) {
             if (fieldName !== "text" && fieldName !== "thought" && fieldValue !== null) {
               nonTextParts.push(fieldName);
@@ -66004,10 +66049,10 @@ var init_node3 = __esm({
        * a warning will be logged.
        */
       get data() {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         let data = "";
         const nonDataParts = [];
-        for (const part of (_c = (_b = (_a5 = this.serverContent) === null || _a5 === void 0 ? void 0 : _a5.modelTurn) === null || _b === void 0 ? void 0 : _b.parts) !== null && _c !== void 0 ? _c : []) {
+        for (const part of (_c = (_b = (_a6 = this.serverContent) === null || _a6 === void 0 ? void 0 : _a6.modelTurn) === null || _b === void 0 ? void 0 : _b.parts) !== null && _c !== void 0 ? _c : []) {
           for (const [fieldName, fieldValue] of Object.entries(part)) {
             if (fieldName !== "inlineData" && fieldValue !== null) {
               nonDataParts.push(fieldName);
@@ -66066,7 +66111,7 @@ var init_node3 = __esm({
         this.init(name2, response, params);
       }
       init(name2, response, params) {
-        var _a5, _b;
+        var _a6, _b;
         this.nameInternal = name2;
         this.pageInternal = response[this.nameInternal] || [];
         this.sdkHttpResponseInternal = response === null || response === void 0 ? void 0 : response.sdkHttpResponse;
@@ -66083,7 +66128,7 @@ var init_node3 = __esm({
           requestParams["config"]["pageToken"] = response["nextPageToken"];
         }
         this.paramsInternal = requestParams;
-        this.pageInternalSize = (_b = (_a5 = requestParams["config"]) === null || _a5 === void 0 ? void 0 : _a5["pageSize"]) !== null && _b !== void 0 ? _b : this.pageInternal.length;
+        this.pageInternalSize = (_b = (_a6 = requestParams["config"]) === null || _a6 === void 0 ? void 0 : _a6["pageSize"]) !== null && _b !== void 0 ? _b : this.pageInternal.length;
       }
       initNextPage(response) {
         this.init(this.nameInternal, response, this.paramsInternal);
@@ -66211,8 +66256,8 @@ var init_node3 = __esm({
        * Returns true if there are more pages to fetch from the API.
        */
       hasNextPage() {
-        var _a5;
-        if (((_a5 = this.params["config"]) === null || _a5 === void 0 ? void 0 : _a5["pageToken"]) !== void 0) {
+        var _a6;
+        if (((_a6 = this.params["config"]) === null || _a6 === void 0 ? void 0 : _a6["pageToken"]) !== void 0) {
           return true;
         }
         return false;
@@ -66322,7 +66367,7 @@ var init_node3 = __esm({
        *
        */
       async createInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66337,7 +66382,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66376,7 +66421,7 @@ var init_node3 = __esm({
        *
        */
       async createEmbeddingsInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66393,7 +66438,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66416,7 +66461,7 @@ var init_node3 = __esm({
        * ```
        */
       async get(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66431,7 +66476,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66474,7 +66519,7 @@ var init_node3 = __esm({
        * ```
        */
       async cancel(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let path6 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
@@ -66488,7 +66533,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           });
         } else {
@@ -66508,7 +66553,7 @@ var init_node3 = __esm({
         }
       }
       async listInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66523,7 +66568,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -66582,7 +66627,7 @@ var init_node3 = __esm({
        * ```
        */
       async delete(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66597,7 +66642,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -66676,7 +66721,7 @@ var init_node3 = __esm({
        * ```
        */
       async create(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66691,7 +66736,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66732,7 +66777,7 @@ var init_node3 = __esm({
        * ```
        */
       async get(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66747,7 +66792,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66788,7 +66833,7 @@ var init_node3 = __esm({
        * ```
        */
       async delete(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66803,7 +66848,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -66865,7 +66910,7 @@ var init_node3 = __esm({
        * ```
        */
       async update(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66880,7 +66925,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -66910,7 +66955,7 @@ var init_node3 = __esm({
         }
       }
       async listInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -66925,7 +66970,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -67043,18 +67088,18 @@ var init_node3 = __esm({
        * ```
        */
       async sendMessage(params) {
-        var _a5;
+        var _a6;
         await this.sendPromise;
         const inputContent = tContent(params.message);
         const responsePromise = this.modelsModule.generateContent({
           model: this.model,
           contents: this.getHistory(true).concat(inputContent),
-          config: (_a5 = params.config) !== null && _a5 !== void 0 ? _a5 : this.config
+          config: (_a6 = params.config) !== null && _a6 !== void 0 ? _a6 : this.config
         });
         this.sendPromise = (async () => {
-          var _a6, _b, _c;
+          var _a7, _b, _c;
           const response = await responsePromise;
-          const outputContent = (_b = (_a6 = response.candidates) === null || _a6 === void 0 ? void 0 : _a6[0]) === null || _b === void 0 ? void 0 : _b.content;
+          const outputContent = (_b = (_a7 = response.candidates) === null || _a7 === void 0 ? void 0 : _a7[0]) === null || _b === void 0 ? void 0 : _b.content;
           const fullAutomaticFunctionCallingHistory = response.automaticFunctionCallingHistory;
           const index = this.getHistory(true).length;
           let automaticFunctionCallingHistory = [];
@@ -67093,13 +67138,13 @@ var init_node3 = __esm({
        * ```
        */
       async sendMessageStream(params) {
-        var _a5;
+        var _a6;
         await this.sendPromise;
         const inputContent = tContent(params.message);
         const streamResponse = this.modelsModule.generateContentStream({
           model: this.model,
           contents: this.getHistory(true).concat(inputContent),
-          config: (_a5 = params.config) !== null && _a5 !== void 0 ? _a5 : this.config
+          config: (_a6 = params.config) !== null && _a6 !== void 0 ? _a6 : this.config
         });
         this.sendPromise = streamResponse.then(() => void 0).catch(() => void 0);
         const response = await streamResponse;
@@ -67135,11 +67180,11 @@ var init_node3 = __esm({
       }
       processStreamResponse(streamResponse, inputContent) {
         return __asyncGenerator(this, arguments, function* processStreamResponse_1() {
-          var _a5, e_1, _b, _c;
+          var _a6, e_1, _b, _c;
           var _d, _e;
           const outputContent = [];
           try {
-            for (var _f = true, streamResponse_1 = __asyncValues(streamResponse), streamResponse_1_1; streamResponse_1_1 = yield __await(streamResponse_1.next()), _a5 = streamResponse_1_1.done, !_a5; _f = true) {
+            for (var _f = true, streamResponse_1 = __asyncValues(streamResponse), streamResponse_1_1; streamResponse_1_1 = yield __await(streamResponse_1.next()), _a6 = streamResponse_1_1.done, !_a6; _f = true) {
               _c = streamResponse_1_1.value;
               _f = false;
               const chunk = _c;
@@ -67155,7 +67200,7 @@ var init_node3 = __esm({
             e_1 = { error: e_1_1 };
           } finally {
             try {
-              if (!_f && !_a5 && (_b = streamResponse_1.return)) yield __await(_b.call(streamResponse_1));
+              if (!_f && !_a6 && (_b = streamResponse_1.return)) yield __await(_b.call(streamResponse_1));
             } finally {
               if (e_1) throw e_1.error;
             }
@@ -67278,7 +67323,7 @@ var init_node3 = __esm({
         return this.registerFilesInternal(params);
       }
       async listInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -67295,7 +67340,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -67315,7 +67360,7 @@ var init_node3 = __esm({
         }
       }
       async createInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -67332,7 +67377,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -67361,7 +67406,7 @@ var init_node3 = __esm({
        * ```
        */
       async get(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -67378,7 +67423,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -67402,7 +67447,7 @@ var init_node3 = __esm({
        * ```
        */
       async delete(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -67419,7 +67464,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -67439,7 +67484,7 @@ var init_node3 = __esm({
         }
       }
       async registerFilesInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -67456,7 +67501,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -67496,9 +67541,9 @@ var init_node3 = __esm({
     ];
     ApiClient = class {
       constructor(opts) {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         this.clientOptions = Object.assign({}, opts);
-        this.customBaseUrl = (_a5 = opts.httpOptions) === null || _a5 === void 0 ? void 0 : _a5.baseUrl;
+        this.customBaseUrl = (_a6 = opts.httpOptions) === null || _a6 === void 0 ? void 0 : _a6.baseUrl;
         if (this.clientOptions.vertexai) {
           if (this.clientOptions.project && this.clientOptions.location) {
             this.clientOptions.apiKey = void 0;
@@ -67543,8 +67588,8 @@ var init_node3 = __esm({
         }
       }
       isVertexAI() {
-        var _a5;
-        return (_a5 = this.clientOptions.vertexai) !== null && _a5 !== void 0 ? _a5 : false;
+        var _a6;
+        return (_a6 = this.clientOptions.vertexai) !== null && _a6 !== void 0 ? _a6 : false;
       }
       getProject() {
         return this.clientOptions.project;
@@ -67739,8 +67784,8 @@ var init_node3 = __esm({
       }
       processStreamResponse(response) {
         return __asyncGenerator(this, arguments, function* processStreamResponse_1() {
-          var _a5;
-          const reader = (_a5 = response === null || response === void 0 ? void 0 : response.body) === null || _a5 === void 0 ? void 0 : _a5.getReader();
+          var _a6;
+          const reader = (_a6 = response === null || response === void 0 ? void 0 : response.body) === null || _a6 === void 0 ? void 0 : _a6.getReader();
           const decoder = new TextDecoder("utf-8");
           if (!reader) {
             throw new Error("Response body is empty");
@@ -67819,7 +67864,7 @@ var init_node3 = __esm({
         });
       }
       async apiCall(url, requestInit) {
-        var _a5;
+        var _a6;
         if (!this.clientOptions.httpOptions || !this.clientOptions.httpOptions.retryOptions) {
           return fetch(url, requestInit);
         }
@@ -67836,7 +67881,7 @@ var init_node3 = __esm({
         };
         return (0, import_p_retry.default)(runFetch, {
           // Retry attempts is one less than the number of total attempts.
-          retries: ((_a5 = retryOptions.attempts) !== null && _a5 !== void 0 ? _a5 : DEFAULT_RETRY_ATTEMPTS) - 1
+          retries: ((_a6 = retryOptions.attempts) !== null && _a6 !== void 0 ? _a6 : DEFAULT_RETRY_ATTEMPTS) - 1
         });
       }
       getDefaultHeaders() {
@@ -67861,11 +67906,11 @@ var init_node3 = __esm({
         return headers;
       }
       getFileName(file) {
-        var _a5;
+        var _a6;
         let fileName = "";
         if (typeof file === "string") {
           fileName = file.replace(/[/\\]+$/, "");
-          fileName = (_a5 = fileName.split(/[/\\]/).pop()) !== null && _a5 !== void 0 ? _a5 : "";
+          fileName = (_a6 = fileName.split(/[/\\]/).pop()) !== null && _a6 !== void 0 ? _a6 : "";
         }
         return fileName;
       }
@@ -67881,7 +67926,7 @@ var init_node3 = __esm({
        * @throws An error if the `mimeType` is not provided and can not be inferred,
        */
       async uploadFile(file, config) {
-        var _a5;
+        var _a6;
         const fileToUpload = {};
         if (config != null) {
           fileToUpload.mimeType = config.mimeType;
@@ -67894,7 +67939,7 @@ var init_node3 = __esm({
         const uploader = this.clientOptions.uploader;
         const fileStat = await uploader.stat(file);
         fileToUpload.sizeBytes = String(fileStat.size);
-        const mimeType = (_a5 = config === null || config === void 0 ? void 0 : config.mimeType) !== null && _a5 !== void 0 ? _a5 : fileStat.type;
+        const mimeType = (_a6 = config === null || config === void 0 ? void 0 : config.mimeType) !== null && _a6 !== void 0 ? _a6 : fileStat.type;
         if (mimeType === void 0 || mimeType === "") {
           throw new Error("Can not determine mimeType. Please provide mimeType in the config.");
         }
@@ -67920,11 +67965,11 @@ var init_node3 = __esm({
        * @throws An error if the `mimeType` is not provided and can not be inferred,
        */
       async uploadFileToFileSearchStore(fileSearchStoreName, file, config) {
-        var _a5;
+        var _a6;
         const uploader = this.clientOptions.uploader;
         const fileStat = await uploader.stat(file);
         const sizeBytes = String(fileStat.size);
-        const mimeType = (_a5 = config === null || config === void 0 ? void 0 : config.mimeType) !== null && _a5 !== void 0 ? _a5 : fileStat.type;
+        const mimeType = (_a6 = config === null || config === void 0 ? void 0 : config.mimeType) !== null && _a6 !== void 0 ? _a6 : fileStat.type;
         if (mimeType === void 0 || mimeType === "") {
           throw new Error("Can not determine mimeType. Please provide mimeType in the config.");
         }
@@ -67948,7 +67993,7 @@ var init_node3 = __esm({
         await downloader.download(params, this);
       }
       async fetchUploadUrl(path6, sizeBytes, mimeType, fileName, body, configHttpOptions) {
-        var _a5;
+        var _a6;
         let httpOptions = {};
         if (configHttpOptions) {
           httpOptions = configHttpOptions;
@@ -67968,7 +68013,7 @@ var init_node3 = __esm({
         if (!httpResponse || !(httpResponse === null || httpResponse === void 0 ? void 0 : httpResponse.headers)) {
           throw new Error("Server did not return an HttpResponse or the returned HttpResponse did not have headers.");
         }
-        const uploadUrl = (_a5 = httpResponse === null || httpResponse === void 0 ? void 0 : httpResponse.headers) === null || _a5 === void 0 ? void 0 : _a5["x-goog-upload-url"];
+        const uploadUrl = (_a6 = httpResponse === null || httpResponse === void 0 ? void 0 : httpResponse.headers) === null || _a6 === void 0 ? void 0 : _a6["x-goog-upload-url"];
         if (uploadUrl === void 0) {
           throw new Error("Failed to get upload url. Server did not return the x-google-upload-url in the headers");
         }
@@ -67998,7 +68043,7 @@ var init_node3 = __esm({
        *     names.
        */
       async initialize() {
-        var _a5, e_1, _b, _c;
+        var _a6, e_1, _b, _c;
         if (this.mcpTools.length > 0) {
           return;
         }
@@ -68006,7 +68051,7 @@ var init_node3 = __esm({
         const mcpTools = [];
         for (const mcpClient of this.mcpClients) {
           try {
-            for (var _d = true, _e = (e_1 = void 0, __asyncValues(listAllTools(mcpClient))), _f; _f = await _e.next(), _a5 = _f.done, !_a5; _d = true) {
+            for (var _d = true, _e = (e_1 = void 0, __asyncValues(listAllTools(mcpClient))), _f; _f = await _e.next(), _a6 = _f.done, !_a6; _d = true) {
               _c = _f.value;
               _d = false;
               const mcpTool = _c;
@@ -68021,7 +68066,7 @@ var init_node3 = __esm({
             e_1 = { error: e_1_1 };
           } finally {
             try {
-              if (!_d && !_a5 && (_b = _e.return)) await _b.call(_e);
+              if (!_d && !_a6 && (_b = _e.return)) await _b.call(_e);
             } finally {
               if (e_1) throw e_1.error;
             }
@@ -68104,7 +68149,7 @@ var init_node3 = __esm({
            ```
           */
       async connect(params) {
-        var _a5, _b;
+        var _a6, _b;
         if (this.apiClient.isVertexAI()) {
           throw new Error("Live music is not supported for Vertex AI.");
         }
@@ -68129,7 +68174,7 @@ var init_node3 = __esm({
           onmessage: (event) => {
             void handleWebSocketMessage$1(apiClient, callbacks.onmessage, event);
           },
-          onerror: (_a5 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onerror) !== null && _a5 !== void 0 ? _a5 : function(e2) {
+          onerror: (_a6 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onerror) !== null && _a6 !== void 0 ? _a6 : function(e2) {
           },
           onclose: (_b = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onclose) !== null && _b !== void 0 ? _b : function(e2) {
           }
@@ -68284,7 +68329,7 @@ var init_node3 = __esm({
            ```
           */
       async connect(params) {
-        var _a5, _b, _c, _d, _e, _f;
+        var _a6, _b, _c, _d, _e, _f;
         if (params.config && params.config.httpOptions) {
           throw new Error("The Live module does not support httpOptions at request-level in LiveConnectConfig yet. Please use the client-level httpOptions configuration instead.");
         }
@@ -68328,8 +68373,8 @@ var init_node3 = __esm({
         });
         const callbacks = params.callbacks;
         const onopenAwaitedCallback = function() {
-          var _a6;
-          (_a6 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onopen) === null || _a6 === void 0 ? void 0 : _a6.call(callbacks);
+          var _a7;
+          (_a7 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onopen) === null || _a7 === void 0 ? void 0 : _a7.call(callbacks);
           onopenResolve({});
         };
         const apiClient = this.apiClient;
@@ -68338,7 +68383,7 @@ var init_node3 = __esm({
           onmessage: (event) => {
             void handleWebSocketMessage(apiClient, callbacks.onmessage, event);
           },
-          onerror: (_a5 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onerror) !== null && _a5 !== void 0 ? _a5 : function(e2) {
+          onerror: (_a6 = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onerror) !== null && _a6 !== void 0 ? _a6 : function(e2) {
           },
           onclose: (_b = callbacks === null || callbacks === void 0 ? void 0 : callbacks.onclose) !== null && _b !== void 0 ? _b : function(e2) {
           }
@@ -68413,7 +68458,7 @@ var init_node3 = __esm({
             if (!apiClient.isVertexAI()) {
               contents = contents.map((item) => contentToMldev$1(item));
             }
-          } catch (_a5) {
+          } catch (_a6) {
             throw new Error(`Failed to parse client content "turns", type: '${typeof params.turns}'`);
           }
           return {
@@ -68614,7 +68659,7 @@ var init_node3 = __esm({
           }
         };
         this.generateContent = async (params) => {
-          var _a5, _b, _c, _d, _e;
+          var _a6, _b, _c, _d, _e;
           const transformedParams = await this.processParamsMaybeAddMcpUsage(params);
           this.maybeMoveToResponseJsonSchem(params);
           if (!hasCallableTools(params) || shouldDisableAfc(params.config)) {
@@ -68628,7 +68673,7 @@ var init_node3 = __esm({
           let response;
           let functionResponseContent;
           const automaticFunctionCallingHistory = tContents(transformedParams.contents);
-          const maxRemoteCalls = (_c = (_b = (_a5 = transformedParams.config) === null || _a5 === void 0 ? void 0 : _a5.automaticFunctionCalling) === null || _b === void 0 ? void 0 : _b.maximumRemoteCalls) !== null && _c !== void 0 ? _c : DEFAULT_MAX_REMOTE_CALLS;
+          const maxRemoteCalls = (_c = (_b = (_a6 = transformedParams.config) === null || _a6 === void 0 ? void 0 : _a6.automaticFunctionCalling) === null || _b === void 0 ? void 0 : _b.maximumRemoteCalls) !== null && _c !== void 0 ? _c : DEFAULT_MAX_REMOTE_CALLS;
           let remoteCalls = 0;
           while (remoteCalls < maxRemoteCalls) {
             response = await this.generateContentInternal(transformedParams);
@@ -68663,7 +68708,7 @@ var init_node3 = __esm({
           return response;
         };
         this.generateContentStream = async (params) => {
-          var _a5, _b, _c, _d, _e;
+          var _a6, _b, _c, _d, _e;
           this.maybeMoveToResponseJsonSchem(params);
           if (shouldDisableAfc(params.config)) {
             const transformedParams = await this.processParamsMaybeAddMcpUsage(params);
@@ -68674,7 +68719,7 @@ var init_node3 = __esm({
             const formattedIndexes = incompatibleToolIndexes.map((index) => `tools[${index}]`).join(", ");
             throw new Error(`Incompatible tools found at ${formattedIndexes}. Automatic function calling with CallableTools (or MCP objects) and basic FunctionDeclarations" is not yet supported.`);
           }
-          const streamFunctionCall = (_c = (_b = (_a5 = params === null || params === void 0 ? void 0 : params.config) === null || _a5 === void 0 ? void 0 : _a5.toolConfig) === null || _b === void 0 ? void 0 : _b.functionCallingConfig) === null || _c === void 0 ? void 0 : _c.streamFunctionCallArguments;
+          const streamFunctionCall = (_c = (_b = (_a6 = params === null || params === void 0 ? void 0 : params.config) === null || _a6 === void 0 ? void 0 : _a6.toolConfig) === null || _b === void 0 ? void 0 : _b.functionCallingConfig) === null || _c === void 0 ? void 0 : _c.streamFunctionCallArguments;
           const disableAfc = (_e = (_d = params === null || params === void 0 ? void 0 : params.config) === null || _d === void 0 ? void 0 : _d.automaticFunctionCalling) === null || _e === void 0 ? void 0 : _e.disable;
           if (streamFunctionCall && !disableAfc) {
             throw new Error("Running in streaming mode with 'streamFunctionCallArguments' enabled, this feature is not compatible with automatic function calling (AFC). Please set 'config.automaticFunctionCalling.disable' to true to disable AFC or leave 'config.toolConfig.functionCallingConfig.streamFunctionCallArguments' to be undefined or set to false to disable streaming function call arguments feature.");
@@ -68683,12 +68728,12 @@ var init_node3 = __esm({
         };
         this.generateImages = async (params) => {
           return await this.generateImagesInternal(params).then((apiResponse) => {
-            var _a5;
+            var _a6;
             let positivePromptSafetyAttributes;
             const generatedImages = [];
             if (apiResponse === null || apiResponse === void 0 ? void 0 : apiResponse.generatedImages) {
               for (const generatedImage of apiResponse.generatedImages) {
-                if (generatedImage && (generatedImage === null || generatedImage === void 0 ? void 0 : generatedImage.safetyAttributes) && ((_a5 = generatedImage === null || generatedImage === void 0 ? void 0 : generatedImage.safetyAttributes) === null || _a5 === void 0 ? void 0 : _a5.contentType) === "Positive Prompt") {
+                if (generatedImage && (generatedImage === null || generatedImage === void 0 ? void 0 : generatedImage.safetyAttributes) && ((_a6 = generatedImage === null || generatedImage === void 0 ? void 0 : generatedImage.safetyAttributes) === null || _a6 === void 0 ? void 0 : _a6.contentType) === "Positive Prompt") {
                   positivePromptSafetyAttributes = generatedImage === null || generatedImage === void 0 ? void 0 : generatedImage.safetyAttributes;
                 } else {
                   generatedImages.push(generatedImage);
@@ -68712,7 +68757,7 @@ var init_node3 = __esm({
           });
         };
         this.list = async (params) => {
-          var _a5;
+          var _a6;
           const defaultConfig = {
             queryBase: true
           };
@@ -68722,7 +68767,7 @@ var init_node3 = __esm({
           };
           if (this.apiClient.isVertexAI()) {
             if (!actualParams.config.queryBase) {
-              if ((_a5 = actualParams.config) === null || _a5 === void 0 ? void 0 : _a5.filter) {
+              if ((_a6 = actualParams.config) === null || _a6 === void 0 ? void 0 : _a6.filter) {
                 throw new Error("Filtering tuned models list for Gemini Enterprise Agent Platform (previously known as Vertex AI) is not currently supported");
               } else {
                 actualParams.config.filter = "labels.tune-type:*";
@@ -68762,12 +68807,12 @@ var init_node3 = __esm({
           return await this.upscaleImageInternal(apiParams);
         };
         this.generateVideos = async (params) => {
-          var _a5, _b, _c, _d, _e, _f;
+          var _a6, _b, _c, _d, _e, _f;
           if ((params.prompt || params.image || params.video) && params.source) {
             throw new Error("Source and prompt/image/video are mutually exclusive. Please only use source.");
           }
           if (!this.apiClient.isVertexAI()) {
-            if (((_a5 = params.video) === null || _a5 === void 0 ? void 0 : _a5.uri) && ((_b = params.video) === null || _b === void 0 ? void 0 : _b.videoBytes)) {
+            if (((_a6 = params.video) === null || _a6 === void 0 ? void 0 : _a6.uri) && ((_b = params.video) === null || _b === void 0 ? void 0 : _b.videoBytes)) {
               params.video = {
                 uri: params.video.uri,
                 mimeType: params.video.mimeType
@@ -68807,8 +68852,8 @@ var init_node3 = __esm({
        * MCP tools in the parameters.
        */
       async processParamsMaybeAddMcpUsage(params) {
-        var _a5, _b, _c;
-        const tools = (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.tools;
+        var _a6, _b, _c;
+        const tools = (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.tools;
         if (!tools) {
           return params;
         }
@@ -68837,9 +68882,9 @@ var init_node3 = __esm({
         return newParams;
       }
       async initAfcToolsMap(params) {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         const afcTools = /* @__PURE__ */ new Map();
-        for (const tool of (_b = (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.tools) !== null && _b !== void 0 ? _b : []) {
+        for (const tool of (_b = (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.tools) !== null && _b !== void 0 ? _b : []) {
           if (isCallableTool(tool)) {
             const callableTool = tool;
             const toolDeclaration = await callableTool.tool();
@@ -68857,14 +68902,14 @@ var init_node3 = __esm({
         return afcTools;
       }
       async processAfcStream(params) {
-        var _a5, _b, _c;
-        const maxRemoteCalls = (_c = (_b = (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.automaticFunctionCalling) === null || _b === void 0 ? void 0 : _b.maximumRemoteCalls) !== null && _c !== void 0 ? _c : DEFAULT_MAX_REMOTE_CALLS;
+        var _a6, _b, _c;
+        const maxRemoteCalls = (_c = (_b = (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.automaticFunctionCalling) === null || _b === void 0 ? void 0 : _b.maximumRemoteCalls) !== null && _c !== void 0 ? _c : DEFAULT_MAX_REMOTE_CALLS;
         let wereFunctionsCalled = false;
         let remoteCallCount = 0;
         const afcToolsMap = await this.initAfcToolsMap(params);
         return (function(models, afcTools, params2) {
           return __asyncGenerator(this, arguments, function* () {
-            var _a6, e_1, _b2, _c2;
+            var _a7, e_1, _b2, _c2;
             var _d, _e;
             while (remoteCallCount < maxRemoteCalls) {
               if (wereFunctionsCalled) {
@@ -68876,7 +68921,7 @@ var init_node3 = __esm({
               const functionResponses = [];
               const responseContents = [];
               try {
-                for (var _f = true, response_1 = (e_1 = void 0, __asyncValues(response)), response_1_1; response_1_1 = yield __await(response_1.next()), _a6 = response_1_1.done, !_a6; _f = true) {
+                for (var _f = true, response_1 = (e_1 = void 0, __asyncValues(response)), response_1_1; response_1_1 = yield __await(response_1.next()), _a7 = response_1_1.done, !_a7; _f = true) {
                   _c2 = response_1_1.value;
                   _f = false;
                   const chunk = _c2;
@@ -68902,7 +68947,7 @@ var init_node3 = __esm({
                 e_1 = { error: e_1_1 };
               } finally {
                 try {
-                  if (!_f && !_a6 && (_b2 = response_1.return)) yield __await(_b2.call(response_1));
+                  if (!_f && !_a7 && (_b2 = response_1.return)) yield __await(_b2.call(response_1));
                 } finally {
                   if (e_1) throw e_1.error;
                 }
@@ -68935,7 +68980,7 @@ var init_node3 = __esm({
         })(this, afcToolsMap, params);
       }
       async generateContentInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -68950,7 +68995,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -68998,7 +69043,7 @@ var init_node3 = __esm({
         }
       }
       async generateContentStreamInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69014,14 +69059,14 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           });
           return response.then(function(apiResponse) {
             return __asyncGenerator(this, arguments, function* () {
-              var _a6, e_2, _b2, _c2;
+              var _a7, e_2, _b2, _c2;
               try {
-                for (var _d2 = true, apiResponse_1 = __asyncValues(apiResponse), apiResponse_1_1; apiResponse_1_1 = yield __await(apiResponse_1.next()), _a6 = apiResponse_1_1.done, !_a6; _d2 = true) {
+                for (var _d2 = true, apiResponse_1 = __asyncValues(apiResponse), apiResponse_1_1; apiResponse_1_1 = yield __await(apiResponse_1.next()), _a7 = apiResponse_1_1.done, !_a7; _d2 = true) {
                   _c2 = apiResponse_1_1.value;
                   _d2 = false;
                   const chunk = _c2;
@@ -69037,7 +69082,7 @@ var init_node3 = __esm({
                 e_2 = { error: e_2_1 };
               } finally {
                 try {
-                  if (!_d2 && !_a6 && (_b2 = apiResponse_1.return)) yield __await(_b2.call(apiResponse_1));
+                  if (!_d2 && !_a7 && (_b2 = apiResponse_1.return)) yield __await(_b2.call(apiResponse_1));
                 } finally {
                   if (e_2) throw e_2.error;
                 }
@@ -69061,9 +69106,9 @@ var init_node3 = __esm({
           });
           return response.then(function(apiResponse) {
             return __asyncGenerator(this, arguments, function* () {
-              var _a6, e_3, _b2, _c2;
+              var _a7, e_3, _b2, _c2;
               try {
-                for (var _d2 = true, apiResponse_2 = __asyncValues(apiResponse), apiResponse_2_1; apiResponse_2_1 = yield __await(apiResponse_2.next()), _a6 = apiResponse_2_1.done, !_a6; _d2 = true) {
+                for (var _d2 = true, apiResponse_2 = __asyncValues(apiResponse), apiResponse_2_1; apiResponse_2_1 = yield __await(apiResponse_2.next()), _a7 = apiResponse_2_1.done, !_a7; _d2 = true) {
                   _c2 = apiResponse_2_1.value;
                   _d2 = false;
                   const chunk = _c2;
@@ -69079,7 +69124,7 @@ var init_node3 = __esm({
                 e_3 = { error: e_3_1 };
               } finally {
                 try {
-                  if (!_d2 && !_a6 && (_b2 = apiResponse_2.return)) yield __await(_b2.call(apiResponse_2));
+                  if (!_d2 && !_a7 && (_b2 = apiResponse_2.return)) yield __await(_b2.call(apiResponse_2));
                 } finally {
                   if (e_3) throw e_3.error;
                 }
@@ -69110,7 +69155,7 @@ var init_node3 = __esm({
        * ```
        */
       async embedContentInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69126,7 +69171,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69177,7 +69222,7 @@ var init_node3 = __esm({
        * Private method for generating images.
        */
       async generateImagesInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69192,7 +69237,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69243,7 +69288,7 @@ var init_node3 = __esm({
        * Private method for editing an image.
        */
       async editImageInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69258,7 +69303,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69283,7 +69328,7 @@ var init_node3 = __esm({
        * Private method for upscaling an image.
        */
       async upscaleImageInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69298,7 +69343,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69344,7 +69389,7 @@ var init_node3 = __esm({
        * ```
        */
       async recontextImage(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69359,7 +69404,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69395,7 +69440,7 @@ var init_node3 = __esm({
        * ```
        */
       async segmentImage(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69410,7 +69455,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69434,7 +69479,7 @@ var init_node3 = __esm({
        * ```
        */
       async get(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69449,7 +69494,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69481,7 +69526,7 @@ var init_node3 = __esm({
         }
       }
       async listInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69496,7 +69541,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69561,7 +69606,7 @@ var init_node3 = __esm({
        * ```
        */
       async update(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69576,7 +69621,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "PATCH",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69619,7 +69664,7 @@ var init_node3 = __esm({
        * ```
        */
       async delete(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69634,7 +69679,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69698,7 +69743,7 @@ var init_node3 = __esm({
        * ```
        */
       async countTokens(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69713,7 +69758,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69779,7 +69824,7 @@ var init_node3 = __esm({
        * ```
        */
       async computeTokens(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69794,7 +69839,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -69819,7 +69864,7 @@ var init_node3 = __esm({
        * Private method for generating videos.
        */
       async generateVideosInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69834,7 +69879,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69952,7 +69997,7 @@ var init_node3 = __esm({
         }
       }
       async getVideosOperationInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -69967,7 +70012,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -69993,7 +70038,7 @@ var init_node3 = __esm({
         }
       }
       async fetchPredictVideosOperationInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70008,7 +70053,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70108,7 +70153,7 @@ var init_node3 = __esm({
        * ```
        */
       async create(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70127,7 +70172,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(transformedBody),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70153,7 +70198,7 @@ var init_node3 = __esm({
        * @return Document.
        */
       async get(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70170,7 +70215,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70186,7 +70231,7 @@ var init_node3 = __esm({
        * @param params - The parameters for deleting a document.
        */
       async delete(params) {
-        var _a5, _b;
+        var _a6, _b;
         let path6 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
@@ -70202,13 +70247,13 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           });
         }
       }
       async listInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70225,7 +70270,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70336,7 +70381,7 @@ var init_node3 = __esm({
        * @return FileSearchStore.
        */
       async create(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70353,7 +70398,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70370,7 +70415,7 @@ var init_node3 = __esm({
        * @return FileSearchStore.
        */
       async get(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70387,7 +70432,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70403,7 +70448,7 @@ var init_node3 = __esm({
        * @param params - The parameters for deleting a File Search Store.
        */
       async delete(params) {
-        var _a5, _b;
+        var _a6, _b;
         let path6 = "";
         let queryParams = {};
         if (this.apiClient.isVertexAI()) {
@@ -70419,13 +70464,13 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "DELETE",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           });
         }
       }
       async listInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70442,7 +70487,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70456,7 +70501,7 @@ var init_node3 = __esm({
         }
       }
       async uploadToFileSearchStoreInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70473,7 +70518,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70495,7 +70540,7 @@ var init_node3 = __esm({
        * @return ImportFileOperation.
        */
       async importFile(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -70512,7 +70557,7 @@ var init_node3 = __esm({
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json();
@@ -70552,7 +70597,7 @@ var init_node3 = __esm({
               error.name = err.name;
             return error;
           }
-        } catch (_a5) {
+        } catch (_a6) {
         }
         try {
           return new Error(JSON.stringify(err));
@@ -70683,10 +70728,10 @@ var init_node3 = __esm({
     };
     VERSION3 = "0.0.1";
     checkFileSupport3 = () => {
-      var _a5;
+      var _a6;
       if (typeof File === "undefined") {
         const { process: process2 } = globalThis;
-        const isOldNode = typeof ((_a5 = process2 === null || process2 === void 0 ? void 0 : process2.versions) === null || _a5 === void 0 ? void 0 : _a5.node) === "string" && parseInt(process2.versions.node.split(".")) < 20;
+        const isOldNode = typeof ((_a6 = process2 === null || process2 === void 0 ? void 0 : process2.versions) === null || _a6 === void 0 ? void 0 : _a6.node) === "string" && parseInt(process2.versions.node.split(".")) < 20;
         throw new Error("`File` is not defined as a global, which is required for file uploads." + (isOldNode ? " Update to Node 20 LTS or newer, or set `globalThis.File` to `import('node:buffer').File`." : ""));
       }
     };
@@ -70707,14 +70752,14 @@ var init_node3 = __esm({
       let postPath = false;
       const invalidSegments = [];
       const path7 = statics.reduce((previousValue, currentValue, index) => {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         if (/[?#]/.test(currentValue)) {
           postPath = true;
         }
         const value2 = params[index];
         let encoded = (postPath ? encodeURIComponent : pathEncoder)("" + value2);
         if (index !== params.length && (value2 == null || typeof value2 === "object" && // handle values from other realms
-        value2.toString === ((_c = Object.getPrototypeOf((_b = Object.getPrototypeOf((_a5 = value2.hasOwnProperty) !== null && _a5 !== void 0 ? _a5 : EMPTY3)) !== null && _b !== void 0 ? _b : EMPTY3)) === null || _c === void 0 ? void 0 : _c.toString))) {
+        value2.toString === ((_c = Object.getPrototypeOf((_b = Object.getPrototypeOf((_a6 = value2.hasOwnProperty) !== null && _a6 !== void 0 ? _a6 : EMPTY3)) !== null && _b !== void 0 ? _b : EMPTY3)) === null || _c === void 0 ? void 0 : _c.toString))) {
           encoded = value2 + "";
           invalidSegments.push({
             start: previousValue.length + currentValue.length,
@@ -70756,7 +70801,7 @@ ${underline}`);
     path5 = /* @__PURE__ */ createPathTagFunction3(encodeURIPath3);
     BaseInteractions = class extends APIResource3 {
       create(params, options) {
-        var _a5;
+        var _a6;
         const { api_version = this._client.apiVersion } = params, body = __rest(params, ["api_version"]);
         if ("model" in body && "agent_config" in body) {
           throw new GeminiNextGenAPIClientError(`Invalid request: specified \`model\` and \`agent_config\`. If specifying \`model\`, use \`generation_config\`.`);
@@ -70764,7 +70809,7 @@ ${underline}`);
         if ("agent" in body && "generation_config" in body) {
           throw new GeminiNextGenAPIClientError(`Invalid request: specified \`agent\` and \`generation_config\`. If specifying \`agent\`, use \`agent_config\`.`);
         }
-        return this._client.post(path5`/${api_version}/interactions`, Object.assign(Object.assign({ body }, options), { stream: (_a5 = params.stream) !== null && _a5 !== void 0 ? _a5 : false }));
+        return this._client.post(path5`/${api_version}/interactions`, Object.assign(Object.assign({ body }, options), { stream: (_a6 = params.stream) !== null && _a6 !== void 0 ? _a6 : false }));
       }
       /**
        * Deletes the interaction by id.
@@ -70796,9 +70841,9 @@ ${underline}`);
         return this._client.post(path5`/${api_version}/interactions/${id}/cancel`, options);
       }
       get(id, params = {}, options) {
-        var _a5;
+        var _a6;
         const _b = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion } = _b, query = __rest(_b, ["api_version"]);
-        return this._client.get(path5`/${api_version}/interactions/${id}`, Object.assign(Object.assign({ query }, options), { stream: (_a5 = params === null || params === void 0 ? void 0 : params.stream) !== null && _a5 !== void 0 ? _a5 : false }));
+        return this._client.get(path5`/${api_version}/interactions/${id}`, Object.assign(Object.assign({ query }, options), { stream: (_a6 = params === null || params === void 0 ? void 0 : params.stream) !== null && _a6 !== void 0 ? _a6 : false }));
       }
     };
     BaseInteractions._key = Object.freeze(["interactions"]);
@@ -70816,14 +70861,14 @@ ${underline}`);
        * Updates an existing Webhook.
        */
       update(id, params = {}, options) {
-        const _a5 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion, update_mask } = _a5, body = __rest(_a5, ["api_version", "update_mask"]);
+        const _a6 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion, update_mask } = _a6, body = __rest(_a6, ["api_version", "update_mask"]);
         return this._client.patch(path5`/${api_version}/webhooks/${id}`, Object.assign({ query: { update_mask }, body }, options));
       }
       /**
        * Lists all Webhooks.
        */
       list(params = {}, options) {
-        const _a5 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion } = _a5, query = __rest(_a5, ["api_version"]);
+        const _a6 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion } = _a6, query = __rest(_a6, ["api_version"]);
         return this._client.get(path5`/${api_version}/webhooks`, Object.assign({ query }, options));
       }
       /**
@@ -70851,7 +70896,7 @@ ${underline}`);
        * Generates a new signing secret for a Webhook.
        */
       rotateSigningSecret(id, params = {}, options) {
-        const _a5 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion } = _a5, body = __rest(_a5, ["api_version"]);
+        const _a6 = params !== null && params !== void 0 ? params : {}, { api_version = this._client.apiVersion } = _a6, body = __rest(_a6, ["api_version"]);
         return this._client.post(path5`/${api_version}/webhooks/${id}:rotateSigningSecret`, Object.assign({ body }, options));
       }
     };
@@ -70865,7 +70910,7 @@ ${underline}`);
         this.searchIndex = 0;
       }
       decode(chunk) {
-        var _a5;
+        var _a6;
         if (chunk == null) {
           return [];
         }
@@ -70873,7 +70918,7 @@ ${underline}`);
         this.buffer = concatBytes3([this.buffer, binaryChunk]);
         const lines = [];
         let patternIndex;
-        while ((patternIndex = findNewlineIndex3(this.buffer, (_a5 = this.carriageReturnIndex) !== null && _a5 !== void 0 ? _a5 : this.searchIndex)) != null) {
+        while ((patternIndex = findNewlineIndex3(this.buffer, (_a6 = this.carriageReturnIndex) !== null && _a6 !== void 0 ? _a6 : this.searchIndex)) != null) {
           if (patternIndex.carriage && this.carriageReturnIndex == null) {
             this.carriageReturnIndex = patternIndex.index;
             continue;
@@ -70958,7 +71003,7 @@ ${underline}`);
         const logger = client ? loggerFor3(client) : console;
         function iterator() {
           return __asyncGenerator(this, arguments, function* iterator_1() {
-            var _a5, e_1, _b, _c;
+            var _a6, e_1, _b, _c;
             if (consumed) {
               throw new GeminiNextGenAPIClientError("Cannot iterate over a consumed stream, use `.tee()` to split the stream.");
             }
@@ -70966,7 +71011,7 @@ ${underline}`);
             let done = false;
             try {
               try {
-                for (var _d = true, _e = __asyncValues(_iterSSEMessages3(response, controller)), _f; _f = yield __await(_e.next()), _a5 = _f.done, !_a5; _d = true) {
+                for (var _d = true, _e = __asyncValues(_iterSSEMessages3(response, controller)), _f; _f = yield __await(_e.next()), _a6 = _f.done, !_a6; _d = true) {
                   _c = _f.value;
                   _d = false;
                   const sse = _c;
@@ -70989,7 +71034,7 @@ ${underline}`);
                 e_1 = { error: e_1_1 };
               } finally {
                 try {
-                  if (!_d && !_a5 && (_b = _e.return)) yield __await(_b.call(_e));
+                  if (!_d && !_a6 && (_b = _e.return)) yield __await(_b.call(_e));
                 } finally {
                   if (e_1) throw e_1.error;
                 }
@@ -71015,11 +71060,11 @@ ${underline}`);
         let consumed = false;
         function iterLines() {
           return __asyncGenerator(this, arguments, function* iterLines_1() {
-            var _a5, e_2, _b, _c;
+            var _a6, e_2, _b, _c;
             const lineDecoder = new LineDecoder3();
             const iter = ReadableStreamToAsyncIterable3(readableStream);
             try {
-              for (var _d = true, iter_1 = __asyncValues(iter), iter_1_1; iter_1_1 = yield __await(iter_1.next()), _a5 = iter_1_1.done, !_a5; _d = true) {
+              for (var _d = true, iter_1 = __asyncValues(iter), iter_1_1; iter_1_1 = yield __await(iter_1.next()), _a6 = iter_1_1.done, !_a6; _d = true) {
                 _c = iter_1_1.value;
                 _d = false;
                 const chunk = _c;
@@ -71031,7 +71076,7 @@ ${underline}`);
               e_2 = { error: e_2_1 };
             } finally {
               try {
-                if (!_d && !_a5 && (_b = iter_1.return)) yield __await(_b.call(iter_1));
+                if (!_d && !_a6 && (_b = iter_1.return)) yield __await(_b.call(iter_1));
               } finally {
                 if (e_2) throw e_2.error;
               }
@@ -71043,7 +71088,7 @@ ${underline}`);
         }
         function iterator() {
           return __asyncGenerator(this, arguments, function* iterator_2() {
-            var _a5, e_3, _b, _c;
+            var _a6, e_3, _b, _c;
             if (consumed) {
               throw new GeminiNextGenAPIClientError("Cannot iterate over a consumed stream, use `.tee()` to split the stream.");
             }
@@ -71051,7 +71096,7 @@ ${underline}`);
             let done = false;
             try {
               try {
-                for (var _d = true, _e = __asyncValues(iterLines()), _f; _f = yield __await(_e.next()), _a5 = _f.done, !_a5; _d = true) {
+                for (var _d = true, _e = __asyncValues(iterLines()), _f; _f = yield __await(_e.next()), _a6 = _f.done, !_a6; _d = true) {
                   _c = _f.value;
                   _d = false;
                   const line = _c;
@@ -71064,7 +71109,7 @@ ${underline}`);
                 e_3 = { error: e_3_1 };
               } finally {
                 try {
-                  if (!_d && !_a5 && (_b = _e.return)) yield __await(_b.call(_e));
+                  if (!_d && !_a6 && (_b = _e.return)) yield __await(_b.call(_e));
                 } finally {
                   if (e_3) throw e_3.error;
                 }
@@ -71134,8 +71179,8 @@ ${underline}`);
             }
           },
           async cancel() {
-            var _a5;
-            await ((_a5 = iter.return) === null || _a5 === void 0 ? void 0 : _a5.call(iter));
+            var _a6;
+            await ((_a6 = iter.return) === null || _a6 === void 0 ? void 0 : _a6.call(iter));
           }
         });
       }
@@ -71259,9 +71304,9 @@ ${underline}`);
       return { [brand_privateNullableHeaders3]: true, values: targetHeaders, nulls: nullHeaders };
     };
     readEnv3 = (env) => {
-      var _a5, _b, _c, _d, _e;
+      var _a6, _b, _c, _d, _e;
       if (typeof globalThis.process !== "undefined") {
-        return ((_b = (_a5 = globalThis.process.env) === null || _a5 === void 0 ? void 0 : _a5[env]) === null || _b === void 0 ? void 0 : _b.trim()) || void 0;
+        return ((_b = (_a6 = globalThis.process.env) === null || _a6 === void 0 ? void 0 : _a6[env]) === null || _b === void 0 ? void 0 : _b.trim()) || void 0;
       }
       if (typeof globalThis.Deno !== "undefined") {
         return ((_e = (_d = (_c = globalThis.Deno.env) === null || _c === void 0 ? void 0 : _c.get) === null || _d === void 0 ? void 0 : _d.call(_c, env)) === null || _e === void 0 ? void 0 : _e.trim()) || void 0;
@@ -71773,13 +71818,13 @@ ${underline}`);
           return await this.getInternal(params);
         };
         this.tune = async (params) => {
-          var _a5;
+          var _a6;
           if (this.apiClient.isVertexAI()) {
             if (params.baseModel.startsWith("projects/")) {
               const preTunedModel = {
                 tunedModelName: params.baseModel
               };
-              if ((_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.preTunedModelCheckpointId) {
+              if ((_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.preTunedModelCheckpointId) {
                 preTunedModel.checkpointId = params.config.preTunedModelCheckpointId;
               }
               const paramsPrivate = Object.assign(Object.assign({}, params), { preTunedModel });
@@ -71807,7 +71852,7 @@ ${underline}`);
         };
       }
       async getInternal(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -71822,7 +71867,7 @@ ${underline}`);
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -71866,7 +71911,7 @@ ${underline}`);
         }
       }
       async listInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -71881,7 +71926,7 @@ ${underline}`);
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "GET",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -71914,7 +71959,7 @@ ${underline}`);
        * ```
        */
       async cancel(params) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -71929,7 +71974,7 @@ ${underline}`);
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -71977,7 +72022,7 @@ ${underline}`);
         }
       }
       async tuneInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -71992,7 +72037,7 @@ ${underline}`);
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -72012,7 +72057,7 @@ ${underline}`);
         }
       }
       async tuneMldevInternal(params) {
-        var _a5, _b;
+        var _a6, _b;
         let response;
         let path6 = "";
         let queryParams = {};
@@ -72029,7 +72074,7 @@ ${underline}`);
             queryParams,
             body: JSON.stringify(body),
             httpMethod: "POST",
-            httpOptions: (_a5 = params.config) === null || _a5 === void 0 ? void 0 : _a5.httpOptions,
+            httpOptions: (_a6 = params.config) === null || _a6 === void 0 ? void 0 : _a6.httpOptions,
             abortSignal: (_b = params.config) === null || _b === void 0 ? void 0 : _b.abortSignal
           }).then((httpResponse) => {
             return httpResponse.json().then((jsonResponse) => {
@@ -72165,19 +72210,19 @@ ${underline}`);
         return mimeType;
       }
       async uploadFileFromPath(file, uploadUrl, apiClient, httpOptions) {
-        var _a5;
+        var _a6;
         const response = await this.uploadFileFromPathInternal(file, uploadUrl, apiClient, httpOptions);
         const responseJson = await (response === null || response === void 0 ? void 0 : response.json());
-        if (((_a5 = response === null || response === void 0 ? void 0 : response.headers) === null || _a5 === void 0 ? void 0 : _a5[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
+        if (((_a6 = response === null || response === void 0 ? void 0 : response.headers) === null || _a6 === void 0 ? void 0 : _a6[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
           throw new Error("Failed to upload file: Upload status is not finalized.");
         }
         return responseJson["file"];
       }
       async uploadFileToFileSearchStoreFromPath(file, uploadUrl, apiClient, httpOptions) {
-        var _a5;
+        var _a6;
         const response = await this.uploadFileFromPathInternal(file, uploadUrl, apiClient, httpOptions);
         const responseJson = await (response === null || response === void 0 ? void 0 : response.json());
-        if (((_a5 = response === null || response === void 0 ? void 0 : response.headers) === null || _a5 === void 0 ? void 0 : _a5[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
+        if (((_a6 = response === null || response === void 0 ? void 0 : response.headers) === null || _a6 === void 0 ? void 0 : _a6[X_GOOG_UPLOAD_STATUS_HEADER_FIELD]) !== "final") {
           throw new Error("Failed to upload file: Upload status is not finalized.");
         }
         const resp = uploadToFileSearchStoreOperationFromMldev(responseJson);
@@ -72186,9 +72231,9 @@ ${underline}`);
         return typedResp;
       }
       async uploadFileFromPathInternal(file, uploadUrl, apiClient, httpOptions) {
-        var _a5, _b, _c;
+        var _a6, _b, _c;
         let finalUrl = uploadUrl;
-        const effectiveBaseUrl = (httpOptions === null || httpOptions === void 0 ? void 0 : httpOptions.baseUrl) || ((_a5 = apiClient.clientOptions.httpOptions) === null || _a5 === void 0 ? void 0 : _a5.baseUrl);
+        const effectiveBaseUrl = (httpOptions === null || httpOptions === void 0 ? void 0 : httpOptions.baseUrl) || ((_a6 = apiClient.clientOptions.httpOptions) === null || _a6 === void 0 ? void 0 : _a6.baseUrl);
         if (effectiveBaseUrl) {
           const baseUri = new URL(effectiveBaseUrl);
           const uploadUri = new URL(uploadUrl);
@@ -72287,7 +72332,7 @@ ${underline}`);
     LANGUAGE_LABEL_PREFIX = "gl-node/";
     GoogleGenAI = class {
       getNextGenClient() {
-        var _a5;
+        var _a6;
         const httpOpts = this.httpOptions;
         if (this._nextGenClient === void 0) {
           this._nextGenClient = new GeminiNextGenAPIClient({
@@ -72297,7 +72342,7 @@ ${underline}`);
             clientAdapter: this.apiClient,
             defaultHeaders: this.apiClient.getDefaultHeaders(),
             timeout: httpOpts === null || httpOpts === void 0 ? void 0 : httpOpts.timeout,
-            maxRetries: (_a5 = httpOpts === null || httpOpts === void 0 ? void 0 : httpOpts.retryOptions) === null || _a5 === void 0 ? void 0 : _a5.attempts
+            maxRetries: (_a6 = httpOpts === null || httpOpts === void 0 ? void 0 : httpOpts.retryOptions) === null || _a6 === void 0 ? void 0 : _a6.attempts
           });
         }
         if (httpOpts === null || httpOpts === void 0 ? void 0 : httpOpts.extraBody) {
@@ -72321,7 +72366,7 @@ ${underline}`);
         return this._webhooks;
       }
       constructor(options) {
-        var _a5, _b, _c, _d;
+        var _a6, _b, _c, _d;
         if ((options.project || options.location) && options.apiKey) {
           throw new Error("Project/location and API key are mutually exclusive in the client initializer.");
         }
@@ -72329,7 +72374,7 @@ ${underline}`);
         const envApiKey = getApiKeyFromEnv();
         const envProject = getEnv("GOOGLE_CLOUD_PROJECT");
         const envLocation = getEnv("GOOGLE_CLOUD_LOCATION");
-        this.apiKey = (_a5 = options.apiKey) !== null && _a5 !== void 0 ? _a5 : envApiKey;
+        this.apiKey = (_a6 = options.apiKey) !== null && _a6 !== void 0 ? _a6 : envApiKey;
         this.project = (_b = options.project) !== null && _b !== void 0 ? _b : envProject;
         this.location = (_c = options.location) !== null && _c !== void 0 ? _c : envLocation;
         if (!this.vertexai && !this.apiKey) {
@@ -76022,13 +76067,58 @@ var init_pi_messages = __esm({
   }
 });
 
+// src/remote.ts
+var remote_exports = {};
+__export(remote_exports, {
+  ProviderSyncService: () => ProviderSyncService,
+  mountProviderSyncRemote: () => mountProviderSyncRemote
+});
+import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+function mountProviderSyncRemote(ctx, refresh) {
+  new ProviderSyncService(ctx, refresh);
+}
+var _refreshRoute_dec, _a5, _init, ProviderSyncService;
+var init_remote = __esm({
+  "src/remote.ts"() {
+    "use strict";
+    ProviderSyncService = class extends (_a5 = TypertRemoteService, _refreshRoute_dec = [Remote], _a5) {
+      /**
+       * @param ctx - owning context (service registration is automatic).
+       * @param refresh - the shared route-refresh pipeline.
+       */
+      constructor(ctx, refresh) {
+        super(ctx, "providerSync");
+        __runInitializers(_init, 5, this);
+        __publicField(this, "refresh");
+        this.refresh = refresh;
+      }
+      async refreshRoute(route) {
+        if (typeof route !== "string" || route.trim() === "") {
+          throw new RemoteError("gateway/bad-request", "providerSync.refreshRoute: route must be a non-empty string", {});
+        }
+        try {
+          return await this.refresh(route);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new RemoteError("gateway/bad-request", `providerSync.refreshRoute: ${message}`, {});
+        }
+      }
+    };
+    _init = __decoratorStart(_a5);
+    __decorateElement(_init, 1, "refreshRoute", _refreshRoute_dec, ProviderSyncService);
+    __decoratorMetadata(_init, ProviderSyncService);
+    /** Nothing is injected into the service fiber; the plugin passes its pipeline. */
+    __publicField(ProviderSyncService, "inject", []);
+  }
+});
+
 // src/index.ts
-import { readFileSync as readFileSync2, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync, writeFileSync, mkdirSync, renameSync, statSync as statSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import Schema from "@deepseek-ai/schemastery";
-import { readSettingsDocument } from "dsh-enpoi-contracts";
+import { readSettingsDocument, ORCHESTRATION_NAMESPACE } from "dsh-enpoi-contracts";
 
 // ../../node_modules/@earendil-works/pi-ai/dist/providers/data/amazon-bedrock.json
 var amazon_bedrock_default = { "bedrock-converse-stream": { "amazon.nova-2-lite-v1:0": { id: "amazon.nova-2-lite-v1:0", name: "Nova 2 Lite", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 0.33, output: 2.75, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096 }, "amazon.nova-lite-v1:0": { id: "amazon.nova-lite-v1:0", name: "Nova Lite", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.06, output: 0.24, cacheRead: 0.015, cacheWrite: 0 }, contextWindow: 3e5, maxTokens: 8192 }, "amazon.nova-micro-v1:0": { id: "amazon.nova-micro-v1:0", name: "Nova Micro", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.035, output: 0.14, cacheRead: 875e-5, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 8192 }, "amazon.nova-pro-v1:0": { id: "amazon.nova-pro-v1:0", name: "Nova Pro", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.8, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, contextWindow: 3e5, maxTokens: 8192 }, "anthropic.claude-fable-5": { id: "anthropic.claude-fable-5", name: "Claude Fable 5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "anthropic.claude-fable-5-1": { id: "anthropic.claude-fable-5-1", name: "Claude Fable 5.1", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "anthropic.claude-haiku-4-5-20251001-v1:0": { id: "anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "anthropic.claude-opus-4-1-20250805-v1:0": { id: "anthropic.claude-opus-4-1-20250805-v1:0", name: "Claude Opus 4.1", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 }, contextWindow: 2e5, maxTokens: 32e3 }, "anthropic.claude-opus-4-5-20251101-v1:0": { id: "anthropic.claude-opus-4-5-20251101-v1:0", name: "Claude Opus 4.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "anthropic.claude-opus-4-6-v1": { id: "anthropic.claude-opus-4-6-v1", name: "Claude Opus 4.6", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "anthropic.claude-opus-4-7": { id: "anthropic.claude-opus-4-7", name: "Claude Opus 4.7", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "anthropic.claude-opus-4-8": { id: "anthropic.claude-opus-4-8", name: "Claude Opus 4.8", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "anthropic.claude-sonnet-4-6": { id: "anthropic.claude-sonnet-4-6", name: "Claude Sonnet 4.6", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 1e6, maxTokens: 64e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "anthropic.claude-sonnet-5": { id: "anthropic.claude-sonnet-5", name: "Claude Sonnet 5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "au.anthropic.claude-haiku-4-5-20251001-v1:0": { id: "au.anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5 (AU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "au.anthropic.claude-opus-4-6-v1": { id: "au.anthropic.claude-opus-4-6-v1", name: "AU Anthropic Claude Opus 4.6", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 16.5, output: 82.5, cacheRead: 1.65, cacheWrite: 20.625 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "au.anthropic.claude-opus-4-8": { id: "au.anthropic.claude-opus-4-8", name: "Claude Opus 4.8 (AU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "au.anthropic.claude-opus-5": { id: "au.anthropic.claude-opus-5", name: "Claude Opus 5 (AU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "au.anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "au.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (AU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "au.anthropic.claude-sonnet-4-6": { id: "au.anthropic.claude-sonnet-4-6", name: "AU Anthropic Claude Sonnet 4.6", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "au.anthropic.claude-sonnet-5": { id: "au.anthropic.claude-sonnet-5", name: "Claude Sonnet 5 (AU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "deepseek.r1-v1:0": { id: "deepseek.r1-v1:0", name: "DeepSeek-R1", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 1.35, output: 5.4, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 32768 }, "deepseek.v3-v1:0": { id: "deepseek.v3-v1:0", name: "DeepSeek-V3.1", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.58, output: 1.68, cacheRead: 0, cacheWrite: 0 }, contextWindow: 163840, maxTokens: 81920, compat: { supportsStrictMode: true } }, "deepseek.v3.2": { id: "deepseek.v3.2", name: "DeepSeek-V3.2", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.62, output: 1.85, cacheRead: 0, cacheWrite: 0 }, contextWindow: 163840, maxTokens: 81920, compat: { supportsStrictMode: true } }, "eu.anthropic.claude-fable-5": { id: "eu.anthropic.claude-fable-5", name: "Claude Fable 5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 11, output: 55, cacheRead: 1.1, cacheWrite: 13.75 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "eu.anthropic.claude-haiku-4-5-20251001-v1:0": { id: "eu.anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1.1, output: 5.5, cacheRead: 0.11, cacheWrite: 1.375 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "eu.anthropic.claude-opus-4-5-20251101-v1:0": { id: "eu.anthropic.claude-opus-4-5-20251101-v1:0", name: "Claude Opus 4.5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "eu.anthropic.claude-opus-4-6-v1": { id: "eu.anthropic.claude-opus-4-6-v1", name: "Claude Opus 4.6 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "eu.anthropic.claude-opus-4-7": { id: "eu.anthropic.claude-opus-4-7", name: "Claude Opus 4.7 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "eu.anthropic.claude-opus-4-8": { id: "eu.anthropic.claude-opus-4-8", name: "Claude Opus 4.8 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "eu.anthropic.claude-opus-5": { id: "eu.anthropic.claude-opus-5", name: "Claude Opus 5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "eu.anthropic.claude-sonnet-4-6": { id: "eu.anthropic.claude-sonnet-4-6", name: "Claude Sonnet 4.6 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 }, contextWindow: 1e6, maxTokens: 64e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "eu.anthropic.claude-sonnet-5": { id: "eu.anthropic.claude-sonnet-5", name: "Claude Sonnet 5 (EU)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2.2, output: 11, cacheRead: 0.22, cacheWrite: 2.75 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-fable-5": { id: "global.anthropic.claude-fable-5", name: "Claude Fable 5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-fable-5-1": { id: "global.anthropic.claude-fable-5-1", name: "Claude Fable 5.1 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-haiku-4-5-20251001-v1:0": { id: "global.anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "global.anthropic.claude-opus-4-5-20251101-v1:0": { id: "global.anthropic.claude-opus-4-5-20251101-v1:0", name: "Claude Opus 4.5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "global.anthropic.claude-opus-4-6-v1": { id: "global.anthropic.claude-opus-4-6-v1", name: "Claude Opus 4.6 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "global.anthropic.claude-opus-4-7": { id: "global.anthropic.claude-opus-4-7", name: "Claude Opus 4.7 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-opus-4-8": { id: "global.anthropic.claude-opus-4-8", name: "Claude Opus 4.8 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-opus-5": { id: "global.anthropic.claude-opus-5", name: "Claude Opus 5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "global.anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "global.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "global.anthropic.claude-sonnet-4-6": { id: "global.anthropic.claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 1e6, maxTokens: 64e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "global.anthropic.claude-sonnet-5": { id: "global.anthropic.claude-sonnet-5", name: "Claude Sonnet 5 (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "global.openai.gpt-5.6-luna": { id: "global.openai.gpt-5.6-luna", name: "GPT-5.6 Luna (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, contextWindow: 105e4, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh" } }, "global.openai.gpt-5.6-sol": { id: "global.openai.gpt-5.6-sol", name: "GPT-5.6 Sol (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }, contextWindow: 105e4, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh" } }, "global.openai.gpt-5.6-terra": { id: "global.openai.gpt-5.6-terra", name: "GPT-5.6 Terra (Global)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 105e4, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh" } }, "google.gemma-3-27b-it": { id: "google.gemma-3-27b-it", name: "Google Gemma 3 27B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.12, output: 0.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 202752, maxTokens: 8192, compat: { supportsStrictMode: true } }, "google.gemma-3-4b-it": { id: "google.gemma-3-4b-it", name: "Gemma 3 4B IT", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.04, output: 0.08, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096 }, "jp.anthropic.claude-haiku-4-5-20251001-v1:0": { id: "jp.anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "jp.anthropic.claude-opus-4-7": { id: "jp.anthropic.claude-opus-4-7", name: "Claude Opus 4.7 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "jp.anthropic.claude-opus-4-8": { id: "jp.anthropic.claude-opus-4-8", name: "Claude Opus 4.8 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "jp.anthropic.claude-opus-5": { id: "jp.anthropic.claude-opus-5", name: "Claude Opus 5 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "jp.anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "jp.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "jp.anthropic.claude-sonnet-4-6": { id: "jp.anthropic.claude-sonnet-4-6", name: "Claude Sonnet 4.6 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 1e6, maxTokens: 64e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "jp.anthropic.claude-sonnet-5": { id: "jp.anthropic.claude-sonnet-5", name: "Claude Sonnet 5 (JP)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "meta.llama3-1-70b-instruct-v1:0": { id: "meta.llama3-1-70b-instruct-v1:0", name: "Llama 3.1 70B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.72, output: 0.72, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096 }, "meta.llama3-1-8b-instruct-v1:0": { id: "meta.llama3-1-8b-instruct-v1:0", name: "Llama 3.1 8B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.22, output: 0.22, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096 }, "meta.llama3-3-70b-instruct-v1:0": { id: "meta.llama3-3-70b-instruct-v1:0", name: "Llama 3.3 70B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.72, output: 0.72, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096 }, "meta.llama4-maverick-17b-instruct-v1:0": { id: "meta.llama4-maverick-17b-instruct-v1:0", name: "Llama 4 Maverick 17B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.24, output: 0.97, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1e6, maxTokens: 16384 }, "meta.llama4-scout-17b-instruct-v1:0": { id: "meta.llama4-scout-17b-instruct-v1:0", name: "Llama 4 Scout 17B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.17, output: 0.66, cacheRead: 0, cacheWrite: 0 }, contextWindow: 35e5, maxTokens: 16384 }, "minimax.minimax-m2": { id: "minimax.minimax-m2", name: "MiniMax M2", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 204608, maxTokens: 128e3 }, "minimax.minimax-m2.1": { id: "minimax.minimax-m2.1", name: "MiniMax M2.1", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 204800, maxTokens: 131072 }, "minimax.minimax-m2.5": { id: "minimax.minimax-m2.5", name: "MiniMax M2.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 196608, maxTokens: 98304 }, "mistral.devstral-2-123b": { id: "mistral.devstral-2-123b", name: "Devstral 2 123B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.4, output: 2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256e3, maxTokens: 8192, compat: { supportsStrictMode: true } }, "mistral.magistral-small-2509": { id: "mistral.magistral-small-2509", name: "Magistral Small 1.2", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 0.5, output: 1.5, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4e4, compat: { supportsStrictMode: true } }, "mistral.ministral-3-14b-instruct": { id: "mistral.ministral-3-14b-instruct", name: "Ministral 14B 3.0", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.2, output: 0.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "mistral.ministral-3-3b-instruct": { id: "mistral.ministral-3-3b-instruct", name: "Ministral 3 3B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256e3, maxTokens: 8192, compat: { supportsStrictMode: true } }, "mistral.ministral-3-8b-instruct": { id: "mistral.ministral-3-8b-instruct", name: "Ministral 3 8B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.15, output: 0.15, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "mistral.mistral-large-3-675b-instruct": { id: "mistral.mistral-large-3-675b-instruct", name: "Mistral Large 3", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.5, output: 1.5, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256e3, maxTokens: 8192, compat: { supportsStrictMode: true } }, "mistral.pixtral-large-2502-v1:0": { id: "mistral.pixtral-large-2502-v1:0", name: "Pixtral Large (25.02)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 8192 }, "mistral.voxtral-mini-3b-2507": { id: "mistral.voxtral-mini-3b-2507", name: "Voxtral Mini 3B 2507", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.04, output: 0.04, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "mistral.voxtral-small-24b-2507": { id: "mistral.voxtral-small-24b-2507", name: "Voxtral Small 24B 2507", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.15, output: 0.35, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32e3, maxTokens: 8192, compat: { supportsStrictMode: true } }, "moonshot.kimi-k2-thinking": { id: "moonshot.kimi-k2-thinking", name: "Kimi K2 Thinking", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.6, output: 2.5, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262143, maxTokens: 16e3, compat: { supportsStrictMode: true } }, "moonshotai.kimi-k2.5": { id: "moonshotai.kimi-k2.5", name: "Kimi K2.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 0.6, output: 3, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262143, maxTokens: 16e3, compat: { supportsStrictMode: true } }, "nvidia.nemotron-nano-12b-v2": { id: "nvidia.nemotron-nano-12b-v2", name: "NVIDIA Nemotron Nano 12B v2 VL BF16", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.2, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "nvidia.nemotron-nano-3-30b": { id: "nvidia.nemotron-nano-3-30b", name: "NVIDIA Nemotron Nano 3 30B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.06, output: 0.24, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "nvidia.nemotron-nano-9b-v2": { id: "nvidia.nemotron-nano-9b-v2", name: "NVIDIA Nemotron Nano 9B v2", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.06, output: 0.23, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 4096, compat: { supportsStrictMode: true } }, "nvidia.nemotron-super-3-120b": { id: "nvidia.nemotron-super-3-120b", name: "NVIDIA Nemotron 3 Super 120B A12B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.15, output: 0.65, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 131072, compat: { supportsStrictMode: true } }, "openai.gpt-5.4": { id: "openai.gpt-5.4", name: "GPT-5.4", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2.75, output: 16.5, cacheRead: 0.275, cacheWrite: 0 }, contextWindow: 272e3, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh" } }, "openai.gpt-5.5": { id: "openai.gpt-5.5", name: "GPT-5.5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5.5, output: 33, cacheRead: 0.55, cacheWrite: 0 }, contextWindow: 272e3, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh" } }, "openai.gpt-5.6-luna": { id: "openai.gpt-5.6-luna", name: "GPT-5.6 Luna", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 0.22, output: 1.32, cacheRead: 0.022, cacheWrite: 0.275 }, contextWindow: 105e4, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh" } }, "openai.gpt-5.6-sol": { id: "openai.gpt-5.6-sol", name: "GPT-5.6 Sol", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 4.4, output: 22, cacheRead: 0.44, cacheWrite: 5.5 }, contextWindow: 105e4, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh" } }, "openai.gpt-5.6-terra": { id: "openai.gpt-5.6-terra", name: "GPT-5.6 Terra", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2.2, output: 13.2, cacheRead: 0.22, cacheWrite: 2.75 }, contextWindow: 105e4, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh" } }, "openai.gpt-oss-120b": { id: "openai.gpt-oss-120b", name: "gpt-oss-120b", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "openai.gpt-oss-120b-1:0": { id: "openai.gpt-oss-120b-1:0", name: "gpt-oss-120b", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "openai.gpt-oss-20b": { id: "openai.gpt-oss-20b", name: "gpt-oss-20b", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.07, output: 0.3, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "openai.gpt-oss-20b-1:0": { id: "openai.gpt-oss-20b-1:0", name: "gpt-oss-20b", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.07, output: 0.3, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "openai.gpt-oss-safeguard-120b": { id: "openai.gpt-oss-safeguard-120b", name: "GPT OSS Safeguard 120B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "openai.gpt-oss-safeguard-20b": { id: "openai.gpt-oss-safeguard-20b", name: "GPT OSS Safeguard 20B", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.07, output: 0.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 16384, compat: { supportsStrictMode: true } }, "qwen.qwen3-235b-a22b-2507-v1:0": { id: "qwen.qwen3-235b-a22b-2507-v1:0", name: "Qwen3 235B A22B 2507", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.22, output: 0.88, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 131072, compat: { supportsStrictMode: true } }, "qwen.qwen3-32b-v1:0": { id: "qwen.qwen3-32b-v1:0", name: "Qwen3 32B (dense)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 16384, maxTokens: 16384, compat: { supportsStrictMode: true } }, "qwen.qwen3-coder-30b-a3b-v1:0": { id: "qwen.qwen3-coder-30b-a3b-v1:0", name: "Qwen3 Coder 30B A3B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 131072, compat: { supportsStrictMode: true } }, "qwen.qwen3-coder-480b-a35b-v1:0": { id: "qwen.qwen3-coder-480b-a35b-v1:0", name: "Qwen3 Coder 480B A35B Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.22, output: 1.8, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 65536, compat: { supportsStrictMode: true } }, "qwen.qwen3-coder-next": { id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.22, output: 1.8, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 65536, compat: { supportsStrictMode: true } }, "qwen.qwen3-next-80b-a3b": { id: "qwen.qwen3-next-80b-a3b", name: "Qwen/Qwen3-Next-80B-A3B-Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text"], cost: { input: 0.14, output: 1.4, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262e3, maxTokens: 262e3, compat: { supportsStrictMode: true } }, "qwen.qwen3-vl-235b-a22b": { id: "qwen.qwen3-vl-235b-a22b", name: "Qwen/Qwen3-VL-235B-A22B-Instruct", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.3, output: 1.5, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262e3, maxTokens: 262e3, compat: { supportsStrictMode: true } }, "us.anthropic.claude-fable-5": { id: "us.anthropic.claude-fable-5", name: "Claude Fable 5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "us.anthropic.claude-fable-5-1": { id: "us.anthropic.claude-fable-5-1", name: "Claude Fable 5.1 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 11, output: 55, cacheRead: 0.275, cacheWrite: 13.75 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "us.anthropic.claude-haiku-4-5-20251001-v1:0": { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", name: "Claude Haiku 4.5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "us.anthropic.claude-opus-4-1-20250805-v1:0": { id: "us.anthropic.claude-opus-4-1-20250805-v1:0", name: "Claude Opus 4.1 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 }, contextWindow: 2e5, maxTokens: 32e3 }, "us.anthropic.claude-opus-4-5-20251101-v1:0": { id: "us.anthropic.claude-opus-4-5-20251101-v1:0", name: "Claude Opus 4.5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "us.anthropic.claude-opus-4-6-v1": { id: "us.anthropic.claude-opus-4-6-v1", name: "Claude Opus 4.6 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "us.anthropic.claude-opus-4-7": { id: "us.anthropic.claude-opus-4-7", name: "Claude Opus 4.7 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "us.anthropic.claude-opus-4-8": { id: "us.anthropic.claude-opus-4-8", name: "Claude Opus 4.8 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "us.anthropic.claude-opus-5": { id: "us.anthropic.claude-opus-5", name: "Claude Opus 5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, contextWindow: 1e6, maxTokens: 128e3, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "us.anthropic.claude-sonnet-4-5-20250929-v1:0": { id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0", name: "Claude Sonnet 4.5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 2e5, maxTokens: 64e3, compat: { supportsStrictMode: true } }, "us.anthropic.claude-sonnet-4-6": { id: "us.anthropic.claude-sonnet-4-6", name: "Claude Sonnet 4.6 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, contextWindow: 1e6, maxTokens: 64e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { max: "max" } }, "us.anthropic.claude-sonnet-5": { id: "us.anthropic.claude-sonnet-5", name: "Claude Sonnet 5 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, contextWindow: 1e6, maxTokens: 128e3, compat: { supportsStrictMode: true }, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, "us.deepseek.r1-v1:0": { id: "us.deepseek.r1-v1:0", name: "DeepSeek-R1 (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 1.35, output: 5.4, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128e3, maxTokens: 32768 }, "us.meta.llama4-maverick-17b-instruct-v1:0": { id: "us.meta.llama4-maverick-17b-instruct-v1:0", name: "Llama 4 Maverick 17B Instruct (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.24, output: 0.97, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1e6, maxTokens: 16384 }, "us.meta.llama4-scout-17b-instruct-v1:0": { id: "us.meta.llama4-scout-17b-instruct-v1:0", name: "Llama 4 Scout 17B Instruct (US)", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: false, input: ["text", "image"], cost: { input: 0.17, output: 0.66, cacheRead: 0, cacheWrite: 0 }, contextWindow: 35e5, maxTokens: 16384 }, "writer.palmyra-x4-v1:0": { id: "writer.palmyra-x4-v1:0", name: "Palmyra X4", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 2.5, output: 10, cacheRead: 0, cacheWrite: 0 }, contextWindow: 122880, maxTokens: 8192 }, "writer.palmyra-x5-v1:0": { id: "writer.palmyra-x5-v1:0", name: "Palmyra X5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.6, output: 6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 104e4, maxTokens: 8192 }, "xai.grok-4.3": { id: "xai.grok-4.3", name: "Grok 4.3", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 }, contextWindow: 1e6, maxTokens: 131072, compat: { supportsStrictMode: true } }, "xai.grok-4.6": { id: "xai.grok-4.6", name: "Grok 4.6", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text", "image"], cost: { input: 2.2, output: 6.6, cacheRead: 0.55, cacheWrite: 0 }, contextWindow: 5e5, maxTokens: 5e5, compat: { supportsStrictMode: true } }, "zai.glm-4.7": { id: "zai.glm-4.7", name: "GLM-4.7", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 204800, maxTokens: 131072, compat: { supportsStrictMode: true } }, "zai.glm-4.7-flash": { id: "zai.glm-4.7-flash", name: "GLM-4.7-Flash", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 0.07, output: 0.4, cacheRead: 0, cacheWrite: 0 }, contextWindow: 2e5, maxTokens: 131072, compat: { supportsStrictMode: true } }, "zai.glm-5": { id: "zai.glm-5", name: "GLM-5", api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", reasoning: true, input: ["text"], cost: { input: 1, output: 3.2, cacheRead: 0, cacheWrite: 0 }, contextWindow: 202752, maxTokens: 101376, compat: { supportsStrictMode: true } } } };
@@ -77682,10 +77772,12 @@ var Config = Schema.object({
   endpoints: live(Schema.dict(String).default({})),
   capacityDefaults: live(Schema.any().default({})),
   modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
-  routeProviderMap: live(Schema.dict(Schema.array(String)).default({}))
+  routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
+  pinnedModels: live(Schema.dict(Schema.array(String)).default({}))
 });
 var SIGN_IN_REQUIRED = "sign-in required";
 var LLM_NS = "llm-pi-ai";
+var AGENT_DEFAULT_MODEL_NS = "agent-default-model";
 function sectionOf(settings, ns) {
   const section = readSettingsDocument(settings, ns);
   if (section === null || typeof section !== "object") return void 0;
@@ -77730,27 +77822,40 @@ async function refreshModelsDevOnline(report, url = DEFAULT_MODELS_DEV_URL) {
     const res = await fetch(url, { signal: AbortSignal.timeout(1e4) });
     if (!res.ok) {
       report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 GET ${url} -> HTTP ${String(res.status)}; local cache kept`);
-      return;
+      return false;
     }
     const data = await res.json();
     if (!data || typeof data !== "object" || Object.keys(data).length <= 50) {
       report?.("provider-sync/models-dev-fetch", "models.dev refresh ignored \u2014 response did not look like the catalogue (>50 providers); local cache kept");
-      return;
+      return false;
     }
     modelsDevCache = data;
     const path6 = modelsDevCachePath();
     try {
       if (path6 === void 0) {
         report?.("provider-sync/models-dev-cache", "models.dev catalogue refreshed in memory, but no OS cache dir resolved \u2014 not persisted");
-        return;
+        return true;
       }
       mkdirSync(dirname2(path6), { recursive: true });
       writeFileSync(path6, JSON.stringify(data), "utf8");
     } catch (error) {
       report?.("provider-sync/models-dev-cache", `models.dev catalogue refreshed in memory, but the cache write failed \u2014 ${error instanceof Error ? error.message : String(error)}`);
     }
+    return true;
   } catch (error) {
     report?.("provider-sync/models-dev-fetch", `models.dev refresh failed \u2014 ${error instanceof Error ? error.message : String(error)}; local cache kept`);
+    return false;
+  }
+}
+var ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1e3;
+var CATALOG_FRESH_MS = 48 * 60 * 60 * 1e3;
+function catalogCacheAgeMs(now, env = process.env, platform = process.platform) {
+  const path6 = modelsDevCachePath(env, platform);
+  if (path6 === void 0) return void 0;
+  try {
+    return Math.max(0, now - statSync2(path6).mtimeMs);
+  } catch {
+    return void 0;
   }
 }
 var DEFAULT_ROUTE_PROVIDER_MAP = Object.freeze({
@@ -78329,10 +78434,11 @@ function mergeConfiguredModels(route, configured, live2, capacities, hints = { t
     seen.add(id);
     const fresh = advertised.get(id);
     if (fresh !== void 0) {
-      models.push(fresh);
+      models.push(entry.source === "manual" ? { ...fresh, source: "manual" } : fresh);
       continue;
     }
-    models.push({ ...entry, source: "configured" });
+    const keptSource = entry.source === "manual" || entry.source === "pinned-in-use" ? entry.source : "configured";
+    models.push({ ...entry, source: keptSource });
     unadvertised.push(id);
   }
   for (const [id, entry] of advertised) {
@@ -78342,11 +78448,218 @@ function mergeConfiguredModels(route, configured, live2, capacities, hints = { t
   }
   return { models, unadvertised };
 }
+function firstSeenAtOf(entry) {
+  const value2 = entry.firstSeenAt;
+  return typeof value2 === "number" && Number.isFinite(value2) ? value2 : void 0;
+}
+function modelsDevProviderModelIds(providerKey) {
+  const provider = loadModelsDev()[providerKey];
+  if (provider?.models === void 0) return void 0;
+  const ids = /* @__PURE__ */ new Set();
+  for (const key of Object.keys(provider.models)) {
+    ids.add(key);
+    ids.add(key.toLowerCase());
+  }
+  return ids;
+}
+function referencedRouteModels(defaultModel, orchestration, route) {
+  const found = [];
+  if (defaultModel !== null && typeof defaultModel === "object" && !Array.isArray(defaultModel)) {
+    const selection = defaultModel;
+    if (selection.provider === route && typeof selection.model === "string" && selection.model !== "") {
+      found.push({ id: selection.model, reason: "agent-default-model" });
+    }
+  }
+  if (orchestration === null || typeof orchestration !== "object" || Array.isArray(orchestration)) return found;
+  const document2 = orchestration;
+  const chains = document2.chains;
+  if (chains !== null && typeof chains === "object" && !Array.isArray(chains)) {
+    for (const [chainId, raw] of Object.entries(chains)) {
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const links = raw.links;
+      if (!Array.isArray(links)) continue;
+      for (const link of links) {
+        if (link === null || typeof link !== "object" || Array.isArray(link)) continue;
+        const entry = link;
+        if (entry.provider === route && typeof entry.model === "string" && entry.model !== "") {
+          found.push({ id: entry.model, reason: `chain:${chainId}` });
+        }
+      }
+    }
+  }
+  const preferences = document2.uiPreferences;
+  if (preferences !== null && typeof preferences === "object" && !Array.isArray(preferences)) {
+    const favorites = preferences.favorites;
+    if (Array.isArray(favorites)) {
+      for (const favorite of favorites) {
+        if (favorite === null || typeof favorite !== "object" || Array.isArray(favorite)) continue;
+        const entry = favorite;
+        if (entry.provider === route && typeof entry.modelId === "string" && entry.modelId !== "") {
+          found.push({ id: entry.modelId, reason: "favorite" });
+        }
+      }
+    }
+  }
+  return found;
+}
 function mergeDiscoveredModels(route, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   return live2.map((model) => {
     const fallback = fallbackFor(capacities, route, model.id);
     return analyzeModel(route, model, fallback, hints, routeProviderMap).discovered;
   });
+}
+function pruneRouteReferences(orchestration, route, removed) {
+  const cleanup = {};
+  if (removed.length === 0) return cleanup;
+  if (orchestration === null || typeof orchestration !== "object" || Array.isArray(orchestration)) return cleanup;
+  const preferences = orchestration.uiPreferences;
+  if (preferences === null || typeof preferences !== "object" || Array.isArray(preferences)) return cleanup;
+  const removedSet = new Set(removed);
+  const hidden = preferences.hiddenModels;
+  if (hidden !== null && typeof hidden === "object" && !Array.isArray(hidden)) {
+    const map = hidden;
+    const list = map[route];
+    if (Array.isArray(list)) {
+      const next = list.filter((id) => typeof id !== "string" || !removedSet.has(id));
+      if (next.length !== list.length) {
+        cleanup.hiddenModels = { ...map, [route]: next };
+      }
+    }
+  }
+  const favorites = preferences.favorites;
+  if (Array.isArray(favorites)) {
+    const next = favorites.filter((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const reference = entry;
+      return reference.provider !== route || typeof reference.modelId !== "string" || !removedSet.has(reference.modelId);
+    });
+    if (next.length !== favorites.length) cleanup.favorites = next;
+  }
+  return cleanup;
+}
+function planRouteModels(input) {
+  const configured = input.configured ?? [];
+  const live2 = input.live;
+  const hints = input.hints ?? { table: loadCapabilityHints(), override: {} };
+  const routeProviderMap = input.routeProviderMap ?? DEFAULT_ROUTE_PROVIDER_MAP;
+  const advertised = /* @__PURE__ */ new Map();
+  for (const model of live2 ?? []) {
+    if (advertised.has(model.id)) continue;
+    advertised.set(model.id, analyzeModel(input.route, model, fallbackFor(input.capacities, input.route, model.id), hints, routeProviderMap).settings);
+  }
+  const catalogIds = input.catalogRoute && input.catalogProviderKey !== void 0 ? modelsDevProviderModelIds(input.catalogProviderKey) : void 0;
+  const authority = live2 === void 0 ? "none" : catalogIds !== void 0 ? "catalog" : input.catalogRoute ? "none" : "endpoint";
+  const report = {
+    removed: [],
+    deprecated: [],
+    degraded: false,
+    authority,
+    source: live2 === void 0 ? "none" : input.source ?? "live"
+  };
+  const configuredById = /* @__PURE__ */ new Map();
+  for (const entry of configured) {
+    const id = typeof entry.id === "string" && entry.id !== "" ? entry.id : void 0;
+    if (id !== void 0 && !configuredById.has(id)) configuredById.set(id, entry);
+  }
+  const grace = /* @__PURE__ */ new Set();
+  if (authority === "catalog" && catalogIds !== void 0) {
+    for (const id of advertised.keys()) {
+      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) continue;
+      const prior = configuredById.get(id);
+      const firstSeen = prior === void 0 ? input.now : firstSeenAtOf(prior);
+      if (firstSeen !== void 0 && input.now - firstSeen < ENDPOINT_ONLY_GRACE_MS) grace.add(id);
+    }
+  }
+  const pinned = new Set(input.pinnedModels ?? []);
+  const overlayUpserts = /* @__PURE__ */ new Set();
+  for (const entry of input.overlay?.upsert ?? []) {
+    const id = listingString(entry.id);
+    if (id !== void 0) overlayUpserts.add(id);
+  }
+  const protectedIds = /* @__PURE__ */ new Set();
+  for (const [id, entry] of configuredById) {
+    if (entry.source === "manual" || pinned.has(id) || overlayUpserts.has(id)) protectedIds.add(id);
+  }
+  for (const id of pinned) if (advertised.has(id)) protectedIds.add(id);
+  for (const id of overlayUpserts) if (advertised.has(id)) protectedIds.add(id);
+  const references = /* @__PURE__ */ new Map();
+  for (const reference of input.references ?? []) {
+    const reasons = references.get(reference.id) ?? [];
+    if (!reasons.includes(reference.reason)) reasons.push(reference.reason);
+    references.set(reference.id, reasons);
+  }
+  const memberBase = /* @__PURE__ */ new Set();
+  if (authority === "catalog" && catalogIds !== void 0) {
+    for (const id of advertised.keys()) {
+      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) memberBase.add(id);
+    }
+  } else if (authority === "endpoint") {
+    for (const id of advertised.keys()) memberBase.add(id);
+  }
+  const isMember = (id) => memberBase.has(id) || protectedIds.has(id) || grace.has(id);
+  const removalsAllowed = authority !== "none" && input.endpointFresh && input.catalogFresh;
+  let keepAll = !removalsAllowed;
+  if (keepAll) {
+    report.degraded = true;
+    report.degradedReason = live2 === void 0 ? "the endpoint listing could not be fetched" : !input.endpointFresh ? "the endpoint listing fetch did not succeed" : !input.catalogFresh ? "the models.dev catalogue is stale (no online refresh and the cache is 48 h or older)" : input.catalogRoute ? "the route has no declared models.dev catalog mapping" : "no membership authority";
+  } else {
+    const currentIds = [...configuredById.keys()];
+    const wouldRemove = currentIds.filter((id) => !isMember(id) && !references.has(id));
+    if (memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0) {
+      keepAll = true;
+      report.degraded = true;
+      report.degradedReason = "the effective model set would be empty";
+    } else if (currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
+      keepAll = true;
+      report.degraded = true;
+      report.degradedReason = `removals would drop ${String(wouldRemove.length)} of ${String(currentIds.length)} stored models (more than half)`;
+    }
+  }
+  const models = [];
+  if (keepAll) {
+    models.push(...live2 === void 0 ? configured : mergeConfiguredModels(input.route, configured, live2, input.capacities, hints, routeProviderMap).models);
+  } else {
+    const seen = /* @__PURE__ */ new Set();
+    for (const entry of configured) {
+      const id = typeof entry.id === "string" && entry.id !== "" ? entry.id : void 0;
+      if (id === void 0) {
+        models.push(entry);
+        continue;
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const fresh = advertised.get(id);
+      const isGrace = grace.has(id);
+      if (!isMember(id)) {
+        const reasons = references.get(id);
+        if (reasons !== void 0) {
+          models.push({ ...entry, source: "pinned-in-use", deprecated: true });
+          report.deprecated.push(id);
+        } else {
+          report.removed.push(id);
+        }
+        continue;
+      }
+      if (fresh !== void 0) {
+        models.push({
+          ...fresh,
+          ...entry.source === "manual" ? { source: "manual" } : {},
+          ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {}
+        });
+      } else if (isGrace) {
+        models.push({ ...entry, firstSeenAt: firstSeenAtOf(entry) ?? input.now });
+      } else {
+        models.push(entry);
+      }
+    }
+    for (const [id, fresh] of advertised) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (!isMember(id)) continue;
+      models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh);
+    }
+  }
+  return { models: applyCatalogOverlay(models, input.overlay), report };
 }
 function stringifyComparable(models) {
   return JSON.stringify(
@@ -78365,7 +78678,9 @@ function stringifyComparable(models) {
       gateReason: m2.gateReason ?? null,
       capabilityHints: m2.capabilityHints ?? null,
       unverified: m2.unverified ?? null,
-      source: m2.source ?? null
+      source: m2.source ?? null,
+      deprecated: m2.deprecated ?? null,
+      firstSeenAt: m2.firstSeenAt ?? null
     }))
   );
 }
@@ -78375,6 +78690,7 @@ function apply(ctx, config) {
   const capacities = value(config.capacityDefaults) ?? {};
   const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL;
   const routeProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) };
+  const pinnedModels = value(config.pinnedModels) ?? {};
   function reportSyncDiagnostic(kind, message) {
     let code;
     try {
@@ -78386,142 +78702,298 @@ function apply(ctx, config) {
   }
   loadModelsDev();
   void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
-  async function syncOnce() {
-    await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
-    let overlays = {};
+  function loadOverlays() {
     try {
-      overlays = loadCatalogOverlays();
+      return loadCatalogOverlays();
     } catch (error) {
       reportSyncDiagnostic("provider-sync/catalog-overlays", error instanceof Error ? error.message : String(error));
+      return {};
     }
-    let hints;
+  }
+  function loadHints() {
     try {
-      hints = { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() };
+      return { table: loadCapabilityHints(), override: loadCapabilityHintsOverride() };
     } catch (error) {
       reportSyncDiagnostic("provider-sync/capability-hints", error instanceof Error ? error.message : String(error));
-      hints = { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} };
+      return { table: { reasoning: [], image: [], audio: [], video: [], files: [], toolsExclude: [] }, override: {} };
     }
+  }
+  const credentials = ctx.get("credentials");
+  async function resolveListingKey(profile) {
+    if (profile?.keyless === true) return void 0;
+    if (profile?.apiKeyEnv !== void 0) {
+      const hit = credentials === void 0 ? void 0 : await credentials.resolve(profile.apiKeyEnv);
+      return hit?.value;
+    }
+    if (profile?.pool?.identities !== void 0 && profile.pool.identities.length > 0) {
+      const primary = [...profile.pool.identities].filter((identity) => identity.enabled !== false).sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0];
+      if (primary !== void 0) {
+        const hit = credentials === void 0 ? void 0 : await credentials.resolve(primary.credentialRef);
+        return hit?.value;
+      }
+    }
+    return void 0;
+  }
+  function revisionOf(settings, ns) {
+    return settings.describe().find((entry) => entry.ns === ns)?.revision;
+  }
+  function authorityLabel(report) {
+    if (report.authority === "catalog") return "live endpoint \u2229 models.dev";
+    if (report.authority === "endpoint") return report.source === "catalog" ? "bundled catalog snapshot" : "live endpoint";
+    return "no authority";
+  }
+  async function computeRouteRefresh(route, options) {
+    const llmProfiles = sectionOf(options.settings, LLM_NS)?.providers;
+    const commandCodeProfiles = sectionOf(options.settings, COMMANDCODE_NS)?.providers;
+    const profile = llmProfiles?.[route] ?? commandCodeProfiles?.[route];
+    const ns = llmProfiles?.[route] !== void 0 ? LLM_NS : commandCodeProfiles?.[route] !== void 0 ? COMMANDCODE_NS : LLM_NS;
+    const knownEndpoint = endpoints[route];
+    if (profile === void 0 && knownEndpoint === void 0) return void 0;
+    const catalogRoute = isCatalogRoute(route);
+    if (profile === void 0 && catalogRoute) return void 0;
+    const baseURL = knownEndpoint ?? profile?.baseURL;
+    if (baseURL === void 0) {
+      logger.debug(`route ${route}: no baseURL and no known endpoint \u2014 skipped`);
+      return void 0;
+    }
+    const overlay = options.overlays.routes?.[route];
+    const key = await resolveListingKey(profile);
+    let live2;
+    try {
+      live2 = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api);
+    } catch (error) {
+      logger.warn(describeSyncFailure(route, error, ns));
+    }
+    const catalogFresh = options.catalogOnlineOk || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < CATALOG_FRESH_MS;
+    const references = referencedRouteModels(
+      readSettingsDocument(options.settings, AGENT_DEFAULT_MODEL_NS),
+      readSettingsDocument(options.settings, ORCHESTRATION_NAMESPACE),
+      route
+    );
+    const planned = planRouteModels({
+      route,
+      configured: profile?.models,
+      live: live2,
+      catalogRoute,
+      catalogProviderKey: routeProviderMap[route]?.[0],
+      endpointFresh: live2 !== void 0,
+      catalogFresh,
+      pinnedModels: pinnedModels[route],
+      overlay,
+      references,
+      now: Date.now(),
+      capacities,
+      hints: options.hints,
+      routeProviderMap,
+      source: ns === COMMANDCODE_NS ? "catalog" : "live"
+    });
+    const advertised = new Set((live2 ?? []).map((model) => model.id));
+    const unadvertised = (profile?.models ?? []).map((entry) => typeof entry.id === "string" && entry.id !== "" ? entry.id : void 0).filter((id) => id !== void 0 && !advertised.has(id));
+    const plannedIds = new Set(planned.models.map((model) => typeof model.id === "string" ? model.id : ""));
+    const cleanup = [...new Set((profile?.models ?? []).map((entry) => typeof entry.id === "string" ? entry.id : "").filter((id) => id !== "" && !plannedIds.has(id)))];
+    if (planned.report.removed.length > 0) {
+      reportSyncDiagnostic(
+        "provider-sync/model-pruned",
+        `route ${route}: pruned ${String(planned.report.removed.length)} outdated model(s) (source: ${authorityLabel(planned.report)}): ${planned.report.removed.join(", ")}`
+      );
+    }
+    for (const id of planned.report.deprecated) {
+      const reasons = references.filter((reference) => reference.id === id).map((reference) => reference.reason);
+      reportSyncDiagnostic(
+        "provider-sync/active-model-deprecated",
+        `route ${route}: model "${id}" is no longer a member but is referenced by ${reasons.join(", ")}; kept as deprecated (source: pinned-in-use)`
+      );
+    }
+    if (planned.report.degraded && live2 !== void 0 && (profile?.models?.length ?? 0) > 0) {
+      reportSyncDiagnostic(
+        "provider-sync/removals-degraded",
+        `route ${route}: model removals skipped \u2014 ${planned.report.degradedReason ?? "unknown reason"}; keeping all ${String(profile?.models?.length ?? 0)} stored model(s)`
+      );
+    }
+    return {
+      route,
+      ns,
+      hasProfile: profile !== void 0,
+      configured: profile?.models ?? [],
+      overlay,
+      live: live2,
+      baseURL,
+      models: planned.models,
+      report: planned.report,
+      cleanup,
+      unadvertised,
+      ...live2 === void 0 ? {} : { advertisedCount: live2.length }
+    };
+  }
+  async function persistRouteModels(settings, outcome) {
+    const before = stringifyComparable(outcome.configured);
+    const after = stringifyComparable(outcome.models);
+    if (before === after) {
+      logger.debug(`route ${outcome.route}: ${outcome.live === void 0 ? "overlay" : `${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models`}, no change`);
+      return;
+    }
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await settings.mutate(
+          outcome.ns,
+          [{ op: "set", path: ["providers", outcome.route, "models"], value: outcome.models }],
+          revisionOf(settings, outcome.ns)
+        );
+        const removed = outcome.report.removed.length;
+        logger.info(removed > 0 ? `route ${outcome.route}: catalog refresh \u2014 ${String(outcome.models.length)} models (${String(removed)} outdated pruned)` : outcome.live === void 0 ? `route ${outcome.route}: catalog overlay applied \u2014 ${String(outcome.models.length)} models` : `route ${outcome.route}: catalog merged & enriched from models.dev \u2014 ${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models (${String(outcome.unadvertised.length)} kept)`);
+        return;
+      } catch (error) {
+        const conflict = error;
+        if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+        throw error;
+      }
+    }
+  }
+  async function cleanupPrunedReferences(settings, route, removed) {
+    if (removed.length === 0) return;
+    try {
+      const deleteDocument = readSettingsDocument(settings, ORCHESTRATION_NAMESPACE);
+      const cleanup = pruneRouteReferences(deleteDocument, route, removed);
+      const settingsOps = [];
+      if (cleanup.hiddenModels !== void 0) {
+        settingsOps.push({ op: "set", path: ["uiPreferences", "hiddenModels"], value: cleanup.hiddenModels });
+      }
+      if (cleanup.favorites !== void 0) {
+        settingsOps.push({ op: "set", path: ["uiPreferences", "favorites"], value: cleanup.favorites });
+      }
+      if (settingsOps.length === 0) return;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await settings.mutate(ORCHESTRATION_NAMESPACE, settingsOps, revisionOf(settings, ORCHESTRATION_NAMESPACE));
+          logger.info(`route ${route}: pruned ids cleaned from hidden models/favorites (${String(removed.length)} id(s))`);
+          return;
+        } catch (error) {
+          const conflict = error;
+          if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
+          throw error;
+        }
+      }
+    } catch (error) {
+      reportSyncDiagnostic(
+        "provider-sync/visibility-cleanup",
+        `route ${route}: pruned ids could not be cleaned from visibility preferences \u2014 ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  function writeDiscoveredCache(outcome, hints) {
+    if (outcome.live === void 0) return;
+    if (outcome.live.length === 0) {
+      logger.warn(`route ${outcome.route}: endpoint advertised no models \u2014 discovered cache kept`);
+      return;
+    }
+    try {
+      const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route];
+      const record = mergeDiscoveredRoute(
+        previous,
+        outcome.baseURL,
+        mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
+        Date.now()
+      );
+      if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
+        logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`);
+      } else {
+        try {
+          writeDiscoveredRoute(outcome.route, record);
+          logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`);
+        } catch (error) {
+          logger.warn(`route ${outcome.route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    } catch (error) {
+      logger.warn(describeSyncFailure(outcome.route, error));
+    }
+  }
+  async function syncOnce() {
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    const overlays = loadOverlays();
+    const hints = loadHints();
     const settings = ctx.get("settings");
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
       return;
     }
-    const section = sectionOf(settings, LLM_NS);
+    const llmProviders = sectionOf(settings, LLM_NS)?.providers;
     const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers;
-    if ((section === void 0 || section.providers === void 0) && commandCode === void 0) {
+    if (llmProviders === void 0 && commandCode === void 0) {
       logger.warn("llm-pi-ai section absent \u2014 nothing to sync");
       return;
     }
-    const llmProviders = section?.providers ?? {};
-    const credentials = ctx.get("credentials");
-    const revisionOf = (ns) => settings.describe().find((entry) => entry.ns === ns)?.revision;
-    const persistRouteModels = async (ns, route, profile, live2, source, overlay) => {
-      const merge = live2 === void 0 ? void 0 : mergeConfiguredModels(route, profile.models, live2, capacities, hints, routeProviderMap);
-      const merged = merge?.models ?? profile.models ?? [];
-      const models = applyCatalogOverlay(merged, overlay);
-      const before = stringifyComparable(profile.models);
-      const after = stringifyComparable(models);
-      if (before === after) {
-        logger.debug(`route ${route}: ${live2 === void 0 ? "overlay" : `${String(live2.length)} ${source} models`}, no change`);
-      } else {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            await settings.mutate(ns, [{ op: "set", path: ["providers", route, "models"], value: models }], revisionOf(ns));
-            logger.info(live2 === void 0 ? `route ${route}: catalog overlay applied \u2014 ${String(models.length)} models` : `route ${route}: catalog merged & enriched from models.dev \u2014 ${String(live2.length)} ${source} models (${String(merge?.unadvertised.length ?? 0)} configured kept)`);
-            break;
-          } catch (error) {
-            const conflict = error;
-            if (conflict?.code === "SETTINGS_CONFLICT" && attempt < 2) continue;
-            throw error;
-          }
-        }
-      }
-      return merge?.unadvertised ?? [];
-    };
-    const routes = [.../* @__PURE__ */ new Set([...Object.keys(llmProviders), ...Object.keys(endpoints)])];
+    const routes = [.../* @__PURE__ */ new Set([
+      ...Object.keys(llmProviders ?? {}),
+      ...Object.keys(commandCode ?? {}),
+      ...Object.keys(endpoints)
+    ])];
     const unadvertised = [];
+    const stats = { routes: 0, pruned: 0, deprecated: 0, degraded: 0 };
     for (const route of routes) {
-      const profile = llmProviders[route];
-      const baseURL = endpoints[route] ?? profile?.baseURL;
-      if (baseURL === void 0) {
-        logger.debug(`route ${route}: no baseURL and no known endpoint \u2014 skipped`);
-        continue;
-      }
-      const catalogRoute = isCatalogRoute(route);
-      if (profile === void 0 && catalogRoute) continue;
-      const overlay = overlays.routes?.[route];
-      let key;
-      if (profile?.keyless === true) {
-        key = void 0;
-      } else if (profile?.apiKeyEnv !== void 0) {
-        const hit = credentials === void 0 ? void 0 : await credentials.resolve(profile.apiKeyEnv);
-        key = hit?.value;
-      } else if (profile?.pool?.identities !== void 0 && profile.pool.identities.length > 0) {
-        const primary = [...profile.pool.identities].filter((identity) => identity.enabled !== false).sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))[0];
-        if (primary !== void 0) {
-          const hit = credentials === void 0 ? void 0 : await credentials.resolve(primary.credentialRef);
-          key = hit?.value;
-        }
-      }
-      let live2;
-      try {
-        live2 = await fetchModels(baseURL, key, profile?.api);
-      } catch (error) {
-        logger.warn(describeSyncFailure(route, error));
-      }
-      if (profile !== void 0 && (live2 !== void 0 || overlay !== void 0 && (profile.models?.length ?? 0) > 0)) {
+      const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings });
+      if (outcome === void 0) continue;
+      stats.routes += 1;
+      stats.pruned += outcome.report.removed.length;
+      stats.deprecated += outcome.report.deprecated.length;
+      if (outcome.report.degraded) stats.degraded += 1;
+      unadvertised.push(...outcome.unadvertised.map((id) => `${route}/${id}`));
+      if (outcome.hasProfile && (outcome.live !== void 0 || outcome.overlay !== void 0 && outcome.configured.length > 0)) {
         try {
-          const kept = await persistRouteModels(LLM_NS, route, profile, live2, live2 === void 0 ? "overlay" : "live", overlay);
-          unadvertised.push(...kept.map((id) => `${route}/${id}`));
+          await persistRouteModels(settings, outcome);
+          await cleanupPrunedReferences(settings, route, outcome.cleanup);
         } catch (error) {
-          logger.warn(describeSyncFailure(route, error));
+          logger.warn(describeSyncFailure(route, error, outcome.ns));
         }
       }
-      if (live2 !== void 0 && !catalogRoute) {
-        try {
-          const previous = readDiscoveredFile(discoveredCachePath()).routes[route];
-          const record = mergeDiscoveredRoute(
-            previous,
-            baseURL,
-            mergeDiscoveredModels(route, live2, capacities, hints, routeProviderMap),
-            Date.now()
-          );
-          if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
-            logger.debug(`route ${route}: ${String(live2.length)} discovered models, no change`);
-          } else {
-            try {
-              writeDiscoveredRoute(route, record);
-              logger.info(`route ${route}: discovered ${String(live2.length)} models from ${baseURL} (source: discovered)`);
-            } catch (error) {
-              logger.warn(`route ${route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }
-        } catch (error) {
-          logger.warn(describeSyncFailure(route, error));
-        }
-      }
+      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints);
     }
-    if (commandCode !== void 0) {
-      let catalog;
-      for (const route of Object.keys(commandCode)) {
-        const profile = commandCode[route];
-        if (profile === void 0) continue;
-        try {
-          catalog ??= loadCommandCodeCatalog();
-          const kept = await persistRouteModels(COMMANDCODE_NS, route, profile, catalog, "catalog", void 0);
-          unadvertised.push(...kept.map((id) => `${route}/${id}`));
-        } catch (error) {
-          logger.warn(describeSyncFailure(route, error, COMMANDCODE_NS));
-        }
-      }
+    if (stats.pruned > 0 || stats.deprecated > 0 || stats.degraded > 0) {
+      reportSyncDiagnostic(
+        "provider-sync/pass-summary",
+        `pass summary over ${String(stats.routes)} route(s): ${String(stats.pruned)} pruned, ${String(stats.deprecated)} deprecated, ${String(stats.degraded)} degraded`
+      );
     }
     if (unadvertised.length > 0) {
       process.stderr.write(
-        `[enpoi-provider-sync] ${String(unadvertised.length)} configured model(s) not advertised by their listing source this pass \u2014 kept with source: "configured": ${unadvertised.join(", ")}
+        `[enpoi-provider-sync] ${String(unadvertised.length)} stored model(s) not advertised by their listing source this pass \u2014 kept (protected, in grace, referenced, or removals degraded): ${unadvertised.join(", ")}
 `
       );
     }
   }
+  async function refreshRouteForClient(route) {
+    const settings = ctx.get("settings");
+    if (settings === void 0) throw new Error("settings seam absent \u2014 cannot refresh a route");
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    const overlays = loadOverlays();
+    const hints = loadHints();
+    const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings });
+    if (outcome === void 0) throw new Error(`route "${route}" is not configured (no profile and no known endpoint)`);
+    await cleanupPrunedReferences(settings, route, outcome.cleanup);
+    if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints);
+    return {
+      route,
+      models: outcome.models,
+      removed: outcome.report.removed,
+      deprecated: outcome.report.deprecated,
+      degraded: outcome.report.degraded,
+      ...outcome.report.degradedReason === void 0 ? {} : { degradedReason: outcome.report.degradedReason },
+      source: outcome.report.source,
+      authority: outcome.report.authority,
+      fetchedAt: Date.now()
+    };
+  }
+  void Promise.resolve().then(() => (init_remote(), remote_exports)).then(({ mountProviderSyncRemote: mountProviderSyncRemote2 }) => {
+    try {
+      mountProviderSyncRemote2(ctx, refreshRouteForClient);
+    } catch (error) {
+      process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}
+`);
+    }
+  }).catch((error) => {
+    process.stderr.write(`[enpoi-provider-sync] providerSync remote import failed: ${String(error)}
+`);
+  });
   const delay = value(config.syncDelayMs) ?? 2e3;
   const interval = value(config.intervalMs) ?? 36e5;
   ctx.effect(() => {
@@ -78542,12 +79014,15 @@ function apply(ctx, config) {
   }, "enpoi-provider-sync schedule");
 }
 export {
+  CATALOG_FRESH_MS,
   Config,
   DEFAULT_MODELS_DEV_URL,
   DEFAULT_ROUTE_PROVIDER_MAP,
+  ENDPOINT_ONLY_GRACE_MS,
   apply,
   applyCatalogOverlay,
   capabilityHintsOverridePath,
+  catalogCacheAgeMs,
   catalogOverlaysPath,
   commandCodeCatalogPath,
   describeSyncFailure,
@@ -78568,6 +79043,9 @@ export {
   name,
   normalizeListingEntry,
   osCacheDir,
+  planRouteModels,
+  pruneRouteReferences,
+  referencedRouteModels,
   refreshModelsDevOnline,
   resolveDshHome,
   writeDiscoveredRoute

@@ -62,6 +62,14 @@ describe('model row tags', () => {
     }
   })
 
+  it('marks a model the sync kept only because something references it', () => {
+    const container = renderRow({ id: 'm', deprecated: true, source: 'pinned-in-use' })
+    const badge = container.querySelector('[data-model-badge="deprecated"]')
+    expect(badge?.textContent).toBe(en.modelDeprecatedBadge)
+    expect(badge?.getAttribute('title')).toBe(en.modelDeprecatedHint)
+    expect(renderRow({ id: 'm', deprecated: false }).querySelector('[data-model-badge="deprecated"]')).toBeNull()
+  })
+
   it('shows both markers together and neither on a plain row', () => {
     const both = renderRow({
       id: 'm',
