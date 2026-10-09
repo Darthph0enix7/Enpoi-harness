@@ -1,19 +1,25 @@
 // @vitest-environment jsdom
 import type { ChatSnapshot, UseChat } from '@deepseek-ai/dsh-client-ui-chat/client'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { ApprovalCommand, commandOf, programOf } from '../src/client/chat/ApprovalCommand.tsx'
+import { en } from '../src/client/locale.ts'
+
+type ApprovalCommandProps = Parameters<typeof ApprovalCommand>[0]
+
+const t: ApprovalCommandProps['t'] = makeTranslate(en, commonEn)
 
 function props(
   nodes: readonly unknown[],
   callId = 'call-1',
-): PropsRuntime<'conversation.approval.detail'> {
+): ApprovalCommandProps {
   const snapshot = {
     nodes: { values: () => nodes },
   } as unknown as ChatSnapshot
   const useChat = ((selector: (value: ChatSnapshot) => unknown) => selector(snapshot)) as UseChat
-  return { callId, useChat } as PropsRuntime<'conversation.approval.detail'>
+  return { callId, useChat, t } as ApprovalCommandProps
 }
 
 describe('commandOf', () => {

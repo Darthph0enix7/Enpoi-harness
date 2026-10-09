@@ -419,11 +419,11 @@ export function Rail({
         })}
       </div>
       <div className={css.railControls}>
-        <Tooltip label="Bottom terminal dock" side="bottom" delayMs={500}>
+        <Tooltip label={t('rail.bottomTerminal')} side="bottom" delayMs={500}>
           <button
             type="button"
             className={css.iconButton}
-            aria-label="Toggle bottom terminal dock"
+            aria-label={t('rail.toggleBottomTerminal')}
             data-sidebar-right-bottom-toggle
             data-enpoi-terminal-bottom-toggle
             onClick={() => {

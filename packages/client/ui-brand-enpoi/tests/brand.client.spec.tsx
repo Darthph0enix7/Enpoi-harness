@@ -6,6 +6,7 @@
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { EnpoiBrandMark, EnpoiBrandName } from '../src/client/Brand.tsx'
+import { brandT } from './brand-i18n.client.ts'
 
 afterEach(cleanup)
 
@@ -26,8 +27,8 @@ describe('EnpoiBrandMark', () => {
 })
 
 describe('EnpoiBrandName', () => {
-  it('renders the Enpoi over Harness wordmark', () => {
-    const view = render(<EnpoiBrandName />)
+  it('renders the Enpoi over Harness wordmark from the dictionary', () => {
+    const view = render(<EnpoiBrandName t={brandT} />)
     expect(view.getByText('Enpoi')).toBeTruthy()
     expect(view.getByText('Harness')).toBeTruthy()
   })

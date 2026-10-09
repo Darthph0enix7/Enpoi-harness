@@ -28,8 +28,8 @@ describe('EnpoiMark', () => {
 })
 
 describe('EnpoiWordmark', () => {
-  it('renders the gradient brand word over the secondary suffix', () => {
-    const view = render(<primitives.EnpoiWordmark />)
+  it('renders the localized primary word over the secondary suffix', () => {
+    const view = render(<primitives.EnpoiWordmark primary="Enpoi" secondary="Harness" />)
     expect(view.getByText('Enpoi')).toBeTruthy()
     expect(view.getByText('Harness')).toBeTruthy()
   })

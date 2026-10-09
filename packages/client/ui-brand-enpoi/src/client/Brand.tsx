@@ -1,5 +1,6 @@
 import type { HeroBrandMarkOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SidebarBrandMarkOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { EnpoiMark, EnpoiWordmark } from '@deepseek-ai/dsh-client-ui-primitives'
 
 type EnpoiBrandMarkProps = Partial<HeroBrandMarkOwnerProps & SidebarBrandMarkOwnerProps>
@@ -15,7 +16,8 @@ export function EnpoiBrandMark(props?: EnpoiBrandMarkProps) {
 
 /**
  * Render the Enpoi Harness wordmark for the sidebar.
+ * @param props.t - the `brandEnpoi` dictionary translate supplying both words.
  */
-export function EnpoiBrandName() {
-  return <EnpoiWordmark />
+export function EnpoiBrandName({ t }: PropsLocale<'brandEnpoi'>) {
+  return <EnpoiWordmark primary={t('brandWordmarkPrimary')} secondary={t('brandWordmarkSecondary')} />
 }

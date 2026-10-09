@@ -19,7 +19,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import clsx from 'clsx'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
-import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   FileTypeIcon, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineMedium, IconCopyOutlineMedium,
   IconDownloadOutlineMedium, IconEllipsisOutlineMedium, IconLinkOutlineMedium, IconListPenOutlineMedium,
@@ -85,11 +85,12 @@ function usePathClipped(
 }
 
 /** The header's path: directories greyed, the final segment in full ink, faded when clipped; click to edit and navigate. */
-function HeaderPath({ pathRef, pathTextRef, path, onNavigate }: {
+function HeaderPath({ pathRef, pathTextRef, path, onNavigate, t }: {
   pathRef: RefObject<HTMLDivElement>
   pathTextRef: RefObject<HTMLSpanElement>
   path: string
   onNavigate?: (newPath: string) => void
+  t: TranslateNS<'sidebarDocumentPreview'>
 }): ReactNode {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(path)
@@ -122,7 +123,7 @@ function HeaderPath({ pathRef, pathTextRef, path, onNavigate }: {
           type="text"
           className={css.pathInput}
           value={draft}
-          aria-label="File path"
+          aria-label={t('path.aria')}
           onChange={(e) => { setDraft(e.target.value) }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
@@ -527,7 +528,7 @@ export function TextPreview({
     return (
       <div className={css.preview} data-textpreview-state="unsupported" data-textpreview-url={tab.contentId}>
         <div className={css.header}>
-          <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} />
+          <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} t={t} />
         </div>
         <div className={css.body} data-textpreview-body>
           <div className={css.empty} data-textpreview-unsupported>
@@ -681,7 +682,7 @@ export function TextPreview({
         </p>
       )}
       <div className={css.header} ref={headerRef} data-textpreview-toolbar>
-        <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} />
+        <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} onNavigate={handleNavigatePath} t={t} />
         {candidates.length > 1
           && (
             <Menu

@@ -373,7 +373,9 @@ export const RevertTray = memo(function RevertTray({
                 </span>
                 {outcomeEntries.length > 0 && (
                   <span className={css.filesCountBadge}>
-                    {outcomeEntries.length} {outcomeEntries.length === 1 ? 'file' : 'files'}
+                    {outcomeEntries.length === 1
+                      ? t('revert.fileCount', { count: outcomeEntries.length })
+                      : t('revert.filesCount', { count: outcomeEntries.length })}
                   </span>
                 )}
               </div>

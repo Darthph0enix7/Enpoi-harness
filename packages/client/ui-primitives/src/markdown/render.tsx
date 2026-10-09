@@ -404,8 +404,8 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
       // has no content yet and took the empty-fence arm above, so `lang`
       // here is final: it can never re-resolve to a different grammar.
       streaming={context.streaming}
-      copyLabel={context.labels?.code?.copyLabel ?? 'Copy'}
-      copiedLabel={context.labels?.code?.copiedLabel ?? 'Copied'}
+      copyLabel={context.labels.code.copyLabel}
+      copiedLabel={context.labels.code.copiedLabel}
       toolbarLabels={context.labels.code.toolbarLabels}
     />
   )
@@ -753,7 +753,7 @@ export function renderFootnoteSection(context: MarkdownRenderContext): ReactNode
   if (items.length === 0) return null
   return (
     <section key="footnotes" data-footnotes className="footnotes">
-      <h2 id="footnote-label" className="sr-only">{context.labels?.footnotes ?? 'Footnotes'}</h2>
+      <h2 id="footnote-label" className="sr-only">{context.labels.footnotes}</h2>
       <ol>{items}</ol>
     </section>
   )

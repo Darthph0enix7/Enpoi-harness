@@ -1,5 +1,5 @@
 /** Chat-owned approval detail resolving a correlated Tool call's command or PTC program. */
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-approval/client'
 import type { ChatNode } from '../contract/chat-nodes.ts'
 import css from './ApprovalCommand.module.css'
@@ -71,7 +71,7 @@ export function programOf(call: ApprovalToolCall | undefined): ApprovalProgram |
  * @param props - Approval identity and Session-standard Chat selector hook.
  * @returns command text, a program detail block, or null when the call carries neither.
  */
-export function ApprovalCommand({ callId, useChat }: PropsRuntime<'conversation.approval.detail'>) {
+export function ApprovalCommand({ callId, useChat, t }: PropsRuntime<'conversation.approval.detail'> & PropsLocale<'chat'>) {
   const root = useChat((snapshot) => {
     for (const node of snapshot.nodes.values()) {
       const candidate = node.kind === 'tool-call' ? (node as ChatNode<'tool-call'>).data.root : undefined
@@ -91,7 +91,7 @@ export function ApprovalCommand({ callId, useChat }: PropsRuntime<'conversation.
       <pre className={css.source} data-approval-program>{program.source}</pre>
       {program.tools.length > 0 && (
         <div className={css.tools}>
-          <span className={css.toolsLabel}>Tools referenced in the program:</span>
+          <span className={css.toolsLabel}>{t('approval.toolsReferenced')}</span>
           {program.tools.map(tool => <code key={tool} className={css.toolPill}>{tool}</code>)}
         </div>
       )}

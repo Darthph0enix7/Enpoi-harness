@@ -91,7 +91,7 @@ describe('ModelSelect groups section', () => {
     fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
 
     // The section header answers the same search box as models.
-    fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'stable' } })
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: 'stable' } })
     const row = await screen.findByText('Stable')
     expect(screen.getByText('模型组')).toBeTruthy()
     fireEvent.click(row)
@@ -138,7 +138,7 @@ describe('ModelSelect groups section', () => {
       t={t}
     />)
     fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
-    fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'boosted' } })
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: 'boosted' } })
     fireEvent.click(await screen.findByText('Boosted'))
 
     // The runtime applies the head link's effort to this route; the recorded

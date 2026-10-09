@@ -315,10 +315,7 @@ export function ModelSelect(
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
   const effectiveEffort = activeSel?.reasoningEffort ?? reasoning?.defaultEffort
-  const rawDefaultEffort = t('effort.providerDefault')
-  const defaultEffortLabel = (rawDefaultEffort && rawDefaultEffort !== 'effort.providerDefault' && !rawDefaultEffort.startsWith('effort.'))
-    ? rawDefaultEffort
-    : 'Default'
+  const defaultEffortLabel = t('effort.providerDefault')
   const effortLabel = reasoning === undefined
     ? undefined
     : effectiveEffort === undefined
@@ -567,7 +564,7 @@ export function ModelSelect(
           ref={searchInputRef}
           className={css.searchInput}
           type="text"
-          placeholder="Search models..."
+          placeholder={t('search.placeholder')}
           value={searchQuery}
           onChange={e => setSearchQuery(e.target.value)}
         />
@@ -665,7 +662,7 @@ export function ModelSelect(
                 <span className={css.groupIcon} style={{ color: '#fbbf24' }}>
                   <IconStar filled />
                 </span>
-                <span className={css.groupTitleText}>Favorites</span>
+                <span className={css.groupTitleText}>{t('group.favorites')}</span>
                 <span className={css.groupBadge}>{filteredFavorites.length}</span>
               </div>
               <span className={clsx(css.groupChevron, !collapsedSet.has('__favorites__') && css.groupChevronExpanded)}>
@@ -692,7 +689,7 @@ export function ModelSelect(
                     >
                       <div className={css.modelRowLeft}>
                         {!q && (
-                          <span className={css.dragHandle} title="Drag to reorder favorite">
+                          <span className={css.dragHandle} title={t('favorite.dragReorder')}>
                             <IconGrip />
                           </span>
                         )}
@@ -703,7 +700,7 @@ export function ModelSelect(
                         <button
                           type="button"
                           className={clsx(css.starBtn, css.starBtnActive)}
-                          title="Remove from favorites"
+                          title={t('favorite.remove')}
                           onClick={(e) => {
                             e.stopPropagation()
                             toggleModelFavorite(fav.provider, fav.model.id)
@@ -736,7 +733,7 @@ export function ModelSelect(
                 <span className={css.groupIcon}>
                   <IconClock />
                 </span>
-                <span className={css.groupTitleText}>Recent</span>
+                <span className={css.groupTitleText}>{t('group.recent')}</span>
                 <span className={css.groupBadge}>{recentItems.length}</span>
               </div>
               <span className={clsx(css.groupChevron, !collapsedSet.has('__recents__') && css.groupChevronExpanded)}>
@@ -766,7 +763,7 @@ export function ModelSelect(
                         <button
                           type="button"
                           className={clsx(css.starBtn, isFav && css.starBtnActive)}
-                          title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                          title={isFav ? t('favorite.remove') : t('favorite.add')}
                           onClick={(e) => {
                             e.stopPropagation()
                             toggleModelFavorite(rec.provider, rec.model.id)
@@ -824,7 +821,7 @@ export function ModelSelect(
                       draggable
                       onDragStart={e => handleProviderDragStart(e, group.id)}
                       onClick={e => e.stopPropagation()}
-                      title="Drag to reorder provider"
+                      title={t('provider.dragReorder')}
                     >
                       <IconGrip />
                     </span>
@@ -868,7 +865,7 @@ export function ModelSelect(
                           <button
                             type="button"
                             className={clsx(css.starBtn, isFav && css.starBtnActive)}
-                            title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+                            title={isFav ? t('favorite.remove') : t('favorite.add')}
                             onClick={(e) => {
                               e.stopPropagation()
                               toggleModelFavorite(group.id, model.id)
@@ -915,7 +912,7 @@ export function ModelSelect(
         {/* Empty search results */}
         {q && revealedHidden.size === 0 &&
           choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
-          <div className={css.emptyState}>No models matching "{searchQuery}"</div>
+          <div className={css.emptyState}>{t('empty.search', { query: searchQuery })}</div>
         )}
       </div>
     </>
@@ -971,7 +968,7 @@ export function ModelSelect(
         <button
           type="button"
           className={clsx(css.effortTrigger, effortOpen && css.effortTriggerActive)}
-          title={`Thinking / Reasoning Effort: ${effortLabel}`}
+          title={t('effort.triggerTitle', { effort: effortLabel })}
           data-effort-trigger
           disabled={locked}
           onClick={() => {

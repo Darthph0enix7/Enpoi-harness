@@ -60,13 +60,24 @@ export function EnpoiMark({ size = 24, className }: IconProps) {
   )
 }
 
+/** Localized words of the Enpoi Harness wordmark. */
+export interface EnpoiWordmarkLabels {
+  /** The gradient primary word ("Enpoi"). */
+  primary: string
+  /** The secondary suffix ("Harness"). */
+  secondary: string
+}
+
 /**
  * Render the Enpoi Harness wordmark: the "Enpoi" gradient over the secondary
  * "Harness". Decorative brand art, so render it inside an aria-hidden identity
- * wrapper.
+ * wrapper; the words arrive as already-localized props (this package owns no
+ * fallback copy).
+ * @param props.primary - the gradient primary word.
+ * @param props.secondary - the secondary suffix.
  * @returns the wordmark element.
  */
-export function EnpoiWordmark() {
+export function EnpoiWordmark({ primary, secondary }: EnpoiWordmarkLabels) {
   return (
     <div
       style={{
@@ -88,7 +99,7 @@ export function EnpoiWordmark() {
           fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}
       >
-        Enpoi
+        {primary}
       </span>
       <span
         style={{
@@ -99,7 +110,7 @@ export function EnpoiWordmark() {
           fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}
       >
-        Harness
+        {secondary}
       </span>
     </div>
   )

@@ -236,7 +236,7 @@ export function apply(ctx: Context): void {
     ctx.slots.inject('sidebar.brand.name', () =>
       ctx.slots.inject('conversation.hero.brand.mark', function* () {
         yield ctx.slots.register({ name: 'sidebar.brand.mark' }, EnpoiBrandMark)
-        yield ctx.slots.register({ name: 'sidebar.brand.name' }, EnpoiBrandName)
+        yield ctx.slots.register({ name: 'sidebar.brand.name', locale: NS }, EnpoiBrandName)
         yield ctx.slots.register({ name: 'conversation.hero.brand.mark' }, EnpoiBrandMark)
       })))
 

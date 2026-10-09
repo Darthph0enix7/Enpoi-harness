@@ -215,7 +215,14 @@ export function SidebarRoot({
                 {renderSlot('sidebar.brand.mark', { size: 24 }, { fallback: <EnpoiMark size={24} /> })}
               </span>
               <span className={css.brandName}>
-                {renderSlot('sidebar.brand.name', {}, { fallback: <EnpoiWordmark /> })}
+                {renderSlot('sidebar.brand.name', {}, {
+                  fallback: (
+                    <EnpoiWordmark
+                      primary={t('brand.wordmarkPrimary')}
+                      secondary={t('brand.wordmarkSecondary')}
+                    />
+                  ),
+                })}
               </span>
             </span>
           )

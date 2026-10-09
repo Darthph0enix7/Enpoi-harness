@@ -27,6 +27,8 @@ export const en = {
 
   // Document identity.
   productTitle: 'Enpoi Harness',
+  brandWordmarkPrimary: 'Enpoi',
+  brandWordmarkSecondary: 'Harness',
 
   // Registered tab labels and guide capsules.
   tabWatchtower: 'Watchtower',
@@ -621,6 +623,8 @@ export const zh: { [Key in keyof typeof en]: string } = {
 
   // Document identity.
   productTitle: 'Enpoi Harness',
+  brandWordmarkPrimary: 'Enpoi',
+  brandWordmarkSecondary: 'Harness',
 
   // Registered tab labels and guide capsules.
   tabWatchtower: '瞭望塔',

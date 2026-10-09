@@ -146,14 +146,14 @@ describe('ModelSelect rules visibility', () => {
     expect(screen.queryByText('hidden by rule: zero-price')).toBeNull()
 
     // An explicit search surfaces the hidden entry with its reason, but it stays unselectable.
-    fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'free' } })
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: 'free' } })
     const hiddenRow = screen.getByText('Free Model')
     expect(screen.getByText('hidden by rule: zero-price')).toBeTruthy()
     fireEvent.click(hiddenRow)
     expect(select).not.toHaveBeenCalled()
 
     // The shown-pin model still selects.
-    fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: '' } })
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: '' } })
     fireEvent.click(screen.getByText('Pinned Model'))
     await waitFor(() => {
       expect(select).toHaveBeenCalledWith({ provider: 'kilo', model: 'pinned-model' })
@@ -178,9 +178,9 @@ describe('ModelSelect rules visibility', () => {
     expect(screen.queryByText('Locally Hidden')).toBeNull()
     // The local pin is manual: even an explicit search does not reveal it, so
     // the search reports no matches rather than explaining a manual hide.
-    fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'local' } })
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: 'local' } })
     expect(screen.queryByText('Locally Hidden')).toBeNull()
-    expect(screen.getByText(/No models matching/)).toBeTruthy()
+    expect(screen.getByText(t('empty.search', { query: 'local' }))).toBeTruthy()
   })
 
   it('keeps the search text and the revealed rows across a decision-map republish', async () => {
@@ -196,7 +196,7 @@ describe('ModelSelect rules visibility', () => {
       t={t}
     />)
     fireEvent.click(screen.getByRole('button', { name: 'Plain Model' }))
-    const search = screen.getByPlaceholderText<HTMLInputElement>('Search models...')
+    const search = screen.getByPlaceholderText<HTMLInputElement>(t('search.placeholder'))
     fireEvent.change(search, { target: { value: 'free' } })
     expect(screen.getByText('Free Model')).toBeTruthy()
 
