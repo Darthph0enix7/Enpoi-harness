@@ -3824,9 +3824,14 @@ print_summary() { # action
   local action="$1" url overlay
   url="$(web_url)"
   overlay="$PROFILE_DIR/device-patches/$(host_short_name)"
+  local action_past
+  case "$action" in
+    update) action_past="updated" ;;
+    *) action_past="${action}ed" ;;
+  esac
   say ""
   say "${C_GREEN}${C_BOLD}╭─────────────────────────────────────────────────────────────╮${C_RESET}"
-  box_row "  ${C_BOLD}Enpoi Harness successfully ${action}ed!${C_RESET}" "${C_GREEN}"
+  box_row "  ${C_BOLD}Enpoi Harness successfully ${action_past}!${C_RESET}" "${C_GREEN}"
   box_row "" "${C_GREEN}"
   box_row "  ${C_BOLD}Version:${C_RESET}   ${VERSION} (${CHANNEL:-stable})" "${C_GREEN}"
   box_row "  ${C_BOLD}Location:${C_RESET}  ${PREFIX}" "${C_GREEN}"
