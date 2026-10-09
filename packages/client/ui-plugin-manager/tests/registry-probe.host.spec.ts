@@ -154,7 +154,7 @@ it.each([
   expect(() => PluginRegistryProbe.Config(config)).toThrow(/registryPingUrls/)
 })
 
-it.each([[[]], [['not-a-url']]] as const)('degrades to null when a directly constructed probe never ran the schema %j', async (registryPingUrls) => {
+it.each([[[]], [['not-a-url']]])('degrades to null when a directly constructed probe never ran the schema %j', async (registryPingUrls) => {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
   // Bypasses PluginRegistryProbe.Config deliberately: schema validation cannot
