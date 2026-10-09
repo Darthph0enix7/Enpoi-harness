@@ -170,6 +170,24 @@ async function main() {
   let lastLogTime = 0
   const isTTY = Boolean(process.stdout.isTTY)
 
+  const progressFile = `${chunkDir}/.progress`
+  const topProgressFile = `${outputFile}.progress`
+
+  function formatProgressBar(pct, currentMB, totalMB, speedMBs) {
+    const width = 12
+    const filled = Math.min(width, Math.max(0, Math.round((pct / 100) * width)))
+    const empty = width - filled
+    const bar = '█'.repeat(filled) + '░'.repeat(empty)
+    return `[${bar}] ${pct}% · ${currentMB}/${totalMB} MB · ${speedMBs.toFixed(1)} MB/s`
+  }
+
+  function writeProgress(text) {
+    try {
+      writeFileSync(progressFile, text)
+      writeFileSync(topProgressFile, text)
+    } catch {}
+  }
+
   function reportProgress(force = false) {
     const now = Date.now()
     if (!force && now - lastLogTime < (isTTY ? 200 : 4000)) return
@@ -180,6 +198,8 @@ async function main() {
     const speedMBs = (totalDownloadedBytes / (1024 * 1024)) / elapsedSec
     const remainingBytes = Math.max(0, totalBytes - totalDownloadedBytes)
     const remainingSec = speedMBs > 0 ? Math.ceil((remainingBytes / (1024 * 1024)) / speedMBs) : 0
+
+    writeProgress(formatProgressBar(pct, currentMB, totalMB, speedMBs))
 
     const msg = `[download] ${pct}% (${currentMB}/${totalMB} MB, ${speedMBs.toFixed(1)} MB/s, ~${remainingSec}s remaining)`
     if (isTTY) {
@@ -281,6 +301,7 @@ async function main() {
   }
 
   console.log(`[download] assembling ${concurrency} parts into ${outputFile}...`)
+  writeProgress('[assembling] verifying SHA-256...')
   const downloadFile = `${outputFile}.download`
   const outStream = createWriteStream(downloadFile)
   const hash = createHash('sha256')
@@ -307,6 +328,7 @@ async function main() {
     if (actualSha256 !== expectedSha256.toLowerCase()) {
       rmSync(downloadFile, { force: true })
       rmSync(chunkDir, { recursive: true, force: true })
+      try { rmSync(topProgressFile, { force: true }) } catch {}
       console.error(`[download] SHA-256 verification failed! Expected: ${expectedSha256}, actual: ${actualSha256}`)
       process.exit(3)
     }
@@ -315,6 +337,7 @@ async function main() {
 
   renameSync(downloadFile, outputFile)
   rmSync(chunkDir, { recursive: true, force: true })
+  try { rmSync(topProgressFile, { force: true }) } catch {}
   console.log(`[download] successfully finished: ${outputFile} (${totalMB} MB)`)
   process.exit(0)
 }
