@@ -1000,6 +1000,20 @@ describe('download resilience', () => {
     // The stall-aware options also guard the source-archive fetch.
     expect(install).toMatch(/Downloading release archive"[\s\S]{0,200}--speed-time 60/)
   })
+
+  it('wires the parallel chunk engine with chunk preservation and checksum gating', () => {
+    const install = readFileSync(installSh, 'utf8')
+    expect(install).toContain('resolve_fast_downloader')
+    expect(install).toContain('write_fast_downloader')
+    // Parallel engine runs before single-stream curl fallback
+    const prebuiltBlock = /stage_prebuilt\(\) \{[\s\S]*?\n\}/.exec(install)?.[0] ?? ''
+    expect(prebuiltBlock).toContain('Fetching prebuilt release ($OS-$ARCH, parallel)')
+    expect(prebuiltBlock).toContain('resolve_fast_downloader')
+    // User abort exits 130 cleanly with chunks preserved rather than falling back to source build
+    expect(prebuiltBlock).toContain('exit 130')
+    // Falls back to single-stream curl on Range refusal
+    expect(prebuiltBlock).toContain('falling back to single-stream curl')
+  })
 })
 
 /**
