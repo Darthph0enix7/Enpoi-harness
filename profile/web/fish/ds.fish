@@ -79,7 +79,7 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
 
     # Node for every JS CLI: PATH first, then the installer's version-independent
     # runtime link ($PREFIX/runtime/node/current), then nvm. An explicit
-    # DSH_NODE_VERSION pins one; the descending version sort picks the newest
+    # DSH_NODE_VERSION pins one; the version comparison picks the newest
     # install otherwise, so a Node bump cannot orphan a subcommand behind a
     # stale v-pin. Prints the path; non-zero when no usable Node exists.
     function __ds_resolve_node
@@ -101,20 +101,62 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             # `ls` + `string match`, not a `v*` glob: fish aborts an unmatched
             # glob with a "No matches for wildcard" error, which would leak to
             # the terminal on every host without version-manager installs.
-            for version_dir in (ls -1 "$nvm_root" 2>/dev/null | string match 'v*' | sort -V -r)
+            # Newest wins via the fish-native comparator: BSD/macOS `sort` has
+            # no `-V`, and no portable Node is guaranteed before this branch
+            # resolves one.
+            set -l newest_version ""
+            set -l newest_bin ""
+            for version_dir in (ls -1 "$nvm_root" 2>/dev/null | string match 'v*')
                 set -l candidate "$nvm_root/$version_dir/bin/node"
                 if test -x "$candidate"
-                    printf '%s\n' "$candidate"
-                    return 0
+                    if test -z "$newest_version"; or __ds_version_newer "$version_dir" "$newest_version"
+                        set newest_version "$version_dir"
+                        set newest_bin "$candidate"
+                    end
                 end
+            end
+            if test -n "$newest_bin"
+                printf '%s\n' "$newest_bin"
+                return 0
             end
         end
         return 1
     end
 
-    # Run one JS CLI with the resolved Node: $argv[1] is the script, the rest
-    # are its arguments. $HOME/.local/bin, PATH resolution, and the exit status
-    # match a direct `node <script>` call; only the binary resolution differs.
+    # Whether nvm version directory $argv[1] is strictly newer than $argv[2],
+    # compared numerically component by component (non-numeric suffixes are
+    # stripped). Portable by construction: no `sort -V`, no locale, no Node.
+    function __ds_version_newer -a a b
+        set -l a_parts (string replace -r '^v' '' -- "$a" | string split .)
+        set -l b_parts (string replace -r '^v' '' -- "$b" | string split .)
+        set -l width (count $a_parts)
+        if test (count $b_parts) -gt $width
+            set width (count $b_parts)
+        end
+        for i in (seq $width)
+            set -l av 0
+            set -l bv 0
+            if test $i -le (count $a_parts)
+                set av (string replace -r '[^0-9].*$' '' -- $a_parts[$i])
+            end
+            if test $i -le (count $b_parts)
+                set bv (string replace -r '[^0-9].*$' '' -- $b_parts[$i])
+            end
+            test -n "$av"; or set av 0
+            test -n "$bv"; or set bv 0
+            if test "$av" -gt "$bv"
+                return 0
+            else if test "$av" -lt "$bv"
+                return 1
+            end
+        end
+        return 1
+    end
+
+    # Run one JS CLI with the resolved Node: $argv[1] is the script path or a
+    # Node flag carrying its own program (`-e`), the rest are its arguments.
+    # $HOME/.local/bin, PATH resolution, and the exit status match a direct
+    # `node <script>` call; only the binary resolution differs.
     function __ds_run_node_cli
         set -l script "$argv[1]"
         set -l node_bin (__ds_resolve_node)
@@ -298,7 +340,7 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             echo " Available Agent Presets"
             echo "═══════════════════════════════════════════════════════════════"
             set -l res (__ds_rpc "agentPreset.list")
-            echo "$res" | node -e '
+            echo "$res" | __ds_run_node_cli -e '
 const chunks = []
 process.stdin.on("data", c => chunks.push(c))
 process.stdin.on("end", () => {
@@ -320,7 +362,7 @@ process.stdin.on("end", () => {
             echo " Provider Pool Status: $provider"
             echo "═══════════════════════════════════════════════════════════════"
             set -l res (__ds_rpc "llm.poolStatus" "{\"settingsNs\":\"llm-pi-ai\",\"provider\":\"$provider\"}")
-            echo "$res" | node -e '
+            echo "$res" | __ds_run_node_cli -e '
 const chunks = []
 process.stdin.on("data", c => chunks.push(c))
 process.stdin.on("end", () => {
@@ -386,8 +428,8 @@ process.stdin.on("end", () => {
 
             # 0. Settings: strip device sections → baseline, extract device patch
             if test -f "$HOME/.local/bin/dsh-sync-merge.mjs"
-                node "$HOME/.local/bin/dsh-sync-merge.mjs" strip "$HOME/.dsh/settings.yaml" "$g_dotfiles/settings.yaml" "$sync_local" "$g_dotfiles/settings.yaml"
-                node "$HOME/.local/bin/dsh-sync-merge.mjs" extract "$HOME/.dsh/settings.yaml" "$g_dotfiles/settings.yaml" "$sync_local" "$g_dotfiles/device-patches/$host.yaml"
+                __ds_run_node_cli "$HOME/.local/bin/dsh-sync-merge.mjs" strip "$HOME/.dsh/settings.yaml" "$g_dotfiles/settings.yaml" "$sync_local" "$g_dotfiles/settings.yaml"
+                __ds_run_node_cli "$HOME/.local/bin/dsh-sync-merge.mjs" extract "$HOME/.dsh/settings.yaml" "$g_dotfiles/settings.yaml" "$sync_local" "$g_dotfiles/device-patches/$host.yaml"
                 echo "  ✔ Settings synced (device sections → device-patches/$host.yaml)"
             else
                 echo "  ⚠ dsh-sync-merge.mjs not found — settings.yaml NOT synced"
@@ -402,7 +444,7 @@ process.stdin.on("end", () => {
             # 2. Agent Presets (device-specific ones → device patch)
             set -l device_presets ""
             if test -f "$HOME/.local/bin/dsh-sync-merge.mjs" -a -f "$HOME/.dsh/sync-local.yaml"
-                set device_presets (node "$HOME/.local/bin/dsh-sync-merge.mjs" device-presets "$HOME/.dsh/sync-local.yaml" 2>/dev/null)
+                set device_presets (__ds_run_node_cli "$HOME/.local/bin/dsh-sync-merge.mjs" device-presets "$HOME/.dsh/sync-local.yaml" 2>/dev/null)
             end
             if test -d "$g_dsh_home/.agent-presets"
                 for preset_dir in "$g_dsh_home/.agent-presets"/*/
@@ -634,7 +676,7 @@ case "pull"
                 set sync_local /dev/null
             end
             if test -f "$HOME/.local/bin/dsh-sync-merge.mjs" -a -f "$g_dotfiles/settings.yaml"
-                node "$HOME/.local/bin/dsh-sync-merge.mjs" merge "$g_dotfiles/settings.yaml" "$patch_file" "$sync_local" "$HOME/.dsh/settings.yaml"
+                __ds_run_node_cli "$HOME/.local/bin/dsh-sync-merge.mjs" merge "$g_dotfiles/settings.yaml" "$patch_file" "$sync_local" "$HOME/.dsh/settings.yaml"
                 echo "  ✔ Settings merged (baseline + device-patches/$host.yaml + sync-local)"
             else
                 echo "  ⚠ Merge script or baseline missing — settings.yaml NOT applied"

@@ -30,14 +30,15 @@
  *
  * @module ui-settings-models/route-references
  */
-import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { GroupWriteFailure } from './model-groups.ts'
-import { MAX_GROUP_WRITE_RETRIES, ORCHESTRATION_NS } from './model-groups.ts'
+import { ORCHESTRATION_NS } from './model-groups.ts'
+import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
+import { canonicalizeHiddenMap, withHiddenList } from './hidden-map.ts'
 import { forgetHiddenProvider } from './hidden-models.ts'
 import type { ModelsWire } from './store.ts'
 import { WIZARD_FREE_MODEL, WIZARD_FREE_PROVIDER } from './welcome-wizard.ts'
-import { withWriteTimeout } from './write-timeout.ts'
 import type { en } from './locales.ts'
 
 /** Settings namespace owning the default (main-session) model selection. */
@@ -137,9 +138,12 @@ export function buildOrchestrationPlan(document: unknown, removedProvider: strin
     rewritten.push('uiPreferences.favorites: pruned')
   }
   const hidden = recordOf(prefs['hiddenModels'])
-  if (Object.hasOwn(hidden, removedProvider)) {
-    const { [removedProvider]: _removed, ...rest } = hidden
-    ops.push({ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: rest as JsonValue })
+  const canonicalHidden = canonicalizeHiddenMap(hidden)
+  const prunedHidden = Object.hasOwn(canonicalHidden, removedProvider)
+    ? withHiddenList(canonicalHidden, removedProvider, [])
+    : canonicalHidden
+  if (prunedHidden !== hidden) {
+    ops.push({ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: prunedHidden as JsonValue })
     rewritten.push('uiPreferences.hiddenModels: pruned')
   }
   const order = arrayOf(prefs['providerOrder'])
@@ -196,55 +200,6 @@ export function buildSubagentSelectionOps(value: unknown, removedProvider: strin
   const ops: SettingsPathOpView[] = [{ op: 'set', path: ['allowedModels'], value: kept as JsonValue }]
   if (kept.length === 0 && selection['enabled'] === true) ops.push({ op: 'set', path: ['enabled'], value: false })
   return ops
-}
-
-/** One namespace's freshly planned write. */
-interface NamespacePlan {
-  ops: readonly SettingsPathOpView[]
-  labels: readonly string[]
-}
-
-/** One fenced namespace outcome: the failure, and the labels of the committed plan. */
-interface FencedOutcome {
-  error: GroupWriteFailure | null
-  labels: readonly string[]
-}
-
-/**
- * Run one namespace's plan against the live document with revision fencing and
- * a bounded conflict retry that re-reads and replans each attempt. A namespace
- * with no operations is a no-op and never mutates.
- * @param api - the settings Remote face (describe + mutate).
- * @param ns - the namespace to rewrite.
- * @param plan - builds the operations from one fresh namespace view.
- * @returns the failure, or the labels of the plan that committed.
- */
-async function applyFenced(
-  api: Pick<ModelsWire, 'settings'>,
-  ns: string,
-  plan: (view: SettingsNamespaceView | undefined) => NamespacePlan,
-): Promise<FencedOutcome> {
-  const timeout: FencedOutcome = { error: { code: 'timeout' }, labels: [] }
-  return withWriteTimeout((async (): Promise<FencedOutcome> => {
-    for (let attempt = 0; attempt <= MAX_GROUP_WRITE_RETRIES; attempt++) {
-      const described = await api.settings.describe()
-      if (!described.ok) return { error: { code: 'unavailable', ...messageOf(described.error.message) }, labels: [] }
-      const view = described.value.namespaces.find(candidate => candidate.ns === ns)
-      const planned = plan(view)
-      if (planned.ops.length === 0) return { error: null, labels: [] }
-      const written = await api.settings.mutate(ns, [...planned.ops], view?.revision)
-      if (written.ok) return { error: null, labels: planned.labels }
-      if (written.error.code !== 'settings/conflict') {
-        return { error: { code: 'rejected', ...messageOf(written.error.message) }, labels: [] }
-      }
-    }
-    return { error: { code: 'conflict' }, labels: [] }
-  })(), timeout)
-}
-
-/** Attach a host message only when it carries text. */
-function messageOf(message: string): { message?: string } {
-  return message === '' ? {} : { message }
 }
 
 /** What one route removal cleanup rewrote. */
@@ -352,12 +307,5 @@ export function cleanupFailureText(
   t: ((key: keyof typeof en) => string) | undefined,
   failure: GroupWriteFailure,
 ): string {
-  if (failure.message !== undefined && failure.message !== '') return failure.message
-  if (t === undefined) return failure.code
-  switch (failure.code) {
-    case 'unavailable': return t('cleanupUnavailable')
-    case 'conflict': return t('cleanupConflict')
-    case 'timeout': return t('cleanupTimeout')
-    case 'rejected': return t('cleanupRejected')
-  }
+  return fencedFailureText(t, failure)
 }

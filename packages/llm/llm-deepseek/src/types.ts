@@ -73,6 +73,10 @@ export interface DeepSeekConnectionOptions {
   inlineImageOffloadByteQuantum: number
   /** Image-count removal step after the count bound is exceeded. */
   imageOffloadCountQuantum: number
+  /** Total-pixel budget for a catalog model declaring `imagePixelBudget: low`. */
+  lowDetailImagePixelBudget: number
+  /** Provider per-side limit applied to every request image. */
+  requestImageMaxDimension: number
   /** Maximum duration of one request-image Files API resolution. */
   filesApiTimeoutMs: number
   /** Upload expiry, refresh, and quota-recovery policy. */

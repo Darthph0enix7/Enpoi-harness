@@ -30,6 +30,20 @@ export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 2 * 1024 * 1024
  */
 export const REQUEST_IMAGE_MAX_DIMENSION = 4096
 
+/** Deployment-varying bounds one route applies to every request image. */
+export interface RequestImageLimits {
+  /** Total-pixel budget for a catalog model declaring `imagePixelBudget: low`. */
+  readonly lowDetailImagePixelBudget: number
+  /** Provider per-side limit applied to every request image. */
+  readonly requestImageMaxDimension: number
+}
+
+/** Shipped request-image bounds; callers without resolved connection facts get these. */
+export const DEFAULT_REQUEST_IMAGE_LIMITS: RequestImageLimits = {
+  lowDetailImagePixelBudget: DEFAULT_LOW_DETAIL_IMAGE_PIXEL_BUDGET,
+  requestImageMaxDimension: REQUEST_IMAGE_MAX_DIMENSION,
+}
+
 /**
  * Resolve the encoded-byte target one DeepSeek model route applies to every request image.
  * @param model - Advertised model route and its optional image overrides.
@@ -47,19 +61,21 @@ export function resolveRequestImageMaxBytes(model: DeepSeekCatalogModel): number
  * encoded-byte target. Small images are never enlarged.
  * @param model - Advertised model route and its optional image overrides.
  * @param source - intrinsic dimensions of the normalized attachment.
+ * @param limits - the route's resolved request-image bounds; omission keeps the shipped defaults.
  * @returns Complete request dimensions and encoded-byte target.
  * @internal
  */
 export function resolveRequestImageTarget(
   model: DeepSeekCatalogModel,
   source: Pick<ImageAttachmentRef, 'width' | 'height'>,
+  limits: RequestImageLimits = DEFAULT_REQUEST_IMAGE_LIMITS,
 ): ImageRequestTarget {
-  const budget = model.imagePixelBudget === 'low' ? DEFAULT_LOW_DETAIL_IMAGE_PIXEL_BUDGET : model.imagePixelBudget
+  const budget = model.imagePixelBudget === 'low' ? limits.lowDetailImagePixelBudget : model.imagePixelBudget
   const projected = budget === undefined
     ? deepSeekRequestImageDimensions(source.width, source.height)
     : requestImageDimensions(source.width, source.height, budget)
-  const capped = Math.max(projected.width, projected.height) > REQUEST_IMAGE_MAX_DIMENSION
-    ? longEdgeDimensions(source.width, source.height, REQUEST_IMAGE_MAX_DIMENSION)
+  const capped = Math.max(projected.width, projected.height) > limits.requestImageMaxDimension
+    ? longEdgeDimensions(source.width, source.height, limits.requestImageMaxDimension)
     : projected
   return { ...capped, maxBytes: resolveRequestImageMaxBytes(model) }
 }
@@ -101,7 +117,7 @@ export function deepSeekImageRequestPricing(
       if (offloaded === true) {
         return { visualTokens: 0, text: offloadedImageText(ref, resolveAccess?.(ref)) }
       }
-      const target = resolveRequestImageTarget(catalogModel, ref)
+      const target = resolveRequestImageTarget(catalogModel, ref, connection)
       return {
         visualTokens: deepSeekImageTokens(target.width, target.height),
         text: requestImageHandleText(ref, target, resolveAccess?.(ref)),

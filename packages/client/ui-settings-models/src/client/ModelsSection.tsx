@@ -16,6 +16,7 @@
 
 import { useState, useMemo, useEffect } from 'react'
 import type { ReactNode } from 'react'
+import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import { Button, IconPlusOutlineRegular, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the model namespace merge for the shared picker's copy seat.
@@ -27,6 +28,7 @@ import { AddProviderModal } from './AddProviderModal.tsx'
 import { ModelGroupsRow } from './ModelGroupsRow.tsx'
 import { ORCHESTRATION_NS } from './model-groups.ts'
 import { cleanupFailureText, cleanupRemovedRoute } from './route-references.ts'
+import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, providerKeyConfigured, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
@@ -213,45 +215,60 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           return
         }
       } else {
-        // A shipped route addresses the whole section: its removal is the
-        // namespace's own `disabled` flag, and its credential may be shared with
-        // another route (the fork's llm-pi-ai deepseek profile names the same
-        // DEEPSEEK_API_KEY), so a route removal never unsets the credential.
+        // 1. Reference cleanup runs BEFORE the route leaves settings. Once the
+        //    profile is unset the route vanishes from this page and a failed
+        //    cleanup could never be retried; a failure here leaves the route
+        //    alive and the dialog up. Trade-off: a route removal that fails
+        //    after a committed cleanup leaves the references reset while the
+        //    route still exists — the retry re-runs the idempotent cleanup.
+        const cleanup = await cleanupRemovedRoute(api, deleteTarget.entry.provider)
+        if (cleanup.error !== null) {
+          setDeleteError(t('deleteCleanupFailed', {
+            provider: providerTargetLabel(deleteTarget.entry),
+            reason: cleanupFailureText(t, cleanup.error),
+          }))
+          setDeleting(false)
+          await controller.load()
+          return
+        }
+
+        // 2. Remove the route with one fenced write. A shipped route
+        //    addresses the whole section: its removal is the namespace's own
+        //    `disabled` flag. A profile route unsets its settings path.
         const shipped = deleteTarget.entry.settingsPath.length === 0
+        const outcome = await applyFenced(api, deleteTarget.entry.settingsNs, () => {
+          const ops: SettingsPathOpView[] = shipped
+            ? [{ op: 'set', path: ['disabled'], value: true }]
+            : [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }]
+          return { ops }
+        })
+        if (outcome.error !== null) {
+          setDeleteError(t('deleteRouteFailed', {
+            provider: providerTargetLabel(deleteTarget.entry),
+            reason: fencedFailureText(t, outcome.error),
+          }))
+          setDeleting(false)
+          await controller.load()
+          return
+        }
+
+        // 3. The credential goes last and its failure never aborts: the route
+        //    is already gone, so the dialog reports the leftover instead of
+        //    pretending the removal did not happen. Retrying runs the
+        //    idempotent cleanup and route unset again, then retries the
+        //    credential. A shipped route never unsets a shared credential.
         if (!shipped && deleteTarget.apiKeyEnv) {
           const credRes = await api.credentials.unset(deleteTarget.apiKeyEnv)
           if (!credRes.ok) {
-            setDeleteError(credRes.error.message)
+            setDeleteError(t('deleteCredentialFailed', {
+              provider: providerTargetLabel(deleteTarget.entry),
+              reason: credRes.error.message,
+            }))
             setDeleting(false)
+            await controller.load()
             return
           }
         }
-        const res = await api.settings.mutate(
-          deleteTarget.entry.settingsNs,
-          shipped
-            ? [{ op: 'set', path: ['disabled'], value: true }]
-            : [{ op: 'unset', path: [...deleteTarget.entry.settingsPath] }],
-          undefined,
-        )
-        if (!res.ok) {
-          setDeleteError(res.error.message)
-          setDeleting(false)
-          return
-        }
-      }
-      // The route is gone; reset every operator reference that named it. Done
-      // after the removal so a refused delete never rewrites selections for a
-      // route that still exists. A failed cleanup keeps the dialog up with the
-      // reason instead of leaving dangling selections silently.
-      const cleanup = await cleanupRemovedRoute(api, deleteTarget.entry.provider)
-      if (cleanup.error !== null) {
-        setDeleteError(t('deleteCleanupFailed', {
-          provider: providerTargetLabel(deleteTarget.entry),
-          reason: cleanupFailureText(t, cleanup.error),
-        }))
-        setDeleting(false)
-        await controller.load()
-        return
       }
       setDeleteTarget(null)
       await controller.load()
@@ -521,40 +538,54 @@ export function needsSetup(row: ProviderRow | undefined, readOnly: boolean): boo
   return !readOnly && !row?.configured
 }
 
-/** Helper to remove a provider route from settings. */
+/**
+ * Helper to remove a provider route from settings. The order is the delete
+ * dialog's: reference cleanup first (a route that leaves settings vanishes
+ * from the page, so a failed cleanup could never be retried), then the fenced
+ * route removal, then the credential. A credential failure does not abort —
+ * the route is already gone, and the returned text says so. A route removal
+ * failure after a committed cleanup leaves references reset while the route
+ * exists; the retry re-runs the idempotent cleanup.
+ * @param face - settings + credentials Remote faces and copy.
+ * @param _controller - unused; kept for the existing call shape.
+ * @param target - the profile address, optional credential reference, route id.
+ * @returns null once removed (a leftover credential still returns its text), or the failure text.
+ */
 export async function removeProviderProfile(
-  face: { api: Pick<ModelsWire, 'settings' | 'credentials'>; t?: (key: keyof typeof en) => string },
+  face: { api: Pick<ModelsWire, 'settings' | 'credentials'>; t?: (key: keyof typeof en, params?: Record<string, unknown>) => string },
   _controller: ModelsSettingsStore,
   target: { settingsNs: string; settingsPath: string[]; credentialRef?: string; provider?: string },
 ): Promise<string | null> {
-  // An empty settings path means the shipped route's address is its whole
-  // namespace: removal is the namespace's own `disabled` flag, and a
-  // credential the route names may be shared with another profile that has to
-  // keep working, so it stays.
-  const shipped = target.settingsPath.length === 0
-  if (!shipped && target.credentialRef) {
-    const credRes = await face.api.credentials.unset(target.credentialRef)
-    if (!credRes.ok && credRes.error) {
-      return credRes.error.message
-    }
-  }
-
-  const settingsRes = await face.api.settings.mutate(
-    target.settingsNs,
-    shipped
-      ? [{ op: 'set', path: ['disabled'], value: true }]
-      : [{ op: 'unset', path: target.settingsPath }],
-    undefined,
-  )
-  if (!settingsRes.ok) {
-    return settingsRes.error.message
-  }
-  // The profile path ends in the route id by construction; an explicit provider
-  // wins for a shipped namespace whose address carries no id.
+  // The profile path ends in the route id by construction; an explicit
+  // provider wins for a shipped namespace whose address carries no id.
   const removedProvider = target.provider ?? target.settingsPath[target.settingsPath.length - 1]
   if (removedProvider !== undefined && removedProvider !== '') {
     const cleanup = await cleanupRemovedRoute(face.api, removedProvider)
     if (cleanup.error !== null) return cleanupFailureText(face.t, cleanup.error)
+  }
+
+  // An empty settings path means the shipped route's address is its whole
+  // namespace: removal is the namespace's own `disabled` flag.
+  const shipped = target.settingsPath.length === 0
+  const outcome = await applyFenced(face.api, target.settingsNs, () => {
+    const ops: SettingsPathOpView[] = shipped
+      ? [{ op: 'set', path: ['disabled'], value: true }]
+      : [{ op: 'unset', path: target.settingsPath }]
+    return { ops }
+  })
+  if (outcome.error !== null) return fencedFailureText(face.t, outcome.error)
+
+  // The credential goes last and its failure never aborts: the route is gone,
+  // and the returned text reports the leftover so the caller does not read it
+  // as an untouched route.
+  if (!shipped && target.credentialRef) {
+    const credRes = await face.api.credentials.unset(target.credentialRef)
+    if (!credRes.ok && credRes.error) {
+      return face.t?.('deleteCredentialFailed', {
+        provider: removedProvider ?? target.settingsNs,
+        reason: credRes.error.message,
+      }) ?? credRes.error.message
+    }
   }
   return null
 }

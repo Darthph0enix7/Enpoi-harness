@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import type { LlmDiscoveredModel } from '@deepseek-ai/dsh-llm'
+import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { AddProviderModal } from '../src/client/AddProviderModal.tsx'
 import { providerPreset } from '../src/client/provider-templates.ts'
 import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
@@ -19,7 +20,14 @@ function discoveryRefused(message: string): RemoteError<'llm/model-discovery-rej
 
 function wire(discoverModels: ReturnType<typeof vi.fn>, mutate: ReturnType<typeof vi.fn>): ModelsWire {
   return {
-    settings: { describe: vi.fn(), update: vi.fn(), replace: vi.fn(), mutate },
+    settings: {
+      // The create drafts do not read a fresh view; the describe only supplies
+      // the fence, which is absent for an unregistered namespace.
+      describe: vi.fn(async () => ({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [] } })),
+      update: vi.fn(),
+      replace: vi.fn(),
+      mutate,
+    },
     // eslint-disable-next-line @stylistic/max-len -- single-line credentials fixture
     credentials: { describe: vi.fn(async () => ({ ok: true as const, value: {} })), set: vi.fn(async () => ({ ok: true as const, value: undefined })), unset: vi.fn() },
     llm: {
@@ -501,4 +509,53 @@ it('honors a keyless override for a preset that ships with a key reference', () 
   expect(providerPreset('openai')?.keyless).toBeUndefined()
   expect(screen.queryByText(en.addNeedsKeyHint)).toBeNull()
   expect(screen.getByPlaceholderText(en.keylessApiKeyPlaceholder)).toBeTruthy()
+})
+
+it('re-applies the create draft after a conflict and writes the fresh revision', async () => {
+  const conflict = {
+    ok: false as const,
+    error: new RemoteError('settings/conflict', 'stale', { ns: 'llm-pi-ai', expected: 1, actual: 2 }),
+  }
+  const mutate = vi.fn()
+    .mockResolvedValueOnce(conflict)
+    .mockResolvedValue({ ok: true as const, value: {} })
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({ ok: true as const, value: [] }))
+  const onClose = vi.fn()
+  const api = wire(discoverModels, mutate)
+  const namespace = (revision: number): SettingsNamespaceView => ({
+    ns: 'llm-pi-ai', schema: {}, value: {}, autoGenerate: true, applies: 'live', secrets: [], revision,
+  })
+  vi.mocked(api.settings.describe)
+    .mockResolvedValueOnce({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [namespace(1)] } })
+    .mockResolvedValue({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [namespace(2)] } })
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={api}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(mutate).toHaveBeenCalledTimes(2)
+  // The refused attempt and the retry carry the moving revision; the draft
+  // profile is rebuilt on both attempts.
+  expect(mutate.mock.calls.map(call => call[2])).toEqual([1, 2])
+  expect(mutate.mock.calls[0]![1]).toEqual(mutate.mock.calls[1]![1])
+  expect(mutate.mock.calls[1]![1]).toEqual([{
+    op: 'set',
+    path: ['providers', 'provider'],
+    value: {
+      displayName: 'New Provider',
+      api: 'openai-completions',
+      baseURL: 'https://api.example/v1',
+      models: [{ id: 'auto' }],
+    },
+  }])
 })

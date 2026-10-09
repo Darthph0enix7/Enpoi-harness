@@ -42,7 +42,7 @@ Set `compression: 'gzip'` to wrap eligible socket-backed responses without chang
 
 ### Registering routes
 
-`register(route)` adds a named `exact` or `prefix` HTTP route, `registerUpgrade(route)` adds an upgrade route for an exact pathname, and both return a disposer that removes the registration. A duplicate path within either table throws — route patterns are a composition-level contract, so a collision is a misconfiguration. HTTP matching is exact over the whole table, then longest prefix, then the fallback handler; upgrades match exactly and unmatched connections are closed.
+`register(route)` adds a named `exact` or `prefix` HTTP route, `registerUpgrade(route)` adds an upgrade route for an exact pathname, and both return a disposer that removes the registration. A duplicate path within either table throws — route patterns are a composition-level contract, so a collision is a misconfiguration. HTTP matching is exact over the whole table, then longest prefix, then the fallback handler; upgrades match exactly and unmatched connections are closed. The duplicate-route, duplicate-upgrade, and double-fallback messages render in the host locale — `DSH_LOCALE` wins, then `LC_ALL`/`LC_MESSAGES`/`LANG`, falling back to `en` — with the zh/en dictionaries in [`src/locales.ts`](src/locales.ts).
 
 ### The fallback seat
 

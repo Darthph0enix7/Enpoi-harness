@@ -292,7 +292,10 @@ const DEFAULT_SAVE_DEBOUNCE_MS = 500
 /**
  * The pool engine. One instance per plugin mount; all methods are safe to
  * call concurrently (Node's single thread serialises the synchronous state
- * transitions; writes are debounced and atomic).
+ * transitions; writes are debounced, serialized per state file, and atomic).
+ * State files assume one harness process per state directory: the per-file
+ * write queue below keeps this process's concurrent flushes from racing their
+ * renames, while two processes writing one file still end last-writer-wins.
  */
 export class PoolEngine {
   readonly #stateDir: string
@@ -307,6 +310,8 @@ export class PoolEngine {
   readonly #saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Providers whose state changed since their last successful write. */
   readonly #dirty = new Set<string>()
+  /** Tail of the serialized write chain per state file; each new write queues behind it. */
+  readonly #writeChains = new Map<string, Promise<void>>()
 
   /** Round-robin cursor per `provider:model` for the `balanced` strategy.
    *  In-memory only: a restart restarts rotation at the first identity, which
@@ -514,7 +519,7 @@ export class PoolEngine {
         clearTimeout(timer)
         this.#saveTimers.delete(provider)
       }
-      await this.#writeNow(provider)
+      await this.#enqueueWrite(provider)
     }
   }
 
@@ -627,7 +632,7 @@ export class PoolEngine {
     if (this.#saveTimers.has(provider)) return
     const timer = setTimeout(() => {
       this.#saveTimers.delete(provider)
-      void this.#writeNow(provider)
+      void this.#enqueueWrite(provider)
     }, this.#saveDebounceMs)
     this.#saveTimers.set(provider, timer)
   }
@@ -647,14 +652,29 @@ export class PoolEngine {
     }
   }
 
+  /**
+   * Serialize one write behind every write already queued for the same state
+   * file. tmp+rename is atomic against readers and crashes, but two
+   * overlapping snapshots race at rename and the older one can land last,
+   * dropping the newer deltas; the per-file chain keeps the final rename the
+   * newest snapshot. The chain promise never rejects: `#persist` absorbs
+   * every error and reports it through the log.
+   */
+  #enqueueWrite(provider: string): Promise<void> {
+    const previous = this.#writeChains.get(provider) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(() => this.#writeNow(provider))
+    this.#writeChains.set(provider, next)
+    return next
+  }
+
   async #writeNow(provider: string): Promise<void> {
     const state = this.#providers.get(provider)
     if (state === undefined) return
     this.#dirty.delete(provider)
     const path = this.statePath(provider)
     const tmp = `${path}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`
-    // Atomic last-writer-wins: concurrent writes rename whole files, so an
-    // interleaved pair can only end on the newer snapshot.
+    // Atomic last-writer-wins across processes; inside this process the queue
+    // above makes the last writer the newest state.
     await this.#persist(provider, path, tmp, state)
   }
 }

@@ -455,6 +455,22 @@ describe('draft-provider model discovery', () => {
       .rejects.toThrow(/answered with more than 4194304 bytes/)
   })
 
+  it('honors a configured response bound and names it in the refusal', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'm' }], pad: 'x'.repeat(64) }) })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, { modelDiscoveryMaxResponseBytes: 32 })
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url }))
+      .rejects.toThrow(/answered with more than 32 bytes/)
+  })
+
+  it('resolves the shipped discovery bounds when the config omits them', () => {
+    expect(LlmPiAi.Config({})).toMatchObject({
+      modelDiscoveryTimeoutMs: 15_000,
+      modelDiscoveryMaxResponseBytes: 4 * 1024 * 1024,
+    })
+  })
+
   it('reports an unreachable endpoint instead of an empty catalog', async () => {
     const ctx = await harness()
     // Port 9 is the discard service: nothing accepts a connection there.

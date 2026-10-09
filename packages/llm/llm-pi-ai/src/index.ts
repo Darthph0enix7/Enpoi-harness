@@ -322,6 +322,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.llm.registerModelDiscovery(settingsNs, (request, signal) => discoverModels(
     { ...request, ...signal === undefined ? {} : { signal } },
     () => storedDiscoveryProfile(request.provider),
+    { timeoutMs: config.modelDiscoveryTimeoutMs, maxResponseBytes: config.modelDiscoveryMaxResponseBytes },
   ))
   ctx.llm.registerPoolOperations(settingsNs, {
     async status(provider: string) {
@@ -350,7 +351,8 @@ export function apply(ctx: Context, config: Config): void {
           ...profile.baseURL !== undefined ? { baseURL: profile.baseURL } : {},
           ...profile.api !== undefined ? { api: profile.api } : {},
           ...key !== undefined ? { apiKey: key } : {},
-        }, () => ({ headers: profile.headers, resolveApiKey: () => Promise.resolve(key) }))
+        }, () => ({ headers: profile.headers, resolveApiKey: () => Promise.resolve(key) }),
+        { timeoutMs: config.modelDiscoveryTimeoutMs, maxResponseBytes: config.modelDiscoveryMaxResponseBytes })
         const latencyMs = Math.round(performance.now() - startTime)
         return { ok: true, latencyMs, modelsCount: models.length }
       } catch (err: unknown) {

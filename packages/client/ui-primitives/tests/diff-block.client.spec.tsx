@@ -164,6 +164,23 @@ describe('DiffBlock local changes', () => {
   })
 })
 
+describe('DiffBlock footer', () => {
+  it('counts added and removed lines and one file', () => {
+    const diffs: DiffHunk[] = [{ path: 'a.ts', oldText: 'a\nb', newText: 'c' }]
+    render(<DiffBlock diffs={diffs} />)
+    expect(screen.getByText('└ +1 -2 · 1 file')).toBeTruthy()
+  })
+
+  it('pluralizes the distinct-file count', () => {
+    const diffs: DiffHunk[] = [
+      { path: 'a.ts', oldText: null, newText: 'x' },
+      { path: 'b.ts', oldText: null, newText: 'y' },
+    ]
+    render(<DiffBlock diffs={diffs} />)
+    expect(screen.getByText('└ +2 -0 · 2 files')).toBeTruthy()
+  })
+})
+
 describe('DiffBlock height cap', () => {
   it('shows head and tail with an expand control past the cap, then all lines expanded', () => {
     // One added line over the default cap forces the collapse.

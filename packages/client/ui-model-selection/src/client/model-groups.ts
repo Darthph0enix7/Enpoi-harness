@@ -8,74 +8,21 @@
  * queues a re-read. The same payload is mirrored into
  * {@link MODEL_GROUPS_STORAGE_KEY} so a surface that must not fetch settings
  * itself (the chat attribution badge) can resolve a group label synchronously.
+ *
+ * The stored parse and the `ModelGroup`/`ModelGroupLink` types live in the
+ * shared `@deepseek-ai/dsh-client-ui-primitives` owner, re-exported here for
+ * this package's consumers.
  */
+import { parseModelGroups, type ModelGroup } from '@deepseek-ai/dsh-client-ui-primitives'
 
-/** One ordered link of a group: a route plus the model it serves. */
-export interface ModelGroupLink {
-  provider: string
-  model: string
-  effort?: string
-}
-
-/** One user-defined failover group (settings `chains.<id>`). */
-export interface ModelGroup {
-  readonly id: string
-  readonly label: string
-  readonly links: readonly ModelGroupLink[]
-  readonly attempts: number
-  readonly onCut: 'failover' | 'continue'
-  readonly disabled: boolean
-}
+export { parseModelGroup, parseModelGroups } from '@deepseek-ai/dsh-client-ui-primitives'
+export type { ModelGroup, ModelGroupLink } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** localStorage mirror of the last loaded registry (read by ui-chat's badge). */
 export const MODEL_GROUPS_STORAGE_KEY = 'dsh_model_groups_v1'
 
 /** Window event asking every consumer to re-read the registry. */
 export const MODEL_GROUPS_CHANGED_EVENT = 'dsh:model-groups-changed'
-
-/** Parse one stored link; a link without a route/model is dropped. */
-function parseLink(raw: unknown): ModelGroupLink | undefined {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const rec = raw as Record<string, unknown>
-  if (typeof rec.provider !== 'string' || rec.provider === '') return undefined
-  if (typeof rec.model !== 'string' || rec.model === '') return undefined
-  return {
-    provider: rec.provider,
-    model: rec.model,
-    ...typeof rec.effort === 'string' && rec.effort !== '' ? { effort: rec.effort } : {},
-  }
-}
-
-/** Parse one stored group; undefined when the entry names no usable id. */
-export function parseModelGroup(id: string, raw: unknown): ModelGroup | undefined {
-  if (id === '' || raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const rec = raw as Record<string, unknown>
-  const links = Array.isArray(rec.links)
-    ? rec.links.map(parseLink).filter((link): link is ModelGroupLink => link !== undefined)
-    : []
-  const attempts = typeof rec.attempts === 'number' && Number.isInteger(rec.attempts) && rec.attempts >= 1
-    ? rec.attempts
-    : 2
-  return {
-    id,
-    label: typeof rec.label === 'string' && rec.label !== '' ? rec.label : id,
-    links,
-    attempts,
-    onCut: rec.onCut === 'continue' ? 'continue' : 'failover',
-    disabled: rec.disabled === true,
-  }
-}
-
-/** Parse the stored `chains` map into registry order, dropping malformed entries. */
-export function parseModelGroups(value: unknown): ModelGroup[] {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return []
-  const groups: ModelGroup[] = []
-  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
-    const group = parseModelGroup(id, raw)
-    if (group !== undefined) groups.push(group)
-  }
-  return groups
-}
 
 let groups: readonly ModelGroup[] = []
 const listeners = new Set<() => void>()

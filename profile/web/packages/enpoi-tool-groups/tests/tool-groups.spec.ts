@@ -517,6 +517,21 @@ describe('tool-group operator overrides', () => {
     expect(catalog.byId.get('plain')).toMatchObject({ label: 'plain', purpose: 'operator-defined group' })
   })
 
+  it('renders the shipped group copy in the requested locale and keeps operator copy verbatim', () => {
+    const catalog = resolveToolGroups({
+      toolGroups: { groups: { house: { label: 'House rules', purpose: 'owner-authored surface', members: ['house_tool'] } } },
+    }, { roster: ROSTER, locale: 'zh' })
+    expect(catalog.byId.get('core')).toMatchObject({ label: '核心', purpose: '日常实现所需的工具面' })
+    expect(catalog.byId.get('house')).toMatchObject({ label: 'House rules', purpose: 'owner-authored surface' })
+    expect(renderMenuText(catalog, new Set(), [], 'orchestrator'))
+      .toContain('- peer — 跨设备对等会话：状态、提问、回答、取消')
+    // The default locale keeps every shipped string byte-identical.
+    expect(catalogWith(undefined).byId.get('core')).toMatchObject({
+      label: SHIPPED_TOOL_GROUPS.find(group => group.id === 'core')?.label,
+      purpose: SHIPPED_TOOL_GROUPS.find(group => group.id === 'core')?.purpose,
+    })
+  })
+
   it('orders custom groups after the shipped catalog and keeps duplicate ids out', () => {
     const catalog = resolveToolGroups({
       toolGroups: { groups: { zeta: { members: ['house_tool'] }, alpha: { members: ['synthetic_ungrouped'] } } },

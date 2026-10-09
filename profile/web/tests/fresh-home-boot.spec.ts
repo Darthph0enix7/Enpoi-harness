@@ -160,6 +160,18 @@ describe('fresh-home boot composition', () => {
     expect(seeded['agent-default-model']).toEqual({ provider: KILO_ROUTE_ID, model: KILO_MODEL_ID })
   })
 
+  it('seeds the keeper/compaction personas onto the Kilo route (never the template)', () => {
+    // The tracked template carries no personas: they name a provider, so they
+    // are route state the first-run seed writes once per home.
+    expect(patchText).not.toContain('personas:')
+    expect(patchText).not.toContain('kilo-auto/free')
+    const personas = (seeded['enpoi-orchestration'] as { personas?: Record<string, { provider?: string; model?: string }> } | undefined)?.personas
+    expect(Object.keys(personas ?? {}).sort()).toEqual(['compaction', 'keeper'])
+    for (const [id, entry] of Object.entries(personas ?? {})) {
+      expect(entry, `persona ${id}`).toEqual({ provider: KILO_ROUTE_ID, model: KILO_MODEL_ID })
+    }
+  })
+
   it('keeps the wizard search gate closed in every preset until the wizard applies', () => {
     for (const seat of ['orchestrator', 'sysadmin', 'creator']) {
       const webTool = presetRows(seat).find(row => row.id === 'tool-web')
@@ -170,10 +182,16 @@ describe('fresh-home boot composition', () => {
 
   it('resolves the role registry the server runs: four spawnable workers and a tool-only oracle', () => {
     const orchestration = entries.find(entry => entry.id === 'enpoi-orchestration')
-    const document = { ...orchestration?.config, ...(settings['enpoi-orchestration'] as Record<string, unknown> | undefined) }
+    // The post-first-boot document: the template entry plus the seeded
+    // settings section (parameters, and the seeded personas).
+    const document = { ...orchestration?.config, ...(seeded['enpoi-orchestration'] as Record<string, unknown> | undefined) }
     // The fresh document never carries the operator capabilities section; the
     // defaults below are what a fresh boot runs with.
     expect(document.capabilities).toBeUndefined()
+    expect(document.personas).toEqual({
+      keeper: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID },
+      compaction: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID },
+    })
     const registry = listRoleRegistry({ describe: () => [{ ns: 'enpoi-orchestration', value: document }] })
     expect(Object.keys(registry).sort()).toEqual(['designer', 'explorer', 'fixer', 'librarian', 'oracle'])
     for (const id of ['fixer', 'explorer', 'librarian', 'designer']) {

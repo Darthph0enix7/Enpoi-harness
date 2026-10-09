@@ -76,5 +76,5 @@ export type TerminalClientFrame =
   | { readonly t: 'resize'; readonly cols: number; readonly rows: number }
   | { readonly t: 'kill' }
 
-/** Socket close code for an unknown key. */
+/** Socket close code for an unknown key. Protocol constant: never configurable. */
 export const TERMINAL_WS_UNKNOWN_KEY = 4404

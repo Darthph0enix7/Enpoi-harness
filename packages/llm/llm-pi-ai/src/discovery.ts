@@ -56,9 +56,10 @@ const ANTHROPIC_MODEL_LIMIT = 1000
  * the user typed, so the ceiling holds on the bytes actually read rather than
  * on the length the server claims — the same two-stage shape `dsh-web-fetch`
  * uses for its own caller-supplied URLs, except that a truncated model listing
- * is not parseable, so overflow rejects instead of truncating.
+ * is not parseable, so overflow rejects instead of truncating. Deployments
+ * override it through the plugin's `modelDiscoveryMaxResponseBytes`.
  */
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+export const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 /**
  * Wall-clock budget for one listing interrogation. A configuration-time probe
@@ -66,8 +67,17 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
  * otherwise leave the add-provider surface waiting forever. The timeout is
  * reported through the same failure path as an unreachable endpoint, so the
  * surface falls back to hand-entry exactly as it does for a refused listing.
+ * Deployments override it through the plugin's `modelDiscoveryTimeoutMs`.
  */
-const DISCOVERY_TIMEOUT_MS = 15_000
+export const DEFAULT_DISCOVERY_TIMEOUT_MS = 15_000
+
+/** Overridable bounds of one listing interrogation; omission keeps the shipped default. */
+export interface ModelDiscoveryLimits {
+  /** Wall-clock budget for one listing interrogation (default {@link DEFAULT_DISCOVERY_TIMEOUT_MS}). */
+  readonly timeoutMs?: number
+  /** Largest model-listing reply accepted (default {@link DEFAULT_MAX_RESPONSE_BYTES}). */
+  readonly maxResponseBytes?: number
+}
 
 /** Capacity fields nested by enriched model-directory replies. */
 interface ListingLimit {
@@ -139,11 +149,11 @@ function listingUrl(baseURL: string, api: string): string {
  * anything; the accumulated total is what actually enforces the bound, because
  * a server that under-declares (or streams) tells us nothing up front.
  */
-async function readBounded(response: Response, url: string): Promise<string> {
+async function readBounded(response: Response, url: string, maxResponseBytes: number): Promise<string> {
   const oversized = (): LlmError =>
-    new LlmError(`${url} answered with more than ${MAX_RESPONSE_BYTES} bytes`, 'DISCOVERY_FAILED')
+    new LlmError(`${url} answered with more than ${maxResponseBytes} bytes`, 'DISCOVERY_FAILED')
   const declared = Number(response.headers.get('content-length') ?? Number.NaN)
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+  if (Number.isFinite(declared) && declared > maxResponseBytes) {
     await response.body?.cancel()
     throw oversized()
   }
@@ -157,7 +167,7 @@ async function readBounded(response: Response, url: string): Promise<string> {
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > MAX_RESPONSE_BYTES) throw oversized()
+      if (total > maxResponseBytes) throw oversized()
       chunks.push(value)
     }
   } finally {
@@ -328,6 +338,7 @@ function catalogApi(installed: ReadonlyMap<string, Model<Api>>): string | undefi
  * @param storedProfile - Host-owned headers and lazy credential resolution for
  *   the named route. It is read only on the path that reaches the network; the
  *   credential is resolved only when the draft carries none.
+ * @param limits - overridable interrogation bounds; omission keeps the shipped defaults.
  * @returns the advertised models in endpoint order, catalog-enriched.
  * @throws LlmError when the draft names no endpoint and no catalog describes
  *   the route, the protocol has no readable listing, the endpoint refuses or
@@ -337,7 +348,10 @@ function catalogApi(installed: ReadonlyMap<string, Model<Api>>): string | undefi
 export async function discoverModels(
   request: LlmModelDiscoveryOperation,
   storedProfile?: () => StoredModelDiscoveryProfile | undefined,
+  limits: ModelDiscoveryLimits = {},
 ): Promise<readonly LlmDiscoveredModel[]> {
+  const timeoutMs = limits.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
+  const maxResponseBytes = limits.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
   const installed = request.provider === undefined ? new Map<string, Model<Api>>() : catalogModels(request.provider)
   const endpoint = request.baseURL !== undefined && request.baseURL.length > 0 ? request.baseURL : undefined
   if (endpoint === undefined) {
@@ -349,7 +363,7 @@ export async function discoverModels(
     )
   }
   try {
-    return await probeListing(endpoint, request, storedProfile, installed)
+    return await probeListing(endpoint, request, storedProfile, installed, { timeoutMs, maxResponseBytes })
   } catch (error: unknown) {
     // Cancellation is the caller's own decision and must surface as such; a
     // deadline expiry is this probe's own failure and keeps the catalog path.
@@ -369,6 +383,7 @@ export async function discoverModels(
  * @param storedProfile - lazy Host-owned headers and credential resolution.
  * @param installed - the route's installed catalog entries, empty when pi-ai
  *   ships none.
+ * @param limits - the interrogation bounds this probe runs under.
  * @returns the advertised models in endpoint order, catalog-enriched.
  */
 async function probeListing(
@@ -376,6 +391,7 @@ async function probeListing(
   request: LlmModelDiscoveryOperation,
   storedProfile: (() => StoredModelDiscoveryProfile | undefined) | undefined,
   installed: ReadonlyMap<string, Model<Api>>,
+  limits: Required<ModelDiscoveryLimits>,
 ): Promise<readonly LlmDiscoveredModel[]> {
   // A draft that has not chosen a protocol yet is asked as OpenAI Chat
   // Completions: it is the shape a gateway is overwhelmingly likely to speak,
@@ -412,7 +428,7 @@ async function probeListing(
   // The endpoint probe races the caller's cancellation against a deadline of
   // its own; both abort the same network phase, and each gets its own report.
   const deadline = new AbortController()
-  const timer = setTimeout(() => { deadline.abort() }, DISCOVERY_TIMEOUT_MS)
+  const timer = setTimeout(() => { deadline.abort() }, limits.timeoutMs)
   timer.unref()
   const signal = request.signal === undefined
     ? deadline.signal
@@ -426,7 +442,7 @@ async function probeListing(
         'DISCOVERY_FAILED',
       )
     }
-    text = await readBounded(response, url)
+    text = await readBounded(response, url, limits.maxResponseBytes)
   } catch (error: unknown) {
     // Cancellation during the transfer rejects with the abort reason, which may
     // be any value; the caller and the deadline get the same coded failure they
@@ -436,7 +452,7 @@ async function probeListing(
     }
     if (deadline.signal.aborted) {
       throw new LlmError(
-        `${url} did not answer within ${String(DISCOVERY_TIMEOUT_MS / 1000)} seconds;`
+        `${url} did not answer within ${String(limits.timeoutMs / 1000)} seconds;`
         + " check the endpoint URL, or enter this provider's models by hand",
         'DISCOVERY_FAILED',
         { cause: error },

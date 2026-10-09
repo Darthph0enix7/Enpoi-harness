@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 import compressionMiddleware from 'compression'
 import Negotiator from 'negotiator'
 import { renderIndexInjections, type IndexInjection } from './injections.ts'
+import { hostLocale, webServerText } from './locales.ts'
 
 export { renderIndexInjections } from './injections.ts'
 export type { IndexInjection, IndexInjectionPlacement } from './injections.ts'
@@ -166,7 +167,7 @@ export class WebServer extends Service {
   register(route: WebRoute): () => void {
     const table = route.kind === 'exact' ? this.exact : this.prefixes
     if (table.has(route.path)) {
-      throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+      throw new Error(webServerText(hostLocale(), 'duplicateRoute', { kind: route.kind, path: route.path }))
     }
     table.set(route.path, route)
     return () => { table.delete(route.path) }
@@ -180,7 +181,7 @@ export class WebServer extends Service {
    */
   registerUpgrade(route: WebUpgradeRoute): () => void {
     if (this.upgrades.has(route.path)) {
-      throw new Error(`webserver: duplicate upgrade route "${route.path}"`)
+      throw new Error(webServerText(hostLocale(), 'duplicateUpgradeRoute', { path: route.path }))
     }
     this.upgrades.set(route.path, route)
     return () => { this.upgrades.delete(route.path) }
@@ -196,7 +197,7 @@ export class WebServer extends Service {
    */
   registerFallback(handler: WebRoute['handler']): () => void {
     if (this.fallback !== undefined) {
-      throw new Error('webserver: fallback already registered')
+      throw new Error(webServerText(hostLocale(), 'fallbackRegistered'))
     }
     this.fallback = handler
     return () => { this.fallback = undefined }

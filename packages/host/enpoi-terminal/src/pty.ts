@@ -11,10 +11,11 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { IPty } from 'node-pty'
 import type { WebSocket } from 'ws'
+import { hostLocale, terminalText, type HostLocale } from './locales.ts'
 import type { TerminalClientFrame, TerminalServerFrame } from './shared.ts'
 
-/** Bounded replay transcript kept per terminal (bytes; the head is dropped). */
-const TRANSCRIPT_LIMIT = 512 * 1024
+/** Default bound on the replay transcript kept per terminal (bytes; the head is dropped). */
+export const DEFAULT_TRANSCRIPT_LIMIT_BYTES = 512 * 1024
 
 /** Concurrent terminals allowed per conversation by default. */
 export const DEFAULT_MAX_PER_SESSION = 8
@@ -111,6 +112,10 @@ export interface TerminalRegistryOptions {
   readonly maxPerSession?: number
   /** How long a process outlives its last attached socket. */
   readonly graceMs?: number
+  /** Replay transcript bound per terminal (bytes; the head is dropped). */
+  readonly transcriptLimitBytes?: number
+  /** User-visible error locale; defaults to the launch environment. */
+  readonly locale?: () => HostLocale
 }
 
 /** Input for one open/reuse. */
@@ -133,7 +138,7 @@ export interface TerminalOpenResult {
 }
 
 /** Default shell for the running platform. */
-function defaultShell(): string {
+export function defaultShell(): string {
   if (process.platform === 'win32') return process.env.COMSPEC ?? 'powershell.exe'
   return process.env.SHELL ?? '/bin/bash'
 }
@@ -150,13 +155,17 @@ export class TerminalRegistry {
   private readonly shell: string
   private readonly maxPerSession: number
   private readonly graceMs: number
+  private readonly transcriptLimitBytes: number
+  private readonly locale: () => HostLocale
   private disposed = false
 
-  /** @param options - shell, per-conversation cap, and disconnect grace. */
+  /** @param options - shell, per-conversation cap, disconnect grace, transcript bound, and error locale. */
   constructor(options: TerminalRegistryOptions = {}) {
     this.shell = options.shell ?? defaultShell()
     this.maxPerSession = options.maxPerSession ?? DEFAULT_MAX_PER_SESSION
     this.graceMs = options.graceMs ?? DEFAULT_DISCONNECT_GRACE_MS
+    this.transcriptLimitBytes = options.transcriptLimitBytes ?? DEFAULT_TRANSCRIPT_LIMIT_BYTES
+    this.locale = options.locale ?? (() => hostLocale())
   }
 
   /**
@@ -176,7 +185,11 @@ export class TerminalRegistry {
     if (existing !== undefined) this.discard(existing)
     const sessionCount = [...this.entries.values()].filter(entry => entry.sessionId === input.sessionId).length
     if (sessionCount >= this.maxPerSession) {
-      throw new TerminalHostError('session-limit', `at most ${this.maxPerSession} terminals may run in one session`, 429)
+      throw new TerminalHostError(
+        'session-limit',
+        terminalText(this.locale(), 'sessionLimit', { max: String(this.maxPerSession) }),
+        429,
+      )
     }
     const nodePty = loadNodePty()
     if (nodePty === undefined) {
@@ -333,8 +346,8 @@ export class TerminalRegistry {
   /** Append output to the bounded transcript and fan it out. */
   private append(entry: TerminalEntry, data: string): void {
     entry.transcript += data
-    if (entry.transcript.length > TRANSCRIPT_LIMIT) {
-      entry.transcript = entry.transcript.slice(entry.transcript.length - TRANSCRIPT_LIMIT)
+    if (entry.transcript.length > this.transcriptLimitBytes) {
+      entry.transcript = entry.transcript.slice(entry.transcript.length - this.transcriptLimitBytes)
       entry.dropped = true
     }
     for (const socket of entry.sockets) this.sendFrame(socket, { t: 'data', data })

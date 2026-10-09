@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import type { ReactNode } from 'react'
-import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { CredentialInfo } from '@deepseek-ai/dsh-credentials/types'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm/types'
@@ -18,7 +18,8 @@ import {
 } from './model-visibility.ts'
 import { idCapabilityHints } from './capability-hints.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
-import { refreshRouteViaPlugin } from './provider-sync-rpc.ts'
+import { refreshRouteViaPlugin, type ProviderSyncRefreshView } from './provider-sync-rpc.ts'
+import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { providerDashboardUrls } from './provider-templates.ts'
@@ -26,6 +27,9 @@ import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
+
+/** Live pool status refresh cadence while the detail panel is mounted. */
+const POOL_POLL_INTERVAL_MS = 15_000
 
 export interface ProviderDetailPanelProps {
   row: ProviderRow
@@ -202,24 +206,44 @@ export function mergeRefreshedModels(
 
 /**
  * Apply one host refresh answer to the route's current models with replace
- * semantics: the answer is the base (the host already kept every protected,
- * grace-listed, and referenced member), provider-sourced entries absent from
- * it are removed, and any hand-added `source: 'manual'` row the answer omits
- * survives. The panel's own draft is the merge side, so a row the user just
- * typed is never discarded by a refresh.
+ * semantics: the answer is the base, and a current row absent from it is kept
+ * unless the host named its id in `removed`. The host's removal list is the
+ * sole deletion gate, so an omitted row the host never reported — a row the
+ * panel is still drafting, or one another writer added mid-refresh — survives
+ * with its own fields and stamp, while a `source: 'manual'` row keeps its
+ * stamp either way.
  * @param current - the route's models as the panel currently holds them.
  * @param answer - the host pipeline's planned records.
- * @returns the list to persist (the answer, plus surviving manual rows).
+ * @param removed - the ids the host reported as removed.
+ * @returns the list to persist (the answer, plus surviving current rows).
  */
 export function applyRefreshedModels(
   current: readonly ModelItem[],
   answer: readonly Record<string, unknown>[],
+  removed: readonly string[],
 ): Array<Record<string, unknown>> {
   const answerIds = new Set(answer.map(model => (typeof model.id === 'string' ? model.id : '')))
-  const keptManual = current.filter(
-    model => model.source === 'manual' && model.id !== '' && !answerIds.has(model.id),
-  )
-  return [...answer, ...keptManual]
+  const removedIds = new Set(removed)
+  const survivors = current.filter(model => !answerIds.has(model.id) && !removedIds.has(model.id))
+  return [...answer, ...survivors]
+}
+
+/**
+ * The toast for one host refresh answer: the pruned and deprecated counts the
+ * pass reports, or the withheld-removal warning when the pass degraded.
+ * @param t - the panel translate.
+ * @param report - the host refresh answer.
+ * @param count - the resulting model count.
+ * @returns the toast text.
+ */
+function refreshReportText(
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+  report: ProviderSyncRefreshView,
+  count: number,
+): string {
+  return report.degraded
+    ? t('refreshedModelsDegraded', { count, reason: report.degradedReason ?? t('refreshDegradedUnknown') })
+    : t('refreshedModelsReport', { count, removed: report.removed.length, deprecated: report.deprecated.length })
 }
 
 /** Which badges rest on the shared id-hint table rather than a disclosure. */
@@ -405,6 +429,25 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       {}) as Record<string, unknown>
   }, [namespace, row.entry.settingsPath, schema])
 
+  // The fenced write plans re-read the live document per attempt: these read
+  // one fresh described view with the same precedence as the render's own
+  // snapshot, so each retry re-applies the operator's draft onto current data.
+  const profileAt = useCallback((view: SettingsNamespaceView | undefined): Record<string, unknown> => {
+    return (schema.getPath(view?.user, row.entry.settingsPath) ??
+      schema.getPath(view?.value, row.entry.settingsPath) ??
+      {}) as Record<string, unknown>
+  }, [row.entry.settingsPath, schema])
+  /** The canonical pool out of one fresh profile, matching the serverPool read. */
+  const poolAt = useCallback((view: SettingsNamespaceView | undefined): PoolShape => {
+    const p = profileAt(view)['pool'] as PoolShape
+    return p && Array.isArray(p.identities) ? p : undefined
+  }, [profileAt])
+  /** The models list out of one fresh profile, matching the modelsList read. */
+  const modelsAt = useCallback((view: SettingsNamespaceView | undefined): ModelItem[] => {
+    const list = profileAt(view)['models']
+    return Array.isArray(list) ? list as ModelItem[] : []
+  }, [profileAt])
+
   // State
   const [displayName, setDisplayName] = useState<string>(
     typeof rawProfile.displayName === 'string' ? rawProfile.displayName : row.entry.displayName,
@@ -457,6 +500,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }>({ state: 'idle' })
   const [busy, setBusy] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+  // Toast timers are owned by the panel: a switch or unmount clears them
+  // instead of leaving a detached timeout to set state on a dead tree.
+  const saveClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const refreshClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Pool State
   const serverPool = useMemo<PoolShape>(() => {
@@ -513,7 +560,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   useEffect(() => {
     void fetchPoolStatus()
-    const timer = setInterval(() => { void fetchPoolStatus() }, 15000)
+    const timer = setInterval(() => { void fetchPoolStatus() }, POOL_POLL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [fetchPoolStatus])
 
@@ -659,13 +706,29 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   })
   const catalogRefreshInFlight = useRef(false)
 
+  // The toast auto-clear is one owned timer: a later toast replaces the
+  // pending clear, and unmount cancels whatever is still armed.
+  const scheduleRefreshClear = useCallback((ms: number): void => {
+    if (refreshClearTimer.current !== null) clearTimeout(refreshClearTimer.current)
+    refreshClearTimer.current = setTimeout(() => {
+      refreshClearTimer.current = null
+      setRefreshState({ isRefreshing: false })
+    }, ms)
+  }, [])
+  useEffect(() => () => {
+    if (saveClearTimer.current !== null) clearTimeout(saveClearTimer.current)
+    if (refreshClearTimer.current !== null) clearTimeout(refreshClearTimer.current)
+  }, [])
+
   /**
    * Refresh the route's models through the removal-aware host pipeline when
    * the provider-sync plugin is mounted: the answer replaces the route's
-   * provider-sourced models (an id the host removed disappears) while
-   * `source: 'manual'` rows survive. The normal settings write persists it.
-   * When the RPC is unavailable (plugin not mounted, offline) the surface
-   * falls back to discovery with the legacy merge, which never deletes.
+   * provider-sourced models (an id the host removed disappears), every current
+   * row the answer omits but the host did not report removed survives, and the
+   * toast reports the pruned/deprecated/degraded outcome. The fenced settings
+   * write persists it. When the RPC is unavailable (plugin not mounted,
+   * offline) the surface falls back to discovery with the legacy merge, which
+   * never deletes.
    * Returns whether the write left the route with any model at all; an
    * in-flight refresh, a read-only surface, an empty route with an empty
    * listing, or any discovery/write failure answers false, so the automatic
@@ -678,27 +741,23 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     catalogRefreshInFlight.current = true
     if (options.silent !== true) setRefreshState({ isRefreshing: true })
     try {
-      const currentModels = Array.isArray(rawProfile.models) ? (rawProfile.models as ModelItem[]) : []
       if (options.silent !== true) {
         const hosted = await refreshRouteViaPlugin(providerId)
         if (hosted.ok) {
-          const merged = applyRefreshedModels(currentModels, hosted.value.models)
-          const hostedRes = await api.settings.mutate(
-            namespace.ns,
-            [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
-            undefined,
-          )
-          if (!hostedRes.ok) {
-            throw new Error(hostedRes.error.message)
-          }
-          setRefreshState({
-            isRefreshing: false,
-            message: t('refreshedModels', { count: merged.length }),
-            isError: false,
+          const report = hosted.value
+          let count = 0
+          const outcome = await applyFenced(api, namespace.ns, (view) => {
+            const merged = applyRefreshedModels(modelsAt(view), report.models, report.removed)
+            count = merged.length
+            return {
+              ops: [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
+            }
           })
-          setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)
+          if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
+          setRefreshState({ isRefreshing: false, message: refreshReportText(t, report, count), isError: false })
+          scheduleRefreshClear(4000)
           onSaved()
-          return merged.length > 0
+          return count > 0
         }
       }
       const res = await api.llm.discoverModels(namespace.ns, {
@@ -709,31 +768,25 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       })
       if (res.ok) {
         const discovered = (res.value as DiscoveredModel[] | undefined) || []
-        // Merge, never replace: a Refresh may add and update models, but
-        // deleting one is the operator's decision, not a listing's.
-        const merged = mergeRefreshedModels(currentModels, discovered, {
-          contextWindow: rawProfile.defaultContextWindow,
-          maxTokens: rawProfile.defaultMaxTokens,
+        let count = 0
+        const outcome = await applyFenced(api, namespace.ns, (view) => {
+          const fresh = profileAt(view)
+          // Merge, never replace: a Refresh may add and update models, but
+          // deleting one is the operator's decision, not a listing's.
+          const merged = mergeRefreshedModels(modelsAt(view), discovered, {
+            contextWindow: fresh.defaultContextWindow,
+            maxTokens: fresh.defaultMaxTokens,
+          })
+          count = merged.length
+          return {
+            ops: [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
+          }
         })
-
-        const settingsRes = await api.settings.mutate(
-          namespace.ns,
-          [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
-          undefined,
-        )
-
-        if (!settingsRes.ok) {
-          throw new Error(settingsRes.error.message)
-        }
-
-        setRefreshState({
-          isRefreshing: false,
-          message: t('refreshedModels', { count: merged.length }),
-          isError: false,
-        })
-        setTimeout(() => setRefreshState({ isRefreshing: false }), 4000)
+        if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
+        setRefreshState({ isRefreshing: false, message: t('refreshedModels', { count }), isError: false })
+        scheduleRefreshClear(4000)
         onSaved()
-        return merged.length > 0
+        return count > 0
       }
       throw new Error(res.error.message)
     } catch (err) {
@@ -745,13 +798,16 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           message: t('refreshFailed', { message: messageOf(err) }),
           isError: true,
         })
-        setTimeout(() => setRefreshState({ isRefreshing: false }), 5000)
+        scheduleRefreshClear(5000)
       }
       return false
     } finally {
       catalogRefreshInFlight.current = false
     }
-  }, [api, baseURL, keyInput, namespace.ns, onSaved, providerId, protocol, rawProfile.models, readOnly, row.entry.settingsPath])
+  }, [
+    api, baseURL, keyInput, modelsAt, namespace.ns, onSaved, profileAt,
+    providerId, protocol, readOnly, row.entry.settingsPath, scheduleRefreshClear, t,
+  ])
 
   const handleRefreshModels = (): void => { void runCatalogRefresh() }
 
@@ -773,28 +829,28 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         setKeyState({ configured: true, writable: true })
       }
 
-      // Update settings
-      const updatedProfile: Record<string, unknown> = {
-        ...rawProfile,
-        displayName: displayName.trim() || providerId,
-        ...baseURL.trim() ? { baseURL: baseURL.trim() } : {},
-        ...protocol ? { api: protocol } : {},
-        ...cleanKey.length > 0 ? { apiKeyEnv: keyRef } : {},
-      }
-
-      const settingsRes = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath], value: updatedProfile as unknown as JsonValue }],
-        undefined,
-      )
-
-      if (!settingsRes.ok) {
-        throw new Error(settingsRes.error.message)
-      }
+      // Leaf writes only: each fenced attempt re-applies this draft onto a
+      // freshly read document, so fields the operator did not touch (headers,
+      // models, a concurrent writer's edit) are never replayed from a stale
+      // whole-profile snapshot.
+      const outcome = await applyFenced(api, namespace.ns, () => {
+        const ops: SettingsPathOpView[] = [
+          { op: 'set', path: [...row.entry.settingsPath, 'displayName'], value: displayName.trim() || providerId },
+        ]
+        if (baseURL.trim()) ops.push({ op: 'set', path: [...row.entry.settingsPath, 'baseURL'], value: baseURL.trim() })
+        if (protocol) ops.push({ op: 'set', path: [...row.entry.settingsPath, 'api'], value: protocol })
+        if (cleanKey.length > 0) ops.push({ op: 'set', path: [...row.entry.settingsPath, 'apiKeyEnv'], value: keyRef })
+        return { ops }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
 
       setKeyInput('')
       setSaveSuccess(true)
-      setTimeout(() => setSaveSuccess(false), 3000)
+      if (saveClearTimer.current !== null) clearTimeout(saveClearTimer.current)
+      saveClearTimer.current = setTimeout(() => {
+        saveClearTimer.current = null
+        setSaveSuccess(false)
+      }, 3000)
       onSaved()
     } catch (err) {
       alert(t('saveFailedAlert', { message: messageOf(err) }))
@@ -918,12 +974,15 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setLocalPool(nextPool)
 
     try {
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: nextIdentities as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        const identities = poolAt(view)?.identities
+        if (identities === undefined || !identities.some(i => i.id === identityId)) return { ops: [] }
+        const updated = identities.map(i => i.id === identityId ? { ...i, enabled: i.enabled === false } : i)
+        return {
+          ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: updated as unknown as JsonValue }],
+        }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
       onSaved()
       void fetchPoolStatus()
     } catch (err) {
@@ -941,12 +1000,10 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setLocalPool(nextPool)
 
     try {
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'strategy'], value: strategy as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      const outcome = await applyFenced(api, namespace.ns, () => ({
+        ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'strategy'], value: strategy as unknown as JsonValue }],
+      }))
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
       onSaved()
     } catch (err) {
       setLocalPool(prev)
@@ -972,12 +1029,25 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setLocalPool(nextPool)
 
     try {
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: updatedIdentities as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        const identities = poolAt(view)?.identities
+        if (identities === undefined) return { ops: [] }
+        // The draft is "move this identity one step"; the fresh order decides
+        // the indexes, so a concurrent reorder applies the move where the
+        // identity actually sits now.
+        const from = identities.findIndex(i => i.id === item.id)
+        const to = from + direction
+        if (from < 0 || to < 0 || to >= identities.length) return { ops: [] }
+        const moved = [...identities]
+        const [entry] = moved.splice(from, 1)
+        if (entry === undefined) return { ops: [] }
+        moved.splice(to, 0, entry)
+        const renumbered = moved.map((identity, position) => ({ ...identity, priority: position + 1 }))
+        return {
+          ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: renumbered as unknown as JsonValue }],
+        }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
       onSaved()
       void fetchPoolStatus()
     } catch (err) {
@@ -991,24 +1061,23 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     if (!confirm(t('removeIdentityConfirm', { id: identityId }))) return
     const prev = poolConfig
     const remaining = poolConfig.identities.filter(i => i.id !== identityId)
-    const nextPool = remaining.length > 0 ? { ...poolConfig, identities: remaining } : undefined
 
     // 0ms instant optimistic update
-    setLocalPool(nextPool)
+    setLocalPool(remaining.length > 0 ? { ...poolConfig, identities: remaining } : undefined)
 
     try {
-      const updated: Record<string, unknown> = {
-        ...rawProfile,
-        ...remaining.length > 0
-          ? { pool: { ...poolConfig, identities: remaining } }
-          : { pool: undefined },
-      }
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath], value: updated as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        const identities = poolAt(view)?.identities
+        if (identities === undefined) return { ops: [] }
+        const kept = identities.filter(i => i.id !== identityId)
+        // The identity is already gone: the previous attempt committed.
+        if (kept.length === identities.length) return { ops: [] }
+        if (kept.length === 0) return { ops: [{ op: 'unset', path: [...row.entry.settingsPath, 'pool'] }] }
+        return {
+          ops: [{ op: 'set', path: [...row.entry.settingsPath, 'pool', 'identities'], value: kept as unknown as JsonValue }],
+        }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
       onSaved()
       void fetchPoolStatus()
     } catch (err) {
@@ -1034,10 +1103,9 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       priority: newKeyPriority || (currentList.length + 1),
       enabled: true,
     }
-    const updatedIdentities = [...currentList, newIdentity]
     const nextPool = {
       strategy: poolConfig?.strategy || 'priority-sticky',
-      identities: updatedIdentities,
+      identities: [...currentList, newIdentity],
     }
 
     // 0ms instant local update & close modal
@@ -1053,17 +1121,22 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       const credRes = await api.credentials.set(ref, val)
       if (!credRes.ok) throw new Error(credRes.error.message)
 
-      // 2. Persist pool settings
-      const updated = {
-        ...rawProfile,
-        pool: nextPool,
-      }
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath], value: updated as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      // 2. Persist pool settings: the draft identity is appended to whatever
+      // pool the fresh document carries, and an id already present is the
+      // previous attempt's own commit, so a retry never duplicates it.
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        const fresh = poolAt(view)
+        if (fresh?.identities?.some(i => i.id === id)) return { ops: [] }
+        const identities = [...(fresh?.identities ?? []), newIdentity]
+        return {
+          ops: [{
+            op: 'set',
+            path: [...row.entry.settingsPath, 'pool'],
+            value: { strategy: fresh?.strategy ?? 'priority-sticky', identities } as unknown as JsonValue,
+          }],
+        }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
 
       onSaved()
       void fetchPoolStatus()
@@ -1096,16 +1169,20 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setLocalPool(nextPool)
 
     try {
-      const updated = {
-        ...rawProfile,
-        pool: nextPool,
-      }
-      const res = await api.settings.mutate(
-        namespace.ns,
-        [{ op: 'set', path: [...row.entry.settingsPath], value: updated as unknown as JsonValue }],
-        undefined,
-      )
-      if (!res.ok) throw new Error(res.error.message)
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        // A pool another writer already created is the committed form of this
+        // draft: the conversion is idempotent and never restamps the pool.
+        const pool = poolAt(view)
+        if (pool !== undefined && (pool.identities?.length ?? 0) > 0) return { ops: [] }
+        return {
+          ops: [{
+            op: 'set',
+            path: [...row.entry.settingsPath, 'pool'],
+            value: nextPool as unknown as JsonValue,
+          }],
+        }
+      })
+      if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
       onSaved()
       void fetchPoolStatus()
     } catch (err) {

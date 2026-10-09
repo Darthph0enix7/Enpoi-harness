@@ -249,6 +249,35 @@ describe('additive profile patch merge', () => {
     expect(merged.match(/- id: llm-pi-ai/g)).toHaveLength(1)
   })
 
+  it('preserves operator personas across a template resync', () => {
+    // The shipped template carries no personas (they are first-run seed
+    // state), so re-applying it must leave the live customizations byte-intact.
+    const shipped = fixture('resync-shipped.patch.yml', guardFixture(CLEAN_ENTRIES))
+    const live = fixture('resync-live.patch.yml', `- id: enpoi-orchestration
+  name: dsh-enpoi-capabilities
+  config:
+    parameters:
+      keeper:
+        structuralDistanceK: 9
+    roles:
+      designer:
+        label: Designer
+        group: specialists
+        seat: true
+    personas:
+      keeper:
+        provider: operator-router
+        model: operator/keeper
+`)
+    const result = runPatchMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = readFileSync(live, 'utf8')
+    expect(merged).toContain('provider: operator-router')
+    expect(merged).toContain('model: operator/keeper')
+    expect(merged).toContain('structuralDistanceK: 9')
+    expect(merged).not.toContain('structuralDistanceK: 24')
+  })
+
   it('leaves a partially present insert block and the whole live file untouched', () => {
     const shipped = fixture('inserts-shipped.patch.yml', `- insert:
     - id: preset-a
@@ -320,7 +349,7 @@ describe('operator-state gate', () => {
     }
   })
 
-  it('keeps the roles/personas template allowlists in lockstep across the guards', () => {
+  it('keeps the roles template allowlists in lockstep across the guards', () => {
     const install = readFileSync(installSh, 'utf8')
     const shellValue = (source: string, name: string): string => {
       const match = new RegExp(`${name}="([^"]*)"`).exec(source)
@@ -330,8 +359,6 @@ describe('operator-state gate', () => {
     const pairs: ReadonlyArray<readonly [string, string]> = [
       ['TEMPLATE_ROLE_IDS', 'PROFILE_PATCH_TEMPLATE_ROLE_IDS'],
       ['TEMPLATE_ROLE_KEYS', 'PROFILE_PATCH_TEMPLATE_ROLE_KEYS'],
-      ['TEMPLATE_PERSONA_IDS', 'PROFILE_PATCH_TEMPLATE_PERSONA_IDS'],
-      ['TEMPLATE_PERSONA_KEYS', 'PROFILE_PATCH_TEMPLATE_PERSONA_KEYS'],
     ]
     for (const guard of [
       'profile/web/scripts/verify-profile-template.mjs',
@@ -342,10 +369,6 @@ describe('operator-state gate', () => {
         expect(extractQuotedList(source, jsName).sort(), `${guard} ${jsName}`)
           .toEqual(shellValue(install, shName).split(' ').sort())
       }
-      expect(/const TEMPLATE_PERSONA_PROVIDER = '([^']+)'/.exec(source)?.[1], `${guard} provider`)
-        .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER'))
-      expect(/const TEMPLATE_PERSONA_MODEL = '([^']+)'/.exec(source)?.[1], `${guard} model`)
-        .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_MODEL'))
     }
     // The web sandbox duplicates the fresh-patch stripper for its own homes;
     // its standalone allowlist constants must match install.sh's.
@@ -355,10 +378,12 @@ describe('operator-state gate', () => {
       expect(shellValue(sandbox, sandboxName).split(' ').sort(), `sandbox.sh ${sandboxName}`)
         .toEqual(shellValue(install, shName).split(' ').sort())
     }
-    expect(shellValue(sandbox, 'TEMPLATE_PERSONA_PROVIDER'))
-      .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_PROVIDER'))
-    expect(shellValue(sandbox, 'TEMPLATE_PERSONA_MODEL'))
-      .toBe(shellValue(install, 'PROFILE_PATCH_TEMPLATE_PERSONA_MODEL'))
+    // Personas are route state now: no guard may keep a persona allowlist, and
+    // install.sh must strip the section like every other operator section.
+    for (const source of [install, readFileSync(join(repoRoot, 'apps/web/tests/scripts/sandbox.sh'), 'utf8')]) {
+      expect(source).not.toMatch(/TEMPLATE_PERSONA_/)
+    }
+    expect(install).toMatch(/strip_patch_sections "\$file" [^\n]*personas/)
   })
 })
 
@@ -383,13 +408,6 @@ const CLEAN_ENTRIES = `    roles:
         label: The Oracle
         group: supervision
         seat: true
-    personas:
-      keeper:
-        provider: kilo
-        model: kilo-auto/free
-      compaction:
-        provider: kilo
-        model: kilo-auto/free
 `
 
 const HOSTILE_ENTRIES = `    roles:
@@ -449,16 +467,14 @@ describe('template entry allowlist gate', () => {
     expect(gated.output).toContain('STRIPPED=PASS')
   })
 
-  it('rejects every operator escape inside roles/personas and strips it entry-by-entry', () => {
+  it('rejects every operator escape inside roles and strips it entry-by-entry', () => {
     const hostile = fixture('hostile-template.patch.yml', guardFixture(HOSTILE_ENTRIES))
     const verified = runVerify(hostile)
     expect(verified.status).toBe(1)
     for (const marker of [
       "role 'toto' is not a template role",
       "role 'designer' carries operator key 'persona'",
-      "persona 'keeper' provider must be 'kilo'",
-      "persona 'keeper' carries operator key 'chain'",
-      "persona 'oracle' is not a template persona",
+      "operator-owned section 'personas'",
     ]) {
       expect(verified.output, marker).toContain(marker)
     }
@@ -471,12 +487,12 @@ describe('template entry allowlist gate', () => {
     expect(stripped).not.toContain('operator text')
     expect(stripped).not.toContain('openrouter')
     expect(stripped).not.toContain('chain: free')
-    // The disallowed persona entries drop whole; the clean designer entry and
-    // the untouched compaction persona survive entry-by-entry.
-    expect(stripped).not.toContain('      oracle:\n        provider: kilo')
-    expect(stripped).not.toContain('      keeper:\n        provider:')
+    // Personas are route state written by the first-run seed: the whole
+    // section drops. The clean designer entry survives entry-by-entry.
+    expect(stripped).not.toContain('    personas:')
+    expect(stripped).not.toContain('provider:')
+    expect(stripped).not.toContain('model: kilo-auto/free')
     expect(stripped).toContain('      designer:\n        label: Designer')
-    expect(stripped).toContain('      compaction:\n        provider: kilo\n        model: kilo-auto/free')
   })
 })
 

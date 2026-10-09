@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { ProviderDetailPanel, mergeRefreshedModels, applyRefreshedModels } from '../src/client/ProviderDetailPanel.tsx'
 import { CATALOG_DECISIONS_CHANGED_EVENT, CATALOG_DECISIONS_MIRROR_KEY } from '../src/client/model-visibility.ts'
 import { heavyStatusCache } from '../src/client/heavy-rpc.ts'
@@ -96,10 +97,22 @@ function row(provider: string): ProviderRow {
 }
 
 /** The wire face the panel reaches; only the pool status read fires on mount. */
-function wire(): ModelsWire {
+function wire(view?: SettingsNamespaceView): ModelsWire {
   return {
-    settings: { describe: vi.fn(), update: vi.fn(), replace: vi.fn(), mutate: vi.fn() },
-    credentials: { describe: vi.fn(), set: vi.fn(), unset: vi.fn() },
+    settings: {
+      describe: vi.fn(async () => ({
+        ok: true as const,
+        value: { writable: true, hasDocument: false, namespaces: view === undefined ? [] : [view] },
+      })),
+      update: vi.fn(),
+      replace: vi.fn(),
+      mutate: vi.fn(),
+    },
+    credentials: {
+      describe: vi.fn(),
+      set: vi.fn(async () => ({ ok: true as const, value: undefined })),
+      unset: vi.fn(),
+    },
     llm: {
       discoverModels: vi.fn(),
       listConfigurableProviders: vi.fn(),
@@ -111,13 +124,19 @@ function wire(): ModelsWire {
   } as unknown as ModelsWire
 }
 
-function panel(provider: string, models: TestModel[] = MODELS) {
+function panel(
+  provider: string,
+  models: TestModel[] = MODELS,
+  stored?: { strategy?: string; identities?: Array<{ id: string; credentialRef: string; priority?: number; enabled?: boolean }> },
+  defaults?: { defaultContextWindow?: number; defaultMaxTokens?: number },
+) {
+  const ns = namespace(provider, models, stored, defaults)
   return (
     <ProviderDetailPanel
       row={row(provider)}
-      namespace={namespace(provider, models)}
+      namespace={ns}
       schema={settingsSchema}
-      api={wire()}
+      api={wire(ns)}
       t={t}
       readOnly={false}
       onDelete={vi.fn()}
@@ -157,11 +176,12 @@ it('keeps an in-progress pool edit across a settings echo with the same pool', (
   // only state the select can show; before the value reconciliation, a fresh
   // namespace identity reset it to the stored strategy.
   const never = new Promise<never>(() => {})
-  const wireFace = { ...wire(), settings: { ...wire().settings, mutate: vi.fn(() => never) } } as ModelsWire
+  const ns = namespace('openai', MODELS, pool('priority-sticky'))
+  const wireFace = { ...wire(ns), settings: { ...wire(ns).settings, mutate: vi.fn(() => never) } } as ModelsWire
   const element = (): ReactElement => (
     <ProviderDetailPanel
       row={row('openai')}
-      namespace={namespace('openai', MODELS, pool('priority-sticky'))}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -302,16 +322,18 @@ it('auto-populates a healthy heavy route with no models, without a Refresh click
     value: [{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)', contextWindow: 200_000, maxTokens: 64_000 }],
   }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('antigravity', [])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
 
   render(
     <ProviderDetailPanel
       row={row('antigravity')}
-      namespace={namespace('antigravity', [])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -335,17 +357,19 @@ it('the automatic pass keeps a configured id the discovered catalog does not adv
     value: [{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' }],
   }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  // The row an older build wrote: the fabricated fallback id alone.
+  const ns = namespace('antigravity', [{ id: 'gemini-2.5-flash' }])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
 
   render(
     <ProviderDetailPanel
       row={row('antigravity')}
-      // The row an older build wrote: the fabricated fallback id alone.
-      namespace={namespace('antigravity', [{ id: 'gemini-2.5-flash' }])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -369,15 +393,17 @@ it('an automatic heavy refresh failure stays silent; the manual path still repor
     ok: false as const,
     error: { message: 'No accounts available' },
   }))
+  const ns = namespace('antigravity', [])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
 
   render(
     <ProviderDetailPanel
       row={row('antigravity')}
-      namespace={namespace('antigravity', [])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -406,27 +432,29 @@ it('Refresh merges the answer into settings without deleting or stripping config
     ],
   }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [
+    {
+      id: 'configured',
+      name: 'Hand Name',
+      contextWindow: 111_111,
+      maxTokens: 2_222,
+      reasoning: true,
+      tools: true,
+      input: ['text', 'image'],
+    },
+    { id: 'retired', name: 'Retired', contextWindow: 9_999 },
+  ])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
 
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [
-        {
-          id: 'configured',
-          name: 'Hand Name',
-          contextWindow: 111_111,
-          maxTokens: 2_222,
-          reasoning: true,
-          tools: true,
-          input: ['text', 'image'],
-        },
-        { id: 'retired', name: 'Retired', contextWindow: 9_999 },
-      ])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -464,16 +492,18 @@ it('Refresh sizes a newly advertised id from the route profile capacity defaults
     value: [{ id: 'fresh' }],
   }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [], undefined, { defaultContextWindow: 1_000_000, defaultMaxTokens: 16_384 })
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
 
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [], undefined, { defaultContextWindow: 1_000_000, defaultMaxTokens: 16_384 })}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -736,19 +766,21 @@ it('manual Refresh uses the removal-aware host pipeline when providerSync answer
   vi.stubGlobal('fetch', fetchMock)
   const discoverModels = vi.fn()
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [
+    { id: 'kept-server' },
+    { id: 'removed-server' },
+    { id: 'hand', source: 'manual' },
+  ])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [
-        { id: 'kept-server' },
-        { id: 'removed-server' },
-        { id: 'hand', source: 'manual' },
-      ])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -761,8 +793,9 @@ it('manual Refresh uses the removal-aware host pipeline when providerSync answer
   await waitFor(() => { expect(mutate).toHaveBeenCalled() })
   const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
   expect(ops[0]?.path).toEqual(['providers', 'gateway', 'models'])
-  // Replace semantics: the host answer wins, a manually added row survives,
-  // and the discovery path was not consulted.
+  // Replace semantics: the host answer wins, the host's `removed` list is the
+  // sole deletion gate (so the unlisted manual row survives), and the
+  // discovery path was not consulted.
   expect(ops[0]?.value.map(model => model.id)).toEqual(['kept-server', 'hand'])
   expect(discoverModels).not.toHaveBeenCalled()
 })
@@ -774,15 +807,17 @@ it('manual Refresh falls back to the non-deleting discovery merge when the RPC i
     value: [{ id: 'advertised', name: 'Advertised' }],
   }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [{ id: 'configured' }])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [{ id: 'configured' }])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -800,10 +835,13 @@ it('manual Refresh falls back to the non-deleting discovery merge when the RPC i
 })
 
 describe('applyRefreshedModels', () => {
-  it('takes the answer as the base and keeps only manual rows it omits', () => {
+  it('takes the answer as the base, keeps unlisted rows, and drops only reported removals', () => {
     const current: TestModel[] = [
       { id: 'kept-server', name: 'Kept' },
       { id: 'removed-server', name: 'Gone' },
+      // The panel's own draft row, not yet written back and carrying no manual
+      // stamp: the host never reported it removed, so it must survive.
+      { id: 'typed-row', name: 'Typed' },
       { id: 'hand', name: 'Hand', source: 'manual' },
       { id: 'hand-in-answer', source: 'manual' },
       { id: '', source: 'manual' },
@@ -814,12 +852,28 @@ describe('applyRefreshedModels', () => {
       { id: 'hand-in-answer', source: 'manual' },
       { name: 'no-id' },
     ]
-    expect(applyRefreshedModels(current, answer)).toEqual([
+    expect(applyRefreshedModels(current, answer, ['removed-server'])).toEqual([
       { id: 'kept-server', name: 'Kept Fresh' },
       { id: 'new-from-server' },
       { id: 'hand-in-answer', source: 'manual' },
       { name: 'no-id' },
+      { id: 'typed-row', name: 'Typed' },
       { id: 'hand', name: 'Hand', source: 'manual' },
+    ])
+  })
+
+  it('survives a refresh whose answer omits a typed row the host did not report removed', () => {
+    // F4: the host answer is replace-semantics for what it lists, but the
+    // `removed` list is the only deletion gate — an omitted non-manual row the
+    // operator just typed is retained with its fields and stamp.
+    const current: TestModel[] = [{ id: 'typed', name: 'Typed', contextWindow: 42 }]
+    expect(applyRefreshedModels(current, [{ id: 'server-row' }], [])).toEqual([
+      { id: 'server-row' },
+      { id: 'typed', name: 'Typed', contextWindow: 42 },
+    ])
+    // The same row is dropped once the host reports it removed.
+    expect(applyRefreshedModels(current, [{ id: 'server-row' }], ['typed'])).toEqual([
+      { id: 'server-row' },
     ])
   })
 })
@@ -849,14 +903,16 @@ it('manual Refresh reports a failed settings write after the host refresh answer
     }),
   } as unknown as Response)))
   const mutate = vi.fn(async () => ({ ok: false as const, error: { message: 'write refused' } }))
+  const ns = namespace('gateway', [{ id: 'kept-server' }])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
+    ...base,
+    settings: { ...base.settings, mutate },
   } as unknown as ModelsWire
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [{ id: 'kept-server' }])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -876,15 +932,17 @@ it('manual Refresh treats an unusable RPC payload as unavailable and falls back 
   } as unknown as Response)))
   const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'advertised' }] }))
   const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [{ id: 'configured' }])
+  const base = wire(ns)
   const wireFace = {
-    ...wire(),
-    settings: { ...wire().settings, mutate },
-    llm: { ...wire().llm, discoverModels },
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
   } as unknown as ModelsWire
   render(
     <ProviderDetailPanel
       row={row('gateway')}
-      namespace={namespace('gateway', [{ id: 'configured' }])}
+      namespace={ns}
       schema={settingsSchema}
       api={wireFace}
       t={t}
@@ -895,4 +953,279 @@ it('manual Refresh treats an unusable RPC payload as unavailable and falls back 
   )
   fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
   await waitFor(() => { expect(discoverModels).toHaveBeenCalled() })
+})
+
+/** One conflict refusal with the details the panel's fence reports. */
+function conflictRefusal(ns: string) {
+  return { ok: false as const, error: new RemoteError('settings/conflict', 'stale', { ns, expected: 0, actual: 1 }) }
+}
+
+/**
+ * A panel wire whose describe hands out `first` once and `second` afterwards,
+ * so a conflict retry must replan against a different revision.
+ */
+function movingConflictWire(
+  first: SettingsNamespaceView,
+  second: SettingsNamespaceView,
+  mutate: ReturnType<typeof vi.fn>,
+): ModelsWire {
+  const base = wire(first)
+  const describe = vi.fn()
+    .mockResolvedValueOnce({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [first] } })
+    .mockResolvedValue({ ok: true as const, value: { writable: true, hasDocument: false, namespaces: [second] } })
+  return { ...base, settings: { ...base.settings, describe, mutate } } as unknown as ModelsWire
+}
+
+/** Render the detail panel for one route over an explicit wire. */
+function renderPanel(provider: string, ns: SettingsNamespaceView, api: ModelsWire): ReturnType<typeof render> {
+  return render(
+    <ProviderDetailPanel
+      row={row(provider)}
+      namespace={ns}
+      schema={settingsSchema}
+      api={api}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+}
+
+describe('fenced conflict retries', () => {
+  it('re-applies the save draft after a conflict and writes the fresh revision', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('gateway', MODELS)
+    const api = movingConflictWire(first, { ...namespace('gateway', MODELS), revision: 1 }, mutate)
+    renderPanel('gateway', first, api)
+
+    fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://mine/v1' } })
+    const saves = screen.getAllByRole('button', { name: en.save })
+    fireEvent.click(saves[saves.length - 1]!)
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    expect(mutate.mock.calls.map(call => call[2])).toEqual([0, 1])
+    // The retry carries leaf operations re-applied from the draft, never a
+    // replayed whole-profile snapshot.
+    expect(mutate.mock.calls[1]![1]).toEqual([
+      { op: 'set', path: ['providers', 'gateway', 'displayName'], value: 'gateway' },
+      { op: 'set', path: ['providers', 'gateway', 'baseURL'], value: 'https://mine/v1' },
+      { op: 'set', path: ['providers', 'gateway', 'api'], value: 'openai-completions' },
+    ])
+    expect(screen.getByText(en.savedLabel)).toBeTruthy()
+  })
+
+  it('re-applies the host refresh answer after a conflict and reports its outcome', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('providerSync.refreshRoute')) {
+        return {
+          ok: true,
+          json: async () => ({
+            result: {
+              ok: true,
+              value: {
+                route: 'gateway',
+                models: [{ id: 'kept-server', name: 'Kept Fresh' }],
+                removed: ['removed-server'],
+                deprecated: ['deprecated-kept'],
+                degraded: false,
+                source: 'live',
+                authority: 'catalog',
+                fetchedAt: 5,
+              },
+            },
+          }),
+        } as unknown as Response
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as unknown as Response
+    }))
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const models = [
+      { id: 'kept-server' },
+      { id: 'removed-server' },
+      { id: 'typed', name: 'Typed' },
+    ]
+    const first = namespace('gateway', models)
+    const api = movingConflictWire(first, { ...namespace('gateway', models), revision: 1 }, mutate)
+    renderPanel('gateway', first, api)
+
+    fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    expect(mutate.mock.calls.map(call => call[2])).toEqual([0, 1])
+    const [, ops] = mutate.mock.calls[1] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+    // The answer is the base, the host's removed list is the sole deletion
+    // gate, and the typed row the host never reported survives.
+    expect(ops[0]?.value.map(model => model.id)).toEqual(['kept-server', 'typed'])
+    // F24: the toast reports the pruned/deprecated outcome.
+    await screen.findByText(t('refreshedModelsReport', { count: 2, removed: 1, deprecated: 1 }))
+  })
+
+  it('reports a degraded refresh that withheld removals', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: {
+            route: 'gateway',
+            models: [{ id: 'kept-server' }],
+            removed: [],
+            deprecated: [],
+            degraded: true,
+            degradedReason: 'shrink guard',
+            source: 'live',
+            authority: 'catalog',
+            fetchedAt: 5,
+          },
+        },
+      }),
+    } as unknown as Response)))
+    const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+    const first = namespace('gateway', [{ id: 'kept-server' }])
+    const base = wire(first)
+    const api = { ...base, settings: { ...base.settings, mutate } } as unknown as ModelsWire
+    renderPanel('gateway', first, api)
+
+    fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+
+    await screen.findByText(t('refreshedModelsDegraded', { count: 1, reason: 'shrink guard' }))
+  })
+
+  it('re-applies the pool strategy after a conflict', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('openai', MODELS, pool('priority-sticky'))
+    const api = movingConflictWire(first, { ...namespace('openai', MODELS, pool('priority-sticky')), revision: 1 }, mutate)
+    renderPanel('openai', first, api)
+
+    fireEvent.change(screen.getByTitle(en.poolStrategyTitle), { target: { value: 'balanced' } })
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    expect(mutate.mock.calls.map(call => call[2])).toEqual([0, 1])
+    expect(mutate.mock.calls[1]![1]).toEqual([
+      { op: 'set', path: ['providers', 'openai', 'pool', 'strategy'], value: 'balanced' },
+    ])
+  })
+
+  it('re-applies a pool identity toggle after a conflict', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('openai', MODELS, pool('priority-sticky'))
+    const api = movingConflictWire(first, { ...namespace('openai', MODELS, pool('priority-sticky')), revision: 1 }, mutate)
+    renderPanel('openai', first, api)
+
+    fireEvent.click(screen.getByTitle(en.poolDisable))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    const [, ops] = mutate.mock.calls[1] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string; enabled?: boolean }> }>]
+    expect(ops[0]?.path).toEqual(['providers', 'openai', 'pool', 'identities'])
+    expect(ops[0]?.value).toEqual([{ id: 'primary', credentialRef: 'OPENAI_API_KEY', priority: 1, enabled: false }])
+  })
+
+  it('re-applies a pool reorder after a conflict against the fresh order', async () => {
+    const two = {
+      strategy: 'priority-sticky',
+      identities: [
+        { id: 'a', credentialRef: 'A', priority: 1, enabled: true },
+        { id: 'b', credentialRef: 'B', priority: 2, enabled: true },
+      ],
+    }
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('openai', MODELS, two)
+    const api = movingConflictWire(first, { ...namespace('openai', MODELS, two), revision: 1 }, mutate)
+    renderPanel('openai', first, api)
+
+    fireEvent.click(screen.getAllByTitle(en.poolMoveDown)[0]!)
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    const [, ops] = mutate.mock.calls[1] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string; priority?: number }> }>]
+    expect(ops[0]?.value.map(identity => [identity.id, identity.priority])).toEqual([['b', 1], ['a', 2]])
+  })
+
+  it('re-applies a pool identity deletion after a conflict', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('openai', MODELS, pool('priority-sticky'))
+    const api = movingConflictWire(first, { ...namespace('openai', MODELS, pool('priority-sticky')), revision: 1 }, mutate)
+    renderPanel('openai', first, api)
+
+    fireEvent.click(screen.getByTitle(en.poolDelete))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    // The last identity going drops the whole pool node.
+    expect(mutate.mock.calls[1]![1]).toEqual([{ op: 'unset', path: ['providers', 'openai', 'pool'] }])
+  })
+
+  it('re-applies a pool identity add after a conflict without duplicating it', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('openai', MODELS, pool('priority-sticky'))
+    const api = movingConflictWire(first, { ...namespace('openai', MODELS, pool('priority-sticky')), revision: 1 }, mutate)
+    renderPanel('openai', first, api)
+
+    fireEvent.click(screen.getByTitle(en.poolAdd))
+    fireEvent.change(screen.getByPlaceholderText(en.poolNamePlaceholder), { target: { value: 'secondary' } })
+    fireEvent.change(screen.getByPlaceholderText(en.poolSecretPlaceholder), { target: { value: 'sk-second' } })
+    fireEvent.click(screen.getByRole('button', { name: en.poolSave }))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    const [, ops] = mutate.mock.calls[1] as unknown as [string, Array<{ path: string[]; value: { identities: Array<{ id: string }> } }>]
+    expect(ops[0]?.path).toEqual(['providers', 'openai', 'pool'])
+    expect(ops[0]?.value.identities.map(identity => identity.id)).toEqual(['primary', 'secondary'])
+  })
+
+  it('re-applies the pool conversion after a conflict', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: undefined })
+    const first = namespace('gateway', MODELS)
+    const api = movingConflictWire(first, { ...namespace('gateway', MODELS), revision: 1 }, mutate)
+    renderPanel('gateway', first, api)
+
+    fireEvent.click(screen.getByTitle(en.poolConvertHint))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    type PoolMutationCall = [
+      string,
+      Array<{ path: string[]; value: { strategy: string; identities: Array<{ id: string; credentialRef: string }> } }>,
+    ]
+    const [, ops] = mutate.mock.calls[1] as unknown as PoolMutationCall
+    expect(ops[0]?.path).toEqual(['providers', 'gateway', 'pool'])
+    expect(ops[0]?.value.strategy).toBe('priority-sticky')
+    expect(ops[0]?.value.identities).toEqual([{ id: 'primary', credentialRef: 'GATEWAY_API_KEY', priority: 1, enabled: true }])
+  })
+})
+
+it('clears the armed refresh-toast timer when the panel unmounts', async () => {
+  const clearSpy = vi.spyOn(globalThis, 'clearTimeout')
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'fresh' }] }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const first = namespace('gateway', [{ id: 'configured' }])
+  const base = wire(first)
+  const api = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  const view = renderPanel('gateway', first, api)
+
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await screen.findByText(t('refreshedModels', { count: 2 }))
+  const before = clearSpy.mock.calls.length
+  view.unmount()
+  expect(clearSpy.mock.calls.length).toBeGreaterThan(before)
+  clearSpy.mockRestore()
 })

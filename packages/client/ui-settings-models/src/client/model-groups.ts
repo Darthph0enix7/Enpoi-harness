@@ -7,72 +7,24 @@
  * bounded by {@link MAX_GROUP_WRITE_RETRIES}, and a bounded race against a
  * never-settling gateway. The row applies the change optimistically and rolls
  * back behind an inline error when the write does not persist.
+ *
+ * The stored parse and the `ModelGroup`/`ModelGroupLink` types live in the
+ * shared `@deepseek-ai/dsh-client-ui-primitives` owner, re-exported here for
+ * this package's consumers.
  */
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import { parseModelGroups, type ModelGroup, type ModelGroupLink } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ModelsWire } from './store.ts'
 import { withWriteTimeout } from './write-timeout.ts'
+
+export { parseModelGroup, parseModelGroups } from '@deepseek-ai/dsh-client-ui-primitives'
+export type { ModelGroup, ModelGroupLink } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** The namespace carrying the operator registries. */
 export const ORCHESTRATION_NS = 'enpoi-orchestration'
 
-/** One ordered link of a group: a route plus the model it serves. */
-export interface ModelGroupLink {
-  provider: string
-  model: string
-  effort?: string
-}
-
-/** One model group as this surface edits it (`chains.<id>`). */
-export interface ModelGroup {
-  id: string
-  label: string
-  links: ModelGroupLink[]
-  attempts: number
-  onCut: 'failover' | 'continue'
-  disabled: boolean
-}
-
 /** How many times a fenced write re-reads and retries on conflict. */
 export const MAX_GROUP_WRITE_RETRIES = 3
-
-/** Parse one stored link; a link without a route/model is dropped. */
-function parseLink(raw: unknown): ModelGroupLink | undefined {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const rec = raw as Record<string, unknown>
-  if (typeof rec.provider !== 'string' || rec.provider === '') return undefined
-  if (typeof rec.model !== 'string' || rec.model === '') return undefined
-  // The effort is adapter-owned: a non-string or blank value is absent, so the
-  // link keeps inheriting exactly as a link that never declared one.
-  const effort = typeof rec.effort === 'string' ? rec.effort.trim() : ''
-  return {
-    provider: rec.provider,
-    model: rec.model,
-    ...effort === '' ? {} : { effort },
-  }
-}
-
-/** Parse the stored `chains` map into editable groups, dropping malformed entries. */
-export function parseModelGroups(value: unknown): ModelGroup[] {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return []
-  const groups: ModelGroup[] = []
-  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (id === '' || raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
-    const rec = raw as Record<string, unknown>
-    groups.push({
-      id,
-      label: typeof rec.label === 'string' && rec.label !== '' ? rec.label : id,
-      links: Array.isArray(rec.links)
-        ? rec.links.map(parseLink).filter((link): link is ModelGroupLink => link !== undefined)
-        : [],
-      attempts: typeof rec.attempts === 'number' && Number.isInteger(rec.attempts) && rec.attempts >= 1
-        ? rec.attempts
-        : 2,
-      onCut: rec.onCut === 'continue' ? 'continue' : 'failover',
-      disabled: rec.disabled === true,
-    })
-  }
-  return groups
-}
 
 /** Read the groups out of the mirrored namespace view. */
 export function readModelGroups(namespace: SettingsNamespaceView | undefined): ModelGroup[] {

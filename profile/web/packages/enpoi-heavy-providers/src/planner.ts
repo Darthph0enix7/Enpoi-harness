@@ -23,6 +23,8 @@ export const ORCHESTRATION_NS = 'enpoi-orchestration'
 /** Minimal settings seam (matches the live service). */
 export interface SettingsSeam {
   describe?(): Array<{ ns: string; revision: number; value?: unknown }>
+  /** 0.1.7+ narrow seam: one namespace's descriptor instead of the full set. */
+  describeNamespace?(ns: string): { value?: unknown } | undefined
   mutate(ns: string, ops: readonly Record<string, unknown>[], expectedRevision?: number): Promise<void>
 }
 

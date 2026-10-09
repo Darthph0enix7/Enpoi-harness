@@ -14,7 +14,7 @@ import {
   heavyProviderProblems,
   resolveHeavyInstall,
 } from '../src/client/heavy-providers.ts'
-import { PROVIDER_TEMPLATES, providerDashboardUrls } from '../src/client/provider-templates.ts'
+import { SHIPPED_PROVIDER_TEMPLATES, providerDashboardUrls } from '../src/client/provider-templates.ts'
 
 it('the manifest table is structurally complete', () => {
   expect(heavyProviderProblems()).toEqual([])
@@ -22,7 +22,7 @@ it('the manifest table is structurally complete', () => {
 })
 
 it('an uninstalled heavy provider is listed in Add Provider with its manifest', () => {
-  const listing = new Map(PROVIDER_TEMPLATES.map(template => [template.id, template]))
+  const listing = new Map(SHIPPED_PROVIDER_TEMPLATES.map(template => [template.id, template]))
   for (const manifest of [fallbackHeavyManifest('freellmapi')!, fallbackHeavyManifest('antigravity')!, fallbackHeavyManifest('commandcode')!]) {
     const template = listing.get(manifest.id)
     expect(template, `${manifest.id} must be listed`).toBeDefined()

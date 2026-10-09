@@ -1,34 +1,67 @@
 /**
  * Provider-catalog data and operator overrides: the keyless/popular sets
- * derive from the generated rows, and `enpoi-orchestration.uiPreferences.
- * providerCatalog` can hide, keyless-enable, or popularize a preset without
- * touching generated data.
+ * derive from the generated rows, the live host heavy table when one was
+ * accepted, and `enpoi-orchestration.uiPreferences.providerCatalog` can hide,
+ * keyless-enable, or popularize a preset without touching generated data.
  */
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import {
-  applyProviderPresetOverrides, KEYLESS_PROVIDERS, liveProviderTemplates,
-  POPULAR_PROVIDERS, providerPreset, PROVIDER_TEMPLATES,
+  applyProviderPresetOverrides, keylessProviders, liveProviderTemplates,
+  popularProviders, providerPreset, SHIPPED_KEYLESS_PROVIDERS,
+  SHIPPED_POPULAR_PROVIDERS, SHIPPED_PROVIDER_TEMPLATES,
 } from '../src/client/provider-templates.ts'
 import { parseProviderPresetOverrides } from '../src/client/provider-overrides.ts'
+import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
+import { fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
+
+afterEach(() => {
+  resetHeavyManifestSource()
+})
 
 it('derives the shipped popular order and keyless set from the generated rows', () => {
-  expect(POPULAR_PROVIDERS).toEqual([
+  expect(SHIPPED_POPULAR_PROVIDERS).toEqual([
     'opencode', 'opencode-go', 'anthropic', 'github-copilot',
     'openai', 'google', 'openrouter', 'vercel',
   ])
   // Every listed id carries the data rank its position came from, and no
   // unlisted template carries one.
-  const ranked = PROVIDER_TEMPLATES.filter(template => template.popular !== undefined).map(template => template.id)
-  expect([...POPULAR_PROVIDERS].sort()).toEqual([...ranked].sort())
-  for (const [index, id] of POPULAR_PROVIDERS.entries()) {
+  const ranked = SHIPPED_PROVIDER_TEMPLATES
+    .filter(template => template.popular !== undefined).map(template => template.id)
+  expect([...SHIPPED_POPULAR_PROVIDERS].sort()).toEqual([...ranked].sort())
+  for (const [index, id] of SHIPPED_POPULAR_PROVIDERS.entries()) {
     expect(providerPreset(id)?.popular).toBe(index + 1)
   }
-  expect(KEYLESS_PROVIDERS).toEqual(new Set(['kilo', 'lmstudio', 'ollama']))
+  expect(SHIPPED_KEYLESS_PROVIDERS).toEqual(new Set(['kilo', 'lmstudio', 'ollama']))
   // The verdict lives on the row, not only in the derived set.
   expect(providerPreset('kilo')?.keyless).toBe(true)
   expect(providerPreset('ollama')?.keyless).toBe(true)
   expect(providerPreset('lmstudio')?.keyless).toBe(true)
   expect(providerPreset('openai')?.keyless).toBeUndefined()
+})
+
+it('falls back to the shipped sets and catalog before a host heavy reply', () => {
+  // No reply was accepted: the selectors must equal the shipped fallbacks.
+  expect(popularProviders()).toEqual(SHIPPED_POPULAR_PROVIDERS)
+  expect(keylessProviders()).toEqual(SHIPPED_KEYLESS_PROVIDERS)
+  expect(providerPreset('commandcode')).toBe(
+    SHIPPED_PROVIDER_TEMPLATES.find(template => template.id === 'commandcode'))
+})
+
+it('derives the selectors from the live host table once a heavy reply lands', () => {
+  const shipped = fallbackHeavyManifest('commandcode')!
+  bindHostHeavyManifests({
+    items: [{ ...shipped, label: 'Command Code (host)', auth: { ...shipped.auth, keyless: true } }],
+    problems: [],
+  })
+  // The host row wins, and an id the host omitted stops resolving.
+  expect(providerPreset('commandcode')?.name).toBe('Command Code (host)')
+  expect(providerPreset('commandcode')?.keyless).toBe(true)
+  expect(providerPreset('freellmapi')).toBeUndefined()
+  // Keyless now tracks the live table (host heavy row plus shipped mainstream).
+  expect(keylessProviders().has('commandcode')).toBe(true)
+  expect(keylessProviders().has('kilo')).toBe(true)
+  // Heavy rows carry no popular rank, so the mainstream order is unchanged.
+  expect(popularProviders()).toEqual(SHIPPED_POPULAR_PROVIDERS)
 })
 
 it('parses overrides only from well-formed boolean fields', () => {

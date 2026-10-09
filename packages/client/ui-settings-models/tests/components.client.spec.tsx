@@ -1235,14 +1235,16 @@ describe('ModelsSection', () => {
     fireEvent.click(screen.getByRole('button', { name: en.remove }))
     fireEvent.click(within(screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) }))
       .getByRole('button', { name: en.confirmDeleteAction }))
-    await waitFor(() => { expect(unset).toHaveBeenCalledWith('OPENAI_API_KEY') })
     await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
-    expect(unset.mock.invocationCallOrder[0]).toBeLessThan(mutate.mock.invocationCallOrder[0] as number)
+    await waitFor(() => { expect(unset).toHaveBeenCalledWith('OPENAI_API_KEY') })
+    // The route unset commits before the credential write: only a removed
+    // route may leave a credential behind, never the other way around.
+    expect(mutate.mock.invocationCallOrder[0]).toBeLessThan(unset.mock.invocationCallOrder[0] as number)
     expect(screen.queryByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBeNull()
     expect(mutate.mock.calls[0]).toEqual([
       'llm-pi-ai',
       [{ op: 'unset', path: ['providers', 'openai'] }],
-      undefined,
+      0,
     ])
   })
 
@@ -1271,7 +1273,7 @@ describe('ModelsSection', () => {
     expect(mutate.mock.calls[0]).toEqual([
       'llm-deepseek',
       [{ op: 'set', path: ['disabled'], value: true }],
-      undefined,
+      0,
     ])
     await waitFor(() => {
       expect(screen.queryByRole('dialog', { name: deepseekCopy(en.deleteTitle) })).toBeNull()
@@ -1375,7 +1377,7 @@ describe('ModelsSection', () => {
     expect(mutate.mock.calls[0]).toEqual([
       'llm-plain',
       [{ op: 'unset', path: ['ghost-profile'] }],
-      undefined,
+      0,
     ])
   })
 
@@ -1403,24 +1405,27 @@ describe('ModelsSection', () => {
     const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
     const confirm = within(dialog).getByRole('button', { name: en.confirmDeleteAction })
     fireEvent.click(confirm)
-    await within(dialog).findByText('the host refused')
+    await within(dialog).findByText(t('deleteRouteFailed', {
+      provider: providerTargetLabel({ provider: 'openai', displayName: 'openai' }),
+      reason: 'the host refused',
+    }))
     expect(screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBe(dialog)
-    expect(unset).toHaveBeenCalledOnce()
+    // The route unset is the refused first write; the credential never ran.
+    expect(unset).not.toHaveBeenCalled()
     expect(mutate).toHaveBeenCalledOnce()
 
     fireEvent.click(confirm)
-    await waitFor(() => { expect(unset).toHaveBeenCalledTimes(2) })
+    await waitFor(() => { expect(unset).toHaveBeenCalledTimes(1) })
     await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
     await waitFor(() => {
       expect(screen.queryByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBeNull()
     })
   })
 
-  it('keeps the reference-cleanup failure in the dialog after the route was deleted', async () => {
+  it('keeps the reference-cleanup failure in the dialog before the route is removed', async () => {
     const mutate = vi.fn()
-      .mockResolvedValueOnce(remoteOk(wireNamespaces()[2]!))
       .mockResolvedValueOnce(remoteFail('cleanup refused', 'settings/rejected'))
-    const { face } = await mountSection({ mutate })
+    const { face, unset } = await mountSection({ mutate })
     // The cleanup pass reads the references from the same describe the page
     // already mirrors; the keeper seat names the route being deleted.
     face.settings.describe.mockResolvedValue(remoteOk({
@@ -1447,8 +1452,90 @@ describe('ModelsSection', () => {
       provider: providerTargetLabel({ provider: 'openai', displayName: 'openai' }),
       reason: 'cleanup refused',
     }))
-    // The delete committed; the cleanup write is the refused second call.
+    // The failed cleanup stopped the flow before any route or credential
+    // write: the route is still alive, so the retry can clean up again.
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(unset).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBe(dialog)
+  })
+
+  it('reports a route-removal failure after a committed cleanup and retries idempotently', async () => {
+    const mutate = vi.fn()
+      // The reference cleanup commits, then the route unset is refused.
+      .mockResolvedValueOnce(remoteOk(wireNamespaces()[2]!))
+      .mockResolvedValueOnce(remoteFail('route refused', 'settings/rejected'))
+      .mockResolvedValueOnce(remoteOk(wireNamespaces()[2]!))
+      .mockResolvedValue(remoteOk(wireNamespaces()[2]!))
+    const { face, unset } = await mountSection({ mutate })
+    face.settings.describe.mockResolvedValue(remoteOk({
+      writable: true,
+      hasDocument: false,
+      namespaces: [
+        ...wireNamespaces(),
+        {
+          ns: 'enpoi-orchestration',
+          schema: {} as JsonValue,
+          value: { personas: { keeper: { provider: 'openai', model: 'gpt' } } },
+          autoGenerate: true,
+          applies: 'live',
+          secrets: [],
+          revision: 0,
+        },
+      ],
+    }))
+    fireEvent.click(providerRow('openai'))
+    fireEvent.click(screen.getByRole('button', { name: en.remove }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+    // Trade-off: the cleanup already reset references while the route remains.
+    // The dialog says the route removal failed so the operator can retry.
+    await within(dialog).findByText(t('deleteRouteFailed', {
+      provider: providerTargetLabel({ provider: 'openai', displayName: 'openai' }),
+      reason: 'route refused',
+    }))
     expect(mutate).toHaveBeenCalledTimes(2)
+    expect(unset).not.toHaveBeenCalled()
+
+    // The retry re-runs the idempotent cleanup (a no-op write), unsets the
+    // route, and then removes the credential.
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+    await waitFor(() => { expect(unset).toHaveBeenCalledWith('OPENAI_API_KEY') })
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBeNull()
+    })
+  })
+
+  it('re-reads and retries the route unset after a settings conflict', async () => {
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(remoteFail('stale', 'settings/conflict'))
+      .mockResolvedValue(remoteOk(wireNamespaces()[2]!))
+    const { unset } = await mountSection({ mutate })
+    fireEvent.click(providerRow('openai'))
+    fireEvent.click(screen.getByRole('button', { name: en.remove }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+
+    await waitFor(() => { expect(unset).toHaveBeenCalledWith('OPENAI_API_KEY') })
+    // One refused attempt plus the replanned retry.
+    expect(mutate).toHaveBeenCalledTimes(2)
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBeNull()
+    })
+  })
+
+  it('reports a leftover credential after the route removal committed', async () => {
+    const { unset } = await mountSection({ unset: vi.fn(() => Promise.resolve(remoteFail('credential is read-only'))) })
+    fireEvent.click(providerRow('openai'))
+    fireEvent.click(screen.getByRole('button', { name: en.remove }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+    fireEvent.click(within(dialog).getByRole('button', { name: en.confirmDeleteAction }))
+    // The credential failure must not abort the removal: the route is gone and
+    // the dialog reports the leftover instead of pretending nothing happened.
+    await within(dialog).findByText(t('deleteCredentialFailed', {
+      provider: providerTargetLabel({ provider: 'openai', displayName: 'openai' }),
+      reason: 'credential is read-only',
+    }))
+    expect(unset).toHaveBeenCalledOnce()
     expect(screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })).toBe(dialog)
   })
 
@@ -1465,16 +1552,16 @@ describe('ModelsSection', () => {
     expect(mutate.mock.calls[0]).toEqual([
       'llm-pi-ai',
       [{ op: 'unset', path: ['providers', 'zombie'] }],
-      undefined,
+      0,
     ])
   })
 
-  it('does not remove provider settings when its managed credential removal is refused', async () => {
+  it('reports a leftover managed credential after the route removal committed', async () => {
     const { face, controller, mutate } = await mountSection({
       unset: vi.fn(() => Promise.resolve(remoteFail('credential is read-only'))),
     })
     const failure = await removeProviderProfile(
-      { api: wireOf(face) },
+      { api: wireOf(face), t },
       controller,
       {
         settingsNs: 'llm-pi-ai',
@@ -1482,8 +1569,13 @@ describe('ModelsSection', () => {
         credentialRef: 'OPENAI_API_KEY',
       },
     )
-    expect(failure).toBe('credential is read-only')
-    expect(mutate).not.toHaveBeenCalled()
+    // The credential failure never aborts: the route was unset first and the
+    // returned text reports the leftover rather than an untouched route.
+    expect(failure).toBe(t('deleteCredentialFailed', {
+      provider: 'openai',
+      reason: 'credential is read-only',
+    }))
+    expect(mutate).toHaveBeenCalledOnce()
   })
 
 })

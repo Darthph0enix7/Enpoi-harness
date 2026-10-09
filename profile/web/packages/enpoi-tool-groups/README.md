@@ -25,6 +25,11 @@ pre-execute backstop).
 
 Operator document: `enpoi-orchestration.toolGroups`.
 
+Shipped group labels and purposes render in the locale the durable `locale.preference` setting
+selects, falling back to the launch environment (`DSH_LOCALE`, then the POSIX tags); the zh/en
+dictionaries live in `src/locales.ts`. Operator-defined groups keep their authored copy verbatim,
+and every other string in the menu and meta-tool output stays English.
+
 - `groups.<id>.enabled` (boolean) — `false` hides the group and denies its members everywhere.
 - `groups.<id>.members` (string[]) — **replaces** the group's membership wholesale. Omitted
   shipped members become ungrouped and are therefore never denied (fail open); an empty list

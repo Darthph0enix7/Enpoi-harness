@@ -7,6 +7,7 @@ import type { ProviderPresetOverrides } from './provider-overrides.ts'
 import { useHeavyManifestState } from './heavy-manifest-source.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
+import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
 import { HeavyPreflightNote } from './HeavyProviderStatus.tsx'
@@ -151,6 +152,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [heavyStatus, setHeavyStatus] = useState<HeavyStatusView | null>(null)
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
+  // The running install poll's abort handle: closing the modal stops the
+  // polled job cleanly instead of leaving the request loop running.
+  const heavyPollAbort = useRef<AbortController | null>(null)
 
   // The listing is rebuilt from the current manifest table: the host reply
   // replaces the labelled fallback heavy rows without a page copy. Operator
@@ -216,6 +220,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   // the same id read as taken instead of showing the fresh list.
   useEffect(() => {
     if (open) return
+    heavyPollAbort.current?.abort()
+    heavyPollAbort.current = null
     setSearch('')
     setSelected(null)
     setProviderId('')
@@ -337,7 +343,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       return
     }
     if (started.value.job !== undefined) setHeavyJob(started.value.job)
-    const final = await pollHeavyJob(manifest.id, setHeavyJob)
+    // One abort handle owns this poll: a modal close aborts the loop at its
+    // next sleep, and a fresh install aborts any previous one.
+    heavyPollAbort.current?.abort()
+    const controller = new AbortController()
+    heavyPollAbort.current = controller
+    const final = await pollHeavyJob(manifest.id, setHeavyJob, { signal: controller.signal })
+    if (controller.signal.aborted) return
     if (final?.state === 'succeeded') {
       await onClose(true)
       return
@@ -360,16 +372,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     }
   }
 
-  /** Persist discovered models onto the stored route. */
+  /** Persist discovered models onto the stored route with a fenced leaf write. */
   const storeDiscovered = async (id: string, models: readonly DiscoveredModel[]): Promise<boolean> => {
     const value = models.map(adoptedModel)
-    const res = await api.settings.mutate(
-      'llm-pi-ai',
-      [{ op: 'set', path: ['providers', id, 'models'], value: value as unknown as JsonValue }],
-      undefined,
-    )
-    if (!res.ok) {
-      setError(res.error.message)
+    const outcome = await applyFenced(api, 'llm-pi-ai', () => ({
+      ops: [{ op: 'set', path: ['providers', id, 'models'], value: value as unknown as JsonValue }],
+    }))
+    if (outcome.error !== null) {
+      setError(fencedFailureText(t, outcome.error))
       return false
     }
     return true
@@ -405,13 +415,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         return false
       }
     }
-    const res = await api.settings.mutate(
-      'llm-pi-ai',
-      [{ op: 'set', path: ['providers', id], value: profileFor(id, modelIds, discovered) as JsonValue }],
-      undefined,
-    )
-    if (!res.ok) {
-      setError(res.error.message)
+    // The draft profile is rebuilt per attempt; the fence only needs the fresh
+    // revision, because a create owns the whole `providers.<id>` node.
+    const outcome = await applyFenced(api, 'llm-pi-ai', () => ({
+      ops: [{ op: 'set', path: ['providers', id], value: profileFor(id, modelIds, discovered) as JsonValue }],
+    }))
+    if (outcome.error !== null) {
+      setError(fencedFailureText(t, outcome.error))
       return false
     }
     return true
@@ -521,21 +531,21 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         }
       }
 
-      // Mutate llm-pi-ai settings namespace
-      const settingsRes = await api.settings.mutate(
-        'llm-pi-ai',
-        [{ op: 'set', path: ['providers', id], value: profileFor(id, manual) as JsonValue }],
-        undefined,
-      )
+      // Create the route profile under the namespace revision fence. The
+      // profile is the draft of this add and is rebuilt on every attempt.
+      const outcome = await applyFenced(api, 'llm-pi-ai', () => ({
+        ops: [{ op: 'set', path: ['providers', id], value: profileFor(id, manual) as JsonValue }],
+      }))
 
-      if (!settingsRes.ok) {
+      if (outcome.error !== null) {
+        const message = fencedFailureText(t, outcome.error)
         // A stored route whose adapter cannot resolve it is repairable on the
         // spot: the recovery panel offers discovery and the manual list.
-        if (/resolves no models/.test(settingsRes.error.message)) {
-          enterRecovery(settingsRes.error.message)
+        if (/resolves no models/.test(message)) {
+          enterRecovery(message)
           return
         }
-        setError(settingsRes.error.message)
+        setError(message)
         setBusy(false)
         return
       }

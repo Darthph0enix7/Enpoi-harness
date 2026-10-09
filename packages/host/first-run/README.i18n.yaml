@@ -1,0 +1,40 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/host/first-run/README.md
+/:
+  en: fe34bdb6013f5044
+  zh: fdd46c8543825cfc
+/deepseek-ai-dsh-host-first-run:
+  en: e82ab6be7e12a82d
+  zh: 7f8834044642eb9b
+/deepseek-ai-dsh-host-first-run/summary:
+  en: 47abcbaf57ec2086
+  zh: 349a31a7eda9afd8
+/deepseek-ai-dsh-host-first-run/table-of-contents:
+  en: 3460b3e585e0c020
+  zh: 3d8d434c8c935a1b
+/deepseek-ai-dsh-host-first-run/use-this-package:
+  en: e9409e7fa9ee0b2b
+  zh: 21cd483b7a086d36
+/deepseek-ai-dsh-host-first-run/understand-the-implementation:
+  en: dd4f1b90a56a1845
+  zh: e82cda2c6946722e
+/deepseek-ai-dsh-host-first-run/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-host-first-run/model-experience/request-context-and-condition:
+  en: cd8530c72534ee6b
+  zh: 16dbf6046e7e51fd
+/deepseek-ai-dsh-host-first-run/model-experience/request-context-and-condition/what-the-model-sees:
+  en: b48f49ce701adca3
+  zh: 412a2faaf77877e0
+/deepseek-ai-dsh-host-first-run/model-experience/request-context-and-condition/token-effect:
+  en: d2968b5c446374cd
+  zh: 9cb9c8bb231d0616
+/deepseek-ai-dsh-host-first-run/model-experience/request-context-and-condition/kv-cache-effect:
+  en: e79afcd68d1cf734
+  zh: 3675403956ed89ef
+/deepseek-ai-dsh-host-first-run/known-limitations-and-deferred-work:
+  en: 2b2571bb8d68588b
+  zh: 06fd1da026c3b412

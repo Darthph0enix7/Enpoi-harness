@@ -49,6 +49,11 @@ kind: "package-reference"
 |---|---|---|
 | `enabled` | `true` | 未存标记时运行种子 |
 | `provider`, `model` | `kilo`, `kilo-auto/free` | 种子写入的路由 id 与免费模型 |
+| `displayName` | `Kilo Gateway` | 写入路由配置的显示名 |
+| `api` | `openai-completions` | 路由声明的 llm-pi-ai 通信协议 |
+| `baseURL` | `https://api.kilo.ai/api/gateway` | 路由指向的网关端点 |
+| `apiKeyEnv` | `KILO_API_KEY` | 路由指向的凭据引用 |
+| `keyless` | `true` | 路由是否接受免密钥请求 |
 | `seedVersion` | 空 | 标记；任何已存值都表示种子已经决定过 |
 | `routes` | `true` | 注册 `/system-analysis/start`、`/status`、`/context`、`/accept`、`/reject` 与 `/seen` |
 | `preset` | `sysadmin` | 负责调查的智能体预设；仅为该会话挂载 |
@@ -65,7 +70,7 @@ kind: "package-reference"
 <details>
 <summary>实现内部细节——点击展开</summary>
 
-种子等待 Loader 完成（`ctx.root.loader.await()`），确保 `llm-pi-ai`、`agent-default-model` 与 `first-run` 条目已激活，然后按序写入提供方路由、默认模型与标记。失败只记一条警告并保留未写标记；下次启动重试。已带提供方路由的设置文档属于已配置安装：种子只写标记。
+种子等待 Loader 完成（`ctx.root.loader.await()`），确保 `llm-pi-ai`、`agent-default-model`、`enpoi-orchestration` 与 `first-run` 条目已激活，然后按序写入提供方路由、默认模型、keeper/compaction 人员配置与标记。人员配置指向刚写入的路由；没有舰队命名空间的 profile 会跳过这一项写入，而不是让种子失败。失败只记一条警告并保留未写标记；下次启动重试。已带提供方路由的设置文档属于已配置安装：种子只写标记，因此操作员的人员配置编辑在之后每次启动都会保留。
 
 一次调查就是配置预设上的一个根智能体会话：运行器解析预设、固定其修订（`acquireScope`）、清空 harness 主目录下的临时工作区、以该工作区为 `cwd` 创建会话、设置配置的权限预设、设置标题，并把清单提示作为开场用户消息发送。提示约束智能体对主机做只读调查，要求使用精确的待办条目驱动阶段轨道，列出六个清单阶段（machine、usage、hosting、networking、tooling、write profile），并携带概括规则：不含确切版本号、文件夹/仓库/项目名、域名、IP 地址或主机名，不做清单式枚举，硬件只到类别层面，且每一条断言都以实际观察为依据而不引用探测过程。它要求在工作区写出 `profile.json` 与 `system-profile.md`（约 60 至 120 行，以 `## At a glance` 摘要开篇）。运行器跟随会话的 `todo_write` 事件推进阶段，等待回合收尾，校验两份文件，允许两次有界的纠正回合，然后原子写入 `system-profile.json` 与 `system-profile.md`，把调查会话归档（记录离开会话列表，但仍可通过取消归档恢复），并删除该运行的临时工作区。已发布的文档若仍带有确切机器事实（IPv4 地址、点分版本号或域名式字符串），仍会被存储，并记录匹配到的事实，因此运行不会仅因风格问题失败。存储文档的头部只添加调查来源；它不含时间戳，因此文档在多次运行之间保持稳定。整个运行受配置时限与插件生命周期取消约束。
 

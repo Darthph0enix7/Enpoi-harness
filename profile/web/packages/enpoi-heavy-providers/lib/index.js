@@ -1571,6 +1571,209 @@ ${outcome.output}
 
 // src/remote.ts
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+
+// src/locales.ts
+function hostLocale(env = process.env) {
+  const tag = env.DSH_LOCALE ?? env.LC_ALL ?? env.LC_MESSAGES ?? env.LANG ?? "";
+  return /^zh\b/i.test(tag.replaceAll("_", "-")) ? "zh" : "en";
+}
+function localeFromPreference(preference, env = process.env) {
+  if (typeof preference !== "string" || preference === "") return hostLocale(env);
+  return /^zh\b/i.test(preference.replaceAll("_", "-")) ? "zh" : "en";
+}
+function settingsLocale(settings, env = process.env) {
+  try {
+    const value = settings?.describeNamespace?.("locale")?.value ?? settings?.describe?.().find((entry) => entry.ns === "locale")?.value;
+    const preference = value !== null && typeof value === "object" ? value.preference : void 0;
+    return localeFromPreference(preference, env);
+  } catch {
+    return hostLocale(env);
+  }
+}
+var zh = {
+  "summary.freellmapi": "\u81EA\u6258\u7BA1\u514D\u8D39\u989D\u5EA6\u7F51\u5173\uFF1A\u7EA6 30 \u4E2A\u63D0\u4F9B\u65B9\u5171\u7528\u4E00\u4E2A OpenAI \u517C\u5BB9\u7AEF\u70B9\u3002",
+  "summary.antigravity": "\u9762\u5411 Google Antigravity OAuth \u8D26\u53F7\u7684\u591A\u8D26\u53F7 Anthropic \u517C\u5BB9\u4EE3\u7406\u3002",
+  "summary.commandcode": "api.commandcode.ai \u4E0A CLI \u5F62\u6001\u7684 Command Code API\uFF0C\u7531 DSH \u63D0\u4F9B\u65B9\u5305\u53CA\u5176\u539F\u751F\u591A\u5BC6\u94A5\u6C60\u670D\u52A1\u2014\u2014\u65E0\u9700\u4EE3\u7406\u3002",
+  "detected.label": "\u4F7F\u7528\u68C0\u6D4B\u5230\u7684\u5B9E\u4F8B",
+  "reuse.freellmapi.label": "\u4F7F\u7528\u68C0\u6D4B\u5230\u7684\u5B9E\u4F8B",
+  "reuse.freellmapi.note": "\u96F6\u5B89\u88C5\uFF1A\u4F7F\u7528\u672C\u673A\u5DF2\u5728\u8FD0\u884C\u7684 FreeLLMAPI \u5B9E\u4F8B\u3002",
+  "reuse.antigravity.label": "\u4F7F\u7528\u68C0\u6D4B\u5230\u7684\u5B9E\u4F8B",
+  "reuse.antigravity.note": "\u96F6\u5B89\u88C5\uFF1A\u4F7F\u7528\u672C\u673A\u5DF2\u5728\u8FD0\u884C\u7684\u4EE3\u7406\u5B9E\u4F8B\u53CA\u5176\u5DF2\u914D\u7F6E\u7684\u8D26\u53F7\u6C60\u3002",
+  "reuse.commandcode.label": "\u7ACB\u5373\u4F7F\u7528\u5382\u5546\u7AEF\u70B9",
+  "reuse.commandcode.note": "\u786E\u8BA4\u7AEF\u70B9\u53EF\u5E94\u7B54\u540E\u628A\u8DEF\u7531\u5199\u5230\u5382\u5546\u7AEF\u70B9\uFF1B\u63D0\u4F9B\u65B9\u5305\u5C1A\u672A\u94FE\u63A5\u65F6\u8BF7\u5148\u8FD0\u884C\u672C\u5730\u8BBE\u7F6E\u3002",
+  "local.freellmapi.label": "\u672C\u5730\u5B89\u88C5\uFF08Docker \u6216 Podman\uFF09",
+  "local.freellmapi.darwin.label": "\u672C\u5730\u5B89\u88C5\uFF08\u5382\u5546\u684C\u9762\u5E94\u7528\uFF0C\u65E0\u9700 Docker\uFF09",
+  "local.freellmapi.win32.label": "\u672C\u5730\u5B89\u88C5\uFF08\u5382\u5546\u684C\u9762\u5E94\u7528\uFF0C\u65E0\u9700 Docker\uFF09",
+  "local.antigravity.label": "\u672C\u5730\u5B89\u88C5\uFF08npm + \u7528\u6237\u670D\u52A1\uFF09",
+  "local.antigravity.linux.label": "\u672C\u5730\u5B89\u88C5\uFF08npm + systemd \u7528\u6237\u5355\u5143\uFF09",
+  "local.antigravity.darwin.label": "\u672C\u5730\u5B89\u88C5\uFF08npm + launchd \u4EE3\u7406\uFF09",
+  "local.antigravity.win32.label": "Windows \u4E0D\u652F\u6301",
+  "local.commandcode.label": "\u94FE\u63A5\u63D0\u4F9B\u65B9\u5305\uFF0C\u7136\u540E\u4F7F\u7528\u5382\u5546\u7AEF\u70B9",
+  "local.commandcode.win32.label": "Windows \u4E0D\u652F\u6301",
+  "freellmapi.default.0": "\u514B\u9686 FreeLLMAPI",
+  "freellmapi.default.1": "\u751F\u6210 ENCRYPTION_KEY",
+  "freellmapi.default.2": "\u542F\u52A8\u670D\u52A1\u6808",
+  "freellmapi.default.3": "\u7B49\u5F85\u7F51\u5173\u5C31\u7EEA",
+  "freellmapi.darwin.0": "\u4E0B\u8F7D\u6700\u65B0 .dmg",
+  "freellmapi.darwin.1": "\u4ECE\u78C1\u76D8\u6620\u50CF\u5B89\u88C5\u5E94\u7528",
+  "freellmapi.darwin.2": "\u5C06\u684C\u9762\u5E94\u7528\u56FA\u5B9A\u5230\u7AEF\u53E3 3002",
+  "freellmapi.darwin.3": "\u542F\u52A8 FreeLLMAPI",
+  "freellmapi.darwin.4": "\u7B49\u5F85\u7F51\u5173\u5C31\u7EEA",
+  "freellmapi.win32.0": "\u4E0B\u8F7D\u6700\u65B0\u5B89\u88C5\u7A0B\u5E8F",
+  "freellmapi.win32.1": "\u9759\u9ED8\u5B89\u88C5",
+  "freellmapi.win32.2": "\u5C06\u684C\u9762\u5E94\u7528\u56FA\u5B9A\u5230\u7AEF\u53E3 3002",
+  "freellmapi.win32.3": "\u542F\u52A8 FreeLLMAPI",
+  "freellmapi.win32.4": "\u7B49\u5F85\u7F51\u5173\u5C31\u7EEA",
+  "freellmapi.removal.0": "\u505C\u6B62\u670D\u52A1\u6808\u5E76\u5220\u9664\u5176\u6570\u636E\u5377",
+  "freellmapi.removal.1": "\u5220\u9664\u5BB9\u5668\u955C\u50CF",
+  "freellmapi.removal.2": "\u5220\u9664\u514B\u9686\u76EE\u5F55",
+  "freellmapi.removal.3": "\u5220\u9664 macOS \u684C\u9762\u5E94\u7528\u53CA\u5176\u6570\u636E",
+  "freellmapi.removal.4": "\u5220\u9664 Windows \u684C\u9762\u5E94\u7528\u53CA\u5176\u6570\u636E",
+  "antigravity.default.0": "\u5B89\u88C5\u4EE3\u7406\u5305",
+  "antigravity.default.1": "\u5199\u5165 systemd \u7528\u6237\u5355\u5143",
+  "antigravity.default.2": "\u542F\u7528\u5E76\u542F\u52A8\u8BE5\u5355\u5143",
+  "antigravity.default.3": "\u542F\u7528 lingering\uFF08\u65E0\u9700\u767B\u5F55\u4F1A\u8BDD\u5373\u53EF\u542F\u52A8\u8BE5\u5355\u5143\uFF09",
+  "antigravity.default.4": "\u7B49\u5F85\u4EE3\u7406\u5C31\u7EEA",
+  "antigravity.linux.0": "\u5B89\u88C5\u4EE3\u7406\u5305",
+  "antigravity.linux.1": "\u5199\u5165 systemd \u7528\u6237\u5355\u5143",
+  "antigravity.linux.2": "\u542F\u7528\u5E76\u542F\u52A8\u8BE5\u5355\u5143",
+  "antigravity.linux.3": "\u542F\u7528 lingering\uFF08\u65E0\u9700\u767B\u5F55\u4F1A\u8BDD\u5373\u53EF\u542F\u52A8\u8BE5\u5355\u5143\uFF09",
+  "antigravity.linux.4": "\u7B49\u5F85\u4EE3\u7406\u5C31\u7EEA",
+  "antigravity.darwin.0": "\u5B89\u88C5\u4EE3\u7406\u5305",
+  "antigravity.darwin.1": "\u5199\u5165 launchd \u4EE3\u7406",
+  "antigravity.darwin.2": "\u52A0\u8F7D\u5E76\u542F\u52A8\u8BE5\u4EE3\u7406",
+  "antigravity.darwin.3": "\u7B49\u5F85\u4EE3\u7406\u5C31\u7EEA",
+  "antigravity.removal.0": "\u505C\u6B62\u5E76\u7981\u7528\u7528\u6237\u670D\u52A1",
+  "antigravity.removal.1": "\u5220\u9664\u7528\u6237\u670D\u52A1\u6587\u4EF6",
+  "antigravity.removal.2": "\u4ECE\u6BCF\u4E2A npm \u524D\u7F00\u5378\u8F7D\u8BE5\u5305",
+  "antigravity.removal.3": "\u5220\u9664 macOS \u4EE3\u7406\u65E5\u5FD7",
+  "antigravity.removal.4": "\u5220\u9664\u914D\u7F6E\u76EE\u5F55\uFF08accounts.json OAuth \u4EE4\u724C\u3001\u7528\u91CF\u5386\u53F2\u3001\u9884\u8BBE\uFF09",
+  "antigravity.removal.5": "\u6E05\u7406 npm npx \u7F13\u5B58\u6B8B\u7559",
+  "commandcode.default.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305",
+  "commandcode.linux.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305",
+  "commandcode.darwin.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305"
+};
+var en = {
+  "summary.freellmapi": "Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.",
+  "summary.antigravity": "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
+  "summary.commandcode": "Command Code's CLI-shaped API at api.commandcode.ai, served by the DSH provider package and its native multi-key pool \u2014 no proxy.",
+  "detected.label": "Use the detected instance",
+  "reuse.freellmapi.label": "Use a detected instance",
+  "reuse.freellmapi.note": "Zero install: uses a FreeLLMAPI instance already running on this device.",
+  "reuse.antigravity.label": "Use a detected instance",
+  "reuse.antigravity.note": "Zero install: uses the proxy instance already running on this device and its configured account pool.",
+  "reuse.commandcode.label": "Use the vendor endpoint now",
+  "reuse.commandcode.note": "Writes the route at the vendor endpoint after confirming it answers; run the local setup first when the provider package is not linked yet.",
+  "local.freellmapi.label": "Install locally (Docker or Podman)",
+  "local.freellmapi.darwin.label": "Install locally (vendor desktop app, no Docker)",
+  "local.freellmapi.win32.label": "Install locally (vendor desktop app, no Docker)",
+  "local.antigravity.label": "Install locally (npm + user service)",
+  "local.antigravity.linux.label": "Install locally (npm + systemd user unit)",
+  "local.antigravity.darwin.label": "Install locally (npm + launchd agent)",
+  "local.antigravity.win32.label": "Not supported on Windows",
+  "local.commandcode.label": "Link the provider package, then use the vendor endpoint",
+  "local.commandcode.win32.label": "Not supported on Windows",
+  "freellmapi.default.0": "Clone FreeLLMAPI",
+  "freellmapi.default.1": "Generate ENCRYPTION_KEY",
+  "freellmapi.default.2": "Start the stack",
+  "freellmapi.default.3": "Wait for the gateway",
+  "freellmapi.darwin.0": "Download the latest .dmg",
+  "freellmapi.darwin.1": "Install the app from the disk image",
+  "freellmapi.darwin.2": "Pin the desktop app to port 3002",
+  "freellmapi.darwin.3": "Launch FreeLLMAPI",
+  "freellmapi.darwin.4": "Wait for the gateway",
+  "freellmapi.win32.0": "Download the latest installer",
+  "freellmapi.win32.1": "Install silently",
+  "freellmapi.win32.2": "Pin the desktop app to port 3002",
+  "freellmapi.win32.3": "Launch FreeLLMAPI",
+  "freellmapi.win32.4": "Wait for the gateway",
+  "freellmapi.removal.0": "Stop the stack and drop its volume",
+  "freellmapi.removal.1": "Remove the container image",
+  "freellmapi.removal.2": "Remove the clone directory",
+  "freellmapi.removal.3": "Remove the macOS desktop app and its data",
+  "freellmapi.removal.4": "Remove the Windows desktop app and its data",
+  "antigravity.default.0": "Install the proxy package",
+  "antigravity.default.1": "Write the systemd user unit",
+  "antigravity.default.2": "Enable and start the unit",
+  "antigravity.default.3": "Enable lingering (the unit starts without an open login session)",
+  "antigravity.default.4": "Wait for the proxy",
+  "antigravity.linux.0": "Install the proxy package",
+  "antigravity.linux.1": "Write the systemd user unit",
+  "antigravity.linux.2": "Enable and start the unit",
+  "antigravity.linux.3": "Enable lingering (the unit starts without an open login session)",
+  "antigravity.linux.4": "Wait for the proxy",
+  "antigravity.darwin.0": "Install the proxy package",
+  "antigravity.darwin.1": "Write the launchd agent",
+  "antigravity.darwin.2": "Load and start the agent",
+  "antigravity.darwin.3": "Wait for the proxy",
+  "antigravity.removal.0": "Stop and disable the user service",
+  "antigravity.removal.1": "Remove the user service file",
+  "antigravity.removal.2": "Uninstall the package from every npm prefix",
+  "antigravity.removal.3": "Remove the macOS agent logs",
+  "antigravity.removal.4": "Remove the config directory (accounts.json OAuth tokens, usage history, presets)",
+  "antigravity.removal.5": "Remove npm npx cache residue",
+  "commandcode.default.0": "Link and build the DSH provider package",
+  "commandcode.linux.0": "Link and build the DSH provider package",
+  "commandcode.darwin.0": "Link and build the DSH provider package"
+};
+function text(locale, key, fallback) {
+  const value = (locale === "zh" ? zh : en)[key];
+  return value ?? fallback;
+}
+function localizeSteps(locale, manifestId, variant, steps) {
+  return steps.map((step, index) => ({
+    ...step,
+    label: text(locale, `${manifestId}.${variant}.${index}`, step.label)
+  }));
+}
+function localizeVariant(locale, manifestId, variant, install) {
+  return {
+    ...install,
+    ...install.label === void 0 ? {} : { label: text(locale, `local.${manifestId}.${variant}.label`, install.label) },
+    steps: localizeSteps(locale, manifestId, variant, install.steps)
+  };
+}
+function localizeHeavyManifest(manifest, locale) {
+  if (locale === "en") return manifest;
+  return {
+    ...manifest,
+    summary: text(locale, `summary.${manifest.id}`, manifest.summary),
+    reuse: {
+      ...manifest.reuse,
+      label: text(locale, `reuse.${manifest.id}.label`, manifest.reuse.label),
+      note: text(locale, `reuse.${manifest.id}.note`, manifest.reuse.note)
+    },
+    local: {
+      ...manifest.local,
+      label: text(locale, `local.${manifest.id}.label`, manifest.local.label),
+      install: {
+        default: localizeVariant(locale, manifest.id, "default", manifest.local.install.default),
+        ...manifest.local.install.linux === void 0 ? {} : { linux: localizeVariant(locale, manifest.id, "linux", manifest.local.install.linux) },
+        ...manifest.local.install.darwin === void 0 ? {} : { darwin: localizeVariant(locale, manifest.id, "darwin", manifest.local.install.darwin) },
+        ...manifest.local.install.win32 === void 0 ? {} : { win32: localizeVariant(locale, manifest.id, "win32", manifest.local.install.win32) }
+      }
+    },
+    removal: {
+      ...manifest.removal,
+      steps: localizeSteps(locale, manifest.id, "removal", manifest.removal.steps)
+    }
+  };
+}
+function localizeHeavySteps(manifest, platform, steps, locale) {
+  if (locale === "en") return steps;
+  const declared = platform === "linux" || platform === "darwin" || platform === "win32" ? manifest.local.install[platform] : void 0;
+  return localizeSteps(locale, manifest.id, declared === void 0 ? "default" : platform, steps);
+}
+function localizeHeavyPreflight(preflight, manifest, platform, locale) {
+  if (locale === "en") return preflight;
+  if (preflight.path === "detected") {
+    return { ...preflight, label: text(locale, "detected.label", preflight.label) };
+  }
+  const resolved = resolveHeavyInstall(manifest.local, platform);
+  return { ...preflight, label: resolved.label, steps: resolved.steps };
+}
+
+// src/remote.ts
 var MAX_KEY_CHARS = 4096;
 var RUNTIME_TTL_MS = 6e4;
 function requireManifest(value) {
@@ -1624,6 +1827,10 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     this.runtimeCache = { at: now, value };
     return value;
   }
+  /** The operator-visible locale: the durable preference, else the host environment. */
+  locale() {
+    return settingsLocale(this.options.deps().settings);
+  }
   /**
    * Resolve one wire id to its effective manifest, refusing a provider the
    * operator disabled. `remove`/`job` keep the plain resolution: an operator
@@ -1643,8 +1850,9 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
   }
   manifests() {
     const overlay = readServerOverlay(this.options.deps().dshHome);
+    const locale = this.locale();
     return {
-      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay),
+      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay).map((manifest) => localizeHeavyManifest(manifest, locale)),
       problems: manifestProblems(),
       platform: process.platform
     };
@@ -1652,6 +1860,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
   async status(request) {
     const manifest = this.requireEnabledManifest(request?.id);
     const deps = this.options.deps();
+    const locale = this.locale();
     const settingsNs = routeSettingsNs(manifest);
     const profile = configuredProfile(deps, manifest.id, settingsNs);
     const configured = profile !== void 0;
@@ -1667,12 +1876,14 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       detection?.ok === true ? detection.port : void 0,
       { home: deps.home, dshHome: deps.dshHome }
     );
+    const localizedManifest = localizeHeavyManifest(manifest, locale);
+    const localizedPreflight = localizeHeavyPreflight(preflight, localizedManifest, process.platform, locale);
     const health = configuredBase !== void 0 ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl) : direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
     const settingsReady = settingsNamespaceReady(deps, settingsNs);
     const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured);
     return {
       id: manifest.id,
-      manifest,
+      manifest: localizedManifest,
       settingsNs,
       ...settingsReady === void 0 ? {} : { settingsReady },
       configured,
@@ -1680,7 +1891,7 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       health,
       platform: process.platform,
       runtime,
-      preflight,
+      preflight: localizedPreflight,
       ...detection?.ok === true && detection.port !== void 0 ? { detectedPort: detection.port } : {},
       ...detection?.ok === true ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === void 0 ? {} : { unsupported: manifest.unsupported },
@@ -1728,7 +1939,13 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`);
       return { ok: false, pendingRestart };
     }
-    const job = this.options.jobs.start(manifest.id, "install", resolveHeavyInstall(manifest.local, process.platform).steps, async () => {
+    const steps = localizeHeavySteps(
+      manifest,
+      process.platform,
+      resolveHeavyInstall(manifest.local, process.platform).steps,
+      this.locale()
+    );
+    const job = this.options.jobs.start(manifest.id, "install", steps, async () => {
       const current = this.options.deps();
       const late = pendingRestartForManifest(current, manifest);
       if (late !== void 0) throw new Error(late.message);

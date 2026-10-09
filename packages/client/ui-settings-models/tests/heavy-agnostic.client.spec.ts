@@ -11,7 +11,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import { FALLBACK_HEAVY_PROVIDER_MANIFESTS } from '../src/client/heavy-providers.ts'
-import { PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
+import { SHIPPED_PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
 
 const FORBIDDEN = [
   /100\.122\.163\.25/,
@@ -24,7 +24,7 @@ const FORBIDDEN = [
 /** Every string reachable from one value, in order. */
 
 it('the shipped manifests and heavy templates name no operator address, hostname, or path', () => {
-  const heavyTemplates = PROVIDER_TEMPLATES.filter(template => template.heavy !== undefined)
+  const heavyTemplates = SHIPPED_PROVIDER_TEMPLATES.filter(template => template.heavy !== undefined)
   expect(heavyTemplates).toHaveLength(FALLBACK_HEAVY_PROVIDER_MANIFESTS.length)
   for (const value of [FALLBACK_HEAVY_PROVIDER_MANIFESTS, heavyTemplates]) {
     const serialized = JSON.stringify(value)

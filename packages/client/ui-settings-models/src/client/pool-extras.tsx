@@ -15,6 +15,7 @@ import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { AddProviderModal } from './AddProviderModal.tsx'
+import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { messageOf, type ModelsWire } from './store.ts'
 import type { ModelsKey } from './locales.ts'
 import {
@@ -236,11 +237,14 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
   )
   const writable = view?.writable === true
 
-  const writePool = useCallback(async (ops: SettingsPathOpView[]): Promise<string | undefined> => {
+  const writePool = useCallback(async (build: (fresh: PoolConfig | undefined) => SettingsPathOpView[]): Promise<string | undefined> => {
     setBusy(true)
     try {
-      const response = await settings.mutate(ns, ops, undefined)
-      if (!response.ok) return response.error.message
+      // Each fenced attempt replans against the freshly described document, so
+      // a conflict retry re-applies the operator's draft onto current rows
+      // instead of replaying a stale snapshot.
+      const outcome = await applyFenced({ settings }, ns, view => ({ ops: build(parsePool(readPath(view?.value, poolPath))) }))
+      if (outcome.error !== null) return fencedFailureText(t, outcome.error)
       await reloadView()
       void refreshStatus()
       return undefined
@@ -249,10 +253,10 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
     } finally {
       setBusy(false)
     }
-  }, [settings, ns, reloadView, refreshStatus])
+  }, [settings, ns, poolPath, reloadView, refreshStatus, t])
 
-  const runWrite = (ops: SettingsPathOpView[]): void => {
-    void writePool(ops).then((failure) => { setActionError(failure) })
+  const runWrite = (build: (fresh: PoolConfig | undefined) => SettingsPathOpView[]): void => {
+    void writePool(build).then((failure) => { setActionError(failure) })
   }
 
   const toggleOpen = (): void => {
@@ -262,37 +266,50 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
   }
 
   const changeStrategy = (strategy: string): void => {
-    runWrite([{ op: 'set', path: [...poolPath, 'strategy'], value: strategy }])
+    runWrite(() => [{ op: 'set', path: [...poolPath, 'strategy'], value: strategy }])
   }
 
   const toggleEnabled = (identity: PoolIdentityConfig): void => {
-    if (pool === undefined) return
-    const identities = pool.identities.map(entry =>
-      entry.id === identity.id ? { ...entry, enabled: entry.enabled === false } : entry)
-    runWrite([{ op: 'set', path: [...poolPath, 'identities'], value: identities as unknown as JsonValue }])
+    runWrite((fresh) => {
+      if (fresh === undefined || !fresh.identities.some(entry => entry.id === identity.id)) return []
+      const identities = fresh.identities.map(entry =>
+        entry.id === identity.id ? { ...entry, enabled: entry.enabled === false } : entry)
+      return [{ op: 'set', path: [...poolPath, 'identities'], value: identities as unknown as JsonValue }]
+    })
   }
 
   const moveIdentity = (index: number, direction: -1 | 1): void => {
     if (pool === undefined) return
-    const target = index + direction
     const entry = pool.identities[index]
-    if (entry === undefined || target < 0 || target >= pool.identities.length) return
-    const list = [...pool.identities]
-    list.splice(index, 1)
-    list.splice(target, 0, entry)
-    const renumbered = list.map((item, position) => ({ ...item, priority: position + 1 }))
-    runWrite([{ op: 'set', path: [...poolPath, 'identities'], value: renumbered as unknown as JsonValue }])
+    if (entry === undefined || index + direction < 0 || index + direction >= pool.identities.length) return
+    runWrite((fresh) => {
+      const identities = fresh?.identities
+      if (identities === undefined) return []
+      // The draft is "move this identity one step"; the fresh order decides
+      // the indexes.
+      const from = identities.findIndex(item => item.id === entry.id)
+      const to = from + direction
+      if (from < 0 || to < 0 || to >= identities.length) return []
+      const list = [...identities]
+      const [moved] = list.splice(from, 1)
+      if (moved === undefined) return []
+      list.splice(to, 0, moved)
+      const renumbered = list.map((item, position) => ({ ...item, priority: position + 1 }))
+      return [{ op: 'set', path: [...poolPath, 'identities'], value: renumbered as unknown as JsonValue }]
+    })
   }
 
   const deleteIdentity = (identityId: string): void => {
     if (pool === undefined) return
     if (!window.confirm(t('poolDeleteConfirm').replace('{id}', identityId))) return
-    const remaining = pool.identities.filter(entry => entry.id !== identityId)
-    if (remaining.length > 0) {
-      runWrite([{ op: 'set', path: [...poolPath, 'identities'], value: remaining as unknown as JsonValue }])
-      return
-    }
-    runWrite([{ op: 'unset', path: [...poolPath] }])
+    runWrite((fresh) => {
+      if (fresh === undefined) return []
+      const remaining = fresh.identities.filter(entry => entry.id !== identityId)
+      // Already gone: the previous attempt committed.
+      if (remaining.length === fresh.identities.length) return []
+      if (remaining.length === 0) return [{ op: 'unset', path: [...poolPath] }]
+      return [{ op: 'set', path: [...poolPath, 'identities'], value: remaining as unknown as JsonValue }]
+    })
   }
 
   const testIdentity = async (identityId: string): Promise<void> => {
@@ -329,25 +346,32 @@ export function PoolProviderCardExtras(props: PoolProviderCardExtrasProps): Reac
     try {
       const credential = await credentials.set(draft.credentialRef, draft.secret)
       if (!credential.ok) return credential.error.message
-      const identity: PoolIdentityConfig = {
-        id: draft.id,
-        credentialRef: draft.credentialRef,
-        priority: (pool?.identities.length ?? 0) + 1,
-        enabled: true,
-      }
-      const identities = [...(pool?.identities ?? []), identity]
-      const response = pool === undefined
-        ? await settings.mutate(ns, [{
-          op: 'set',
-          path: [...poolPath],
-          value: { strategy: 'priority-sticky', identities } as unknown as JsonValue,
-        }], undefined)
-        : await settings.mutate(ns, [{
-          op: 'set',
-          path: [...poolPath, 'identities'],
-          value: identities as unknown as JsonValue,
-        }], undefined)
-      if (!response.ok) return response.error.message
+      const outcome = await applyFenced({ settings }, ns, (view) => {
+        const fresh = parsePool(readPath(view?.value, poolPath))
+        // An id already present is the previous attempt's own commit: the
+        // retry is a no-op instead of a duplicate row.
+        if (fresh?.identities.some(entry => entry.id === draft.id)) return { ops: [] }
+        const identity: PoolIdentityConfig = {
+          id: draft.id,
+          credentialRef: draft.credentialRef,
+          priority: (fresh?.identities.length ?? 0) + 1,
+          enabled: true,
+        }
+        const identities = [...(fresh?.identities ?? []), identity]
+        const ops: SettingsPathOpView[] = fresh === undefined
+          ? [{
+            op: 'set',
+            path: [...poolPath],
+            value: { strategy: 'priority-sticky', identities } as unknown as JsonValue,
+          }]
+          : [{
+            op: 'set',
+            path: [...poolPath, 'identities'],
+            value: identities as unknown as JsonValue,
+          }]
+        return { ops }
+      })
+      if (outcome.error !== null) return fencedFailureText(t, outcome.error)
       await reloadView()
       void refreshStatus()
       return undefined

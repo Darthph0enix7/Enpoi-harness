@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import { diffWordsWithSpace, structuredPatch } from 'diff'
@@ -545,13 +545,18 @@ export function DiffBlock({ diffs, served, view = 'unified', wordLevel = false, 
     ? (diffs.every(diff => languageForPath(diff.path) === firstLanguage) ? firstLanguage : undefined)
     : firstLanguage
 
+  useEffect(() => {
+    if (!copied) return
+    const id = window.setTimeout(() => { setCopied(false) }, 1000)
+    return () => { window.clearTimeout(id) }
+  }, [copied])
+
   const onCopy = useCallback(() => {
     if (copied) return
     const text = model.mode === 'cards' ? copyText(model.rows) : servedCopyText(model.files)
     void writeClipboard(text).then((ok) => {
       if (!ok) return
       setCopied(true)
-      window.setTimeout(() => { setCopied(false) }, 1000)
     })
   }, [copied, model])
 

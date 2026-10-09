@@ -29,12 +29,9 @@ export class EnpoiRolesService extends TypertRemoteService {
    */
   @Remote
   async list(): Promise<EffectiveRoleList> {
-    const settings = this.ctx.get('settings') as SettingsDocumentReader | undefined
-    // The engine's role registry reads the shared document through the
-    // pre-0.1.7 `get(ns)` handle; adapt the merged describe()-based document
-    // onto that handle so settings overrides keep reaching the panel.
+    const settings = this.ctx.get('settings') as { describe?: () => ReadonlyArray<{ ns: string; value?: unknown }> } | undefined
     const handle: OrchestrationSettingsHandle = {
-      get: () => readOrchestrationDocument(settings),
+      describe: () => (typeof settings?.describe === 'function' ? settings.describe() : []),
     }
     return effectiveRoleRows(handle)
   }

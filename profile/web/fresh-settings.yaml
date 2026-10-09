@@ -24,6 +24,9 @@ dsh-better-sidebar:
     diff: true
     capabilities: true
 enpoi-orchestration:
+  # No personas ship here: keeper/compaction name the seeded LLM route, so the
+  # first-run seed (packages/host/first-run) writes them once and this
+  # seed-once file stays free of committed provider state.
   parameters:
     council:
       maxDebateTokens: 180000

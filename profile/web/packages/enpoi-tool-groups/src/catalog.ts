@@ -19,6 +19,8 @@
  * @module dsh-enpoi-tool-groups/catalog
  */
 
+import { toolGroupText, type HostLocale } from './locales.js'
+
 /** Whether a group is always presented or attachable on demand. */
 export type ToolGroupMode = 'static' | 'on-demand'
 
@@ -72,6 +74,11 @@ export interface ResolveToolGroupsOptions {
   readonly roster?: ReadonlySet<string>
   /** Receives one line per dropped member, ignored custom group, or malformed override value; omitted = silent. */
   readonly warn?: (message: string) => void
+  /**
+   * Locale for the shipped group labels and purposes; omitted means English.
+   * Operator-defined custom groups keep their authored copy verbatim.
+   */
+  readonly locale?: HostLocale
 }
 
 /** Shipped defaults, frozen against the live registry roster. */
@@ -310,6 +317,7 @@ export function resolveToolGroups(
   const doc = asRecord(document)
   const toolGroups = asRecord(doc?.['toolGroups'])
   const groupOverrides = asRecord(toolGroups?.['groups'])
+  const locale = options.locale ?? 'en'
   const groups: ToolGroupDefinition[] = SHIPPED_TOOL_GROUPS.map((group): ToolGroupDefinition => {
     const override = asRecord(groupOverrides?.[group.id])
     if (override !== undefined) warnMalformed(override, group.id, options)
@@ -318,8 +326,8 @@ export function resolveToolGroups(
     const seats = resolveSeats(override, group.seats)
     return {
       id: group.id,
-      label: group.label,
-      purpose: group.purpose,
+      label: toolGroupText(locale, group.id, 'label', group.label),
+      purpose: toolGroupText(locale, group.id, 'purpose', group.purpose),
       members: members === undefined ? group.members : validateMembers(group.id, members, options),
       mode,
       preAttach: group.preAttach,

@@ -42,6 +42,13 @@ function sourceFiles(): string[] {
       walk(resolve(packagesRoot, group, pkg, 'src'), files)
     }
   }
+  // The web profile's plugin workspace ships product copy too (host-locale
+  // dictionaries for heavy providers, tool groups, and friends); the same
+  // symmetry rule applies there, so the sweep does not silently narrow.
+  const profileRoot = resolve(root, 'profile/web/packages')
+  for (const pkg of directories(profileRoot)) {
+    walk(resolve(profileRoot, pkg, 'src'), files)
+  }
   return files.sort()
 }
 

@@ -346,21 +346,23 @@ describe('removeProviderProfile cleanup wiring', () => {
     } as unknown as Parameters<typeof removeProviderProfile>[0]
   }
 
-  it('returns the localized cleanup failure after the deletion committed', async () => {
+  it('reports the cleanup failure before any route write', async () => {
     const scripted = settingsFace(fullDocs())
     scripted.mutate
-      .mockResolvedValueOnce(ok(undefined))
       .mockResolvedValueOnce(refuse('cleanup refused') as never)
     const failure = await removeProviderProfile(
       profileFace(scripted, translateEn),
       undefined as never,
       { settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'gone'], provider: 'gone' },
     )
+    // The cleanup runs first and fails: the route write never happened, so
+    // the route is still alive and the retry can clean up again.
     expect(failure).toBe('cleanup refused')
-    expect(scripted.mutate).toHaveBeenCalledTimes(2)
+    expect(scripted.mutate).toHaveBeenCalledTimes(1)
+    expect(scripted.mutate.mock.calls[0]![0]).toBe(ORCHESTRATION_NS)
   })
 
-  it('derives the removed route from the profile path and resets its references', async () => {
+  it('derives the removed route from the profile path, then unsets the route', async () => {
     const scripted = settingsFace(fullDocs())
     const failure = await removeProviderProfile(
       profileFace(scripted),
@@ -369,7 +371,9 @@ describe('removeProviderProfile cleanup wiring', () => {
     )
     expect(failure).toBeNull()
     expect(scripted.mutate).toHaveBeenCalledTimes(4)
-    expect(scripted.mutate.mock.calls[1]![0]).toBe(ORCHESTRATION_NS)
+    // Cleanup namespaces first, then the route unset on the profile namespace.
+    expect(scripted.mutate.mock.calls[0]![0]).toBe(ORCHESTRATION_NS)
+    expect(scripted.mutate.mock.calls[3]![0]).toBe('llm-pi-ai')
   })
 
   it('returns the machine code when no translate seat is bound', async () => {

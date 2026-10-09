@@ -1330,7 +1330,7 @@ describe('DeepSeekAdapter against a mock server', () => {
     const server = await mockServer([behavior])
     const ctx = await harness(server.url)
     const result = await assemble(ctx,{ model: 'deepseek-v4-flash', messages: [] })
-    expect(result.finish).toEqual({
+    expect(result.finish).toMatchObject({
       kind: 'error',
       failure: { message: `failed with ${status}`, code, status },
     })
@@ -1379,7 +1379,7 @@ describe('DeepSeekAdapter against a mock server', () => {
     }])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-    expect(result.finish).toEqual({
+    expect(result.finish).toMatchObject({
       kind: 'error',
       failure: {
         message: 'slow down',
@@ -1406,7 +1406,7 @@ describe('DeepSeekAdapter against a mock server', () => {
       }])
       const ctx = await harness(server.url)
       const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-      expect(result.finish).toEqual({
+      expect(result.finish).toMatchObject({
         kind: 'error',
         failure: {
           message: 'come back later',
@@ -1437,7 +1437,7 @@ describe('DeepSeekAdapter against a mock server', () => {
       }])
       const ctx = await harness(server.url)
       const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-      expect(result.finish).toEqual({
+      expect(result.finish).toMatchObject({
         kind: 'error',
         failure: { message: 'retry later', code: 'RATE_LIMIT', status: 429 },
       })

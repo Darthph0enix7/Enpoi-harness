@@ -9,7 +9,7 @@ import { effectiveRoleRows } from '../src/roles-view.ts'
 
 /** A Settings handle stub: one namespace document, no service machinery. */
 function settingsHandle(document: unknown) {
-  return { get: (ns: string) => (ns === 'enpoi-orchestration' ? document : undefined) }
+  return { describe: () => [{ ns: 'enpoi-orchestration', value: document }] }
 }
 
 describe('enpoiRoles effectiveRoleRows', () => {

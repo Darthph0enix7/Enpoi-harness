@@ -355,6 +355,22 @@ describe('real Loader composition', () => {
       + '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>')
   })
 
+  it('renders registration errors in the host locale', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition()
+    const server = loaded.webServer
+    const previous = process.env.DSH_LOCALE
+    process.env.DSH_LOCALE = 'zh-CN'
+    try {
+      const dispose = server.register({ kind: 'exact', path: '/locale-probe', handler: () => {} })
+      expect(() => server.register({ kind: 'exact', path: '/locale-probe', handler: () => {} }))
+        .toThrow(/重复的 exact 路由/)
+      dispose()
+    } finally {
+      if (previous === undefined) delete process.env.DSH_LOCALE
+      else process.env.DSH_LOCALE = previous
+    }
+  })
+
   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {
     const first = await loadComposition()
     const takenPort = first.webServer.port

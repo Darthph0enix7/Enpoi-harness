@@ -27,11 +27,12 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { ToolExecution, ToolRunContext, PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
+import { readOrchestrationDocument, readSettingsDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
   denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel,
   type ResolvedToolGroups,
 } from './catalog.js'
+import { localeFromPreference, type HostLocale } from './locales.js'
 import { toolGroupsProjection, type ToolGroupsProjectionState } from './projection.js'
 
 /** Cordis plugin name. */
@@ -297,9 +298,14 @@ function mount(ctx: Context, config: Config, seams: ToolGroupsSeams): void {
   }
   ctx.on('tools/change', () => { toolRoster = null })
 
+  /** The locale the shipped group copy renders in; falls back to the host environment. */
+  const textLocale = (): HostLocale =>
+    localeFromPreference(readSettingsDocument(settings, 'locale')?.['preference'])
+
   /** Resolve the catalog hot: operator edits apply to the next ensure. */
   const catalog = (): ResolvedToolGroups => resolveToolGroups(readOrchestrationDocument(settings), {
     roster: knownToolNames(),
+    locale: textLocale(),
     warn: (message) => {
       if (warnedMembers.has(message)) return
       warnedMembers.add(message)

@@ -112,15 +112,19 @@ export function heavyTemplate(manifest: HeavyProviderManifest): ProviderTemplate
 }
 
 /** The generated mainstream presets, verbatim from the data module. */
-const MAINSTREAM_TEMPLATES: ProviderTemplate[] = presets as unknown as ProviderTemplate[]
+const SHIPPED_MAINSTREAM_TEMPLATES: ProviderTemplate[] = presets as unknown as ProviderTemplate[]
 
 /**
- * The pre-connection listing: mainstream presets plus the labelled fallback
- * heavy table. Live render code uses {@link liveProviderTemplates}; pickers
- * that honor operator overrides go through {@link applyProviderPresetOverrides}.
+ * The shipped pre-connection listing: mainstream presets plus the labelled
+ * fallback heavy table. This is the fallback {@link liveProviderTemplates}
+ * replaces once the host heavy reply lands, and the fallback the
+ * {@link popularProviders}/{@link keylessProviders}/{@link providerPreset}
+ * selectors derive from before that reply. Live render code uses
+ * {@link liveProviderTemplates}; pickers that honor operator overrides go
+ * through {@link applyProviderPresetOverrides}.
  */
-export const PROVIDER_TEMPLATES: ProviderTemplate[] =
-  MAINSTREAM_TEMPLATES.concat(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(heavyTemplate))
+export const SHIPPED_PROVIDER_TEMPLATES: ProviderTemplate[] =
+  SHIPPED_MAINSTREAM_TEMPLATES.concat(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(heavyTemplate))
 
 /**
  * The listing to render now: mainstream presets plus the current heavy table
@@ -130,14 +134,22 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] =
  * @returns the templates in listing order.
  */
 export function liveProviderTemplates(): ProviderTemplate[] {
-  return MAINSTREAM_TEMPLATES.concat(heavyManifestState().manifests.map(heavyTemplate))
+  return SHIPPED_MAINSTREAM_TEMPLATES.concat(heavyManifestState().manifests.map(heavyTemplate))
+}
+
+/**
+ * The listing the selectors derive from: the live host-backed table once a
+ * heavy reply was accepted, the shipped fallback before.
+ */
+function selectableTemplates(): readonly ProviderTemplate[] {
+  return heavyManifestState().live ? liveProviderTemplates() : SHIPPED_PROVIDER_TEMPLATES
 }
 
 /**
  * Shipped popular ordering, derived from the generated rows' `popular` rank.
  * An operator override changes what a picker renders, never this shipped set.
  */
-export const POPULAR_PROVIDERS: readonly string[] = PROVIDER_TEMPLATES
+export const SHIPPED_POPULAR_PROVIDERS: readonly string[] = SHIPPED_PROVIDER_TEMPLATES
   .filter(template => template.popular !== undefined)
   .toSorted((left, right) => (left.popular ?? 0) - (right.popular ?? 0))
   .map(template => template.id)
@@ -148,17 +160,43 @@ export const POPULAR_PROVIDERS: readonly string[] = PROVIDER_TEMPLATES
  * An operator override changes what the Add-Provider form does, never this
  * shipped set.
  */
-export const KEYLESS_PROVIDERS: ReadonlySet<string> = new Set(
-  PROVIDER_TEMPLATES.filter(template => template.keyless === true).map(template => template.id),
+export const SHIPPED_KEYLESS_PROVIDERS: ReadonlySet<string> = new Set(
+  SHIPPED_PROVIDER_TEMPLATES.filter(template => template.keyless === true).map(template => template.id),
 )
+
+/**
+ * Popular ordering in force: the live host-backed table once a heavy reply was
+ * accepted, the shipped fallback before. The `popular` rank only exists on the
+ * generated mainstream rows, so a host reply cannot reorder the group — the
+ * live derivation keeps one path for every selector.
+ * @returns the provider ids in popular order.
+ */
+export function popularProviders(): readonly string[] {
+  return selectableTemplates()
+    .filter(template => template.popular !== undefined)
+    .toSorted((left, right) => (left.popular ?? 0) - (right.popular ?? 0))
+    .map(template => template.id)
+}
+
+/**
+ * Keyless providers in force: the live host-backed table once a heavy reply was
+ * accepted (a host manifest may declare its route keyless), the shipped
+ * fallback before.
+ * @returns the provider ids that need no API key.
+ */
+export function keylessProviders(): ReadonlySet<string> {
+  return new Set(selectableTemplates().filter(template => template.keyless === true).map(template => template.id))
+}
 
 /**
  * Resolve a preset by id, regardless of an operator `hidden` override: a
  * configured route's metadata (dashboard, docs, env ref) must keep resolving
- * after its preset left the picker.
+ * after its preset left the picker. The live host-backed table wins once a
+ * heavy reply was accepted, so a retired page-copy row cannot resolve after
+ * the host dropped it; the shipped fallback stands before that reply.
  */
 export function providerPreset(id: string): ProviderTemplate | undefined {
-  return PROVIDER_TEMPLATES.find(p => p.id === id)
+  return selectableTemplates().find(p => p.id === id)
 }
 
 /**

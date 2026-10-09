@@ -15,7 +15,7 @@ import {
 } from '../src/client/heavy-manifest-source.ts'
 import { FALLBACK_HEAVY_PROVIDER_MANIFESTS, fallbackHeavyManifest } from '../src/client/heavy-providers.ts'
 import { HEAVY_OVERLAY_GLOBAL } from '../src/heavy-overlay.ts'
-import { liveProviderTemplates, PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
+import { liveProviderTemplates, SHIPPED_PROVIDER_TEMPLATES } from '../src/client/provider-templates.ts'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -28,7 +28,7 @@ it('renders the labelled fallback before any host reply', () => {
   expect(resolveHeavyManifest('commandcode')).toEqual(fallbackHeavyManifest('commandcode'))
   expect(resolveHeavyManifest('commandcode')?.unsupported).toBeUndefined()
   // The pre-connection listing still carries every fallback heavy row.
-  expect(PROVIDER_TEMPLATES.filter(template => template.heavy !== undefined))
+  expect(SHIPPED_PROVIDER_TEMPLATES.filter(template => template.heavy !== undefined))
     .toHaveLength(state.manifests.length)
 })
 

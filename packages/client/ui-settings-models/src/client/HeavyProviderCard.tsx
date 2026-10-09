@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { autoPopulateDue, type AutoPopulateAttempt } from './heavy-auto-populate.ts'
-import { heavyApi, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
+import { pollHeavyJob, HEAVY_JOB_POLL_MS, type HeavyJobView } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyPreflightNote, useHeavyStatus } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import type { en } from './locales.ts'
@@ -85,24 +85,20 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
   }, [status])
 
   // While a job runs, poll it directly: status is TTL-cached for health, but
-  // progress must move. A terminal snapshot forces a status refresh so the
-  // mode/dashboard badges pick up the route the finalizer just wrote.
+  // progress must move. The effect's abort signal owns the loop, so unmount or
+  // a job that settled elsewhere stops the polling at its next sleep. A
+  // terminal snapshot forces a status refresh so the mode/dashboard badges
+  // pick up the route the finalizer just wrote.
   useEffect(() => {
     if (job?.state !== 'running') return
-    let cancelled = false
-    const timer = setInterval(() => {
-      void heavyApi.job(providerId).then((result) => {
-        if (cancelled) return
-        const next = result.ok ? result.value.job : undefined
-        if (next === undefined) return
-        setJob(next)
-        if (next.state !== 'running') refresh()
-      })
-    }, HEAVY_JOB_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
+    const controller = new AbortController()
+    void pollHeavyJob(providerId, (next) => { setJob(next) }, {
+      intervalMs: HEAVY_JOB_POLL_MS,
+      signal: controller.signal,
+    }).then((final) => {
+      if (final !== null && final.state !== 'running') refresh()
+    })
+    return () => { controller.abort() }
   }, [job?.state, providerId, refresh])
 
   if (manifest === undefined) return null

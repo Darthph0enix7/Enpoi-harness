@@ -10,8 +10,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import z from '@deepseek-ai/schemastery'
 import { WebSocketServer } from 'ws'
-import { TerminalHostError, TerminalRegistry, ensureSpawnHelper } from './pty.ts'
+import {
+  DEFAULT_DISCONNECT_GRACE_MS,
+  DEFAULT_MAX_PER_SESSION,
+  DEFAULT_TRANSCRIPT_LIMIT_BYTES,
+  TerminalHostError,
+  TerminalRegistry,
+  defaultShell,
+  ensureSpawnHelper,
+} from './pty.ts'
 import {
   ENPOI_TERMINAL_API_PATH,
   ENPOI_TERMINAL_WS_PATH,
@@ -43,7 +52,33 @@ function connectionOf(ctx: Context): FencedConnection {
   return Reflect.get(ctx, 'connection') as FencedConnection
 }
 
-/** API request bodies are tiny JSON objects; anything larger is hostile. */
+/**
+ * Plugin configuration: the deployment-varying terminal tunables. Wire
+ * constants stay frozen and are deliberately not configurable:
+ * `MAX_BODY_BYTES` bounds every API request body and
+ * `TERMINAL_WS_UNKNOWN_KEY` (4404) is the socket close code the browser
+ * branches on, so both are protocol surface.
+ */
+export interface Config {
+  /** Concurrent terminals allowed per conversation (default 8). */
+  maxPerSession: number
+  /** How long a process outlives its last attached socket (default 90,000 ms). */
+  disconnectGraceMs: number
+  /** Replay transcript bound per terminal in bytes (default 512 KiB; the head is dropped). */
+  transcriptLimitBytes: number
+  /** Login shell; defaults to `$SHELL`, then `/bin/bash` (`powershell.exe` on Windows). */
+  shell: string
+}
+
+/** Validated terminal host configuration. */
+export const Config: z<Partial<Config>, Config> = z.object({
+  maxPerSession: z.number().step(1).min(1).default(DEFAULT_MAX_PER_SESSION),
+  disconnectGraceMs: z.natural().default(DEFAULT_DISCONNECT_GRACE_MS),
+  transcriptLimitBytes: z.number().step(1).min(1).default(DEFAULT_TRANSCRIPT_LIMIT_BYTES),
+  shell: z.string().default(defaultShell()),
+}) as z<Partial<Config>, Config>
+
+/** API request bodies are tiny JSON objects; anything larger is hostile. Protocol constant: never configurable. */
 const MAX_BODY_BYTES = 64 * 1024
 
 /** JSON response (no-store: terminal facts are live). */
@@ -110,10 +145,16 @@ function numberField(payload: Record<string, unknown>, field: string): number | 
 /**
  * Client plugin body: one PTY registry behind the fenced API and upgrade.
  * @param ctx - host root context carrying the route carrier and the trust fence.
+ * @param config - validated terminal tunables; wire constants stay fixed.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   ensureSpawnHelper()
-  const registry = new TerminalRegistry()
+  const registry = new TerminalRegistry({
+    shell: config.shell,
+    maxPerSession: config.maxPerSession,
+    graceMs: config.disconnectGraceMs,
+    transcriptLimitBytes: config.transcriptLimitBytes,
+  })
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
 
   const dispatch = (method: string, payload: Record<string, unknown>): unknown => {

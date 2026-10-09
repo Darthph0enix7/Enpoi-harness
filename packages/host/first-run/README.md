@@ -49,6 +49,11 @@ Mount the analysis routes where browsers can reach them, and the context row ins
 |---|---|---|
 | `enabled` | `true` | Run the seed when no marker is stored |
 | `provider`, `model` | `kilo`, `kilo-auto/free` | Route id and free model the seed writes |
+| `displayName` | `Kilo Gateway` | Display name written into the route profile |
+| `api` | `openai-completions` | llm-pi-ai wire protocol the route declares |
+| `baseURL` | `https://api.kilo.ai/api/gateway` | Gateway endpoint the route names |
+| `apiKeyEnv` | `KILO_API_KEY` | Credential reference the route names |
+| `keyless` | `true` | Whether the route accepts keyless requests |
 | `seedVersion` | empty | Marker; any stored value means the seed already decided |
 | `routes` | `true` | Register `/system-analysis/start`, `/status`, `/context`, `/accept`, `/reject`, and `/seen` |
 | `preset` | `sysadmin` | Agent preset that investigates; it is mounted for that one session |
@@ -65,7 +70,7 @@ The run is a singleton and only ever starts on an explicit client action. `start
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The seed waits for the Loader to settle (`ctx.root.loader.await()`) so the `llm-pi-ai`, `agent-default-model`, and `first-run` entries are active, then writes provider route, default model, and marker in that order. A failure logs one warning and leaves the marker unset; the next boot retries. A settings document that already carries provider routes is a configured install: the seed writes only the marker.
+The seed waits for the Loader to settle (`ctx.root.loader.await()`) so the `llm-pi-ai`, `agent-default-model`, `enpoi-orchestration`, and `first-run` entries are active, then writes provider route, default model, the keeper/compaction personas, and the marker in that order. The personas name the route just seeded; a profile without the fleet namespace skips that one write instead of failing the seed. A failure logs one warning and leaves the marker unset; the next boot retries. A settings document that already carries provider routes is a configured install: the seed writes only the marker, so operator persona edits survive every later boot.
 
 One investigation is one root agent session on the configured preset: the runner resolves the preset, pins its revision (`acquireScope`), clears its scratch workspace under the harness home, creates the session with `cwd` there, sets the configured permission preset, titles it, and sends the checklist prompt as the opening user message. The prompt binds the agent to a read-only investigation of the host, requires the exact todo items that drive the stage rail, names the six checklist stages (machine, usage, hosting, networking, tooling, write profile), and carries the generalization rules: no exact version numbers, folder/repo/project names, domains, IP addresses, or hostnames, no inventories, hardware only in classes, and every claim grounded in what was actually observed without citing the probes. It asks for `profile.json` plus `system-profile.md` (around 60 to 120 lines, opened by the `## At a glance` summary) in the workspace. The runner follows the session's `todo_write` events for stages, waits for the turn to close, validates the two files, allows two bounded corrective turns, then writes `system-profile.json` and `system-profile.md` atomically, archives the investigation session — the transcript leaves the session list but stays restorable through Unarchive — and removes the run's scratch workspace. A published document that still carries exact machine facts (an IPv4 address, a dotted version number, or a domain-like string) is stored anyway and logged with the matched facts, so the run never fails on style alone. The stored document header adds only the investigation's provenance; it carries no timestamp, so the document stays stable between runs. The whole run is cancelled by the configured time bound and by the plugin lifetime.
 

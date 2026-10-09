@@ -234,21 +234,51 @@ export const heavyApi = {
 }
 
 /**
+ * Sleep for `ms`, resolving false as soon as `signal` aborts. The abort
+ * listener is removed on both paths, so a long-lived signal never accumulates
+ * dead listeners across polls.
+ * @param ms - how long to wait.
+ * @param signal - the owning poll's abort signal, when it has one.
+ * @returns true when the wait completed, false when it was aborted.
+ */
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve(false)
+      return
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
  * Poll a running install job until it settles.
  * @param id - provider id.
  * @param onUpdate - observer for every snapshot (the progress bar).
- * @param options - poll cadence and overall bound.
- * @returns the settled snapshot, or a failed snapshot carrying the reason.
+ * @param options - poll cadence, overall bound, and the owning abort signal.
+ *   An aborted signal stops the loop before its next request and resolves null.
+ * @returns the settled snapshot, a failed snapshot carrying the reason, or
+ *   null when the deadline passed or the signal aborted.
  */
 export async function pollHeavyJob(
   id: string,
   onUpdate: (job: HeavyJobView) => void,
-  options: { intervalMs?: number; timeoutMs?: number } = {},
+  options: { intervalMs?: number; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<HeavyJobView | null> {
   const interval = options.intervalMs ?? 1000
   const deadline = Date.now() + (options.timeoutMs ?? 30 * 60 * 1000)
   for (;;) {
+    if (Boolean(options.signal?.aborted)) return null
     const result = await heavyApi.job(id)
+    if (Boolean(options.signal?.aborted)) return null
     if (result.ok) {
       const job = result.value.job
       if (job !== undefined) {
@@ -257,7 +287,7 @@ export async function pollHeavyJob(
       }
     }
     if (Date.now() >= deadline) return null
-    await new Promise(resolve => setTimeout(resolve, interval))
+    if (!await abortableSleep(interval, options.signal)) return null
   }
 }
 

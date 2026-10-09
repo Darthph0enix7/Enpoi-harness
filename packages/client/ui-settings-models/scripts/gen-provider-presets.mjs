@@ -161,7 +161,8 @@ function protocolOf(npm) {
 
 // ── 4. Shipped catalog verdicts ──────────────────────────────────────────────
 // Shipped defaults, frozen as generator inputs. The client derives its
-// KEYLESS_PROVIDERS / POPULAR_PROVIDERS sets from the generated rows and an
+// keylessProviders() / popularProviders() selectors from the generated rows
+// (falling back to the SHIPPED_* sets before a host heavy reply), and an
 // operator settings override can change either per provider.
 /** Routes whose free tier serves anonymous requests with no credential. */
 const KEYLESS_PRESET_IDS = new Set(['kilo', 'ollama', 'lmstudio', 'llama-cpp', 'vllm', 'localai'])

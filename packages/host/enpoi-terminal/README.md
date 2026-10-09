@@ -18,13 +18,26 @@ Fork-only host half of the browser terminals the Enpoi operator asked for: the r
 
 Every route passes `connection.requestRejection` first — the same browser trust fence as the rest of the composition.
 
+The per-session cap refusal renders in the host locale — `DSH_LOCALE`, then `LC_ALL`/`LC_MESSAGES`/`LANG`, falling back to `en` — with the zh/en dictionaries in [`src/locales.ts`](src/locales.ts).
+
 ## Process lifetime
 
-One `node-pty` process per `${sessionId}:${tabId}` key (`@deepseek-ai/dsh-client-ui-brand-enpoi` mints the tab ids). A process survives socket disconnects for the disconnect grace (90 s), so a page reload reattaches to the same shell; the last detach starts the grace, explicit closes kill immediately, and plugin teardown kills everything. Output is retained in a bounded in-memory transcript (512 KiB).
+One `node-pty` process per `${sessionId}:${tabId}` key (`@deepseek-ai/dsh-client-ui-brand-enpoi` mints the tab ids). A process survives socket disconnects for the disconnect grace (default 90 s), so a page reload reattaches to the same shell; the last detach starts the grace, explicit closes kill immediately, and plugin teardown kills everything. Output is retained in a bounded in-memory transcript (default 512 KiB).
+
+## Configuration
+
+The plugin row takes a validated `Config`; every field defaults to the shipped value, so an omitted config behaves exactly as before. Wire constants stay frozen: `MAX_BODY_BYTES` (request bodies) and the 4404 unknown-key close code are protocol surface, not config.
+
+| Field | Default | Effect |
+|---|---|---|
+| `maxPerSession` | `8` | Concurrent terminals per conversation; a further `open` is refused with `session-limit`. |
+| `disconnectGraceMs` | `90000` | How long a process outlives its last attached socket. |
+| `transcriptLimitBytes` | `524288` | Replay transcript bound per terminal; the head is dropped past it. |
+| `shell` | `$SHELL` then `/bin/bash` (`COMSPEC`/`powershell.exe` on Windows) | Login shell spawned for every terminal. |
 
 ## Composition
 
-The row lives in [`@deepseek-ai/dsh-web-app`](../../bundle/web-app/cordis.patch.yml) as `id: enpoi-terminal`. It requires the `webServer` route carrier and the `connection` trust fence; the shell comes from `$SHELL` (or `/bin/bash`; `COMSPEC`/`powershell.exe` on Windows).
+The row lives in [`@deepseek-ai/dsh-web-app`](../../bundle/web-app/cordis.patch.yml) as `id: enpoi-terminal`. It requires the `webServer` route carrier and the `connection` trust fence; the shell comes from `$SHELL` (or `/bin/bash`; `COMSPEC`/`powershell.exe` on Windows) unless `config.shell` overrides it.
 
 ## Known limits
 

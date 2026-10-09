@@ -14,6 +14,7 @@ import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typer
 import type { HeavyJobView } from './jobs.js'
 import { HeavyJobManager, visibleJobSnapshot } from './jobs.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
+import { localizeHeavyManifest, localizeHeavyPreflight, localizeHeavySteps, settingsLocale, type HostLocale } from './locales.js'
 import {
   chooseLocalPath,
   commitRoute,
@@ -194,6 +195,11 @@ export class HeavyProvidersService extends TypertRemoteService {
     return value
   }
 
+  /** The operator-visible locale: the durable preference, else the host environment. */
+  private locale(): HostLocale {
+    return settingsLocale(this.options.deps().settings)
+  }
+
   /**
    * Resolve one wire id to its effective manifest, refusing a provider the
    * operator disabled. `remove`/`job` keep the plain resolution: an operator
@@ -216,8 +222,10 @@ export class HeavyProvidersService extends TypertRemoteService {
   @Remote
   manifests(): ManifestsValue {
     const overlay = readServerOverlay(this.options.deps().dshHome)
+    const locale = this.locale()
     return {
-      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay),
+      items: effectiveHeavyManifests(HEAVY_MANIFESTS, overlay)
+        .map(manifest => localizeHeavyManifest(manifest, locale)),
       problems: manifestProblems(),
       platform: process.platform,
     }
@@ -234,6 +242,7 @@ export class HeavyProvidersService extends TypertRemoteService {
   async status(request: { id?: unknown }): Promise<StatusValue> {
     const manifest = this.requireEnabledManifest(request?.id)
     const deps = this.options.deps()
+    const locale = this.locale()
     const settingsNs = routeSettingsNs(manifest)
     const profile = configuredProfile(deps, manifest.id, settingsNs)
     const configured = profile !== undefined
@@ -251,6 +260,11 @@ export class HeavyProvidersService extends TypertRemoteService {
       detection?.ok === true ? detection.port : undefined,
       { home: deps.home, dshHome: deps.dshHome },
     )
+    // The UI renders these two manifest projections; localize at the wire
+    // boundary so the canonical table stays the English fixture the client
+    // mirror pins.
+    const localizedManifest = localizeHeavyManifest(manifest, locale)
+    const localizedPreflight = localizeHeavyPreflight(preflight, localizedManifest, process.platform, locale)
     // A configured endpoint wins over the manifest default: an operator
     // migrating from the legacy keypool keeps a loopback baseURL, and its
     // health must reflect that endpoint, not the vendor root.
@@ -263,7 +277,7 @@ export class HeavyProvidersService extends TypertRemoteService {
     const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured)
     return {
       id: manifest.id,
-      manifest,
+      manifest: localizedManifest,
       settingsNs,
       ...settingsReady === undefined ? {} : { settingsReady },
       configured,
@@ -271,7 +285,7 @@ export class HeavyProvidersService extends TypertRemoteService {
       health,
       platform: process.platform,
       runtime,
-      preflight,
+      preflight: localizedPreflight,
       ...detection?.ok === true && detection.port !== undefined ? { detectedPort: detection.port } : {},
       ...detection?.ok === true ? { detectedEndpoint: detection.baseURL } : {},
       ...manifest.unsupported === undefined ? {} : { unsupported: manifest.unsupported },
@@ -345,7 +359,15 @@ export class HeavyProvidersService extends TypertRemoteService {
       this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
       return { ok: false, pendingRestart }
     }
-    const job = this.options.jobs.start(manifest.id, 'install', resolveHeavyInstall(manifest.local, process.platform).steps, async () => {
+    // The job view renders these labels for the operator; localize at the
+    // boundary so the manifest table itself stays canonical English.
+    const steps = localizeHeavySteps(
+      manifest,
+      process.platform,
+      resolveHeavyInstall(manifest.local, process.platform).steps,
+      this.locale(),
+    )
+    const job = this.options.jobs.start(manifest.id, 'install', steps, async () => {
       const current = this.options.deps()
       // Re-check at the commit point: the namespace may have gone away (or the
       // install may have been started through another surface) since the guard.

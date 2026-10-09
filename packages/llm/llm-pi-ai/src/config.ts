@@ -44,6 +44,7 @@ import type {
 } from './catalog.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
 import { discoveredModelsFor } from './discovered.ts'
+import { DEFAULT_DISCOVERY_TIMEOUT_MS, DEFAULT_MAX_RESPONSE_BYTES } from './discovery.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -80,6 +81,14 @@ export const DEFAULT_MAX_TOKENS = 32_768
  * repeating a request that cannot succeed.
  */
 export const DEFAULT_INPUT: readonly PiAiModality[] = ['text']
+
+/**
+ * Wire protocols that can serve an anonymous (keyless) route. Only these
+ * clear the Authorization header outright; every other supported protocol
+ * authenticates through a header with no omission, so a keyless profile on
+ * one would send a placeholder credential instead of none.
+ */
+const ANONYMOUS_CAPABLE_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
 
 export type {
   PiAiCompatProfile,
@@ -277,6 +286,10 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers: Volatile<Record<string, PiAiProviderProfile>>
+  /** Wall-clock budget for one model-listing interrogation (default 15,000 ms). */
+  modelDiscoveryTimeoutMs: number
+  /** Largest model-listing reply accepted, in bytes (default 4 MiB). */
+  modelDiscoveryMaxResponseBytes: number
 }
 
 /** Plain options accepted by the provider resolver. */
@@ -417,6 +430,8 @@ const profile = z.object({
 /** Runtime schema for {@link Config}. */
 export const Config = z.object({
   providers: z.dict(profile).default({}).volatile(),
+  modelDiscoveryTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(DEFAULT_DISCOVERY_TIMEOUT_MS),
+  modelDiscoveryMaxResponseBytes: z.number().step(1).min(1).default(DEFAULT_MAX_RESPONSE_BYTES),
 })
 
 /**
@@ -550,11 +565,13 @@ export function resolveProfiles(
     // the OpenAI-compatible protocols can express (their SDK clears the header
     // for a null value); Anthropic Messages authenticates with `x-api-key`,
     // which has no such omission, so a keyless profile there would send a
-    // placeholder key instead of none.
-    if (keyless === true && source.api === 'anthropic-messages') {
+    // placeholder key instead of none. An omitted `api` keeps its catalog
+    // protocol (and its existing resolution), so only an explicit protocol
+    // outside this set is refused.
+    if (keyless === true && source.api !== undefined && !ANONYMOUS_CAPABLE_APIS.has(source.api)) {
       throw new Error(
-        `llm-pi-ai: provider "${provider}" sets keyless, which this build cannot serve over anthropic-messages;`
-        + ' use openai-completions or openai-responses for an anonymous route',
+        `llm-pi-ai: provider "${provider}" sets keyless, which this build cannot serve over ${source.api};`
+        + ` use ${[...ANONYMOUS_CAPABLE_APIS].join(' or ')} for an anonymous route`,
       )
     }
     // Schemastery materializes an absent object key's array fields as empty

@@ -51,6 +51,13 @@ export { HostConnectionService } from './rpc-host.ts'
 
 export { API_PATH } from './api-path.ts'
 
+// Host-face fence primitives, published for host-side plugins that must fence
+// their own browser routes with the same rules as the /api gateway
+// (`dsh-better-sidebar`). Client plugins still consume the derived trust state
+// through Cordis rather than importing these.
+export { isLoopbackHostname } from './loopback-hostname.ts'
+export { isTrustedApiRequest } from './api-request-trust.ts'
+
 /** Stable Cordis plugin name. */
 export const name = 'client-connection'
 

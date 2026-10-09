@@ -1,7 +1,9 @@
 /**
  * Browser-safe, zero-dependency loopback classification shared by the `/api`
- * Host fence and the package's `ctx.connection` state. The predicate stays
- * package-internal; client plugins consume the derived state through Cordis.
+ * Host fence and the package's `ctx.connection` state. The predicate is
+ * published from the package's Host entry for host-side plugins that fence
+ * their own browser routes (`dsh-better-sidebar`); client plugins consume the
+ * derived state through Cordis.
  */
 
 /**
@@ -30,7 +32,10 @@ export function isTailscaleHostname(hostname: string): boolean {
   if (host === 'serverlocal' || host.startsWith('serverlocal.')) return true
   if (host.startsWith('100.')) {
     const octets = host.split('.').map(Number)
-    if (octets.length === 4 && octets[0] === 100 && Number.isInteger(octets[1]) && octets[1]! >= 64 && octets[1]! <= 127) return true
+    const second = octets[1]
+    if (octets.length === 4 && octets[0] === 100 && typeof second === 'number' && Number.isInteger(second) && second >= 64 && second <= 127) {
+      return true
+    }
   }
   return false
 }

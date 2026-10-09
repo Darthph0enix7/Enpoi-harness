@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CAPACITY_BACKOFF_TIERS_MS,
   classifyFailure,
@@ -11,6 +11,25 @@ import {
   parseResetMs,
   ROTATING_CLASSES,
 } from '../src/pool.ts'
+
+/**
+ * Holds `rename` so one test can keep a write between its temp-file write and
+ * its atomic replace, then observe whether a concurrent flush starts a
+ * competing write (it must not) or queues behind the held one. Disabled for
+ * every other suite in this file.
+ */
+const fsGate = vi.hoisted(() => ({ enabled: false, pending: [] as Array<() => void> }))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (fsGate.enabled) await new Promise<void>((resolve) => { fsGate.pending.push(resolve) })
+      await actual.rename(...args)
+    },
+  }
+})
 
 let stateDir: string
 
@@ -217,6 +236,33 @@ describe('PoolEngine persistence', () => {
     const second = engine()
     await second.hydrate('myroute')
     expect(second.cooldownRemaining('myroute', 'key-1', 'model-a')).toBeGreaterThan(119 * 60_000)
+  })
+
+  it('serializes concurrent flushes for one provider so both deltas persist', async () => {
+    const e = engine()
+    fsGate.enabled = true
+    try {
+      e.recordFailure('route', 'a', 'm', 'AUTH', '401')
+      const first = e.flush()
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      // The second flush starts while the first write sits between its temp
+      // file and its rename: it must queue behind that write instead of
+      // racing it, or the older snapshot can rename last and drop the delta.
+      e.recordFailure('route', 'b', 'm', 'AUTH', '401')
+      const second = e.flush()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(fsGate.pending).toHaveLength(1)
+      fsGate.pending.shift()?.()
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      fsGate.pending.shift()?.()
+      await Promise.all([first, second])
+    } finally {
+      fsGate.enabled = false
+      for (const release of fsGate.pending.splice(0)) release()
+    }
+    const persisted = JSON.parse(await readFile(join(stateDir, 'route.json'), 'utf8'))
+    expect(persisted.identities.a.m.cooldownUntil).toBeGreaterThan(0)
+    expect(persisted.identities.b.m.cooldownUntil).toBeGreaterThan(0)
   })
 
   it('starts clean from corrupt or unknown-shaped files', async () => {

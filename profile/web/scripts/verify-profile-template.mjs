@@ -38,21 +38,18 @@ const STATE_SECTIONS = [
 ]
 
 /**
- * Template registry exceptions: the `roles`/`personas` sections stay
- * operator-owned by name, but the tracked template may carry exactly these
- * shipped entries — the two specialist roles the Fleet screens expect, and the
- * keeper/compaction personas pinned to the keyless Kilo route the first-run
- * seed writes. Ids, keys, and the Kilo route are allowlisted; everything else
- * in either section is operator state. Pinned in lockstep with
- * `scripts/install.sh` and `packages/enpoi-capabilities/tests/profile-patch.spec.ts`
- * by `scripts/install-profile-merge.spec.ts`.
+ * Template registry exceptions: the `roles` section stays operator-owned by
+ * name, but the tracked template may carry exactly these shipped entries — the
+ * two specialist roles the Fleet screens expect. Ids and keys are allowlisted;
+ * everything else in the section is operator state. Personas are route state
+ * and never belong in the tracked template: the keeper/compaction personas
+ * are written by the first-run seed (packages/host/first-run). Pinned in
+ * lockstep with `scripts/install.sh` and
+ * `packages/enpoi-capabilities/tests/profile-patch.spec.ts` by
+ * `scripts/install-profile-merge.spec.ts`.
  */
 const TEMPLATE_ROLE_IDS = ['designer', 'oracle']
 const TEMPLATE_ROLE_KEYS = ['label', 'group', 'seat']
-const TEMPLATE_PERSONA_IDS = ['keeper', 'compaction']
-const TEMPLATE_PERSONA_KEYS = ['provider', 'model']
-const TEMPLATE_PERSONA_PROVIDER = 'kilo'
-const TEMPLATE_PERSONA_MODEL = 'kilo-auto/free'
 
 const violations = []
 for (const id of STATE_ROWS) {
@@ -97,53 +94,6 @@ function checkRoleTemplate(section) {
   }
 }
 
-/** Flag any persona entry, key, or route beyond the keyless-Kilo template. */
-function checkPersonaTemplate(section) {
-  let current
-  let entry
-  const flush = () => {
-    if (entry === undefined) {
-      return
-    }
-    for (const key of TEMPLATE_PERSONA_KEYS) {
-      if (!(key in entry)) violations.push(`persona '${current}' must carry '${key}'`)
-    }
-    for (const key of Object.keys(entry)) {
-      if (!TEMPLATE_PERSONA_KEYS.includes(key)) {
-        violations.push(`persona '${current}' carries operator key '${key}'`)
-      }
-    }
-    if (entry.provider !== TEMPLATE_PERSONA_PROVIDER) {
-      violations.push(`persona '${current}' provider must be '${TEMPLATE_PERSONA_PROVIDER}'`)
-    }
-    if (entry.model !== TEMPLATE_PERSONA_MODEL) {
-      violations.push(`persona '${current}' model must be '${TEMPLATE_PERSONA_MODEL}'`)
-    }
-    entry = undefined
-  }
-  for (const line of section.split('\n')) {
-    if (line.trim() === '') continue
-    const persona = /^      ([A-Za-z0-9_-]+):\s*$/.exec(line)
-    if (persona !== null) {
-      flush()
-      current = persona[1]
-      if (TEMPLATE_PERSONA_IDS.includes(current)) {
-        entry = {}
-      } else {
-        violations.push(`persona '${current}' is not a template persona (${TEMPLATE_PERSONA_IDS.join(', ')})`)
-      }
-      continue
-    }
-    const key = /^        ([A-Za-z0-9_-]+):\s*(\S.*?)\s*$/.exec(line)
-    if (key !== null && entry !== undefined) {
-      entry[key[1]] = key[2]
-      continue
-    }
-    violations.push(`unrecognized line in the template personas section: '${line.trim()}'`)
-  }
-  flush()
-}
-
 const start = patch.indexOf('\n- id: enpoi-orchestration\n')
 if (start === -1) {
   violations.push("missing '- id: enpoi-orchestration' row")
@@ -152,15 +102,14 @@ if (start === -1) {
   const end = row.indexOf('\n- ')
   const body = end === -1 ? row : row.slice(0, end)
   for (const section of STATE_SECTIONS) {
-    // roles/personas stay operator-owned names but carry the template
-    // registry exceptions checked below.
-    if (section === 'roles' || section === 'personas') continue
+    // roles stays an operator-owned name but carries the template registry
+    // exception checked below; every other section, personas included, is
+    // operator state and must not ship.
+    if (section === 'roles') continue
     if (body.includes(`\n    ${section}:\n`)) violations.push(`operator-owned section '${section}'`)
   }
   const roles = templateSection(body, 'roles')
   if (roles !== undefined) checkRoleTemplate(roles)
-  const personas = templateSection(body, 'personas')
-  if (personas !== undefined) checkPersonaTemplate(personas)
 }
 
 if (violations.length > 0) {

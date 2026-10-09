@@ -9,8 +9,12 @@
  * flight keeps its optimistic value until that write settles. The map is
  * written whole, so every attempt re-reads the live document, re-applies the
  * operator's change onto that fresh map, and carries the read revision as a
- * write fence; a conflict re-reads and retries.
+ * write fence; a conflict re-reads and retries. A provider's entry is its
+ * non-empty list of hidden ids: an empty list removes the key rather than
+ * storing `[]` (`./hidden-map.ts` owns the rule).
  */
+
+import { canonicalizeHiddenMap, withHiddenList } from './hidden-map.ts'
 
 const STORAGE_KEY = 'dsh_hidden_models_v1'
 const EVENT_NAME = 'dsh:hidden-models-changed'
@@ -98,7 +102,7 @@ export async function refreshFromServer(): Promise<void> {
     const serverHidden = view.value?.uiPreferences?.hiddenModels ?? view.user?.uiPreferences?.hiddenModels
     if (serverHidden === undefined || typeof serverHidden !== 'object') return
     const local = readStore()
-    let merged: HiddenMap = { ...local, ...serverHidden }
+    let merged: HiddenMap = canonicalizeHiddenMap({ ...local, ...serverHidden }) as HiddenMap
     for (const provider of pendingProviders) {
       if (Object.hasOwn(local, provider)) merged[provider] = local[provider] as string[]
       else {
@@ -216,13 +220,13 @@ export function toggleModelHidden(provider: string, modelId: string): boolean {
     list.add(modelId)
     nextHidden = true
   }
-  map[provider] = [...list]
-  writeStore(map, provider)
+  const nextMap = withHiddenList(map, provider, [...list]) as HiddenMap
+  writeStore(nextMap, provider)
   void persistHiddenModels(provider, (fresh) => {
     const freshList = new Set(fresh[provider] ?? [])
     if (nextHidden) freshList.add(modelId)
     else freshList.delete(modelId)
-    return { ...fresh, [provider]: [...freshList] }
+    return withHiddenList(fresh, provider, [...freshList]) as HiddenMap
   })
   return nextHidden
 }
@@ -234,9 +238,9 @@ export function toggleModelHidden(provider: string, modelId: string): boolean {
  */
 export function hideAllModels(provider: string, modelIds: string[]): void {
   const map = readStore()
-  map[provider] = [...new Set(modelIds)]
-  writeStore(map, provider)
-  void persistHiddenModels(provider, fresh => ({ ...fresh, [provider]: [...new Set(modelIds)] }))
+  const ids = [...new Set(modelIds)]
+  writeStore(withHiddenList(map, provider, ids) as HiddenMap, provider)
+  void persistHiddenModels(provider, fresh => withHiddenList(fresh, provider, ids) as HiddenMap)
 }
 
 /**
@@ -245,12 +249,8 @@ export function hideAllModels(provider: string, modelIds: string[]): void {
  */
 export function showAllModels(provider: string): void {
   const map = readStore()
-  const { [provider]: _removed, ...rest } = map
-  writeStore(rest, provider)
-  void persistHiddenModels(provider, (fresh) => {
-    const { [provider]: _dropped, ...others } = fresh
-    return others
-  })
+  writeStore(withHiddenList(map, provider, []) as HiddenMap, provider)
+  void persistHiddenModels(provider, fresh => withHiddenList(fresh, provider, []) as HiddenMap)
 }
 
 /**

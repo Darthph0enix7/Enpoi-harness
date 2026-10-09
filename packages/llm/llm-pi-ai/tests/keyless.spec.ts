@@ -192,4 +192,19 @@ describe('keyless provider routes', () => {
       },
     } as never)).toThrow(/keyless.*anthropic-messages/)
   })
+
+  it.each(['openai-completions', 'openai-responses'] as const)(
+    'accepts keyless over the anonymous-capable protocol %s',
+    (api) => {
+      const profiles = resolveProfiles({
+        keylessRoute: {
+          api,
+          baseURL: 'https://gateway.example/v1',
+          keyless: true,
+          models: [{ id: 'free-model' }],
+        },
+      } as never)
+      expect(profiles.get('keylessRoute')?.keyless).toBe(true)
+    },
+  )
 })
