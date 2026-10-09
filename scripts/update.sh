@@ -17,15 +17,18 @@ prefix=""
 dsh_home="${DSH_HOME:-}"
 explicit_home=0
 expect_prefix=0
+expect_channel=0
+explicit_channel=""
 mode="update"
 argv=()
-has_channel=0
 for arg in "$@"; do
   if [ "$expect_prefix" = 1 ]; then prefix="$arg"; expect_prefix=0; argv+=("$arg"); continue; fi
+  if [ "$expect_channel" = 1 ]; then explicit_channel="$arg"; expect_channel=0; argv+=("$arg"); continue; fi
   case "$arg" in
     --prefix) expect_prefix=1; argv+=("$arg");;
     --prefix=*) prefix="${arg#--prefix=}"; argv+=("$arg");;
-    --channel|--channel=*) has_channel=1; argv+=("$arg");;
+    --channel) expect_channel=1; argv+=("$arg");;
+    --channel=*) explicit_channel="${arg#--channel=}"; argv+=("$arg");;
     --dsh-home|--dsh-home=*) explicit_home=1; argv+=("$arg");;
     update|repair|uninstall|doctor|clean) mode="$arg";;
     *) argv+=("$arg");;
@@ -85,11 +88,13 @@ case "$mode" in
 esac
 installer="$HERE/install.sh"
 if [ "$mode" = "update" ]; then
-  update_channel=""
-  [ -n "$prefix" ] || prefix="$HOME/.dsh"
-  state="$prefix/harness/install-state.json"
-  if [ -f "$state" ]; then
-    update_channel="$(sed -n 's/.*"channel": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
+  update_channel="$explicit_channel"
+  if [ -z "$update_channel" ]; then
+    [ -n "$prefix" ] || prefix="$HOME/.dsh"
+    state="$prefix/harness/install-state.json"
+    if [ -f "$state" ]; then
+      update_channel="$(sed -n 's/.*"channel": "\([^"]*\)".*/\1/p' "$state" | head -n 1)"
+    fi
   fi
   [ -n "$update_channel" ] || update_channel="stable"
   # The update runs the fetched installer via exec, so its EXIT trap cannot
@@ -114,7 +119,7 @@ if [ "$mode" = "update" ]; then
     printf 'dsh update: WARNING: could not fetch the %s installer from %s; using the installed updater%s — it may be older than the %s channel\n' \
       "$update_channel" "$remote_url" "${installed_revision:+ (script revision $installed_revision)}" "$update_channel" >&2
   fi
-  if [ "$has_channel" = 0 ] && [ -n "$update_channel" ]; then
+  if [ -z "$explicit_channel" ] && [ -n "$update_channel" ]; then
     argv+=(--channel "$update_channel")
   fi
 fi

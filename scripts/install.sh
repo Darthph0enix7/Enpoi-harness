@@ -260,8 +260,9 @@ run_logged() { # desc timeout workdir cmd...
   printf "  ${C_CYAN}⏳${C_RESET} %s..." "$desc" >&2
   printf '\n--- START: %s (dir: %s) ---\n' "$desc" "$workdir" >> "$LOG_FILE" 2>/dev/null || true
 
-  ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1 &
+  ( exec 9>&-; cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1 &
   local pid=$!
+  CURRENT_RUN_LOGGED_PID="$pid"
 
   local spin='-\|/'
   local i=0
@@ -275,15 +276,18 @@ run_logged() { # desc timeout workdir cmd...
           [ -n "$prog" ] && break
         fi
       done
+      local elapsed_cur=$(( $(date +%s) - start_t ))
+      [ "$elapsed_cur" -ge 0 ] || elapsed_cur=0
       if [ -n "$prog" ]; then
         printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s %s" "${spin:$i:1}" "$desc" "$prog" >&2
       else
-        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s..." "${spin:$i:1}" "$desc" >&2
+        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s... ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$elapsed_cur" >&2
       fi
     fi
     sleep 0.2
   done
 
+  CURRENT_RUN_LOGGED_PID=""
   wait "$pid" 2>/dev/null || rc=$?
   printf '\n--- END: %s (exit: %d) ---\n' "$desc" "$rc" >> "$LOG_FILE" 2>/dev/null || true
 
@@ -413,7 +417,7 @@ USAGE
 # that an early die did not reach explicitly, and the portable mkdir lock
 # directory. A single chained trap keeps the existing cleanup from being
 # clobbered by a later trap registration.
-trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; rm -f "$UPDATE_LOCK_FILE" 2>/dev/null; fi' EXIT
+trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; fi; if [ -n "${CURRENT_RUN_LOGGED_PID:-}" ]; then kill -TERM "$CURRENT_RUN_LOGGED_PID" 2>/dev/null || true; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -481,9 +485,10 @@ done
 
 run_limited() {
   local seconds="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$seconds" "$@"
-  else "$@"; fi
+  exec 9>&- 2>/dev/null || true
+  if command -v timeout >/dev/null 2>&1; then exec timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then exec gtimeout "$seconds" "$@"
+  else exec "$@"; fi
 }
 
 host_short_name() {
@@ -1158,6 +1163,7 @@ async function main() {
 
   const startTime = Date.now()
   let lastLogTime = 0
+  let lastProgressWriteTime = 0
   const isTTY = Boolean(process.stdout.isTTY)
 
   const progressFile = `${chunkDir}/.progress`
@@ -1173,13 +1179,26 @@ async function main() {
 
   function writeProgress(text) {
     try {
-      writeFileSync(progressFile, text)
-      writeFileSync(topProgressFile, text)
+      const pTmp = `${progressFile}.tmp.${process.pid}`
+      writeFileSync(pTmp, text)
+      renameSync(pTmp, progressFile)
+      const topTmp = `${topProgressFile}.tmp.${process.pid}`
+      writeFileSync(topTmp, text)
+      renameSync(topTmp, topProgressFile)
     } catch {}
   }
 
   function reportProgress(force = false) {
     const now = Date.now()
+    if (force || now - lastProgressWriteTime >= 200) {
+      lastProgressWriteTime = now
+      const elapsedSec = Math.max(0.1, (now - startTime) / 1000)
+      const currentMB = (totalDownloadedBytes / (1024 * 1024)).toFixed(1)
+      const pct = Math.min(100, Math.floor((totalDownloadedBytes / totalBytes) * 100))
+      const speedMBs = (totalDownloadedBytes / (1024 * 1024)) / elapsedSec
+      writeProgress(formatProgressBar(pct, currentMB, totalMB, speedMBs))
+    }
+
     if (!force && now - lastLogTime < (isTTY ? 200 : 4000)) return
     lastLogTime = now
     const elapsedSec = Math.max(0.1, (now - startTime) / 1000)
@@ -1188,8 +1207,6 @@ async function main() {
     const speedMBs = (totalDownloadedBytes / (1024 * 1024)) / elapsedSec
     const remainingBytes = Math.max(0, totalBytes - totalDownloadedBytes)
     const remainingSec = speedMBs > 0 ? Math.ceil((remainingBytes / (1024 * 1024)) / speedMBs) : 0
-
-    writeProgress(formatProgressBar(pct, currentMB, totalMB, speedMBs))
 
     const msg = `[download] ${pct}% (${currentMB}/${totalMB} MB, ${speedMBs.toFixed(1)} MB/s, ~${remainingSec}s remaining)`
     if (isTTY) {
@@ -1235,8 +1252,8 @@ async function main() {
           signal: controller.signal,
         })
 
-        if (!resp.ok && resp.status !== 206) {
-          throw new Error(`HTTP ${resp.status} on chunk ${chunk.index}`)
+        if (resp.status !== 206 && !(concurrency === 1 && resp.status === 200 && rangeStart === 0)) {
+          throw new Error(`server returned HTTP ${resp.status} instead of HTTP 206 Partial Content for chunk ${chunk.index}`)
         }
 
         const outStream = createWriteStream(chunk.partPath, { flags: 'a' })
@@ -1296,14 +1313,17 @@ async function main() {
 
   for (const c of chunks) {
     const partStream = createReadStream(c.partPath)
-    await new Promise((resolve, reject) => {
-      partStream.on('data', (buf) => {
-        hash.update(buf)
-        outStream.write(buf)
-      })
-      partStream.on('end', resolve)
-      partStream.on('error', reject)
-    })
+    await pipeline(
+      partStream,
+      async function* (source) {
+        for await (const buf of source) {
+          hash.update(buf)
+          yield buf
+        }
+      },
+      outStream,
+      { end: false }
+    )
   }
 
   await new Promise((resolve, reject) => {
@@ -2492,10 +2512,27 @@ profile_install() {
   if [ -z "$PNPM" ] && [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; fi
   [ -n "$PNPM" ] || { warn "profile deps: no pnpm available"; return 1; }
   export HARNESS_ROOT="${HARNESS:-$PREFIX/harness/current}"
-  if ! run_logged "Installing Enpoi profile dependencies" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install; then
+
+  local deps_hash="" hash_file="$PROFILE_DIR/.pnpm-deps.hash"
+  if command -v sha256sum >/dev/null 2>&1; then
+    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
+  fi
+
+  if [ -n "$deps_hash" ] && [ -d "$PROFILE_DIR/node_modules" ] && [ -f "$hash_file" ]; then
+    if [ "$deps_hash" = "$(cat "$hash_file" 2>/dev/null || true)" ]; then
+      log "profile deps: dependencies already up to date (hash match); skipping pnpm install"
+      substep_ok "Profile dependencies up to date (cached)"
+      return 0
+    fi
+  fi
+
+  if ! run_logged "Installing Enpoi profile dependencies" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline; then
     warn "profile pnpm install failed"
     return 1
   fi
+  [ -n "$deps_hash" ] && printf '%s\n' "$deps_hash" > "$hash_file" 2>/dev/null || true
   return 0
 }
 
@@ -4320,21 +4357,11 @@ acquire_update_lock() {
 
   local lock_file="$PREFIX/harness/.update.lock"
   if command -v flock >/dev/null 2>&1; then
-    exec 9>"$lock_file"
+    exec 9>>"$lock_file"
     if ! flock -n 9; then
-      # A lock is held. Check if the recorded PID is still alive.
       local holder_pid=""
       holder_pid="$(head -n 1 "$lock_file" 2>/dev/null || true)"
-      if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
-        # The process that held the lock died or was canceled.
-        # Break the stale lock by unlinking and reopening with a fresh inode.
-        log "update: reclaiming stale lock from dead process (PID $holder_pid)"
-        rm -f "$lock_file"
-        exec 9>"$lock_file"
-      fi
-      if ! flock -n 9; then
-        die "another update is already running${holder_pid:+ (PID $holder_pid)}; wait for it to finish, or remove $lock_file if it is stale"
-      fi
+      die "another update is already running${holder_pid:+ (PID $holder_pid)}; wait for it to finish"
     fi
     printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
     UPDATE_LOCK_FILE="$lock_file"
@@ -4366,6 +4393,7 @@ do_update() {
   step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
+  case "$CHANNEL" in stable|beta) :;; *) die "unknown channel in $state: $CHANNEL (expected stable|beta)";; esac
   if [ -z "$SOURCE" ]; then SOURCE="$(json_field "$state" source)"; fi
   if [ -z "$REF" ]; then REF="$(json_field "$state" ref)"; fi
   if [ -z "$PROFILE" ]; then PROFILE="$(json_field "$state" profile)"; [ -n "$PROFILE" ] || PROFILE=web; fi

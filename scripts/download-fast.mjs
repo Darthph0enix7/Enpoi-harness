@@ -168,6 +168,7 @@ async function main() {
 
   const startTime = Date.now()
   let lastLogTime = 0
+  let lastProgressWriteTime = 0
   const isTTY = Boolean(process.stdout.isTTY)
 
   const progressFile = `${chunkDir}/.progress`
@@ -183,13 +184,26 @@ async function main() {
 
   function writeProgress(text) {
     try {
-      writeFileSync(progressFile, text)
-      writeFileSync(topProgressFile, text)
+      const pTmp = `${progressFile}.tmp.${process.pid}`
+      writeFileSync(pTmp, text)
+      renameSync(pTmp, progressFile)
+      const topTmp = `${topProgressFile}.tmp.${process.pid}`
+      writeFileSync(topTmp, text)
+      renameSync(topTmp, topProgressFile)
     } catch {}
   }
 
   function reportProgress(force = false) {
     const now = Date.now()
+    if (force || now - lastProgressWriteTime >= 200) {
+      lastProgressWriteTime = now
+      const elapsedSec = Math.max(0.1, (now - startTime) / 1000)
+      const currentMB = (totalDownloadedBytes / (1024 * 1024)).toFixed(1)
+      const pct = Math.min(100, Math.floor((totalDownloadedBytes / totalBytes) * 100))
+      const speedMBs = (totalDownloadedBytes / (1024 * 1024)) / elapsedSec
+      writeProgress(formatProgressBar(pct, currentMB, totalMB, speedMBs))
+    }
+
     if (!force && now - lastLogTime < (isTTY ? 200 : 4000)) return
     lastLogTime = now
     const elapsedSec = Math.max(0.1, (now - startTime) / 1000)
@@ -198,8 +212,6 @@ async function main() {
     const speedMBs = (totalDownloadedBytes / (1024 * 1024)) / elapsedSec
     const remainingBytes = Math.max(0, totalBytes - totalDownloadedBytes)
     const remainingSec = speedMBs > 0 ? Math.ceil((remainingBytes / (1024 * 1024)) / speedMBs) : 0
-
-    writeProgress(formatProgressBar(pct, currentMB, totalMB, speedMBs))
 
     const msg = `[download] ${pct}% (${currentMB}/${totalMB} MB, ${speedMBs.toFixed(1)} MB/s, ~${remainingSec}s remaining)`
     if (isTTY) {
@@ -245,8 +257,8 @@ async function main() {
           signal: controller.signal,
         })
 
-        if (!resp.ok && resp.status !== 206) {
-          throw new Error(`HTTP ${resp.status} on chunk ${chunk.index}`)
+        if (resp.status !== 206 && !(concurrency === 1 && resp.status === 200 && rangeStart === 0)) {
+          throw new Error(`server returned HTTP ${resp.status} instead of HTTP 206 Partial Content for chunk ${chunk.index}`)
         }
 
         const outStream = createWriteStream(chunk.partPath, { flags: 'a' })
@@ -308,14 +320,17 @@ async function main() {
 
   for (const c of chunks) {
     const partStream = createReadStream(c.partPath)
-    await new Promise((resolve, reject) => {
-      partStream.on('data', (buf) => {
-        hash.update(buf)
-        outStream.write(buf)
-      })
-      partStream.on('end', resolve)
-      partStream.on('error', reject)
-    })
+    await pipeline(
+      partStream,
+      async function* (source) {
+        for await (const buf of source) {
+          hash.update(buf)
+          yield buf
+        }
+      },
+      outStream,
+      { end: false }
+    )
   }
 
   await new Promise((resolve, reject) => {
