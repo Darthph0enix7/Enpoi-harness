@@ -413,7 +413,7 @@ USAGE
 # that an early die did not reach explicitly, and the portable mkdir lock
 # directory. A single chained trap keeps the existing cleanup from being
 # clobbered by a later trap registration.
-trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi' EXIT
+trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; rm -f "$UPDATE_LOCK_FILE" 2>/dev/null; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -4314,25 +4314,45 @@ do_clean() {
 acquire_update_lock() {
   [ "${DRY_RUN:-0}" != 1 ] || return 0
   mkdir -p "$PREFIX/harness" 2>/dev/null || true
+  # Always ensure signals trigger the EXIT trap to clean up locks and staged trees
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  local lock_file="$PREFIX/harness/.update.lock"
   if command -v flock >/dev/null 2>&1; then
-    exec 9>"$PREFIX/harness/.update.lock" && flock -n 9 || die "another update is already running (lock: $PREFIX/harness/.update.lock); wait for it to finish, or remove the lock file if it is stale"
-    log "update lock acquired: $PREFIX/harness/.update.lock"
+    exec 9>"$lock_file"
+    if ! flock -n 9; then
+      # A lock is held. Check if the recorded PID is still alive.
+      local holder_pid=""
+      holder_pid="$(head -n 1 "$lock_file" 2>/dev/null || true)"
+      if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+        # The process that held the lock died or was canceled.
+        # Break the stale lock by unlinking and reopening with a fresh inode.
+        log "update: reclaiming stale lock from dead process (PID $holder_pid)"
+        rm -f "$lock_file"
+        exec 9>"$lock_file"
+      fi
+      if ! flock -n 9; then
+        die "another update is already running${holder_pid:+ (PID $holder_pid)}; wait for it to finish, or remove $lock_file if it is stale"
+      fi
+    fi
+    printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
+    UPDATE_LOCK_FILE="$lock_file"
+    log "update lock acquired: $lock_file (PID $$)"
     return 0
   fi
+
   local lock_dir="$PREFIX/harness/.update.lock.d" pid
   if ! mkdir "$lock_dir" 2>/dev/null; then
     pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
     if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
       rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null || die "another update is already running (lock: $lock_dir)"
     else
-      die "another update is already running (lock: $lock_dir)"
+      die "another update is already running${pid:+ (PID $pid)}; wait for it to finish, or remove $lock_dir if it is stale"
     fi
   fi
   echo "$$" > "$lock_dir/pid"
   UPDATE_LOCK_DIR="$lock_dir"
-  # A signal must run the EXIT trap (lock removal, restore safety net).
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
   log "update lock acquired (mkdir fallback): $lock_dir"
   return 0
 }
