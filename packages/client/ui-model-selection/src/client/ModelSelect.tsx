@@ -248,7 +248,8 @@ export function ModelSelect(
   // Portaled placement (the Menu primitive's portal rules: fixed from the
   // anchor rect, measured before paint, clamped inside the viewport): above
   // the trigger, right edges aligned. Depends on the directory state because
-  // async catalog loads resize the card.
+  // async catalog loads resize the card; the panel-size observer below catches
+  // the resizes no state change announces, such as collapsing a group.
   /* jscpd:ignore-start -- deliberate mirror of ui-primitives useAnchoredPosition:
      that hook only places from the anchor's LEFT edge, while this card aligns
      right edges (x = rect.right - width), so the measure-and-clamp plumbing repeats. */
@@ -265,14 +266,27 @@ export function ModelSelect(
       let y = rect.top - 8 - lh
       if (lw > 0) x = Math.min(Math.max(x, MARGIN), window.innerWidth - lw - MARGIN)
       if (lh > 0) y = Math.min(Math.max(y, MARGIN), window.innerHeight - lh - MARGIN)
-      setMenuPos({ left: x, top: y })
+      // Replay on every observed size change; skip the state write when the
+      // clamp lands on the same spot so the observer cannot loop on itself.
+      setMenuPos(prev => prev !== null && prev.left === x && prev.top === y ? prev : { left: x, top: y })
     }
     // First run measures the hidden pre-render (same commit as the open), so
     // the card lands placed before anything paints.
     place()
     window.addEventListener('scroll', place, true)
     window.addEventListener('resize', place)
+    // Collapsing or expanding a group resizes the card without a state change,
+    // a scroll, or a window resize; the observer re-anchors and re-clamps it.
+    // The guard keeps the picker usable where `ResizeObserver` is absent,
+    // which is how jsdom runs.
+    const panel = pickerRef.current
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined' && panel !== null) {
+      observer = new ResizeObserver(place)
+      observer.observe(panel)
+    }
     return () => {
+      observer?.disconnect()
       window.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }
@@ -899,7 +913,8 @@ export function ModelSelect(
         })}
 
         {/* Empty search results */}
-        {q && revealedHidden.size === 0 && choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
+        {q && revealedHidden.size === 0 &&
+          choices.filter(c => c.model.name.toLowerCase().includes(q) || c.model.id.toLowerCase().includes(q)).length === 0 && (
           <div className={css.emptyState}>No models matching "{searchQuery}"</div>
         )}
       </div>

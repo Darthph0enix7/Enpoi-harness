@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -58,6 +58,7 @@ afterEach(() => {
   // Recents/favorites live in localStorage: without a reset, a later case sees
   // the previous case's model twice (Recents + provider group).
   localStorage.clear()
+  vi.unstubAllGlobals()
 })
 
 describe('ModelSelect reasoning effort', () => {
@@ -262,6 +263,90 @@ describe('ModelSelect reasoning effort', () => {
       Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth)
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight)
     }
+  })
+
+  it('re-anchors the card when its own size changes and releases the observer on close', () => {
+    /** One recorded ResizeObserver instance, so the test can drive its callback. */
+    interface Recorded {
+      callback: ResizeObserverCallback
+      observed: Element[]
+      disconnected: boolean
+    }
+    const made: Recorded[] = []
+    vi.stubGlobal('ResizeObserver', class {
+      private readonly record: Recorded
+
+      constructor(callback: ResizeObserverCallback) {
+        this.record = { callback, observed: [], disconnected: false }
+        made.push(this.record)
+      }
+
+      observe(element: Element): void { this.record.observed.push(element) }
+      disconnect(): void { this.record.disconnected = true }
+    })
+    const width = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(400)
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(300)
+    vi.stubGlobal('innerWidth', 1200)
+    vi.stubGlobal('innerHeight', 800)
+    const rect = {
+      left: 0, right: 1000, top: 800, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect
+    const anchorRect = vi.spyOn(HTMLButtonElement.prototype, 'getBoundingClientRect').mockReturnValue(rect)
+    try {
+      render(<ModelSelect
+        locked={false}
+        available
+        directory={createSnapshotStore(state())}
+        load={vi.fn()}
+        select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+        t={t}
+      />)
+      fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
+      const menu = screen.getByRole('menu')
+      // 400x300 card hung off the trigger's top-right corner, bottom-clamped to the 12px margin.
+      expect(menu.style.left).toBe('600px')
+      expect(menu.style.top).toBe('488px')
+      expect(made).toHaveLength(1)
+      expect(made[0]?.observed).toEqual([menu])
+
+      // Collapse shrinks the card with no state change, scroll, or window resize:
+      // only the observer notices, and the card re-anchors instead of floating.
+      height.mockReturnValue(120)
+      act(() => { made[0]?.callback([], {} as ResizeObserver) })
+      expect(menu.style.left).toBe('600px')
+      expect(menu.style.top).toBe('668px')
+
+      // Expanding from fully collapsed grows the card again: the clamp keeps it
+      // fully inside the viewport instead of clipping below the screen.
+      height.mockReturnValue(700)
+      act(() => { made[0]?.callback([], {} as ResizeObserver) })
+      expect(menu.style.top).toBe('88px')
+      expect(Number.parseFloat(menu.style.top) + 700).toBeLessThanOrEqual(800 - 12)
+
+      fireEvent.mouseDown(document.body)
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(made[0]?.disconnected).toBe(true)
+    } finally {
+      width.mockRestore()
+      height.mockRestore()
+      anchorRect.mockRestore()
+    }
+  })
+
+  it('still places the card where ResizeObserver does not exist', () => {
+    // jsdom's own condition, and any host without the API: the picker must fall
+    // back to scroll/resize placement rather than fail at open.
+    vi.stubGlobal('ResizeObserver', undefined)
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
+    expect(screen.getByRole('menu')).toBeTruthy()
   })
 
   it('renders no Agent-bound control for an addressed subagent session', () => {
