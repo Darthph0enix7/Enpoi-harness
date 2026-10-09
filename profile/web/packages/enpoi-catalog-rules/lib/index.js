@@ -34,16 +34,25 @@ function privacyPolicy(value) {
   return value === "trains" || value === "no-train" ? value : void 0;
 }
 function effectivePrivacy(overrides) {
-  const providers = { ...SEED_PRIVACY.providers };
-  const models = { ...SEED_PRIVACY.models };
+  const useSeed = overrides?.useSeed !== false;
+  const providers = useSeed ? { ...SEED_PRIVACY.providers } : {};
+  const models = useSeed ? { ...SEED_PRIVACY.models } : {};
   if (overrides?.providers !== void 0 && isRecord(overrides.providers)) {
     for (const [key, value] of Object.entries(overrides.providers)) {
+      if (value === null) {
+        delete providers[key];
+        continue;
+      }
       const policy = privacyPolicy(value);
       if (policy !== void 0) providers[key] = policy;
     }
   }
   if (overrides?.models !== void 0 && isRecord(overrides.models)) {
     for (const [key, value] of Object.entries(overrides.models)) {
+      if (value === null) {
+        delete models[key];
+        continue;
+      }
       const policy = privacyPolicy(value);
       if (policy !== void 0) models[key] = policy;
     }
@@ -78,6 +87,15 @@ function isKnownZeroPrice(entry) {
 function hasVision(entry) {
   return Array.isArray(entry.input) && (entry.input.includes("image") || entry.input.includes("vision"));
 }
+function hasAudio(entry) {
+  return Array.isArray(entry.input) && entry.input.includes("audio");
+}
+function hasVideo(entry) {
+  return Array.isArray(entry.input) && entry.input.includes("video");
+}
+function hasPdf(entry) {
+  return Array.isArray(entry.input) && entry.input.includes("pdf");
+}
 function evaluatePredicate(entry, predicate, privacy) {
   let clauses = 0;
   const fail = (failed) => ({ matched: false, failed });
@@ -98,6 +116,18 @@ function evaluatePredicate(entry, predicate, privacy) {
   if (predicate.vision !== void 0) {
     clauses += 1;
     if (predicate.vision !== hasVision(entry)) return fail(predicate.vision ? "vision" : "no vision");
+  }
+  if (predicate.audio !== void 0) {
+    clauses += 1;
+    if (predicate.audio !== hasAudio(entry)) return fail(predicate.audio ? "audio" : "no audio");
+  }
+  if (predicate.video !== void 0) {
+    clauses += 1;
+    if (predicate.video !== hasVideo(entry)) return fail(predicate.video ? "video" : "no video");
+  }
+  if (predicate.pdf !== void 0) {
+    clauses += 1;
+    if (predicate.pdf !== hasPdf(entry)) return fail(predicate.pdf ? "pdf" : "no pdf");
   }
   if (predicate.reasoning !== void 0) {
     clauses += 1;
@@ -142,6 +172,9 @@ function describePredicate(predicate) {
   if (predicate.maxPrice !== void 0) parts.push(`price \u2264 ${String(predicate.maxPrice)}`);
   if (predicate.tools !== void 0) parts.push(predicate.tools ? "tool-calling" : "no tool-calling");
   if (predicate.vision !== void 0) parts.push(predicate.vision ? "vision" : "no vision");
+  if (predicate.audio !== void 0) parts.push(predicate.audio ? "audio" : "no audio");
+  if (predicate.video !== void 0) parts.push(predicate.video ? "video" : "no video");
+  if (predicate.pdf !== void 0) parts.push(predicate.pdf ? "pdf" : "no pdf");
   if (predicate.reasoning !== void 0) parts.push(predicate.reasoning ? "reasoning" : "no reasoning");
   if (predicate.minContextWindow !== void 0) parts.push(`context \u2265 ${String(predicate.minContextWindow)}`);
   if (predicate.provider !== void 0) parts.push(`provider ${predicate.provider}`);
@@ -160,7 +193,7 @@ function parseCatalogPredicate(raw, context, warnings) {
     return {};
   }
   const predicate = {};
-  const booleanKeys = ["zeroPrice", "tools", "vision", "reasoning", "noTraining", "gated"];
+  const booleanKeys = ["zeroPrice", "tools", "vision", "audio", "video", "pdf", "reasoning", "noTraining", "gated"];
   for (const key of booleanKeys) {
     const value = raw[key];
     if (value === void 0) continue;

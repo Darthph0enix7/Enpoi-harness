@@ -46,10 +46,10 @@ var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read fr
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
-// packages/enpoi-role-registry/src/roles-remote.ts
+// src/roles-remote.ts
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
-// packages/enpoi-role-registry/src/roles-view.ts
+// src/roles-view.ts
 import { listRoleRegistry } from "@deepseek-ai/dsh-tool-subagent";
 function effectiveRoleRows(settings) {
   const registry = listRoleRegistry(settings);
@@ -66,7 +66,7 @@ function effectiveRoleRows(settings) {
   return { roles };
 }
 
-// packages/enpoi-role-registry/src/roles-remote.ts
+// src/roles-remote.ts
 var _list_dec, _a, _init;
 var EnpoiRolesService = class extends (_a = TypertRemoteService, _list_dec = [Remote], _a) {
   /**
@@ -91,7 +91,7 @@ function mountEnpoiRolesRemote(ctx) {
   ctx.plugin(EnpoiRolesService);
 }
 
-// packages/enpoi-role-registry/src/index.ts
+// src/index.ts
 var name = "enpoi-role-registry";
 var inject = ["settings"];
 function apply(ctx) {

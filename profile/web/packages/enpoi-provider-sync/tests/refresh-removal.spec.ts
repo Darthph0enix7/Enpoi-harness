@@ -237,6 +237,66 @@ describe('two-key gate and shrink guards', () => {
     expect(planned.report.degradedReason).toMatch(/more than half/)
     expect(planned.models.map(model => model.id)).toEqual(['a', 'b', 'c', 'd'])
   })
+
+  it('bypasses the shrink guard when force is true (manual operator refresh)', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { verity: { models: { a: {} } } })
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'verity',
+      configured: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }],
+      live: [{ id: 'a' }],
+      catalogRoute: true,
+      catalogProviderKey: 'verity',
+      endpointFresh: true,
+      catalogFresh: true,
+      force: true,
+      now: 1_000_000,
+    })
+    expect(planned.report.removed).toEqual(['b', 'c', 'd'])
+    expect(planned.report.degraded).toBe(false)
+    expect(planned.models.map(model => model.id)).toEqual(['a'])
+  })
+
+  it('restricts antigravity route provider map strictly to google and anthropic', async () => {
+    const { DEFAULT_ROUTE_PROVIDER_MAP: map } = await freshIndex()
+    expect(map.antigravity).toEqual(['google', 'anthropic'])
+  })
+
+  it('filters non-standard thinking levels so reasoningEfforts keys match THINKING_LEVELS', async () => {
+    const directory = tempDir()
+    // Model with 'default' in models.dev reasoning_options:
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
+      'custom-gateway': {
+        models: {
+          'reasoning-model': {
+            reasoning: true,
+            reasoning_options: [{ values: ['default', 'low', 'medium', 'high', 'custom_level'] }],
+          },
+        },
+      },
+    })
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'custom-gateway',
+      configured: [],
+      live: [{ id: 'reasoning-model', reasoning: true }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1_000_000,
+    })
+    const model = planned.models[0]
+    expect(model).toBeDefined()
+    expect(model?.reasoningEfforts).toBeDefined()
+    const efforts = model?.reasoningEfforts as Record<string, string>
+    // Only standard THINKING_LEVELS keys allowed
+    expect(efforts).toHaveProperty('low')
+    expect(efforts).toHaveProperty('medium')
+    expect(efforts).toHaveProperty('high')
+    expect(efforts).not.toHaveProperty('default')
+    expect(efforts).not.toHaveProperty('custom_level')
+  })
 })
 
 describe('in-use protection and migration backfill', () => {
@@ -420,5 +480,57 @@ describe('manual-refresh RPC', () => {
     expect(planned.models.map(model => model.id)).toEqual(['kept'])
     expect(url).toContain('127.0.0.1')
     expect(DEFAULT_MODELS_DEV_URL).toBe('https://models.dev/api.json')
+  })
+
+  it('bypasses the >50% withhold guard on manual refresh RPC (refreshRoute)', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
+      verity: { models: { kept: {} } },
+    })
+    const url = await listingServer(JSON.stringify({
+      object: 'list',
+      data: [{ id: 'kept' }],
+    }))
+    const { apply: applyPlugin } = await freshIndex()
+    const ctx = new Context()
+    contexts.push(ctx)
+    let handler: ((route: string) => Promise<unknown>) | undefined
+    ctx.provide('remote', {
+      registerService: (_name: string, _service: unknown) => {},
+    })
+    ctx.provide('settings', {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        revision: 1,
+        value: {
+          providers: {
+            verity: {
+              baseURL: url,
+              models: [{ id: 'kept' }, { id: 'stale1' }, { id: 'stale2' }, { id: 'stale3' }],
+            },
+          },
+        },
+      }],
+      mutate: async () => {},
+    })
+    applyPlugin(ctx, {
+      intervalMs: { get: () => 3_600_000 },
+      syncOnStart: { get: () => false },
+      syncDelayMs: { get: () => 0 },
+      endpoints: { get: () => ({}) },
+      capacityDefaults: { get: () => ({}) },
+      modelsDevUrl: { get: () => DEFAULT_MODELS_DEV_URL },
+      routeProviderMap: { get: () => ({}) },
+      pinnedModels: { get: () => ({}) },
+      endpointGraceMs: { get: () => 14 * 24 * 60 * 60 * 1000 },
+      catalogFreshMs: { get: () => 48 * 60 * 60 * 1000 },
+    })
+    // Allow the dynamic import effect to mount ProviderSyncService on ctx
+    await vi.waitFor(() => { expect((ctx as any).providerSync).toBeDefined() })
+    const outcome = await (ctx as any).providerSync.refreshRoute('verity') as { removed: string[], models: Array<{ id: string }>, degraded: boolean }
+    // Removing 3 of 4 is >50%, but manual refresh (force: true) must prune them
+    expect(outcome.degraded).toBe(false)
+    expect(outcome.removed).toEqual(['stale1', 'stale2', 'stale3'])
+    expect(outcome.models.map(m => m.id)).toEqual(['kept'])
   })
 })

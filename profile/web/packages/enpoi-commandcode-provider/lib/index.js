@@ -1,5 +1,5 @@
 // src/index.ts
-import { readFileSync } from "node:fs";
+import { readFileSync as readFileSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,11 +85,12 @@ var CatalogStore = class {
   pending;
   resolved;
   origin = "snapshot";
+  failure;
   /** Kick the live fetch; safe to call once per route. */
   start() {
     void this.load().catch(() => void 0);
   }
-  /** The catalog entries, fetching once on first demand. */
+  /** The catalog entries, resolving once on first demand. */
   async entries() {
     return await this.load();
   }
@@ -97,18 +98,40 @@ var CatalogStore = class {
   source() {
     return this.origin;
   }
+  /** Why the fallback was refused or the live fetch failed, when it did. */
+  error() {
+    return this.failure;
+  }
+  /** The bundled snapshot's stamp, when the snapshot file carried one. */
+  stamp() {
+    return this.options.stamp;
+  }
   load() {
     if (this.resolved !== void 0) return Promise.resolve(this.resolved);
-    this.pending ??= (isLoopbackBaseURL(this.options.baseURL) ? this.fetchLive().then((entries) => ({ entries, source: "live" })) : Promise.resolve({ entries: [...this.options.snapshot], source: "snapshot" })).then(({ entries, source }) => {
+    this.pending ??= this.resolveEntries().then(({ entries, source }) => {
       this.resolved = entries;
       this.origin = source;
       return entries;
-    }).catch(() => {
-      this.resolved = [...this.options.snapshot];
-      this.origin = "snapshot";
-      return this.resolved;
     });
     return this.pending;
+  }
+  async resolveEntries() {
+    const mode = this.options.mode ?? "auto";
+    if (mode === "pin") return { entries: [...this.options.snapshot], source: "snapshot" };
+    if (isLoopbackBaseURL(this.options.baseURL)) {
+      try {
+        return { entries: await this.fetchLive(), source: "live" };
+      } catch (error) {
+        this.failure = error instanceof Error ? error.message : String(error);
+        if (mode === "off") return { entries: [], source: "none" };
+        return { entries: [...this.options.snapshot], source: "snapshot" };
+      }
+    }
+    if (mode === "off") {
+      this.failure = `no live catalog endpoint for ${this.options.baseURL} and the snapshot fallback is off`;
+      return { entries: [], source: "none" };
+    }
+    return { entries: [...this.options.snapshot], source: "snapshot" };
   }
   async fetchLive() {
     const fetchImpl = this.options.fetchImpl ?? globalThis.fetch;
@@ -123,6 +146,35 @@ var CatalogStore = class {
     return entries;
   }
 };
+
+// src/catalog-refresh.ts
+import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+function snapshotMetaPath(snapshotPath) {
+  return snapshotPath.endsWith(".json") ? `${snapshotPath.slice(0, -".json".length)}.meta.json` : `${snapshotPath}.meta.json`;
+}
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function readSnapshotStamp(snapshotPath) {
+  try {
+    const raw = JSON.parse(readFileSync(snapshotMetaPath(snapshotPath), "utf8"));
+    if (!isRecord(raw)) return void 0;
+    const version = raw.version;
+    const fetchedAt = raw.fetchedAt;
+    const entryCount = raw.entryCount;
+    if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) return void 0;
+    if (typeof fetchedAt !== "string" || fetchedAt === "") return void 0;
+    if (typeof entryCount !== "number" || !Number.isSafeInteger(entryCount) || entryCount < 0) return void 0;
+    return {
+      version,
+      fetchedAt,
+      entryCount,
+      ...typeof raw.source === "string" && raw.source !== "" ? { source: raw.source } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
 
 // src/adapter.ts
 import { requestImageDimensions } from "@deepseek-ai/dsh-attachment";
@@ -205,7 +257,7 @@ function planUserImages(messages, resolveImage) {
   for (const message of messages) {
     if (message.role !== "user" || typeof message.content === "string") continue;
     for (const part of message.content) {
-      if (!isRecord(part) || typeof part.type !== "string") continue;
+      if (!isRecord2(part) || typeof part.type !== "string") continue;
       if (part.type !== "file" && part.type !== "image" && part.type !== "media") continue;
       if (!detectMediaType(part).startsWith("image/")) continue;
       const dataUri = resolvePartDataUri(part, resolveImage);
@@ -229,7 +281,7 @@ function planUserImages(messages, resolveImage) {
   }
   return plan;
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function dataUriMime(dataUri) {
@@ -336,7 +388,7 @@ function convertUserContent(content, forwarder, resolveImage, plan, scrub) {
   const parts = [];
   let hasMultimodal = false;
   for (const part of content) {
-    if (!isRecord(part) || typeof part.type !== "string") continue;
+    if (!isRecord2(part) || typeof part.type !== "string") continue;
     if (part.type === "text" && typeof part.text === "string") {
       parts.push({ type: "text", text: part.text });
       continue;
@@ -1351,15 +1403,27 @@ var routeProfileSchema = Schema.object({
   }).default(void 0)
 });
 var Config = Schema.object({
-  providers: live(Schema.dict(routeProfileSchema).default({}))
+  providers: live(Schema.dict(routeProfileSchema).default({})),
+  catalog: Schema.object({
+    snapshot: Schema.union(["auto", "pin", "off"]).default("auto")
+  }).default({ snapshot: "auto" })
 });
 function loadSnapshot() {
   try {
     const path = fileURLToPath(new URL("../catalog.snapshot.json", import.meta.url));
-    return parseCatalog(JSON.parse(readFileSync(path, "utf8")));
+    const entries = parseCatalog(JSON.parse(readFileSync2(path, "utf8")));
+    if (entries.length === 0) return { entries };
+    const stamp = readSnapshotStamp(path);
+    return { entries, ...stamp === void 0 ? {} : { stamp } };
   } catch {
-    return [];
+    return { entries: [] };
   }
+}
+function catalogModeOf(config) {
+  const catalog = plainConfig(config).catalog;
+  if (typeof catalog !== "object" || catalog === null || Array.isArray(catalog)) return "auto";
+  const snapshot = catalog.snapshot;
+  return snapshot === "pin" || snapshot === "off" ? snapshot : "auto";
 }
 function parsePoolConfig(route, raw) {
   if (raw === void 0) return {};
@@ -1482,6 +1546,13 @@ function parseProfiles(providers) {
 function apply(ctx, config = {}) {
   const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS;
   const snapshot = loadSnapshot();
+  const catalogMode = catalogModeOf(config);
+  if (snapshot.stamp !== void 0) {
+    ctx.logger.info(
+      `commandcode-provider: catalog snapshot v${String(snapshot.stamp.version)} fetched ${snapshot.stamp.fetchedAt} (${String(snapshot.stamp.entryCount)} entries)`
+    );
+  }
+  if (catalogMode !== "auto") ctx.logger.info(`commandcode-provider: catalog snapshot mode "${catalogMode}"`);
   let lastRaw;
   let memoized;
   const profiles = () => {
@@ -1500,14 +1571,19 @@ function apply(ctx, config = {}) {
   const catalogFor = (profile) => {
     const cached = catalogs.get(profile.route);
     if (cached !== void 0 && cached.baseURL === profile.baseURL) return cached.store;
-    const store = new CatalogStore({ baseURL: profile.baseURL, snapshot });
+    const store = new CatalogStore({
+      baseURL: profile.baseURL,
+      snapshot: snapshot.entries,
+      mode: catalogMode,
+      ...snapshot.stamp === void 0 ? {} : { stamp: snapshot.stamp }
+    });
     catalogs.set(profile.route, { baseURL: profile.baseURL, store });
     store.start();
     return store;
   };
   ctx.llm.registerModelDiscovery(settingsNs, async (request) => {
     const profile = request.provider === void 0 ? void 0 : profiles().get(request.provider);
-    const entries = profile === void 0 ? snapshot : await catalogFor(profile).entries();
+    const entries = profile === void 0 ? snapshot.entries : await catalogFor(profile).entries();
     return entries.map((entry) => {
       const contextWindow = contextWindowOf(entry);
       const maxTokens = maxOutputTokensOf(entry);

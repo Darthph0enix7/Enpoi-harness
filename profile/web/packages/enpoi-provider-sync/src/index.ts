@@ -426,7 +426,7 @@ export type RouteProviderMap = Record<string, readonly string[]>
 export const DEFAULT_ROUTE_PROVIDER_MAP: RouteProviderMap = Object.freeze({
   'opencode-go': ['opencode-go', 'opencode'],
   'opencode': ['opencode', 'opencode-go'],
-  'antigravity': ['anthropic', 'google', 'openai', 'deepseek', 'minimax'],
+  'antigravity': ['google', 'anthropic'],
   'minimax': ['minimax', 'minimax-cn-coding-plan'],
   'deepseek': ['deepseek'],
   'deepseek-official': ['deepseek'],
@@ -1368,12 +1368,13 @@ function analyzeModel(
   let reasoningEfforts: Record<string, string | null> | undefined
   if (isReasoning) {
     const levels: Record<string, string | null> = {}
+    const VALID_THINKING_KEYS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
     if (Array.isArray(mDev?.reasoning_options)) {
       for (const opt of mDev.reasoning_options) {
         if (Array.isArray(opt.values)) {
           for (const val of opt.values) {
-            if (val !== 'off' && val !== 'none') {
+            if (typeof val === 'string' && VALID_THINKING_KEYS.has(val)) {
               levels[val] = val
             }
           }
@@ -1383,8 +1384,8 @@ function analyzeModel(
 
     if (cat?.thinkingLevelMap !== undefined) {
       for (const [k, v] of Object.entries(cat.thinkingLevelMap)) {
-        if (k !== 'off') {
-          levels[k] = typeof v === 'string' && v.length > 0 ? v : k
+        if (VALID_THINKING_KEYS.has(k) && typeof v === 'string' && v.length > 0) {
+          levels[k] = v
         }
       }
     }
@@ -1763,6 +1764,8 @@ export interface PlanRouteInput {
   routeProviderMap?: RouteProviderMap | undefined
   /** Which listing answered the endpoint authority question. */
   source?: 'live' | 'catalog' | undefined
+  /** Force removal execution even if removals drop >50% (e.g. manual refresh or authoritative endpoint). */
+  force?: boolean | undefined
 }
 
 /**
@@ -1879,11 +1882,12 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   } else {
     const currentIds = [...configuredById.keys()]
     const wouldRemove = currentIds.filter(id => !isMember(id) && !references.has(id))
+    const skipWithholdGuard = input.force === true
     if (memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0) {
       keepAll = true
       report.degraded = true
       report.degradedReason = 'the effective model set would be empty'
-    } else if (currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
+    } else if (!skipWithholdGuard && currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
       keepAll = true
       report.degraded = true
       report.degradedReason = `removals would drop ${String(wouldRemove.length)} of ${String(currentIds.length)} stored models (more than half)`
@@ -2107,6 +2111,7 @@ export function apply(ctx: Context, config: Config): void {
       overlay: RouteCatalogOverlay | undefined
       hints: CapabilityHintContext
       source: 'live' | 'catalog'
+      force?: boolean | undefined
     }
 
     /** The human label of the membership authority behind a removal decision. */
@@ -2156,6 +2161,7 @@ export function apply(ctx: Context, config: Config): void {
         routeProviderMap,
         source: recipe.source,
         endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
+        force: recipe.force,
       })
     }
 
@@ -2197,6 +2203,7 @@ export function apply(ctx: Context, config: Config): void {
       overlays: CatalogOverlayDocument
       hints: CapabilityHintContext
       settings: SettingsSeam
+      force?: boolean
     }): Promise<RouteComputeOutcome | undefined> {
       const llmProfiles = sectionOf(options.settings, LLM_NS)?.providers
       const commandCodeProfiles = sectionOf(options.settings, COMMANDCODE_NS)?.providers
@@ -2230,6 +2237,7 @@ export function apply(ctx: Context, config: Config): void {
         overlay,
         hints: options.hints,
         source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
+        force: options.force,
       }
       const planned = planWith(route, profile?.models, recipe, options.settings)
       const references = referencedRouteModels(
@@ -2546,7 +2554,7 @@ export function apply(ctx: Context, config: Config): void {
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
     const overlays = loadOverlays()
     const hints = loadHints()
-    const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings })
+    const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true })
     if (outcome === undefined) throw new Error(`route "${route}" is not configured (no profile and no known endpoint)`)
     await cleanupPrunedReferences(settings, route, outcome.cleanup)
     // Same cache side effect as the hourly pass for a discovery route; the
