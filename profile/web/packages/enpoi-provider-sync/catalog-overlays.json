@@ -5,7 +5,15 @@
     "opencode-go": {
       "remove": [
         "glm-5.1",
-        "omen-alpha"
+        "omen-alpha",
+        "glm-5",
+        "kimi-k2.5",
+        "mimo-v2-omni",
+        "mimo-v2-pro",
+        "minimax-m2.5",
+        "qwen3.5-plus",
+        "hy3-preview",
+        "deepseek-flash"
       ],
       "upsert": [
         {
