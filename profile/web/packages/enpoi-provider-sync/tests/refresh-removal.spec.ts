@@ -112,6 +112,26 @@ describe('catalog intersection membership', () => {
     expect(legacy.report.removed).toEqual(['long-retired'])
   })
 
+  it('honors an injected endpoint grace window instead of the shipped 14 days', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { verity: { models: { kept: { name: 'Kept' } } } })
+    const { planRouteModels: plan } = await freshIndex()
+    const now = 1_700_000_000_000
+    const input = {
+      route: 'verity',
+      live: [{ id: 'kept' }, { id: 'newcomer' }],
+      catalogRoute: true,
+      catalogProviderKey: 'verity',
+      endpointFresh: true,
+      catalogFresh: true,
+    }
+    const stamped = plan({ ...input, configured: [{ id: 'kept' }, { id: 'newcomer', firstSeenAt: now }], now })
+    expect(stamped.report.removed).toEqual([])
+    // A zero grace expires the stamp immediately.
+    const expired = plan({ ...input, configured: stamped.models, now: now + 1000, endpointGraceMs: 0 })
+    expect(expired.report.removed).toEqual(['newcomer'])
+  })
+
   it('keeps hand-added, pinned, and overlay-upserted ids through removal', async () => {
     const directory = tempDir()
     process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { verity: { models: { kept: { name: 'Kept' } } } })
@@ -334,6 +354,15 @@ describe('visibility cleanup', () => {
     ])
     expect(pruneRouteReferences({ uiPreferences: { hiddenModels: { verity: ['kept'] } } }, 'verity', ['gone'])).toEqual({})
     expect(pruneRouteReferences(undefined, 'verity', ['gone'])).toEqual({})
+  })
+
+  it('deletes the route key when its last hidden id is pruned, never leaving an empty list', () => {
+    expect(pruneRouteReferences({
+      uiPreferences: { hiddenModels: { verity: ['gone'], other: ['gone'] } },
+    }, 'verity', ['gone'])).toEqual({ hiddenModels: { other: ['gone'] } })
+    expect(pruneRouteReferences({
+      uiPreferences: { hiddenModels: { verity: ['gone'] } },
+    }, 'verity', ['gone'])).toEqual({ hiddenModels: {} })
   })
 })
 

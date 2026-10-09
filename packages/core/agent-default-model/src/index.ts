@@ -126,14 +126,18 @@ export class AgentDefaultModelConfig extends Service {
    * change, or a host-side teardown) leaves every consumer reading a route the
    * next request cannot reach; this diagnostic names the dangling selection
    * without changing it. Settings are always live, so a later registration of
-   * the same provider simply stops the warning.
+   * the same provider stops the warning and clears the one-shot record: a
+   * second disappearance is a new incident and must warn again.
    * @param provider - the resolved provider route id.
    */
   private diagnoseMissingRoute(provider: string): void {
     if (provider === '') return
     const registry = this.ownerContext.get('llm') as ProviderRouteRegistry | undefined
     if (registry === undefined) return
-    if (registry.listProviders().some(candidate => candidate.id === provider)) return
+    if (registry.listProviders().some(candidate => candidate.id === provider)) {
+      this.warnedMissing.delete(provider)
+      return
+    }
     if (this.warnedMissing.has(provider)) return
     this.warnedMissing.add(provider)
     this.ownerContext.logger.warn(
@@ -167,7 +171,11 @@ export class AgentDefaultModelConfig extends Service {
    * `modelChains` registry cannot route is dropped before the profile write.
    * The deployment's `baseline` policy is not part of a selection and is carried
    * over from the live entry, so a model pick never silently re-enables the Kilo
-   * fallback an owner turned off.
+   * fallback an owner turned off; an entry that carries no legal policy (a
+   * legacy row) records the live Config value, so every saved row has one.
+   * The write re-validates the picked route against the live registry: a route
+   * removed while the save waited in the queue is not resurrected as a dangling
+   * default — the write falls back to the baseline pair instead.
    * @param next - resolved selection accepted by an entry point.
    * @returns fulfillment after the optional profile write settles.
    */
@@ -191,8 +199,23 @@ export class AgentDefaultModelConfig extends Service {
       },
     )
     const saved = this.saves.then(() => editor.edit(entry, (current) => {
-      const baseline = current.baseline
-      return baseline === 'kilo' || baseline === 'off' ? { ...config, baseline } : config
+      // A legacy row may carry no legal policy at all; prefer the stored one,
+      // then the live Config, so the write always records a baseline.
+      const stored = current?.baseline
+      const baseline = stored === 'kilo' || stored === 'off'
+        ? stored
+        : this.config.baseline.get() ?? 'kilo'
+      // The route may have been removed while this save waited in the queue;
+      // re-validate against the live registry so the write cannot resurrect a
+      // dangling default. An absent registry leaves nothing to check.
+      const registry = this.ownerContext.get('llm') as ProviderRouteRegistry | undefined
+      const dangling = registry !== undefined
+        && !registry.listProviders().some(candidate => candidate.id === next.provider)
+      return {
+        ...config,
+        ...dangling ? resolveBaseline({ provider: '', model: '' }, baseline) : {},
+        baseline,
+      }
     }))
     this.saves = saved.catch(() => {})
     await saved

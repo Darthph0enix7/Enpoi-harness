@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
-import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,6 +39,7 @@ afterEach(async () => {
   Reflect.deleteProperty(process.env, 'DSH_DISCOVERED_MODELS')
   Reflect.deleteProperty(process.env, 'DSH_COMMANDCODE_CATALOG')
   Reflect.deleteProperty(process.env, 'DSH_MODELS_DEV_PATH')
+  Reflect.deleteProperty(process.env, 'DSH_CATALOG_OVERLAYS')
   await Promise.all(servers.splice(0).map(server => new Promise(resolve => server.close(resolve))))
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
@@ -157,16 +158,33 @@ describe('discovered-cache records', () => {
     expect(changed.fetchedAt).toBe(2000)
   })
 
-  it('writes the cache atomically and byte-identically for an unchanged listing', () => {
+  it('writes the cache atomically and byte-identically for an unchanged listing', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
     directories.push(directory)
     process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
     const record = mergeDiscoveredRoute(undefined, 'https://kilo.test', mergeDiscoveredModels('kilo', [{ id: 'a' }], undefined), 1234)
-    writeDiscoveredRoute('kilo', record)
+    await writeDiscoveredRoute('kilo', record)
     const first = readFileSync(discoveredCachePath(), 'utf8')
-    writeDiscoveredRoute('kilo', mergeDiscoveredRoute(record, 'https://kilo.test', mergeDiscoveredModels('kilo', [{ id: 'a' }], undefined), 9999))
+    await writeDiscoveredRoute('kilo', mergeDiscoveredRoute(record, 'https://kilo.test', mergeDiscoveredModels('kilo', [{ id: 'a' }], undefined), 9999))
     expect(readFileSync(discoveredCachePath(), 'utf8')).toBe(first)
     expect(JSON.parse(first).routes.kilo).toMatchObject({ fetchedAt: 1234, models: [{ id: 'a', source: 'discovered', discoveredAt: 1234 }] })
+    // The write is atomic: no temp sibling survives a successful rename.
+    expect(readdirSync(dirname(discoveredCachePath())).some(name => name.includes('.tmp-'))).toBe(false)
+  })
+
+  it('serializes concurrent writes so distinct routes both survive', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    const first = mergeDiscoveredRoute(undefined, 'https://a.test', mergeDiscoveredModels('a', [{ id: 'a1' }], undefined), 1)
+    const second = mergeDiscoveredRoute(undefined, 'https://b.test', mergeDiscoveredModels('b', [{ id: 'b1' }], undefined), 1)
+    await Promise.all([writeDiscoveredRoute('a', first), writeDiscoveredRoute('b', second)])
+    const document = JSON.parse(readFileSync(discoveredCachePath(), 'utf8')) as {
+      routes: Record<string, { models: Array<{ id: string }> }>
+    }
+    expect(Object.keys(document.routes).sort()).toEqual(['a', 'b'])
+    expect(document.routes.a?.models.map(model => model.id)).toEqual(['a1'])
+    expect(document.routes.b?.models.map(model => model.id)).toEqual(['b1'])
   })
 })
 
@@ -328,6 +346,28 @@ describe('portable paths and refresh diagnostics', () => {
     await fresh.refreshModelsDevOnline(undefined, 'https://mirror.test/api.json')
     expect(urls).toEqual(['https://mirror.test/api.json'])
     expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual(catalogue)
+    // Atomic write: no temp sibling remains after the rename.
+    expect(readdirSync(dirname(target)).some(name => name.includes('.tmp-'))).toBe(false)
+  })
+
+  it('reports a failed models.dev cache write and removes its temp file', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-models-dev-'))
+    directories.push(directory)
+    const target = join(directory, 'opencode', 'models.json')
+    mkdirSync(target, { recursive: true })
+    process.env.DSH_MODELS_DEV_PATH = target
+    const catalogue = Object.fromEntries(Array.from({ length: 51 }, (_, index) => [`provider-${String(index)}`, { models: {} }]))
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => catalogue }))
+    vi.resetModules()
+    const fresh = await import('../src/index.ts')
+    const calls: Array<{ kind: string; message: string }> = []
+    // The target path is a directory, so the rename fails; the write is
+    // reported and its temp file is cleaned up.
+    await fresh.refreshModelsDevOnline((kind, message) => { calls.push({ kind, message }) }, 'https://mirror.test/api.json')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.kind).toBe('provider-sync/models-dev-cache')
+    expect(calls[0]?.message).toContain('cache write failed')
+    expect(readdirSync(dirname(target)).some(name => name.includes('.tmp-'))).toBe(false)
   })
 
   it('resolves DSH home from DSH_HOME, then the real home, without assuming a user name', () => {
@@ -456,9 +496,14 @@ function syncHarness(
   commandcode: Record<string, HarnessRoute> = {},
   options: {
     conflicts?: number
+    /** Per-namespace conflict counts; consumed before {@link conflicts}. */
+    conflictsByNs?: Record<string, number>
+    /** Invoked when a conflict is thrown, before the retry re-reads settings. */
+    onConflict?: (ns: string) => void
     modelsDevUrl?: string
     routeProviderMap?: Record<string, string[]>
-    pinnedModels?: Record<string, string[]>
+    pinnedModels?: Record<string, string[]> | (() => Record<string, string[]>)
+    endpointGraceMs?: number
     /** The `agent-default-model` settings document, when the test sets one. */
     defaultModel?: Record<string, unknown>
     /** The `enpoi-orchestration` settings document, when the test sets one. */
@@ -473,6 +518,7 @@ function syncHarness(
   const infos: string[] = []
   const diagnostics: SyncHarness['diagnostics'] = []
   let conflicts = options.conflicts ?? 0
+  const conflictsByNs = { ...options.conflictsByNs }
   const settings = {
     describe: () => [
       ...(llm === undefined ? [] : [{ ns: 'llm-pi-ai', revision: 7, value: { providers: llm } }]),
@@ -482,13 +528,20 @@ function syncHarness(
     ],
     mutate: async (ns: string, ops: SyncHarness['mutations'][number]['ops'], revision: number | undefined) => {
       mutations.push({ ns, ops, revision })
+      const byNs = conflictsByNs[ns] ?? 0
+      if (byNs > 0) {
+        conflictsByNs[ns] = byNs - 1
+        options.onConflict?.(ns)
+        throw Object.assign(new Error('settings conflict'), { code: 'SETTINGS_CONFLICT' })
+      }
       if (conflicts > 0) {
         conflicts -= 1
+        options.onConflict?.(ns)
         throw Object.assign(new Error('settings conflict'), { code: 'SETTINGS_CONFLICT' })
       }
     },
   }
-  let cleanup: (() => void) | undefined
+  const cleanups: Array<() => void> = []
   const ctx = {
     logger: () => ({
       debug: () => {},
@@ -500,8 +553,9 @@ function syncHarness(
       : service === 'diagnostics'
         ? { report: (request: { kind: string, message: string }) => { diagnostics.push(request); return {} } }
         : undefined,
-    effect: (callback: () => () => void) => {
-      cleanup = callback()
+    effect: (callback: () => (() => void) | void) => {
+      const cleanup = callback()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
       return () => { cleanup?.() }
     },
   }
@@ -513,14 +567,16 @@ function syncHarness(
     capacityDefaults: { get: () => ({}) },
     modelsDevUrl: { get: () => options.modelsDevUrl ?? DEFAULT_MODELS_DEV_URL },
     routeProviderMap: { get: () => options.routeProviderMap ?? ({}) },
-    pinnedModels: { get: () => options.pinnedModels ?? ({}) },
+    pinnedModels: { get: () => typeof options.pinnedModels === 'function' ? options.pinnedModels() : options.pinnedModels ?? ({}) },
+    endpointGraceMs: { get: () => options.endpointGraceMs ?? 14 * 24 * 60 * 60 * 1000 },
+    catalogFreshMs: { get: () => 48 * 60 * 60 * 1000 },
   })
   return {
     mutations,
     warnings,
     infos,
     diagnostics,
-    dispose: () => { cleanup?.() },
+    dispose: () => { for (const cleanup of cleanups.splice(0)) cleanup() },
   }
 }
 
@@ -678,6 +734,141 @@ describe('route passes', () => {
       await vi.waitFor(() => { expect(harness.mutations).toHaveLength(2) })
       expect(harness.mutations.map(mutation => mutation.revision)).toEqual([3, 3])
       expect(harness.mutations[1]!.ops[0]!.value.map(model => model.id)).toEqual(['zzz-commandcode-model-c'])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('re-plans a conflict retry from the moved document and cleans with the re-planned removals', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      object: 'list',
+      data: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    const fresh = await freshSyncModule()
+    stubProviderNetwork()
+    const llm: Record<string, HarnessRoute> = {
+      antigravity: {
+        baseURL: url,
+        api: 'anthropic-messages',
+        models: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'retired' }],
+      },
+    }
+    const orchestration = {
+      uiPreferences: {
+        hiddenModels: { antigravity: ['retired', 'orphan', 'visible'] },
+      },
+    }
+    const harness = syncHarness(llm, {}, {
+      applyFn: fresh.apply,
+      orchestration,
+      conflictsByNs: { 'llm-pi-ai': 1 },
+      onConflict: (ns) => {
+        // A concurrent edit pins one model and stores another while the first
+        // plan is in flight; the stale whole-array write would drop both.
+        if (ns !== 'llm-pi-ai') return
+        llm.antigravity!.models!.push({ id: 'new-pinned', name: 'Pinned', source: 'manual' })
+        llm.antigravity!.models!.push({ id: 'orphan' })
+      },
+    })
+    try {
+      await vi.waitFor(() => { expect(harness.mutations.filter(m => m.ns === 'llm-pi-ai')).toHaveLength(2) })
+      const written = harness.mutations.filter(m => m.ns === 'llm-pi-ai')[1]!.ops[0]!.value.map(model => model.id)
+      // The pinned model survives the retry; the concurrently stored id the
+      // re-plan removed is gone.
+      expect(written).toEqual(['a', 'b', 'c', 'new-pinned'])
+      await vi.waitFor(() => { expect(harness.mutations.some(m => m.ns === 'enpoi-orchestration')).toBe(true) })
+      const cleanup = harness.mutations.find(m => m.ns === 'enpoi-orchestration')!
+      // The cleanup used the re-planned removed list: the orphan id the
+      // original plan never saw is dropped from the hidden map too.
+      expect(cleanup.ops).toEqual([
+        { op: 'set', path: ['uiPreferences', 'hiddenModels'], value: { antigravity: ['visible'] } },
+      ])
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('re-reads the orchestration document per cleanup attempt so a concurrent favorite survives', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      object: 'list',
+      data: [{ id: 'kept' }, { id: 'retired' }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    // The overlay drops one advertised id; a favorite references it, so the
+    // cleanup has a favorites payload to rewrite. Membership pruning alone
+    // would protect a referenced id, which is why the overlay is needed here.
+    const overlays = join(directory, 'catalog-overlays.json')
+    writeFileSync(overlays, JSON.stringify({ routes: { antigravity: { remove: ['retired'] } } }))
+    process.env.DSH_CATALOG_OVERLAYS = overlays
+    const fresh = await freshSyncModule()
+    stubProviderNetwork()
+    const orchestration: {
+      uiPreferences: { hiddenModels: Record<string, string[]>; favorites: Array<Record<string, unknown>> }
+    } = {
+      uiPreferences: {
+        hiddenModels: { antigravity: ['retired'] },
+        favorites: [{ provider: 'antigravity', modelId: 'retired' }, { provider: 'other', modelId: 'existing' }],
+      },
+    }
+    const harness = syncHarness({
+      antigravity: { baseURL: url, api: 'anthropic-messages', models: [{ id: 'kept' }, { id: 'retired' }] },
+    }, {}, {
+      applyFn: fresh.apply,
+      orchestration,
+      conflictsByNs: { 'enpoi-orchestration': 1 },
+      onConflict: (ns) => {
+        if (ns === 'enpoi-orchestration') orchestration.uiPreferences.favorites.push({ provider: 'other', modelId: 'fav' })
+      },
+    })
+    try {
+      await vi.waitFor(() => { expect(harness.mutations.filter(m => m.ns === 'enpoi-orchestration')).toHaveLength(2) })
+      const cleanup = harness.mutations.filter(m => m.ns === 'enpoi-orchestration')[1]!
+      const favorites = cleanup.ops.find(op => op.path.join('.') === 'uiPreferences.favorites')
+      // The favorite another writer added while the first payload was
+      // in flight is in the rewritten array, not clobbered by the stale one.
+      expect(favorites?.value).toEqual([{ provider: 'other', modelId: 'existing' }, { provider: 'other', modelId: 'fav' }])
+      // The route's last hidden id is gone, so the key is removed, not [].
+      const hidden = cleanup.ops.find(op => op.path.join('.') === 'uiPreferences.hiddenModels')
+      expect(hidden?.value).toEqual({})
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('skips the cleanup write when a conflict-winning edit already cleaned the references', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      object: 'list',
+      data: [{ id: 'kept' }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-sync-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    const fresh = await freshSyncModule()
+    stubProviderNetwork()
+    const orchestration = { uiPreferences: { hiddenModels: { antigravity: ['retired'] } as Record<string, string[]> } }
+    const harness = syncHarness({
+      antigravity: { baseURL: url, api: 'anthropic-messages', models: [{ id: 'kept' }, { id: 'retired' }] },
+    }, {}, {
+      applyFn: fresh.apply,
+      orchestration,
+      conflictsByNs: { 'enpoi-orchestration': 1 },
+      onConflict: (ns) => {
+        if (ns === 'enpoi-orchestration') orchestration.uiPreferences.hiddenModels = {}
+      },
+    })
+    try {
+      // The discovered-cache line lands after persist and cleanup, so it is
+      // the pass's completion signal.
+      await vi.waitFor(() => { expect(harness.infos.some(line => line.includes('discovered'))).toBe(true) })
+      expect(harness.mutations.filter(m => m.ns === 'enpoi-orchestration')).toHaveLength(1)
     } finally {
       harness.dispose()
     }

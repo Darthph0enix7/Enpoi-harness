@@ -58,6 +58,29 @@ it('warns once when the selected provider is not registered, without changing it
   warn.mockRestore()
 })
 
+it('warns again when a re-registered route disappears a second time', async () => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  let providers = [{ id: 'ghost', name: 'Ghost' }]
+  ctx.provide('llm', { listProviders: () => providers })
+  const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+  await ctx.plugin(DefaultModel, { provider: 'ghost', model: 'm' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).not.toHaveBeenCalled()
+  providers = []
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).toHaveBeenCalledTimes(1)
+  // The route resolves again: the one-shot record clears,
+  providers = [{ id: 'ghost', name: 'Ghost' }]
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).toHaveBeenCalledTimes(1)
+  // so the second disappearance is a new incident that warns again.
+  providers = []
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'ghost', model: 'm' })
+  expect(warn).toHaveBeenCalledTimes(2)
+  warn.mockRestore()
+})
+
 it('stays silent while the selected provider is registered', async () => {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
@@ -97,6 +120,40 @@ it('keeps the profile baseline policy across a saved selection', async () => {
   // The complete-selection write replaces the model fields but must not erase
   // the deployment's baseline opt-out.
   expect(readFileSync(profile.patchPath, 'utf8')).toContain('baseline: off')
+})
+
+it('records a legal baseline for a legacy entry that has none', async () => {
+  const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
+  const { ctx, profile } = await configurationFixture({ hmr: false })
+  // The fixture's row predates `baseline`; the save must still write one.
+  await ctx.agentDefaultModel.saveSelection({ provider: 'test', model: 'next' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'test', model: 'next' })
+  expect(readFileSync(profile.patchPath, 'utf8')).toContain('baseline: kilo')
+})
+
+it('treats a missing current config as a legacy row when deriving the baseline', async () => {
+  const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
+  const { ctx } = await configurationFixture({ hmr: false })
+  const editor = ctx.configEditor
+  let candidate: Record<string, unknown> | undefined
+  const intercepted = vi.spyOn(editor, 'edit').mockImplementationOnce(async (_entry, change) => {
+    candidate = change(undefined as unknown as Record<string, unknown>, {})
+  })
+  await ctx.agentDefaultModel.saveSelection({ provider: 'test', model: 'next' })
+  intercepted.mockRestore()
+  expect(candidate).toEqual({ provider: 'test', model: 'next', baseline: 'kilo' })
+})
+
+it('falls back to the baseline pair when the picked route is gone before the write lands', async () => {
+  const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
+  const { ctx } = await configurationFixture({ hmr: false })
+  let providers = [{ id: 'ghost', name: 'Ghost' }, { id: 'kilo', name: 'Kilo' }]
+  ctx.provide('llm', { listProviders: () => providers })
+  // Queue the save, then drop the route before the serialized edit runs.
+  const pending = ctx.agentDefaultModel.saveSelection({ provider: 'ghost', model: 'm' })
+  providers = [{ id: 'kilo', name: 'Kilo' }]
+  await pending
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
 })
 
 it('drops a selection that echoes a group the runtime cannot route', async () => {

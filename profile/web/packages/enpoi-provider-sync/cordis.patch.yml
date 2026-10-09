@@ -69,3 +69,12 @@
         # nor models.dev advertises it (a hand-added model is protected by its
         # own `source: "manual"` stamp instead). Empty: nothing pinned.
         pinnedModels: {}
+        # Live-editable membership windows, spelled in milliseconds. An
+        # endpoint-only model (advertised by the listing but not yet indexed
+        # by models.dev) survives this long before pruning — two weeks by
+        # default, long enough for a new id to reach models.dev. The on-disk
+        # models.dev cache counts as fresh for this long when the online
+        # refresh fails — 48 hours by default; while it is stale, removals are
+        # withheld. Both values below are the shipped defaults.
+        endpointGraceMs: 1209600000
+        catalogFreshMs: 172800000

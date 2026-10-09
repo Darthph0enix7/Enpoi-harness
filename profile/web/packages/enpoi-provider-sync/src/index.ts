@@ -31,7 +31,7 @@
  * @module dsh-enpoi-provider-sync
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -79,6 +79,12 @@ export interface RouteCapacity {
 /** The authoritative models.dev catalogue URL; the `modelsDevUrl` config may point at a mirror. */
 export const DEFAULT_MODELS_DEV_URL = 'https://models.dev/api.json'
 
+/** How long an endpoint-only model survives before pruning while models.dev has not indexed it yet; the `endpointGraceMs` config overrides it. */
+export const ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1000
+
+/** Freshness window for the on-disk models.dev cache when the online refresh fails; the `catalogFreshMs` config overrides it. */
+export const CATALOG_FRESH_MS = 48 * 60 * 60 * 1000
+
 /** Live-editable sync schedule and enrichment configuration. */
 export interface Config {
   /** Refresh cadence in milliseconds; hourly by default, matching the shipped profile. */
@@ -105,6 +111,17 @@ export interface Config {
    * An empty map is the shipped default: nothing is pinned.
    */
   pinnedModels: Volatile<Record<string, string[]>>
+  /**
+   * How long an endpoint-only model (advertised by the listing but not yet
+   * indexed by models.dev) survives before pruning; live Config, shipped
+   * default {@link ENDPOINT_ONLY_GRACE_MS}.
+   */
+  endpointGraceMs: Volatile<number>
+  /**
+   * Freshness window for the on-disk models.dev cache when the online refresh
+   * fails; live Config, shipped default {@link CATALOG_FRESH_MS}.
+   */
+  catalogFreshMs: Volatile<number>
 }
 
 export const Config = Schema.object({
@@ -116,6 +133,8 @@ export const Config = Schema.object({
   modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
   routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
   pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
+  endpointGraceMs: live(Schema.number().default(ENDPOINT_ONLY_GRACE_MS)),
+  catalogFreshMs: live(Schema.number().default(CATALOG_FRESH_MS)),
 })
 
 /** One request-modality token a listing or catalog may disclose. */
@@ -248,6 +267,9 @@ type ModelsDevDatabase = Record<string, ModelsDevProvider>
 
 let modelsDevCache: ModelsDevDatabase | undefined
 
+/** Distinguishes concurrent models.dev temp names that share a millisecond. */
+let modelsDevTmpSeq = 0
+
 /** First non-empty string; `undefined` when every candidate is absent or empty. */
 function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
@@ -345,7 +367,21 @@ export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: s
         return true
       }
       mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, JSON.stringify(data), 'utf8')
+      // Atomic replace: a reader (or a crash) never observes a half-written
+      // catalogue, and a failed write leaves no temp file behind.
+      const temporary = `${path}.tmp-${String(process.pid)}-${String(Date.now())}-${String(modelsDevTmpSeq++)}`
+      try {
+        writeFileSync(temporary, JSON.stringify(data), 'utf8')
+        renameSync(temporary, path)
+      } catch (error) {
+        try {
+          rmSync(temporary, { force: true })
+        } catch {
+          // A failed temp cleanup must not mask the cache-write failure
+          // reported below.
+        }
+        throw error
+      }
     } catch (error) {
       report?.('provider-sync/models-dev-cache', `models.dev catalogue refreshed in memory, but the cache write failed — ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -355,12 +391,6 @@ export async function refreshModelsDevOnline(report?: SyncDiagnosticSink, url: s
     return false
   }
 }
-
-/** How long an endpoint-only model survives before pruning while models.dev has not indexed it yet. */
-export const ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1000
-
-/** Freshness window for the on-disk models.dev cache when the online refresh fails. */
-export const CATALOG_FRESH_MS = 48 * 60 * 60 * 1000
 
 /**
  * Age of the on-disk models.dev cache at `now`, or `undefined` when no path
@@ -1093,22 +1123,48 @@ export function mergeDiscoveredRoute(
 }
 
 /**
- * Persist one route's discovered models atomically. Cache-write failures are
+ * Tail of the in-process discovered-cache write chain. The file is shared by
+ * every route (and by sibling tooling), so a read-modify-write pair must not
+ * interleave: each locked task re-reads the file it is about to replace, and
+ * a write of route A therefore cannot drop a concurrent write of route B.
+ */
+let discoveredWriteChain: Promise<void> = Promise.resolve()
+
+/**
+ * Persist one route's discovered models atomically. Writes serialize through
+ * an in-process promise chain and re-read the file inside the locked task, so
+ * concurrent distinct-route writes all survive. Cache-write failures are
  * logged by the caller and never fail the sync pass: the settings-side merge
  * (for configured routes) is the durable catalogue, and this file is the
  * resolution layer's copy.
  * @param route - the provider route key.
  * @param record - the merged route record.
+ * @returns fulfillment after the write lands; rejection when it fails.
  */
-export function writeDiscoveredRoute(route: string, record: DiscoveredFileRoute): void {
-  const path = discoveredCachePath()
-  const document = readDiscoveredFile(path)
-  document.version = DISCOVERED_CACHE_VERSION
-  document.routes[route] = record
-  mkdirSync(dirname(path), { recursive: true })
-  const temporary = `${path}.tmp-${String(process.pid)}`
-  writeFileSync(temporary, JSON.stringify(document), 'utf8')
-  renameSync(temporary, path)
+export function writeDiscoveredRoute(route: string, record: DiscoveredFileRoute): Promise<void> {
+  const write = discoveredWriteChain.then(() => {
+    const path = discoveredCachePath()
+    const document = readDiscoveredFile(path)
+    document.version = DISCOVERED_CACHE_VERSION
+    document.routes[route] = record
+    mkdirSync(dirname(path), { recursive: true })
+    const temporary = `${path}.tmp-${String(process.pid)}`
+    try {
+      writeFileSync(temporary, JSON.stringify(document), 'utf8')
+      renameSync(temporary, path)
+    } catch (error) {
+      try {
+        rmSync(temporary, { force: true })
+      } catch {
+        // A failed temp cleanup must not mask the write failure reported below.
+      }
+      throw error
+    }
+  })
+  // A failed write rejects the caller's promise but must not break the chain:
+  // later routes still serialize behind it.
+  discoveredWriteChain = write.catch(() => {})
+  return write
 }
 
 /**
@@ -1624,7 +1680,12 @@ export function pruneRouteReferences(
     if (Array.isArray(list)) {
       const next = list.filter(id => typeof id !== 'string' || !removedSet.has(id))
       if (next.length !== list.length) {
-        cleanup.hiddenModels = { ...(map as Record<string, string[]>), [route]: next as string[] }
+        const nextMap = { ...(map as Record<string, string[]>) }
+        // An empty route list is canonicalized away: the client reads an
+        // absent key and an empty list as the same "nothing hidden here".
+        if (next.length === 0) Reflect.deleteProperty(nextMap, route)
+        else nextMap[route] = next as string[]
+        cleanup.hiddenModels = nextMap
       }
     }
   }
@@ -1681,6 +1742,11 @@ export interface PlanRouteInput {
   endpointFresh: boolean
   /** Whether the models.dev catalogue is fresh (online refresh, or cache younger than 48 h). */
   catalogFresh: boolean
+  /**
+   * How long an endpoint-only id survives before pruning; defaults to
+   * {@link ENDPOINT_ONLY_GRACE_MS}.
+   */
+  endpointGraceMs?: number | undefined
   /** Route-level ids the deployment pins against removal. */
   pinnedModels?: readonly string[] | undefined
   /** The route's maintained catalog overlay, when the file names one. */
@@ -1720,6 +1786,7 @@ export interface PlanRouteInput {
 export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const configured = input.configured ?? []
   const live = input.live
+  const endpointGraceMs = input.endpointGraceMs ?? ENDPOINT_ONLY_GRACE_MS
   const hints = input.hints ?? { table: loadCapabilityHints(), override: {} }
   const routeProviderMap = input.routeProviderMap ?? DEFAULT_ROUTE_PROVIDER_MAP
   const advertised = new Map<string, Record<string, unknown>>()
@@ -1759,7 +1826,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) continue
       const prior = configuredById.get(id)
       const firstSeen = prior === undefined ? input.now : firstSeenAtOf(prior)
-      if (firstSeen !== undefined && input.now - firstSeen < ENDPOINT_ONLY_GRACE_MS) grace.add(id)
+      if (firstSeen !== undefined && input.now - firstSeen < endpointGraceMs) grace.add(id)
     }
   }
 
@@ -1923,8 +1990,6 @@ export function apply(ctx: Context, config: Config): void {
   // The configured route map extends the shipped table key by key: a route the
   // deployment newly serves is mapped from configuration alone.
   const routeProviderMap: RouteProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) }
-  // Route-level ids the deployment pins against catalog-driven removal.
-  const pinnedModels = value(config.pinnedModels) ?? {}
 
   /**
    * Record one coded incident (kind `provider-sync/...`) and log it. The
@@ -2026,6 +2091,22 @@ export function apply(ctx: Context, config: Config): void {
       /** Configured ids the listing did not advertise this pass. */
       unadvertised: string[]
       advertisedCount?: number
+      /** The fetched facts a settings-conflict retry re-plans against. */
+      plan: PlanRecipe
+    }
+
+    /**
+     * The fetched facts one plan uses. A settings-conflict retry re-plans from
+     * these without refetching the listing or the catalogue.
+     */
+    interface PlanRecipe {
+      live: LiveModel[] | undefined
+      catalogRoute: boolean
+      catalogProviderKey: string | undefined
+      catalogOnlineOk: boolean
+      overlay: RouteCatalogOverlay | undefined
+      hints: CapabilityHintContext
+      source: 'live' | 'catalog'
     }
 
     /** The human label of the membership authority behind a removal decision. */
@@ -2033,6 +2114,71 @@ export function apply(ctx: Context, config: Config): void {
       if (report.authority === 'catalog') return 'live endpoint ∩ models.dev'
       if (report.authority === 'endpoint') return report.source === 'catalog' ? 'bundled catalog snapshot' : 'live endpoint'
       return 'no authority'
+    }
+
+    /**
+     * Plan one route's records from an already-fetched listing. The initial
+     * pass and a settings-conflict retry both call it: the retry passes the
+     * records the namespace currently holds, so a concurrent edit is respected
+     * without refetching anything. Pinned ids, references, the grace window,
+     * and the cache-freshness gate are read live at plan time.
+     * @param route - the provider route key.
+     * @param configured - the route's stored records to plan from.
+     * @param recipe - the pass's fetched facts.
+     * @param settings - the settings seam references are re-read from.
+     * @returns the planned records and the removal audit.
+     */
+    function planWith(
+      route: string,
+      configured: Array<Record<string, unknown>> | undefined,
+      recipe: PlanRecipe,
+      settings: SettingsSeam,
+    ): PlannedRouteModels {
+      return planRouteModels({
+        route,
+        configured,
+        live: recipe.live,
+        catalogRoute: recipe.catalogRoute,
+        catalogProviderKey: recipe.catalogProviderKey,
+        endpointFresh: recipe.live !== undefined,
+        catalogFresh: recipe.catalogOnlineOk
+          || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < (value(config.catalogFreshMs) ?? CATALOG_FRESH_MS),
+        pinnedModels: (value(config.pinnedModels) ?? {})[route],
+        overlay: recipe.overlay,
+        references: referencedRouteModels(
+          readSettingsDocument(settings, AGENT_DEFAULT_MODEL_NS),
+          readSettingsDocument(settings, ORCHESTRATION_NAMESPACE),
+          route,
+        ),
+        now: Date.now(),
+        capacities,
+        hints: recipe.hints,
+        routeProviderMap,
+        source: recipe.source,
+        endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
+      })
+    }
+
+    /** Every configured id the plan no longer carries, for visibility cleanup. */
+    function danglingIds(
+      configured: ReadonlyArray<Record<string, unknown>>,
+      models: ReadonlyArray<Record<string, unknown>>,
+    ): string[] {
+      const plannedIds = new Set(models.map(model => (typeof model.id === 'string' ? model.id : '')))
+      return [...new Set(configured
+        .map(entry => (typeof entry.id === 'string' ? entry.id : ''))
+        .filter(id => id !== '' && !plannedIds.has(id)))]
+    }
+
+    /** The configured ids one listing did not advertise. */
+    function unadvertisedIds(
+      configured: ReadonlyArray<Record<string, unknown>>,
+      live: LiveModel[] | undefined,
+    ): string[] {
+      const advertised = new Set((live ?? []).map(model => model.id))
+      return configured
+        .map(entry => typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined)
+        .filter((id): id is string => id !== undefined && !advertised.has(id))
     }
 
     /**
@@ -2076,40 +2222,25 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         logger.warn(describeSyncFailure(route, error, ns))
       }
-      const catalogFresh = options.catalogOnlineOk
-        || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < CATALOG_FRESH_MS
+      const recipe: PlanRecipe = {
+        live,
+        catalogRoute,
+        catalogProviderKey: routeProviderMap[route]?.[0],
+        catalogOnlineOk: options.catalogOnlineOk,
+        overlay,
+        hints: options.hints,
+        source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
+      }
+      const planned = planWith(route, profile?.models, recipe, options.settings)
       const references = referencedRouteModels(
         readSettingsDocument(options.settings, AGENT_DEFAULT_MODEL_NS),
         readSettingsDocument(options.settings, ORCHESTRATION_NAMESPACE),
         route,
       )
-      const planned = planRouteModels({
-        route,
-        configured: profile?.models,
-        live,
-        catalogRoute,
-        catalogProviderKey: routeProviderMap[route]?.[0],
-        endpointFresh: live !== undefined,
-        catalogFresh,
-        pinnedModels: pinnedModels[route],
-        overlay,
-        references,
-        now: Date.now(),
-        capacities,
-        hints: options.hints,
-        routeProviderMap,
-        source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
-      })
-      const advertised = new Set((live ?? []).map(model => model.id))
-      const unadvertised = (profile?.models ?? [])
-        .map(entry => typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined)
-        .filter((id): id is string => id !== undefined && !advertised.has(id))
+      const unadvertised = unadvertisedIds(profile?.models ?? [], live)
       // Every configured id the plan no longer carries (membership removals
       // and overlay removals alike) is a dangling visibility reference.
-      const plannedIds = new Set(planned.models.map(model => (typeof model.id === 'string' ? model.id : '')))
-      const cleanup = [...new Set((profile?.models ?? [])
-        .map(entry => (typeof entry.id === 'string' ? entry.id : ''))
-        .filter(id => id !== '' && !plannedIds.has(id)))]
+      const cleanup = danglingIds(profile?.models ?? [], planned.models)
       if (planned.report.removed.length > 0) {
         reportSyncDiagnostic(
           'provider-sync/model-pruned',
@@ -2142,6 +2273,7 @@ export function apply(ctx: Context, config: Config): void {
         cleanup,
         unadvertised,
         ...live === undefined ? {} : { advertisedCount: live.length },
+        plan: recipe,
       }
     }
 
@@ -2149,34 +2281,59 @@ export function apply(ctx: Context, config: Config): void {
      * Persist one computed route's records under the settings revision-retry,
      * keeping the sync's fail-soft semantics: a result that changes nothing
      * skips the write, and a concurrent settings edit elsewhere is retried
-     * rather than lost.
+     * rather than lost. A retry re-reads the route's records from the moved
+     * namespace and re-plans from the same fetched listing, so an edit that
+     * landed during the conflict (for example a newly pinned model) survives
+     * instead of being overwritten by the stale plan.
+     * @param settings - the settings seam.
      * @param outcome - the computed route refresh.
+     * @returns the outcome actually persisted (re-planned after a conflict).
      */
-    async function persistRouteModels(settings: SettingsSeam, outcome: RouteComputeOutcome): Promise<void> {
-      const before = stringifyComparable(outcome.configured)
-      const after = stringifyComparable(outcome.models)
-      if (before === after) {
-        logger.debug(`route ${outcome.route}: ${outcome.live === undefined ? 'overlay' : `${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models`}, no change`)
-        return
+    async function persistRouteModels(settings: SettingsSeam, outcome: RouteComputeOutcome): Promise<RouteComputeOutcome> {
+      let current = outcome
+      if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
+        logger.debug(`route ${current.route}: ${current.live === undefined ? 'overlay' : `${String(current.advertisedCount ?? 0)} ${current.report.source} models`}, no change`)
+        return current
       }
       for (let attempt = 0; ; attempt++) {
         try {
           await settings.mutate(
-            outcome.ns as SettingsNamespace,
-            [{ op: 'set', path: ['providers', outcome.route, 'models'], value: outcome.models }],
-            revisionOf(settings, outcome.ns),
+            current.ns as SettingsNamespace,
+            [{ op: 'set', path: ['providers', current.route, 'models'], value: current.models }],
+            revisionOf(settings, current.ns),
           )
-          const removed = outcome.report.removed.length
+          const removed = current.report.removed.length
           logger.info(removed > 0
-            ? `route ${outcome.route}: catalog refresh — ${String(outcome.models.length)} models (${String(removed)} outdated pruned)`
-            : outcome.live === undefined
-              ? `route ${outcome.route}: catalog overlay applied — ${String(outcome.models.length)} models`
-              : `route ${outcome.route}: catalog merged & enriched from models.dev — ${String(outcome.advertisedCount ?? 0)} ${outcome.report.source} models (${String(outcome.unadvertised.length)} kept)`)
-          return
+            ? `route ${current.route}: catalog refresh — ${String(current.models.length)} models (${String(removed)} outdated pruned)`
+            : current.live === undefined
+              ? `route ${current.route}: catalog overlay applied — ${String(current.models.length)} models`
+              : `route ${current.route}: catalog merged & enriched from models.dev — ${String(current.advertisedCount ?? 0)} ${current.report.source} models (${String(current.unadvertised.length)} kept)`)
+          return current
         } catch (error) {
           const conflict = error as Partial<SettingsConflictError>
-          if (conflict?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
-          throw error
+          if (conflict?.code !== 'SETTINGS_CONFLICT' || attempt >= 2) throw error
+          const profile = sectionOf(settings, current.ns)?.providers?.[current.route]
+          if (profile === undefined) {
+            // The route was removed while the write was in flight: there is
+            // nothing left to converge, and writing would resurrect a partial
+            // profile row.
+            logger.debug(`route ${current.route}: profile removed by a concurrent edit — re-plan skipped`)
+            return current
+          }
+          const configured = profile.models ?? []
+          const planned = planWith(current.route, configured, current.plan, settings)
+          current = {
+            ...current,
+            configured,
+            models: planned.models,
+            report: planned.report,
+            cleanup: danglingIds(configured, planned.models),
+            unadvertised: unadvertisedIds(configured, current.live),
+          }
+          if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
+            logger.debug(`route ${current.route}: concurrent edit already converged — no second write`)
+            return current
+          }
         }
       }
     }
@@ -2192,17 +2349,22 @@ export function apply(ctx: Context, config: Config): void {
     async function cleanupPrunedReferences(settings: SettingsSeam, route: string, removed: readonly string[]): Promise<void> {
       if (removed.length === 0) return
       try {
-        const deleteDocument = readSettingsDocument(settings, ORCHESTRATION_NAMESPACE)
-        const cleanup = pruneRouteReferences(deleteDocument, route, removed)
-        const settingsOps: SettingsPathOp[] = []
-        if (cleanup.hiddenModels !== undefined) {
-          settingsOps.push({ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: cleanup.hiddenModels })
-        }
-        if (cleanup.favorites !== undefined) {
-          settingsOps.push({ op: 'set', path: ['uiPreferences', 'favorites'], value: cleanup.favorites })
-        }
-        if (settingsOps.length === 0) return
         for (let attempt = 0; ; attempt++) {
+          // Re-read and re-plan every attempt: a conflict means another
+          // writer moved the namespace, and the stale whole-map payload would
+          // clobber their edit. A re-plan that finds nothing left to clean
+          // (the other writer already did, or a concurrent edit removed the
+          // reference) is a clean no-op.
+          const deleteDocument = readSettingsDocument(settings, ORCHESTRATION_NAMESPACE)
+          const cleanup = pruneRouteReferences(deleteDocument, route, removed)
+          const settingsOps: SettingsPathOp[] = []
+          if (cleanup.hiddenModels !== undefined) {
+            settingsOps.push({ op: 'set', path: ['uiPreferences', 'hiddenModels'], value: cleanup.hiddenModels })
+          }
+          if (cleanup.favorites !== undefined) {
+            settingsOps.push({ op: 'set', path: ['uiPreferences', 'favorites'], value: cleanup.favorites })
+          }
+          if (settingsOps.length === 0) return
           try {
             await settings.mutate(ORCHESTRATION_NAMESPACE as SettingsNamespace, settingsOps, revisionOf(settings, ORCHESTRATION_NAMESPACE))
             logger.info(`route ${route}: pruned ids cleaned from hidden models/favorites (${String(removed.length)} id(s))`)
@@ -2229,8 +2391,10 @@ export function apply(ctx: Context, config: Config): void {
      * never written, so a route that answers nothing keeps its last good
      * cache instead of silently falling back to the installed catalog.
      * @param outcome - the computed route refresh (its live listing is the cache source).
+     * @param hints - the pass's capability hints.
+     * @returns fulfillment after the cache write settles.
      */
-    function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): void {
+    async function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): Promise<void> {
       if (outcome.live === undefined) return
       if (outcome.live.length === 0) {
         logger.warn(`route ${outcome.route}: endpoint advertised no models — discovered cache kept`)
@@ -2251,7 +2415,7 @@ export function apply(ctx: Context, config: Config): void {
           logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`)
         } else {
           try {
-            writeDiscoveredRoute(outcome.route, record)
+            await writeDiscoveredRoute(outcome.route, record)
             logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`)
           } catch (error) {
             logger.warn(`route ${outcome.route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
@@ -2262,7 +2426,27 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-  async function syncOnce(): Promise<void> {
+  /** The pass currently in flight, or undefined; overlapping ticks short-circuit. */
+  let inFlight: Promise<void> | undefined
+
+  /**
+   * Run one sync pass, short-circuiting a tick that overlaps a pass already in
+   * flight. The boot delay, the interval, and a manual refresh share the same
+   * settings document and discovered-cache writes: two overlapping passes
+   * would each persist a plan computed from the document the other replaced.
+   * @returns fulfillment after this pass settles; the in-flight pass's promise
+   *   when an overlapping tick is skipped.
+   */
+  function syncOnce(): Promise<void> {
+    if (inFlight !== undefined) {
+      logger.debug('sync pass already in flight — overlapping tick skipped')
+      return inFlight
+    }
+    inFlight = runSyncPass().finally(() => { inFlight = undefined })
+    return inFlight
+  }
+
+  async function runSyncPass(): Promise<void> {
     // Refresh models.dev metadata on every pass (not just startup) so new
     // models and corrected limits appear within one interval; the pass cadence
     // itself is the configured interval (hourly in the shipped profile).
@@ -2302,27 +2486,31 @@ export function apply(ctx: Context, config: Config): void {
       const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings })
       if (outcome === undefined) continue
       stats.routes += 1
-      stats.pruned += outcome.report.removed.length
       stats.deprecated += outcome.report.deprecated.length
       if (outcome.report.degraded) stats.degraded += 1
-      unadvertised.push(...outcome.unadvertised.map(id => `${route}/${id}`))
       // A route with nothing configured and no listing has nothing to
       // persist: its models stay the installed catalog plus anything
       // discovered below. A route without configured models is also never
       // materialized from the overlay alone, which would replace the
       // installed catalog with the overlay's few records.
+      let final = outcome
       if (outcome.hasProfile && (outcome.live !== undefined || (outcome.overlay !== undefined && outcome.configured.length > 0))) {
         try {
-          await persistRouteModels(settings, outcome)
-          await cleanupPrunedReferences(settings, route, outcome.cleanup)
+          final = await persistRouteModels(settings, outcome)
+          await cleanupPrunedReferences(settings, route, final.cleanup)
         } catch (error) {
           logger.warn(describeSyncFailure(route, error, outcome.ns))
         }
       }
+      // The persisted plan is what the pass reports: a conflict retry may have
+      // re-planned against a concurrent edit, and its removals are the ones
+      // the visibility cleanup above was given.
+      stats.pruned += final.report.removed.length
+      unadvertised.push(...final.unadvertised.map(id => `${route}/${id}`))
       // The discovered cache is llm-pi-ai's resolution source; Command Code
       // resolves its own adapter catalog, and a catalog route's answer is the
       // installed catalog itself.
-      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints)
+      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(outcome, hints)
     }
 
     if (stats.pruned > 0 || stats.deprecated > 0 || stats.degraded > 0) {
@@ -2363,7 +2551,7 @@ export function apply(ctx: Context, config: Config): void {
     await cleanupPrunedReferences(settings, route, outcome.cleanup)
     // Same cache side effect as the hourly pass for a discovery route; the
     // settings records themselves are the caller's write.
-    if (outcome.ns === LLM_NS && !isCatalogRoute(route)) writeDiscoveredCache(outcome, hints)
+    if (outcome.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(outcome, hints)
     return {
       route,
       models: outcome.models,
@@ -2379,15 +2567,22 @@ export function apply(ctx: Context, config: Config): void {
 
   // The manual-refresh RPC is imported lazily, like the other profile
   // plugins: the @Remote decorator stays out of the unit-test import graph.
-  void import('./remote.ts').then(({ mountProviderSyncRemote }) => {
-    try {
-      mountProviderSyncRemote(ctx, refreshRouteForClient)
-    } catch (error) {
-      process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}\n`)
-    }
-  }).catch((error: unknown) => {
-    process.stderr.write(`[enpoi-provider-sync] providerSync remote import failed: ${String(error)}\n`)
-  })
+  // The mount runs inside an effect so a teardown that lands before the
+  // import settles never leaves the service registered on a dead fiber.
+  ctx.effect(() => {
+    let disposed = false
+    void import('./remote.ts').then(({ mountProviderSyncRemote }) => {
+      if (disposed) return
+      try {
+        mountProviderSyncRemote(ctx, refreshRouteForClient)
+      } catch (error) {
+        process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}\n`)
+      }
+    }).catch((error: unknown) => {
+      process.stderr.write(`[enpoi-provider-sync] providerSync remote import failed: ${String(error)}\n`)
+    })
+    return () => { disposed = true }
+  }, 'enpoi-provider-sync remote')
 
   const delay = value(config.syncDelayMs) ?? 2000
   const interval = value(config.intervalMs) ?? 3_600_000

@@ -35,8 +35,19 @@ const ADDED = [
   'step-5-preview-free',
 ]
 
-/** The two ids upstream removed but the endpoint and the stored list still carry. */
-const REMOVED = ['glm-5.1', 'omen-alpha']
+/** The ten ids upstream retired but the endpoint and the stored list still carry. */
+const REMOVED = [
+  'glm-5.1',
+  'omen-alpha',
+  'glm-5',
+  'kimi-k2.5',
+  'mimo-v2-omni',
+  'mimo-v2-pro',
+  'minimax-m2.5',
+  'qwen3.5-plus',
+  'hy3-preview',
+  'deepseek-flash',
+]
 
 const directories: string[] = []
 
@@ -55,7 +66,7 @@ function overlayFile(content: string): string {
 }
 
 describe('shipped catalog overlays', () => {
-  it('ships an opencode-go overlay that removes the two stale ids and upserts the eleven missing ones', () => {
+  it('ships an opencode-go overlay that removes the ten stale ids and upserts the eleven missing ones', () => {
     const document = loadCatalogOverlays()
     expect(Object.keys(document.routes ?? {})).toEqual(['opencode-go'])
     const overlay = document.routes?.['opencode-go']
@@ -68,8 +79,8 @@ describe('shipped catalog overlays', () => {
     expect(nameFix).toEqual({ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' })
   })
 
-  it('resolves the merged route to the eleven added ids, without the two removed ones, at models.dev capacities', () => {
-    // The live listing still advertises both removed ids and ten of the
+  it('resolves the merged route to the eleven added ids, without the ten removed ones, at models.dev capacities', () => {
+    // The live listing still advertises the removed ids and ten of the
     // eleven additions; `space-bunny-free` is served by no endpoint, so only
     // the overlay can add it.
     const live = [...REMOVED, ...ADDED.filter(id => id !== 'space-bunny-free')].map(id => ({ id }))
