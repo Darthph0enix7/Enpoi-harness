@@ -5269,7 +5269,6 @@ if [ "$UPDATE_MODE" = 0 ] && [ "$REPAIR_MODE" = 0 ] && [ "$UNINSTALL_MODE" = 0 ]
   apply_profile_ref_default 0
 else
   if [ "$UPDATE_MODE" = 1 ]; then
-    if [ -z "$CHANNEL" ]; then CHANNEL=stable; fi
     if [ -z "$PROFILE" ]; then PROFILE=web; fi
   fi
 fi

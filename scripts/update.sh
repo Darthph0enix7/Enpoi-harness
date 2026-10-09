@@ -19,11 +19,13 @@ explicit_home=0
 expect_prefix=0
 mode="update"
 argv=()
+has_channel=0
 for arg in "$@"; do
   if [ "$expect_prefix" = 1 ]; then prefix="$arg"; expect_prefix=0; argv+=("$arg"); continue; fi
   case "$arg" in
     --prefix) expect_prefix=1; argv+=("$arg");;
     --prefix=*) prefix="${arg#--prefix=}"; argv+=("$arg");;
+    --channel|--channel=*) has_channel=1; argv+=("$arg");;
     --dsh-home|--dsh-home=*) explicit_home=1; argv+=("$arg");;
     update|repair|uninstall|doctor|clean) mode="$arg";;
     *) argv+=("$arg");;
@@ -111,6 +113,9 @@ if [ "$mode" = "update" ]; then
     installed_revision="$(sed -n 's/^SCRIPT_REVISION=//p' "$installer" 2>/dev/null | head -n 1 | tr -d '"' || true)"
     printf 'dsh update: WARNING: could not fetch the %s installer from %s; using the installed updater%s — it may be older than the %s channel\n' \
       "$update_channel" "$remote_url" "${installed_revision:+ (script revision $installed_revision)}" "$update_channel" >&2
+  fi
+  if [ "$has_channel" = 0 ] && [ -n "$update_channel" ]; then
+    argv+=(--channel "$update_channel")
   fi
 fi
 if [ "$explicit_home" = 0 ] && [ -z "$dsh_home" ]; then
