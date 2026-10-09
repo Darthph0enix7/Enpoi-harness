@@ -26,8 +26,8 @@ function patchWarning(ctx: Context): (message: string, ...args: unknown[]) => vo
   }
 }
 
-function manifestOf(ctx: Context, name: string, parentURL: string): object | undefined {
-  if (name.startsWith('cordis:')) return undefined
+function manifestOf(ctx: Context, name: string | undefined, parentURL: string): object | undefined {
+  if (typeof name !== 'string' || name.length === 0 || name.startsWith('cordis:')) return undefined
   const specifier = name.startsWith('#') ? resolvePluginResource(name, parentURL) : name
   const packages = ctx.get('pluginPackages')
   const pkg = packages?.packageOf(specifier, parentURL)
