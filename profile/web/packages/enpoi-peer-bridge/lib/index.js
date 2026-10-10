@@ -549,12 +549,17 @@ function readPairingDocument(path) {
 function callerPairings(document) {
   return document.pairings.filter((pairing) => pairing.endpoint !== void 0);
 }
+function describeCallerPairings(callers) {
+  return callers.length === 0 ? "no caller-role entries (an entry needs `endpoint` and `peer`)" : `available: ${callers.map((pairing) => `${pairing.alias} \u2192 ${pairing.peer}`).join(", ")}`;
+}
 function resolveCallerPairing(document, alias) {
   const callers = callerPairings(document);
   const found = callers.find((pairing) => pairing.alias === alias);
   if (found !== void 0) return found;
-  const available = callers.length === 0 ? "no caller-role entries (an entry needs `endpoint` and `peer`)" : `available: ${callers.map((pairing) => pairing.alias).join(", ")}`;
-  throw new PairingDocumentError(`no caller-role pairing with alias ${JSON.stringify(alias)} \u2014 ${available}`, 0);
+  throw new PairingDocumentError(
+    `no caller-role pairing with alias ${JSON.stringify(alias)}; ${describeCallerPairings(callers)}`,
+    0
+  );
 }
 function loadCallerPairing(path, alias) {
   const document = readPairingDocument(path);
@@ -582,6 +587,7 @@ function parseEntry(entry, subject) {
   const create = entry.create === void 0 || entry.create === null ? void 0 : isRecord(entry.create) ? entry.create : (() => {
     throw new PairingDocumentError(`${subject}: create must be a mapping`, 1);
   })();
+  const createRouting = parseCreateRouting(create, subject);
   const runawayCeiling = entry.runawayCeiling === void 0 || entry.runawayCeiling === null ? void 0 : typeof entry.runawayCeiling === "number" && Number.isFinite(entry.runawayCeiling) && entry.runawayCeiling > 0 ? entry.runawayCeiling : (() => {
     throw new PairingDocumentError(`${subject}: runawayCeiling must be a positive number`, 1);
   })();
@@ -598,8 +604,34 @@ function parseEntry(entry, subject) {
     ...optionalString("remoteSessionId") === void 0 ? {} : { remoteSessionId: optionalString("remoteSessionId") },
     ...optionalString("sessionId") === void 0 ? {} : { sessionId: optionalString("sessionId") },
     ...create === void 0 ? {} : { create },
+    ...createRouting === void 0 ? {} : { createRouting },
     ...runawayCeiling === void 0 ? {} : { runawayCeiling }
   };
+}
+function parseCreateRouting(create, subject) {
+  if (create === void 0) return void 0;
+  const provider = createField(create, "provider", subject);
+  const model = createField(create, "model", subject);
+  if (provider === void 0 && model === void 0) return void 0;
+  if (provider === void 0 || model === void 0) {
+    throw new PairingDocumentError(`${subject}: create.provider and create.model must be provided together`, 1);
+  }
+  const chain = createField(create, "chain", subject);
+  const reasoningEffort = createField(create, "reasoningEffort", subject);
+  return {
+    provider,
+    model,
+    ...chain === void 0 ? {} : { chain },
+    ...reasoningEffort === void 0 ? {} : { reasoningEffort }
+  };
+}
+function createField(create, key, subject) {
+  const value = create[key];
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "string" || value === "") {
+    throw new PairingDocumentError(`${subject}: create.${key} must be a non-empty string when present`, 1);
+  }
+  return value;
 }
 function requireNonEmptyString(value, subject) {
   if (typeof value !== "string" || value === "") {
@@ -814,7 +846,9 @@ function registerTools(ctx, config, deps = {}) {
     description: [
       "Handshake with a paired peer device and read its session latch: host identity, capabilities,",
       "exposure, target session id, execution state (latch, active descendants, pending remote asks),",
-      "and current model. Use it before peer_ask to confirm the peer and the session are reachable."
+      "and current model. Use it before peer_ask to confirm the peer and the session are reachable.",
+      "The alias names the pairing (the member device in the fleet convention) and is the same string",
+      "on both devices \u2014 it is NOT the target host name."
     ].join(" "),
     parameters: {
       type: "object",
@@ -965,13 +999,14 @@ function registerTools(ctx, config, deps = {}) {
       } catch (error) {
         return { ok: false, device: "", sessions: [], error: badRequest(errorText(error)).error };
       }
-      const dialable = callerPairings(document).filter((pairing) => filter === void 0 || pairing.alias === filter);
+      const callers = callerPairings(document);
+      const dialable = callers.filter((pairing) => filter === void 0 || pairing.alias === filter);
       if (dialable.length === 0) {
         return {
           ok: false,
           device: document.device,
           sessions: [],
-          error: badRequest(filter === void 0 ? "no caller-role pairings in the pairing document" : `no caller-role pairing with alias ${JSON.stringify(filter)}`).error
+          error: badRequest(filter === void 0 ? "no caller-role pairings in the pairing document" : `no caller-role pairing with alias ${JSON.stringify(filter)}; ${describeCallerPairings(callers)}`).error
         };
       }
       const sessions = [];
@@ -1013,7 +1048,9 @@ function registerTools(ctx, config, deps = {}) {
       "Send a message to a paired peer session as an attributed peer turn, then follow the remote",
       "session until the turn reaches a terminal state and return the remote answer (or the structured",
       "failure when the turn failed). Remote asks that appear while following are surfaced locally for",
-      "the operator to answer. The remote runs with its OWN tools, workspace, and approvals."
+      "the operator to answer. The remote runs with its OWN tools, workspace, and approvals.",
+      "The alias names the pairing (the member device in the fleet convention) and is the same string",
+      "on both devices \u2014 it is NOT the target host name."
     ].join(" "),
     parameters: {
       type: "object",
@@ -1393,7 +1430,10 @@ async function runAsk(ctx, options) {
         alias: pairing.alias,
         participant,
         ...typeof defaults.cwd === "string" ? { cwd: defaults.cwd } : {},
-        ...typeof defaults.agentPreset === "string" ? { agentPreset: defaults.agentPreset } : {}
+        ...typeof defaults.agentPreset === "string" ? { agentPreset: defaults.agentPreset } : {},
+        // The host pins this route on the created Session only; the parser
+        // already guarantees provider+model travel together.
+        ...pairing.createRouting ?? {}
       });
       created = true;
       baseline = await client.state(requestedTarget);

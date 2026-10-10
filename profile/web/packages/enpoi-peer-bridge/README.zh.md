@@ -32,10 +32,20 @@ pairings:
     create:
       cwd: /home/user/projects/thing
       agentPreset: standard
+      provider: antigravity            # 可选；固定新建会话的路由
+      model: gemini-3.8-flash-tiered   # 与 provider 成对
+      chain: loopback                  # 可选；仅在 provider+model 齐备时转发
+      reasoningEffort: high            # 可选；仅在 provider+model 齐备时转发
 ```
 
 主机角色字段（`sessionId`、`exposure`）被调用方忽略；条目需要 `alias`、
-`peer`、`endpoint` 才可拨号。插件 Config 字段（`pairingsPath`、`noticesPath`、
+`peer`、`endpoint` 才可拨号。调用方角色别名命名的是配对本身——按 fleet 约定即
+成员设备——在两台设备的文档中是同一字符串，而不是目标主机名。未知别名会列出
+各调用方角色别名及其目标设备，例如 `available: pc → serverlocal`。`create` 块会把
+会话默认值转发给新建会话；`create.provider` 与 `create.model` 还会固定该会话的
+路由（主机以 `persistDefault: false` 应用，不改变部署默认值），两者必须成对出现
+——只出现其一会导致文档解析失败——`create.chain` / `create.reasoningEffort` 仅在
+成对时转发。插件 Config 字段（`pairingsPath`、`noticesPath`、
 `device`、`participantName`、`waitMs`、`settleMs`、`maxReconnects`）均声明为
 `.volatile()`，合并后的 settings 服务会将其暴露为实时表单并持久化到 profile
 patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他文档，测试因此

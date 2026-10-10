@@ -34,10 +34,23 @@ pairings:
     create:
       cwd: /home/user/projects/thing
       agentPreset: standard
+      provider: antigravity            # optional; pins the created session's route
+      model: gemini-3.8-flash-tiered   # required with provider
+      chain: loopback                  # optional; forwarded only with provider+model
+      reasoningEffort: high            # optional; forwarded only with provider+model
 ```
 
 Host-role fields (`sessionId`, `exposure`) are ignored by the caller; an entry
-needs `alias`, `peer`, and `endpoint` to be dialable. The plugin's Config
+needs `alias`, `peer`, and `endpoint` to be dialable. A caller-role alias names
+the pairing — under the fleet convention the member device — and is the same
+string in both devices' documents, not the target host name. An unknown alias
+fails with the caller-role aliases and the peer each targets,
+e.g. `available: pc → serverlocal`. A `create` block forwards its session
+defaults to a fresh create; `create.provider` and `create.model` additionally
+pin that session's route (the host applies them with `persistDefault: false`,
+so no deployment default changes) and must appear together — a lone half fails
+document parsing — while `create.chain` / `create.reasoningEffort` are
+forwarded only with the pair. The plugin's Config
 fields (`pairingsPath`, `noticesPath`, `device`, `participantName`, `waitMs`,
 `settleMs`, `maxReconnects`) are declared `.volatile()`, so the merged settings
 service exposes them as a live form persisted in the profile patch.

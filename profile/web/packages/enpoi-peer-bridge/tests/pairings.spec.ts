@@ -30,6 +30,10 @@ const DOCUMENT = [
   '    create:',
   '      cwd: /home/user/projects/thing',
   '      agentPreset: standard',
+  '      provider: antigravity',
+  '      model: gemini-3.8-flash-tiered',
+  '      chain: loopback',
+  '      reasoningEffort: high',
   '  - alias: caller-only',
   '    peer: macbook',
   '    exposure: answer-only',
@@ -53,6 +57,35 @@ describe('pairing document parser', () => {
     expect(coDev.token).toBeUndefined()
     expect(coDev.runawayCeiling).toBeUndefined()
     expect(coDev.create).toMatchObject({ cwd: '/home/user/projects/thing', agentPreset: 'standard' })
+    expect(coDev.createRouting).toEqual({
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash-tiered',
+      chain: 'loopback',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('rejects a create routing half-pair as a malformed pairing', () => {
+    const partial = 'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    create:\n      provider: antigravity\n'
+    expect(() => parsePairingDocument(partial, 't'))
+      .toThrowError(/create\.provider and create\.model must be provided together/u)
+    const flipped = 'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    create:\n      model: gemini-3.8-flash-tiered\n'
+    expect(() => parsePairingDocument(flipped, 't'))
+      .toThrowError(/create\.provider and create\.model must be provided together/u)
+  })
+
+  it('leaves createRouting absent without a provider/model pair and ignores lone qualifiers', () => {
+    const parsed = parsePairingDocument(DOCUMENT, 'test.yaml')
+    // caller-only has no create block at all.
+    expect(parsed.pairings[1]!.createRouting).toBeUndefined()
+    const qualifiersOnly = 'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    create:\n      chain: loopback\n      reasoningEffort: high\n'
+    expect(parsePairingDocument(qualifiersOnly, 't').pairings[0]!.createRouting).toBeUndefined()
+  })
+
+  it('rejects a non-string create routing field when the pair is present', () => {
+    const wrongType = 'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    create:\n      provider: antigravity\n      model: 42\n'
+    expect(() => parsePairingDocument(wrongType, 't'))
+      .toThrowError(/create\.model must be a non-empty string when present/u)
   })
 
   it('resolves only dialable caller-role entries', () => {
@@ -62,10 +95,21 @@ describe('pairing document parser', () => {
     expect(resolveCallerPairing(parsed, 'co-dev').create).toMatchObject({ agentPreset: 'standard' })
   })
 
-  it('fails loud when the alias is not dialable and names the available aliases', () => {
+  it('fails loud on an unknown alias, naming each available alias and its target device', () => {
     const parsed = parsePairingDocument(DOCUMENT, 'test.yaml')
-    expect(() => resolveCallerPairing(parsed, 'host-only')).toThrowError(/available: co-dev, caller-only/u)
+    // The alias names the pairing, not the target host: the caller-role alias
+    // is the same string on both devices, so each entry reports its peer.
+    expect(() => resolveCallerPairing(parsed, 'host-only'))
+      .toThrowError('no caller-role pairing with alias "host-only"; available: co-dev → laptop, caller-only → macbook')
+    expect(() => resolveCallerPairing(parsed, 'missing'))
+      .toThrowError('no caller-role pairing with alias "missing"; available: co-dev → laptop, caller-only → macbook')
     expect(() => resolveCallerPairing(parsed, 'missing')).toThrowError(PairingDocumentError)
+  })
+
+  it('names the missing-entry reason when no caller-role entry is dialable', () => {
+    const parsed = parsePairingDocument('version: 1\ndevice: x\npairings:\n  - alias: host-only\n    peer: desktop\n', 't')
+    expect(() => resolveCallerPairing(parsed, 'pc'))
+      .toThrowError('no caller-role pairing with alias "pc"; no caller-role entries (an entry needs `endpoint` and `peer`)')
   })
 
   it('rejects bad version, aliases, endpoints, and trailing content', () => {

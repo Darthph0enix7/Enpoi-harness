@@ -20,6 +20,24 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+/**
+ * Create-time session routing the caller forwards to the host.
+ *
+ * The host applies it to the created Session only (`session.selectModel` with
+ * `persistDefault: false`), so pinning a model here changes no deployment
+ * default. Provider and model are one route and always travel together.
+ */
+export interface CallerCreateRouting {
+  /** Provider route to pin on the created Session. */
+  readonly provider: string
+  /** Provider-owned model id to pin on the created Session. */
+  readonly model: string
+  /** Model-group id the created Session's requests carry. */
+  readonly chain?: string
+  /** Adapter-owned reasoning effort for the pinned route. */
+  readonly reasoningEffort?: string
+}
+
 /** One pairing entry; caller-role when it carries an `endpoint`. */
 export interface CallerPairing {
   /** Deterministic alias; matches `[A-Za-z0-9._-]+`. */
@@ -36,6 +54,8 @@ export interface CallerPairing {
   readonly remoteSessionId?: string
   /** Peer-created session defaults, host-role (unused by the caller). */
   readonly create?: Readonly<Record<string, unknown>>
+  /** Validated create-time routing the caller forwards; absent when the pairing pins none. */
+  readonly createRouting?: CallerCreateRouting
   /** This host's session exposed to `peer`, host-role (unused by the caller). */
   readonly sessionId?: string
   /** Optional emergency stop for the serving host, host-role. */
@@ -128,20 +148,35 @@ export function callerPairings(document: PairingDocument): readonly DialablePair
 }
 
 /**
+ * Describe the dialable caller-role entries for an unknown-alias failure.
+ *
+ * A caller-role alias names the pairing, not the target host: the same alias
+ * string appears in both devices' pairing documents, so each entry is reported
+ * with the peer device it targets.
+ * @param callers - caller-role entries from the document.
+ * @returns the `available: alias → peer` summary, or why no entry is dialable.
+ */
+export function describeCallerPairings(callers: readonly DialablePairing[]): string {
+  return callers.length === 0
+    ? 'no caller-role entries (an entry needs `endpoint` and `peer`)'
+    : `available: ${callers.map(pairing => `${pairing.alias} → ${pairing.peer}`).join(', ')}`
+}
+
+/**
  * Resolve one alias among the caller-role entries.
  * @param document - parsed pairing document.
  * @param alias - requested alias.
  * @returns the resolved entry.
- * @throws {@link PairingDocumentError} naming the available aliases.
+ * @throws {@link PairingDocumentError} naming the available aliases and their target devices.
  */
 export function resolveCallerPairing(document: PairingDocument, alias: string): DialablePairing {
   const callers = callerPairings(document)
   const found = callers.find(pairing => pairing.alias === alias)
   if (found !== undefined) return found
-  const available = callers.length === 0
-    ? 'no caller-role entries (an entry needs `endpoint` and `peer`)'
-    : `available: ${callers.map(pairing => pairing.alias).join(', ')}`
-  throw new PairingDocumentError(`no caller-role pairing with alias ${JSON.stringify(alias)} — ${available}`, 0)
+  throw new PairingDocumentError(
+    `no caller-role pairing with alias ${JSON.stringify(alias)}; ${describeCallerPairings(callers)}`,
+    0,
+  )
 }
 
 /** Load + resolve in one call; the bridge's only document entry point. */
@@ -177,6 +212,7 @@ function parseEntry(entry: Record<string, unknown>, subject: string): CallerPair
     : isRecord(entry.create)
       ? entry.create
       : (() => { throw new PairingDocumentError(`${subject}: create must be a mapping`, 1) })()
+  const createRouting = parseCreateRouting(create, subject)
   const runawayCeiling = entry.runawayCeiling === undefined || entry.runawayCeiling === null
     ? undefined
     : typeof entry.runawayCeiling === 'number' && Number.isFinite(entry.runawayCeiling) && entry.runawayCeiling > 0
@@ -195,8 +231,51 @@ function parseEntry(entry: Record<string, unknown>, subject: string): CallerPair
     ...(optionalString('remoteSessionId') === undefined ? {} : { remoteSessionId: optionalString('remoteSessionId') as string }),
     ...(optionalString('sessionId') === undefined ? {} : { sessionId: optionalString('sessionId') as string }),
     ...(create === undefined ? {} : { create }),
+    ...(createRouting === undefined ? {} : { createRouting }),
     ...(runawayCeiling === undefined ? {} : { runawayCeiling }),
   }
+}
+
+/**
+ * Read the optional create-time routing a caller forwards to the host.
+ *
+ * Provider and model are one route and must appear together; a lone half is a
+ * malformed pairing. Chain and reasoning effort qualify that route, so they
+ * are forwarded only when the pair is present.
+ * @param create - the entry's `create` mapping, when present.
+ * @param subject - diagnostic subject naming the entry.
+ * @returns the routing to forward, or undefined when the pairing pins none.
+ * @throws {@link PairingDocumentError} when only one of create.provider/create.model is present.
+ */
+function parseCreateRouting(
+  create: Readonly<Record<string, unknown>> | undefined,
+  subject: string,
+): CallerCreateRouting | undefined {
+  if (create === undefined) return undefined
+  const provider = createField(create, 'provider', subject)
+  const model = createField(create, 'model', subject)
+  if (provider === undefined && model === undefined) return undefined
+  if (provider === undefined || model === undefined) {
+    throw new PairingDocumentError(`${subject}: create.provider and create.model must be provided together`, 1)
+  }
+  const chain = createField(create, 'chain', subject)
+  const reasoningEffort = createField(create, 'reasoningEffort', subject)
+  return {
+    provider,
+    model,
+    ...(chain === undefined ? {} : { chain }),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  }
+}
+
+/** Read one optional non-empty string from the entry's create mapping. */
+function createField(create: Readonly<Record<string, unknown>>, key: string, subject: string): string | undefined {
+  const value = create[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || value === '') {
+    throw new PairingDocumentError(`${subject}: create.${key} must be a non-empty string when present`, 1)
+  }
+  return value
 }
 
 function requireNonEmptyString(value: unknown, subject: string): string {

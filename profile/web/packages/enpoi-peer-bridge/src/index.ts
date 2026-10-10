@@ -46,7 +46,7 @@ import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnsw
 import { PeerBridgeError, PeerClient } from './peer-client.js'
 import { DEFAULT_SETTLE_QUIET_MS, isPeerSessionSettled, recordAssistantText, recordRpcId, recordSourceKind, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
-import { callerPairings, defaultPairingsPath, loadCallerPairing, readPairingDocument } from './pairings.js'
+import { callerPairings, defaultPairingsPath, describeCallerPairings, loadCallerPairing, readPairingDocument } from './pairings.js'
 
 /** Cordis plugin name. */
 export const name = 'enpoi-peer-bridge'
@@ -183,6 +183,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       'Handshake with a paired peer device and read its session latch: host identity, capabilities,',
       'exposure, target session id, execution state (latch, active descendants, pending remote asks),',
       'and current model. Use it before peer_ask to confirm the peer and the session are reachable.',
+      'The alias names the pairing (the member device in the fleet convention) and is the same string',
+      'on both devices — it is NOT the target host name.',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -336,7 +338,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       } catch (error) {
         return { ok: false, device: '', sessions: [], error: badRequest(errorText(error)).error }
       }
-      const dialable = callerPairings(document).filter(pairing => filter === undefined || pairing.alias === filter)
+      const callers = callerPairings(document)
+      const dialable = callers.filter(pairing => filter === undefined || pairing.alias === filter)
       if (dialable.length === 0) {
         return {
           ok: false,
@@ -344,7 +347,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           sessions: [],
           error: badRequest(filter === undefined
             ? 'no caller-role pairings in the pairing document'
-            : `no caller-role pairing with alias ${JSON.stringify(filter)}`).error,
+            : `no caller-role pairing with alias ${JSON.stringify(filter)}; ${describeCallerPairings(callers)}`).error,
         }
       }
       const sessions: Record<string, unknown>[] = []
@@ -388,6 +391,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       'session until the turn reaches a terminal state and return the remote answer (or the structured',
       'failure when the turn failed). Remote asks that appear while following are surfaced locally for',
       'the operator to answer. The remote runs with its OWN tools, workspace, and approvals.',
+      'The alias names the pairing (the member device in the fleet convention) and is the same string',
+      'on both devices — it is NOT the target host name.',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -801,6 +806,9 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         participant,
         ...(typeof defaults.cwd === 'string' ? { cwd: defaults.cwd } : {}),
         ...(typeof defaults.agentPreset === 'string' ? { agentPreset: defaults.agentPreset } : {}),
+        // The host pins this route on the created Session only; the parser
+        // already guarantees provider+model travel together.
+        ...(pairing.createRouting ?? {}),
       })
       created = true
       baseline = await client.state(requestedTarget)

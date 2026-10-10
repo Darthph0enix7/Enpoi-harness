@@ -300,6 +300,14 @@ export class PeerClient {
     readonly sessionId?: string
     readonly cwd?: string
     readonly agentPreset?: string
+    /** Provider route the host pins on the created Session (with `model`). */
+    readonly provider?: string
+    /** Model id the host pins on the created Session (with `provider`). */
+    readonly model?: string
+    /** Model-group id the created Session's requests carry. */
+    readonly chain?: string
+    /** Adapter-owned reasoning effort for the pinned route. */
+    readonly reasoningEffort?: string
   }): Promise<PeerCreateValue> {
     return this.rpc('create', request)
   }

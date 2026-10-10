@@ -20,6 +20,24 @@ const PAIRING_DOC = [
   '',
 ].join('\n')
 
+/** The same pairing with a create-time route, as the live loopback pairing pins it. */
+const ROUTED_PAIRING_DOC = [
+  'version: 1',
+  'device: serverlocal',
+  'pairings:',
+  '  - alias: scratch',
+  '    peer: serverlocal',
+  '    exposure: debug',
+  '    endpoint: https://serverlocal.pike-acrux.ts.net:8443',
+  '    create:',
+  '      cwd: /tmp/scratch-work',
+  '      provider: antigravity',
+  '      model: gemini-3.8-flash-tiered',
+  '      chain: loopback',
+  '      reasoningEffort: high',
+  '',
+].join('\n')
+
 interface HostOptions {
   readonly answerError?: string
   readonly ask?: PeerPendingAsk | null
@@ -69,6 +87,10 @@ interface HostOptions {
   readonly answerTransportFail?: boolean
   /** Throw a transport error on cancel; `peer.state` reports the configured latch. */
   readonly cancelTransportFail?: boolean
+  /** Report `peer/not-paired` from `peer.state` until `create` binds the session. */
+  readonly unbound?: boolean
+  /** Pairing document override (defaults to {@link PAIRING_DOC}). */
+  readonly pairingDoc?: string
 }
 
 interface RegisteredTool {
@@ -82,10 +104,11 @@ function createHarness(options: HostOptions = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'peer-bridge-tools-'))
   const pairingsPath = join(dir, 'pairings.yaml')
   const noticesPath = join(dir, 'peer-bridge', 'asks.jsonl')
-  writeFileSync(pairingsPath, PAIRING_DOC)
+  writeFileSync(pairingsPath, options.pairingDoc ?? PAIRING_DOC)
 
   const calls: Array<{ method: string; args: Record<string, unknown> }> = []
   const captured = { requestId: undefined as string | undefined }
+  let boundNow = options.unbound !== true
   // The scripted remote: state reads report the asks currently pending, and a
   // successful answer removes its ask, so a later confirming read agrees with
   // the state frames the socket already emitted.
@@ -102,6 +125,7 @@ function createHarness(options: HostOptions = {}) {
       case 'handshake':
         return ok({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: ['state-latch'], pairings: [] })
       case 'state':
+        if (!boundNow) return fail('peer/not-paired', 'no session bound')
         return ok({
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
           state: {
@@ -112,6 +136,12 @@ function createHarness(options: HostOptions = {}) {
             lastTurnEnd: { turn: 0, reason: 'completed', at: 0 },
           },
           cursor: 0,
+        })
+      case 'create':
+        boundNow = true
+        return ok({
+          target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
+          created: true,
         })
       case 'list':
         return ok({
@@ -432,6 +462,30 @@ describe('enpoi-peer-bridge tools', () => {
     })
   })
 
+  it('peer_ask forwards the pairing create routing to the host verbatim', async () => {
+    const harness = createHarness({ unbound: true, pairingDoc: ROUTED_PAIRING_DOC })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, created: true })
+    expect(harness.calls.find(call => call.method === 'create')!.args).toMatchObject({
+      alias: 'scratch',
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash-tiered',
+      chain: 'loopback',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('peer_ask sends no create routing fields when the pairing pins none', async () => {
+    const harness = createHarness({ unbound: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi' }, harness.exec)
+    expect(result).toMatchObject({ ok: true, created: true })
+    const args = harness.calls.find(call => call.method === 'create')!.args
+    expect(args).not.toHaveProperty('provider')
+    expect(args).not.toHaveProperty('model')
+    expect(args).not.toHaveProperty('chain')
+    expect(args).not.toHaveProperty('reasoningEffort')
+  })
+
   it('surfaces a remote approval ask locally and relays allowed-once', async () => {
     const harness = createHarness({ ask: APPROVAL_ASK })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
@@ -520,7 +574,8 @@ describe('enpoi-peer-bridge tools', () => {
     expect(failing.tools.get('peer_sessions')!.output.render({}, result)[0]!.text).toContain('unreachable')
     const missing = await failing.tools.get('peer_sessions')!.execute({ alias: 'nope' }, failing.exec)
     expect(missing.ok).toBe(false)
-    expect(String((missing.error as Record<string, unknown>).message)).toContain('no caller-role pairing')
+    expect(String((missing.error as Record<string, unknown>).message))
+      .toContain('no caller-role pairing with alias "nope"; available: scratch → serverlocal')
   })
 
   it('leaves a local ask answerable while the follow stays open, then relays the answer', async () => {
@@ -751,6 +806,23 @@ describe('enpoi-peer-bridge tools', () => {
   it('fails loud on an unknown alias', async () => {
     const harness = createHarness()
     await expect(harness.tools.get('peer_status')!.execute({ alias: 'nope' }, harness.exec))
-      .rejects.toThrowError(/available: scratch/u)
+      .rejects.toThrowError('no caller-role pairing with alias "nope"; available: scratch → serverlocal')
+  })
+
+  it('peer_ask names the available aliases and their targets for an unknown alias', async () => {
+    // The fleet convention resolves one alias both directions: asking for the
+    // target host name is the confusion this listing prevents.
+    const harness = createHarness()
+    await expect(harness.tools.get('peer_ask')!.execute({ alias: 'serverlocal', message: 'hi' }, harness.exec))
+      .rejects.toThrowError('no caller-role pairing with alias "serverlocal"; available: scratch → serverlocal')
+  })
+
+  it('states in the peer_status and peer_ask descriptions that the alias names the pairing, not the host', () => {
+    const harness = createHarness()
+    for (const name of ['peer_status', 'peer_ask']) {
+      const description = harness.tools.get(name)!.description
+      expect(description).toContain('The alias names the pairing (the member device in the fleet convention)')
+      expect(description).toContain('it is NOT the target host name')
+    }
   })
 })
