@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,15 +9,42 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
  * Behavior guard for the update progress and no-hang work in
  * `scripts/install.sh`: the portable `file_size`, the non-TTY heartbeat
  * `run_logged` grows for long silent steps, the watched-download progress
- * line, the --quiet/--json suppression of that progress, the non-interactive
- * git/ssh exports, the timed profile fetch, and the update-lock release and
- * self-heal semantics an interrupted update depends on.
+ * line, the --quiet/--json suppression of that progress, the width-clamped
+ * TTY frames that must never wrap (a wrapped frame bloat the terminal when
+ * `\r` + `\033[K` repaints only its last row), the non-interactive git/ssh
+ * exports, the timed profile fetch, and the update-lock release and self-heal
+ * semantics an interrupted update depends on.
  *
  * The functions are exercised by sourcing install.sh as a library
  * (DSH_INSTALL_LIB_ONLY=1), which defines every helper without running a mode.
  */
 
 const installSh = join(dirname(fileURLToPath(import.meta.url)), 'install.sh')
+const fastDownloader = join(dirname(installSh), 'download-fast.mjs')
+
+const ENGINE_PROGRESS = '[███████░░░░░] 60% · 179.9/297.3 MB · 0.8 MB/s'
+const LONG_DESC = 'Fetching prebuilt release (linux-x64, parallel)'
+
+/** util-linux `script` gives the child a pty; macOS/BSD script has no `-c`. */
+const ptyAvailable =
+  process.platform !== 'win32' &&
+  spawnSync('script', ['-qec', 'true', '/dev/null'], { encoding: 'utf8', timeout: 10_000 }).status === 0
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')
+}
+
+/** Visible (ANSI-stripped) length in characters, never bytes. */
+function visibleLength(line: string): number {
+  return Array.from(line).length
+}
+
+/** Lines of a terminal capture, split at CR/LF and free of script(1) chrome. */
+function visibleLines(raw: string): string[] {
+  return stripAnsi(raw)
+    .split(/[\r\n]/u)
+    .filter(line => line.trim().length > 0 && !/^Script (started|done)/u.test(line))
+}
 
 let root: string
 let counter = 0
@@ -35,6 +62,18 @@ function scratch(): string {
   const dir = join(root, `case-${counter}`)
   mkdirSync(dir, { recursive: true })
   return dir
+}
+
+/** A PATH directory holding only the named tools (so tput/stty stay hidden). */
+function toolBin(tools: readonly string[]): string {
+  counter += 1
+  const binDir = join(root, `bin-${counter}`)
+  mkdirSync(binDir, { recursive: true })
+  for (const tool of tools) {
+    const resolved = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim()
+    symlinkSync(resolved, join(binDir, tool))
+  }
+  return binDir
 }
 
 interface BashResult {
@@ -188,13 +227,7 @@ describe('copy_profile_tree', () => {
 describe('update lock', () => {
   /** Minimal PATH without flock so the mkdir fallback is exercised. */
   function fakeBin(): string {
-    const binDir = join(root, `fakebin-${counter}`)
-    mkdirSync(binDir, { recursive: true })
-    for (const tool of ['dirname', 'basename', 'date', 'mkdir', 'cat', 'rm', 'head', 'sleep']) {
-      const resolved = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim()
-      symlinkSync(resolved, join(binDir, tool))
-    }
-    return binDir
+    return toolBin(['dirname', 'basename', 'date', 'mkdir', 'cat', 'rm', 'head', 'sleep'])
   }
 
   function fallbackPreamble(dir: string, binDir: string): string {
@@ -247,5 +280,125 @@ describe('update lock', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('another update is already running')
     expect(result.stdout).not.toContain('SHOULD NOT REACH')
+  })
+})
+
+describe('width-safe text fitting', () => {
+  it('fits by characters under a UTF-8 locale and never splits a glyph', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'LANG=C.UTF-8; export LANG; LC_ALL=C.UTF-8; export LC_ALL',
+        'bar="██████████"',
+        'printf "utf8=[%s]\\n" "$(fit_text "$bar" 5)"',
+        'LANG=C; export LANG; LC_ALL=C; export LC_ALL',
+        'printf "c=[%s]\\n" "$(fit_text "$bar" 5)"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    // UTF-8 locale: ${#s} counts characters, so 10 bars fit to 4 bars + ellipsis.
+    expect(result.stdout).toContain('utf8=[████…]')
+    // C locale: ${#s} counts bytes; the cut must still emit valid UTF-8.
+    const cFitted = /c=\[(.*)\]/u.exec(result.stdout)?.[1] ?? ''
+    expect(visibleLength(cFitted)).toBeLessThanOrEqual(5)
+    expect(Buffer.from(cFitted, 'utf8').toString('utf8')).toBe(cFitted)
+  })
+
+  it('composes a frame within COLUMNS-1 and keeps spinner and desc', () => {
+    const dir = scratch()
+    const binDir = toolBin(['dirname', 'basename', 'date', 'mkdir', 'sed', 'tr'])
+    const result = runBash(
+      [
+        `export PATH="${binDir}"`,
+        libPreamble(dir),
+        'COLUMNS=40; export COLUMNS',
+        'LANG=C.UTF-8; export LANG; LC_ALL=C.UTF-8; export LC_ALL',
+        `tty_frame "/" "${LONG_DESC}" "${ENGINE_PROGRESS}" "" "220"`,
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    const frames = stripAnsi(result.stderr).split('\r').filter(frame => frame.trim().length > 0)
+    expect(frames).toHaveLength(1)
+    expect(visibleLength(frames[0] ?? '')).toBeLessThanOrEqual(39)
+    expect(frames[0]).toContain('/')
+    expect(frames[0]).toContain('Fetching')
+    expect(frames[0]).toContain('…')
+    expect(result.stderr).toContain('\x1b[K')
+  })
+})
+
+describe.runIf(ptyAvailable)('narrow-pty progress frames', () => {
+  /** Run run_logged for 2s inside a pty of the given width with a planted side channel. */
+  function ptyRun(cols: number): { raw: string; result: BashResult } {
+    const dir = scratch()
+    const probe = join(dir, 'probe.sh')
+    writeFileSync(
+      probe,
+      [
+        'export DSH_INSTALL_LIB_ONLY=1',
+        '. "$INSTALL_SH" >/dev/null 2>&1',
+        `PREFIX="${dir}/prefix"`,
+        'mkdir -p "$PREFIX/harness/.cache"',
+        'LOG_FILE="$PREFIX/install.log"',
+        `printf '%s' "${ENGINE_PROGRESS}" > "$PREFIX/harness/.cache/dsh-harness-x.tar.gz.progress"`,
+        `run_logged "${LONG_DESC}" 30 "$PREFIX" sleep 2`,
+      ].join('\n'),
+    )
+    const result = spawnSync('script', ['-qec', `stty cols ${cols}; bash ${probe}`, '/dev/null'], {
+      // COLUMNS is emptied so the pty width (`stty size`) is the only source
+      // when `tput` cannot answer; an inherited wide COLUMNS would mask it.
+      env: { ...process.env, INSTALL_SH: installSh, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', COLUMNS: '' },
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
+    return {
+      raw: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+      result: { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' },
+    }
+  }
+
+  it('at 60 columns stays within 59 cells and never wraps a frame', () => {
+    const { raw } = ptyRun(60)
+    const lines = visibleLines(raw)
+    expect(lines.length).toBeGreaterThan(2)
+    for (const line of lines) expect(visibleLength(line)).toBeLessThanOrEqual(60)
+    // Frames repaint with CR + erase, and the long desc still shows whole.
+    expect(raw).toContain('\r')
+    expect(raw).toContain('\x1b[K')
+    expect(lines.some(line => line.includes('(linux-x64, parallel)'))).toBe(true)
+  })
+
+  it('at 40 columns keeps the spinner and a truncated desc within the width', () => {
+    const { raw } = ptyRun(40)
+    const lines = visibleLines(raw)
+    for (const line of lines) expect(visibleLength(line)).toBeLessThanOrEqual(40)
+    expect(lines.some(line => line.includes('/') && line.includes('Fetching') && line.includes('…'))).toBe(true)
+  })
+
+  it('at 80 columns degrades the engine bar to a compact segment that fits', () => {
+    const { raw } = ptyRun(80)
+    const lines = visibleLines(raw)
+    for (const line of lines) expect(visibleLength(line)).toBeLessThanOrEqual(80)
+    // [bar] was dropped and the speed field elided; MB counters remain.
+    expect(lines.some(line => line.includes('60%') && line.includes('179.9/297.3 MB'))).toBe(true)
+    expect(lines.some(line => line.includes('█'))).toBe(false)
+  })
+})
+
+describe('engine renderer clamp', () => {
+  it('keeps the standalone and inline downloader frames consistent', () => {
+    const installSource = readFileSync(installSh, 'utf8')
+    const standaloneSource = readFileSync(fastDownloader, 'utf8')
+    const frameWrite = '\\r\\x1b[K${clampLine(msg, terminalLimit())}'
+    for (const source of [installSource, standaloneSource]) {
+      expect(source).toContain(frameWrite)
+      expect(source).toContain('function terminalLimit()')
+      expect(source).toContain('function clampLine(text, max)')
+    }
+    // Non-TTY behavior keeps its newline form in both copies.
+    for (const source of [installSource, standaloneSource]) {
+      expect(source).toContain('      console.log(msg)')
+    }
   })
 })

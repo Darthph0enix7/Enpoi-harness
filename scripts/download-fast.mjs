@@ -182,6 +182,22 @@ async function main() {
     return `[${bar}] ${pct}% · ${currentMB}/${totalMB} MB · ${speedMBs.toFixed(1)} MB/s`
   }
 
+  // \r + \x1b[K repaints a frame only while it fits the terminal: a wrapped
+  // frame leaves the rows above it behind, so every frame is clamped to the
+  // current width minus one column. Array.from counts code points, so a
+  // multi-byte glyph is never cut in half.
+  function terminalLimit() {
+    const cols = typeof process.stdout.columns === 'number' && process.stdout.columns > 0 ? process.stdout.columns : 80
+    return Math.max(20, Math.min(500, cols)) - 1
+  }
+
+  function clampLine(text, max) {
+    const chars = Array.from(text)
+    if (chars.length <= max) return text
+    if (max <= 1) return '…'
+    return `${chars.slice(0, max - 1).join('')}…`
+  }
+
   function writeProgress(text) {
     try {
       const pTmp = `${progressFile}.tmp.${process.pid}`
@@ -215,7 +231,7 @@ async function main() {
 
     const msg = `[download] ${pct}% (${currentMB}/${totalMB} MB, ${speedMBs.toFixed(1)} MB/s, ~${remainingSec}s remaining)`
     if (isTTY) {
-      process.stdout.write(`\r${msg}   `)
+      process.stdout.write(`\r\x1b[K${clampLine(msg, terminalLimit())}`)
     } else {
       console.log(msg)
     }

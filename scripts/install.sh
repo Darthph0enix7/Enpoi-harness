@@ -306,6 +306,133 @@ heartbeat_interval() { # -> seconds
   printf '%s' "$v"
 }
 
+# ── Terminal-width-safe progress frames ─────────────────────────────────────
+# A frame wider than the terminal wraps; \r + \033[K then repaint only the last
+# row, so every tick leaves an orphaned row behind and the terminal bloats
+# without bound. Frames are therefore clamped to the terminal width minus one
+# column and can never wrap. Width: the `stty size` column of stderr's terminal
+# while it is a TTY (the authoritative ioctl — tput is blind when stdout is
+# redirected, and a COLUMNS computed by a shell at startup goes stale after a
+# later `stty cols` resize), then `tput cols`, then $COLUMNS, then 80; clamped
+# to 20..500.
+# Character counting: ${#s} and ${s:i:n} count characters only under a UTF-8
+# locale; under C they count bytes, so fit_text maps non-ASCII bytes away
+# before cutting and a byte cut can never emit half a multi-byte glyph.
+
+locale_is_utf8() {
+  local loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  case "$loc" in
+    *[Uu][Tt][Ff]-*8*|*[Uu][Tt][Ff]8*) return 0;;
+    *) return 1;;
+  esac
+}
+
+fit_text() { # text max -> text shortened to <= max visible characters
+  local text="$1" max="$2" n ascii
+  case "$max" in ''|*[!0-9]*) max=1;; esac
+  [ "$max" -ge 1 ] 2>/dev/null || max=1
+  if locale_is_utf8; then
+    n="${#text}"
+    if [ "$n" -le "$max" ]; then printf '%s' "$text"; return 0; fi
+    if [ "$max" -le 1 ]; then printf '…'; return 0; fi
+    printf '%s…' "${text:0:$((max - 1))}"
+    return 0
+  fi
+  # C locale: count and slice bytes, but only after mapping every non-printable
+  # byte (UTF-8 continuation bytes included) to '?', so the result is ASCII.
+  ascii="$(printf '%s' "$text" | LC_ALL=C tr -c '[:print:]' '?')"
+  n="${#ascii}"
+  if [ "$n" -le "$max" ]; then printf '%s' "$ascii"; return 0; fi
+  if [ "$max" -le 1 ]; then printf '…'; return 0; fi
+  printf '%s…' "${ascii:0:$((max - 1))}"
+}
+
+terminal_cols() { # -> usable terminal width, clamped to 20..500
+  local cols=""
+  if [ -t 2 ] && command -v stty >/dev/null 2>&1; then
+    cols="$(stty size <&2 2>/dev/null | awk 'NR==1 {print $2}' || true)"
+    case "$cols" in ''|*[!0-9]*|0) cols="";; esac
+  fi
+  if [ -z "$cols" ] && command -v tput >/dev/null 2>&1; then
+    cols="$(tput cols 2>/dev/null || true)"
+    case "$cols" in ''|*[!0-9]*|0) cols="";; esac
+  fi
+  if [ -z "$cols" ]; then cols="${COLUMNS:-}"; fi
+  case "$cols" in ''|*[!0-9]*) cols=80;; esac
+  [ "$cols" -ge 20 ] 2>/dev/null || cols=20
+  [ "$cols" -le 500 ] 2>/dev/null || cols=500
+  printf '%s' "$cols"
+}
+
+text_limit() { # -> columns a frame may occupy (width - 1)
+  printf '%s' "$(( $(terminal_cols) - 1 ))"
+}
+
+# Best fitting progress segment within max visible characters. The engine's
+# `.progress` content degrades first: full, then without the [bar], then
+# without the speed field, then percentage only, then the caller's own byte
+# form, then an ellipsis-truncated compact form. Empty when nothing useful
+# fits (< 3 columns). The multibyte `·` separator is normalized, so every
+# construct that may be sliced is ASCII.
+pick_prog() { # prog alt max
+  local prog="$1" alt="$2" max="$3" s n
+  case "$max" in ''|*[!0-9]*) max=0;; esac
+  if [ -n "$prog" ]; then
+    n="${#prog}"
+    if [ "$n" -le "$max" ]; then printf '%s' "$prog"; return 0; fi
+    s="$(printf '%s' "$prog" | sed -e 's/^\[[^]]*\] *//' -e 's/ · / - /g')"
+    n="${#s}"
+    if [ "$n" -le "$max" ]; then printf '%s' "$s"; return 0; fi
+    s="$(printf '%s' "$s" | sed -e 's/ - [0-9.]* MB\/s$//')"
+    n="${#s}"
+    if [ "$n" -le "$max" ]; then printf '%s' "$s"; return 0; fi
+    s="$(printf '%s' "$prog" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)%.*/\1%/p')"
+    if [ -n "$s" ]; then
+      n="${#s}"
+      if [ "$n" -le "$max" ]; then printf '%s' "$s"; return 0; fi
+    fi
+    if [ -n "$alt" ]; then
+      n="${#alt}"
+      if [ "$n" -le "$max" ]; then printf '%s' "$alt"; return 0; fi
+    fi
+    [ -n "$s" ] || s="$(printf '%s' "$prog" | sed -e 's/^\[[^]]*\] *//' -e 's/ · / - /g')"
+    [ "$max" -ge 3 ] && { fit_text "$s" "$max"; return 0; }
+    return 0
+  fi
+  if [ -n "$alt" ]; then
+    n="${#alt}"
+    if [ "$n" -le "$max" ]; then printf '%s' "$alt"; return 0; fi
+    [ "$max" -ge 3 ] && { fit_text "$alt" "$max"; return 0; }
+  fi
+  return 0
+}
+
+# One rewritten TTY progress frame: spinner + desc + (progress) + elapsed,
+# clamped so it can never wrap. The progress segment yields first (compacted,
+# replaced by the byte form, or truncated); desc is truncated only after that.
+tty_frame() { # spin desc prog alt elapsed
+  local spin="$1" desc="$2" prog="$3" alt="$4" elapsed="$5"
+  local limit room suffix desc_fit prog_fit body
+  limit="$(text_limit)"
+  [ "$limit" -ge 12 ] 2>/dev/null || limit=12
+  suffix=" (${elapsed}s)"
+  room=$((limit - 4 - ${#suffix}))
+  [ "$room" -ge 1 ] 2>/dev/null || room=1
+  desc_fit="$desc"
+  prog_fit=""
+  if [ "${#desc}" -le "$room" ]; then
+    if [ "${#desc}" -lt "$room" ]; then
+      prog_fit="$(pick_prog "$prog" "$alt" $((room - ${#desc} - 1)))"
+    fi
+  else
+    desc_fit="$(fit_text "$desc" "$room")"
+  fi
+  body="$desc_fit"
+  [ -n "$prog_fit" ] && body="$body $prog_fit"
+  body="$body$suffix"
+  printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s" "$spin" "$body" >&2
+}
+
 run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL add byte progress
   local desc="$1" timeout="$2" workdir="$3"
   shift 3
@@ -328,7 +455,9 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
     return $?
   fi
 
-  printf "  ${C_CYAN}⏳${C_RESET} %s..." "$desc" >&2
+  local init_desc="$desc"
+  if [ -t 2 ]; then init_desc="$(fit_text "$desc" "$(( $(text_limit) - 8 ))")"; fi
+  printf "  ${C_CYAN}⏳${C_RESET} %s..." "$init_desc" >&2
   printf '\n--- START: %s (dir: %s) ---\n' "$desc" "$workdir" >> "$LOG_FILE" 2>/dev/null || true
 
   ( exec 9>&-; cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1 &
@@ -340,41 +469,44 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
   while kill -0 "$pid" 2>/dev/null; do
     local elapsed_cur=$(( $(date +%s) - start_t ))
     [ "$elapsed_cur" -ge 0 ] || elapsed_cur=0
-    local prog="" pf="" bytes=""
+    local prog="" alt="" pf="" bytes=""
     for pf in "$PREFIX/harness/.cache/"*.chunks/.progress "$PREFIX/harness/.cache/"*.progress "$workdir/"*.chunks/.progress "$workdir/"*.progress; do
       if [ -f "$pf" ]; then
         prog="$(cat "$pf" 2>/dev/null || true)"
         [ -n "$prog" ] && break
       fi
     done
-    # A watched destination file (the download being written) wins: it is the
-    # live truth, while a *.progress file is an engine-specific side channel.
+    # The watched destination file (the download being written) is the live
+    # truth and is rendered as the owned byte form; the *.progress content
+    # above is the engine's side channel and is preferred while it fits.
     if [ -n "$watch_file" ]; then
       bytes="$(file_size "$watch_file" 2>/dev/null || true)"
       if [ -n "$bytes" ] && [ "$bytes" -gt 0 ]; then
         if [ -n "$watch_total" ] && [ "$watch_total" -gt 0 ]; then
           local pct=$((bytes * 100 / watch_total))
           [ "$pct" -le 100 ] || pct=100
-          prog="$((bytes / 1048576)) MB of $((watch_total / 1048576)) MB (${pct}%)"
+          alt="$((bytes / 1048576)) MB of $((watch_total / 1048576)) MB (${pct}%)"
         else
-          prog="$((bytes / 1048576)) MB"
+          alt="$((bytes / 1048576)) MB"
         fi
       fi
     fi
-    if [ -n "$prog" ]; then
-      if [ -t 2 ]; then
+    if [ -t 2 ]; then
+      # A TTY gets one rewritten frame, width-clamped so it can never wrap.
+      if progress_enabled; then
         i=$(( (i + 1) % 4 ))
-        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s %s ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$prog" "$elapsed_cur" >&2
-      else
-        progress_note "⏳ $desc: $prog (${elapsed_cur}s)"
+        tty_frame "${spin:$i:1}" "$desc" "$prog" "$alt" "$elapsed_cur"
       fi
-    elif [ -t 2 ]; then
-      i=$(( (i + 1) % 4 ))
-      printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s... ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$elapsed_cur" >&2
-    elif [ "$elapsed_cur" -ge "$hb_interval" ]; then
-      # Non-TTY heartbeat: a long silent step must still say it is alive; the
-      # non-TTY throttle in progress_note caps the log at one line per 30s.
-      progress_note "… still working: $desc (${elapsed_cur}s)"
+    else
+      local note_prog="$prog"
+      [ -n "$note_prog" ] || note_prog="$alt"
+      if [ -n "$note_prog" ]; then
+        progress_note "⏳ $desc: $note_prog (${elapsed_cur}s)"
+      elif [ "$elapsed_cur" -ge "$hb_interval" ]; then
+        # Non-TTY heartbeat: a long silent step must still say it is alive; the
+        # non-TTY throttle in progress_note caps the log at one line per 30s.
+        progress_note "… still working: $desc (${elapsed_cur}s)"
+      fi
     fi
     sleep 0.2
   done
@@ -388,11 +520,15 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
 
   if [ "$rc" = 0 ]; then
     if [ -t 2 ]; then printf "\r\033[K" >&2; fi
-    printf "  ${C_GREEN}✓${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\n" "$desc" "$elapsed" >&2
+    local done_desc="$desc"
+    if [ -t 2 ]; then done_desc="$(fit_text "$desc" "$(( $(text_limit) - 14 ))")"; fi
+    printf "  ${C_GREEN}✓${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\n" "$done_desc" "$elapsed" >&2
     return 0
   else
     if [ -t 2 ]; then printf "\r\033[K" >&2; fi
-    printf "  ${C_RED}✗${C_RESET} ${C_BOLD}%s${C_RESET} ${C_RED}failed${C_RESET} ${C_DIM}(exit code %d, %ds)${C_RESET}\n" "$desc" "$rc" "$elapsed" >&2
+    local fail_desc="$desc"
+    if [ -t 2 ]; then fail_desc="$(fit_text "$desc" "$(( $(text_limit) - 44 ))")"; fi
+    printf "  ${C_RED}✗${C_RESET} ${C_BOLD}%s${C_RESET} ${C_RED}failed${C_RESET} ${C_DIM}(exit code %d, %ds)${C_RESET}\n" "$fail_desc" "$rc" "$elapsed" >&2
     if [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
       printf "\n${C_RED}Last 15 lines of log (${LOG_FILE}):${C_RESET}\n" >&2
       printf "${C_DIM}─────────────────────────────────────────────────────────────────${C_RESET}\n" >&2
@@ -1273,6 +1409,22 @@ async function main() {
     return `[${bar}] ${pct}% · ${currentMB}/${totalMB} MB · ${speedMBs.toFixed(1)} MB/s`
   }
 
+  // \r + \x1b[K repaints a frame only while it fits the terminal: a wrapped
+  // frame leaves the rows above it behind, so every frame is clamped to the
+  // current width minus one column. Array.from counts code points, so a
+  // multi-byte glyph is never cut in half.
+  function terminalLimit() {
+    const cols = typeof process.stdout.columns === 'number' && process.stdout.columns > 0 ? process.stdout.columns : 80
+    return Math.max(20, Math.min(500, cols)) - 1
+  }
+
+  function clampLine(text, max) {
+    const chars = Array.from(text)
+    if (chars.length <= max) return text
+    if (max <= 1) return '…'
+    return `${chars.slice(0, max - 1).join('')}…`
+  }
+
   function writeProgress(text) {
     try {
       const pTmp = `${progressFile}.tmp.${process.pid}`
@@ -1306,7 +1458,7 @@ async function main() {
 
     const msg = `[download] ${pct}% (${currentMB}/${totalMB} MB, ${speedMBs.toFixed(1)} MB/s, ~${remainingSec}s remaining)`
     if (isTTY) {
-      process.stdout.write(`\r${msg}   `)
+      process.stdout.write(`\r\x1b[K${clampLine(msg, terminalLimit())}`)
     } else {
       console.log(msg)
     }
