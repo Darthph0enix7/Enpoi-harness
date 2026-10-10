@@ -1227,11 +1227,13 @@ describe('dsh-tool-subagent continuable background mode', () => {
     expect(schema.description).toContain('injects a notice into this session')
     expect(schema.description).toContain('wakes to process it')
     expect(schema.description).toContain('runs in the background by default')
+    expect(schema.description).toContain('a foreground call is one-shot')
     expect(schema.description).not.toContain('never poll or wait on it')
     const properties = (schema.parameters as {
       properties: Record<string, { description?: string }>
     }).properties
     expect(properties.run_in_background?.description).toContain('Defaults to true')
+    expect(properties.run_in_background?.description).toContain('cannot receive follow-up messages')
     const assembly = await ctx.systemPrompt.assemble(assembleContextFor(parent))
     const guidance = assembly.sections.find(section => section.name === 'tool:subagent')
     expect(guidance?.text).toContain('Start independent subagent delegations together')

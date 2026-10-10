@@ -264,6 +264,9 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     // so its inactive status must not send the model looking for a result.
     expect(schema?.description).toContain('You will be notified when a subagent finishes')
     expect(schema?.description).toContain('inactive means it is not currently working')
+    // One-shot children never appear as rows, so the description must not let
+    // the model read the empty result as "no child ran".
+    expect(schema?.description).toContain('one-shot delegations are not listed')
     // The enum is the closed vocabulary the model renders, so pin it rather than
     // scanning prose that legitimately reads "not to poll for completion".
     const variants = ctx.tools.get('list_agents')?.output.schema.items?.oneOf ?? []

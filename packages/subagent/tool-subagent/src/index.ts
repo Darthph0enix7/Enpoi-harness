@@ -516,7 +516,10 @@ export const SHARED_CHILD_DENY: readonly string[] = [
  * retrieval is read-only and session-scoped. Only an explicit operator `deny`
  * entry can still remove them — deny is the operator's voice and always wins
  * in `tools.restrict()`. An operator edits the list through
- * `enpoi-orchestration.extendBuiltins.sharedKeep`.
+ * `enpoi-orchestration.extendBuiltins.sharedKeep`. A keep name the live
+ * registry does not resolve is dropped with a warning like every other
+ * profile-provided name, so a composition that mounts no whiteboard or
+ * compressor still spawns children.
  */
 export const SHARED_CHILD_KEEP: readonly string[] = [
   'whiteboard_read',
@@ -886,18 +889,19 @@ export function listRoleRegistry(
 }
 
 /**
- * The registry read used to audit a STORED or BUILT-IN availability list
- * (`permissions.agents[role].available`, the registry's `tools.available`, and
- * the {@link ROLE_CHILD_ALLOW} code defaults): operator data and profile
- * composition outlive tool renames, so an unresolvable name is dropped with a
- * warning instead of reaching `tools.restrict()`, whose unknown-allow check
- * would abort the child's spawn. The code-authored `config.toolFilter` never
- * goes through this audit — there an unknown name stays a build-time contract
- * and keeps throwing; the built-in role allowlists name profile-provided tools
- * (research customs, web tools) whose registration depends on the deployment
- * composition, so they are audited like stored lists and never fail a spawn.
+ * The registry read used to audit a STORED, BUILT-IN, or KEEP availability list
+ * (`permissions.agents[role].available`, the registry's `tools.available`, the
+ * {@link ROLE_CHILD_ALLOW} code defaults, and {@link SHARED_CHILD_KEEP}):
+ * operator data and profile composition outlive tool renames, so an
+ * unresolvable name is dropped with a warning instead of reaching
+ * `tools.restrict()`, whose unknown-allow check would abort the child's spawn.
+ * The code-authored `config.toolFilter` never goes through this audit — there
+ * an unknown name stays a build-time contract and keeps throwing; the built-in
+ * lists name profile-provided tools (research customs, web tools, the
+ * whiteboard) whose registration depends on the deployment composition, so
+ * they are audited like stored lists and never fail a spawn.
  */
-interface StoredAvailabilityAudit {
+interface AvailabilityAudit {
   /** Whether the registry resolves a tool name for the spawning agent's scope. */
   readonly isKnown: (name: string) => boolean
   /** Warning sink for each dropped name. */
@@ -905,23 +909,23 @@ interface StoredAvailabilityAudit {
 }
 
 /**
- * Drop names a stored or built-in availability list carries that the live
- * registry no longer resolves, warning once per name. The known subset keeps
- * its order; the caller re-deduplicates when composing the filter.
+ * Drop names one availability list carries that the live registry no longer
+ * resolves, warning once per name. The known subset keeps its order; the
+ * caller re-deduplicates when composing the filter.
  * @param available - the availability allowlist, in authored order.
- * @param role - the role the list belongs to (for the warning).
+ * @param source - the list's owner for the warning (e.g. `role "fixer"`, `child keep list`).
  * @param audit - registry lookup plus warning sink.
  * @returns the resolvable names, in their authored order.
  */
-function auditStoredAvailability(
+function auditAvailability(
   available: readonly string[],
-  role: string | undefined,
-  audit: StoredAvailabilityAudit,
+  source: string,
+  audit: AvailabilityAudit,
 ): string[] {
   const kept: string[] = []
   for (const name of available) {
     if (audit.isKnown(name)) kept.push(name)
-    else audit.warn(`tool-subagent: role "${role ?? 'unknown'}" stores unavailable tool "${name}" — dropping it so the role still spawns`)
+    else audit.warn(`tool-subagent: ${source} names unavailable tool "${name}" — dropping it so the child still spawns`)
   }
   return kept
 }
@@ -947,9 +951,9 @@ function applyBuiltinListEdit(base: readonly string[], edit: BuiltinListEdit | u
  * shared worker deny list and the selected role's surface. Configured deny
  * entries survive (first, de-duplicated), the configured `allow` list passes
  * through untouched, and `deny` wins over `allow` in `tools.restrict()`.
- * Unknown deny names are no-ops there. A stored or built-in availability list
- * is audited against the live registry first (see
- * {@link StoredAvailabilityAudit}); configured code-authored names are never
+ * Unknown deny names are no-ops there. A stored, built-in, or keep availability
+ * list is audited against the live registry first (see
+ * {@link AvailabilityAudit}); configured code-authored names are never
  * audited. `enpoi-orchestration.extendBuiltins` edits the compiled lists in
  * place (see {@link applyBuiltinListEdit}) without replacing them; an explicit
  * stored allowlist still replaces its role's built-in surface and extension.
@@ -973,10 +977,17 @@ export function childToolFilter(
   document: OrchestrationSettingsDocument | undefined,
   role: string,
   roleEntry: ResolvedRole,
-  audit: StoredAvailabilityAudit,
+  audit: AvailabilityAudit,
 ): NonNullable<Config['toolFilter']> {
   const builtinEdits = document?.extendBuiltins
-  const keep = applyBuiltinListEdit(SHARED_CHILD_KEEP, builtinEdits?.sharedKeep)
+  // The keep names are profile-provided (the whiteboard and the compressor
+  // retrieval exist only where their plugins mount), so an unmounted one must
+  // degrade to the live registry instead of aborting the spawn.
+  const keep = auditAvailability(
+    applyBuiltinListEdit(SHARED_CHILD_KEEP, builtinEdits?.sharedKeep),
+    'child keep list',
+    audit,
+  )
   const keepTool = (name: string): boolean => keep.includes(name)
   // The Oracle and the Librarian are the children allowed to delegate
   // (operator design: the reviewer spawns its own researchers; the librarian's
@@ -1007,7 +1018,7 @@ export function childToolFilter(
     // SHARED_CHILD_DENY already removes).
     return {
       ...configured,
-      allow: [...new Set([...configured?.allow ?? [], ...auditStoredAvailability(stored, role, audit), ...keep])],
+      allow: [...new Set([...configured?.allow ?? [], ...auditAvailability(stored, `role "${role}"`, audit), ...keep])],
       deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
     }
   }
@@ -1198,7 +1209,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           // a separately installed capability, so this promise holds whenever the
           // continuable background path is reachable at all.
           ? continuable
-            ? ' This tool runs in the background by default and keeps the child conversation available for later turns. When that run settles, the runtime injects a notice into this session containing its outcome and the child\'s final report; the session wakes to process it, or the notice steers the running turn. Set `run_in_background: false` only when your next action depends on the result.'
+            ? ' This tool runs in the background by default and keeps the child conversation available for later turns. When that run settles, the runtime injects a notice into this session containing its outcome and the child\'s final report; the session wakes to process it, or the notice steers the running turn. Set `run_in_background: false` only when your next action depends on the result; a foreground call is one-shot: it returns the child\'s result and ends the conversation, so it cannot receive follow-up messages.'
             : ' This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.'
           : ' This call waits for the subagent and returns its result.') + choiceDescription,
         parameters: {
@@ -1243,7 +1254,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             run_in_background: {
               type: 'boolean' as const,
               description: continuable
-                ? 'Defaults to true. Set false only when your next action depends on the result.'
+                ? 'Defaults to true. Set false only when your next action depends on the result; a foreground call is one-shot and cannot receive follow-up messages.'
                 : 'Run as a background job and return its id (collect with job_output, stop with job_kill). Defaults to false.',
             },
           } : {},

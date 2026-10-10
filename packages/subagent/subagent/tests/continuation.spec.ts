@@ -1256,7 +1256,7 @@ describe('direct-child Queue residency routing', () => {
       .rejects.toThrow(/belongs to another parent session/)
   })
 
-  it('reports an unresumable child whose persisted log has no supported descriptor', async () => {
+  it('reports a one-shot child as unresumable and names the corrective', async () => {
     const { ctx, parent } = await setup([textResponse('one shot')])
     // A one-shot child has durable identity but no supported continuation state.
     const run = await ctx.subagents.start('spawn', {
@@ -1274,7 +1274,7 @@ describe('direct-child Queue residency routing', () => {
       .catch((error: unknown) => error)
     expect(rejection).toMatchObject({
       code: 'NOT_RESUMABLE',
-      message: `subagent "${oneShotId}" has no supported continuation state and cannot be resumed; choose a different target`,
+      message: `subagent "${oneShotId}" cannot receive follow-up messages: it was a one-shot delegation and its conversation ended with its result. Dispatch a fresh subagent for new work.`,
     })
     expect(String(rejection)).not.toContain('send_message')
   })

@@ -34,6 +34,15 @@ type SetupConfig = tool.Config & {
   settingsDocument?: Record<string, unknown>
   /** Test-only stub Settings handle; takes precedence over {@link settingsDocument}. */
   settingsHandle?: tool.OrchestrationSettingsHandle
+  /**
+   * Omit the whiteboard/compressor stubs, simulating a profile that mounts
+   * neither. The keep-list audit must then drop the names instead of composing
+   * a filter `tools.restrict()` refuses. Default false: the composition mounts
+   * them, as the web profile does.
+   */
+  withoutKeepTools?: boolean
+  /** Extra global tool stubs mounted after the defaults (e.g. an operator-extended keep name). */
+  extraTools?: readonly string[]
 }
 
 const TEST_ALLOWED_MODELS = [
@@ -46,15 +55,30 @@ const TEST_ALLOWED_MODELS = [
 ])
 
 /**
- * Stub globals for the names the stored-availability specs use: the spawn path
- * audits a stored allowlist against the live registry, so a real deployment
- * registers these tools and the specs must too.
+ * Stub globals for the names the availability specs use: the spawn path audits
+ * stored, built-in, and keep lists against the live registry, so a real
+ * deployment registers these tools and the specs must too. The keep names
+ * mirror the web deployment that mounts the whiteboard and the compressor.
  */
-export const TEST_REGISTERED_TOOLS = ['bash', 'read', 'grep', 'edit', 'write'] as const
+export const TEST_REGISTERED_TOOLS = [
+  'bash', 'read', 'grep', 'edit', 'write',
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve',
+] as const
+
+/**
+ * The keep-list stubs within {@link TEST_REGISTERED_TOOLS}; a composition
+ * without them is the headless profile the keep-list audit must survive.
+ */
+export const TEST_KEEP_TOOLS = [
+  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve',
+] as const
 
 /** Register the stub surface after the ToolRuntime is active. */
-function registerStubTools(ctx: Context): void {
-  for (const name of TEST_REGISTERED_TOOLS) {
+function registerStubTools(ctx: Context, withoutKeepTools: boolean, extraTools: readonly string[]): void {
+  const defaults = withoutKeepTools
+    ? TEST_REGISTERED_TOOLS.filter(name => !(TEST_KEEP_TOOLS as readonly string[]).includes(name))
+    : TEST_REGISTERED_TOOLS
+  for (const name of [...defaults, ...extraTools]) {
     ctx.tools.register(defineContentToolFixture({
       name,
       description: `stub ${name}`,
@@ -66,7 +90,10 @@ function registerStubTools(ctx: Context): void {
 
 export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Config> = {}): Promise<Context> {
   const ctx = new Context()
-  const { withModelSelection, parentAgentOptions, settingsDocument, settingsHandle, ...config } = toolConfig
+  const {
+    withModelSelection, parentAgentOptions, settingsDocument, settingsHandle,
+    withoutKeepTools, extraTools, ...config
+  } = toolConfig
   if (settingsHandle !== undefined) {
     ctx.reflect.provide('settings', settingsHandle)
   } else if (settingsDocument !== undefined) {
@@ -102,7 +129,7 @@ export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Co
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  registerStubTools(ctx)
+  registerStubTools(ctx, withoutKeepTools === true, extraTools ?? [])
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SessionProjectionRegistry)
   const provider = await mock.mountScriptedProvider(ctx, { name: 'mock', ...mockConfig })

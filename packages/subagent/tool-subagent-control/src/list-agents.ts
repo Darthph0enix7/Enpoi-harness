@@ -125,7 +125,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'list_agents',
     description:
-      'List subagents you started, with their ids, labels, and status. '
+      'List the continuable subagents you started, with their ids, labels, and status; one-shot delegations are not listed. '
       + 'running means it is working; inactive means it is not currently working. '
       + 'Running children are listed first, then inactive ones by most recent creation. '
       + `The result shows at most ${String(DEFAULT_LIST_AGENTS_LIMIT)} rows (set \`limit\`, max ${String(MAX_LIST_AGENTS_LIMIT)}) and a footer with the totals when rows are omitted. `

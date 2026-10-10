@@ -69,9 +69,9 @@ enpoi-orchestration:
         available: [read, glob, grep, web_search]
 ```
 
-`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换其工具面，并始终受共享子级下限约束；librarian 与 Oracle 随附内置允许列表（`ROLE_CHILD_ALLOW`，即服务器实时权限面在代码中的默认值），在 permissions 与注册表都未设置时填充同一层。模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。由于存储的列表与内置允许列表都依赖注册表，每个名称在派生时都会对照实时注册表检查：无法解析的名称会被丢弃并给出 `role "…" stores unavailable tool "…"` 警告，子 agent 以已知子集启动，因此 profile 中的工具改名不会让角色无法派发。由代码编写的 `toolFilter` 配置保持严格的 `tools.restrict()` 契约：未知的 allow 名称仍会抛出。
+`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换其工具面，并始终受共享子级下限约束；librarian 与 Oracle 随附内置允许列表（`ROLE_CHILD_ALLOW`，即服务器实时权限面在代码中的默认值），在 permissions 与注册表都未设置时填充同一层。模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。由于存储的列表、内置允许列表与共享 keep 列表都依赖注册表，每个名称在派生时都会对照实时注册表检查：无法解析的名称会被丢弃并给出 `role "…" stores unavailable tool "…"`（或 `child keep list names unavailable tool "…"`）警告，子 agent 以已知子集启动，因此 profile 中的工具改名不会让角色无法派发。由代码编写的 `toolFilter` 配置保持严格的 `tools.restrict()` 契约：未知的 allow 名称仍会抛出。
 
-运维者也可以就地编辑已编译的列表，而不是整体替换：`enpoi-orchestration.extendBuiltins` 携带 `{ add?, remove? }` 编辑——按角色放在 `roles.<id>` 下，作用于该角色的内置允许列表；`sharedDeny`/`sharedKeep` 作用于共享下限。角色编辑仅在内置列表是生效层时应用：显式的 `tools.available` 或 `permissions.agents[<role>].available` 条目会整体替换该角色的内置工具面及其扩展。新增的角色允许列表名称会像它加入的内置条目一样接受注册表审计；共享编辑始终应用，因为每个子级工具面都会并入共享下限。
+运维者也可以就地编辑已编译的列表，而不是整体替换：`enpoi-orchestration.extendBuiltins` 携带 `{ add?, remove? }` 编辑——按角色放在 `roles.<id>` 下，作用于该角色的内置允许列表；`sharedDeny`/`sharedKeep` 作用于共享下限。角色编辑仅在内置列表是生效层时应用：显式的 `tools.available` 或 `permissions.agents[<role>].available` 条目会整体替换该角色的内置工具面及其扩展。新增的角色允许列表或 `sharedKeep` 名称会像它加入的内置条目一样接受注册表审计；共享编辑始终应用，因为每个子级工具面都会并入共享下限。
 
 ```yaml
 enpoi-orchestration:
@@ -244,7 +244,7 @@ Start independent subagent delegations together in one assistant message and con
 - **后台运行不通过本工具公开结果**——一次性任务的最终输出通过通用 Task 接口收集，可继续子 agent 的输出留在其自身会话中，按其 subagent id 读取。结算通知会说明该子 agent 如何结束，并携带其最终 assistant 输出中的非空文本，但它不是本次调用的返回值，也无法在此等待。
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）——可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
 - **随附 fork 工具不能选择子级 LLM 路由**——它们继承父级提供方与模型，使复制的对话前缀仍有资格复用 KV Cache。仅当路由变更能保留复用或公开有界重算成本时，才重新启用选择。
-- **存储与内置的角色可用列表对改名是宽容的**——派生时会丢弃 `tools.available`、`permissions.agents[<role>].available` 或内置 `ROLE_CHILD_ALLOW` 工具面（包括 `extendBuiltins.roles` 新增项）中实时注册表无法解析的名称，并逐个名称警告一次；子 agent 在没有该工具的情况下启动。由代码编写的 `config.toolFilter` 不经过该审计，未知的 allow 名称仍会失败。通过 `extendBuiltins.sharedKeep` 新增的名称会像随附的 whiteboard 列表一样原样并入每个显式 allow 工具面，因此部署必须注册它，否则子 agent 的 `tools.restrict()` 会以未知 allow 名称拒绝启动。
+- **存储、内置与 keep 可用列表对改名是宽容的**——派生时会丢弃 `tools.available`、`permissions.agents[<role>].available`、内置 `ROLE_CHILD_ALLOW` 工具面（包括 `extendBuiltins.roles` 新增项）或共享 keep 列表（包括 `extendBuiltins.sharedKeep` 新增项）中实时注册表无法解析的名称，并逐个名称警告一次；子 agent 在没有该工具的情况下启动。由代码编写的 `config.toolFilter` 不经过该审计，未知的 allow 名称仍会失败。正因如此，未挂载 whiteboard 或 compressor 的组合也能派生受允许列表约束的角色，而不会在 `tools.restrict()` 的未知 allow 检查上中止。
 - **非路由子 agent 策略按实例固定**——另一个 persona、工具过滤器或深度上限需要另一个名称不同的工具。LLM 选择要求启用逐 Session 偏好，且提供方必须声明 `agentOptions`；两个进程内提供方和 DSH SDK 会声明该能力，而 ACP、Codex 与 Claude Code 会拒绝它，而不是忽略它。
 
 <a id="dev-note"></a>

@@ -116,8 +116,8 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const request = await captureRequest('Librarian: research the API documentation')
     // The built-in allowlist is audited against the live registry, so the test
     // composition keeps only the registered names; the whiteboard keep list is
-    // unioned into every explicit allow surface.
-    expect(request.toolFilter?.allow).toEqual([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])
+    // unioned into every explicit allow surface and de-duplicated.
+    expect(request.toolFilter?.allow).toEqual([...new Set([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])])
     expect(request.toolFilter?.deny).toEqual(SHARED_DENY_DELEGATING)
   })
 
@@ -138,7 +138,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
       inferRole: true,
     })
     expect(result.isError).toBe(false)
-    expect(seen?.toolFilter?.allow).toEqual([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])
+    expect(seen?.toolFilter?.allow).toEqual([...new Set([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])])
     expect(warnings.filter(message => message.includes('"web_search"'))).toHaveLength(1)
     expect(warnings[0]).toContain('role "librarian"')
   })
@@ -147,7 +147,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const request = await captureRequest('Oracle: architecture review', {
       settingsDocument: { roles: { oracle: { spawnable: true } } },
     })
-    expect(request.toolFilter?.allow).toEqual([...auditedBuiltin('oracle'), ...SHARED_CHILD_KEEP])
+    expect(request.toolFilter?.allow).toEqual([...new Set([...auditedBuiltin('oracle'), ...SHARED_CHILD_KEEP])])
     expect(request.toolFilter?.deny).toEqual(SHARED_DENY_DELEGATING)
   })
 
@@ -264,8 +264,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     // The removal applies to the built-in list; the addition is registry-audited
     // like every built-in entry, so an unknown name warns and drops.
     expect(seen?.toolFilter?.allow).toEqual([
-      ...auditedBuiltin('librarian').filter(name => name !== 'subagent'),
-      ...SHARED_CHILD_KEEP,
+      ...new Set([...auditedBuiltin('librarian').filter(name => name !== 'subagent'), ...SHARED_CHILD_KEEP]),
     ])
     expect(seen?.toolFilter?.allow).not.toContain('subagent')
     expect(warnings.some(message => message.includes('"custom_probe"') && message.includes('role "librarian"'))).toBe(true)
@@ -304,14 +303,54 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(request.toolFilter?.allow).toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_unpin', 'compressor_retrieve'])
   })
 
-  it('appends extendBuiltins sharedKeep additions to the keep union', async () => {
-    const request = await captureRequest('Explorer: map the delegation surface', {
-      toolFilter: { allow: ['read'] },
-      settingsDocument: {
-        extendBuiltins: { sharedKeep: { add: ['custom_board'] } },
+  it('audits extendBuiltins sharedKeep additions against the live registry', async () => {
+    // An operator addition naming an unregistered tool would abort the spawn on
+    // `tools.restrict()`'s unknown-allow check; the audit drops it with a
+    // warning like every other profile-provided keep name.
+    const warnings: string[] = []
+    let seen: SubagentStartRequest | undefined
+    const ctx = await setup(
+      {
+        provider: 'mock',
+        toolFilter: { allow: ['read'] },
+        settingsDocument: {
+          extendBuiltins: { sharedKeep: { add: ['custom_board'] } },
+        },
       },
-    })
-    expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP, 'custom_board'])
+      { onStart: (request) => { seen = request } },
+    )
+    ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
+    const result = await callSubagent(ctx, { role: 'explorer', description: 'Explorer: map the delegation surface', prompt: 'work' })
+    expect(result.isError).toBe(false)
+    expect(seen?.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
+    expect(seen?.toolFilter?.allow).not.toContain('custom_board')
+    expect(warnings.filter(message => message.includes('"custom_board"'))).toHaveLength(1)
+    expect(warnings[0]).toContain('child keep list')
+  })
+
+  it('drops keep names the deployment does not register and still spawns', () => {
+    // The headless/base composition mounts no whiteboard or compressor: the
+    // keep list must degrade to the live registry instead of aborting the
+    // spawn, and the role's own audited surface is unaffected.
+    const warnings: string[] = []
+    const registry = tool.listRoleRegistry(undefined)
+    const audit = {
+      isKnown: (name: string): boolean => (TEST_REGISTERED_TOOLS as readonly string[]).includes(name) || name === 'subagent',
+      warn: (message: string): void => { warnings.push(message) },
+    }
+    const unmounted = {
+      isKnown: (name: string): boolean =>
+        name !== 'whiteboard_read' && name !== 'whiteboard_write' && name !== 'whiteboard_pin'
+        && name !== 'whiteboard_unpin' && name !== 'compressor_retrieve'
+        && audit.isKnown(name),
+      warn: audit.warn,
+    }
+    const fixer = tool.childToolFilter(undefined, undefined, 'fixer', registry['fixer']!, unmounted)
+    expect(fixer.allow).toEqual(auditedBuiltin('fixer'))
+    for (const name of SHARED_CHILD_KEEP) {
+      expect(warnings.filter(message => message.includes(`"${name}"`))).toHaveLength(1)
+    }
+    expect(warnings[0]).toContain('child keep list')
   })
 
   it('lets a stored allowlist replace the built-in list and its extendBuiltins edit', async () => {

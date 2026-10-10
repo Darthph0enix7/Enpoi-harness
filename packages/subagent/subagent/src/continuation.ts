@@ -436,9 +436,15 @@ export class SubagentContinuationManager {
     const descriptor = foldSubagentDescriptor(
       source.events.slice(source.inheritedEventCount),
     )
-    if (descriptor === undefined || descriptor.mode !== 'continuable') {
+    if (descriptor === undefined) {
       throw new SubagentError(
         `subagent "${childId}" has no supported continuation state and cannot be resumed; choose a different target`,
+        'NOT_RESUMABLE',
+      )
+    }
+    if (descriptor.mode !== 'continuable') {
+      throw new SubagentError(
+        `subagent "${childId}" cannot receive follow-up messages: it was a one-shot delegation and its conversation ended with its result. Dispatch a fresh subagent for new work.`,
         'NOT_RESUMABLE',
       )
     }
