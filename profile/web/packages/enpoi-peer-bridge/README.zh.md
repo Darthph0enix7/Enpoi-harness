@@ -10,7 +10,7 @@
 | 工具 | 作用 |
 |---|---|
 | `peer_status {alias}` | 握手（对端身份、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型。 |
-| `peer_ask {alias, message, waitMs?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。 |
+| `peer_ask {alias, message?, waitMs?, resume?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。 |
 | `peer_asks {alias}` | 远端待决询问（审批与提问两种）。 |
 | `peer_answer {alias, askId, outcome}` | 解决审批询问（`allowed-once` \| `rejected`）。先到先得。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
 | `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。传输失败时重读闩锁：无活动回合时报 `confirmation: 'lost'`。 |
@@ -64,6 +64,17 @@ patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他�
 持久通知文件（`<配对目录>/peer-bridge/asks.jsonl`），仍可通过
 `peer_answer` / `ds peer answer` 应答。`peer/conflict` 表示其他参与者已先行
 应答——本插件如实报告，绝不盲目重试。不会自动应答任何询问。
+
+被跟踪回合进入 `waiting_approval` 时不会把调用方拖到 `waitMs`：`peer_ask`
+提前返回 `ok: false`、`pending: true`、`status: 'waiting_approval'`、会话 id、
+request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]` 行）。
+调用方 agent（或非交互车道上的人）用 `peer_asks`/`peer_answer` 逐条决定；
+随后再次调用 `peer_ask` 并传 `resume: <requestId>`，即可在不重发消息的情况下
+把**同一**回合跟到终态（`resumed: true`、`admitted: false`）。requestId 是
+跟踪的因果锚点：开屏快照仍携带原始准入记录（甚至该回合的终态记录）时，结果
+会被精确归因到该回合。提前返回会拆除本次跟踪世代，因此同时打开的本地审批卡
+会被撤回（`cancelled`），询问仍可通过 `peer_answer` 应答；无询问的长时间停滞
+仍受 `waitMs` 约束。
 
 ## 跟踪可靠性
 

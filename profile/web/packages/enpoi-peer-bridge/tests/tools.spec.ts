@@ -43,6 +43,10 @@ interface HostOptions {
   readonly ask?: PeerPendingAsk | null
   readonly withApproval?: boolean
   readonly networkFail?: boolean
+  /** Halt the first follow at the gated ask, then replay the same turn to terminal on later follows. */
+  readonly resumeFlow?: boolean
+  /** Latch the ask state frame carries (default waiting_approval, which returns early). */
+  readonly askLatch?: PeerExecutionState['latch']
   /** Hold the local approval card open until settled manually or its signal aborts. */
   readonly holdApproval?: boolean
   /** Hold the local question card open until its signal aborts. */
@@ -73,6 +77,8 @@ interface HostOptions {
   readonly silentSecondTurn?: boolean
   /** End our own turn in error after committing its assistant text. */
   readonly ourTurnError?: boolean
+  /** End our own turn as cancelled after committing its assistant text. */
+  readonly ourTurnCancelled?: boolean
   /** Skip the trailing settled state frame, leaving the last follow state busy. */
   readonly noFinalState?: boolean
   /** Quiet window override for the follow's settle clock. */
@@ -177,22 +183,55 @@ function createHarness(options: HostOptions = {}) {
     }
   }) as unknown as typeof fetch
 
+  let followGen = 0
   const socketFactory = (): PeerWebSocket => new FakeSocket((socket, streamId) => {
+    followGen += 1
     const ourTurn = options.prelude === true ? 2 : 1
     const settled: PeerExecutionState = {
       latch: 'idle', since: 20, source: 'host-latch', activeDescendants: 0,
       descendantsExact: true, pendingAsks: [],
+    }
+    if (options.resumeFlow === true && followGen > 1) {
+      // The resume generation: the same turn replays from its admission to its
+      // terminal. No turn/start is replayed, so attribution must come from the
+      // resumed requestId (or the seeded floor when the window cut it).
+      socket.frame(streamId, {
+        ...SNAPSHOT,
+        state: {
+          latch: 'running', since: 1, source: 'host-latch', activeDescendants: 0,
+          descendantsExact: true, pendingAsks: [],
+        },
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 10, time: 4, type: 'user/message', data: { source: { kind: 'user', rpcId: captured.requestId }, content: [{ type: 'text', text: 'run it' }] } },
+        cursor: 10,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 11, time: 5, type: 'assistant/message', data: { turn: ourTurn, message: { content: [{ type: 'text', text: 'remote answer text' }] } } },
+        cursor: 11,
+      })
+      socket.frame(streamId, {
+        type: 'event',
+        record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: 'completed' } } },
+        cursor: 12,
+      })
+      pendingAsksNow = []
+      socket.frame(streamId, { type: 'state', state: settled, cursor: 20 })
+      return
     }
     socket.frame(streamId, SNAPSHOT)
     if (options.ask !== undefined && options.ask !== null) {
       socket.frame(streamId, {
         type: 'state',
         state: {
-          latch: 'waiting_approval', since: 1, source: 'host-latch', activeDescendants: 0,
+          latch: options.askLatch ?? 'waiting_approval', since: 1, source: 'host-latch', activeDescendants: 0,
           descendantsExact: true, pendingAsks: [options.ask],
         },
         cursor: 1,
       })
+      if (options.resumeFlow === true) return
       if (options.settleAskRemotely === true) {
         setTimeout(() => {
           pendingAsksNow = []
@@ -238,7 +277,7 @@ function createHarness(options: HostOptions = {}) {
     })
     socket.frame(streamId, {
       type: 'event',
-      record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: options.ourTurnError === true ? 'error' : 'completed' } } },
+      record: { seq: 12, time: 6, type: 'turn/end', data: { turn: ourTurn, reason: { kind: options.ourTurnError === true ? 'error' : options.ourTurnCancelled === true ? 'cancelled' : 'completed' } } },
       cursor: 12,
     })
     if (options.replay === true) {
@@ -486,10 +525,30 @@ describe('enpoi-peer-bridge tools', () => {
     expect(args).not.toHaveProperty('reasoningEffort')
   })
 
-  it('surfaces a remote approval ask locally and relays allowed-once', async () => {
+  it('returns early on waiting_approval with the structured asks and relays the local decision', async () => {
     const harness = createHarness({ ask: APPROVAL_ASK })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
-    expect(result.ok).toBe(true)
+    expect(result).toMatchObject({
+      ok: false,
+      pending: true,
+      status: 'waiting_approval',
+      settled: false,
+      alias: 'scratch',
+      sessionId: 'sess-1',
+      admitted: true,
+      latch: 'waiting_approval',
+    })
+    expect(String(result.requestId)).toContain('peer-bridge-')
+    expect(result.pendingAsks).toEqual([{
+      askId: 'ask-1',
+      kind: 'approval',
+      toolName: 'bash',
+      reason: 'bash rule "rm" requires approval',
+      questions: [],
+      since: 1,
+    }])
+    // The local card still surfaced; its immediate decision relayed before the
+    // early return finished.
     expect(harness.approvalCalls).toHaveLength(1)
     const request = harness.approvalCalls[0] as Record<string, unknown>
     expect(request.toolName).toBe('bash')
@@ -498,22 +557,66 @@ describe('enpoi-peer-bridge tools', () => {
     const answerCall = harness.calls.find(call => call.method === 'answer')
     expect(answerCall!.args).toMatchObject({ answer: { kind: 'approval', outcome: 'allowed-once' } })
     expect((result.asks as string[])[0]).toContain('relay=settled')
+    const rendered = harness.tools.get('peer_ask')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('WAITING FOR APPROVAL')
+    expect(rendered).toContain(`resume: ${JSON.stringify(String(result.requestId))}`)
   })
 
-  it('cancels a pending local ask when the follow ends while the card is open', async () => {
+  it('withdraws the local card when the early return ends the follow', async () => {
     const harness = createHarness({ ask: APPROVAL_ASK, holdApproval: true })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
-    expect(result).toMatchObject({ ok: true, terminal: 'completed', answer: 'remote answer text' })
+    expect(result).toMatchObject({ ok: false, pending: true, status: 'waiting_approval' })
     expect(harness.approvalCalls).toHaveLength(1)
-    // The card's signal is the linked follow lifetime: it must be aborted.
+    // The card's signal is the linked follow lifetime: the early return aborts it.
     expect((harness.approvalCalls[0] as { signal: AbortSignal }).signal.aborted).toBe(true)
-    // A withdrawn local ask is never relayed blind.
+    // A withdrawn local ask is never relayed blind; the caller answers via peer_answer.
     expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
     expect((result.asks as string[])[0]).toContain('decision=cancelled')
   })
 
+  it('resumes the same followed turn to terminal after peer_answer, without re-prompting', async () => {
+    // withApproval false models the non-interactive caller: the ask is left for
+    // peer_answer instead of a local card.
+    const harness = createHarness({ ask: APPROVAL_ASK, resumeFlow: true, withApproval: false })
+    const first = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
+    expect(first).toMatchObject({ ok: false, pending: true, status: 'waiting_approval', admitted: true })
+    expect((first.asks as string[])[0]).toContain('decision=unsurfaced')
+    const requestId = String(first.requestId)
+
+    const answered = await harness.tools.get('peer_answer')!.execute({ alias: 'scratch', askId: 'ask-1', outcome: 'rejected' }, harness.exec)
+    expect(answered).toMatchObject({ ok: true, settled: true })
+    expect((harness.calls.find(call => call.method === 'answer')!.args.answer as Record<string, unknown>).outcome).toBe('rejected')
+
+    const second = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', resume: requestId }, harness.exec)
+    expect(second).toMatchObject({
+      ok: true,
+      resumed: true,
+      admitted: false,
+      settled: true,
+      turn: 1,
+      terminal: 'completed',
+      answer: 'remote answer text',
+    })
+    // Resume never sends the message again.
+    expect(harness.calls.filter(call => call.method === 'prompt')).toHaveLength(1)
+  })
+
+  it('rejects a resume that also carries a message, and a blank resume', async () => {
+    const harness = createHarness()
+    const withMessage = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', resume: 'peer-bridge-x', message: 'hi' }, harness.exec)
+    expect(withMessage.ok).toBe(false)
+    expect(String((withMessage.error as Record<string, unknown>).message)).toContain('drop message')
+    const blank = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', resume: '' }, harness.exec)
+    expect(blank.ok).toBe(false)
+    expect(String((blank.error as Record<string, unknown>).message)).toContain('requestId')
+    // Neither malformed call reached the wire.
+    expect(harness.calls).toHaveLength(0)
+  })
+
   it('dismisses a local approval card when the remote ask settles elsewhere', async () => {
-    const harness = createHarness({ ask: APPROVAL_ASK, holdApproval: true, holdFollow: true, settleAskRemotely: true })
+    // askLatch running keeps the follow alive past the ask frame so the
+    // remote-side settle (not the early return) is what withdraws the card.
+    const harness = createHarness({ ask: APPROVAL_ASK, askLatch: 'running', holdApproval: true, holdFollow: true, settleAskRemotely: true })
     const pending = harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
     await waitFor(() => harness.approvalCalls.length === 1)
     const request = harness.approvalCalls[0] as { signal: AbortSignal }
@@ -529,7 +632,7 @@ describe('enpoi-peer-bridge tools', () => {
   })
 
   it('dismisses a local question card when the remote ask settles elsewhere', async () => {
-    const harness = createHarness({ ask: QUESTION_ASK, holdQuestion: true, holdFollow: true, settleAskRemotely: true })
+    const harness = createHarness({ ask: QUESTION_ASK, askLatch: 'running', holdQuestion: true, holdFollow: true, settleAskRemotely: true })
     const pending = harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ask me something' }, harness.exec)
     await waitFor(() => harness.questionCalls.length === 1)
     const request = harness.questionCalls[0] as { signal: AbortSignal }
@@ -578,8 +681,10 @@ describe('enpoi-peer-bridge tools', () => {
       .toContain('no caller-role pairing with alias "nope"; available: scratch → serverlocal')
   })
 
-  it('leaves a local ask answerable while the follow stays open, then relays the answer', async () => {
-    const harness = createHarness({ ask: APPROVAL_ASK, holdApproval: true, holdFollow: true })
+  it('leaves a local ask answerable while a non-approval follow stays open, then relays the answer', async () => {
+    // askLatch running: latch alone does not trigger the early return, the card
+    // stays linked to the open follow, and the operator's decision relays.
+    const harness = createHarness({ ask: APPROVAL_ASK, askLatch: 'running', holdApproval: true, holdFollow: true })
     const pending = harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir' }, harness.exec)
     await waitFor(() => harness.approvalCalls.length === 1)
     const request = harness.approvalCalls[0] as { signal: AbortSignal }
@@ -645,10 +750,18 @@ describe('enpoi-peer-bridge tools', () => {
     expect(result).toMatchObject({ ok: true, alias: 'scratch', latch: 'idle', asks: [] })
   })
 
-  it('surfaces a remote question locally, relays the selected label, and reports it', async () => {
+  it('surfaces a remote question locally, relays the selected label, and returns it as a pending ask', async () => {
     const harness = createHarness({ ask: QUESTION_ASK })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ask me something' }, harness.exec)
-    expect(result.ok).toBe(true)
+    expect(result).toMatchObject({ ok: false, pending: true, status: 'waiting_approval' })
+    expect(result.pendingAsks).toEqual([{
+      askId: 'ask-q1',
+      kind: 'question',
+      toolName: '',
+      reason: '',
+      questions: [{ id: 'colour', question: 'Pick a colour', multiSelect: false, options: ['red', 'blue'] }],
+      since: 2,
+    }])
     expect(harness.questionCalls).toHaveLength(1)
     const request = harness.questionCalls[0] as { questions: Array<Record<string, unknown>> }
     expect(request.questions[0]).toMatchObject({ id: 'colour', question: 'Pick a colour', options: [{ label: 'red' }, { label: 'blue' }] })
@@ -775,6 +888,30 @@ describe('enpoi-peer-bridge tools', () => {
     expect(result.answer).toBe('remote answer text')
   })
 
+  it('renders a cancelled settled turn informatively instead of an empty failure', async () => {
+    const harness = createHarness({ ourTurnCancelled: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'ours' }, harness.exec)
+    expect(result).toMatchObject({ ok: false, settled: true, turn: 1, terminal: 'cancelled' })
+    // The text committed before the cancellation is still returned.
+    expect(result.answer).toBe('remote answer text')
+    const rendered = harness.tools.get('peer_ask')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('REMOTE TURN CANCELLED on scratch (session sess-1, turn 1).')
+    expect(rendered).toContain('remote answer text')
+    expect(rendered).not.toContain('peer_ask failed')
+    expect(rendered).not.toContain('unknown')
+  })
+
+  it('renders a target-unreachable peer_ask once, without doubling the prefix', async () => {
+    const harness = createHarness({ networkFail: true })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi' }, harness.exec)
+    expect(result.ok).toBe(false)
+    const rendered = harness.tools.get('peer_ask')!.output.render({}, result)[0]!.text
+    expect(rendered.match(/REMOTE TARGET UNREACHABLE/g)).toHaveLength(1)
+    expect(rendered).toContain('https://serverlocal.pike-acrux.ts.net:8443')
+    // The structured message keeps the loud prefix for non-render consumers.
+    expect(String((result.error as Record<string, unknown>).message)).toContain('REMOTE TARGET UNREACHABLE:')
+  })
+
   it('confirms a settled quiet window against a fresh state read', async () => {
     const harness = createHarness({ stateLatch: 'running', stateDescendants: 1 })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing' }, harness.exec)
@@ -824,5 +961,12 @@ describe('enpoi-peer-bridge tools', () => {
       expect(description).toContain('The alias names the pairing (the member device in the fleet convention)')
       expect(description).toContain('it is NOT the target host name')
     }
+  })
+
+  it('documents the waiting_approval early return and the resume flow in the peer_ask description', () => {
+    const description = createHarness().tools.get('peer_ask')!.description
+    expect(description).toContain('waiting_approval')
+    expect(description).toContain('peer_asks/peer_answer')
+    expect(description).toContain('resume set to the returned requestId')
   })
 })

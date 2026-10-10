@@ -12,7 +12,7 @@ executes anything remotely.
 |---|---|
 | `peer_status {alias}` | Handshake (host identity, capabilities, protocol) + `peer.state`: exposure, target session, latch, descendants, pending asks, current model. |
 | `peer_sessions {alias?}` | Discovery across every caller-role pairing: alias, peer, endpoint, the bound remote session id (local `remoteSessionId` pin or the host-reported session), exposure, latch summary, and last activity; an unreachable host is that row's error. Read-only. |
-| `peer_ask {alias, message, waitMs?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. |
+| `peer_ask {alias, message?, waitMs?, resume?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. A followed turn that enters `waiting_approval` returns EARLY with `status: 'waiting_approval'` and the pending ask(s) (`askId`, `kind`, `toolName`, `reason`, question options); `resume: <requestId>` continues that same turn to completion without re-sending the message. |
 | `peer_asks {alias}` | Pending remote asks (approval and question kinds); question rows carry the question ids and option labels. |
 | `peer_answer {alias, askId, outcome \| answers[]}` | Settles an approval ask (`allowed-once` \| `rejected`) or a question ask (`answers: [{id, selected[], custom?}]`). First answer wins. A malformed selection is rejected locally with the reason; the host is never called. A transport failure re-reads `peer.state` and reports `confirmation: 'lost'` when the ask is already gone, instead of a failure that invites a blind retry. |
 | `peer_cancel {alias}` | Cancels the remote active turn, attributed to this caller. A transport failure re-reads the latch: no active turn surfaces as `confirmation: 'lost'`, not as a failed cancel. |
@@ -87,6 +87,22 @@ through `peer_answer` / `ds peer answer` (questions with `--select <label>`, or
 `--select <questionId>=<label>` for multi-question asks). A `peer/conflict`
 answer means another participant settled it first — the bridge reports that
 and never retries blind. Nothing is auto-answered.
+
+A followed turn that enters `waiting_approval` does not hold the caller until
+`waitMs`: `peer_ask` returns EARLY with `ok: false`, `pending: true`,
+`status: 'waiting_approval'`, the session id, the request id, and the pending
+asks as structured `pendingAsks[]` rows (plus the summary `asks[]` lines). The
+calling agent — or a human watching a non-interactive lane — decides each ask
+with `peer_asks`/`peer_answer`; calling `peer_ask` again with
+`resume: <requestId>` then follows the SAME remote turn to its terminal state
+without re-sending the message (`resumed: true`, `admitted: false`). The
+requestId is the follow's causal anchor: when the opening snapshot still
+carries the original admission record (and even the terminal, when the turn
+ended before the resume), the remaining result is attributed to exactly that
+turn. The early return tears the follow generation down, so a local card that
+was opened concurrently is withdrawn (`cancelled`) and the ask stays
+answerable through `peer_answer`; `waitMs` remains the cap for stalls without
+an ask.
 
 `peer_sessions` (and `ds peer list`) discovers what the caller-role entries
 currently address: each row shows the local `remoteSessionId` pin or the

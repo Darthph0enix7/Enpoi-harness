@@ -12,7 +12,12 @@
  * and the local decision is relayed back with `peer.answer` — first answer
  * wins; a `peer/conflict` is reported, never retried blind. When the remote
  * ask settles elsewhere first, the follow's next `state` frame withdraws the
- * local card instead of leaving it answerable.
+ * local card instead of leaving it answerable. A followed turn that enters
+ * `waiting_approval` returns EARLY with `status: 'waiting_approval'` and its
+ * pending asks, so a non-interactive caller can decide with
+ * `peer_asks`/`peer_answer` instead of blocking until `waitMs`; `peer_ask`
+ * called again with `resume: <requestId>` continues that same turn to its
+ * terminal state without re-prompting.
  *
  * Pairings are read from `~/.dsh/pairings.yaml` by default; `pairingsPath`
  * points at another document (the live test uses a scratch file and never
@@ -389,8 +394,12 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
     description: [
       'Send a message to a paired peer session as an attributed peer turn, then follow the remote',
       'session until the turn reaches a terminal state and return the remote answer (or the structured',
-      'failure when the turn failed). Remote asks that appear while following are surfaced locally for',
-      'the operator to answer. The remote runs with its OWN tools, workspace, and approvals.',
+      'failure when the turn failed). If the followed turn enters waiting_approval, the call returns',
+      'EARLY with status "waiting_approval" and the pending ask(s) (askId, kind, toolName, reason)',
+      'instead of blocking: decide each with peer_asks/peer_answer, then call peer_ask again with',
+      'resume set to the returned requestId to follow the same turn to completion. Remote asks that',
+      'appear while following are surfaced locally for the operator to answer. The remote runs with',
+      'its OWN tools, workspace, and approvals.',
       'The alias names the pairing (the member device in the fleet convention) and is the same string',
       'on both devices — it is NOT the target host name.',
     ].join(' '),
@@ -398,10 +407,17 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       type: 'object',
       properties: {
         alias: { type: 'string', description: 'Pairing alias of the peer session to prompt.' },
-        message: { type: 'string', description: 'The message to send (plain text).' },
+        message: { type: 'string', description: 'The message to send (plain text); omit when resuming.' },
         waitMs: { type: 'number', description: `How long to follow, in milliseconds (default ${String(waitMs)}).` },
+        resume: {
+          type: 'string',
+          description: [
+            'A requestId from a prior peer_ask result (waiting_approval or pending): continues',
+            'following that same remote turn to its terminal state without sending the message again.',
+          ].join(' '),
+        },
       },
-      required: ['alias', 'message'],
+      required: ['alias'],
     },
     output: {
       schema: {
@@ -415,6 +431,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           created: { type: 'boolean' },
           requestId: { type: 'string' },
           admitted: { type: 'boolean' },
+          resumed: { type: 'boolean' },
+          status: { type: 'string' },
           settled: { type: 'boolean' },
           superseded: { type: 'boolean' },
           turn: { type: 'number' },
@@ -433,6 +451,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           },
           answer: { type: 'string' },
           asks: { type: 'array', items: { type: 'string' } },
+          pendingAsks: { type: 'array', items: askItemSchema() },
           latch: { type: 'string' },
           cursor: { type: 'number' },
           note: { type: 'string' },
@@ -445,7 +464,15 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const request = narrow(args)
       const alias = requireAlias(request.alias)
       const message = typeof request.message === 'string' ? request.message : ''
-      if (message.trim() === '') return { ok: false, error: { code: 'gateway/bad-request', message: 'peer_ask needs a non-empty message' } }
+      const resumeRaw = request.resume
+      if (resumeRaw !== undefined && (typeof resumeRaw !== 'string' || resumeRaw === '')) {
+        return { ok: false, error: { code: 'gateway/bad-request', message: 'resume must be the requestId string from a prior peer_ask result' } }
+      }
+      const resume = typeof resumeRaw === 'string' ? resumeRaw : undefined
+      if (resume !== undefined && message.trim() !== '') {
+        return { ok: false, error: { code: 'gateway/bad-request', message: 'resume continues a followed turn; drop message (the first peer_ask already sent it)' } }
+      }
+      if (resume === undefined && message.trim() === '') return { ok: false, error: { code: 'gateway/bad-request', message: 'peer_ask needs a non-empty message' } }
       if (message.length > MAX_MESSAGE_CHARS) {
         return { ok: false, error: { code: 'gateway/bad-request', message: `peer_ask message exceeds ${String(MAX_MESSAGE_CHARS)} characters` } }
       }
@@ -462,6 +489,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         agent: exec.agent,
         alias,
         message,
+        ...(resume === undefined ? {} : { resume }),
         allowCreate: true,
         deps: effectiveDeps,
       })
@@ -489,32 +517,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           latch: { type: 'string' },
           asks: {
             type: 'array',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                askId: { type: 'string' },
-                kind: { type: 'string' },
-                toolName: { type: 'string' },
-                reason: { type: 'string' },
-                questions: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                      id: { type: 'string' },
-                      question: { type: 'string' },
-                      multiSelect: { type: 'boolean' },
-                      options: { type: 'array', items: { type: 'string' } },
-                    },
-                    required: ['id', 'question', 'options'],
-                  },
-                },
-                since: { type: 'number' },
-              },
-              required: ['askId', 'kind', 'since'],
-            },
+            items: askItemSchema(),
           },
           error: failureSchema(),
         },
@@ -535,21 +538,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           alias,
           sessionId: value.target.sessionId,
           latch: value.state.latch,
-          asks: value.state.pendingAsks.map(ask => ({
-            askId: ask.askId,
-            kind: ask.kind,
-            toolName: ask.kind === 'approval' ? ask.toolName ?? '' : '',
-            reason: ask.kind === 'approval' ? ask.reason ?? '' : '',
-            questions: ask.kind === 'question'
-              ? (ask.questions ?? []).map(question => ({
-                id: question.id,
-                question: question.question,
-                multiSelect: question.multiSelect === true,
-                options: (question.options ?? []).map(option => option.label),
-              }))
-              : [],
-            since: ask.since,
-          })),
+          asks: value.state.pendingAsks.map(askPayload),
         }
       } catch (error) {
         return failureFrom(error, pairing.endpoint)
@@ -776,6 +765,8 @@ interface AskRunOptions {
   readonly agent?: Agent
   readonly alias: string
   readonly message: string
+  /** RequestId of a prior result to resume; no prompt is sent when set. */
+  readonly resume?: string
   readonly allowCreate: boolean
   readonly deps: BridgeDeps
 }
@@ -784,6 +775,11 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   const { pairing, document } = resolveEntry(options.pairingsPath, options.alias)
   const client = makeClient(pairing, options.config, document.device, options.deps)
   const participant = participantOf(options.config, document)
+  // Resume continues a turn whose prompt was already admitted: no new message,
+  // no create, and the original requestId keeps record attribution exact (the
+  // resumed follow may replay the admission and even the turn's terminal in
+  // its opening snapshot).
+  const resumed = options.resume !== undefined && options.resume !== ''
   let created = false
   try {
     await client.handshake()
@@ -796,7 +792,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     baseline = await client.state(requestedTarget)
   } catch (error) {
     const code = error instanceof PeerBridgeError ? error.code : ''
-    if (!options.allowCreate || requestedTarget.kind !== 'alias' || (code !== 'peer/not-paired' && code !== 'peer/not-found')) {
+    if (resumed || !options.allowCreate || requestedTarget.kind !== 'alias' || (code !== 'peer/not-paired' && code !== 'peer/not-found')) {
       return failureFrom(error, pairing.endpoint)
     }
     try {
@@ -817,17 +813,19 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     }
   }
   const baselineTurn = baseline.state.lastTurnEnd?.turn ?? 0
-  const requestId = `peer-bridge-${randomUUID()}`
-  try {
-    await client.prompt({
-      target: requestedTarget,
-      participant,
-      requestId,
-      content: [{ type: 'text', text: options.message }],
-      hopCount: 0,
-    })
-  } catch (error) {
-    return failureFrom(error, pairing.endpoint)
+  const requestId = options.resume ?? `peer-bridge-${randomUUID()}`
+  if (!resumed) {
+    try {
+      await client.prompt({
+        target: requestedTarget,
+        participant,
+        requestId,
+        content: [{ type: 'text', text: options.message }],
+        hopCount: 0,
+      })
+    } catch (error) {
+      return failureFrom(error, pairing.endpoint)
+    }
   }
 
   const controller = new AbortController()
@@ -844,12 +842,14 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   let cursor = baseline.cursor
   // The prompt response already proved the host recorded this prompt; the
   // durable `user/message` below only marks which turn carried it.
-  const admitted = true
+  const admitted = !resumed
   let terminal: ReturnType<typeof recordTerminal>
   let detached = false
+  let approvalPause = false
   let activeDescendants = baseline.state.activeDescendants
   let descendantsExact = baseline.state.descendantsExact
-  let pendingAskCount = baseline.state.pendingAsks.length
+  let pendingNow: readonly PeerPendingAsk[] = baseline.state.pendingAsks
+  let pendingAskCount = pendingNow.length
   const answerParts: string[] = []
   let answerTurn: number | undefined
   // Durable seqs already folded: a reconnect snapshot replay must never append
@@ -859,8 +859,11 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   // that carried our admitted prompt (or a later one). A concurrent
   // third-party turn that ends before our `user/message` appears is ignored,
   // and a later turn opened by a different operator's prompt cannot replace
-  // our own result (`abandoned`).
-  let admittedTurn: number | undefined
+  // our own result (`abandoned`). A resume seeds the floor with the first turn
+  // after the resumed baseline; the replayed admission record refines it when
+  // the opening snapshot still carries it (the turn may even have ended before
+  // the resume, in which case the admission and its terminal arrive together).
+  let admittedTurn: number | undefined = resumed ? baselineTurn + 1 : undefined
   let observedTurn: number | undefined
   let admissionSeen = false
   let abandoned = false
@@ -942,10 +945,13 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     // The first turn-bound record after admission is the turn carrying our
     // prompt when the snapshot window cut its `turn/start`.
     if (admittedTurn === undefined && admissionSeen && turn !== undefined) admittedTurn = turn
+    // The floor is the admitted turn; before admission the resume seed already
+    // names the first candidate, and normal follows reject everything.
+    const floor = admittedTurn ?? baselineTurn + 1
     const attributed = admittedTurn !== undefined && turn !== undefined && turn >= admittedTurn
       && (!abandoned || turn <= admittedTurn)
     if (!attributed) return
-    if (record.type === 'assistant/message' && turn > baselineTurn) {
+    if (record.type === 'assistant/message' && turn !== undefined && turn >= floor) {
       const text = recordAssistantText(record)
       if (text !== '') {
         // A later turn REPLACES the previous turn's text, so a fan-out
@@ -959,7 +965,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       return
     }
     const end = recordTerminal(record)
-    if (end !== undefined && end.turn > baselineTurn) {
+    if (end !== undefined && end.turn >= floor) {
       // A terminal owns only the text committed for its own turn: a later turn
       // that produced no answer must not report the previous turn's text.
       if (answerTurn !== undefined && answerTurn !== end.turn) {
@@ -976,21 +982,30 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         latch = frame.state.latch
         activeDescendants = frame.state.activeDescendants
         descendantsExact = frame.state.descendantsExact
-        pendingAskCount = frame.state.pendingAsks.length
+        pendingNow = frame.state.pendingAsks
+        pendingAskCount = pendingNow.length
         for (const record of frame.records) absorb(record)
-        await surfaceFrame(frame.state.pendingAsks)
+        await surfaceFrame(pendingNow)
       } else if (frame.type === 'state') {
         cursor = frame.cursor
         latch = frame.state.latch
         activeDescendants = frame.state.activeDescendants
         descendantsExact = frame.state.descendantsExact
-        pendingAskCount = frame.state.pendingAsks.length
-        await surfaceFrame(frame.state.pendingAsks)
+        pendingNow = frame.state.pendingAsks
+        pendingAskCount = pendingNow.length
+        await surfaceFrame(pendingNow)
       } else if (frame.type === 'event') {
         cursor = Math.max(cursor, frame.record.seq)
         absorb(frame.record)
       } else if (frame.type === 'end' && frame.reason === 'target-detached') {
         detached = true
+        break
+      }
+      // A followed turn blocked on an ask: return the pending asks now instead
+      // of holding the caller until waitMs. The caller (or its operator)
+      // decides with peer_asks/peer_answer and resumes with the requestId.
+      if (latch === 'waiting_approval' && pendingNow.length > 0) {
+        approvalPause = true
         break
       }
       // A different operator's prompt opened a later turn after our admitted
@@ -1041,10 +1056,36 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      ...(resumed ? { resumed: true } : {}),
       asks: askLines(asks),
       latch,
       cursor,
       note: 'the remote pairing/session binding disappeared (target-detached)',
+    }
+  }
+
+  if (approvalPause) {
+    const ids = pendingNow.map(ask => ask.askId)
+    return {
+      ok: false,
+      pending: true,
+      status: 'waiting_approval',
+      settled: false,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      ...(resumed ? { resumed: true } : {}),
+      asks: askLines(asks),
+      pendingAsks: pendingNow.map(askPayload),
+      latch,
+      cursor,
+      note: [
+        `the remote turn is waiting_approval on ${String(ids.length)} ask(s): ${ids.join(', ')}`,
+        `decide each with peer_asks/peer_answer, then call peer_ask again with resume: ${JSON.stringify(requestId)}`,
+        'to follow the same turn to completion (no message is re-sent)',
+      ].join(' — '),
     }
   }
 
@@ -1058,11 +1099,12 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      ...(resumed ? { resumed: true } : {}),
       answer,
       asks: askLines(asks),
       latch,
       cursor,
-      note: `no terminal within ${String(options.waitMs)}ms — the remote turn is still live (follow it again with peer_ask or ds peer follow)`,
+      note: `no terminal within ${String(options.waitMs)}ms — the remote turn is still live (follow it again with peer_ask resume: ${JSON.stringify(requestId)}, or ds peer follow)`,
     }
   }
   if (abandoned) {
@@ -1075,6 +1117,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      ...(resumed ? { resumed: true } : {}),
       turn: terminal.turn,
       terminal: terminal.reason,
       ...(terminal.error === undefined ? {} : {
@@ -1101,6 +1144,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      ...(resumed ? { resumed: true } : {}),
       turn: terminal.turn,
       terminal: terminal.reason,
       ...(terminal.error === undefined ? {} : {
@@ -1127,6 +1171,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       created,
       requestId,
       admitted,
+      ...(resumed ? { resumed: true } : {}),
       turn: terminal.turn,
       terminal: terminal.reason,
       ...(terminal.error === undefined ? {} : {
@@ -1151,6 +1196,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     created,
     requestId,
     admitted,
+    ...(resumed ? { resumed: true } : {}),
     turn: terminal.turn,
     terminal: 'completed',
     answer,
@@ -1468,6 +1514,55 @@ function failureSchema(): Record<string, unknown> {
   }
 }
 
+/** Schema of one pending ask as `peer_asks` and a waiting_approval `peer_ask` result report it. */
+function askItemSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      askId: { type: 'string' },
+      kind: { type: 'string' },
+      toolName: { type: 'string' },
+      reason: { type: 'string' },
+      questions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            question: { type: 'string' },
+            multiSelect: { type: 'boolean' },
+            options: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['id', 'question', 'options'],
+        },
+      },
+      since: { type: 'number' },
+    },
+    required: ['askId', 'kind', 'since'],
+  }
+}
+
+/** One pending ask as a structured tool-output row. */
+function askPayload(ask: PeerPendingAsk): Record<string, unknown> {
+  return {
+    askId: ask.askId,
+    kind: ask.kind,
+    toolName: ask.kind === 'approval' ? ask.toolName ?? '' : '',
+    reason: ask.kind === 'approval' ? ask.reason ?? '' : '',
+    questions: ask.kind === 'question'
+      ? (ask.questions ?? []).map(question => ({
+        id: question.id,
+        question: question.question,
+        multiSelect: question.multiSelect === true,
+        options: (question.options ?? []).map(option => option.label),
+      }))
+      : [],
+    since: ask.since,
+  }
+}
+
 function askLines(asks: Map<string, AskBridgeRecord>): string[] {
   return [...asks.values()].map(record => {
     const parts = [record.summary]
@@ -1521,21 +1616,42 @@ function renderSessions(value: unknown): string {
 
 function renderAsk(value: unknown): string {
   const record = narrow(value)
-  if (record.ok !== true && record.pending !== true) {
+  // Only a structured failure carries `error`; settled non-completed results
+  // (terminal cancelled/aborted/error) and superseded turns carry `terminal`
+  // instead and must render their reason below, never as an empty failure.
+  if (record.error !== undefined && record.ok !== true && record.pending !== true) {
     const error = narrow(record.error)
     if (error.code === 'peer/target-unreachable') {
-      return `REMOTE TARGET UNREACHABLE: ${String(error.message)}`
+      // `failureFrom` already prefixes the message; never double it here.
+      const message = String(error.message ?? '')
+      return message.startsWith('REMOTE TARGET UNREACHABLE')
+        ? message
+        : `REMOTE TARGET UNREACHABLE: ${message}`
     }
     return `peer_ask failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`
   }
   const lines: string[] = []
+  if (record.status === 'waiting_approval') {
+    const pendingAsks = Array.isArray(record.pendingAsks) ? record.pendingAsks as Record<string, unknown>[] : []
+    lines.push(`REMOTE TURN WAITING FOR APPROVAL on ${String(record.alias)} (session ${String(record.sessionId)}).`)
+    lines.push(renderAsks({ ok: true, alias: record.alias, latch: record.latch, asks: pendingAsks }))
+    lines.push(`decide with peer_asks/peer_answer, then call peer_ask again with resume: ${JSON.stringify(String(record.requestId))} to follow the same turn to completion.`)
+    if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${(record.asks as string[]).join('; ')}`)
+    return lines.join('\n')
+  }
   if (record.pending === true) {
     lines.push(`REMOTE TURN STILL RUNNING on ${String(record.alias)} (${String(record.note ?? '')}).`)
     if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${(record.asks as string[]).join('; ')}`)
     return lines.join('\n')
   }
-  if (record.terminal !== 'completed') {
-    const remoteError = record.remoteError === undefined ? undefined : narrow(record.remoteError)
+  const remoteError = record.remoteError === undefined ? undefined : narrow(record.remoteError)
+  if (record.terminal === 'cancelled' || record.terminal === 'aborted') {
+    // A cancelled/aborted turn is not an infrastructure failure: report the
+    // terminal reason, the session, and any answer text committed before the
+    // cancellation instead of an empty `peer_ask failed` line.
+    lines.push(`REMOTE TURN ${String(record.terminal).toUpperCase()} on ${String(record.alias)} (session ${String(record.sessionId)}, turn ${String(record.turn)}).`)
+    if (remoteError !== undefined) lines.push(`remote error [${String(remoteError.code)}] ${String(remoteError.message)}`)
+  } else if (record.terminal !== 'completed') {
     lines.push(`REMOTE TURN FAILED on ${String(record.alias)}: ${String(record.terminal)}${remoteError === undefined ? '' : ` [${String(remoteError.code)}] ${String(remoteError.message)}`}`)
   } else {
     lines.push(`remote answer from ${String(record.alias)} (session ${String(record.sessionId)}):`)
