@@ -44,17 +44,24 @@ export function useHeavyStatus(
   options: { enabled?: boolean } = {},
 ): { status: HeavyStatusView | null; checking: boolean; refresh: () => void } {
   const enabled = options.enabled !== false
-  const [status, setStatus] = useState<HeavyStatusView | null>(() => heavyStatusCache.peek(providerId) ?? null)
+  // The status is bound to the provider it was read for: when the hook is
+  // reused for another provider id (a switch render), the previous provider's
+  // snapshot must read as null — never as this provider's status — until its
+  // own read answers. Without the binding a consumer could probe or act on a
+  // foreign provider's health snapshot.
+  const [view, setView] = useState<{ providerId: string; status: HeavyStatusView | null }>(
+    () => ({ providerId, status: heavyStatusCache.peek(providerId) ?? null }),
+  )
   const [checking, setChecking] = useState(false)
   useEffect(() => {
-    setStatus(heavyStatusCache.peek(providerId) ?? null)
+    setView({ providerId, status: heavyStatusCache.peek(providerId) ?? null })
     if (!enabled) return
     let cancelled = false
     const pull = () => {
       setChecking(true)
       void heavyStatusCache.read(providerId).then((result) => {
         if (cancelled) return
-        if (result.ok) setStatus(result.value)
+        if (result.ok) setView({ providerId, status: result.value })
         setChecking(false)
       })
     }
@@ -70,11 +77,13 @@ export function useHeavyStatus(
   const refresh = useCallback(() => {
     setChecking(true)
     void heavyStatusCache.read(providerId, { force: true }).then((result) => {
-      if (result.ok) setStatus(result.value)
+      // A read that settled after the hook moved to another provider updates
+      // nothing: its snapshot belongs to the provider id it was read for.
+      if (result.ok) setView({ providerId, status: result.value })
       setChecking(false)
     })
   }, [providerId])
-  return { status, checking, refresh }
+  return { status: view.providerId === providerId ? view.status : null, checking, refresh }
 }
 
 /**

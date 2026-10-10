@@ -405,6 +405,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
         <main className={styles['providerDetailMain']}>
           {selectedRow && selectedNamespace ? (
             <ProviderDetailPanel
+              key={selectedRow.entry.provider}
               row={selectedRow}
               namespace={selectedNamespace}
               schema={schema}

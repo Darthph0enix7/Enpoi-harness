@@ -59,6 +59,19 @@ function readHiddenMap(): Record<string, string[]> {
   } catch { return {} }
 }
 
+/**
+ * Explicitly-shown-map reader (the Settings page's eye toggle writes it): a
+ * model pinned shown must survive rule/gate hiding in the picker, so this map
+ * wins over the published decision map. Same 0ms local read as the hidden map.
+ */
+function readShownMap(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem('dsh_shown_models_v1')
+    if (!raw) return {}
+    return JSON.parse(raw) as Record<string, string[]>
+  } catch { return {} }
+}
+
 /** Format the model context window compactly (guaranteed display). */
 function resolveModelContext(model: ModelContextTarget): string {
   const tokens = resolveContextTokens(model)
@@ -188,7 +201,7 @@ export function ModelSelect(
     return () => { cancelled = true }
   }, [])
 
-  // 0ms hot-path caches: parse hidden/collapsed maps once per prefsVersion, not per model
+  // 0ms hot-path caches: parse hidden/shown/collapsed maps once per prefsVersion, not per model
   const hiddenMap = useMemo(() => readHiddenMap(), [prefsVersion])
   const hiddenSets = useMemo(() => {
     const m = new Map<string, Set<string>>()
@@ -198,16 +211,30 @@ export function ModelSelect(
   const isHiddenCached = useMemo(() => {
     return (provider: string, modelId: string) => hiddenSets.get(provider)?.has(modelId) ?? false
   }, [hiddenSets])
+  const shownMap = useMemo(() => readShownMap(), [prefsVersion])
+  const shownSets = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [k, v] of Object.entries(shownMap)) if (Array.isArray(v)) m.set(k, new Set(v))
+    return m
+  }, [shownMap])
+  const isShownCached = useMemo(() => {
+    return (provider: string, modelId: string) => shownSets.get(provider)?.has(modelId) ?? false
+  }, [shownSets])
   // Rule decisions ride the same prefsVersion: the localStorage list is the 0ms
-  // manual truth, the published map adds hide-rule/gating state (and pins).
+  // manual truth, the published map adds hide-rule/gating state (and pins). An
+  // explicit local shown pin beats every hiding source, matching the eye.
   const catalogVisibility = useMemo(() => catalogVisibilitySnapshot(), [prefsVersion])
   const decisionFor = useMemo(() => {
     return (provider: string, modelId: string) => catalogVisibility.get(`${provider}/${modelId}`)
   }, [catalogVisibility])
   const isModelHidden = useMemo(() => {
+    // Precedence mirrors the rules engine and the settings eye: a manual hidden
+    // pin beats a manual shown pin; a shown pin beats the decision map (rules
+    // and gating). A model present in both maps therefore stays hidden.
     return (provider: string, modelId: string) =>
-      isHiddenCached(provider, modelId) || decisionFor(provider, modelId)?.state === 'hidden'
-  }, [isHiddenCached, decisionFor])
+      isHiddenCached(provider, modelId)
+      || (!isShownCached(provider, modelId) && decisionFor(provider, modelId)?.state === 'hidden')
+  }, [isHiddenCached, isShownCached, decisionFor])
   const collapsedSet = useMemo(() => {
     try {
       const raw = localStorage.getItem('dsh_collapsed_groups_v2')
@@ -470,12 +497,15 @@ export function ModelSelect(
         if (!(model.name.toLowerCase().includes(q) || model.id.toLowerCase().includes(q))) continue
         if (activeSel?.provider === group.id && activeSel.model === model.id) continue
         if (isHiddenCached(group.id, model.id)) continue
+        // A shown pin renders as an ordinary row (the engine's map may not
+        // have caught up yet): never also list it as a dimmed hidden match.
+        if (isShownCached(group.id, model.id)) continue
         const decision = decisionFor(group.id, model.id)
         if (decision?.state === 'hidden' && decision.source !== 'manual') keys.add(`${group.id}/${model.id}`)
       }
     }
     return keys
-  }, [state.groups, q, activeSel, isHiddenCached, decisionFor])
+  }, [state.groups, q, activeSel, isHiddenCached, isShownCached, decisionFor])
 
   // Assignable model groups: enabled groups with at least one link, read from
   // the cached registry and refreshed on the groups-changed event.

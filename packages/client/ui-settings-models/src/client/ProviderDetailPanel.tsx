@@ -11,7 +11,7 @@ import {
   IconPlus, IconRefresh, IconArrowUp, IconArrowDown, IconLayers,
 } from './capability-icons.tsx'
 import {
-  toggleModelHidden, hideAllModels, showAllModels,
+  toggleModelVisibility, hideAllModels, showAllModels,
 } from './hidden-models.ts'
 import {
   CATALOG_DECISIONS_CHANGED_EVENT, modelVisibility, readCatalogDecisions,
@@ -417,6 +417,15 @@ function readHiddenMap(): Record<string, string[]> {
   } catch { return {} }
 }
 
+/** 0ms shown-map reader: explicit eye-toggle "shown" pins for this panel. */
+function readShownMap(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem('dsh_shown_models_v1')
+    if (!raw) return {}
+    return JSON.parse(raw) as Record<string, string[]>
+  } catch { return {} }
+}
+
 export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode {
   const { row, namespace, schema, api, t, readOnly, onDelete, onSaved } = props
   const providerId = row.entry.provider
@@ -488,6 +497,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     return m
   }, [hiddenMap])
   const hiddenSet = useMemo(() => hiddenSets.get(providerId) ?? new Set<string>(), [hiddenSets, providerId])
+  const shownMap = useMemo(() => readShownMap(), [prefsVersion])
+  const shownSets = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [k, v] of Object.entries(shownMap)) if (Array.isArray(v)) m.set(k, new Set(v))
+    return m
+  }, [shownMap])
+  const shownSet = useMemo(() => shownSets.get(providerId) ?? new Set<string>(), [shownSets, providerId])
   // The picker's own decision mirror, so a gated or rule-hidden model shows the
   // same eye state the picker renders. The route row's own data is the fallback
   // when no host engine published decisions.
@@ -639,17 +655,18 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   const enrichedFilteredModels = useMemo(() => {
     return filteredModels.map(m => ({
       model: m,
-      visibility: modelVisibility(m, hiddenSet, catalogDecisions.get(`${providerId}/${m.id}`)),
+      visibility: modelVisibility(m, hiddenSet, catalogDecisions.get(`${providerId}/${m.id}`), shownSet),
       caps: getCapsCached(m),
       contextStr: formatTokens(m.contextWindow),
       maxTokStr: formatTokens(m.maxTokens),
     }))
-  }, [filteredModels, hiddenSet, catalogDecisions, providerId])
+  }, [filteredModels, hiddenSet, shownSet, catalogDecisions, providerId])
 
-  // Toggle model hidden
-  // 0ms optimistic hide toggles: write store + bump prefsVersion so hiddenMap memo updates synchronously
-  const handleToggleHide = (modelId: string) => {
-    toggleModelHidden(providerId, modelId)
+  // Toggle model visibility from the state the eye renders: a model the picker
+  // hides via a rule or gate is shown by pinning it, not by adding it to the
+  // hidden list; 0ms optimistic write + debounced serialized persistence.
+  const handleToggleHide = (modelId: string, currentlyHidden: boolean) => {
+    toggleModelVisibility(providerId, modelId, currentlyHidden)
     setPrefsVersion(v => v + 1)
   }
 
@@ -661,7 +678,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }
 
   const handleShowAll = () => {
-    showAllModels(providerId)
+    showAllModels(providerId, modelsList.map(m => m.id))
     setPrefsVersion(v => v + 1)
   }
 
@@ -1834,17 +1851,16 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     </div>
                   </div>
 
-                  {/* Eye Toggle: gated/rule-hidden models state the picker's
-                      verdict and cannot be toggled from here; a manual pin can. */}
+                  {/* Eye Toggle: reflects the picker's verdict; the operator can
+                      always override it — clicking a rule/gate-hidden model pins
+                      it shown (the shown map beats every hiding source). */}
                   <button
                     type="button"
                     className={`${styles['modelEyeBtn']} ${visibility.hidden ? styles['modelEyeBtnHidden'] : ''}`}
-                    disabled={visibility.locked}
-                    onClick={() => handleToggleHide(m.id)}
+                    disabled={readOnly}
+                    onClick={() => handleToggleHide(m.id, visibility.hidden)}
                     title={visibility.hidden
-                      ? visibility.locked
-                        ? visibility.reason === null ? t('hiddenByRule') : t('hiddenInPicker', { reason: visibility.reason })
-                        : t('hiddenClickShow')
+                      ? visibility.reason === null ? t('hiddenClickShow') : t('hiddenInPicker', { reason: visibility.reason })
                       : t('visibleClickHide')}
                     aria-label={visibility.hidden ? t('showModel', { id: m.id }) : t('hideModel', { id: m.id })}
                   >

@@ -246,7 +246,7 @@ it('renders the detail panel root container with the detailPanel class contract'
   expect(panelEl?.className).toContain(styles.detailPanel)
 })
 
-it('states the picker verdict on the eye: non-free rows off and locked, free rows on', () => {
+it('states the picker verdict on the eye and lets the operator override any hide', () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ result: { ok: true } }) })))
   render(panel('gateway', [
     { id: 'gateway/auto-free', name: 'Auto Free', isFree: true },
@@ -256,18 +256,23 @@ it('states the picker verdict on the eye: non-free rows off and locked, free row
   ]))
 
   const paid = screen.getByLabelText<HTMLButtonElement>('Show gateway/auto-efficient')
-  expect(paid.disabled).toBe(true)
+  expect(paid.disabled).toBe(false)
   expect(paid.title).toContain('sign-in required')
   // A gate the listing never explained still renders off, with a generic title.
   const silent = screen.getByLabelText<HTMLButtonElement>('Show gateway/silent-gate')
-  expect(silent.disabled).toBe(true)
-  expect(silent.title).toBe('Hidden in picker by provider or rule')
+  expect(silent.disabled).toBe(false)
+  expect(silent.title).toBe('Hidden in picker (click to show)')
   expect(screen.getByLabelText<HTMLButtonElement>('Hide gateway/auto-free').disabled).toBe(false)
   // An absent free/paid marker is undisclosed, not a paid claim.
   expect(screen.getByLabelText<HTMLButtonElement>('Hide gateway/undisclosed').disabled).toBe(false)
+
+  // The operator clicks a gate-hidden row: it is pinned shown, not hidden again.
+  fireEvent.click(paid)
+  expect(screen.getByLabelText<HTMLButtonElement>('Hide gateway/auto-efficient').disabled).toBe(false)
+  expect(JSON.parse(localStorage.getItem('dsh_shown_models_v1') ?? '{}')).toEqual({ gateway: ['gateway/auto-efficient'] })
 })
 
-it('follows a published picker decision when the rules engine hides a row', async () => {
+it('follows a published picker decision when the rules engine hides a row, and can override it', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ result: { ok: true } }) })))
   render(panel('gateway', [{ id: 'rule-hidden', name: 'Rule Hidden' }]))
   expect(screen.getByLabelText<HTMLButtonElement>('Hide rule-hidden').disabled).toBe(false)
@@ -280,8 +285,13 @@ it('follows a published picker decision when the rules engine hides a row', asyn
   })
 
   const eye = screen.getByLabelText<HTMLButtonElement>('Show rule-hidden')
-  expect(eye.disabled).toBe(true)
+  expect(eye.disabled).toBe(false)
   expect(eye.title).toContain('no-training')
+
+  // Overriding a rule hide pins the model shown for the picker.
+  fireEvent.click(eye)
+  expect(screen.getByLabelText<HTMLButtonElement>('Hide rule-hidden').disabled).toBe(false)
+  expect(JSON.parse(localStorage.getItem('dsh_shown_models_v1') ?? '{}')).toEqual({ gateway: ['rule-hidden'] })
 })
 
 /** The heavy status envelope for a healthy configured Antigravity route. */

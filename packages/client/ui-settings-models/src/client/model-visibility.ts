@@ -2,12 +2,14 @@
  * Effective picker visibility for the Models card's eye toggle.
  *
  * The composer picker hides a model when the operator hid it by hand
- * (`enpoi-orchestration.uiPreferences.hiddenModels`) or when the host catalogue
+ * (`enpoi-orchestration.uiPreferences.hiddenModels`), when the host catalogue
  * rules resolve it hidden — which includes the route rows' own `gated` marker,
  * stamped by `enpoi-provider-sync` when the endpoint listing reported
- * `isFree: false`. The eye must state what the picker does, so it derives from
- * the same two sources and never from a model-name list, a provider allowlist,
- * or any other hardcoded model set.
+ * `isFree: false` — and shows it again when the operator pinned it shown
+ * (`uiPreferences.shownModels`). The eye must state what the picker does and
+ * must always let the operator override it, so it derives from those sources
+ * and never from a model-name list, a provider allowlist, or any other
+ * hardcoded model set.
  *
  * The rule decisions are read from the mirror `ui-model-selection` keeps under
  * {@link CATALOG_DECISIONS_MIRROR_KEY} — the module documents that mirror for
@@ -33,13 +35,12 @@ export interface ModelVisibilityRow {
 export interface ModelVisibility {
   /** Hidden from the picker: the eye renders off. */
   readonly hidden: boolean
-  /** Why the picker hides it when no manual local pin did; null when visible or manually hidden. */
-  readonly reason: string | null
   /**
-   * True when the hide comes from provider data or a rule, so this surface
-   * cannot toggle it: only a manual local pin can be switched here.
+   * Why the picker hides it when no manual hidden pin did; null when visible
+   * or manually hidden. The eye keeps it for the tooltip, and the operator can
+   * still click through to pin the model shown.
    */
-  readonly locked: boolean
+  readonly reason: string | null
 }
 
 /** `localStorage` key of the picker's published decision mirror (`ui-model-selection`). */
@@ -103,30 +104,29 @@ export function readCatalogDecisions(): Map<string, CatalogDecision> {
 }
 
 /**
- * Decide one model's picker visibility. A published manual-shown pin beats
- * provider data and rules, exactly as the rules engine orders them; a
- * published hidden decision and a non-free row are both off and locked,
- * because only a manual local pin is switchable from this surface. An absent
- * decision is default-visible.
+ * Decide one model's picker visibility, in the same precedence the rules
+ * engine applies: a manual hidden pin beats a manual shown pin, the shown pin
+ * beats everything else, then the published decision map (rules and gating),
+ * then the row's own gate marker, else default-visible. The operator may
+ * always toggle any row from the settings surface — a hide coming from a rule
+ * or gate is overridden by pinning the model shown, which is why no verdict
+ * here is locked.
  * @param row - the route model row.
  * @param manualHidden - the route's locally hidden model ids.
  * @param decision - the published decision for `${provider}/${row.id}`, when any.
- * @returns how the eye renders and whether it can be toggled.
+ * @param manualShown - the route's locally shown (explicitly pinned) model ids.
+ * @returns how the eye renders.
  */
 export function modelVisibility(
   row: ModelVisibilityRow,
   manualHidden: ReadonlySet<string>,
-  decision: CatalogDecision | undefined,
+  decision?: CatalogDecision | undefined,
+  manualShown: ReadonlySet<string> = new Set(),
 ): ModelVisibility {
-  const manual = manualHidden.has(row.id)
-  if (decision?.state === 'visible') {
-    // A manual-shown pin keeps the model in the picker whatever its marker.
-    return manual
-      ? { hidden: true, reason: null, locked: false }
-      : { hidden: false, reason: null, locked: false }
-  }
-  if (decision?.state === 'hidden') return { hidden: true, reason: decision.reason, locked: true }
-  if (isModelRowGated(row)) return { hidden: true, reason: row.gateReason ?? null, locked: true }
-  if (manual) return { hidden: true, reason: null, locked: false }
-  return { hidden: false, reason: null, locked: false }
+  if (manualHidden.has(row.id)) return { hidden: true, reason: null }
+  if (manualShown.has(row.id)) return { hidden: false, reason: null }
+  if (decision?.state === 'visible') return { hidden: false, reason: null }
+  if (decision?.state === 'hidden') return { hidden: true, reason: decision.reason }
+  if (isModelRowGated(row)) return { hidden: true, reason: row.gateReason ?? null }
+  return { hidden: false, reason: null }
 }

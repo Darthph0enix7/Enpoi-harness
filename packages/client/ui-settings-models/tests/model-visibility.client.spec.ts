@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 /**
  * The Models card's eye must state exactly what the picker shows, derived from
- * the listing's own free/paid markers and the picker's published rule
- * decisions — never from model names or any hardcoded model set.
+ * the listing's own free/paid markers, the operator's manual hidden/shown pins,
+ * and the picker's published rule decisions — never from model names or any
+ * hardcoded model set. Every verdict stays operator-toggleable: a hide from a
+ * rule or gate is overridden by pinning the model shown.
  */
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import {
   CATALOG_DECISIONS_MIRROR_KEY, isModelRowGated, modelVisibility, parseCatalogDecisions, readCatalogDecisions,
 } from '../src/client/model-visibility.ts'
 
 afterEach(() => {
+  vi.restoreAllMocks()
   localStorage.clear()
 })
 
@@ -20,10 +23,10 @@ it('hides rows the listing marked non-free and shows rows it marked free', () =>
   const gatedStamp = { id: 'vendor/gated-stamp', gated: true, gateReason: 'sign-in required' }
   const manual = new Set<string>()
 
-  expect(modelVisibility(free, manual, undefined)).toEqual({ hidden: false, reason: null, locked: false })
-  expect(modelVisibility(priced, manual, undefined)).toEqual({ hidden: true, reason: 'sign-in required', locked: true })
-  expect(modelVisibility(rawPaidMarker, manual, undefined)).toEqual({ hidden: true, reason: null, locked: true })
-  expect(modelVisibility(gatedStamp, manual, undefined)).toEqual({ hidden: true, reason: 'sign-in required', locked: true })
+  expect(modelVisibility(free, manual, undefined)).toEqual({ hidden: false, reason: null })
+  expect(modelVisibility(priced, manual, undefined)).toEqual({ hidden: true, reason: 'sign-in required' })
+  expect(modelVisibility(rawPaidMarker, manual, undefined)).toEqual({ hidden: true, reason: null })
+  expect(modelVisibility(gatedStamp, manual, undefined)).toEqual({ hidden: true, reason: 'sign-in required' })
 })
 
 it('an absent free marker is undisclosed, never a paid claim', () => {
@@ -47,25 +50,34 @@ it('derives from markers alone across a generated listing, not from names', () =
   expect(hidden).not.toContain('looks-paid/model-pro-max')
 })
 
-it('a manual local pin wins and stays toggleable', () => {
+it('a manual hidden pin beats every other source', () => {
   expect(modelVisibility({ id: 'm' }, new Set(['m']), undefined))
-    .toEqual({ hidden: true, reason: null, locked: false })
-  // A published manual-shown pin cannot beat the operator's local hide, but it
-  // still means clearing the local pin would show the model again.
+    .toEqual({ hidden: true, reason: null })
+  // A published manual-shown pin cannot beat the operator's local hide.
   expect(modelVisibility({ id: 'm' }, new Set(['m']), { state: 'visible', reason: null }))
-    .toEqual({ hidden: true, reason: null, locked: false })
-  // A local pin beside a non-free marker states the marker: off and locked.
+    .toEqual({ hidden: true, reason: null })
+  // A local hidden pin beside a non-free marker keeps its own verdict.
   expect(modelVisibility({ id: 'm', gated: true, gateReason: 'sign-in required' }, new Set(['m']), undefined))
-    .toEqual({ hidden: true, reason: 'sign-in required', locked: true })
+    .toEqual({ hidden: true, reason: null })
+  // Hidden wins over shown when both pins exist, matching the rules engine.
+  expect(modelVisibility({ id: 'm' }, new Set(['m']), undefined, new Set(['m'])))
+    .toEqual({ hidden: true, reason: null })
+})
+
+it('a manual shown pin beats gating and rule decisions', () => {
+  expect(modelVisibility({ id: 'm', gated: true, gateReason: 'sign-in required' }, new Set(), undefined, new Set(['m'])))
+    .toEqual({ hidden: false, reason: null })
+  expect(modelVisibility({ id: 'm' }, new Set(), { state: 'hidden', reason: 'hidden by rule: x' }, new Set(['m'])))
+    .toEqual({ hidden: false, reason: null })
 })
 
 it('follows a published hidden decision with its reason, and a shown pin over gating', () => {
   expect(modelVisibility({ id: 'm' }, new Set(), { state: 'hidden', reason: 'sign-in required' }))
-    .toEqual({ hidden: true, reason: 'sign-in required', locked: true })
+    .toEqual({ hidden: true, reason: 'sign-in required' })
   expect(modelVisibility({ id: 'm', gated: true }, new Set(), { state: 'visible', reason: null }))
-    .toEqual({ hidden: false, reason: null, locked: false })
+    .toEqual({ hidden: false, reason: null })
   expect(modelVisibility({ id: 'm', gated: true }, new Set(), { state: 'hidden', reason: 'hidden by rule: x' }))
-    .toEqual({ hidden: true, reason: 'hidden by rule: x', locked: true })
+    .toEqual({ hidden: true, reason: 'hidden by rule: x' })
 })
 
 it('parses the picker decision mirror and drops malformed rows', () => {
@@ -94,4 +106,14 @@ it('reads the mirror from localStorage, empty on absence or malformed JSON', () 
   expect(readCatalogDecisions().get('p/hidden')).toEqual({ state: 'hidden', reason: 'sign-in required' })
   localStorage.setItem(CATALOG_DECISIONS_MIRROR_KEY, '{ not json')
   expect(readCatalogDecisions().size).toBe(0)
+})
+
+it('reads no decisions when storage is disabled', () => {
+  // Private mode / quota: getItem itself throws; the eye falls back to the
+  // route row's own data exactly as an unpublished mirror would.
+  const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage disabled') })
+  expect(readCatalogDecisions().size).toBe(0)
+  getItem.mockRestore()
+  localStorage.setItem(CATALOG_DECISIONS_MIRROR_KEY, JSON.stringify({ 'p/hidden': { state: 'hidden' } }))
+  expect(readCatalogDecisions().size).toBe(1)
 })
