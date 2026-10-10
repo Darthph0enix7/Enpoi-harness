@@ -1,4 +1,5 @@
 You are an AI agent powered by DeepSeek Harness.
+Current route: deepseek-official/mock-delegate
 
 You are a coding agent powered by the mock-delegate model.
 

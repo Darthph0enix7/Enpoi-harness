@@ -43,7 +43,7 @@ kind: "package-reference"
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `includeHarnessIdentity` | `true` | 是否包含顺序为 −1000 的第一方固定开场白 `You are an AI agent powered by DeepSeek Harness.`。仅当兼容性部署拥有完整系统提示词时设为 false。 |
+| `includeHarnessIdentity` | `true` | 是否包含顺序为 −1000 的第一方开场白：固定品牌句 `You are an AI agent powered by DeepSeek Harness.`，其后是路由模型数据行（`Current route: <provider>/<model>`；组装声明 chain 时追加 `(chain: <chain>)`）。仅当兼容性部署拥有完整系统提示词时设为 false。 |
 | `includeRuntimeContext` | `true` | 是否在组装中包含有序动态 runtime 上下文 |
 | `personaPrefix` | `''` | 全局 persona 前缀模板，顺序为 `0`，位于第一方指导之前 |
 | `personaSuffix` | `''` | 全局 `deployment:persona-suffix` 模板，顺序为 `10200`，位于第一方指导之后 |
@@ -134,12 +134,13 @@ ctx.systemPrompt.variable('cwd', ({ agent }) => agent?.session.header.cwd)
 
 #### 模型看到什么
 
-第一方段落依次渲染 harness 身份、部署 persona 前缀（含模型名称介绍）、可复用指令（包括生成的工具 SDK 和结构化输出指导），最后是携带环境信息的后缀：harness 源码（`10000`）、Web 表层（`10100`）和部署 persona 后缀（`10200`）。外部段落的顺序与组装监听器仍决定其最终结果。`includeHarnessIdentity: false` 仅省略这个固定开场白。空段会消失；带作用域的段与变量可以为一个 agent 遮蔽全局项。`system-prompt/assemble` waterfall 决定交付的提示词与工具 schema，除非一个有效段声明自身为 complete——此时该确切段会成为完整的系统提示词，而 waterfall 得到的上下文、工具与变量保持不变。渲染后的提示词作为派生历史中的 system 角色消息——surface 第 0 号节点，或历史内更新之后最新的系统节点——到达模型；循环请求与 `request/header` 均不含单独的 `system` 字段。完整渲染结果为空时，循环通过有日志记录的空内容替换清除所有生效的系统节点，模型历史不再保留任何旧提示词。有序动态上下文与段分离，只在存在时才会成为带来源的 user 角色快照；`includeRuntimeContext: false` 或带作用域的抑制器会移除全部这类上下文。
+第一方段落依次渲染 harness 身份、部署 persona 前缀（含模型名称介绍）、可复用指令（包括生成的工具 SDK 和结构化输出指导），最后是携带环境信息的后缀：harness 源码（`10000`）、Web 表层（`10100`）和部署 persona 后缀（`10200`）。身份保留固定品牌句，并追加来自组装的 `provider`/`model` 变量的路由模型数据行——即请求实际路由使用的值——组装未声明路由时整行省略；仅当组装声明 `chain` 时出现 chain 子句。路由行是数据，而不是供模型解读的散文：它重复路由所有者为此组装声明的值，因此模型读到自己的实际 provider 与 model；路由不变时该行逐轮字节一致，路由变化时它与 persona 的模型名称介绍一起更新。外部段落的顺序与组装监听器仍决定其最终结果。`includeHarnessIdentity: false` 仅省略这个开场白。空段会消失；带作用域的段与变量可以为一个 agent 遮蔽全局项。`system-prompt/assemble` waterfall 决定交付的提示词与工具 schema，除非一个有效段声明自身为 complete——此时该确切段会成为完整的系统提示词，而 waterfall 得到的上下文、工具与变量保持不变。渲染后的提示词作为派生历史中的 system 角色消息——surface 第 0 号节点，或历史内更新之后最新的系统节点——到达模型；循环请求与 `request/header` 均不含单独的 `system` 字段。完整渲染结果为空时，循环通过有日志记录的空内容替换清除所有生效的系统节点，模型历史不再保留任何旧提示词。有序动态上下文与段分离，只在存在时才会成为带来源的 user 角色快照；`includeRuntimeContext: false` 或带作用域的抑制器会移除全部这类上下文。
 
 ##### harness 身份
 
 ```markdown
 You are an AI agent powered by DeepSeek Harness.
+Current route: <provider>/<model> (chain: <chain>)
 ```
 
 #### Token 影响
@@ -148,7 +149,7 @@ You are an AI agent powered by DeepSeek Harness.
 
 #### KV Cache 影响
 
-只要身份、persona、变量、段文本与顺序的渲染完全相同，前缀就保持稳定：渲染未变时系统节点保持不动，除非不支持该能力的路由或新请求序列必须归并保留的历史内提示词。没有 `systemPromptUpdate` 时，非空提示词文本通过有日志记录的逐节点替换归并到首个系统节点，因此头节点重写会从首个变化的 token 起失去前缀复用；当已准备调用声明 `systemPromptUpdate: 'in-history'` 时，agent loop（智能体循环）会在同一请求序列延续期间把变化后的非空提示词追加到已缓存历史之后，因此直到该历史末尾的前缀仍可复用（[决策规则](../agent-loop/README.zh.md#understand-the-implementation)）。模型、persona 前缀、工具与前置指令一致时，不同源码路径、本地 Web URL 或 persona 后缀值不会改变可复用的第一方前缀。persona 前缀变化可能改变靠前的前缀。任何变更都可能从第一个变化的 token 起使复用失效；不保证提供方共享缓存或实际命中率。
+只要身份、persona、变量、段文本与顺序的渲染完全相同，前缀就保持稳定：身份路由行来自同一模型选择，路由不变时逐轮字节一致，因此模型切换才是从该行起使复用失效的变化。渲染未变时系统节点保持不动，除非不支持该能力的路由或新请求序列必须归并保留的历史内提示词。没有 `systemPromptUpdate` 时，非空提示词文本通过有日志记录的逐节点替换归并到首个系统节点，因此头节点重写会从首个变化的 token 起失去前缀复用；当已准备调用声明 `systemPromptUpdate: 'in-history'` 时，agent loop（智能体循环）会在同一请求序列延续期间把变化后的非空提示词追加到已缓存历史之后，因此直到该历史末尾的前缀仍可复用（[决策规则](../agent-loop/README.zh.md#understand-the-implementation)）。模型、persona 前缀、工具与前置指令一致时，不同源码路径、本地 Web URL 或 persona 后缀值不会改变可复用的第一方前缀。persona 前缀变化可能改变靠前的前缀。任何变更都可能从第一个变化的 token 起使复用失效；不保证提供方共享缓存或实际命中率。
 
 ### 工具 schema
 
@@ -171,6 +172,7 @@ schema token 在每次请求中重复。限制工具会为该 agent 移除其全
 
 这些限制说明提示词组装何时需要特别留意。它们是当前包约束，不是待办事项清单。
 
+- **身份 chain 子句由调用方声明**：仅当组装声明 `chain` 提示词变量时，路由行才追加 `(chain: <chain>)`；当前 `dsh-agent-loop` 与模型选择所有者只注册 `provider` 和 `model`，因此在有路由所有者在 assemble waterfall 上声明 chain 之前，已交付组合只渲染 provider/model 对，不含 chain 子句。
 - **部署方编写的提示词文本只来自配置／组合**：此插件拥有全局 persona 前缀与后缀默认值；创建方插件可以注册 agent 作用域的遮蔽项；其他段来自拥有相应事实的插件。不存在终端用户提示词编辑 API。
 - **插值文本不支持行内转义语法**：整段需要保留字面花括号时，使用 `interpolate: false`。
 - **`toolOrder` 配置错误在提示词组装（首轮）时出现，而不是启动时**：只有形状违规会在配置加载时抛出。

@@ -116,6 +116,69 @@ describe('SystemPrompt', () => {
         .toThrow('prompt section "deployment:persona-prefix" is already registered')
     })
 
+    it('states the routed provider/model as identity data, with the chain the assembly carries', async () => {
+      const ctx = new Context()
+      try {
+        await ctx.plugin(SystemPrompt, {})
+        // The route owner's projections: agent-loop registers provider/model and
+        // a composition may state a model-group id; all land in the same map.
+        ctx.systemPrompt.variable('provider', () => 'kilo')
+        ctx.systemPrompt.variable('model', () => 'inclusionai/ling-3.1-flash')
+        ctx.systemPrompt.variable('chain', () => 'test')
+        const assembly = await ctx.systemPrompt.assemble()
+        expect(assembly.sections.find(section => section.name === 'harness:identity')?.text)
+          .toBe(`${IDENTITY}\nCurrent route: kilo/inclusionai/ling-3.1-flash (chain: test)`)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    })
+
+    it('follows the routed values the selection states for this assembly, byte-identical on the same route', async () => {
+      // The model-selection owner overlays provider/model on the assembly
+      // waterfall exactly like this before routing the request; the identity
+      // line must state those values, not the pre-waterfall projections.
+      const ctx = new Context()
+      try {
+        await ctx.plugin(SystemPrompt, {})
+        ctx.systemPrompt.variable('provider', () => 'configured')
+        ctx.systemPrompt.variable('model', () => 'configured-model')
+        ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+          const assembled = await next()
+          return {
+            ...assembled,
+            variables: { ...assembled.variables, provider: 'kilo', model: 'inclusionai/ling-3.1-flash' },
+          }
+        })
+        const first = renderPrompt(await ctx.systemPrompt.assemble())
+        const second = renderPrompt(await ctx.systemPrompt.assemble())
+        expect(first).toBe(`${IDENTITY}\nCurrent route: kilo/inclusionai/ling-3.1-flash`)
+        expect(second).toBe(first)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    })
+
+    it('omits the route line when the assembly states no route, and never scans routed values as templates', async () => {
+      const ctx = new Context()
+      try {
+        await ctx.plugin(SystemPrompt, {})
+        let route: { provider?: string; model?: string } = {}
+        ctx.systemPrompt.variable('provider', () => route.provider)
+        ctx.systemPrompt.variable('model', () => route.model)
+        expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
+        route = { provider: 'kilo' }
+        expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
+        route = { provider: 'kilo', model: '' }
+        expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
+        // Routed values are data: a brace inside one stays literal.
+        route = { provider: 'kilo', model: 'm-{{literal}}' }
+        expect(renderPrompt(await ctx.systemPrompt.assemble()))
+          .toBe(`${IDENTITY}\nCurrent route: kilo/m-{{literal}}`)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    })
+
     it('renders no persona section for a persona-less deployment (empty default)', async () => {
       const ctx = new Context()
       await ctx.plugin(SystemPrompt)

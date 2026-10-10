@@ -1,4 +1,5 @@
 You are an AI agent powered by DeepSeek Harness.
+Current route: deepseek-official/deepseek-v4-flash
 
 You are a coding agent powered by the deepseek-v4-flash model.
 

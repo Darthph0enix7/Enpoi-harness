@@ -18,8 +18,8 @@
   en: 7bea567207cd7e00
   zh: ffc050b05f07ba7f
 /deepseek-ai-dsh-system-prompt/use-this-package/configure-the-prompt:
-  en: 77c27acfc831cf4c
-  zh: ae4d89acd08eb204
+  en: b87e7963ef174978
+  zh: cef9eb84b3954dff
 /deepseek-ai-dsh-system-prompt/use-this-package/contribute-a-prompt-section:
   en: 15d70e3b8eddd636
   zh: a3a67cab60eee86f
@@ -57,8 +57,8 @@
   en: cf78b9dd5596495f
   zh: bd44560f8c2435e8
 /deepseek-ai-dsh-system-prompt/model-experience/system-prompt/what-the-model-sees:
-  en: 9927fdee4f8aa8ec
-  zh: 3687314c357fa7f4
+  en: ff4948199db2e688
+  zh: 41d41d0ad648fe85
 /deepseek-ai-dsh-system-prompt/model-experience/system-prompt/what-the-model-sees/harness-identity:
   en: 40effd71cb503319
   zh: 9969356237a4f398
@@ -66,8 +66,8 @@
   en: 29722e212137deaa
   zh: 92cd0f1a16b10315
 /deepseek-ai-dsh-system-prompt/model-experience/system-prompt/kv-cache-effect:
-  en: ae980c28b57dc060
-  zh: 331eea5b204fa9ac
+  en: b2d270aeb7e15ab8
+  zh: 70fb5523405b79db
 /deepseek-ai-dsh-system-prompt/model-experience/tool-schemas:
   en: 3039bc5e7a796b21
   zh: 6b7a9eaf69c9ea53
@@ -81,8 +81,8 @@
   en: ebd329e360f0d143
   zh: 9d67fe503a6a095a
 /deepseek-ai-dsh-system-prompt/known-limitations-and-deferred-work:
-  en: 23bb9f59ceb1620c
-  zh: be34f1770fa2e027
+  en: 08af9de22abb6b33
+  zh: 56be2de9e163b1da
 /deepseek-ai-dsh-system-prompt/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773
   zh: 3bb0c20c93f16f98

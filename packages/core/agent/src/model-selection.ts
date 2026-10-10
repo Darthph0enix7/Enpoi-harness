@@ -59,6 +59,7 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
         ...assembled.variables,
         provider: selected.provider,
         model: selected.model,
+        ...(selected.chain === undefined ? {} : { chain: selected.chain }),
       },
     }
   })

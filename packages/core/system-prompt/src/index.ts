@@ -122,6 +122,20 @@ export interface PromptAssembly {
   variables: Record<string, string | undefined>
 }
 
+/**
+ * The built-in harness identity section's registered name. Its text is the
+ * fixed brand sentence; {@link SystemPrompt.assemble} may append the routed
+ * provider/model facts to that exact text.
+ */
+const HARNESS_IDENTITY_SECTION = 'harness:identity'
+
+/**
+ * The fixed first-party brand sentence. It names the product, never the
+ * model; the routed-model facts are stated separately as data on the same
+ * section (see {@link SystemPrompt.assemble}).
+ */
+const HARNESS_IDENTITY_TEXT = 'You are an AI agent powered by DeepSeek Harness.'
+
 const SECTION_ORDERS = {
   HARNESS_IDENTITY: -1000,
   DEPLOYMENT_PERSONA_PREFIX: 0,
@@ -424,9 +438,9 @@ export class SystemPrompt extends Service {
     // Keep harness-owned openers independent of the selected loop plugin.
     if (config.includeHarnessIdentity ?? true) {
       this.section({
-        name: 'harness:identity',
+        name: HARNESS_IDENTITY_SECTION,
         order: this.getSectionOrder('HARNESS_IDENTITY'),
-        text: 'You are an AI agent powered by DeepSeek Harness.',
+        text: HARNESS_IDENTITY_TEXT,
       })
     }
     this.section({
@@ -550,9 +564,10 @@ export class SystemPrompt extends Service {
    * canonical ordering, then run the assembly waterfall. Scoped sections and
    * variables shadow globals. The returned waterfall value is authoritative
    * except that an effective complete section is restored afterwards as the
-   * sole prompt section.
+   * sole prompt section, and the built-in identity section gains the routed
+   * provider/model data line (see {@link SystemPrompt.withRouteIdentity}).
    * @param context - the optional scope and plugin-defined assembly fields.
-   * @returns the post-waterfall assembly with any complete prompt enforced.
+   * @returns the post-waterfall assembly with any complete prompt enforced and the identity route line stated.
    */
   // Keep configuration failures on the declared asynchronous error path.
   async assemble(context: AssembleContext = {}): Promise<PromptAssembly> {
@@ -626,12 +641,53 @@ export class SystemPrompt extends Service {
       scopeTarget(this, scope), 'system-prompt/assemble', assembly, context,
       () => Promise.resolve(assembly),
     )
-    if (completeSection === undefined && !runtimeContextSuppressed) return transformed
-    return {
+    if (completeSection === undefined && !runtimeContextSuppressed) {
+      return this.withRouteIdentity(transformed)
+    }
+    return this.withRouteIdentity({
       ...transformed,
       sections: completeSection === undefined ? transformed.sections : [completeSection],
       contexts: runtimeContextSuppressed ? [] : transformed.contexts,
-    }
+    })
+  }
+
+  /**
+   * Append the routed-model facts to the built-in identity section.
+   *
+   * The values are read from the assembled `variables` map — the seam the
+   * owner of the route states on the `system-prompt/assemble` waterfall and
+   * the request itself is routed from — so the line is the route actually in
+   * use for this assembly, never a hand-written or guessed name. `provider`
+   * and `model` are both required; `chain` is appended as the model-group id
+   * only when the owning composition states one. Neither partial values nor
+   * absent values are defaulted: a route that cannot be resolved contributes
+   * no line, and the brand sentence stands alone as before.
+   *
+   * Only the untouched built-in text is enriched, so a scoped shadow or a
+   * waterfall replacement of `harness:identity` keeps its own wording. The
+   * line derives from the same per-assembly selection on every turn, so it is
+   * byte-identical while the route is unchanged and the prompt prefix stays
+   * reusable across turns.
+   * @param assembly - the post-waterfall assembly to enrich.
+   * @returns the assembly with the identity route line stated, or the input unchanged.
+   */
+  private withRouteIdentity(assembly: PromptAssembly): PromptAssembly {
+    const index = assembly.sections.findIndex(section =>
+      section.name === HARNESS_IDENTITY_SECTION && section.text === HARNESS_IDENTITY_TEXT)
+    if (index < 0) return assembly
+    const provider = assembly.variables.provider
+    const model = assembly.variables.model
+    if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) return assembly
+    const chain = assembly.variables.chain
+    const route = chain === undefined || chain.length === 0
+      ? `Current route: ${provider}/${model}`
+      : `Current route: ${provider}/${model} (chain: ${chain})`
+    const identity = assembly.sections[index]
+    if (identity === undefined) return assembly
+    const sections = [...assembly.sections]
+    // The routed values are data, not a template: braces in a value stay literal.
+    sections[index] = { ...identity, text: `${HARNESS_IDENTITY_TEXT}\n${route}`, interpolate: false }
+    return { ...assembly, sections }
   }
 }
 

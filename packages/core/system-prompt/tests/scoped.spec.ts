@@ -43,6 +43,23 @@ describe('scoped sections', () => {
     expect(global).not.toContain('You run tests.')
   })
 
+  it('leaves a scoped harness:identity shadow without the routed-model line', async () => {
+    const ctx = await mount()
+    const scope = await mintScope(ctx, 'child')
+    scope.ctx.systemPrompt.section({
+      name: 'harness:identity',
+      order: ctx.systemPrompt.getSectionOrder('HARNESS_IDENTITY'),
+      text: 'You are a custom deployment.',
+    })
+    ctx.systemPrompt.variable('provider', () => 'kilo')
+    ctx.systemPrompt.variable('model', () => 'inclusionai/ling-3.1-flash')
+
+    const scoped = renderPrompt(await ctx.systemPrompt.assemble({ scope: scopeKeyOf(scope) }))
+    expect(scoped).toContain('You are a custom deployment.')
+    expect(scoped).not.toContain('Current route:')
+    expect(renderPrompt(await ctx.systemPrompt.assemble())).toContain('Current route: kilo/inclusionai/ling-3.1-flash')
+  })
+
   it('scoped-only sections join that scope alone; disposal removes them', async () => {
     const ctx = await mount()
     const scope = await mintScope(ctx, 'child')

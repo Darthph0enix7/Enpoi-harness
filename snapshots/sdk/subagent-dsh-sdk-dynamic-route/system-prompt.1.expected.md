@@ -1,4 +1,5 @@
 You are an AI agent powered by DeepSeek Harness.
+Current route: mock/mock-routed
 
 Echo where you run.
 
