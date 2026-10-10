@@ -301,7 +301,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
         extendBuiltins: { sharedKeep: { remove: ['whiteboard_pin'] } },
       },
     })
-    expect(request.toolFilter?.allow).toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_unpin'])
+    expect(request.toolFilter?.allow).toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_unpin', 'compressor_retrieve'])
   })
 
   it('appends extendBuiltins sharedKeep additions to the keep union', async () => {

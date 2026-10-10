@@ -7,6 +7,7 @@
     "@xterm/xterm": "^6.0.0",
     "dsh-context": "0.54.4",
     "dsh-context-lens": "0.3.1",
+    "dsh-compressor": "0.1.0",
     "dsh-enpoi-agent-switch": "workspace:*",
     "dsh-enpoi-capabilities": "workspace:*",
     "dsh-enpoi-cascade": "workspace:*",

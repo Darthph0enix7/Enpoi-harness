@@ -1364,3 +1364,16 @@
 # Web profiles opt in; Desktop retains it by default.
 - id: ui-sidebar-browser
   disabled: false
+
+
+# dsh-compressor: in-process tool-result crushing (<<compressor:hash>> locators)
+# with a compressor_retrieve tool for verbatim recovery. Inserted as a template
+# row: the installer unions dependencies into existing devices, but
+# dsh.profile.bundles does not merge on refresh, so this insert is what mounts
+# it everywhere. The exact-version exemption lives in compatibility.json; when
+# the native addon is missing (darwin-x64, linux-arm64, musl) the plugin is
+# fail-open: content passes through unchanged with one stderr warning. Do not
+# also register the dsh-compressor bundle - that would double-mount this row.
+- insert:
+    - id: dsh-compressor
+      name: dsh-compressor

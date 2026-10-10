@@ -13,4 +13,5 @@ allowBuilds:
   protobufjs: false
   ssh2: true
 patchedDependencies:
+  dsh-compressor@0.1.0: patches/dsh-compressor@0.1.0.patch
   dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch

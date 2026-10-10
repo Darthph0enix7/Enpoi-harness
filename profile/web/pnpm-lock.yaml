@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
+  dsh-compressor@0.1.0: 4afd979922c95ae4e811abdd299f11b76d25afa72ddebc6609506d11be42a5d0
   dsh-fast@0.2.14: 1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6
 
 importers:
@@ -23,6 +24,9 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
+      dsh-compressor:
+        specifier: 0.1.0
+        version: 0.1.0(patch_hash=4afd979922c95ae4e811abdd299f11b76d25afa72ddebc6609506d11be42a5d0)
       dsh-context:
         specifier: 0.54.4
         version: 0.54.4
@@ -976,6 +980,11 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
+
+  dsh-compressor@0.1.0:
+    resolution: {integrity: sha512-oJT3Xy8/jpofp5elHmow6+4W2hPSJi35pYPMCHzoQqtSlhMVEmx5iyxTQ1jmPxJB9OsqUA7sTZcJD/MEH9609w==}
+    peerDependencies:
+      '@deepseek-ai/dsh-tools': 0.1.0-rc.6
 
   dsh-context-lens@0.3.1:
     resolution: {integrity: sha512-Kfg3T6d6qhwi/qLVVRNKFxhcGWG7QUNhDjWG3HZw5A6sxws3ZNInCnx67JileueU+UDmRsapIXFLVDMO6MhfqA==}
@@ -2156,6 +2165,8 @@ snapshots:
   defu@6.1.7: {}
 
   detect-libc@2.1.2: {}
+
+  dsh-compressor@0.1.0(patch_hash=4afd979922c95ae4e811abdd299f11b76d25afa72ddebc6609506d11be42a5d0): {}
 
   dsh-context-lens@0.3.1:
     dependencies:

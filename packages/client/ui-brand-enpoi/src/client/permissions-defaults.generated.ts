@@ -18,15 +18,16 @@
  * tool-defaults completeness spec verifies it from the other side.
  */
 
-export const HOST_DEFAULTS_DIGEST = '8d93d6e784cad7141f24344b872b100023c7dcb82abc17bf0bdf241e99a019d7'
+export const HOST_DEFAULTS_DIGEST = 'fa311fad760a1c2298a21c7d5722c4377521527122a2f78fc5e5b9257d168cd1'
 
-export const MIRROR_SOURCE_DIGEST = 'c735d388c9de9f09813ac002a8a80b9fa6bffbb630d84ec3e1772dba00b06d92'
+export const MIRROR_SOURCE_DIGEST = 'f40d51e5d90542acf36875168615fb6993ac7a35da24f5cf9748e757c7fe75ad'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
   'ask_user_question': 'allow',
   'bash': 'ask',
   'chorus': 'allow',
+  'compressor_retrieve': 'allow',
   'cordis_inspect_list': 'allow',
   'cordis_inspect_query': 'allow',
   'council_list': 'allow',
@@ -224,7 +225,7 @@ export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>>
 })
 
 /** Tools every child keeps regardless of role surface (host keep list). */
-export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin'])
+export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve'])
 
 /** Tools denied to every child (host anti-leak floor). */
 export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents', 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query', 'review_run'])

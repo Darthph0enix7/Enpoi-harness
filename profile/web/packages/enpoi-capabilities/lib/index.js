@@ -773,6 +773,12 @@ var init_policy = __esm({
       session_event_search: "allow",
       session_event_read: "allow",
       session_event_trace: "allow",
+      // dsh-compressor rescue (doc 93): the augment ships crushed tool results as
+      // `<<compressor:hash>>` locators; retrieving the original text is read-only
+      // and scoped to the calling session, so it rides the same read-only
+      // introspection family. The subagent keep list (`SHARED_CHILD_KEEP`) pins it
+      // for delegated children as well.
+      compressor_retrieve: "allow",
       council_list: "allow",
       // Fleet recovery (doc 07): the orchestrator continues a child that stopped
       // before its end result — the settlement notice names its session id and

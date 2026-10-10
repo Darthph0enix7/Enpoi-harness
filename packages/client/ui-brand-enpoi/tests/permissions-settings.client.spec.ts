@@ -95,7 +95,7 @@ describe('registry role surfaces', () => {
 
   it('roleSurfaceFor resolves a registry-only role surface and unions the kept whiteboard tools', () => {
     expect(roleSurfaceFor('muse', mergeRoleRegistry({ muse: { tools: { available: ['read'] } } })))
-      .toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin'])
+      .toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve'])
     expect(roleSurfaceFor('muse')).toBeUndefined()
     expect(roleSurfaceFor(undefined)).toBeUndefined()
     // The child-keep list is a floor, not an override: the role still keeps them.

@@ -506,19 +506,24 @@ export const SHARED_CHILD_DENY: readonly string[] = [
 ]
 
 /**
- * Tools every child keeps regardless of role surface: the pinned whiteboard.
- * A delegated child may be sent precisely to read or record the board, so the
- * keep list is unioned into every explicit allow surface (operator-configured
- * or role-registry) and stripped from the built-in role deny maps. Only an
- * explicit operator `deny` entry can still remove them — deny is the
- * operator's voice and always wins in `tools.restrict()`. An operator edits
- * the list through `enpoi-orchestration.extendBuiltins.sharedKeep`.
+ * Tools every child keeps regardless of role surface: the pinned whiteboard
+ * and the tool-result rescue. A delegated child may be sent precisely to read
+ * or record the board, so the keep list is unioned into every explicit allow
+ * surface (operator-configured or role-registry) and stripped from the
+ * built-in role deny maps. `compressor_retrieve` joins it because a child that
+ * can read a crushed tool result (the dsh-compressor locator form) must be
+ * able to restore its original text instead of failing on the locator; the
+ * retrieval is read-only and session-scoped. Only an explicit operator `deny`
+ * entry can still remove them — deny is the operator's voice and always wins
+ * in `tools.restrict()`. An operator edits the list through
+ * `enpoi-orchestration.extendBuiltins.sharedKeep`.
  */
 export const SHARED_CHILD_KEEP: readonly string[] = [
   'whiteboard_read',
   'whiteboard_write',
   'whiteboard_pin',
   'whiteboard_unpin',
+  'compressor_retrieve',
 ]
 
 /**

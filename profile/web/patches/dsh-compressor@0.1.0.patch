@@ -1,0 +1,12 @@
+diff --git a/lib/index.js b/lib/index.js
+index c60a42eae9f9319b1cab00ff442784fdd54331ba..ff00ac4596d71557f2efc02edb8bf9cc66b1ca08 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -154,7 +154,6 @@ function hangHooks(ctx) {
+     if (typeof ctx.on !== "function") {
+         return;
+     }
+-    ctx.on("agent/pre-step", (payload, next) => onPreStep(ctx, payload, next));
+     ctx.on("tools/post-execute", (exec, result, next) => onPostExecute(ctx, exec, result, next));
+ }
+ export function apply(ctx) {
