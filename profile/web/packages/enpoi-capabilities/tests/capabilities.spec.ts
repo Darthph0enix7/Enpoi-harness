@@ -8,14 +8,13 @@ import {
 } from '../src/index'
 
 describe('enpoi-capabilities unit & enforcement suite', () => {
-  it('initializes defaults correctly (MCP default OFF, skills/tools default ON)', () => {
+  it('initializes defaults correctly (no MCP defaults, skills/tools default ON)', () => {
     const state = initialCapabilitiesState()
 
-    // MCP servers must be default OFF per user directive
-    expect(state.mcp['plane-mcp']).toBe(false)
-    // Settings-owned servers are not hardcoded descriptors: they merge in from
-    // global defaults, not from this catalog.
-    expect(state.mcp['custom-mcp']).toBeUndefined()
+    // No MCP server ships as a default; every MCP row is settings-owned and
+    // merges in from global defaults, never from this catalog.
+    expect(state.mcp).toEqual({})
+    expect(state.mcp['plane-mcp']).toBeUndefined()
 
     // Skills must be default ON
     expect(state.skills['tier2-workflow']).toBe(true)

@@ -210,7 +210,9 @@ describe('fresh-home boot composition', () => {
     for (const id of ['tier1-workflow', 'tier2-workflow', 'tier3-workflow']) {
       expect(state.skills[id], `skill ${id} must default on`).toBe(true)
     }
-    expect(state.mcp['plane-mcp']).toBe(false)
+    // No MCP server ships as a default: every MCP row is settings-owned, so a
+    // device-specific server (plane-mcp) never appears on a fresh install.
+    expect(state.mcp).toEqual({})
 
     const catalog = resolveToolGroups(undefined)
     for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'fixer', 'explorer', 'librarian', 'designer', 'oracle']) {

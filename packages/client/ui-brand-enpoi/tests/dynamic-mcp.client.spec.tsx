@@ -179,12 +179,24 @@ describe('McpPanel', () => {
   })
 
   it('enable toggle writes the capabilities.mcp path', async () => {
-    const fetchMock = await mountPanel({})
-    fireEvent.click(await screen.findByLabelText('Enable Plane MCP'))
+    const fetchMock = await mountPanel({
+      servers: { 'plane-mcp': { serverName: 'plane', transport: 'streamable-http', url: 'https://plane.example/mcp' } },
+    })
+    fireEvent.click(await screen.findByLabelText('Enable plane-mcp'))
     await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })
     expect(mutateBodies(fetchMock)[0]!.payload.args.ops).toEqual([
       { op: 'set', path: ['capabilities', 'mcp', 'plane-mcp'], value: true },
     ])
+  })
+
+  it('lists exactly the servers the settings document owns, never a shipped catalog row', async () => {
+    await mountPanel({})
+    // No stored `mcpServers` record: the panel shows no MCP row at all, so it
+    // can never render a server the settings document cannot delete.
+    await waitFor(() => { expect(screen.queryByText('Loading MCP catalog…')).toBeNull() })
+    expect(screen.queryByText('Plane MCP')).toBeNull()
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByLabelText('Remove plane-mcp')).toBeNull()
   })
 
   it('renders the mount failure reported by the host heartbeat', async () => {

@@ -67,9 +67,9 @@ export const PROTECTED_CAPABILITIES = new Set<string>([
 ])
 
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF)
-  { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
-  { id: 'ue-mcp', name: 'Unreal Engine MCP', kind: 'mcp', category: 'mcp', description: 'Unreal Engine editor automation and actor controls', defaultEnabled: false },
+  // No MCP descriptors: every MCP row is owned by the settings document
+  // (`enpoi-orchestration.mcpServers`), so a device-specific server never
+  // ships as a phantom row on another machine.
 
   // Skills (Default ON)
   { id: 'project-management', name: 'Project Management', kind: 'skill', category: 'skills', description: 'Plane documentation and progress journaling', defaultEnabled: true },
@@ -618,21 +618,14 @@ export function CapabilitiesView(props: CapabilitiesViewProps): React.ReactNode 
     if (!result.ok) setMcpActionError(result.reason)
   }
 
-  const mcpList: CapabilityDescriptor[] = (() => {
-    const rows = new Map<string, CapabilityDescriptor>()
-    for (const c of KNOWN_CAPABILITIES.filter(k => k.kind === 'mcp')) rows.set(c.id, { ...c })
-    for (const [id, def] of Object.entries(view.mcpServers)) {
-      if (!rows.has(id)) {
-        const friendly = def.serverName
-          ? def.serverName.charAt(0).toUpperCase() + def.serverName.slice(1)
-          : id.replace(/-mcp$/, '').split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
-        let desc = 'MCP server'
-        try { desc = new URL(def.url ?? '').host } catch { /* keep default */ }
-        rows.set(id, { id, name: `${friendly} MCP`, kind: 'mcp', category: 'mcp', description: desc, defaultEnabled: false })
-      }
-    }
-    return [...rows.values()]
-  })()
+  const mcpList: CapabilityDescriptor[] = Object.entries(view.mcpServers).map(([id, def]) => {
+    const friendly = def.serverName
+      ? def.serverName.charAt(0).toUpperCase() + def.serverName.slice(1)
+      : id.replace(/-mcp$/, '').split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    let desc = 'MCP server'
+    try { desc = new URL(def.url ?? '').host } catch { /* keep default */ }
+    return { id, name: `${friendly} MCP`, kind: 'mcp', category: 'mcp', description: desc, defaultEnabled: false }
+  })
   const skillList: CapabilityDescriptor[] = view.skills.map(s => ({
     id: s.name,
     name: s.name.split('-').map(w => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' '),

@@ -8,14 +8,17 @@
  * operator's providers, default model, UI settings, seats, grants, MCP catalog,
  * chains, favorites, and whiteboard into end-user installs. This checker is the
  * packaging gate: the pre-commit and pre-push hooks run it against the staged
- * and committed document, and it can be run by hand before packaging. The same
- * split is pinned by
+ * and committed document, and it can be run by hand before packaging. It also
+ * refuses committed per-device patches under `device-patches/` (found next to
+ * the checked document): another machine's MCP servers and capability flags
+ * are operator state and must live in the dotfiles repo or `sync-local.yaml`.
+ * The same split is pinned by
  * `packages/enpoi-capabilities/tests/profile-patch.spec.ts`.
  *
  * Usage: node scripts/verify-profile-template.mjs [path-to-cordis.patch.yml]
  */
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -110,6 +113,19 @@ if (start === -1) {
   }
   const roles = templateSection(body, 'roles')
   if (roles !== undefined) checkRoleTemplate(roles)
+}
+
+// A committed device patch is another machine's settings delta; the merged
+// engine folds it in only when the file is named exactly after the resolved
+// host, so on every other device it is dead weight that can still ship. The
+// release archive prunes it; this gate refuses it at the source.
+const patchesDir = join(dirname(resolve(file)), 'device-patches')
+if (existsSync(patchesDir)) {
+  for (const entry of readdirSync(patchesDir, { recursive: true })) {
+    const rel = String(entry)
+    if (rel === 'README.md') continue
+    violations.push(`device patch 'device-patches/${rel}' is committed operator state`)
+  }
 }
 
 if (violations.length > 0) {

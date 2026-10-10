@@ -46,10 +46,10 @@ export interface CapabilityDescriptor {
 }
 
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF per user directive). Plane is the only shipped
-  // MCP descriptor; the rest of the catalog is settings-owned and must not be
-  // mirrored here as phantom rows.
-  { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
+  // No MCP descriptors: MCP rows are settings-owned
+  // (`enpoi-orchestration.mcpServers`); a descriptor here would seed a phantom
+  // entry on every device, and a device-specific server (plane-mcp on one
+  // host, UE MCP on another) must never ship as a default.
 
   // Skills (Default ON)
   { id: 'tier1-workflow', name: 'Tier 1 Guided Workflow', kind: 'skill', category: 'skills', description: 'Guided planning with Oracle supervision', defaultEnabled: true },

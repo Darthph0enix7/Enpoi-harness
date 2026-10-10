@@ -43,6 +43,11 @@ beforeAll(() => {
   write('dist/out.js', 'x\n')
   write('coverage/lcov.info', 'x\n')
 
+  // Removed: per-device settings patches are operator state, never released.
+  write('profile/web/device-patches/README.md', '# patches\n')
+  write('profile/web/device-patches/serverlocal.yaml', 'merge:\n')
+  write('profile/web/device-patches/serverlocal/presets/sysadmin/preset.yml', 'name: sysadmin\n')
+
   // Removed: source maps and incremental build metadata.
   write('tsconfig.host.tsbuildinfo', '{}')
   write('packages/foo/lib/index.js.map', '{}')
@@ -110,8 +115,8 @@ afterAll(() => {
 })
 
 describe('prune-release-tree.sh', () => {
-  it('removes the VCS, documentation, and build-output trees', () => {
-    for (const path of ['docs', 'snapshots', 'benchmarks', 'python', 'website', 'dist', 'coverage', '.git', '.agents/notes']) {
+  it('removes the VCS, documentation, build-output, and device-patch trees', () => {
+    for (const path of ['docs', 'snapshots', 'benchmarks', 'python', 'website', 'dist', 'coverage', '.git', '.agents/notes', 'profile/web/device-patches']) {
       expect(exists(path), path).toBe(false)
     }
   })

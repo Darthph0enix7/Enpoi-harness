@@ -18,10 +18,16 @@ merge uses `device-patches/<host>.yaml`; when that file does not exist the
 patch input is empty (`/dev/null` in the `ds` CLI, a missing-file read in the
 installer engine) and the result is the baseline plus `~/.dsh/sync-local.yaml`
 only. `serverlocal.yaml` therefore applies on exactly one machine; a friend's
-machine never reads it. The canonical installer
-(`scripts/install.sh copy_profile_tree`) additionally excludes
-`device-patches/` from what it stages, so a fresh install does not even
-contain another device's patch file.
+machine never reads it.
+
+**This tracked tree keeps only this README.** `scripts/prune-release-tree.sh`
+prunes `device-patches/` from the release archive, `scripts/install.sh
+copy_profile_tree` excludes it from the staged profile, and
+`scripts/verify-profile-template.mjs` (run by the release workflow) refuses a
+committed patch file or preset directory here. Per-device patches live in the
+dotfiles repo (`device-patches/<hostname>.yaml`) or `~/.dsh/sync-local.yaml`,
+never in this repository — a committed patch would ship another machine's
+servers to every install.
 
 **Patch format:**
 ```yaml

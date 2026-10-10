@@ -171,6 +171,12 @@ jobs:
           HARNESS_ROOT: ${{ github.workspace }}
         run: bash profile/web/build-plugins.sh profile/web
 
+      # The packaging gate: refuses operator state in the fresh-install
+      # template and any committed per-device patch under device-patches/, so
+      # another machine's settings can never reach the release archive.
+      - name: Verify profile template carries no operator state
+        run: node profile/web/scripts/verify-profile-template.mjs
+
       # The stage exists before the smoke so the gate boots the exact tree the
       # tarball will carry: a prune that drops a runtime file fails here.
       - name: Stage and prune the artifact tree

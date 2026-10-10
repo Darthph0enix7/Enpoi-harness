@@ -1,9 +1,12 @@
 /**
  * McpPanel — the MCP catalog editor on the Dynamic settings page.
  *
- * Rows come from `enpoi-orchestration.mcpServers` in settings.describe plus the
- * host heartbeat in `mcpStatus` (state dot and mount-failure text). Enable
- * toggles reuse the shared `toggleCapability` writer (`capabilities.mcp.<id>`),
+ * Rows are exactly the ids `enpoi-orchestration.mcpServers` owns in
+ * settings.describe; the host heartbeat in `mcpStatus` supplies the state dot
+ * and mount-failure text. A shipped catalog descriptor is only a label for a
+ * stored id and never fabricates a row — the panel must not list a server the
+ * settings document cannot delete. Enable toggles reuse the shared
+ * `toggleCapability` writer (`capabilities.mcp.<id>`),
  * add reuses the shared catalog writer `addMcpServer`, remove prefers the
  * host's atomic `enpoiCapabilities.removeMcpServer` route (one fenced write
  * that also prunes the server's policy rows) and falls back to the shared
@@ -452,17 +455,20 @@ export function McpPanel({ t }: { t: BrandT }) {
   }
 
   const rows = useMemo<McpRow[]>(() => {
-    const list = new Map<string, McpRow>()
-    for (const cap of KNOWN_CAPABILITIES) {
-      if (cap.kind === 'mcp') list.set(cap.id, { id: cap.id, name: cap.name, description: cap.description, known: true })
-    }
-    for (const [id, entry] of Object.entries(servers ?? {})) {
-      if (list.has(id)) continue
+    // The settings document owns the row list: only stored `mcpServers.<id>`
+    // records render, so every visible row has a delete affordance and no
+    // shipped descriptor can seed a phantom server on a fresh device.
+    return Object.entries(servers ?? {}).map(([id, entry]) => {
+      const known = KNOWN_CAPABILITIES.find(cap => cap.kind === 'mcp' && cap.id === id)
       let host = 'MCP server'
       try { host = new URL(entry.url ?? '').host } catch { /* keep the default label */ }
-      list.set(id, { id, name: id, description: host, known: false })
-    }
-    return [...list.values()]
+      return {
+        id,
+        name: known?.name ?? id,
+        description: known?.description ?? host,
+        known: known !== undefined,
+      }
+    })
   }, [servers])
 
   return (

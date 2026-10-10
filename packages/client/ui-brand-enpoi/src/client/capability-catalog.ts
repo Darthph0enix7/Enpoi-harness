@@ -10,6 +10,11 @@
  * exists so the settings page has stable labels/descriptions for the shipped
  * tools and skills it lets the operator pre-seed; new live entries still appear
  * in the drawer and the settings panel without a code change.
+ *
+ * No MCP descriptor ships here: every MCP row is owned by the settings
+ * document (`enpoi-orchestration.mcpServers`). A descriptor with no stored
+ * record would be a phantom row the operator cannot delete — and a device's
+ * server (plane-mcp on one host, UE on another) would appear on every install.
  */
 
 /** Capability family the enforcement state keys on. */
@@ -39,11 +44,9 @@ export const PROTECTED_CAPABILITIES = new Set<string>([
 
 /** Shipped catalog descriptors for the settings panels (never read by the drawer). */
 export const KNOWN_CAPABILITIES: readonly CapabilityDescriptor[] = [
-  // MCP Servers (Default OFF). Plane is the only shipped MCP descriptor; every
-  // other MCP row comes from a stored `enpoi-orchestration.mcpServers.<id>`
-  // record. A descriptor with no record and no live server is a phantom row,
-  // so the catalog carries no such entries.
-  { id: 'plane-mcp', name: 'Plane MCP', kind: 'mcp', category: 'mcp', description: 'Project management and backlog tooling', defaultEnabled: false },
+  // MCP rows are settings-owned (`enpoi-orchestration.mcpServers`); no
+  // descriptor here may fabricate one, so a row always has a stored record
+  // the settings page can delete.
 
   // Skills (Default ON)
   { id: 'project-management', name: 'Project Management', kind: 'skill', category: 'skills', description: 'Plane documentation and progress journaling', defaultEnabled: true },

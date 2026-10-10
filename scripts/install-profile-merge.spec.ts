@@ -467,6 +467,32 @@ describe('template entry allowlist gate', () => {
     expect(gated.output).toContain('STRIPPED=PASS')
   })
 
+  it('rejects a committed device patch beside the template', () => {
+    counter += 1
+    const dir = join(root, `${counter}-device-patch-template`)
+    mkdirSync(join(dir, 'device-patches', 'serverlocal'), { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), guardFixture(CLEAN_ENTRIES))
+    writeFileSync(join(dir, 'device-patches', 'serverlocal.yaml'), 'merge:\n')
+    const flat = runVerify(join(dir, 'cordis.patch.yml'))
+    expect(flat.status).toBe(1)
+    expect(flat.output).toContain("device patch 'device-patches/serverlocal.yaml' is committed operator state")
+    writeFileSync(join(dir, 'device-patches', 'serverlocal', 'preset.yml'), 'name: sysadmin\n')
+    const nested = runVerify(join(dir, 'cordis.patch.yml'))
+    expect(nested.status).toBe(1)
+    expect(nested.output).toContain("device patch 'device-patches/serverlocal/preset.yml' is committed operator state")
+  })
+
+  it('accepts a device-patches directory that only keeps its README', () => {
+    counter += 1
+    const dir = join(root, `${counter}-device-patch-readme`)
+    mkdirSync(join(dir, 'device-patches'), { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), guardFixture(CLEAN_ENTRIES))
+    writeFileSync(join(dir, 'device-patches', 'README.md'), '# patches\n')
+    const accepted = runVerify(join(dir, 'cordis.patch.yml'))
+    expect(accepted.status).toBe(0)
+    expect(accepted.output).toContain('profile template clean')
+  })
+
   it('rejects every operator escape inside roles and strips it entry-by-entry', () => {
     const hostile = fixture('hostile-template.patch.yml', guardFixture(HOSTILE_ENTRIES))
     const verified = runVerify(hostile)

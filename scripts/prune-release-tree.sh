@@ -29,6 +29,13 @@ fi
 rm -rf "$TREE/.git" "$TREE/docs" "$TREE/snapshots" "$TREE/benchmarks" \
        "$TREE/python" "$TREE/website" "$TREE/dist" "$TREE/coverage"
 
+# Per-device settings patches are operator state (another machine's MCP
+# servers and capability flags); the live profile reads its own copy from the
+# installed profile directory, and a missing patch means empty input to the
+# merge engine. A release must never carry them, or every device stages
+# another device's patch next to its runtime tree.
+rm -rf "$TREE/profile/web/device-patches"
+
 # Source maps and incremental build metadata are never loaded by the runtime.
 find "$TREE" -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete
 
