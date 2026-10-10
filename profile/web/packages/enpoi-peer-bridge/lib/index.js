@@ -180,6 +180,28 @@ var PeerClient = class {
     return this.rpc("page", request);
   }
   /**
+   * Cheap reachability probe: one bounded `peer.state` read.
+   *
+   * A sleep, a cut link, or a dead host leaves a follow socket open and silent,
+   * so the follow loop cannot tell "the host is gone" from "the model is
+   * thinking" without an independent call. This answers only reachability:
+   * any response — including a structured error — means reachable; only a
+   * transport failure or the deadline means the host did not answer.
+   * @param target - resolved peer target.
+   * @param options - deadline and caller cancellation.
+   * @returns true when the host answered within the deadline; false when it did not.
+   */
+  async probe(target, options) {
+    const signals = [AbortSignal.timeout(options.timeoutMs)];
+    if (options.signal !== void 0) signals.push(options.signal);
+    try {
+      await this.rpc("state", { target }, AbortSignal.any(signals));
+      return true;
+    } catch (error) {
+      return !(error instanceof PeerBridgeError && error.code === "peer/target-unreachable");
+    }
+  }
+  /**
    * Open one follow generation without reconnect handling.
    * @param request - target and window options.
    * @param signal - caller cancellation closing the socket.
@@ -348,7 +370,7 @@ var PeerClient = class {
     collected.sort((left, right) => left.seq - right.seq);
     for (const record of collected) yield { type: "event", record, cursor: record.seq };
   }
-  async rpc(method, args) {
+  async rpc(method, args, signal) {
     const endpoint = `${this.endpoint}/api/peer/${method}`;
     let response;
     try {
@@ -361,7 +383,8 @@ var PeerClient = class {
           method: `peer/${method}`,
           // SRC-derived host descriptors name the business parameter `request`.
           payload: { args: { request: args } }
-        })
+        }),
+        ...signal === void 0 ? {} : { signal }
       });
     } catch (error) {
       throw unreachable(this.endpoint, error);
@@ -817,9 +840,12 @@ var Config = Schema.object({
   participantName: live(Schema.string()),
   waitMs: live(Schema.number()),
   settleMs: live(Schema.number()),
-  maxReconnects: live(Schema.number())
+  maxReconnects: live(Schema.number()),
+  probeIntervalMs: live(Schema.number())
 });
 var DEFAULT_WAIT_MS = 3e5;
+var DEFAULT_PROBE_INTERVAL_MS = 3e4;
+var HOST_PROBE_TIMEOUT_MS = 4e3;
 var MAX_MESSAGE_CHARS = 1e5;
 var MAX_SURFACE_TASKS = 4;
 function apply(ctx, config = {}) {
@@ -835,6 +861,7 @@ function registerTools(ctx, config, deps = {}) {
   const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname2(pairingsPath));
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS;
   const settleMs = config.settleMs ?? DEFAULT_SETTLE_QUIET_MS;
+  const probeIntervalMs = config.probeIntervalMs ?? DEFAULT_PROBE_INTERVAL_MS;
   const effectiveDeps = {
     ...deps,
     onWarning: deps.onWarning ?? ((hole) => {
@@ -1050,7 +1077,10 @@ function registerTools(ctx, config, deps = {}) {
       "failure when the turn failed). If the followed turn enters waiting_approval, the call returns",
       'EARLY with status "waiting_approval" and the pending ask(s) (askId, kind, toolName, reason)',
       "instead of blocking: decide each with peer_asks/peer_answer, then call peer_ask again with",
-      "resume set to the returned requestId to follow the same turn to completion. Remote asks that",
+      "resume set to the returned requestId to follow the same turn to completion. A host that goes",
+      "silent mid-follow (for example a sleeping laptop) is detected by a reachability probe after",
+      'the configured probeIntervalMs and returns status "host_unreachable" without cancelling the',
+      "remote turn. Remote asks that",
       "appear while following are surfaced locally for the operator to answer. The remote runs with",
       "its OWN tools, workspace, and approvals.",
       "The alias names the pairing (the member device in the fleet convention) and is the same string",
@@ -1135,6 +1165,7 @@ function registerTools(ctx, config, deps = {}) {
         noticesPath,
         waitMs: requestedWait,
         settleMs,
+        probeIntervalMs,
         config,
         signal: exec.signal,
         agent: exec.agent,
@@ -1453,6 +1484,22 @@ async function runAsk(ctx, options) {
     controller.abort();
   };
   options.signal.addEventListener("abort", relayAbort, { once: true });
+  let lastFrameAt = Date.now();
+  let hostSilent = false;
+  const watchdog = options.probeIntervalMs > 0 ? (async () => {
+    while (!controller.signal.aborted) {
+      await delay2(options.probeIntervalMs, controller.signal);
+      if (controller.signal.aborted) return;
+      if (Date.now() - lastFrameAt < options.probeIntervalMs) continue;
+      const reachable = await client.probe(requestedTarget, { timeoutMs: HOST_PROBE_TIMEOUT_MS, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!reachable) {
+        hostSilent = true;
+        controller.abort();
+        return;
+      }
+    }
+  })() : void 0;
   const asks = /* @__PURE__ */ new Map();
   let latch = baseline.state.latch;
   let cursor = baseline.cursor;
@@ -1576,6 +1623,7 @@ async function runAsk(ctx, options) {
   };
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
+      lastFrameAt = Date.now();
       if (frame.type === "snapshot") {
         cursor = frame.cursor;
         latch = frame.state.latch;
@@ -1617,7 +1665,7 @@ async function runAsk(ctx, options) {
     clearQuiet();
     options.signal.removeEventListener("abort", relayAbort);
     controller.abort();
-    await Promise.allSettled([...inFlight]);
+    await Promise.allSettled([...inFlight, ...watchdog === void 0 ? [] : [watchdog]]);
   }
   if (quietExpired) {
     try {
@@ -1629,6 +1677,30 @@ async function runAsk(ctx, options) {
       cursor = Math.max(cursor, confirmed.cursor);
     } catch {
     }
+  }
+  if (hostSilent) {
+    return {
+      ok: false,
+      pending: true,
+      status: "host_unreachable",
+      settled: false,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      ...resumed ? { resumed: true } : {},
+      answer: answerParts.join("\n").trim(),
+      asks: askLines(asks),
+      pendingAsks: pendingNow.map(askPayload),
+      latch,
+      cursor,
+      note: [
+        `the remote host stopped answering mid-turn (no frame for ${String(options.probeIntervalMs)}ms and the reachability probe failed) \u2014 it may be asleep`,
+        "the remote turn was NOT cancelled and may resume if the host wakes",
+        `call peer_ask again with resume: ${JSON.stringify(requestId)} to re-follow`
+      ].join(" \u2014 ")
+    };
   }
   if (detached) {
     return {
@@ -2009,6 +2081,24 @@ function errorText(error) {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
   return String(error);
 }
+function delay2(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 function failureSchema() {
   return {
     type: "object",
@@ -2123,6 +2213,13 @@ function renderAsk(value) {
     lines.push(`REMOTE TURN WAITING FOR APPROVAL on ${String(record.alias)} (session ${String(record.sessionId)}).`);
     lines.push(renderAsks({ ok: true, alias: record.alias, latch: record.latch, asks: pendingAsks }));
     lines.push(`decide with peer_asks/peer_answer, then call peer_ask again with resume: ${JSON.stringify(String(record.requestId))} to follow the same turn to completion.`);
+    if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${record.asks.join("; ")}`);
+    return lines.join("\n");
+  }
+  if (record.status === "host_unreachable") {
+    lines.push(`REMOTE TARGET WENT SILENT (unreachable) mid-turn on ${String(record.alias)} (session ${String(record.sessionId)}, latch ${String(record.latch ?? "unknown")}, cursor ${String(record.cursor ?? 0)}).`);
+    lines.push(`It may be asleep; the remote turn was NOT cancelled and may resume if the host wakes \u2014 call peer_ask again with resume: ${JSON.stringify(String(record.requestId))} to re-follow.`);
+    if (typeof record.answer === "string" && record.answer !== "") lines.push(record.answer);
     if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${record.asks.join("; ")}`);
     return lines.join("\n");
   }

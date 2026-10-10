@@ -12,7 +12,7 @@ executes anything remotely.
 |---|---|
 | `peer_status {alias}` | Handshake (host identity, capabilities, protocol) + `peer.state`: exposure, target session, latch, descendants, pending asks, current model. |
 | `peer_sessions {alias?}` | Discovery across every caller-role pairing: alias, peer, endpoint, the bound remote session id (local `remoteSessionId` pin or the host-reported session), exposure, latch summary, and last activity; an unreachable host is that row's error. Read-only. |
-| `peer_ask {alias, message?, waitMs?, resume?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. A followed turn that enters `waiting_approval` returns EARLY with `status: 'waiting_approval'` and the pending ask(s) (`askId`, `kind`, `toolName`, `reason`, question options); `resume: <requestId>` continues that same turn to completion without re-sending the message. |
+| `peer_ask {alias, message?, waitMs?, resume?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. A followed turn that enters `waiting_approval` returns EARLY with `status: 'waiting_approval'` and the pending ask(s) (`askId`, `kind`, `toolName`, `reason`, question options); `resume: <requestId>` continues that same turn to completion without re-sending the message. A host that stops answering mid-follow returns `status: 'host_unreachable'` after `probeIntervalMs` (never cancelling the remote turn). |
 | `peer_asks {alias}` | Pending remote asks (approval and question kinds); question rows carry the question ids and option labels. |
 | `peer_answer {alias, askId, outcome \| answers[]}` | Settles an approval ask (`allowed-once` \| `rejected`) or a question ask (`answers: [{id, selected[], custom?}]`). First answer wins. A malformed selection is rejected locally with the reason; the host is never called. A transport failure re-reads `peer.state` and reports `confirmation: 'lost'` when the ask is already gone, instead of a failure that invites a blind retry. |
 | `peer_cancel {alias}` | Cancels the remote active turn, attributed to this caller. A transport failure re-reads the latch: no active turn surfaces as `confirmation: 'lost'`, not as a failed cancel. |
@@ -52,8 +52,9 @@ so no deployment default changes) and must appear together — a lone half fails
 document parsing — while `create.chain` / `create.reasoningEffort` are
 forwarded only with the pair. The plugin's Config
 fields (`pairingsPath`, `noticesPath`, `device`, `participantName`, `waitMs`,
-`settleMs`, `maxReconnects`) are declared `.volatile()`, so the merged settings
-service exposes them as a live form persisted in the profile patch.
+`settleMs`, `maxReconnects`, `probeIntervalMs`) are declared `.volatile()`, so
+the merged settings service exposes them as a live form persisted in the
+profile patch.
 `pairingsPath` in the plugin config (and `--pairings` on the CLI) points at
 another document so a test never touches the operator's real file.
 
@@ -133,6 +134,16 @@ so a recorded prompt is never reported as unadmitted. An error frame for
 stops the follow with that code instead of reconnecting at backoff cadence; a
 durable hole `peer.page` cannot prove contiguous is reported through the
 warning sink with its `[from, to)` range and the replay continues past it.
+
+A host that dies mid-turn (a sleeping laptop, a cut link) leaves the follow
+socket open and silent, so silence alone can never distinguish "the host is
+gone" from "the model is generating". After `probeIntervalMs` (default 30000
+ms; 0 disables) without a frame, `peer_ask` makes one cheap bounded `peer.state`
+call: any answer — even a structured error — keeps the follow waiting; only a
+host that does not answer at all ends the follow early with
+`status: 'host_unreachable'`, `sessionId`, the last observed `latch`/`cursor`,
+and a note that the remote turn was NOT cancelled and may resume if the host
+wakes. `waitMs` remains the outer bound for reachable-but-silent turns.
 
 ## Known limitations and deferred work
 

@@ -17,7 +17,10 @@
  * pending asks, so a non-interactive caller can decide with
  * `peer_asks`/`peer_answer` instead of blocking until `waitMs`; `peer_ask`
  * called again with `resume: <requestId>` continues that same turn to its
- * terminal state without re-prompting.
+ * terminal state without re-prompting. A host that stops answering mid-follow
+ * (a sleeping laptop, a cut link) is detected by a reachability probe after
+ * `probeIntervalMs` of follow silence and surfaces as
+ * `status: 'host_unreachable'`, again without cancelling the remote turn.
  *
  * Pairings are read from `~/.dsh/pairings.yaml` by default; `pairingsPath`
  * points at another document (the live test uses a scratch file and never
@@ -91,6 +94,8 @@ export interface Config {
   settleMs?: Volatile<number>
   /** Maximum consecutive follow reconnects before `peer/target-unreachable`. */
   maxReconnects?: Volatile<number>
+  /** Idle interval before `peer_ask` probes a silent host for reachability (default 30000; 0 disables). */
+  probeIntervalMs?: Volatile<number>
 }
 
 /** Schemastery validator for {@link Config}; volatile so the merged settings service derives a live form. */
@@ -102,6 +107,7 @@ export const Config = Schema.object({
   waitMs: live(Schema.number()),
   settleMs: live(Schema.number()),
   maxReconnects: live(Schema.number()),
+  probeIntervalMs: live(Schema.number()),
 })
 
 /** Defaulted plain values the bridge closes over. */
@@ -113,6 +119,7 @@ export interface ResolvedConfig {
   waitMs?: number
   settleMs?: number
   maxReconnects?: number
+  probeIntervalMs?: number
 }
 
 /** Test seams: replace the carrier without touching a real socket. */
@@ -126,6 +133,10 @@ export interface BridgeDeps {
 }
 
 const DEFAULT_WAIT_MS = 300_000
+/** Idle interval before the follow probes a silent host; 0 disables the probe. */
+const DEFAULT_PROBE_INTERVAL_MS = 30_000
+/** Deadline for one reachability probe; a host that cannot answer this stays "unreachable". */
+const HOST_PROBE_TIMEOUT_MS = 4_000
 const MAX_MESSAGE_CHARS = 100_000
 /** Cap on concurrent ask-surfacing tasks per follow; a frame waits at the cap. */
 const MAX_SURFACE_TASKS = 4
@@ -175,6 +186,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
   const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname(pairingsPath))
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS
   const settleMs = config.settleMs ?? DEFAULT_SETTLE_QUIET_MS
+  const probeIntervalMs = config.probeIntervalMs ?? DEFAULT_PROBE_INTERVAL_MS
   const effectiveDeps: BridgeDeps = {
     ...deps,
     onWarning: deps.onWarning ?? ((hole: PeerRepairHole): void => {
@@ -397,7 +409,10 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       'failure when the turn failed). If the followed turn enters waiting_approval, the call returns',
       'EARLY with status "waiting_approval" and the pending ask(s) (askId, kind, toolName, reason)',
       'instead of blocking: decide each with peer_asks/peer_answer, then call peer_ask again with',
-      'resume set to the returned requestId to follow the same turn to completion. Remote asks that',
+      'resume set to the returned requestId to follow the same turn to completion. A host that goes',
+      'silent mid-follow (for example a sleeping laptop) is detected by a reachability probe after',
+      'the configured probeIntervalMs and returns status "host_unreachable" without cancelling the',
+      'remote turn. Remote asks that',
       'appear while following are surfaced locally for the operator to answer. The remote runs with',
       'its OWN tools, workspace, and approvals.',
       'The alias names the pairing (the member device in the fleet convention) and is the same string',
@@ -484,6 +499,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         noticesPath,
         waitMs: requestedWait,
         settleMs,
+        probeIntervalMs,
         config,
         signal: exec.signal,
         agent: exec.agent,
@@ -760,6 +776,8 @@ interface AskRunOptions {
   readonly waitMs: number
   /** Quiet window after a terminal before the session is accepted as settled. */
   readonly settleMs: number
+  /** Idle interval before a silent host is probed for reachability; 0 disables. */
+  readonly probeIntervalMs: number
   readonly config: ResolvedConfig
   readonly signal: AbortSignal
   readonly agent?: Agent
@@ -836,6 +854,32 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   }, options.waitMs)
   const relayAbort = (): void => { controller.abort() }
   options.signal.addEventListener('abort', relayAbort, { once: true })
+
+  // Mid-follow host death (a sleeping laptop, a cut link) leaves the follow
+  // socket open and silent, so no frame ever arrives and the loop would wait
+  // out waitMs. The watchdog checks REACHABILITY, never silence: after
+  // probeIntervalMs without a frame it makes one cheap unary call; only a host
+  // that fails to answer at all ends the follow early. A reachable host that is
+  // merely generating keeps the follow alive, and the remote turn is never
+  // cancelled — the abort below only tears down this local follow generation.
+  let lastFrameAt = Date.now()
+  let hostSilent = false
+  const watchdog = options.probeIntervalMs > 0
+    ? (async (): Promise<void> => {
+      while (!controller.signal.aborted) {
+        await delay(options.probeIntervalMs, controller.signal)
+        if (controller.signal.aborted) return
+        if (Date.now() - lastFrameAt < options.probeIntervalMs) continue
+        const reachable = await client.probe(requestedTarget, { timeoutMs: HOST_PROBE_TIMEOUT_MS, signal: controller.signal })
+        if (controller.signal.aborted) return
+        if (!reachable) {
+          hostSilent = true
+          controller.abort()
+          return
+        }
+      }
+    })()
+    : undefined
 
   const asks = new Map<string, AskBridgeRecord>()
   let latch = baseline.state.latch
@@ -977,6 +1021,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   }
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
+      lastFrameAt = Date.now()
       if (frame.type === 'snapshot') {
         cursor = frame.cursor
         latch = frame.state.latch
@@ -1029,7 +1074,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     // withdraw any local card still open for it and let the contained tasks
     // settle, so the result below reports their final decisions.
     controller.abort()
-    await Promise.allSettled([...inFlight])
+    await Promise.allSettled([...inFlight, ...(watchdog === undefined ? [] : [watchdog])])
   }
 
   // The quiet window aborts the follow, so a frame in flight at the cut can be
@@ -1044,6 +1089,31 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       cursor = Math.max(cursor, confirmed.cursor)
     } catch {
       // Without the confirming read the last observed settled signals stand.
+    }
+  }
+
+  if (hostSilent) {
+    return {
+      ok: false,
+      pending: true,
+      status: 'host_unreachable',
+      settled: false,
+      alias: pairing.alias,
+      sessionId: baseline.target.sessionId,
+      created,
+      requestId,
+      admitted,
+      ...(resumed ? { resumed: true } : {}),
+      answer: answerParts.join('\n').trim(),
+      asks: askLines(asks),
+      pendingAsks: pendingNow.map(askPayload),
+      latch,
+      cursor,
+      note: [
+        `the remote host stopped answering mid-turn (no frame for ${String(options.probeIntervalMs)}ms and the reachability probe failed) — it may be asleep`,
+        'the remote turn was NOT cancelled and may resume if the host wakes',
+        `call peer_ask again with resume: ${JSON.stringify(requestId)} to re-follow`,
+      ].join(' — '),
     }
   }
 
@@ -1500,6 +1570,26 @@ function errorText(error: unknown): string {
   return String(error)
 }
 
+/** Abortable delay used by the follow's reachability watchdog. */
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 function failureSchema(): Record<string, unknown> {
   return {
     type: 'object',
@@ -1636,6 +1726,13 @@ function renderAsk(value: unknown): string {
     lines.push(`REMOTE TURN WAITING FOR APPROVAL on ${String(record.alias)} (session ${String(record.sessionId)}).`)
     lines.push(renderAsks({ ok: true, alias: record.alias, latch: record.latch, asks: pendingAsks }))
     lines.push(`decide with peer_asks/peer_answer, then call peer_ask again with resume: ${JSON.stringify(String(record.requestId))} to follow the same turn to completion.`)
+    if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${(record.asks as string[]).join('; ')}`)
+    return lines.join('\n')
+  }
+  if (record.status === 'host_unreachable') {
+    lines.push(`REMOTE TARGET WENT SILENT (unreachable) mid-turn on ${String(record.alias)} (session ${String(record.sessionId)}, latch ${String(record.latch ?? 'unknown')}, cursor ${String(record.cursor ?? 0)}).`)
+    lines.push(`It may be asleep; the remote turn was NOT cancelled and may resume if the host wakes — call peer_ask again with resume: ${JSON.stringify(String(record.requestId))} to re-follow.`)
+    if (typeof record.answer === 'string' && record.answer !== '') lines.push(record.answer)
     if (Array.isArray(record.asks) && record.asks.length > 0) lines.push(`asks: ${(record.asks as string[]).join('; ')}`)
     return lines.join('\n')
   }

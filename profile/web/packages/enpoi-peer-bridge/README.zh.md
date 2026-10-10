@@ -46,7 +46,8 @@ pairings:
 路由（主机以 `persistDefault: false` 应用，不改变部署默认值），两者必须成对出现
 ——只出现其一会导致文档解析失败——`create.chain` / `create.reasoningEffort` 仅在
 成对时转发。插件 Config 字段（`pairingsPath`、`noticesPath`、
-`device`、`participantName`、`waitMs`、`settleMs`、`maxReconnects`）均声明为
+`device`、`participantName`、`waitMs`、`settleMs`、`maxReconnects`、
+`probeIntervalMs`）均声明为
 `.volatile()`，合并后的 settings 服务会将其暴露为实时表单并持久化到 profile
 patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他文档，测试因此
 不会碰操作者真实的配对文件。
@@ -92,6 +93,14 @@ request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]
 `peer/version-skew` 错误帧会立即终止跟踪并上报该错误，而不是按退避节奏无限
 重连；`peer.page` 无法证明连续的持久化空洞会带 `[from, to)` 范围经警告回调
 上报，重放则跨过该空洞继续。
+
+主机在回合中途消失（笔记本休眠、链路中断）时，跟踪套接字仍然静默打开，单凭
+静默无法区分"主机已离开"与"模型正在生成"。在无帧达到
+`probeIntervalMs`（默认 30000 毫秒；0 关闭）后，`peer_ask` 会发起一次廉价且有
+期限的 `peer.state` 调用：只要得到任何应答（哪怕是结构化错误）就继续等待；
+只有完全无人应答时才提前结束跟踪并返回 `status: 'host_unreachable'`、会话 id、
+最后观测到的 `latch`/`cursor`，并注明远端回合**未被取消**、主机唤醒后可能继续。
+可达但静默的回合仍以 `waitMs` 为外层上限。
 
 ## 已知限制与后续工作
 

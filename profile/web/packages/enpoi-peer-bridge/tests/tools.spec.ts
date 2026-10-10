@@ -83,6 +83,10 @@ interface HostOptions {
   readonly noFinalState?: boolean
   /** Quiet window override for the follow's settle clock. */
   readonly settleMs?: number
+  /** Reachability probe interval (0 disables); absent keeps the plugin default. */
+  readonly probeIntervalMs?: number
+  /** Make every `state` call throw this many ms after the follow socket opens (host dies). */
+  readonly probeDownAfterMs?: number
   /** Latch the unary `peer.state` read reports (default idle). */
   readonly stateLatch?: string
   /** Live descendants the unary `peer.state` read reports (default 0). */
@@ -119,6 +123,12 @@ function createHarness(options: HostOptions = {}) {
   // successful answer removes its ask, so a later confirming read agrees with
   // the state frames the socket already emitted.
   let pendingAsksNow: PeerPendingAsk[] = options.ask === undefined || options.ask === null ? [] : [options.ask]
+  // Reachability-probe control: probeDown makes every `state` call throw once
+  // the follow socket has opened; probeCalls counts `state` calls made while
+  // following (the watchdog's probes).
+  let probeDown = false
+  let followStarted = false
+  let probeCalls = 0
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (options.networkFail === true) throw new Error('econnrefused')
     const method = String(input).split('/api/peer/')[1]!
@@ -131,6 +141,8 @@ function createHarness(options: HostOptions = {}) {
       case 'handshake':
         return ok({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: ['state-latch'], pairings: [] })
       case 'state':
+        if (followStarted) probeCalls += 1
+        if (probeDown) throw new Error('econnrefused')
         if (!boundNow) return fail('peer/not-paired', 'no session bound')
         return ok({
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
@@ -186,6 +198,10 @@ function createHarness(options: HostOptions = {}) {
   let followGen = 0
   const socketFactory = (): PeerWebSocket => new FakeSocket((socket, streamId) => {
     followGen += 1
+    followStarted = true
+    if (options.probeDownAfterMs !== undefined) {
+      setTimeout(() => { probeDown = true }, options.probeDownAfterMs)
+    }
     const ourTurn = options.prelude === true ? 2 : 1
     const settled: PeerExecutionState = {
       latch: 'idle', since: 20, source: 'host-latch', activeDescendants: 0,
@@ -413,7 +429,12 @@ function createHarness(options: HostOptions = {}) {
     logger: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
   } as unknown as Context
 
-  registerTools(ctx, { pairingsPath, noticesPath, settleMs: options.settleMs ?? 20 }, { fetch: fetchImpl, webSocket: socketFactory })
+  registerTools(ctx, {
+    pairingsPath,
+    noticesPath,
+    settleMs: options.settleMs ?? 20,
+    ...(options.probeIntervalMs === undefined ? {} : { probeIntervalMs: options.probeIntervalMs }),
+  }, { fetch: fetchImpl, webSocket: socketFactory })
   const execController = new AbortController()
   return {
     tools,
@@ -422,6 +443,7 @@ function createHarness(options: HostOptions = {}) {
     questionCalls,
     noticesPath,
     dir,
+    probeCalls: () => probeCalls,
     setApprovalDecision: (value: string) => { approvalDecision = value },
     settleApproval: (outcome: string) => { settleHeld?.(outcome) },
     abortExec: () => { execController.abort() },
@@ -912,6 +934,75 @@ describe('enpoi-peer-bridge tools', () => {
     expect(String((result.error as Record<string, unknown>).message)).toContain('REMOTE TARGET UNREACHABLE:')
   })
 
+  it('fast-fails with host_unreachable when the host stops answering mid-follow', async () => {
+    const harness = createHarness({ holdFollow: true, probeIntervalMs: 25, probeDownAfterMs: 10 })
+    const started = Date.now()
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing', waitMs: 5000 }, harness.exec)
+    const elapsed = Date.now() - started
+    expect(result).toMatchObject({
+      ok: false,
+      pending: true,
+      status: 'host_unreachable',
+      settled: false,
+      alias: 'scratch',
+      sessionId: 'sess-1',
+      admitted: true,
+    })
+    expect(result.resumed).toBeUndefined()
+    expect(String(result.requestId)).toContain('peer-bridge-')
+    // Last observed follow position is reported, not dropped.
+    expect(result.cursor).toBeGreaterThanOrEqual(10)
+    expect(typeof result.latch).toBe('string')
+    expect(String(result.note)).toContain('may be asleep')
+    expect(String(result.note)).toContain('NOT cancelled')
+    // Fast-fail, long before waitMs, and without cancelling the remote turn.
+    expect(elapsed).toBeLessThan(1000)
+    expect(harness.probeCalls()).toBeGreaterThanOrEqual(1)
+    expect(harness.calls.filter(call => call.method === 'cancel')).toHaveLength(0)
+    const rendered = harness.tools.get('peer_ask')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('REMOTE TARGET WENT SILENT')
+    expect(rendered).toContain('session sess-1')
+    expect(rendered).toContain(`resume: ${JSON.stringify(String(result.requestId))}`)
+  })
+
+  it('preserves the pending ask record when the host dies mid-follow', async () => {
+    const harness = createHarness({
+      ask: APPROVAL_ASK, askLatch: 'running', holdApproval: true, holdFollow: true,
+      probeIntervalMs: 25, probeDownAfterMs: 10,
+    })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'rm the dir', waitMs: 5000 }, harness.exec)
+    expect(result.status).toBe('host_unreachable')
+    expect(result.pendingAsks).toEqual([{
+      askId: 'ask-1',
+      kind: 'approval',
+      toolName: 'bash',
+      reason: 'bash rule "rm" requires approval',
+      questions: [],
+      since: 1,
+    }])
+    expect((result.asks as string[])[0]).toContain('ask-1')
+    // The ask is left answerable: never auto-answered, never mislabeled.
+    expect(harness.calls.filter(call => call.method === 'answer')).toHaveLength(0)
+  })
+
+  it('keeps waiting when the host is reachable but the turn is silent', async () => {
+    const harness = createHarness({ holdFollow: true, probeIntervalMs: 25 })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing', waitMs: 200 }, harness.exec)
+    expect(result).toMatchObject({ ok: false, pending: true, alias: 'scratch' })
+    // No host_unreachable: a reachable host is never abandoned mid-generation.
+    expect(result.status).toBeUndefined()
+    expect(String(result.note)).toContain('no terminal within 200ms')
+    expect(harness.probeCalls()).toBeGreaterThanOrEqual(2)
+  })
+
+  it('probeIntervalMs 0 disables the reachability probe', async () => {
+    const harness = createHarness({ holdFollow: true, probeIntervalMs: 0 })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing', waitMs: 120 }, harness.exec)
+    expect(result).toMatchObject({ ok: false, pending: true })
+    expect(result.status).toBeUndefined()
+    expect(harness.probeCalls()).toBe(0)
+  })
+
   it('confirms a settled quiet window against a fresh state read', async () => {
     const harness = createHarness({ stateLatch: 'running', stateDescendants: 1 })
     const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'do the thing' }, harness.exec)
@@ -968,5 +1059,6 @@ describe('enpoi-peer-bridge tools', () => {
     expect(description).toContain('waiting_approval')
     expect(description).toContain('peer_asks/peer_answer')
     expect(description).toContain('resume set to the returned requestId')
+    expect(description).toContain('host_unreachable')
   })
 })

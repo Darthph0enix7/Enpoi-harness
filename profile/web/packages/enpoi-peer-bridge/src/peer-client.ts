@@ -344,6 +344,29 @@ export class PeerClient {
   }
 
   /**
+   * Cheap reachability probe: one bounded `peer.state` read.
+   *
+   * A sleep, a cut link, or a dead host leaves a follow socket open and silent,
+   * so the follow loop cannot tell "the host is gone" from "the model is
+   * thinking" without an independent call. This answers only reachability:
+   * any response — including a structured error — means reachable; only a
+   * transport failure or the deadline means the host did not answer.
+   * @param target - resolved peer target.
+   * @param options - deadline and caller cancellation.
+   * @returns true when the host answered within the deadline; false when it did not.
+   */
+  async probe(target: PeerTarget, options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<boolean> {
+    const signals = [AbortSignal.timeout(options.timeoutMs)]
+    if (options.signal !== undefined) signals.push(options.signal)
+    try {
+      await this.rpc('state', { target }, AbortSignal.any(signals))
+      return true
+    } catch (error) {
+      return !(error instanceof PeerBridgeError && error.code === 'peer/target-unreachable')
+    }
+  }
+
+  /**
    * Open one follow generation without reconnect handling.
    * @param request - target and window options.
    * @param signal - caller cancellation closing the socket.
@@ -513,7 +536,7 @@ export class PeerClient {
     for (const record of collected) yield { type: 'event', record, cursor: record.seq }
   }
 
-  private async rpc<T>(method: string, args: unknown): Promise<T> {
+  private async rpc<T>(method: string, args: unknown, signal?: AbortSignal): Promise<T> {
     const endpoint = `${this.endpoint}/api/peer/${method}`
     let response: Response
     try {
@@ -527,6 +550,7 @@ export class PeerClient {
           // SRC-derived host descriptors name the business parameter `request`.
           payload: { args: { request: args } },
         }),
+        ...(signal === undefined ? {} : { signal }),
       })
     } catch (error) {
       throw unreachable(this.endpoint, error)
