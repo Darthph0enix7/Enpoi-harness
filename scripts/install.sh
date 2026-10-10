@@ -2650,6 +2650,144 @@ console.log(`${added.length} added, ${updated.length} updated, ${kept.length} us
   return 0
 }
 
+# Union the shipped `patchedDependencies:` entries into the live workspace
+# file. `pnpm-workspace.yaml` is operator state on refresh (copy_profile_tree
+# seeds it only when absent, mirroring pnpm-lock.yaml), so a patch declaration
+# shipped in a newer template would never reach an existing device and its
+# dependency would install UNPATCHED. The merge is additive and shipped-wins,
+# exactly like merge_profile_package_json: live-only entries are kept, shipped
+# values replace conflicting live values, and everything outside the
+# patchedDependencies block stays byte-identical. The patch file itself is
+# copied by the refresh tree copy; the following profile `pnpm install`
+# reconciles pnpm-lock.yaml (patch_hash included).
+merge_profile_workspace_patched_dependencies() { # shipped live
+  local shipped="$1" live="$2" tmp="$2.merge-patch-$$" out rc
+  if [ ! -s "$shipped" ]; then
+    log "profile workspace merge: no shipped workspace at $shipped; skipping"
+    return 0
+  fi
+  if [ ! -s "$live" ]; then
+    log "profile workspace merge: no live workspace at $live; skipping"
+    return 0
+  fi
+  if ! grep -q '^patchedDependencies:' "$shipped"; then
+    log "profile workspace merge: shipped workspace declares no patchedDependencies; nothing to merge"
+    return 0
+  fi
+  out="$("$NODE" -e '
+const fs = require("fs")
+const [shippedPath, livePath, outPath] = process.argv.slice(1)
+function patchedBlock(text, label) {
+  const lines = text.split("\n")
+  let start = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^patchedDependencies:\s*(?:#.*)?$/.test(lines[i])) { start = i; break }
+  }
+  if (start === -1) return { lines, start: -1, end: -1, entries: [] }
+  let end = start + 1
+  while (end < lines.length) {
+    const line = lines[end]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line) || /^\s/.test(line)) { end += 1; continue }
+    break
+  }
+  const entries = []
+  for (let i = start + 1; i < end; i += 1) {
+    const line = lines[i]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
+    const m = /^  ([^#\s][^:]*?):[ ](.+?)\s*$/.exec(line)
+    if (m === null) {
+      console.error(`${label}: unrecognized line inside patchedDependencies: ${JSON.stringify(line)}`)
+      process.exit(3)
+    }
+    entries.push({ key: m[1], value: m[2], line: i })
+  }
+  return { lines, start, end, entries }
+}
+const shipped = patchedBlock(fs.readFileSync(shippedPath, "utf8"), "shipped workspace")
+if (shipped.entries.length === 0) {
+  console.error("shipped workspace patchedDependencies block carries no entries")
+  process.exit(3)
+}
+const seen = new Set()
+for (const entry of shipped.entries) {
+  if (seen.has(entry.key)) {
+    console.error(`shipped workspace repeats patchedDependencies key ${entry.key}`)
+    process.exit(3)
+  }
+  seen.add(entry.key)
+}
+const liveText = fs.readFileSync(livePath, "utf8")
+const live = patchedBlock(liveText, "live workspace")
+const liveKeys = new Set()
+for (const entry of live.entries) {
+  if (liveKeys.has(entry.key)) {
+    console.error(`live workspace repeats patchedDependencies key ${entry.key}; refusing to rewrite a malformed block`)
+    process.exit(3)
+  }
+  liveKeys.add(entry.key)
+}
+if (live.start === -1) {
+  let text = liveText
+  if (!text.endsWith("\n")) text += "\n"
+  const block = ["", "patchedDependencies:", ...shipped.entries.map((entry) => `  ${entry.key}: ${entry.value}`), ""].join("\n")
+  fs.writeFileSync(outPath, text + block)
+  console.log(`added ${shipped.entries.length} patchedDependencies entr${shipped.entries.length === 1 ? "y" : "ies"} (new block): ${shipped.entries.map((entry) => entry.key).join(", ")}`)
+  process.exit(0)
+}
+const liveByKey = new Map(live.entries.map((entry) => [entry.key, entry]))
+const lines = [...live.lines]
+const insertions = []
+const added = []
+const updated = []
+const kept = live.entries.filter((entry) => !seen.has(entry.key)).map((entry) => entry.key)
+for (const entry of shipped.entries) {
+  const existing = liveByKey.get(entry.key)
+  if (existing === undefined) { insertions.push(entry); added.push(entry.key); continue }
+  if (existing.value !== entry.value) { lines[existing.line] = `  ${entry.key}: ${entry.value}`; updated.push(entry.key) }
+}
+if (added.length === 0 && updated.length === 0) {
+  console.log("live workspace already carries every shipped patchedDependencies entry")
+  process.exit(2)
+}
+if (insertions.length > 0) {
+  let at = live.start + 1
+  for (const entry of live.entries) at = Math.max(at, entry.line + 1)
+  lines.splice(at, 0, ...insertions.map((entry) => `  ${entry.key}: ${entry.value}`))
+}
+fs.writeFileSync(outPath, lines.join("\n"))
+const detail = [
+  added.length > 0 ? `added ${added.join(", ")}` : "",
+  updated.length > 0 ? `updated ${updated.join(", ")}` : "",
+  kept.length > 0 ? `kept user-only ${kept.join(", ")}` : "",
+].filter(Boolean).join("; ")
+console.log(`${added.length} added, ${updated.length} updated, ${kept.length} user-only kept${detail ? ` (${detail})` : ""}`)
+' "$shipped" "$live" "$tmp" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0)
+      if mv "$tmp" "$live" 2>/dev/null; then
+        log "profile workspace merge: $out"
+      else
+        rm -f "$tmp"
+        warn "profile workspace merge: could not write $live; workspace left untouched"
+      fi
+      ;;
+    2)
+      rm -f "$tmp"
+      log "profile workspace merge: live workspace already carries every shipped patchedDependencies entry"
+      ;;
+    3)
+      rm -f "$tmp"
+      die "profile workspace merge: $out"
+      ;;
+    *)
+      rm -f "$tmp"
+      warn "profile workspace merge skipped (exit $rc): $out"
+      ;;
+  esac
+  return 0
+}
+
 # Profile refresh merges: additive patch rows + dependency union. The staged
 # shipped tree is the source when present (set by prepare_profile), otherwise
 # the bundled profile of the tree being installed. Never runs on a fresh seed.
@@ -2667,6 +2805,7 @@ refresh_profile_merges() {
     merge_profile_patch "$shipped/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml"
   fi
   merge_profile_package_json "$shipped/package.json" "$PROFILE_DIR/package.json"
+  merge_profile_workspace_patched_dependencies "$shipped/pnpm-workspace.yaml" "$PROFILE_DIR/pnpm-workspace.yaml"
   return 0
 }
 

@@ -74,6 +74,10 @@ function runPackageMerge(shipped: string, live: string) {
   return runBash('NODE="$(command -v node)"\nmerge_profile_package_json "$SHIPPED" "$LIVE" 2>&1', shipped, live)
 }
 
+function runPatchedDependenciesMerge(shipped: string, live: string) {
+  return runBash('NODE="$(command -v node)"\nmerge_profile_workspace_patched_dependencies "$SHIPPED" "$LIVE" 2>&1', shipped, live)
+}
+
 const SHIPPED_TEMPLATE = `# shipped template
 - id: subagent
   name: "@deepseek-ai/dsh-subagent"
@@ -829,6 +833,86 @@ describe('profile package.json dependency union', () => {
     expect(readFileSync(live, 'utf8')).toBe(before)
     expect(result.output).toContain('refusing to overwrite')
     expect(result.output).toContain('shipped-dep')
+  })
+})
+
+describe('profile patchedDependencies union', () => {
+  const SHIPPED_WORKSPACE = `packages:
+  - .
+
+nodeLinker: hoisted
+
+autoInstallPeers: false
+
+allowBuilds:
+  esbuild: true
+
+patchedDependencies:
+  dsh-compressor@0.1.0: patches/dsh-compressor@0.1.0.patch
+  dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch
+`
+
+  it('adds the shipped declaration to an old workspace that has none', () => {
+    const shipped = fixture('shipped.pnpm-workspace.yaml', SHIPPED_WORKSPACE)
+    const liveBefore = `packages:
+  - .
+
+nodeLinker: hoisted
+
+autoInstallPeers: false
+
+allowBuilds:
+  node-pty: true
+`
+    const live = fixture('live-old.pnpm-workspace.yaml', liveBefore)
+    const result = runPatchedDependenciesMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = readFileSync(live, 'utf8')
+    // Everything outside the appended block is byte-identical; no duplicate keys.
+    expect(merged.startsWith(liveBefore)).toBe(true)
+    expect(merged).toContain('patchedDependencies:\n  dsh-compressor@0.1.0: patches/dsh-compressor@0.1.0.patch\n  dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch')
+    expect(merged.match(/dsh-compressor@0\.1\.0:/g)).toHaveLength(1)
+    expect(result.output).toContain('added 2 patchedDependencies entries')
+    // Idempotent: a second merge is a no-op and the file stays byte-identical.
+    const after = readFileSync(live, 'utf8')
+    const second = runPatchedDependenciesMerge(shipped, live)
+    expect(second.status).toBe(0)
+    expect(readFileSync(live, 'utf8')).toBe(after)
+  })
+
+  it('keeps user-only entries and lets shipped values win conflicts', () => {
+    const shipped = fixture('shipped2.pnpm-workspace.yaml', SHIPPED_WORKSPACE)
+    const liveBefore = `packages:
+  - .
+
+patchedDependencies:
+  user-patch@1.0.0: patches/user.patch
+  dsh-fast@0.2.14: patches/OLD-fast.patch
+
+onlyBuiltDependencies:
+  - esbuild
+`
+    const live = fixture('live2.pnpm-workspace.yaml', liveBefore)
+    const result = runPatchedDependenciesMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = readFileSync(live, 'utf8')
+    expect(merged).toContain('user-patch@1.0.0: patches/user.patch')
+    expect(merged).toContain('dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch')
+    expect(merged).not.toContain('OLD-fast.patch')
+    expect(merged).toContain('dsh-compressor@0.1.0: patches/dsh-compressor@0.1.0.patch')
+    // The block after the mapping is untouched.
+    expect(merged).toContain('onlyBuiltDependencies:\n  - esbuild')
+    expect(result.output).toContain('1 added, 1 updated, 1 user-only kept')
+  })
+
+  it('is a no-op when the live workspace already carries every shipped entry', () => {
+    const shipped = fixture('shipped3.pnpm-workspace.yaml', SHIPPED_WORKSPACE)
+    const live = fixture('live3.pnpm-workspace.yaml', SHIPPED_WORKSPACE)
+    const before = readFileSync(live, 'utf8')
+    const result = runPatchedDependenciesMerge(shipped, live)
+    expect(result.status).toBe(0)
+    expect(readFileSync(live, 'utf8')).toBe(before)
+    expect(result.output).toContain('already carries every shipped patchedDependencies entry')
   })
 })
 
