@@ -23,7 +23,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import {
-  buildResolvedVisibility, diffRules, evaluateVisibility, isGated, isRecord, parseRulesDocument, resolvePrivacy, withHiddenPins,
+  buildResolvedVisibility, diffRules, evaluateVisibility, isGated, isRecord, parseRulesDocument, resolvePrivacy, withHiddenPins, withShownPins,
   type CatalogEntry, type ParsedRules, type RulesDiff, type VisibilityDecision, type VisibilityReport,
 } from './rules.ts'
 import { expandSelector, parseGroupSelector, type GroupSelector, type SelectorExpansion } from './selectors.ts'
@@ -92,12 +92,14 @@ export class CatalogRulesEngine implements CatalogRulesService {
   /**
    * @param readRules - reads the raw `catalogRules` value (ctx-bound in production).
    * @param readCatalogue - reads the live catalogue snapshot (ctx-bound in production).
-   * @param readHiddenPins - reads `uiPreferences.hiddenModels`, the picker's manual pins.
+   * @param readHiddenPins - reads `uiPreferences.hiddenModels`, the picker's manual hidden pins.
+   * @param readShownPins - reads `uiPreferences.shownModels`, the picker's manual shown pins.
    */
   constructor(
     private readonly readRules: () => unknown,
     private readonly readCatalogue: () => CatalogEntry[],
     private readonly readHiddenPins: () => unknown = () => undefined,
+    private readonly readShownPins: () => unknown = () => undefined,
   ) {
     this.rules = parseRulesDocument(undefined)
     this.entries = []
@@ -107,7 +109,7 @@ export class CatalogRulesEngine implements CatalogRulesService {
 
   /** Re-read the rules document and catalogue; rebuilding every derived view. */
   refresh(): void {
-    this.rules = withHiddenPins(parseRulesDocument(this.readRules()), this.readHiddenPins())
+    this.rules = withShownPins(withHiddenPins(parseRulesDocument(this.readRules()), this.readHiddenPins()), this.readShownPins())
     const entries = this.readCatalogue().map(entry => ({
       ...entry,
       ...(isGated(entry, this.rules) ? { gated: true } : {}),
@@ -152,7 +154,7 @@ export class CatalogRulesEngine implements CatalogRulesService {
   previewRulesChange(nextRaw: unknown): RulesDiff {
     // The proposed document inherits the picker's manual pins, exactly as the
     // live document does — otherwise the diff would misreport them as removed.
-    const next = withHiddenPins(parseRulesDocument(nextRaw), this.readHiddenPins())
+    const next = withShownPins(withHiddenPins(parseRulesDocument(nextRaw), this.readHiddenPins()), this.readShownPins())
     return diffRules(this.rules, next, this.entries)
   }
 
@@ -177,6 +179,11 @@ export function apply(ctx: Context): void {
       const document = readOrchestrationDocument(settings())
       const preferences = document?.uiPreferences
       return isRecord(preferences) ? preferences.hiddenModels : undefined
+    },
+    () => {
+      const document = readOrchestrationDocument(settings())
+      const preferences = document?.uiPreferences
+      return isRecord(preferences) ? preferences.shownModels : undefined
     },
   )
   const emitted = new Set<string>()
@@ -276,7 +283,7 @@ export function apply(ctx: Context): void {
 }
 
 export {
-  buildResolvedVisibility, diffRules, evaluateVisibility, formatHiddenReason, parseRulesDocument, resolvePrivacy, withHiddenPins,
+  buildResolvedVisibility, diffRules, evaluateVisibility, formatHiddenReason, parseRulesDocument, resolvePrivacy, withHiddenPins, withShownPins,
   type CatalogEntry, type CatalogPredicate, type HideRule, type ModelOverrides, type ParsedRules,
   type PrivacyOverrides, type PrivacyVerdict, type ResolvedVisibilityEntry, type RulesDiff,
   type VisibilityDecision, type VisibilityReport,

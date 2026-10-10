@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readCatalogue } from '../src/catalogue.ts'
 import {
   decideVisibility, describePredicate, diffRules, evaluatePredicate, evaluateVisibility,
-  formatHiddenReason, globMatches, parseRulesDocument, resolvePrivacy, withHiddenPins,
+  formatHiddenReason, globMatches, parseRulesDocument, resolvePrivacy, withHiddenPins, withShownPins,
   type CatalogEntry, type ParsedRules,
 } from '../src/rules.ts'
 
@@ -228,6 +228,20 @@ describe('enpoi-catalog-rules visibility precedence', () => {
     // A manual visible pin still beats the merged hidden pin only when the hidden pin is absent.
     const shown = withHiddenPins(rulesOf({ overrides: { shown: { p: ['free'] } } }), { q: ['other'] })
     expect(decideVisibility(free, shown, 'unknown')).toMatchObject({ state: 'visible', source: 'manual', reason: 'pinned visible' })
+  })
+
+  it('merges the picker shownModels map as manual shown pins, gated entries included', () => {
+    const gated = entry({ provider: 'p', id: 'free', cost: { input: 0, output: 0 }, gated: true, gateReason: 'sign-in required' })
+    const rules = withShownPins(rulesOf({ visibility: { hide: [{ when: { zeroPrice: true } }] } }), { p: ['free'], q: ['other'] })
+    expect(decideVisibility(gated, rules, 'unknown')).toMatchObject({
+      state: 'visible', source: 'manual', reason: 'pinned visible (rule: zero-price)',
+    })
+    // Document pins survive the union; malformed rows are skipped.
+    const union = withShownPins(rulesOf({ overrides: { shown: { p: ['stay'] } } }), { p: ['free', 7], q: 'nope' })
+    expect(union.overrides.shown).toMatchObject({ p: ['stay', 'free'] })
+    // A hidden pin for the same entry still beats the shown pin.
+    const both = withShownPins(withHiddenPins(rulesOf(undefined), { p: ['free'] }), { p: ['free'] })
+    expect(decideVisibility(gated, both, 'unknown')).toMatchObject({ state: 'hidden', source: 'manual', reason: 'hidden manually' })
   })
 
   it('warns when a hide rule or a manual pin matches nothing', () => {

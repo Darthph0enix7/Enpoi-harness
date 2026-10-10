@@ -563,19 +563,17 @@ export function isGated(entry: Pick<CatalogEntry, 'provider' | 'id' | 'gated'>, 
 }
 
 /**
- * Merge the picker's existing manual hidden pins (`uiPreferences.hiddenModels`,
- * the map the Models settings page writes) into a parsed rules document as
- * manual hidden overrides. Manual pins always beat rules, and this keeps the
- * two manual sources — uiPreferences and catalogRules.overrides — one concept.
- * @param rules - parsed rules document.
- * @param hiddenModels - raw `uiPreferences.hiddenModels` value, if any.
- * @returns a document whose manual hidden map is the union.
+ * Union one raw picker pin map into a document override map. Malformed rows
+ * (non-array values, non-string or blank ids) are skipped rather than trusted.
+ * @param pins - the document's current override map.
+ * @param raw - raw `uiPreferences` pin map, if any.
+ * @returns the merged map plus whether it gained an id, or undefined when `raw` is not a map.
  */
-export function withHiddenPins(rules: ParsedRules, hiddenModels: unknown): ParsedRules {
-  if (!isRecord(hiddenModels)) return rules
-  const merged: Record<string, readonly string[]> = { ...rules.overrides.hidden }
+function mergePins(pins: Record<string, readonly string[]>, raw: unknown): { pins: Record<string, readonly string[]>; changed: boolean } | undefined {
+  if (!isRecord(raw)) return undefined
+  const merged: Record<string, readonly string[]> = { ...pins }
   let changed = false
-  for (const [provider, models] of Object.entries(hiddenModels)) {
+  for (const [provider, models] of Object.entries(raw)) {
     if (!Array.isArray(models)) continue
     const current = new Set(merged[provider] ?? [])
     for (const model of models) {
@@ -587,10 +585,43 @@ export function withHiddenPins(rules: ParsedRules, hiddenModels: unknown): Parse
       changed = true
     }
   }
-  if (!changed) return rules
+  return { pins: merged, changed }
+}
+
+/**
+ * Merge the picker's existing manual hidden pins (`uiPreferences.hiddenModels`,
+ * the map the Models settings page writes) into a parsed rules document as
+ * manual hidden overrides. Manual pins always beat rules, and this keeps the
+ * two manual sources — uiPreferences and catalogRules.overrides — one concept.
+ * @param rules - parsed rules document.
+ * @param hiddenModels - raw `uiPreferences.hiddenModels` value, if any.
+ * @returns a document whose manual hidden map is the union.
+ */
+export function withHiddenPins(rules: ParsedRules, hiddenModels: unknown): ParsedRules {
+  const merged = mergePins(rules.overrides.hidden, hiddenModels)
+  if (merged === undefined || !merged.changed) return rules
   return Object.freeze({
     ...rules,
-    overrides: Object.freeze({ ...rules.overrides, hidden: Object.freeze(merged) }),
+    overrides: Object.freeze({ ...rules.overrides, hidden: Object.freeze(merged.pins) }),
+  })
+}
+
+/**
+ * Merge the picker's explicit shown pins (`uiPreferences.shownModels`) into a
+ * parsed rules document as manual shown overrides, the mirror of
+ * {@link withHiddenPins}. A shown pin resolves the entry visible even when
+ * gated or matched by a hide rule; a hidden pin naming the same entry still
+ * wins, per the precedence in {@link decideVisibility}.
+ * @param rules - parsed rules document.
+ * @param shownModels - raw `uiPreferences.shownModels` value, if any.
+ * @returns a document whose manual shown map is the union.
+ */
+export function withShownPins(rules: ParsedRules, shownModels: unknown): ParsedRules {
+  const merged = mergePins(rules.overrides.shown, shownModels)
+  if (merged === undefined || !merged.changed) return rules
+  return Object.freeze({
+    ...rules,
+    overrides: Object.freeze({ ...rules.overrides, shown: Object.freeze(merged.pins) }),
   })
 }
 

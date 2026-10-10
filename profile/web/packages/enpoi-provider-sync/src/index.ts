@@ -20,13 +20,21 @@
  * - Tool-calling and price metadata (models.dev `tool_call` / `cost`) consumed
  *   by the dynamic catalogue rules (dsh-enpoi-catalog-rules predicates).
  * - Live hot-swap into runtime memory without restarting the server.
- * - Catalog-authoritative membership: on a route with a declared models.dev
- *   mapping, the route converges to the endpoint-advertised models the fresh
- *   catalog confirms, so ids the provider retired are removed. Hand-added
+ * - Authoritative membership, per route: an endpoint-authority route (one the
+ *   installed catalog does not describe) converges to exactly the ids its own
+ *   listing advertises whenever that listing fetched, so ids the provider
+ *   retired are removed without waiting on the models.dev cache. A
+ *   catalog-authority route converges to the endpoint-advertised models the
+ *   fresh catalog confirms and needs both sources fresh. Hand-added
  *   (`source: 'manual'`), pinned (`pinnedModels`), overlay-`upsert`, recently
- *   first-seen endpoint-only, and referenced models survive; a removal pass
- *   runs only when both the endpoint listing and the models.dev catalogue are
- *   fresh, and aborts on the shrink guards.
+ *   first-seen endpoint-only, and referenced models survive; the shrink guards
+ *   protect the unattended pass, and a manual refresh forces past the >half
+ *   guard.
+ * - Provider isolation: a route's models.dev metadata resolves only within its
+ *   own mapped provider keys, and its installed-catalog metadata only from its
+ *   own pi-ai provider keys — an id collision can never inherit another
+ *   vendor's metadata, and a route can never grow ids another route's endpoint
+ *   advertised.
  *
  * @module dsh-enpoi-provider-sync
  */
@@ -39,7 +47,7 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { readSettingsDocument, ORCHESTRATION_NAMESPACE } from 'dsh-enpoi-contracts'
-import { builtinProviders, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
+import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
 // The schema floor is llm-pi-ai's own resolution default: the sync writes it
 // explicitly so a discovered record is complete, but the one authoritative
@@ -434,7 +442,19 @@ export const DEFAULT_ROUTE_PROVIDER_MAP: RouteProviderMap = Object.freeze({
   'huggingface': ['huggingface'],
 })
 
-/** Resolve a model from models.dev with provider scoping and fallback. */
+/**
+ * Resolve a model from models.dev within the route's own provider namespace.
+ *
+ * Only the providers the route declares are consulted: the mapped keys when
+ * the route map names the route, its own key alone otherwise. There is no
+ * cross-provider fallback — an id that no declared provider carries is
+ * resolved by no one, so a route can never inherit another vendor's metadata
+ * through an id collision. Callers disclose nothing for it instead.
+ * @param route - the provider route key.
+ * @param modelId - the endpoint-advertised model id.
+ * @param routeProviderMap - the effective route → models.dev provider keys.
+ * @returns the mapped provider's record, or `undefined` when none carries it.
+ */
 function resolveFromModelsDev(
   route: string,
   modelId: string,
@@ -480,40 +500,51 @@ function resolveFromModelsDev(
     return undefined
   }
 
-  // 1. Check candidate providers
+  // The route's declared providers are the only namespace consulted; there is
+  // deliberately no global scan, so an id collision cannot lend this route a
+  // foreign vendor's metadata.
   for (const p of candidateProviders) {
     const hit = find(db[p]?.models)
-    if (hit) return hit
-  }
-
-  // 2. Global search across all providers in models.dev
-  for (const [, pData] of Object.entries(db)) {
-    const hit = find(pData.models)
     if (hit) return hit
   }
 
   return undefined
 }
 
-/** Global in-memory catalog index of all known models across pi-ai (secondary fallback). */
-let globalCatalogIndex: Map<string, Model<Api>> | undefined
+/** Per-route installed-catalog indexes, keyed by the exact provider-key set consulted. */
+const routeCatalogIndexes = new Map<string, Map<string, Model<Api>>>()
 
-function getCatalogIndex(): Map<string, Model<Api>> {
-  if (globalCatalogIndex !== undefined) return globalCatalogIndex
+/**
+ * The installed pi-ai catalog index for one route: the models of the route's
+ * own pi-ai provider id plus the provider ids its route map declares, and
+ * nothing else. A route therefore never inherits another vendor's catalog
+ * metadata through an id collision; a route pi-ai does not describe and whose
+ * map names no pi-ai provider has no catalog answer at all.
+ * @param route - the provider route key.
+ * @param routeProviderMap - the effective route → models.dev provider keys.
+ * @returns the id-and-short-id index of the route's own providers.
+ */
+function catalogIndexForRoute(route: string, routeProviderMap: RouteProviderMap): Map<string, Model<Api>> {
+  const providerKeys = [...new Set([route, ...(routeProviderMap[route] ?? [])])]
+  const cacheKey = providerKeys.join('\u0000')
+  const cached = routeCatalogIndexes.get(cacheKey)
+  if (cached !== undefined) return cached
   const index = new Map<string, Model<Api>>()
-  for (const provider of builtinProviders()) {
+  for (const provider of providerKeys) {
+    let models: readonly Model<Api>[]
     try {
-      const models = getBuiltinModels(provider.id as Parameters<typeof getBuiltinModels>[0])
-      for (const m of models) {
-        if (!index.has(m.id)) index.set(m.id, m)
-        const short = m.id.includes('/') ? m.id.split('/').pop()! : m.id
-        if (!index.has(short)) index.set(short, m)
-      }
+      models = getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0])
     } catch {
-      // provider catalog resolution errors ignored
+      // A provider key pi-ai does not know contributes nothing.
+      continue
+    }
+    for (const m of models) {
+      if (!index.has(m.id)) index.set(m.id, m)
+      const short = m.id.includes('/') ? m.id.split('/').pop()! : m.id
+      if (!index.has(short)) index.set(short, m)
     }
   }
-  globalCatalogIndex = index
+  routeCatalogIndexes.set(cacheKey, index)
   return index
 }
 
@@ -1293,7 +1324,7 @@ function analyzeModel(
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
 ): AnalyzedModel {
   const mDev = resolveFromModelsDev(route, model.id, routeProviderMap)
-  const catalog = getCatalogIndex()
+  const catalog = catalogIndexForRoute(route, routeProviderMap)
   const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
   const cat = catalog.get(model.id) ?? catalog.get(shortId)
 
@@ -1322,23 +1353,30 @@ function analyzeModel(
   const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? DEFAULT_MAX_TOKENS
 
-  // 3. Resolve Modalities, Reasoning, and their provenance. `input` and
-  // `reasoning` are facts only when a disclosure stated them; the shared id
-  // table's operands are hints. An explicit `reasoning: false` from any
-  // source is a disclosure of absence and blocks the heuristics that used to
-  // override it.
-  const disclosed = [mDev?.modalities?.input, cat?.input, model.input]
+  // 3. Resolve Modalities, Reasoning, and their provenance. The endpoint's own
+  // listing speaks for the route it serves, so a disclosure it makes wins over
+  // enrichment: `input` and `reasoning` are facts when the listing stated them,
+  // and an explicit `reasoning: false` from the listing blocks the enrichment
+  // and heuristics that used to override it. models.dev and the installed
+  // catalog fill only what the listing left undisclosed; the shared id table's
+  // operands are hints, kept labeled in `capabilityHints`.
+  const disclosed = [model.input, mDev?.modalities?.input, cat?.input]
     .find(value => Array.isArray(value) && liveModalities(value).length > 0)
   const modalityDisclosed = disclosed !== undefined
   const inputModalities: LiveModality[] = modalityDisclosed
     ? ['text', ...liveModalities(disclosed).filter(modality => modality !== 'text')]
     : ['text']
-  const reasoningSources = [mDev?.reasoning, cat?.reasoning, model.reasoning]
+  // An explicit boolean the listing stated is the route's own answer; only a
+  // listing that stayed silent lets models.dev and the catalog speak.
+  const listingReasoning = typeof model.reasoning === 'boolean' ? model.reasoning : undefined
+  const enrichedReasoning = [mDev?.reasoning, cat?.reasoning]
     .filter((value): value is boolean => typeof value === 'boolean')
-  const reasoningOptions = Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0
-  const thinkingLevels = cat?.thinkingLevelMap !== undefined && Object.keys(cat.thinkingLevelMap).some(key => key !== 'off')
-  const reasoningDisclosed = reasoningSources.length > 0 || reasoningOptions || thinkingLevels
-  const isReasoning = reasoningSources.some(value => value === true) || reasoningOptions || thinkingLevels
+  const reasoningOptions = listingReasoning === undefined
+    && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0
+  const thinkingLevels = listingReasoning === undefined
+    && cat?.thinkingLevelMap !== undefined && Object.keys(cat.thinkingLevelMap).some(key => key !== 'off')
+  const reasoningDisclosed = listingReasoning !== undefined || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels
+  const isReasoning = listingReasoning ?? (enrichedReasoning.some(value => value === true) || reasoningOptions || thinkingLevels)
 
   // The shared table's guess (and any owner override) never becomes a fact:
   // it is kept only under `capabilityHints`, and a claim for a capability
@@ -1406,12 +1444,12 @@ function analyzeModel(
 
   // 5. Tool-calling and price metadata. Both feed the dynamic catalogue rules
   // (dsh-enpoi-catalog-rules): the `tools` and `zeroPrice`/`maxPrice`
-  // predicates. models.dev wins; the listing fills what models.dev does not
-  // know; absent fields stay absent so a rule can tell "unknown" from "known
-  // free"/"known pays".
-  const tools = typeof mDev?.tool_call === 'boolean'
-    ? mDev.tool_call
-    : model.tools
+  // predicates. The listing's own disclosure wins (it serves the route);
+  // models.dev fills what the listing did not state; absent fields stay absent
+  // so a rule can tell "unknown" from "known free"/"known pays".
+  const tools = typeof model.tools === 'boolean'
+    ? model.tools
+    : mDev?.tool_call
   const costInput = typeof mDev?.cost?.input === 'number' && Number.isFinite(mDev.cost.input) ? mDev.cost.input : undefined
   const costOutput = typeof mDev?.cost?.output === 'number' && Number.isFinite(mDev.cost.output) ? mDev.cost.output : undefined
   const cost = costInput !== undefined || costOutput !== undefined
@@ -1776,11 +1814,13 @@ export interface PlanRouteInput {
  * that set confirms, plus protected entries (`source: 'manual'`, pinned ids,
  * overlay `upsert` ids), plus endpoint-only ids first seen inside the 14-day
  * grace, minus the overlay's `remove` ids. On any other route with a
- * successful listing fetch the advertised list itself is the authority.
- * Removals run only when the endpoint listing and the catalogue are both
- * fresh in the same pass, and abort when the effective set would be empty or
- * would drop more than half of the route's stored models. A referenced model
- * that would be pruned is kept, stamped `deprecated: true` and
+ * successful listing fetch the advertised list itself is the authority, and
+ * removals run on that listing alone — the catalogue's freshness gates a
+ * catalog-authority intersection, never an endpoint-authoritative prune.
+ * Removals abort when the effective set would be empty or, on an unattended
+ * pass, would drop more than half of the route's stored models; `force`
+ * (the operator's manual refresh) bypasses the shrink guard. A referenced
+ * model that would be pruned is kept, stamped `deprecated: true` and
  * `source: 'pinned-in-use'`, and named in the report. A degraded pass is the
  * legacy merge: nothing is removed.
  * @param input - the route, its stored records, the listing, and the gate facts.
@@ -1866,7 +1906,14 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   }
   const isMember = (id: string): boolean => memberBase.has(id) || protectedIds.has(id) || grace.has(id)
 
-  const removalsAllowed = authority !== 'none' && input.endpointFresh && input.catalogFresh
+  // The freshness each authority needs: an endpoint-authority route's members
+  // are exactly its listing's advertised ids, so the listing is the only
+  // source that must be fresh; catalogue freshness is required only where
+  // membership itself is the endpoint ∩ models.dev intersection. Stale
+  // catalogue metadata never withholds an endpoint-authoritative prune.
+  const removalsAllowed = authority === 'endpoint'
+    ? input.endpointFresh
+    : authority === 'catalog' && input.endpointFresh && input.catalogFresh
   let keepAll = !removalsAllowed
   if (keepAll) {
     report.degraded = true
@@ -1874,7 +1921,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       ? 'the endpoint listing could not be fetched'
       : !input.endpointFresh
         ? 'the endpoint listing fetch did not succeed'
-        : !input.catalogFresh
+        : authority === 'catalog' && !input.catalogFresh
           ? 'the models.dev catalogue is stale (no online refresh and the cache is 48 h or older)'
           : input.catalogRoute
             ? 'the route has no declared models.dev catalog mapping'

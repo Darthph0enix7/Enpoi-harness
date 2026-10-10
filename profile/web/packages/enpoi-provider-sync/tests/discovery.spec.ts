@@ -968,16 +968,18 @@ describe('route provider mapping', () => {
     return cache
   }
 
-  it('resolves a route through its mapped provider list instead of the global fallback', async () => {
+  it('resolves a route only through its mapped provider list, never by global id search', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-route-map-'))
     directories.push(directory)
     process.env.DSH_MODELS_DEV_PATH = writeSharedIdCatalogue(directory)
     vi.resetModules()
     const fresh = await import('../src/index.ts')
-    // Unmapped, the global search answers with the first provider carrying the id.
+    // Unmapped, no other provider's namespace may answer: the id stays
+    // undisclosed rather than inheriting a foreign vendor's metadata.
     const unmapped = fresh.mergeConfiguredModels('zzz-route', undefined, [{ id: 'mapped-model' }], undefined)
-    expect(unmapped.models[0]).toMatchObject({ id: 'mapped-model', name: 'From First' })
-    // Mapped, the route's own provider list wins over the global order.
+    expect(unmapped.models[0]).not.toMatchObject({ name: 'From First' })
+    expect(unmapped.models[0]).toMatchObject({ id: 'mapped-model', unverified: true })
+    // Mapped, the route's own provider list is the only namespace consulted.
     const mapped = fresh.mergeConfiguredModels('zzz-route', undefined, [{ id: 'mapped-model' }], undefined, undefined, { 'zzz-route': ['zzz-second'] })
     expect(mapped.models[0]).toMatchObject({ id: 'mapped-model', name: 'From Second' })
   })

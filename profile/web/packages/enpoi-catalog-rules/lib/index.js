@@ -300,11 +300,11 @@ function isGated(entry, rules) {
   if (rules.overrides.gatedProviders.has(entry.provider)) return true;
   return rules.overrides.gatedModels.has(`${entry.provider}/${entry.id}`) || rules.overrides.gatedModels.has(entry.id);
 }
-function withHiddenPins(rules, hiddenModels) {
-  if (!isRecord(hiddenModels)) return rules;
-  const merged = { ...rules.overrides.hidden };
+function mergePins(pins, raw) {
+  if (!isRecord(raw)) return void 0;
+  const merged = { ...pins };
   let changed = false;
-  for (const [provider, models] of Object.entries(hiddenModels)) {
+  for (const [provider, models] of Object.entries(raw)) {
     if (!Array.isArray(models)) continue;
     const current = new Set(merged[provider] ?? []);
     for (const model of models) {
@@ -316,10 +316,22 @@ function withHiddenPins(rules, hiddenModels) {
       changed = true;
     }
   }
-  if (!changed) return rules;
+  return { pins: merged, changed };
+}
+function withHiddenPins(rules, hiddenModels) {
+  const merged = mergePins(rules.overrides.hidden, hiddenModels);
+  if (merged === void 0 || !merged.changed) return rules;
   return Object.freeze({
     ...rules,
-    overrides: Object.freeze({ ...rules.overrides, hidden: Object.freeze(merged) })
+    overrides: Object.freeze({ ...rules.overrides, hidden: Object.freeze(merged.pins) })
+  });
+}
+function withShownPins(rules, shownModels) {
+  const merged = mergePins(rules.overrides.shown, shownModels);
+  if (merged === void 0 || !merged.changed) return rules;
+  return Object.freeze({
+    ...rules,
+    overrides: Object.freeze({ ...rules.overrides, shown: Object.freeze(merged.pins) })
   });
 }
 function ruleText(rule) {
@@ -580,12 +592,14 @@ var CatalogRulesEngine = class {
   /**
    * @param readRules - reads the raw `catalogRules` value (ctx-bound in production).
    * @param readCatalogue - reads the live catalogue snapshot (ctx-bound in production).
-   * @param readHiddenPins - reads `uiPreferences.hiddenModels`, the picker's manual pins.
+   * @param readHiddenPins - reads `uiPreferences.hiddenModels`, the picker's manual hidden pins.
+   * @param readShownPins - reads `uiPreferences.shownModels`, the picker's manual shown pins.
    */
-  constructor(readRules, readCatalogue2, readHiddenPins = () => void 0) {
+  constructor(readRules, readCatalogue2, readHiddenPins = () => void 0, readShownPins = () => void 0) {
     this.readRules = readRules;
     this.readCatalogue = readCatalogue2;
     this.readHiddenPins = readHiddenPins;
+    this.readShownPins = readShownPins;
     this.rules = parseRulesDocument(void 0);
     this.entries = [];
     this.report = { decisions: [], warnings: [] };
@@ -597,7 +611,7 @@ var CatalogRulesEngine = class {
   decisions = /* @__PURE__ */ new Map();
   /** Re-read the rules document and catalogue; rebuilding every derived view. */
   refresh() {
-    this.rules = withHiddenPins(parseRulesDocument(this.readRules()), this.readHiddenPins());
+    this.rules = withShownPins(withHiddenPins(parseRulesDocument(this.readRules()), this.readHiddenPins()), this.readShownPins());
     const entries = this.readCatalogue().map((entry) => ({
       ...entry,
       ...isGated(entry, this.rules) ? { gated: true } : {}
@@ -633,7 +647,7 @@ var CatalogRulesEngine = class {
     return { ...expansion, warnings: Object.freeze([...warnings, ...expansion.warnings]) };
   }
   previewRulesChange(nextRaw) {
-    const next = withHiddenPins(parseRulesDocument(nextRaw), this.readHiddenPins());
+    const next = withShownPins(withHiddenPins(parseRulesDocument(nextRaw), this.readHiddenPins()), this.readShownPins());
     return diffRules(this.rules, next, this.entries);
   }
   warnings() {
@@ -652,6 +666,11 @@ function apply(ctx) {
       const document = readOrchestrationDocument(settings());
       const preferences = document?.uiPreferences;
       return isRecord(preferences) ? preferences.hiddenModels : void 0;
+    },
+    () => {
+      const document = readOrchestrationDocument(settings());
+      const preferences = document?.uiPreferences;
+      return isRecord(preferences) ? preferences.shownModels : void 0;
     }
   );
   const emitted = /* @__PURE__ */ new Set();
@@ -745,5 +764,6 @@ export {
   parseRulesDocument,
   readCatalogue,
   resolvePrivacy,
-  withHiddenPins
+  withHiddenPins,
+  withShownPins
 };

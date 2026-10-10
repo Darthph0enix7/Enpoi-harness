@@ -45,8 +45,8 @@ drops the seed so only the document answers.
 ## Precedence
 
 Manual hidden (the picker's `uiPreferences.hiddenModels` plus
-`overrides.hidden`) > manual shown (`overrides.shown`) > gated marker > hide
-rules > default visible. The picker renders `decide()`'s `reason`, e.g.
+`overrides.hidden`) > manual shown (the picker's `uiPreferences.shownModels`
+plus `overrides.shown`) > gated marker > hide rules > default visible. The picker renders `decide()`'s `reason`, e.g.
 `hidden by rule: zero-price`, `gated`, `hidden manually`, or
 `pinned visible (rule: zero-price)`.
 

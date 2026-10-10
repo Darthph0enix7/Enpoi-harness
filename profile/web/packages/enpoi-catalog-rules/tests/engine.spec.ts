@@ -55,6 +55,43 @@ describe('enpoi-catalog-rules engine', () => {
     expect(engine.decide('p', 'free')).toMatchObject({ state: 'hidden', source: 'manual', reason: 'hidden manually' })
   })
 
+  it('merges picker shownModels pins into the manual tier, resolving gated entries visible', () => {
+    const engine = new CatalogRulesEngine(
+      () => ({ visibility: { hide: [{ when: { zeroPrice: true } }] } }),
+      () => [entry('p', 'gated', { cost: { input: 0, output: 0 }, gated: true, gateReason: 'sign-in required' })],
+      () => undefined,
+      () => ({ p: ['gated'], q: ['other'] }),
+    )
+    expect(engine.decide('p', 'gated')).toMatchObject({
+      state: 'visible', source: 'manual', reason: 'pinned visible (rule: zero-price)',
+    })
+    expect(buildResolvedVisibility(engine.visibility().decisions)).toEqual({
+      'p/gated': { state: 'visible', reason: 'pinned visible (rule: zero-price)', source: 'manual', overriddenRule: 'zero-price' },
+    })
+  })
+
+  it('keeps hidden pins ahead of shown pins for the same model', () => {
+    const engine = new CatalogRulesEngine(
+      () => undefined,
+      () => [entry('p', 'both')],
+      () => ({ p: ['both'] }),
+      () => ({ p: ['both'] }),
+    )
+    expect(engine.decide('p', 'both')).toMatchObject({ state: 'hidden', source: 'manual', reason: 'hidden manually' })
+  })
+
+  it('previews a proposed edit with the picker shown pins inherited', () => {
+    const engine = new CatalogRulesEngine(
+      () => ({ visibility: { hide: [{ when: { zeroPrice: true } }] } }),
+      () => [entry('p', 'free', { cost: { input: 0, output: 0 } })],
+      () => undefined,
+      () => ({ p: ['free'] }),
+    )
+    const diff = engine.previewRulesChange({ visibility: { hide: [{ when: { zeroPrice: true } }] } })
+    expect(diff.hiddenAdded).toEqual([])
+    expect(diff.hiddenRemoved).toEqual([])
+  })
+
   it('warns once for rules that match nothing and previews a proposed edit', () => {
     const { state, engine } = makeEngine(undefined, [entry('p', 'free', { cost: { input: 0, output: 0 } })])
     expect(engine.warnings()).toEqual([])
@@ -147,6 +184,40 @@ describe('enpoi-catalog-rules resolved publish', () => {
     expect(artifacts).toHaveLength(2)
     expect(artifacts[1]!.value).toMatchObject({ 'p/free': { state: 'visible', reason: 'pinned visible (rule: zero-price)' } })
     expect(writes).toHaveLength(1)
+  })
+
+  it('publishes uiPreferences.shownModels pins as manual visible entries (apply wiring)', async () => {
+    const { apply } = await import('../src/index.ts')
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const doc = {
+      enpoi: {
+        catalogRules: { visibility: { hide: [{ when: { zeroPrice: true } }] } },
+        uiPreferences: { shownModels: { p: ['gated'] } },
+      },
+      llm: {
+        providers: {
+          p: { models: [{ id: 'gated', gated: true, gateReason: 'sign-in required', cost: { input: 0, output: 0 } }] },
+        },
+      },
+    }
+    const artifacts: Array<{ key: string; value: unknown }> = []
+    const settings = {
+      get: (ns: string) => ns === 'enpoi-orchestration' ? doc.enpoi : ns === 'llm-pi-ai' ? doc.llm : undefined,
+      publishArtifact: (key: string, value: unknown) => {
+        artifacts.push({ key, value })
+        return artifacts.length
+      },
+    }
+    const ctx = {
+      get: (ns: string) => ns === 'settings' ? settings : undefined,
+      provide: () => undefined,
+      on: () => () => undefined,
+    }
+    apply(ctx as never)
+    expect(artifacts).toEqual([{
+      key: 'catalogRules.resolved',
+      value: { 'p/gated': { state: 'visible', reason: 'pinned visible (rule: zero-price)', source: 'manual', overriddenRule: 'zero-price' } },
+    }])
   })
 
   it('publishes through settings once and republishes on a rules change', async () => {

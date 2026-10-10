@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { DEFAULT_CONTEXT_WINDOW } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_MODELS_DEV_URL, planRouteModels, pruneRouteReferences, referencedRouteModels } from '../src/index.ts'
 
@@ -532,5 +533,134 @@ describe('manual-refresh RPC', () => {
     expect(outcome.degraded).toBe(false)
     expect(outcome.removed).toEqual(['stale1', 'stale2', 'stale3'])
     expect(outcome.models.map(m => m.id)).toEqual(['kept'])
+  })
+})
+
+describe('provider isolation', () => {
+  it('does not inherit models.dev metadata from an unmapped provider namespace', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
+      othervendor: { models: { 'orion-9': { name: 'Orion Nine Ultra', limit: { context: 333_333, output: 77_777 } } } },
+    })
+    const { planRouteModels: plan } = await freshIndex()
+    const input = {
+      route: 'custom-gateway',
+      configured: [],
+      live: [{ id: 'orion-9' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1_000_000,
+    }
+    // Unmapped: no provider namespace answers, so the record is the honest
+    // floor — never another vendor's metadata through an id collision.
+    const unmapped = plan(input)
+    expect(unmapped.models[0]).toMatchObject({ id: 'orion-9', name: 'Orion 9', contextWindow: DEFAULT_CONTEXT_WINDOW, unverified: true })
+    // Mapped: the declared provider is the only namespace consulted.
+    const mapped = plan({ ...input, routeProviderMap: { 'custom-gateway': ['othervendor'] } })
+    expect(mapped.models[0]).toMatchObject({ id: 'orion-9', name: 'Orion Nine Ultra', contextWindow: 333_333, maxTokens: 77_777 })
+  })
+
+  it('lets the endpoint listing disclosure win over models.dev enrichment', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
+      'zzz-vendor': {
+        models: {
+          'orion-9': {
+            name: 'Orion Nine Ultra',
+            limit: { context: 999_999, output: 111_111 },
+            modalities: { input: ['text', 'image'] },
+            tool_call: false,
+            reasoning: true,
+            reasoning_options: [{ values: ['low', 'high'] }],
+          },
+        },
+      },
+    })
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'zzz-route',
+      configured: [],
+      live: [{
+        id: 'orion-9',
+        contextWindow: 4242,
+        maxTokens: 2424,
+        input: ['text', 'audio'],
+        tools: true,
+        reasoning: false,
+      }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      routeProviderMap: { 'zzz-route': ['zzz-vendor'] },
+      now: 1_000_000,
+    })
+    // Capacity, modalities, tools, and reasoning all follow the listing's own
+    // disclosure; the enrichment only supplies the display name it did not state.
+    expect(planned.models[0]).toMatchObject({
+      id: 'orion-9',
+      name: 'Orion Nine Ultra',
+      contextWindow: 4242,
+      maxTokens: 2424,
+      input: ['text', 'audio'],
+      tools: true,
+      reasoning: false,
+    })
+    // An explicit `reasoning: false` blocks the enrichment's effort ladder too.
+    expect(planned.models[0]!.reasoningEfforts).toBeUndefined()
+  })
+
+  it('prunes an endpoint-authority route to its listing even when the models.dev cache is stale', async () => {
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'gateway',
+      configured: [{ id: 'kept' }, { id: 'retired' }],
+      live: [{ id: 'kept' }, { id: 'fresh' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: false,
+      now: 1_000_000,
+    })
+    // The endpoint is the whole membership authority here: a stale catalogue
+    // (metadata only) must not withhold the prune.
+    expect(planned.report).toMatchObject({ removed: ['retired'], degraded: false, authority: 'endpoint' })
+    expect(planned.models.map(model => model.id)).toEqual(['kept', 'fresh'])
+  })
+
+  it('still withholds an unattended endpoint-authority prune over half the stored list', async () => {
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'gateway',
+      configured: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }],
+      live: [{ id: 'a' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1_000_000,
+    })
+    expect(planned.report).toMatchObject({ removed: [], degraded: true })
+    expect(planned.report.degradedReason).toMatch(/more than half/)
+    expect(planned.models.map(model => model.id)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('forces a full foreign-catalog prune on a manual refresh (the contaminated-route case)', async () => {
+    const directory = tempDir()
+    // A stale catalogue must not matter: the endpoint listing is the authority.
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { kilo: { models: {} } })
+    const { planRouteModels: plan } = await freshIndex()
+    const foreign = Array.from({ length: 6 }, (_, index) => ({ id: `kilo-foreign-${String(index)}` }))
+    const planned = plan({
+      route: 'antigravity',
+      configured: foreign,
+      live: [{ id: 'gemini-3.6-flash-high' }, { id: 'claude-sonnet-4-6' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: false,
+      force: true,
+      now: 1_000_000,
+    })
+    expect(planned.report.removed).toEqual(foreign.map(model => model.id))
+    expect(planned.report.degraded).toBe(false)
+    expect(planned.models.map(model => model.id)).toEqual(['gemini-3.6-flash-high', 'claude-sonnet-4-6'])
   })
 })
