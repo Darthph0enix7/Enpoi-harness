@@ -70,6 +70,15 @@ case "$SELF" in
 esac
 [ -f "$SELF" ] || SELF=""
 
+# No git or ssh invocation may block on an interactive prompt. `dsh update`
+# runs detached from launchd/systemd where no terminal exists, and a fetch that
+# needs credentials must fail with an error instead of waiting forever for an
+# answer that can never arrive. Private profile sources authenticate through
+# PROFILE_TOKEN / http.extraheader, never interactively.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
+
 # ── Distribution parameters (the public repo fills these) ───────────────────
 DSH_GITHUB_REPO="${DSH_GITHUB_REPO:-Darthph0enix7/enpoi-harness}"
 DSH_GITHUB_URL="${DSH_GITHUB_URL:-https://github.com/${DSH_GITHUB_REPO}}"
@@ -204,11 +213,13 @@ log() {
 
 warn() {
   [ -n "${LOG_FILE:-}" ] && printf '%s: WARNING: %s\n' "$SCRIPT_NAME" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  progress_clear
   printf "${C_YELLOW}${C_BOLD}! WARNING:${C_RESET} %s\n" "$*" >&2
 }
 
 die() {
   [ -n "${LOG_FILE:-}" ] && printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$*" >> "$LOG_FILE" 2>/dev/null || true
+  progress_clear
   printf "\n${C_RED}${C_BOLD}✗ ERROR:${C_RESET} %s\n" "$*" >&2
   if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
     printf "${C_DIM}Full installation log available at: %s${C_RESET}\n\n" "$LOG_FILE" >&2
@@ -223,6 +234,7 @@ say() {
 step() { # label
   STEP_NO=$((STEP_NO + 1))
   [ "$QUIET" = 1 ] && return 0
+  progress_clear
   if [ "$STEP_TOTAL" -gt 0 ]; then
     printf "\n${C_BOLD}${C_CYAN}[%d/%d]${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$STEP_NO" "$STEP_TOTAL" "$*" >&2
   else
@@ -232,19 +244,78 @@ step() { # label
 
 substep_ok() {
   [ "$QUIET" = 1 ] && return 0
+  progress_clear
   printf "  ${C_GREEN}✓${C_RESET} %s\n" "$*" >&2
 }
 
 substep_info() {
   [ "$QUIET" = 1 ] && return 0
+  progress_clear
   printf "  ${C_CYAN}ℹ${C_RESET} %s\n" "$*" >&2
 }
 
-run_logged() { # desc timeout workdir cmd...
+# ── Live progress for long operations ───────────────────────────────────────
+# Progress output is human-facing and stderr-only: it is suppressed entirely
+# under --quiet and --json, a terminal gets one rewritten line, and anything
+# else (a CI log, a piped capture) gets at most one line per
+# DSH_PROGRESS_INTERVAL seconds (default 30) so a slow step stays visible
+# without spamming. A running update must never look dead.
+LAST_PROGRESS_PLAIN_AT=0
+
+progress_enabled() { [ "${QUIET:-0}" != 1 ] && [ "${JSON_OUT:-0}" != 1 ]; }
+
+# Erase the rewritten TTY progress line before normal output lands on it.
+progress_clear() {
+  if [ -t 2 ]; then printf '\r\033[K' >&2; fi
+  return 0
+}
+
+progress_note() { # text
+  progress_enabled || return 0
+  local now plain_interval
+  now="$(date +%s)"
+  if [ -t 2 ]; then
+    printf "\r\033[K  ${C_CYAN}%s${C_RESET}" "$1" >&2
+  else
+    plain_interval="${DSH_PROGRESS_INTERVAL:-30}"
+    case "$plain_interval" in ''|*[!0-9]*) plain_interval=30;; esac
+    [ $((now - LAST_PROGRESS_PLAIN_AT)) -ge "$plain_interval" ] || return 0
+    printf "  %s\n" "$1" >&2
+  fi
+  LAST_PROGRESS_PLAIN_AT="$now"
+  return 0
+}
+
+# Portable file size in bytes, empty + non-zero on an unreadable path. GNU
+# stat first (`stat -c%s`), then BSD/macOS (`stat -f%z`), then wc.
+file_size() { # path -> bytes
+  local f="$1" s=""
+  [ -f "$f" ] || return 1
+  s="$(stat -c%s "$f" 2>/dev/null || true)"
+  [ -n "$s" ] || s="$(stat -f%z "$f" 2>/dev/null || true)"
+  case "$s" in ''|*[!0-9]*) s="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')";; esac
+  case "$s" in ''|*[!0-9]*) return 1;; esac
+  printf '%s' "$s"
+  return 0
+}
+
+# Validated heartbeat cadence for run_logged and the copy loop.
+heartbeat_interval() { # -> seconds
+  local v="${DSH_HEARTBEAT_INTERVAL:-15}"
+  case "$v" in ''|*[!0-9]*) v=15;; esac
+  printf '%s' "$v"
+}
+
+run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL add byte progress
   local desc="$1" timeout="$2" workdir="$3"
   shift 3
   local start_t rc=0
   start_t="$(date +%s)"
+  local watch_file="${DSH_RUN_LOG_PROGRESS_FILE:-}" watch_total="${DSH_RUN_LOG_PROGRESS_TOTAL:-}"
+  case "$watch_total" in ''|*[!0-9]*) watch_total="";; esac
+  # A download's first progress line is worth a non-TTY line even when the
+  # previous step printed recently: the throttle restarts per watched download.
+  if [ -n "$watch_file" ]; then LAST_PROGRESS_PLAIN_AT=0; fi
 
   if [ "$VERBOSE" = 1 ]; then
     printf "  ${C_CYAN}▸${C_RESET} %s...\n" "$desc" >&2
@@ -264,25 +335,46 @@ run_logged() { # desc timeout workdir cmd...
   local pid=$!
   CURRENT_RUN_LOGGED_PID="$pid"
 
-  local spin='-\|/'
-  local i=0
+  local spin='-\|/' i=0 hb_interval
+  hb_interval="$(heartbeat_interval)"
   while kill -0 "$pid" 2>/dev/null; do
-    if [ -t 2 ]; then
-      i=$(( (i + 1) % 4 ))
-      local prog="" pf=""
-      for pf in "$PREFIX/harness/.cache/"*.chunks/.progress "$PREFIX/harness/.cache/"*.progress "$workdir/"*.chunks/.progress "$workdir/"*.progress; do
-        if [ -f "$pf" ]; then
-          prog="$(cat "$pf" 2>/dev/null || true)"
-          [ -n "$prog" ] && break
-        fi
-      done
-      local elapsed_cur=$(( $(date +%s) - start_t ))
-      [ "$elapsed_cur" -ge 0 ] || elapsed_cur=0
-      if [ -n "$prog" ]; then
-        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s %s" "${spin:$i:1}" "$desc" "$prog" >&2
-      else
-        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s... ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$elapsed_cur" >&2
+    local elapsed_cur=$(( $(date +%s) - start_t ))
+    [ "$elapsed_cur" -ge 0 ] || elapsed_cur=0
+    local prog="" pf="" bytes=""
+    for pf in "$PREFIX/harness/.cache/"*.chunks/.progress "$PREFIX/harness/.cache/"*.progress "$workdir/"*.chunks/.progress "$workdir/"*.progress; do
+      if [ -f "$pf" ]; then
+        prog="$(cat "$pf" 2>/dev/null || true)"
+        [ -n "$prog" ] && break
       fi
+    done
+    # A watched destination file (the download being written) wins: it is the
+    # live truth, while a *.progress file is an engine-specific side channel.
+    if [ -n "$watch_file" ]; then
+      bytes="$(file_size "$watch_file" 2>/dev/null || true)"
+      if [ -n "$bytes" ] && [ "$bytes" -gt 0 ]; then
+        if [ -n "$watch_total" ] && [ "$watch_total" -gt 0 ]; then
+          local pct=$((bytes * 100 / watch_total))
+          [ "$pct" -le 100 ] || pct=100
+          prog="$((bytes / 1048576)) MB of $((watch_total / 1048576)) MB (${pct}%)"
+        else
+          prog="$((bytes / 1048576)) MB"
+        fi
+      fi
+    fi
+    if [ -n "$prog" ]; then
+      if [ -t 2 ]; then
+        i=$(( (i + 1) % 4 ))
+        printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s %s ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$prog" "$elapsed_cur" >&2
+      else
+        progress_note "⏳ $desc: $prog (${elapsed_cur}s)"
+      fi
+    elif [ -t 2 ]; then
+      i=$(( (i + 1) % 4 ))
+      printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s... ${C_DIM}(%ds)${C_RESET}" "${spin:$i:1}" "$desc" "$elapsed_cur" >&2
+    elif [ "$elapsed_cur" -ge "$hb_interval" ]; then
+      # Non-TTY heartbeat: a long silent step must still say it is alive; the
+      # non-TTY throttle in progress_note caps the log at one line per 30s.
+      progress_note "… still working: $desc (${elapsed_cur}s)"
     fi
     sleep 0.2
   done
@@ -483,6 +575,10 @@ done
 # DSH_PROFILE_REF names an explicit ref exactly like --profile-ref does.
 [ -n "$PROFILE_REF" ] && PROFILE_REF_EXPLICIT=1
 
+# Timeout wrapper for run_logged's background subshell. This function exec()s
+# (replacing its own process and closing the inherited lock FD), so every caller
+# must invoke it in a subshell — `( run_limited ... )` — never directly in the
+# installer's shell, or the update ends when the wrapped command does.
 run_limited() {
   local seconds="$1"; shift
   exec 9>&- 2>/dev/null || true
@@ -656,7 +752,7 @@ fetch_node() {
   tmp="$PREFIX/runtime/.node-tmp-$$"
   mkdir -p "$tmp" "$PREFIX/runtime/node" || return 1
   log "downloading Node.js v${DSH_NODE_VERSION} (${plat}-${arch})"
-  run_logged "Downloading Node.js v${DSH_NODE_VERSION} (${plat}-${arch})" 120 "$tmp" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$tmp/$tarball" || { warn "Node download failed: $url"; rm -rf "$tmp"; return 1; }
+  DSH_RUN_LOG_PROGRESS_FILE="$tmp/$tarball" run_logged "Downloading Node.js v${DSH_NODE_VERSION} (${plat}-${arch})" 120 "$tmp" curl -fsSL --retry 2 --connect-timeout 20 "$url" -o "$tmp/$tarball" || { warn "Node download failed: $url"; rm -rf "$tmp"; return 1; }
   if curl -fsSL --retry 1 "$url.sha256" -o "$tmp/$tarball.sha256" 2>/dev/null; then
     expected="$(awk '{print $1}' "$tmp/$tarball.sha256")"
     if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
@@ -920,7 +1016,7 @@ stage_remote() { # url
     archive="$PREFIX/harness/.download-$$.tar.gz"
     log "fetching $url"
     local dl_timeout="${DSH_DOWNLOAD_TIMEOUT:-600}"
-    if ! run_logged "Downloading release archive" "$dl_timeout" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 "$url" -o "$archive"; then
+    if ! DSH_RUN_LOG_PROGRESS_FILE="$archive" run_logged "Downloading release archive" "$dl_timeout" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 "$url" -o "$archive"; then
       rm -f "$archive"
       # Fallback to git clone if curl download fails or times out
       if command -v git >/dev/null 2>&1; then
@@ -1466,7 +1562,11 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 
     # Fallback: single-stream curl if fast downloader was skipped or fell back
     if [ "$dl_ok" = 0 ]; then
-      if ! run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 -C - "$url" -o "$asset_file.download"; then
+      # Drop a stale progress file from a failed parallel attempt; the size of
+      # the .download file below is the live progress source.
+      rm -f "$asset_file.progress"
+      if ! DSH_RUN_LOG_PROGRESS_FILE="$asset_file.download" DSH_RUN_LOG_PROGRESS_TOTAL="$asset_bytes" \
+        run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 -C - "$url" -o "$asset_file.download"; then
         log "prebuilt: download failed; keeping the partial for a resumable retry ($asset_file.download); building from source for now"
         return 1
       fi
@@ -1694,7 +1794,9 @@ profile_source_kind() { # src -> dir|tarball|git|unknown
 
 resolve_profile_token() {
   if [ -z "$PROFILE_TOKEN" ] && command -v gh >/dev/null 2>&1; then
-    PROFILE_TOKEN="$(run_limited 10 gh auth token 2>/dev/null || true)"
+    # Bounded and non-interactive: a missing or expired gh session yields an
+    # empty token (public sources) instead of a prompt on a detached update.
+    PROFILE_TOKEN="$(GH_PROMPT_DISABLED=1 run_limited 10 gh auth token 2>/dev/null || true)"
   fi
   return 0
 }
@@ -1708,7 +1810,8 @@ profile_auth_header() { # HTTP Basic with x-access-token, for private GitHub sou
 }
 
 stage_profile_source() { # src kind stage
-  local src="$1" kind="$2" stage="$3" tarball args
+  local src="$1" kind="$2" stage="$3" tarball args fetch_timeout
+  fetch_timeout="${DSH_PROFILE_FETCH_TIMEOUT:-600}"
   case "$kind" in
     dir)
       ( cd "$src" && tar -cf - --exclude='./.git' --exclude='.git' \
@@ -1719,10 +1822,15 @@ stage_profile_source() { # src kind stage
       tarball="$src"
       if [ ! -f "$tarball" ]; then
         tarball="$stage/.profile-download"
+        # The timeout and the stall detector are what make this fetch bounded:
+        # a dead connection fails (with run_logged naming the step) instead of
+        # hanging the whole update.
         if [ -n "$PROFILE_TOKEN" ]; then
-          curl -fsSL --retry 2 --connect-timeout 20 -H "$(profile_auth_header)" "$src" -o "$tarball" || return 1
+          DSH_RUN_LOG_PROGRESS_FILE="$tarball" run_logged "Downloading profile source" "$fetch_timeout" "$stage" \
+            curl -fsSL --retry 2 --connect-timeout 20 --speed-limit 10240 --speed-time 60 -H "$(profile_auth_header)" "$src" -o "$tarball" || return 1
         else
-          curl -fsSL --retry 2 --connect-timeout 20 "$src" -o "$tarball" || return 1
+          DSH_RUN_LOG_PROGRESS_FILE="$tarball" run_logged "Downloading profile source" "$fetch_timeout" "$stage" \
+            curl -fsSL --retry 2 --connect-timeout 20 --speed-limit 10240 --speed-time 60 "$src" -o "$tarball" || return 1
         fi
       fi
       tar -xzf "$tarball" -C "$stage" --strip-components=1 2>/dev/null \
@@ -1734,7 +1842,10 @@ stage_profile_source() { # src kind stage
       [ -n "$PROFILE_TOKEN" ] && args+=(-c "http.extraheader=$(profile_auth_header)")
       args+=(clone --depth 1)
       [ -n "$PROFILE_REF" ] && args+=(--branch "$PROFILE_REF")
-      GIT_TERMINAL_PROMPT=0 run_limited 600 git "${args[@]}" "$src" "$stage" || return 1
+      # The git-wide non-interactive exports above cover prompts; the timeout
+      # bounds a stalled connection. run_logged keeps the clone visible as a
+      # heartbeat instead of a silent wait.
+      run_logged "Cloning profile source" "$fetch_timeout" "$stage" git "${args[@]}" "$src" "$stage" || return 1
       ;;
     *)
       warn "unsupported profile source: $src"; return 1;;
@@ -1945,9 +2056,18 @@ copy_profile_tree() { # src dst mode(seed|refresh)
   # config-editor document), device-patches/, node_modules/, backups.
   # Profile-shipped fish/ and systemd/ files are re-seeded when their content
   # changed: a stale function or unit must not survive an update silently.
-  local src="$1" dst="$2" mode="${3:-seed}" rel d
+  local src="$1" dst="$2" mode="${3:-seed}" rel d copied=0 last_note hb_interval
+  hb_interval="$(heartbeat_interval)"
+  last_note="$SECONDS"
   while IFS= read -r -d '' rel; do
     rel="${rel#./}"
+    copied=$((copied + 1))
+    # A large tree copy can run for minutes; SECONDS keeps the check cheap and
+    # the heartbeat line tells the operator the update is not stuck.
+    if [ $((SECONDS - last_note)) -ge "$hb_interval" ]; then
+      progress_note "… still copying profile tree ($copied entries)"
+      last_note="$SECONDS"
+    fi
     case "$rel" in
       .git|.git/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*) continue;;
       .backup-*|.backup-*/*) continue;;
@@ -2436,7 +2556,11 @@ generate_peer_pairings() {
     warn "pairings: no Node.js available; $DSH_HOME/pairings.yaml left untouched"
     return 0
   fi
-  if run_limited 120 env "DSH_HARNESS=${HARNESS:-}" "$NODE" "$script"; then
+  # run_limited exec()s (it closes the lock FD and replaces its own process), so
+  # it must never run in the installer's own shell: a direct call would end the
+  # update after the generator. The subshell contains both the FD close and the
+  # process replacement.
+  if ( run_limited 120 env "DSH_HARNESS=${HARNESS:-}" "$NODE" "$script" ); then
     log "pairings: fleet generator finished for $PROFILE_DIR (details above)"
   else
     warn "pairings: generator exited non-zero; $DSH_HOME/pairings.yaml left untouched"
@@ -3556,10 +3680,10 @@ run_backfill() {
   fi
   BACKFILL="ran status"
   log "projection backfill: $b status"
-  run_limited 300 "$NODE" "$b" status >/dev/null 2>&1 || warn "projection backfill status failed (continuing)"
+  ( run_limited 300 "$NODE" "$b" status >/dev/null 2>&1 ) || warn "projection backfill status failed (continuing)"
   if [ -n "$SERVICE_UNIT" ]; then
     BACKFILL="ran status+run"
-    run_limited 1800 "$NODE" "$b" run >/dev/null 2>&1 || warn "projection backfill run failed (continuing)"
+    ( run_limited 1800 "$NODE" "$b" run >/dev/null 2>&1 ) || warn "projection backfill run failed (continuing)"
   fi
   return 0
 }
@@ -3684,7 +3808,7 @@ run_migrations() {
     out="$PROFILE_DIR/settings.yaml"
     if [ -f "$out" ]; then cp -p "$out" "$backup_dir/settings.yaml" 2>/dev/null || true; fi
     tmp="$out.merge-$$.tmp"
-    run_limited 300 "$NODE" "$engine" merge "$MERGE_BASELINE" "$patch" "$DSH_HOME/sync-local.yaml" "$tmp" >&2
+    ( run_limited 300 "$NODE" "$engine" merge "$MERGE_BASELINE" "$patch" "$DSH_HOME/sync-local.yaml" "$tmp" >&2 )
     rc=$?
     if [ "$rc" -ne 0 ] || [ ! -f "$tmp" ]; then
       rm -f "$tmp"
@@ -3707,7 +3831,7 @@ run_migrations() {
   for m in "$HARNESS"/scripts/migrations/*.mjs; do
     [ -f "$m" ] || continue
     log "migration: $m"
-    if ! DSH_HOME="$DSH_HOME" run_limited 300 "$NODE" "$m" >&2; then
+    if ! ( DSH_HOME="$DSH_HOME" run_limited 300 "$NODE" "$m" >&2 ); then
       warn "migration $m failed (never fail closed; continuing)"
       MIGRATION_FAILURES="${MIGRATION_FAILURES:+$MIGRATION_FAILURES, }$(basename "$m")"
     fi
@@ -3727,15 +3851,15 @@ selfcheck() {
   CHECK_VERSION=0; CHECK_HELP=0; CHECK_SMOKE=0; CHECK_AUDIT="skipped"
   v="$(run_limited 60 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --version 2>/dev/null)" || { warn "self-check: --version failed"; ok=1; }
   if [ -n "$v" ]; then CHECK_VERSION=1; else warn "self-check: empty version"; ok=1; fi
-  if run_limited 60 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --help >/dev/null 2>&1; then CHECK_HELP=1; else warn "self-check: --help failed"; ok=1; fi
-  if run_limited 300 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --profile "$PROFILE" --dump-default-config >/dev/null 2>&1; then
+  if ( run_limited 60 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --help >/dev/null 2>&1 ); then CHECK_HELP=1; else warn "self-check: --help failed"; ok=1; fi
+  if ( run_limited 300 "$NODE" "$HARNESS/apps/cli/lib/bin.js" --profile "$PROFILE" --dump-default-config >/dev/null 2>&1 ); then
     CHECK_SMOKE=1
   else
     warn "self-check: smoke (--dump-default-config) failed"; ok=1
   fi
   local audit="$HARNESS/scripts/error-audit.mjs"
   if [ -f "$audit" ] && [ -d "$DSH_HOME/sessions" ] && [ -n "$(ls -A "$DSH_HOME/sessions" 2>/dev/null)" ]; then
-    run_limited 300 "$NODE" "$audit" --json-only > "$PREFIX/harness/.last-audit.json" 2>/dev/null
+    ( run_limited 300 "$NODE" "$audit" --json-only > "$PREFIX/harness/.last-audit.json" 2>/dev/null )
     rc=$?
     case "$rc" in
       0) CHECK_AUDIT="pass";;
@@ -4513,6 +4637,7 @@ do_update() {
     step "pnpm: present (nothing to rebuild)"
     step "dependencies and build: already up to date at $VERSION"
     step "profile: $PROFILE (refresh)"
+    substep_info "refreshing profile: fetch → copy → merges → pairings"
     # The refresh merges the profile patch and package.json; arm the same
     # pre-switch restore the full path uses so a failed self-check cannot
     # leave mutated user files behind.
@@ -4591,6 +4716,7 @@ do_update() {
     exit 1
   fi
   step "profile: $PROFILE"
+  substep_info "refreshing profile: fetch → copy → merges → pairings"
   if ! prepare_profile; then
     warn "profile refresh failed before switching; $current remains active"
     restore_pre_switch "$backup" "the profile refresh"
@@ -4984,10 +5110,10 @@ EOF
       repair_note "projection backfill would run: $b"
     elif [ -z "$NODE" ]; then
       repair_fail "projection backfill cannot run (no Node.js found)" "ds backfill"
-    elif run_limited 300 "$NODE" "$b" status >/dev/null 2>&1; then
+    elif ( run_limited 300 "$NODE" "$b" status >/dev/null 2>&1 ); then
       repair_note "projection backfill: status ok"
       if [ -n "$unit" ]; then
-        if run_limited 600 "$NODE" "$b" run >/dev/null 2>&1; then repair_note "projection backfill: run complete"; else repair_fail "projection backfill run failed" "DSH_HOME='$DSH_HOME' node '$b' run"; fi
+        if ( run_limited 600 "$NODE" "$b" run >/dev/null 2>&1 ); then repair_note "projection backfill: run complete"; else repair_fail "projection backfill run failed" "DSH_HOME='$DSH_HOME' node '$b' run"; fi
       fi
     else
       repair_fail "projection backfill status failed" "DSH_HOME='$DSH_HOME' node '$b' status"
