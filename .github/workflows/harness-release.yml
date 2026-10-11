@@ -11,7 +11,19 @@
 #   dsh-harness-<version>-linux-x64.tar.gz        + .sha256
 #   dsh-harness-<version>-darwin-arm64.tar.gz     + .sha256
 #   dsh-harness-<version>-darwin-x64.tar.gz       + .sha256
+#   manifest-<os>-<arch>-<version>.json.gz        + .sha256
+#   diff-<os>-<arch>-<from>-<to>.tar.gz           + .sha256 (when the previous
+#                                                 release's manifest exists)
 #   SHA256SUMS
+#
+# The manifest (scripts/release-delta.mjs, schema "dsh-release-manifest/1")
+# lists every shipped path with type/mode/size/sha256 and symlink targets in
+# deterministic byte order; delta updates and the updater's `--dry-run`
+# inspection compare against it. The consecutive diff is best-effort: it is
+# computed from the previous published release's manifest (fetched from that
+# immutable release) and skipped cleanly when the previous release predates
+# manifest emission. Both carry .sha256 sidecars, so the publish job's
+# SHA256SUMS assembly covers them unchanged.
 #
 # `prepare` resolves the version and skips a commit that already has a
 # published release (a re-dispatch must not duplicate it). Builds upload into a
@@ -282,6 +294,83 @@ jobs:
           fi
           ls -lh "$ASSET" "$ASSET.sha256"
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+
+      # The manifest is the per-file baseline delta updates and the updater's
+      # dry-run inspection compare against: every shipped path -> type/mode/
+      # size/sha256 (target for symlinks), deterministic byte order, gzipped,
+      # plus a .sha256 sidecar so SHA256SUMS covers it.
+      - name: Emit release manifest
+        id: manifest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          PLATFORM="${{ matrix.os }}-${{ matrix.arch }}"
+          TREE="$RUNNER_TEMP/dsh-stage/dsh-harness-$VERSION"
+          MANIFEST="manifest-$PLATFORM-$VERSION.json.gz"
+          node "$GITHUB_WORKSPACE/scripts/release-delta.mjs" manifest \
+            --tree "$TREE" --platform "$PLATFORM" --version "$VERSION" --out "$MANIFEST"
+          echo "manifest: $MANIFEST ($(wc -c < "$MANIFEST" | tr -d ' ') bytes gzipped)"
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+      # Best-effort consecutive diff against the previous published release
+      # for this platform. Releases are immutable, so the previous manifest is
+      # fetched from its own release; when it predates manifest emission (the
+      # first releases after this step exists) or is unreachable, the diff is
+      # skipped cleanly and only the full tarball ships. Sizes are logged: real
+      # delta numbers are the point of this phase.
+      - name: Emit consecutive diff
+        id: diff
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          PLATFORM="${{ matrix.os }}-${{ matrix.arch }}"
+          TREE="$RUNNER_TEMP/dsh-stage/dsh-harness-$VERSION"
+          META="$RUNNER_TEMP/dsh-diff-meta"
+          rm -rf "$META"; mkdir -p "$META"
+          PREV_TAG="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "[.[] | select(.draft == false and .prerelease == false and .tag_name != \"v$VERSION\")] | sort_by(.created_at) | reverse | .[0].tag_name // empty" 2>/dev/null || true)"
+          case "$PREV_TAG" in
+            v*) : ;;
+            *) echo "diff: no previous published release; skipping"; exit 0 ;;
+          esac
+          PREV="${PREV_TAG#v}"
+          if ! gh release download "$PREV_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "manifest-$PLATFORM-$PREV.json.gz" --dir "$META" 2>/dev/null; then
+            echo "diff: $PREV_TAG carries no manifest-$PLATFORM-$PREV.json.gz (predates manifest emission); skipping"
+            exit 0
+          fi
+          DIFF="diff-$PLATFORM-$PREV-$VERSION.tar.gz"
+          if ! node "$GITHUB_WORKSPACE/scripts/release-delta.mjs" diff \
+            --tree "$TREE" --platform "$PLATFORM" --from "$PREV" --to "$VERSION" \
+            --old "$META/manifest-$PLATFORM-$PREV.json.gz" \
+            --new "manifest-$PLATFORM-$VERSION.json.gz" \
+            --out "$DIFF" | tee "$META/diff-stats.json"; then
+            echo "diff: previous manifest unreadable or diff failed; skipping (the full tarball remains the update path)"
+            exit 0
+          fi
+          echo "diff: $DIFF ($(wc -c < "$DIFF" | tr -d ' ') bytes gzipped) for $PLATFORM $PREV -> $VERSION"
+          echo "diff=$DIFF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload manifest and diff assets to the draft release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+          MANIFEST='${{ steps.manifest.outputs.manifest }}'
+          DIFF='${{ steps.diff.outputs.diff }}'
+          gh release upload "$TAG" "$MANIFEST" "$MANIFEST.sha256" --clobber
+          if [ -n "$DIFF" ] && [ -f "$DIFF" ]; then
+            gh release upload "$TAG" "$DIFF" "$DIFF.sha256" --clobber
+          fi
 
       - name: Upload to the draft release
         shell: bash

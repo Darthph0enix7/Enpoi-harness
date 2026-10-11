@@ -678,16 +678,19 @@ describe('pre-switch failure restore', () => {
     const install = readFileSync(installSh, 'utf8')
     const doUpdate = /do_update\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
     expect(doUpdate).toBeDefined()
-    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(4)
+    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(5)
     expect(doUpdate).toMatch(/if ! install_tree; then[\s\S]*?restore_pre_switch/)
+    expect(doUpdate).toMatch(/if ! delta_prepare_full_fallback; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! prepare_profile; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! run_migrations; then[\s\S]*?restore_pre_switch/)
     // The no-op "already up to date" path arms the same restore around its
     // profile refresh, so its self-check failure cannot leave merged files.
     expect(doUpdate).toMatch(/already up to date[\s\S]*?PRE_SWITCH_RESTORE="\$backup"/)
     expect(doUpdate).toMatch(/restore_pre_switch "\$backup" "already up to date self-check"/)
-    // Rollback always restores the pristine early backup, never the late one.
-    expect(doUpdate).toMatch(/rollback "\$current" "\$backup" "\$TREE_DIR_NAME"/)
+    // Rollback always restores a pre-migration source (the pre-migration
+    // snapshot, or the pristine early backup when no snapshot exists), never
+    // the late pre-switch one.
+    expect(doUpdate).toMatch(/rollback "\$current" "\$\{PRE_MIGRATION_BACKUP:-\$backup\}" "\$TREE_DIR_NAME"/)
     expect(install).not.toContain('${late_backup:-$backup}')
   })
 

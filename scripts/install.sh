@@ -604,7 +604,11 @@ Options:
   --purge             with --uninstall: remove everything including caches,
                       state and logs; requires typing "purge"; --dry-run lists
                       exactly what would be removed
-  --dry-run           print the plan and exit; writes nothing
+  --dry-run           print the plan and exit; writes nothing. With --update
+                      this also inspects the newest release read-only: the
+                      ladder rung, expected download size, changed files,
+                      deletions, and the local tree against the installed
+                      version's release manifest (see scripts/update-inspect.mjs)
   --force             rebuild/reinstall even when the version is already present
   --force-downgrade   allow a downgrade to an older version
   --write-rc          add the bin dir to the detected shell's startup files
@@ -1202,6 +1206,8 @@ sha256_of() { # file
 # fallback still uses the channel ref. Empty when no release exists yet.
 latest_release_tag() { # -> `v<version>` or empty
   local target=""
+  # Explicit pin (fixtures, bisecting): the updater targets exactly this tag.
+  if [ -n "${DSH_RELEASE_TAG:-}" ]; then printf '%s' "$DSH_RELEASE_TAG"; return 0; fi
   target="$(run_limited 30 curl -fsS -o /dev/null -w '%{redirect_url}' --connect-timeout 10 "$DSH_GITHUB_URL/releases/latest" 2>/dev/null || true)"
   case "$target" in
     */releases/tag/*) printf '%s' "${target##*/}";;
@@ -4171,13 +4177,18 @@ selfcheck() {
 # ── JSON / summary output ───────────────────────────────────────────────────
 emit_json() { # action ok
   [ "$JSON_OUT" = 1 ] || return 0
-  printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "profileSource": "%s", "profileRef": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}}\n' \
+  # The inspection object is appended only when a dry-run update produced one,
+  # so every other invocation's JSON output stays byte-identical.
+  local extra=""
+  [ -n "${DRY_INSPECTION_JSON:-}" ] && extra="$extra, \"inspection\": $DRY_INSPECTION_JSON"
+  [ -n "${UPDATE_DETAIL_JSON:-}" ] && extra="$extra, \"update\": $UPDATE_DETAIL_JSON"
+  printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "profileSource": "%s", "profileRef": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}%s}\n' \
     "$2" "$1" "$DRY_RUN" "$(json_escape "$PREFIX")" "$(json_escape "$VERSION")" "$(json_escape "${PREV_VERSION:-}")" \
     "$(json_escape "$CHANNEL")" "$(json_escape "$SOURCE")" "$(json_escape "$SOURCE_URL")" "$(json_escape "$HARNESS")" \
     "$(json_escape "$PREFIX/harness/current")" "$(json_escape "$NODE")" "$(json_escape "$NODE_ORIGIN")" "$(json_escape "$PNPM")" \
     "$(json_escape "$DSH_HOME")" "$(json_escape "$PROFILE")" "$(json_escape "$PROFILE_SOURCE")" "$(json_escape "$PROFILE_REF")" \
     "$(json_escape "$SERVICE_UNIT")" "$(json_escape "$BACKFILL")" \
-    "$ROLLED_BACK" "$CHECK_VERSION" "$CHECK_HELP" "$CHECK_SMOKE" "$(json_escape "$CHECK_AUDIT")"
+    "$ROLLED_BACK" "$CHECK_VERSION" "$CHECK_HELP" "$CHECK_SMOKE" "$(json_escape "$CHECK_AUDIT")" "$extra"
   return 0
 }
 
@@ -4358,6 +4369,748 @@ dry_run_plan() {
   fi
 }
 
+# ── Update inspection (read-only, `--update --dry-run` only) ────────────────
+# `ds update --dry-run` adds a manifest-based inspection of the newest release:
+# the ladder rung an apply would choose, the expected download bytes (diff
+# chain vs full tarball), changed files, the deletions an apply would make,
+# and the installed tree classified against the installed version's baseline
+# release manifest. It is entirely read-only: manifests are decompressed in
+# memory, sizes are probed with HEAD requests, and nothing is written to disk.
+# The logic lives in scripts/update-inspect.mjs — the local copy when this
+# script runs from a checkout (or from a tree that ships it), otherwise the
+# channel copy streamed from raw.githubusercontent.com into node's stdin (no
+# temporary file). Every step degrades to an honest note (no reachable release,
+# no target manifest, no baseline) instead of guessing.
+update_inspect_module() { # -> path of a local module when one exists
+  local script_dir=""
+  script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+  if [ -n "$script_dir" ] && [ -f "$script_dir/update-inspect.mjs" ]; then
+    printf '%s\n' "$script_dir/update-inspect.mjs"
+    return 0
+  fi
+  if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/update-inspect.mjs" ]; then
+    printf '%s\n' "$REPO_ROOT/scripts/update-inspect.mjs"
+    return 0
+  fi
+  return 1
+}
+
+update_inspect_raw_url() { # ref -> raw module URL on the selected channel
+  local ref="$1"
+  case "$DSH_GITHUB_URL" in
+    https://github.com/*) printf 'https://raw.githubusercontent.com/%s/%s/scripts/update-inspect.mjs\n' "$DSH_GITHUB_REPO" "$ref";;
+    *) printf '%s/raw/%s/scripts/update-inspect.mjs\n' "$DSH_GITHUB_URL" "$ref";;
+  esac
+}
+
+update_inspect_run() { # args... -> module stdout; nonzero when the module is unavailable
+  local module="" url=""
+  module="$(update_inspect_module 2>/dev/null || true)"
+  if [ -n "$module" ]; then
+    # run_limited exec()s, so it must run in a subshell (see its own contract).
+    ( run_limited 180 "$NODE" "$module" "$@" )
+    return $?
+  fi
+  url="$(update_inspect_raw_url "${REF:-$CHANNEL}")"
+  # Verify the module exists before streaming it, so a 404 is never executed
+  # as an empty program; the stream keeps the dry run from writing any file.
+  # The module runs main() when DSH_UPDATE_INSPECT_MAIN=1 because a stdin
+  # module's import.meta.url never matches argv[1]. Both pipeline elements run
+  # in subshells, so the exec inside run_limited stays contained.
+  ( run_limited 30 curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null "$url" 2>/dev/null ) || return 1
+  run_limited 120 curl -fsSL --connect-timeout 10 --max-time 60 "$url" 2>/dev/null \
+    | DSH_UPDATE_INSPECT_MAIN=1 "$NODE" --input-type=module - "$@"
+}
+
+# ── Delta update apply (P3) ─────────────────────────────────────────────────
+# `ds update` picks the ladder rung with the same read-only planner the dry run
+# uses (scripts/update-inspect.mjs): rung 1/2 apply a consecutive diff chain,
+# rung 3 downloads the full tarball. Both rungs then run the preservation
+# engine (packages/host/update-engine) over a staging directory seeded from the
+# active tree, so user modifications — including core-harness edits — survive
+# the update. scripts/update-delta.mjs owns manifest validation, diff
+# extraction (with member-name path safety), plan construction, and staged
+# apply; this script owns transport, the atomic switch, and rollback.
+#
+# DSH_RELEASE_TAG pins the release an update targets (fixtures, bisecting);
+# DSH_UPDATE_STOP_AFTER_ACTIONS is the engine's deterministic interruption
+# point used by the crash-recovery drills.
+
+# A live owner pid recorded beside a scratch path protects it from concurrent
+# cleanup while the process that created it still runs.
+scratch_owner_alive() { # path -> 0 when a live owner exists
+  local path="$1" pid owner
+  # The recorded owner file wins: a `.staging-<version>` name can end in a
+  # numeric version segment that collides with a live pid.
+  owner="$path.owner"
+  [ -f "$owner" ] || owner="$path/.dsh-owner"
+  if [ -f "$owner" ]; then
+    pid="$(cat "$owner" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    kill -0 "$pid" 2>/dev/null && return 0
+    return 1
+  fi
+  pid="${path##*-}"
+  case "$pid" in
+    ''|*[!0-9]*) return 1;;
+    *) kill -0 "$pid" 2>/dev/null && return 0; return 1;;
+  esac
+}
+
+update_delta_module() { # -> path of a local apply module when one exists
+  local script_dir=""
+  script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
+  if [ -n "$script_dir" ] && [ -f "$script_dir/update-delta.mjs" ]; then
+    printf '%s\n' "$script_dir/update-delta.mjs"
+    return 0
+  fi
+  if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/update-delta.mjs" ]; then
+    printf '%s\n' "$REPO_ROOT/scripts/update-delta.mjs"
+    return 0
+  fi
+  return 1
+}
+
+update_delta_raw_url() { # ref -> raw module URL on the selected channel
+  local ref="$1"
+  case "$DSH_GITHUB_URL" in
+    https://github.com/*) printf 'https://raw.githubusercontent.com/%s/%s/scripts/update-delta.mjs\n' "$DSH_GITHUB_REPO" "$ref";;
+    *) printf '%s/raw/%s/scripts/update-delta.mjs\n' "$DSH_GITHUB_URL" "$ref";;
+  esac
+}
+
+# Run the apply module; its stdout is the engine's human report. The exit code
+# is the module's (0 applied/noop/interrupted, 1 failed, 2 input rejected,
+# 3 aborted, 4 foreign journal) or 2 when the module itself is unavailable.
+update_delta_run() { # args...
+  local module="" url=""
+  module="$(update_delta_module 2>/dev/null || true)"
+  if [ -n "$module" ]; then
+    # run_limited exec()s, so it must run in a subshell (see its own contract).
+    ( run_limited "${DSH_DELTA_TIMEOUT:-1800}" "$NODE" "$module" "$@" )
+    return $?
+  fi
+  url="$(update_delta_raw_url "${REF:-$CHANNEL}")"
+  ( run_limited 30 curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null "$url" 2>/dev/null ) || return 2
+  run_limited "${DSH_DELTA_TIMEOUT:-1800}" curl -fsSL --connect-timeout 10 --max-time 120 "$url" 2>/dev/null \
+    | DSH_UPDATE_DELTA_MAIN=1 "$NODE" --input-type=module - "$@"
+}
+
+update_engine_bundle() { # tree... -> engine bundle path
+  local tree candidate
+  for tree in "$@"; do
+    [ -n "$tree" ] || continue
+    for candidate in "$tree/packages/host/update-engine/lib/index.js" "$tree/packages/host/update-engine/lib/types/index.js"; do
+      if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+    done
+  done
+  return 1
+}
+
+json_pick() { # file key... -> value (objects JSON-encoded); 1 when absent
+  [ -f "$1" ] || return 1
+  "$NODE" -e 'const fs=require("fs");let v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const k of process.argv.slice(2)){if(v===null||v===undefined)process.exit(1);v=v[k]}if(v===undefined)process.exit(1);process.stdout.write(typeof v==="object"?JSON.stringify(v):String(v))' "$@" 2>/dev/null
+}
+
+human_bytes() { # bytes -> "1.5 MiB"
+  awk -v b="${1:-}" 'BEGIN{ if(b==""||b+0<0){printf "unknown";exit} v=b+0; split("KiB MiB GiB TiB",u," "); i=0; while(v>=1024&&i<4){v/=1024;i++} if(i==0)printf "%d B",v; else if(v>=100)printf "%d %s",v,u[i]; else printf "%.1f %s",v,u[i] }'
+}
+
+# Read-only ladder evaluation: run the dry-run planner in JSON mode against the
+# configured release and extract the rung, chain (oldest hop first, with each
+# asset's own release tag), target version, and full-tarball size.
+delta_evaluate_plan() { # tag from -> 0 when a plan was produced
+  local tag="$1" from="$2" inspect_api=""
+  case "$DSH_GITHUB_URL" in
+    https://github.com/*) inspect_api="https://api.github.com";;
+    *) inspect_api="$DSH_GITHUB_URL/api/v3";;
+  esac
+  local -a args=(
+    --platform "$OS-$ARCH"
+    --repo "$DSH_GITHUB_REPO"
+    --base-url "$DSH_GITHUB_URL"
+    --api-url "$inspect_api"
+    --tag "$tag"
+    --channel "$CHANNEL"
+    --tree "$PREFIX/harness/$current"
+    --pins "$DSH_HOME/update/pins.yaml"
+    --tombstones "$DSH_HOME/update/tombstones.txt"
+    --tombstones "$DSH_HOME/update/tombstones.yaml"
+    --limit 40
+    --json
+  )
+  [ -n "$from" ] && args+=(--from "$from")
+  update_inspect_run "${args[@]}" > "$DELTA_PLAN_FILE" 2>/dev/null || return 1
+  [ -s "$DELTA_PLAN_FILE" ] || return 1
+  "$NODE" -e '
+const fs = require("fs")
+const plan = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+const ladder = plan.ladder || {}
+const chain = Array.isArray(ladder.chain) ? ladder.chain : []
+const tags = Array.isArray(ladder.chainTags) ? ladder.chainTags : []
+const lines = []
+for (let i = chain.length - 1; i >= 0; i -= 1) lines.push(`${chain[i]}\t${tags[i] ?? plan.target?.version ?? ""}`)
+fs.writeFileSync(process.argv[2], lines.length > 0 ? `${lines.join("\n")}\n` : "")
+' "$DELTA_PLAN_FILE" "$DELTA_CHAIN_FILE" 2>/dev/null || return 1
+  return 0
+}
+
+delta_plan_init() { # installed_version -> populates DELTA_* / UPDATE_TAG; never fails
+  local from="$1"
+  DELTA_MODE=""; DELTA_RUNG=""; DELTA_KIND=""; DELTA_UP_TO_DATE=0
+  DELTA_TARGET_VERSION=""; DELTA_FULL_NAME=""; DELTA_FULL_BYTES=""; DELTA_CHAIN_COUNT=0
+  UPDATE_TAG=""
+  [ -z "$SOURCE" ] || return 0
+  [ "${NO_PREBUILT:-0}" != 1 ] || return 0
+  [ "${DSH_NO_PREBUILT:-0}" != 1 ] || return 0
+  [ "${FORCE:-0}" != 1 ] || return 0
+  [ -n "$NODE" ] && [ -x "$NODE" ] || return 0
+  UPDATE_TAG="$(latest_release_tag 2>/dev/null || true)"
+  case "$UPDATE_TAG" in
+    v?*) :;;
+    *) log "delta: no published release is reachable; using the full path"; UPDATE_TAG=""; return 0;;
+  esac
+  DELTA_PLAN_FILE="$PREFIX/harness/.update-plan-$$.json"
+  DELTA_CHAIN_FILE="$PREFIX/harness/.update-chain-$$.txt"
+  if ! delta_evaluate_plan "$UPDATE_TAG" "$from"; then
+    log "delta: release inspection unavailable; using the full path"
+    rm -f "$DELTA_PLAN_FILE" "$DELTA_CHAIN_FILE"
+    DELTA_PLAN_FILE=""
+    return 0
+  fi
+  DELTA_RUNG="$(json_pick "$DELTA_PLAN_FILE" ladder rung 2>/dev/null || true)"
+  DELTA_KIND="$(json_pick "$DELTA_PLAN_FILE" ladder kind 2>/dev/null || true)"
+  DELTA_TARGET_VERSION="$(json_pick "$DELTA_PLAN_FILE" target version 2>/dev/null || true)"
+  DELTA_FULL_NAME="$(json_pick "$DELTA_PLAN_FILE" ladder fullTarball name 2>/dev/null || true)"
+  DELTA_FULL_BYTES="$(json_pick "$DELTA_PLAN_FILE" ladder fullTarball bytes 2>/dev/null || true)"
+  [ "$DELTA_FULL_BYTES" = "null" ] && DELTA_FULL_BYTES=""
+  [ -n "$DELTA_TARGET_VERSION" ] || DELTA_TARGET_VERSION="${UPDATE_TAG#v}"
+  case "$DELTA_RUNG" in
+    0) DELTA_UP_TO_DATE=1; DELTA_MODE="up-to-date";;
+    1|2) DELTA_MODE="delta";;
+    3) DELTA_MODE="full";;
+    *) log "delta: planner returned no rung; using the full path"; DELTA_MODE="";;
+  esac
+  if [ "$DELTA_MODE" = "delta" ] && [ ! -s "$DELTA_CHAIN_FILE" ]; then
+    log "delta: planner returned no diff chain; using the full path"
+    DELTA_MODE=""
+  fi
+  case "$DELTA_MODE" in
+    delta|full) RELEASE_COMMIT="$(resolve_target_commit "$UPDATE_TAG" "$DSH_GITHUB_URL" 2>/dev/null || true)";;
+  esac
+  log "delta: target $UPDATE_TAG rung ${DELTA_RUNG:-?} (${DELTA_MODE:-none}); full tarball ${DELTA_FULL_BYTES:-unknown} bytes"
+  return 0
+}
+
+# Fetch one release asset into a directory, verified against its sha256sum
+# sidecar when one is published. required=1 refuses an unverifiable artifact
+# (diff archives); required=0 logs and continues (manifests, older releases).
+delta_fetch_asset() { # name url dir required -> 0 ok
+  local name="$1" url="$2" dir="$3" required="${4:-0}" dest fallback_expected expected actual tmp
+  dest="$dir/$name"
+  if [ ! -s "$dest" ]; then
+    tmp="$dest.download-$$"
+    rm -f "$tmp"
+    if ! curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 20 --max-time "${DSH_DELTA_FETCH_TIMEOUT:-600}" "$url" -o "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      return 1
+    fi
+    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+  fi
+  if [ ! -s "$dest.sha256" ]; then
+    tmp="$dest.sha256.tmp.$$"
+    if curl -fsSL --retry 1 --connect-timeout 20 --max-time 60 "$url.sha256" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$dest.sha256"
+    else
+      rm -f "$tmp"
+      if [ "$required" = 1 ]; then
+        warn "delta: no checksum sidecar for $name; refusing the unverified artifact"
+        rm -f "$dest"
+        return 1
+      fi
+      warn "delta: no checksum sidecar for $name; continuing without archive verification (structurally validated before use)"
+      return 0
+    fi
+  fi
+  expected="$(awk 'NR==1 {print $1}' "$dest.sha256" 2>/dev/null || true)"
+  actual="$(sha256_of "$dest" 2>/dev/null || true)"
+  if [ -z "$actual" ] || [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+    warn "delta: checksum mismatch for $name (expected ${expected:-unavailable}, got ${actual:-unavailable}); discarding the download"
+    rm -f "$dest"
+    return 1
+  fi
+  return 0
+}
+
+# Extract the installed version's cached full-release archive as the pristine
+# merge base. A version directory cannot serve as the base: it holds the user's
+# modifications, and merging against modified bytes would silently drop them.
+# When no verifiable archive is cached, the base stays empty and the engine
+# keeps both-changed files locally with a shipped sidecar (reported).
+delta_prepare_base() { # from base_dir -> 0 full base, 1 empty fallback
+  local from="$1" base_dir="$2" archive expected actual
+  archive="$PREFIX/harness/.cache/dsh-harness-$from-$OS-$ARCH.tar.gz"
+  mkdir -p "$base_dir" || return 1
+  if [ -s "$archive" ] && [ -s "$archive.sha256" ]; then
+    expected="$(awk 'NR==1 {print $1}' "$archive.sha256" 2>/dev/null || true)"
+    actual="$(sha256_of "$archive" 2>/dev/null || true)"
+    if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
+      if tar -xzf "$archive" -C "$base_dir" 2>/dev/null; then
+        flatten_stage "$base_dir"
+        if [ -f "$base_dir/package.json" ]; then
+          log "delta: pristine merge base from the cached release archive ($from)"
+          return 0
+        fi
+        warn "delta: cached release archive for $from carries no package.json; merge base unavailable"
+      else
+        warn "delta: could not extract the cached release archive for $from"
+      fi
+    else
+      warn "delta: cached release archive for $from failed its checksum; merge base unavailable"
+    fi
+  fi
+  find "$base_dir" -mindepth 1 -delete 2>/dev/null || rm -rf "$base_dir"/* 2>/dev/null || true
+  log "delta: no pristine merge base for $from; both-changed files will keep local bytes with shipped sidecars"
+  return 1
+}
+
+delta_discard_staging() {
+  rm -rf "$DELTA_STAGING_DIR" "$DELTA_STAGING_DIR.journal.json" "$DELTA_STAGING_DIR.owner"
+}
+
+delta_cleanup_scratch() {
+  local path=""
+  for path in "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" "$DELTA_BASE_DIR"; do
+    [ -n "$path" ] && rm -rf "$path"
+  done
+  DELTA_RUN_DIR=""; DELTA_RELEASE_DIR=""; DELTA_BASE_DIR=""
+}
+
+# Move a verified staging directory into place and write its build marker.
+delta_finalize_tree() { # staging to
+  local staging="$1" to="$2" target="$PREFIX/harness/$to" displaced=""
+  if [ -e "$target" ]; then
+    if [ -f "$target/.dsh-install-complete" ] && [ "${FORCE:-0}" != 1 ]; then
+      log "delta: version $to is already installed at $target (reusing)"
+      rm -rf "$staging" "$staging.journal.json" "$staging.owner"
+      TREE_DIR_NAME="$to"
+      HARNESS="$target"
+      return 0
+    fi
+    displaced="$target.replaced-$$"
+    rm -rf "$displaced"
+    if ! mv "$target" "$displaced" 2>/dev/null; then
+      warn "delta: could not move the existing $target aside"
+      return 1
+    fi
+  fi
+  if ! mv "$staging" "$target"; then
+    [ -n "$displaced" ] && mv "$displaced" "$target" 2>/dev/null
+    return 1
+  fi
+  [ -n "$displaced" ] && rm -rf "$displaced"
+  rm -f "$staging.journal.json" "$staging.owner"
+  TREE_DIR_NAME="$to"
+  HARNESS="$target"
+  BUILD_COMMIT="${RELEASE_COMMIT:-${TARGET_COMMIT:-}}"
+  [ -n "$BUILD_COMMIT" ] || resolve_build_commit
+  printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$to" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+  return 0
+}
+
+# Compact transport/preservation summary for the update UX and --json output.
+delta_report() { # result_json to from base_mode
+  local result="$1" to="$2" from="$3" base_mode="$4"
+  local replaced added merged keptlocal untracked pinned deleted restored conflicts preserved bytes full transport_mode report_json report_txt
+  replaced="$(json_pick "$result" plan counts replace 2>/dev/null || printf '0')"
+  added="$(json_pick "$result" plan counts add 2>/dev/null || printf '0')"
+  merged="$(json_pick "$result" plan counts merge 2>/dev/null || printf '0')"
+  keptlocal="$(json_pick "$result" plan counts keep-local 2>/dev/null || printf '0')"
+  untracked="$(json_pick "$result" plan counts keep-untracked 2>/dev/null || printf '0')"
+  pinned="$(json_pick "$result" plan counts pin-skip 2>/dev/null || printf '0')"
+  deleted="$(json_pick "$result" plan counts delete 2>/dev/null || printf '0')"
+  restored="$(json_pick "$result" plan counts restore 2>/dev/null || printf '0')"
+  conflicts="$(json_pick "$result" plan conflicts 2>/dev/null || printf '0')"
+  preserved="$(json_pick "$result" report preserved 2>/dev/null | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).length)}catch{console.log(0)}})' 2>/dev/null || printf '0')"
+  bytes="${DELTA_DOWNLOAD_BYTES:-0}"
+  full="${DELTA_FULL_BYTES:-}"
+  [ -n "$full" ] || full="$(json_pick "$result" report bytes replaced 2>/dev/null || true)"
+  transport_mode="$(json_pick "$result" transport mode 2>/dev/null || printf 'delta')"
+  # Preserve the report beyond the scratch cleanup: one JSON + one human file
+  # per installed version under $PREFIX/harness (newest 3 kept).
+  report_json="$PREFIX/harness/.last-update-$to.json"
+  report_txt="$PREFIX/harness/.last-update-$to.txt"
+  [ -f "$result" ] && cp -f "$result" "$report_json" 2>/dev/null || true
+  [ -f "$DELTA_RUN_DIR/human.txt" ] && cp -f "$DELTA_RUN_DIR/human.txt" "$report_txt" 2>/dev/null || true
+  say ""
+  if [ "$transport_mode" = "full" ]; then
+    say "  transport:  full tarball${DELTA_FULL_NAME:+ $DELTA_FULL_NAME} ($(human_bytes "$full")) applied through the preservation engine"
+  else
+    say "  transport:  rung $DELTA_RUNG${DELTA_KIND:+ $DELTA_KIND} — $(human_bytes "$bytes") downloaded vs $(human_bytes "$full") full tarball"
+  fi
+  say "  update:     $from -> $to; $replaced replaced, $added added, $restored restored, $merged merged, $keptlocal kept local, $untracked untracked kept, $pinned pinned, $deleted deleted, $conflicts conflict(s)"
+  if [ "$base_mode" = "empty" ]; then
+    say "  merge base: unavailable (no cached release archive for $from); both-changed files were kept local with sidecars"
+  fi
+  say "  report:     $report_json"
+  if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+    {
+      printf 'dsh-install: delta apply report (%s -> %s):\n' "$from" "$to"
+      [ -f "$report_txt" ] && cat "$report_txt" 2>/dev/null || true
+    } >> "$LOG_FILE" 2>/dev/null || true
+  fi
+  if [ -n "$NODE" ] && [ -x "$NODE" ]; then
+    UPDATE_DETAIL_JSON="$("$NODE" -e '
+const fs = require("fs")
+const result = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+const counts = result.plan?.counts ?? {}
+process.stdout.write(JSON.stringify({
+  rung: Number(process.argv[2]),
+  kind: process.argv[3] || result.transport?.mode || null,
+  status: result.status,
+  mode: result.transport?.mode ?? "full",
+  downloadedBytes: Number(process.argv[4] || 0),
+  fullTarballBytes: process.argv[5] === "" ? null : Number(process.argv[5]),
+  base: result.transport?.base ?? null,
+  counts: { replaced: counts.replace ?? 0, added: counts.add ?? 0, merged: counts.merge ?? 0, keptLocal: counts["keep-local"] ?? 0, untracked: counts["keep-untracked"] ?? 0, pinned: counts["pin-skip"] ?? 0, deleted: counts.delete ?? 0, restored: counts.restore ?? 0, conflicts: result.plan?.conflicts ?? 0 },
+  preserved: Array.isArray(result.report?.preserved) ? result.report.preserved.length : 0,
+  verificationOk: result.verification?.ok ?? null,
+}))' "$result" "${DELTA_RUNG:-0}" "$DELTA_KIND" "${bytes:-0}" "${full:-}" 2>/dev/null || true)"
+  fi
+  return 0
+}
+
+# Delta apply (rungs 1-2). Returns 0 applied, 2 fallback prepared, 3 aborted,
+# 1 failure; the caller turns 1/2 into the full-tarball path.
+delta_apply_delta() { # backup_dir [retry]
+  local backup="$1" retry="${2:-0}"
+  local to="$DELTA_TARGET_VERSION" from="$installed_version" platform="$OS-$ARCH"
+  local cache="$PREFIX/harness/.cache" engine rc status prev_asset next_asset name tag base_mode="" chain_count=0
+  local -a apply_args=()
+  DELTA_DOWNLOAD_BYTES=0
+  DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
+  DELTA_RUN_DIR="$PREFIX/harness/.update-$to-$$"
+  DELTA_RELEASE_DIR="$PREFIX/harness/.release-$to-$$"
+  DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
+  engine="$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)"
+  if [ -z "$engine" ]; then
+    warn "delta: the active tree carries no update engine; using the full path"
+    return 2
+  fi
+  mkdir -p "$cache" "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" "$DELTA_BASE_DIR" || { warn "delta: could not create scratch directories"; return 1; }
+  printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
+  step "delta transport (rung $DELTA_RUNG, $(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '?' ) artifact(s))"
+  prev_asset="manifest-$platform-$from.json.gz"
+  next_asset="manifest-$platform-$to.json.gz"
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0; then
+    warn "delta: the installed version's release manifest is unavailable ($prev_asset); using the full path"
+    delta_cleanup_scratch; return 2
+  fi
+  DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$prev_asset")))
+  if ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0; then
+    warn "delta: the target release manifest is unavailable ($next_asset); using the full path"
+    delta_cleanup_scratch; return 2
+  fi
+  DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$next_asset")))
+  if delta_prepare_base "$from" "$DELTA_BASE_DIR"; then base_mode="cache"; else base_mode="empty"; fi
+  while IFS=$'\t' read -r name tag; do
+    [ -n "$name" ] || continue
+    if ! delta_fetch_asset "$name" "$DSH_GITHUB_URL/releases/download/v$tag/$name" "$cache" 1; then
+      warn "delta: could not fetch a verified $name from release v$tag; using the full path"
+      delta_cleanup_scratch; return 2
+    fi
+    DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$cache/$name")))
+    apply_args+=(--diff "$cache/$name")
+    chain_count=$((chain_count + 1))
+  done < "$DELTA_CHAIN_FILE"
+  if [ "$chain_count" = 0 ]; then
+    warn "delta: the planner returned no diff chain; using the full path"
+    delta_cleanup_scratch; return 2
+  fi
+  apply_args=(
+    apply
+    --engine "$engine"
+    --local "$PREFIX/harness/$current"
+    --base "$DELTA_BASE_DIR"
+    --release "$DELTA_RELEASE_DIR"
+    --previous "$DELTA_RUN_DIR/$prev_asset"
+    --next "$DELTA_RUN_DIR/$next_asset"
+    --staging "$DELTA_STAGING_DIR"
+    --journal "$DELTA_STAGING_DIR.journal.json"
+    --to-version "$to"
+    --from-version "$from"
+    --platform "$platform"
+    --base-mode "$base_mode"
+    --out "$DELTA_RUN_DIR/result.json"
+    "${apply_args[@]}"
+  )
+  if [ -f "$DSH_HOME/update/pins.yaml" ]; then apply_args+=(--pins "$DSH_HOME/update/pins.yaml"); fi
+  local tombstone_file=""
+  for tombstone_file in "$DSH_HOME/update/tombstones.txt" "$DSH_HOME/update/tombstones.yaml"; do
+    if [ -f "$tombstone_file" ]; then apply_args+=(--tombstones "$tombstone_file"); break; fi
+  done
+  if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
+  if [ -n "${backup:-}" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
+  update_delta_run "${apply_args[@]}" > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
+  rc=$?
+  status="$(json_pick "$DELTA_RUN_DIR/result.json" status 2>/dev/null || true)"
+  case "$rc" in
+    0)
+      if [ "$status" = "interrupted" ]; then
+        say ""
+        say "dsh update: apply interrupted; the staged tree and its journal were kept."
+        say "  resume:  re-run 'dsh update' to continue from the journal"
+        write_diagnostics delta-interrupted
+        emit_json update 0
+        exit 1
+      fi
+      if ! delta_finalize_tree "$DELTA_STAGING_DIR" "$to"; then
+        warn "delta: could not move the verified tree into place"
+        delta_discard_staging
+        delta_cleanup_scratch
+        return 1
+      fi
+      delta_report "$DELTA_RUN_DIR/result.json" "$to" "$from" "$base_mode"
+      delta_cleanup_scratch
+      return 0
+      ;;
+    3)
+      say ""
+      say "dsh update ABORTED: the plan carries runtime-code merge conflicts; $current stays active."
+      sed -n '1,60p' "$DELTA_RUN_DIR/human.txt" 2>/dev/null >&2 || true
+      say "  sidecars: shipped bytes for every conflicted path sit next to the live file (suffix .new-$to)"
+      [ -f "$DELTA_RUN_DIR/result.json" ] && cp -f "$DELTA_RUN_DIR/result.json" "$PREFIX/harness/.last-update-$to.json" 2>/dev/null || true
+      [ -f "$DELTA_RUN_DIR/human.txt" ] && cp -f "$DELTA_RUN_DIR/human.txt" "$PREFIX/harness/.last-update-$to.txt" 2>/dev/null || true
+      say "  report:   $PREFIX/harness/.last-update-$to.json"
+      delta_discard_staging
+      delta_cleanup_scratch
+      write_diagnostics delta-aborted
+      emit_json update 0
+      return 3
+      ;;
+    4)
+      if [ "$retry" = 1 ]; then
+        warn "delta: the staging journal still belongs to a different plan; using the full path"
+        delta_discard_staging
+        delta_cleanup_scratch
+        return 1
+      fi
+      warn "delta: staging belongs to a different plan; discarding it and retrying once"
+      delta_discard_staging
+      rm -rf "$DELTA_RELEASE_DIR"
+      delta_apply_delta "$backup" 1
+      return $?
+      ;;
+    2)
+      warn "delta: input rejected during extraction or validation; using the full path"
+      delta_cleanup_scratch
+      return 2
+      ;;
+    *)
+      warn "delta apply failed${DELTA_RUN_DIR:+: $(tail -n 1 "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null || printf 'see the update log')}"
+      delta_discard_staging
+      delta_cleanup_scratch
+      return 1
+      ;;
+  esac
+}
+
+# Stage the full release for a fallback (pinned to the planned tag), keeping
+# VERSION/TREE_DIR_NAME/HARNESS aligned with the delta plan.
+delta_prepare_full_fallback() {
+  export DSH_RELEASE_TAG="$UPDATE_TAG"
+  prepare_source || return 1
+  resolve_target_for_source
+  if [ "$VERSION" != "$DELTA_TARGET_VERSION" ]; then
+    warn "delta: the full fallback resolved $VERSION instead of the planned $DELTA_TARGET_VERSION"
+    return 1
+  fi
+  if [ -n "${REUSED_TREE_DIR:-}" ]; then TREE_DIR_NAME="$REUSED_TREE_DIR"; else TREE_DIR_NAME="$VERSION"; fi
+  HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
+  log "delta fallback: full release $VERSION staged (${STAGED:-reused tree})"
+  return 0
+}
+
+# Full-tarball apply through the preservation engine (rung 3 and delta
+# fallback). Returns 0 applied, 3 aborted, 1 failure (the caller then uses the
+# legacy install path).
+delta_apply_full() { # release_tree [retry]
+  local release="$1" retry="${2:-0}"
+  local to="$VERSION" from="$installed_version" platform="$OS-$ARCH" engine rc status prev_asset next_asset base_mode=""
+  local -a apply_args=()
+  DELTA_DOWNLOAD_BYTES="${DELTA_DOWNLOAD_BYTES:-0}"
+  [ -n "$DELTA_RUNG" ] || DELTA_RUNG=3
+  DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
+  DELTA_RUN_DIR="$PREFIX/harness/.update-$to-$$"
+  DELTA_RELEASE_DIR=""
+  DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
+  engine="$(update_engine_bundle "$PREFIX/harness/$current" "$release" 2>/dev/null || true)"
+  if [ -z "$engine" ]; then
+    log "full update: no preservation engine available in either tree; using the legacy install path"
+    return 1
+  fi
+  mkdir -p "$DELTA_RUN_DIR" "$DELTA_BASE_DIR" || return 1
+  printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
+  step "full release apply (preservation engine)"
+  prev_asset="manifest-$platform-$from.json.gz"
+  next_asset="manifest-$platform-$to.json.gz"
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 \
+    || ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0; then
+    warn "full update: release manifests unavailable; using the legacy install path"
+    delta_cleanup_scratch
+    return 1
+  fi
+  if delta_prepare_base "$from" "$DELTA_BASE_DIR"; then base_mode="cache"; else base_mode="empty"; fi
+  apply_args=(
+    apply
+    --engine "$engine"
+    --local "$PREFIX/harness/$current"
+    --base "$DELTA_BASE_DIR"
+    --release "$release"
+    --previous "$DELTA_RUN_DIR/$prev_asset"
+    --next "$DELTA_RUN_DIR/$next_asset"
+    --staging "$DELTA_STAGING_DIR"
+    --journal "$DELTA_STAGING_DIR.journal.json"
+    --to-version "$to"
+    --from-version "$from"
+    --platform "$platform"
+    --base-mode "$base_mode"
+    --out "$DELTA_RUN_DIR/result.json"
+  )
+  if [ -f "$DSH_HOME/update/pins.yaml" ]; then apply_args+=(--pins "$DSH_HOME/update/pins.yaml"); fi
+  local tombstone_file=""
+  for tombstone_file in "$DSH_HOME/update/tombstones.txt" "$DSH_HOME/update/tombstones.yaml"; do
+    if [ -f "$tombstone_file" ]; then apply_args+=(--tombstones "$tombstone_file"); break; fi
+  done
+  if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
+  if [ -n "$backup" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
+  update_delta_run "${apply_args[@]}" > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
+  rc=$?
+  status="$(json_pick "$DELTA_RUN_DIR/result.json" status 2>/dev/null || true)"
+  case "$rc" in
+    0)
+      if [ "$status" = "interrupted" ]; then
+        warn "full update interrupted mid-apply; staging discarded — re-run 'dsh update'"
+        delta_discard_staging
+        delta_cleanup_scratch
+        return 1
+      fi
+      if ! delta_finalize_tree "$DELTA_STAGING_DIR" "$to"; then
+        delta_discard_staging
+        delta_cleanup_scratch
+        return 1
+      fi
+      if [ "$release" = "${STAGED:-}" ]; then rm -rf "$STAGED"; STAGED=""; fi
+      delta_report "$DELTA_RUN_DIR/result.json" "$to" "$from" "$base_mode"
+      delta_cleanup_scratch
+      return 0
+      ;;
+    3)
+      say ""
+      say "dsh update ABORTED: the plan carries runtime-code merge conflicts; $current stays active."
+      sed -n '1,60p' "$DELTA_RUN_DIR/human.txt" 2>/dev/null >&2 || true
+      say "  sidecars: shipped bytes for every conflicted path sit next to the live file (suffix .new-$to)"
+      [ -f "$DELTA_RUN_DIR/result.json" ] && cp -f "$DELTA_RUN_DIR/result.json" "$PREFIX/harness/.last-update-$to.json" 2>/dev/null || true
+      [ -f "$DELTA_RUN_DIR/human.txt" ] && cp -f "$DELTA_RUN_DIR/human.txt" "$PREFIX/harness/.last-update-$to.txt" 2>/dev/null || true
+      say "  report:   $PREFIX/harness/.last-update-$to.json"
+      delta_discard_staging
+      delta_cleanup_scratch
+      write_diagnostics delta-aborted
+      emit_json update 0
+      return 3
+      ;;
+    4)
+      if [ "$retry" = 0 ]; then
+        warn "full update: staging belongs to a different plan; discarding it and retrying once"
+        delta_discard_staging
+        delta_apply_full "$release" 1
+        return $?
+      fi
+      delta_discard_staging
+      delta_cleanup_scratch
+      return 1
+      ;;
+    *)
+      warn "full update apply failed${DELTA_RUN_DIR:+: $(tail -n 1 "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null || printf 'see the update log')}"
+      delta_discard_staging
+      delta_cleanup_scratch
+      return 1
+      ;;
+  esac
+}
+
+# Apply the user's declared pnpm patches to the freshly installed tree. The
+# declaration source is the tree's own pnpm-workspace.yaml (the engine keeps the
+# user's merged copy through a delta update); the previous tree's copy is the
+# fallback for the legacy full path, where the new tree is pristine. Each
+# `patchedDependencies` entry names a patch file relative to the tree, applied
+# with the standard `patch` utility at the package root. A patch that refuses
+# (already applied, context drift) keeps the shipped files and is reported;
+# this step never fails the update.
+apply_user_patches() { # tree [previous_tree]
+  local tree="$1" previous="${2:-}" key file dir f list_file applied=0 kept=0 missing=0
+  command -v patch >/dev/null 2>&1 || return 0
+  [ -n "$NODE" ] && [ -x "$NODE" ] || return 0
+  [ -f "$tree/pnpm-workspace.yaml" ] || return 0
+  list_file="$PREFIX/harness/.update-patches-$$.txt"
+  "$NODE" -e '
+const fs = require("fs")
+const seen = new Set()
+const out = []
+for (const file of process.argv.slice(1)) {
+  if (!file || !fs.existsSync(file)) continue
+  const lines = fs.readFileSync(file, "utf8").split("\n")
+  let start = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^patchedDependencies:\s*(?:#.*)?$/.test(lines[i])) { start = i; break }
+  }
+  if (start === -1) continue
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
+    if (!/^\s/.test(line)) break
+    const m = /^\s+([^#\s][^:]*?):\s+(.+?)\s*$/.exec(line)
+    if (m === null) continue
+    const key = m[1]
+    let value = m[2].replace(/^["'"'"']|["'"'"']$/g, "")
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(`${key}\t${value}`)
+  }
+}
+process.stdout.write(out.length > 0 ? `${out.join("\n")}\n` : "")
+' "$tree/pnpm-workspace.yaml" "$previous/pnpm-workspace.yaml" > "$list_file" 2>/dev/null || { rm -f "$list_file"; return 0; }
+  while IFS=$'\t' read -r key file; do
+    [ -n "$key" ] && [ -n "$file" ] || continue
+    case "$file" in
+      /*|*..*) warn "user patch $key: refusing unsafe patch path '$file'"; kept=$((kept + 1)); continue;;
+    esac
+    f="$tree/$file"
+    if [ ! -f "$f" ]; then missing=$((missing + 1)); continue; fi
+    dir="$tree/node_modules/$(printf '%s' "$key" | sed -E 's/@[^@/]+$//')"
+    if [ ! -d "$dir" ]; then
+      missing=$((missing + 1))
+      log "user patch $key: no node_modules directory under $tree; declaration kept"
+      continue
+    fi
+    if ( cd "$dir" && patch -p1 -R --batch --forward --silent --dry-run < "$f" ) >/dev/null 2>&1; then
+      log "user patch $key: already applied (shipped or a previous run)"
+    elif ( cd "$dir" && patch -p1 --batch --forward --silent --dry-run < "$f" ) >/dev/null 2>&1 \
+      && ( cd "$dir" && patch -p1 --batch --forward --silent < "$f" ) >/dev/null 2>&1; then
+      applied=$((applied + 1))
+      log "user patch $key applied to $dir"
+    else
+      kept=$((kept + 1))
+      warn "user patch $key did not apply cleanly; the shipped files were kept (patch: $file)"
+    fi
+  done < "$list_file"
+  rm -f "$list_file"
+  if [ "$applied" -gt 0 ] || [ "$kept" -gt 0 ]; then
+    substep_ok "User patches: $applied applied, $kept kept${missing:+; $missing declared without a local target}"
+  fi
+  return 0
+}
+
 # ── Install ─────────────────────────────────────────────────────────────────
 do_install() {
   STEP_TOTAL=6
@@ -4512,21 +5265,48 @@ rollback() { # prev backup failed_version
   return 0
 }
 
-prune_versions() { # keep1 keep2 (newest first)
-  local keep1="$1" keep2="${2:-}" d name size removed=0
-  for d in "$PREFIX/harness"/*; do
-    [ -d "$d" ] || continue
+# Version retention (design §2.3): keep the last K version directories
+# (DSH_KEEP_VERSIONS, default 3) — they are the rollback targets and carry the
+# installer state a later update inspects. Never prune within K; every removal
+# and the kept set are reported.
+prune_versions() { # keep1 keep2
+  local keep1="$1" keep2="${2:-}" keep_k="${DSH_KEEP_VERSIONS:-3}" removed=0 kept_n=0 d name size
+  case "$keep_k" in ''|*[!0-9]*) keep_k=3;; esac
+  [ "$keep_k" -ge 2 ] || keep_k=2
+  local -a order=() keep_set=()
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    d="${d%/}"
     name="$(basename "$d")"
     case "$name" in .*|current|*.failed-*) continue;; esac
-    if [ -n "$keep1" ] && [ "$name" = "$keep1" ]; then continue; fi
-    if [ -n "$keep2" ] && [ "$name" = "$keep2" ]; then continue; fi
     [ -f "$d/.dsh-install-complete" ] || continue
-    size="$(du -sh "$d" 2>/dev/null | awk '{print $1}')"
-    log "pruning old version $name${size:+ (freed $size)}"
-    if rm -rf "$d"; then removed=$((removed + 1)); else warn "could not prune $name"; fi
+    order+=("$name")
+  done <<EOF
+$(ls -1dt "$PREFIX/harness"/*/ 2>/dev/null)
+EOF
+  # The freshly installed tree and the previous active one are pinned; the
+  # remaining retention slots fill newest-first by directory mtime.
+  [ -n "$keep1" ] && keep_set+=("$keep1")
+  [ -n "$keep2" ] && [ "$keep2" != "$keep1" ] && keep_set+=("$keep2")
+  for name in ${order[@]+"${order[@]}"}; do
+    [ "${#keep_set[@]}" -ge "$keep_k" ] && break
+    local seen_keep=0 k
+    for k in ${keep_set[@]+"${keep_set[@]}"}; do [ "$k" = "$name" ] && seen_keep=1; done
+    [ "$seen_keep" = 1 ] && continue
+    keep_set+=("$name")
+  done
+  for name in ${order[@]+"${order[@]}"}; do
+    local pinned=0 k
+    for k in ${keep_set[@]+"${keep_set[@]}"}; do [ "$k" = "$name" ] && pinned=1; done
+    if [ "$pinned" = 1 ]; then kept_n=$((kept_n + 1)); continue; fi
+    if [ -d "$PREFIX/harness/$name" ]; then
+      size="$(du -sh "$PREFIX/harness/$name" 2>/dev/null | awk '{print $1}')"
+      log "pruning old version $name (retention K=$keep_k${size:+; freed $size})"
+      if rm -rf "$PREFIX/harness/$name"; then removed=$((removed + 1)); else warn "could not prune $name"; fi
+    fi
   done
   prune_failed_versions
-  [ "$removed" -gt 0 ] && log "pruned $removed old version tree(s)"
+  log "retention: kept $kept_n version tree(s) (K=$keep_k); pruned $removed"
   return 0
 }
 
@@ -4562,6 +5342,26 @@ prune_update_artifacts() {
     [ "$i" -le 2 ] && continue
     if rm -f "$f" "$f.sha256" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune cached archive $f"; fi
   done < <(ls -1t "$PREFIX/harness/.cache"/dsh-harness-*.tar.gz 2>/dev/null)
+  # Release metadata and diff archives are needed only for the active and the
+  # target version; keep the newest 4 (with sidecars) so a resumed apply still
+  # finds its chain, and prune older.
+  for pattern in 'manifest-*.json.gz' 'diff-*.tar.gz'; do
+    i=0
+    while IFS= read -r f; do
+      [ -e "$f" ] || continue
+      i=$((i + 1))
+      [ "$i" -le 4 ] && continue
+      if rm -f "$f" "$f.sha256" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune cached release artifact $f"; fi
+    done < <(ls -1t "$PREFIX/harness/.cache"/$pattern 2>/dev/null)
+  done
+  # Update reports: keep the newest 3 per prefix.
+  i=0
+  while IFS= read -r f; do
+    [ -e "$f" ] || continue
+    i=$((i + 1))
+    [ "$i" -le 3 ] && continue
+    if rm -f "$f" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune update report $f"; fi
+  done < <(ls -1t "$PREFIX/harness"/.last-update-* 2>/dev/null)
   for group in "$PREFIX/harness" "$PROFILE_DIR"; do
     [ -d "$group" ] || continue
     i=0
@@ -4595,12 +5395,20 @@ dir_recently_touched() { # dir minutes -> 0 when modified within the window
 
 cleanup_stale_artifacts() {
   local count=0 p d name pid
-  # 1. Clean orphaned staging directories (.staging-*) where process is dead
+  # 1. Clean orphaned staging directories (.staging-*) whose owner is gone.
+  # A delta staging (.staging-<version>) records its live owner beside it; a
+  # pid-suffixed staging carries the pid in its own name.
   for p in "$PREFIX/harness"/.staging-*; do
     [ -d "$p" ] || continue
-    pid="${p##*-}"
-    case "$pid" in ''|*[!0-9]*) pid="";; esac
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    scratch_owner_alive "$p" && continue
+    rm -rf -- "$p" "$p.owner" 2>/dev/null && count=$((count + 1))
+  done
+
+  # 1b. Delta scratch (release/base views, run dirs, planner files) is always
+  # pid-suffixed; keep it while the owner lives.
+  for p in "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
+    [ -e "$p" ] || continue
+    scratch_owner_alive "$p" && continue
     rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
   done
 
@@ -4723,8 +5531,8 @@ do_clean() {
     fi
   done
 
-  # 3. Prune staging, download, and backup directories
-  for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-*; do
+  # 3. Prune staging, download, backup, and delta scratch directories
+  for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-* "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
     clean_remove "$p" "staging artifact"
   done
 
@@ -4883,6 +5691,53 @@ do_update() {
     if [ -n "$PROFILE_SOURCE" ]; then say "  profile:  $PROFILE (source: $PROFILE_SOURCE${PROFILE_REF:+, ref: $PROFILE_REF})"; else say "  profile:  $PROFILE (no recorded source)"; fi
     say "  steps:    fetch -> install+build -> profile refresh+deps -> migrations -> switch current -> service restart ($([ -n "$SERVICE_UNIT" ] && printf '%s' "$SERVICE_UNIT" || printf 'none recorded')) -> backfill -> self-check"
     say "  rollback: current link + user-file backups would be restored on failure"
+    # Manifest-based inspection of the newest release (read-only). Skipped for
+    # source builds, which have no release manifest baseline; the module names
+    # its own missing inputs (no release, no target manifest, no baseline)
+    # rather than guessing.
+    if [ -n "$SOURCE" ]; then
+      say "  inspection: skipped (a source build has no release manifest baseline)"
+      DRY_INSPECTION_JSON='{"available": false, "note": "source build; no release manifest baseline"}'
+    else
+      local inspect_tag="" inspect_json="" inspect_api=""
+      inspect_tag="$(latest_release_tag)"
+      if [ -z "$inspect_tag" ]; then
+        say "  inspection: skipped (no published release is reachable)"
+        DRY_INSPECTION_JSON='{"available": false, "note": "no published release reachable"}'
+      else
+        case "$DSH_GITHUB_URL" in
+          https://github.com/*) inspect_api="https://api.github.com";;
+          *) inspect_api="$DSH_GITHUB_URL/api/v3";;
+        esac
+        local -a inspect_args=(
+          --platform "$OS-$ARCH"
+          --repo "$DSH_GITHUB_REPO"
+          --base-url "$DSH_GITHUB_URL"
+          --api-url "$inspect_api"
+          --tag "$inspect_tag"
+          --channel "$CHANNEL"
+          --tree "$PREFIX/harness/$current"
+          --pins "$DSH_HOME/update/pins.yaml"
+          --tombstones "$DSH_HOME/update/tombstones.txt"
+          --tombstones "$DSH_HOME/update/tombstones.yaml"
+          --limit 40
+        )
+        [ -n "$installed_version" ] && inspect_args+=(--from "$installed_version")
+        if [ "$JSON_OUT" = 1 ]; then
+          inspect_args+=(--json)
+          if inspect_json="$(update_inspect_run "${inspect_args[@]}")" && [ -n "$inspect_json" ]; then
+            case "$inspect_json" in
+              '{'*) DRY_INSPECTION_JSON="$inspect_json";;
+              *) DRY_INSPECTION_JSON='{"available": false, "note": "inspection output was not JSON"}';;
+            esac
+          else
+            DRY_INSPECTION_JSON='{"available": false, "note": "inspection module unavailable"}'
+          fi
+        elif ! update_inspect_run "${inspect_args[@]}"; then
+          say "  inspection: unavailable (could not fetch the inspection module; check the network and retry)"
+        fi
+      fi
+    fi
     emit_json update 1
     return 0
   fi
@@ -4894,22 +5749,40 @@ do_update() {
   # reclaim them before the new tree needs the space.
   prune_failed_versions
   log "update: active $current on the $CHANNEL channel"
+  # Ladder selection first: the read-only planner names the rung before any
+  # artifact download (the apply path shares the dry-run planner's decision).
+  delta_plan_init "$installed_version"
   step "source: ${SOURCE:-$CHANNEL channel archive}"
-  prepare_source
-  resolve_target_for_source
-  if [ "${PREBUILT:-0}" = 1 ]; then
-    log "update target: $VERSION (prebuilt release${RELEASE_COMMIT:+; commit ${RELEASE_COMMIT}})"
+  if [ "$DELTA_UP_TO_DATE" = 1 ] || [ "$DELTA_MODE" = "delta" ]; then
+    # A delta rung (or an already-current target) needs no full-tree download:
+    # the target version is the release tag and the tree is assembled from the
+    # active tree plus the verified diff chain.
+    VERSION="$DELTA_TARGET_VERSION"
+    PREBUILT=1
+    TREE_DIR_NAME="$current"
+    if [ "$DELTA_MODE" = "delta" ]; then
+      TREE_DIR_NAME="$VERSION"
+      log "delta: target $VERSION via rung $DELTA_RUNG (no full-tarball download)"
+    else
+      log "delta: already up to date at $VERSION; no download"
+    fi
   else
-    log "update target: $VERSION${TARGET_COMMIT:+ (commit ${TARGET_COMMIT})}"
-  fi
-  # A complete tree found by prepare_source for this exact commit is reused
-  # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
-  # point install_tree at a directory that does not exist while $STAGED is empty
-  # (nothing to extract), failing the update with a tar open error.
-  if [ -n "${REUSED_TREE_DIR:-}" ]; then
-    TREE_DIR_NAME="$REUSED_TREE_DIR"
-  else
-    TREE_DIR_NAME="$VERSION"
+    prepare_source
+    resolve_target_for_source
+    if [ "${PREBUILT:-0}" = 1 ]; then
+      log "update target: $VERSION (prebuilt release${RELEASE_COMMIT:+; commit ${RELEASE_COMMIT}})"
+    else
+      log "update target: $VERSION${TARGET_COMMIT:+ (commit $TARGET_COMMIT)}"
+    fi
+    # A complete tree found by prepare_source for this exact commit is reused
+    # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
+    # point install_tree at a directory that does not exist while $STAGED is empty
+    # (nothing to extract), failing the update with a tar open error.
+    if [ -n "${REUSED_TREE_DIR:-}" ]; then
+      TREE_DIR_NAME="$REUSED_TREE_DIR"
+    else
+      TREE_DIR_NAME="$VERSION"
+    fi
   fi
 
   # A prebuilt release carries a unique version, so version equality alone is
@@ -4999,13 +5872,57 @@ do_update() {
   log "user-file backups: $backup"
 
   step "dependencies and build (this takes a few minutes)"
-  if ! install_tree; then
-    warn "update failed before switching; $current remains active"
-    restore_pre_switch "$backup" "the build"
-    write_diagnostics install-failed
-    emit_json update 0
-    exit 1
+  # Three ways to produce the new tree, in order of preference:
+  #   1. delta rungs 1-2: the verified diff chain applied over a staging seed;
+  #   2. full tarball through the preservation engine (rung 3 and delta
+  #      fallback), so the preservation net covers every prebuilt update;
+  #   3. the legacy install_tree when no engine/manifests are available.
+  update_tree_ok=0
+  if [ "$DELTA_MODE" = "delta" ]; then
+    delta_apply_delta "$backup"
+    delta_rc=$?
+    case "$delta_rc" in
+      0) update_tree_ok=1;;
+      3) exit 1;;
+      *)
+        if [ "$delta_rc" = 2 ]; then
+          log "delta: continuing with the full release"
+        else
+          warn "delta: apply failed; retrying with the full release"
+        fi
+        if ! delta_prepare_full_fallback; then
+          warn "could not fetch the full release; no changes were made to \$DSH_HOME"
+          restore_pre_switch "$backup" "the build"
+          write_diagnostics install-failed
+          emit_json update 0
+          exit 1
+        fi
+        ;;
+    esac
   fi
+  if [ "$update_tree_ok" = 0 ] && [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ] \
+    && [ -n "${STAGED:-}" ] && [ -d "${STAGED:-}" ]; then
+    delta_apply_full "$STAGED"
+    delta_rc=$?
+    case "$delta_rc" in
+      0) update_tree_ok=1;;
+      3) exit 1;;
+      *) :;;
+    esac
+  fi
+  if [ "$update_tree_ok" = 0 ]; then
+    if ! install_tree; then
+      warn "update failed before switching; $current remains active"
+      restore_pre_switch "$backup" "the build"
+      write_diagnostics install-failed
+      emit_json update 0
+      exit 1
+    fi
+  fi
+  # Post-apply, before the switch: the user's declared pnpm patches are
+  # re-applied to the fresh shipped node_modules (a refused patch keeps the
+  # shipped bytes and is reported).
+  apply_user_patches "$HARNESS" "$PREFIX/harness/$current"
   step "profile: $PROFILE"
   substep_info "refreshing profile: fetch → copy → merges → pairings"
   if ! prepare_profile; then
@@ -5016,6 +5933,19 @@ do_update() {
     exit 1
   fi
   step "home, dependencies and migrations"
+  # Pre-migration $DSH_HOME snapshot: the rollback source once the switch has
+  # happened (restoring files migrated for the new tree onto the old tree is
+  # exactly what must not happen). Fail-open: without it rollback falls back to
+  # the pristine early snapshot.
+  PRE_MIGRATION_BACKUP="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-pre-migration"
+  [ -e "$PRE_MIGRATION_BACKUP" ] && PRE_MIGRATION_BACKUP="$PRE_MIGRATION_BACKUP-$$"
+  if mkdir -p "$PRE_MIGRATION_BACKUP" 2>/dev/null; then
+    backup_user_files "$PRE_MIGRATION_BACKUP"
+    log "pre-migration home snapshot: $PRE_MIGRATION_BACKUP"
+  else
+    warn "could not create the pre-migration snapshot; rollback will use the early user-file backup"
+    PRE_MIGRATION_BACKUP=""
+  fi
   if ! run_migrations; then
     warn "migrations failed before switching; $current remains active"
     restore_pre_switch "$backup" "migrations"
@@ -5055,10 +5985,11 @@ do_update() {
 
   step "self-check"
   if ! selfcheck; then
-    # Restore the pristine pre-update snapshot: the late pre-switch snapshot
-    # holds migrated new-format files and would put them onto the old binary.
-    # It stays on disk as forensic evidence.
-    rollback "$current" "$backup" "$TREE_DIR_NAME"
+    # Restore the pre-migration snapshot (or the pristine early backup when no
+    # snapshot exists): both predate the migrations, so nothing migrated for the
+    # new tree lands on the old one. The late pre-switch backup holds migrated
+    # files and stays on disk as forensic evidence only.
+    rollback "$current" "${PRE_MIGRATION_BACKUP:-$backup}" "$TREE_DIR_NAME"
     exit 1
   fi
   write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
@@ -5067,6 +5998,10 @@ do_update() {
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
   prune_update_artifacts
+  # Planner scratch files served this run only; their PID suffix keeps a
+  # concurrent invocation's files while the matching install-time cleanup
+  # reaps leftovers from crashed runs.
+  rm -f "${DELTA_PLAN_FILE:-}" "${DELTA_CHAIN_FILE:-}"
   print_summary update
   emit_json update 1
   if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
@@ -5233,17 +6168,16 @@ do_repair() {
     repair_fail "$PREFIX/harness/current exists but is not a symlink" "move it aside and re-run the installer: mv '$PREFIX/harness/current' '$PREFIX/harness/current.manual'"
   fi
 
-  # ── stale staging/lock paths (only when their PID is gone) ──
-  for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.profile-staging-*; do
+  # ── stale staging/lock paths (only when their owner is gone) ──
+  for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.profile-staging-* \
+    "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
     [ -e "$p" ] || [ -L "$p" ] || continue
-    pid="${p##*-}"
-    case "$pid" in ''|*[!0-9]*) pid="";; esac
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      repair_note "active staging $p (pid $pid alive; left alone)"
+    if scratch_owner_alive "$p"; then
+      repair_note "active staging $p (owner alive; left alone)"
       continue
     fi
     if repair_fixable "stale staging path $p"; then
-      if rm -rf -- "$p"; then repair_fixed "pruned $p"; else repair_fail "could not prune $p" "rm -rf '$p'"; fi
+      if rm -rf -- "$p" "$p.owner"; then repair_fixed "pruned $p"; else repair_fail "could not prune $p" "rm -rf '$p'"; fi
     fi
   done
 

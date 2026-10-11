@@ -18,16 +18,11 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./cli": {
-      "types": "./lib/types/cli.d.ts",
-      "default": "./lib/cli.js"
-    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
-    "lib/cli.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT"
