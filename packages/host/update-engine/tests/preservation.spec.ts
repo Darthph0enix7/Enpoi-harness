@@ -189,18 +189,18 @@ describe('§3.3 preservation suite', () => {
     const f = await fixture(
       'untracked-collision',
       { 'core.txt': 'x\n' },
-      { 'core.txt': 'x\n', 'docs/readme.md': 'shipped docs\n' },
+      { 'core.txt': 'x\n', 'docs/notes.txt': 'shipped docs\n' },
       async (localRoot) => {
-        await writeTreeFile(localRoot, 'docs/readme.md', 'user docs\n')
+        await writeTreeFile(localRoot, 'docs/notes.txt', 'user docs\n')
       },
     )
     const { plan, result } = await runUpdate(f)
     expect(result.status).toBe('applied')
     expect(plan.switchDecision).toBe('proceed')
-    expect(await readStaged(f.stagingRoot, 'docs/readme.md')).toBe('user docs\n')
-    const sidecar = await readFile(join(f.stagingRoot, 'docs/readme.md.shipped-2.0.0'), 'utf8')
+    expect(await readStaged(f.stagingRoot, 'docs/notes.txt')).toBe('user docs\n')
+    const sidecar = await readFile(join(f.stagingRoot, 'docs/notes.txt.shipped-2.0.0'), 'utf8')
     expect(sidecar).toBe('shipped docs\n')
-    expect(plan.conflicts.find(conflict => conflict.path === 'docs/readme.md')?.kind).toBe('untracked-collision')
+    expect(plan.conflicts.find(conflict => conflict.path === 'docs/notes.txt')?.kind).toBe('untracked-collision')
     expect(result.verification?.ok).toBe(true)
   })
 

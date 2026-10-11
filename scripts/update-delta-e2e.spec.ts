@@ -14,7 +14,7 @@
  * the switch.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
@@ -53,19 +53,35 @@ function write(dir: string, rel: string, content: string, mode = 0o644): string 
   return file
 }
 
+const VERSION_LINES = ['FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT']
+
+/** Shipped core file for one version: every version appends one more line. */
+function versionCore(version: string): string {
+  const lines = ['core', 'line2', 'line3']
+  for (let index = 0; index < Number(version) - 1 && index < VERSION_LINES.length; index += 1) lines.push(VERSION_LINES[index]!)
+  return `${lines.join('\n')}\n`
+}
+
+/** Shipped both-changed config for one version: every version appends a key. */
+function versionBoth(version: string): string {
+  return version === '1' ? 'x: 1\ny: 2\n' : `x: 1\ny: 2\nz: ${version}\n`
+}
+
 function releaseFiles(version: string): Record<string, { content: string; mode?: number }> {
   const first = version === '1'
   const files: Record<string, { content: string; mode?: number }> = {
     'package.json': { content: `{"version":"${version}"}\n` },
     'apps/cli/lib/bin.js': { content: STUB_CLI, mode: 0o755 },
-    'core/app.js': { content: first ? 'core\nline2\nline3\n' : 'core\nline2\nline3\nFOUR\n' },
+    'core/app.js': { content: versionCore(version) },
     'cfg/app.yaml': { content: 'a: 1\nb: 2\n' },
     'cfg/stable.yaml': { content: 'stable: true\n' },
+    'cfg/both.yaml': { content: versionBoth(version) },
     'docs/keep.txt': { content: first ? 'shipped v1\n' : `shipped ${version}\n` },
     'docs/pinme.txt': { content: first ? 'pin v1\n' : `pin ${version}\n` },
     'docs/remove.txt': { content: first ? 'gone v1\n' : `gone ${version}\n` },
     'docs/lost.txt': { content: first ? 'lost v1\n' : `lost ${version}\n` },
     'node_modules/pkg/index.js': { content: first ? 'A\nB\nC\n' : 'A\nB\nC\nNEW\n' },
+    'node_modules/@fixture/pkg/index.js': { content: first ? 'A\nB\nC\n' : 'A\nB\nC\nNEW\n' },
     'modefile.txt': { content: 'same\n', mode: first ? 0o644 : 0o755 },
   }
   if (!first) {
@@ -79,6 +95,12 @@ interface FixtureOptions {
   versions?: string[]
   installed?: string
   target?: string
+  /**
+   * Releases the server publishes initially; `server.publish(version)`
+   * exposes a later one, which is how successive delta hops are simulated
+   * (a real device updates to whatever release is newest at that moment).
+   */
+  visible?: string[]
   /** Per-version tree mutation applied before manifests, diffs, and tarballs are built. */
   mutate?: (version: string, tree: string) => void
 }
@@ -90,7 +112,7 @@ interface Fixture {
   binDir: string
   trees: Map<string, string>
   assets: Map<string, Buffer>
-  server: { base: string; close: () => Promise<void>; failures: Map<string, string> }
+  server: { base: string; close: () => Promise<void>; failures: Map<string, string>; publish: (version: string) => void }
   fullName: (version: string) => string
   manifestName: (version: string) => string
   diffName: (from: string, to: string) => string
@@ -177,6 +199,7 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
   // paths (one tombstoned), an untracked collision, and a user pnpm patch.
   write(installedTree, 'core/app.js', 'core\nUSER\nline2\nline3\n')
   write(installedTree, 'cfg/stable.yaml', 'stable: user\n')
+  write(installedTree, 'cfg/both.yaml', 'x: LOCAL\ny: 2\n')
   write(installedTree, 'user/notes.txt', 'notes\n')
   write(installedTree, 'profiles/web/packages/my-plugin/package.json', '{"name":"my-plugin"}\n')
   write(installedTree, 'skills/my-skill/SKILL.md', '# my skill\n')
@@ -185,7 +208,19 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
   rmSync(join(installedTree, 'docs/remove.txt'))
   write(home, 'update/pins.yaml', 'paths:\n  - docs/pinme.txt\n')
   write(home, 'update/tombstones.txt', 'docs/remove.txt\n')
-  write(installedTree, 'pnpm-workspace.yaml', 'patchedDependencies:\n  pkg: patches/pkg.patch\n')
+  // A quoted scoped key (the shape pnpm writes for scoped packages) plus the
+  // plain form: both must resolve to their node_modules directories.
+  write(installedTree, 'pnpm-workspace.yaml', 'patchedDependencies:\n  pkg: patches/pkg.patch\n  \'@fixture/pkg\': patches/scoped.patch\n')
+  write(installedTree, 'patches/scoped.patch', [
+    '--- a/index.js',
+    '+++ b/index.js',
+    '@@ -1,3 +1,3 @@',
+    '-A',
+    '+A-scoped',
+    ' B',
+    ' C',
+    '',
+  ].join('\n'))
   write(installedTree, 'patches/pkg.patch', [
     '--- a/index.js',
     '+++ b/index.js',
@@ -205,6 +240,14 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
     write(dir, '.dsh-install-complete', `{"version": "${name}", "commit": "", "installedAt": "2026-01-01T00:00:00Z"}\n`)
     const stamp = new Date(oldTime.getTime() - index * 3600 * 1000)
     utimesSync(dir, stamp, stamp)
+  }
+  // Retained merge-base slots: old-a follows its kept version; old-b and the
+  // version-less ghost must be GC'd by the retention/orphan sweep.
+  mkdirSync(join(prefix, 'harness', '.bases'), { recursive: true })
+  for (const name of ['old-a', 'old-b', 'ghost']) {
+    const slot = join(prefix, 'harness', '.bases', `${name}.tar`)
+    writeFileSync(slot, `not a real archive: ${name}\n`)
+    writeFileSync(`${slot}.sha256`, `${sha256Bytes(readFileSync(slot))}  ${name}.tar\n`)
   }
 
   write(prefix, 'harness/install-state.json', `${JSON.stringify({
@@ -230,7 +273,7 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
     updatedAt: '2026-01-01T00:00:00Z',
   }, null, 2)}\n`)
 
-  const server = await startFixtureServer(assets, versions, target)
+  const server = await startFixtureServer(assets, [...(options.visible ?? versions)])
   servers.push(server.http)
   return {
     root,
@@ -239,7 +282,7 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
     binDir,
     trees,
     assets,
-    server: { base: server.base, close: server.close, failures: server.failures },
+    server: { base: server.base, close: server.close, failures: server.failures, publish: server.publish },
     fullName,
     manifestName,
     diffName,
@@ -252,21 +295,24 @@ interface ServerHandle {
   http: http.Server
   base: string
   failures: Map<string, string>
+  /** Expose one more release as newest (successive-hop simulation). */
+  publish: (version: string) => void
   close: () => Promise<void>
 }
 
-function startFixtureServer(assets: Map<string, Buffer>, versions: string[], latest: string): Promise<ServerHandle> {
+function startFixtureServer(assets: Map<string, Buffer>, visibleVersions: string[]): Promise<ServerHandle> {
   const failures = new Map<string, string>()
-  const state: { base: string } = { base: '' }
+  const state: { base: string; visible: string[] } = { base: '', visible: [...visibleVersions] }
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     if (url.pathname === '/releases/latest') {
+      const latest = state.visible[state.visible.length - 1]
       res.writeHead(302, { Location: `${state.base}/releases/tag/v${latest}` })
       res.end()
       return
     }
     if (url.pathname.includes('/repos/') && url.pathname.endsWith('/releases')) {
-      const list = [...versions].reverse().map((version, index) => {
+      const list = [...state.visible].reverse().map((version, index) => {
         const tag = `v${version}`
         const names = [...assets.keys()].filter(key => key.startsWith(`${tag}/`)).map(key => key.slice(tag.length + 1))
         return {
@@ -347,6 +393,7 @@ function startFixtureServer(assets: Map<string, Buffer>, versions: string[], lat
         http: server,
         base: state.base,
         failures,
+        publish: (version: string) => { if (!state.visible.includes(version)) state.visible.push(version) },
         close: () => new Promise<void>((done) => { server.close(() => { done() }) }),
       })
     })
@@ -434,6 +481,8 @@ afterAll(async () => {
   for (const server of servers.splice(0)) {
     await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
   }
+  // DSH_E2E_KEEP=1 keeps the scratch prefixes for post-mortem inspection.
+  if (process.env.DSH_E2E_KEEP === '1') return
   for (const dir of cleanups.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -467,6 +516,13 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     // tombstoned paths, collision sidecar, restored deletion.
     const v2 = join(fixture.prefix, 'harness/2')
     expect(readFileSync(join(v2, 'core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\n')
+    expect(readFileSync(join(v2, 'cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 2\n')
+    // The pristine base for the new version is retained for the next update.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar'))).toBe(true)
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar.sha256'))).toBe(true)
+    const baseArchive = update.baseArchive as { path: string; bytes: number } | null
+    expect(baseArchive?.path).toContain('.bases/2.tar')
+    expect(baseArchive?.bytes ?? 0).toBeGreaterThan(0)
     expect(readFileSync(join(v2, 'user/notes.txt'), 'utf8')).toBe('notes\n')
     expect(readFileSync(join(v2, 'profiles/web/packages/my-plugin/package.json'), 'utf8')).toBe('{"name":"my-plugin"}\n')
     expect(readFileSync(join(v2, 'skills/my-skill/SKILL.md'), 'utf8')).toBe('# my skill\n')
@@ -479,8 +535,10 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(readFileSync(join(v2, 'modefile.txt'), 'utf8')).toBe('same\n')
     expect(readFileSync(join(v2, 'cfg/stable.yaml'), 'utf8')).toBe('stable: user\n')
 
-    // User patch applied to the fresh shipped node_modules.
+    // User patches applied to the fresh shipped node_modules (plain and
+    // quoted-scoped keys both resolve).
     expect(readFileSync(join(v2, 'node_modules/pkg/index.js'), 'utf8')).toBe('A-patched\nB\nC\nNEW\n')
+    expect(readFileSync(join(v2, 'node_modules/@fixture/pkg/index.js'), 'utf8')).toBe('A-scoped\nB\nC\nNEW\n')
 
     // Retention K=3: v2, v1, and exactly one older complete tree survive.
     const kept = completeVersions(fixture.prefix)
@@ -491,7 +549,7 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(existsSync(reportFile)).toBe(true)
     const report = JSON.parse(readFileSync(reportFile, 'utf8')) as { verification: { ok: boolean }; bytesWritten: number }
     expect(report.verification.ok).toBe(true)
-    console.log(`[e2e] rung-1 delta: ${elapsedMs}ms, downloaded ${update.downloadedBytes} B vs full ${update.fullTarballBytes} B, written ${report.bytesWritten} B`)
+    console.log(`[e2e] rung-1 delta: ${elapsedMs}ms, downloaded ${update.downloadedBytes} B vs full ${update.fullTarballBytes} B, written ${report.bytesWritten} B, base retained ${(baseArchive?.bytes ?? 0)} B`)
   }, 240_000)
 
   it('dry run reports the same ladder rung and writes nothing', async () => {
@@ -533,7 +591,11 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.mode).toBe('delta')
     expect(update.verificationOk).toBe(true)
     expect(currentTarget(fixture.prefix)).toBe('3')
-    expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\n')
+    expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\n')
+    expect(readFileSync(join(fixture.prefix, 'harness/3/cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 3\n')
+    // The two-hop target's pristine base is synthesized from the verified tree.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/3.tar'))).toBe(true)
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/3.tar.sha256'))).toBe(true)
     // Both hops arrived: the v1->v2 hop's own change and the v2->v3 hop's.
     expect(readFileSync(join(fixture.prefix, 'harness/3/docs/keep.txt'), 'utf8')).toBe('shipped 3\n')
     expect(readFileSync(join(fixture.prefix, 'harness/3/docs/added.txt'), 'utf8')).toBe('added in v2\n')
@@ -554,6 +616,152 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(existsSync(join(fixture.prefix, 'harness/2'))).toBe(false)
     expect(existsSync(join(fixture.prefix, 'harness/1/core/app.js.new-2'))).toBe(true)
     expect(readFileSync(join(fixture.prefix, 'harness/1/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\n')
+    // An aborted attempt must not retain a base for a version that is not installed.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar'))).toBe(false)
+  }, 240_000)
+
+  it('keeps a true merge base across consecutive delta hops', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3'], installed: '1', visible: ['1', '2'] })
+    const hop1 = await runUpdate(fixture)
+    expect(hop1.status, hop1.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    expect((hop1.json?.update as Record<string, unknown>).rung).toBe(1)
+
+    // The retained base for the first hop's version is pristine: shipped bytes
+    // only, no user edits, no untracked files, no sidecars.
+    const retained = join(fixture.prefix, 'harness/.bases/2.tar')
+    expect(existsSync(retained)).toBe(true)
+    expect(existsSync(`${retained}.sha256`)).toBe(true)
+    const extracted = join(fixture.root, 'base-check')
+    mkdirSync(extracted, { recursive: true })
+    const untar = spawnSync('tar', ['-xf', retained, '-C', extracted], { encoding: 'utf8' })
+    expect(untar.status, untar.stderr).toBe(0)
+    expect(readFileSync(join(extracted, 'core/app.js'), 'utf8')).toBe(versionCore('2'))
+    expect(readFileSync(join(extracted, 'cfg/both.yaml'), 'utf8')).toBe(versionBoth('2'))
+    expect(existsSync(join(extracted, 'user/notes.txt'))).toBe(false)
+    expect(existsSync(join(extracted, 'core/app.js.new-2'))).toBe(false)
+
+    // Second hop: both-changed files must 3-way merge again, from the retained
+    // base — not degrade to keep-local. Release 3 becomes newest only now.
+    fixture.server.publish('3')
+    const hop2 = await runUpdate(fixture)
+    expect(hop2.status, hop2.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('3')
+    const update = hop2.json?.update as Record<string, unknown>
+    expect(update.rung).toBe(1)
+    expect(update.mode).toBe('delta')
+    expect(update.base).toBe('retained')
+    expect(update.verificationOk).toBe(true)
+    expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\n')
+    expect(readFileSync(join(fixture.prefix, 'harness/3/cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 3\n')
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/3.tar'))).toBe(true)
+    console.log(`[e2e] second hop: base=${String(update.base)} mode=${String(update.mode)} downloaded ${String(update.downloadedBytes)} B vs full ${String(update.fullTarballBytes)} B, merged ${String((update.counts as Record<string, number>).merged)}`)
+  }, 240_000)
+
+  it('degrades a both-changed config when the retained base is missing', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3'], installed: '1', visible: ['1', '2'] })
+    const hop1 = await runUpdate(fixture)
+    expect(hop1.status, hop1.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    // Only the config file stays both-changed: revert the runtime-code edit so
+    // the missing base cannot abort the switch.
+    write(join(fixture.prefix, 'harness/2'), 'core/app.js', versionCore('2'))
+    rmSync(join(fixture.prefix, 'harness/.bases/2.tar'), { force: true })
+    rmSync(join(fixture.prefix, 'harness/.bases/2.tar.sha256'), { force: true })
+
+    fixture.server.publish('3')
+    const hop2 = await runUpdate(fixture)
+    expect(hop2.status, hop2.stderr).toBe(0)
+    const update = hop2.json?.update as Record<string, unknown>
+    expect(update.mode).toBe('delta')
+    expect(update.base).toBe('empty')
+    const counts = update.counts as Record<string, number>
+    expect(counts.merged).toBe(0)
+    expect(counts.keptLocal).toBeGreaterThanOrEqual(1)
+    expect(readFileSync(join(fixture.prefix, 'harness/3/cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 2\n')
+    expect(existsSync(join(fixture.prefix, 'harness/3/cfg/both.yaml.new-3'))).toBe(true)
+    expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe(versionCore('3'))
+    // Retention does not depend on the previous base: shipped bytes for the
+    // preserved config path are in the release view, so the new base is built.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/3.tar'))).toBe(true)
+  }, 240_000)
+
+  it('GC drops retained bases with their version dirs and reaps orphans', async () => {
+    const fixture = await buildFixture()
+    const result = await runUpdate(fixture)
+    expect(result.status, result.stderr).toBe(0)
+    const bases = join(fixture.prefix, 'harness/.bases')
+    // old-b/old-c/old-d fall outside retention K=3; old-b's base follows it.
+    expect(existsSync(join(bases, 'old-b.tar'))).toBe(false)
+    expect(existsSync(join(bases, 'old-b.tar.sha256'))).toBe(false)
+    // old-a survives as the third retention slot, so its base stays.
+    expect(existsSync(join(bases, 'old-a.tar'))).toBe(true)
+    // A version-less base slot is orphaned and reaped even without a prune.
+    expect(existsSync(join(bases, 'ghost.tar'))).toBe(false)
+    expect(existsSync(join(bases, 'ghost.tar.sha256'))).toBe(false)
+    // The freshly installed version keeps its retained base.
+    expect(existsSync(join(bases, '2.tar'))).toBe(true)
+  }, 240_000)
+
+  it('records --forget tombstones before planning, idempotently', async () => {
+    const fixture = await buildFixture()
+    const result = await runUpdate(fixture, {}, ['--forget', 'docs/lost.txt'])
+    expect(result.status, result.stderr).toBe(0)
+    const tombstones = readFileSync(join(fixture.home, 'update/tombstones.txt'), 'utf8')
+    expect(tombstones.trim().split('\n')).toEqual(['docs/remove.txt', 'docs/lost.txt'])
+    // The same run respected the fresh tombstone: no restore of the locally deleted file.
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    expect(existsSync(join(fixture.prefix, 'harness/2/docs/lost.txt'))).toBe(false)
+    const actions = (result.json?.updateActions as { forgotten: { path: string; outcome: string }[] })
+    expect(actions.forgotten).toEqual([{ path: 'docs/lost.txt', outcome: 'recorded' }])
+
+    // Idempotent: a second run records nothing new and reports it.
+    const second = await runUpdate(fixture, {}, ['--forget', 'docs/lost.txt'])
+    expect(second.status, second.stderr).toBe(0)
+    expect(readFileSync(join(fixture.home, 'update/tombstones.txt'), 'utf8').trim().split('\n')).toEqual(['docs/remove.txt', 'docs/lost.txt'])
+    const secondActions = (second.json?.updateActions as { forgotten: { path: string; outcome: string }[] })
+    expect(secondActions.forgotten).toEqual([{ path: 'docs/lost.txt', outcome: 'already' }])
+
+    // --dry-run reports the intent and writes nothing.
+    const dry = await runUpdate(fixture, {}, ['--dry-run', '--forget', 'docs/extra.txt'])
+    expect(dry.status, dry.stderr).toBe(0)
+    expect(dry.json?.dryRun).toBe(1)
+    expect(readFileSync(join(fixture.home, 'update/tombstones.txt'), 'utf8')).not.toContain('docs/extra.txt')
+    expect(dry.stderr).toContain('would record docs/extra.txt')
+  }, 240_000)
+
+  it('--accept-shipped removes the pin and restores the shipped file from the pristine archive', async () => {
+    const fixture = await buildFixture()
+    // The pin was the only thing protecting this locally edited file.
+    write(join(fixture.prefix, 'harness/1'), 'docs/pinme.txt', 'pin USER\n')
+    const result = await runUpdate(fixture, {}, ['--accept-shipped', 'docs/pinme.txt'])
+    expect(result.status, result.stderr).toBe(0)
+    const pins = readFileSync(join(fixture.home, 'update/pins.yaml'), 'utf8')
+    expect(pins).not.toContain('pinme')
+    // The update then takes the target's shipped bytes (no pin left to skip it).
+    expect(readFileSync(join(fixture.prefix, 'harness/2/docs/pinme.txt'), 'utf8')).toBe('pin 2\n')
+    const counts = (result.json?.update as { counts: Record<string, number> }).counts
+    expect(counts.pinned).toBe(0)
+    const actions = (result.json?.updateActions as { acceptedShipped: { path: string; restored: boolean; note: string | null }[] })
+    expect(actions.acceptedShipped).toEqual([{ path: 'docs/pinme.txt', restored: true, note: null }])
+  }, 240_000)
+
+  it('--accept-shipped reports honestly when no pristine archive is available', async () => {
+    // Only release 1 is published: the run is a no-op, so the file cannot be
+    // replaced by an update — the flag alone decides what happens now.
+    const fixture = await buildFixture({ visible: ['1'] })
+    write(join(fixture.prefix, 'harness/1'), 'docs/pinme.txt', 'pin USER\n')
+    rmSync(join(fixture.prefix, 'harness/.cache', fixture.fullName('1')), { force: true })
+    rmSync(join(fixture.prefix, 'harness/.cache', `${fixture.fullName('1')}.sha256`), { force: true })
+    rmSync(join(fixture.prefix, 'harness/.bases/1.tar'), { force: true })
+    rmSync(join(fixture.prefix, 'harness/.bases/1.tar.sha256'), { force: true })
+    const result = await runUpdate(fixture, {}, ['--accept-shipped', 'docs/pinme.txt'])
+    expect(result.status, result.stderr).toBe(0)
+    const pins = readFileSync(join(fixture.home, 'update/pins.yaml'), 'utf8')
+    expect(pins).not.toContain('pinme')
+    expect(readFileSync(join(fixture.prefix, 'harness/1/docs/pinme.txt'), 'utf8')).toBe('pin USER\n')
+    const actions = (result.json?.updateActions as { acceptedShipped: { path: string; restored: boolean; note: string | null }[] })
+    expect(actions.acceptedShipped).toEqual([{ path: 'docs/pinme.txt', restored: false, note: 'no pristine archive for 1; the next update will take the shipped file' }])
   }, 240_000)
 
   it('falls back to the full tarball when the diff hash does not match', async () => {
@@ -567,6 +775,8 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(result.stderr).toContain('checksum mismatch')
     expect(currentTarget(fixture.prefix)).toBe('2')
     expect(readFileSync(join(fixture.prefix, 'harness/2/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\n')
+    // The fallback downloaded the full release; it is retained as the base.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar.gz'))).toBe(true)
   }, 240_000)
 
   it('falls back to the full tarball when the diff is a corrupt gzip with a valid hash', async () => {
@@ -594,6 +804,8 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(currentTarget(fixture.prefix)).toBe('1')
     expect(existsSync(join(fixture.prefix, 'harness/2'))).toBe(false)
     expect(existsSync(join(fixture.prefix, 'harness/.staging-2'))).toBe(false)
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar'))).toBe(false)
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/2.tar.gz'))).toBe(false)
     const after = readdirSync(join(fixture.prefix, 'harness')).sort().filter(name => !name.startsWith('.'))
     expect(after).toEqual(before.filter(name => !name.startsWith('.')))
     expect(readFileSync(join(fixture.prefix, 'harness/1/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\n')
@@ -609,7 +821,9 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.mode).toBe('full')
     expect(update.verificationOk).toBe(true)
     expect(currentTarget(fixture.prefix)).toBe('5')
-    expect(readFileSync(join(fixture.prefix, 'harness/5/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\n')
+    expect(readFileSync(join(fixture.prefix, 'harness/5/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\nSIX\nSEVEN\n')
+    // A full update retains the downloaded archive verbatim as the base.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/5.tar.gz'))).toBe(true)
   }, 240_000)
 
   it('rolls back to the previous tree and restores user files when the self-check fails after the switch', async () => {

@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## Summary
 
-在两个发布版本之间计算并执行更新，同时不丢失用户添加或修改的任何内容。本包是最优安装/更新设计（`dsh-migration/95-optimal-install-update-design.md`）的 P2 部分：清单工具（§2.1）、完整决策矩阵（§3.2）、内嵌三方合并网（§3.1–§3.5），以及带中断日志与合格校验的分阶段 apply（§2.3）。它是不依赖任何外部依赖、不使用 Cordis、不调用宿主 `git`/`diff3` 的纯 Node/TypeScript 实现；它只接受显式传入的树根路径，绝不猜测任何前缀。更新器之后会将它作为 CLI 在随包发行的目录树上调用；把它接入 `scripts/install.sh` 属于 P3。
+在两个发布版本之间计算并执行更新，同时不丢失用户添加或修改的任何内容。本包是最优安装/更新设计（`dsh-migration/95-optimal-install-update-design.md`）的 P2 部分：清单工具（§2.1）、完整决策矩阵（§3.2）、内嵌三方合并网（§3.1–§3.5），以及带中断日志与合格校验的分阶段 apply（§2.3）。它是不依赖任何外部依赖、不使用 Cordis、不调用宿主 `git`/`diff3` 的纯 Node/TypeScript 实现；它只接受显式传入的树根路径，绝不猜测任何前缀。`scripts/install.sh` 会在每次预构建更新中将它作为 CLI 调用。
 
 ## Table of Contents
 
@@ -57,7 +57,7 @@ dsh-update-engine discard --staging <dir> [--journal <file>]
 
 ### 合并引擎
 
-基线是上一版本目录的原始字节，永不远程获取基线。`merge3` 通过 patience 锚点 LCS（带有限的动态规划回退）计算匹配，并在两侧均未改动的行处切分文件，然后按 diff3 区域规则处理；相邻的不同侧修改会像 GNU diff3 一样冲突。默认冲突标记为 `<<<<<<< local`、`||||||| baseline`、`>>>>>>> shipped`。双方都改动的二进制文件绝不进行文本合并：保留本地，并将随包字节写入 `<file>.new-<version>`。
+基线是已安装版本经校验和验证的原始归档（保留的 `.bases/<version>.tar[.gz]` 或缓存的完整发布包），以只读方式解包；永不远程获取基线。没有该归档时，双方都改动的文件保留本地字节并写入随包边车，报告会说明这一点。`merge3` 通过 patience 锚点 LCS（带有限的动态规划回退）计算匹配，并在两侧均未改动的行处切分文件，然后按 diff3 区域规则处理；相邻的不同侧修改会像 GNU diff3 一样冲突。默认冲突标记为 `<<<<<<< local`、`||||||| baseline`、`>>>>>>> shipped`。双方都改动的二进制文件绝不进行文本合并：保留本地，并将随包字节写入 `<file>.new-<version>`。
 
 ### 冲突分级
 
@@ -86,10 +86,10 @@ dsh-update-engine discard --staging <dir> [--journal <file>]
 <a id="further-exploration"></a>
 ## 进一步阅读
 
-先读本包实现的设计文档，再读将要调用它的更新器。
+先读本包实现的设计文档，再读调用它的更新器。
 
-- [95 — 最优安装与更新系统](../../../dsh-migration/95-optimal-install-update-design.md) — §2.3 分阶段 apply、§3 保留矩阵、§5 报告、§8 P2 范围。
-- [`scripts/install.sh`](../../../scripts/install.sh) — 现有安装脚本，P3 将复用其 `switch_current` 模式。
+- 95 — 最优安装与更新系统（`~/dsh-migration/95-optimal-install-update-design.md`，位于本仓库之外）— §2.3 分阶段 apply、§3 保留矩阵、§5 报告、§8 P2 范围。
+- [`scripts/install.sh`](../../../scripts/install.sh) — 调用本引擎（`delta_apply_delta`/`delta_apply_full`）并负责传输、原子 `switch_current` 与回滚的更新器。
 
 <a id="model-experience"></a>
 ## Model Experience
@@ -104,7 +104,7 @@ dsh-update-engine discard --staging <dir> [--journal <file>]
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **传输、原子切换与回滚仍属 P3。** 本包负责构建并校验新树以及报告；差分应用、阶梯档位选择与 `current` 切换不在范围内。
+- **传输、原子切换与回滚由更新器负责。** 本包负责构建并校验新树以及报告；差分应用、阶梯档位选择与 `current` 切换不在范围内。
 - **目录与符号链接不参与合并。** 双方都改动的目录或符号链接保留本地并报告；只有普通文本文件进入合并引擎。
 - **删除目录时绝不删除未跟踪内容。** 计划删除的非空目录会被保留并报告为 `retained`。
 - **运行时代码分级基于扩展名。** 二进制模块路径（`.node`、`.wasm`）双方都改动时与其他运行时代码一样中止。

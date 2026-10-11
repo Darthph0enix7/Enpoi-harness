@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Compute and execute an update between two shipped releases without losing anything the user added or changed. The package is the P2 slice of the optimal install/update design (`dsh-migration/95-optimal-install-update-design.md`): manifest utilities (§2.1), the total decision matrix (§3.2), the embedded 3-way merge net (§3.1–§3.5), and the staged apply with interruption journal and qualified verification (§2.3). It is pure Node/TypeScript with no dependencies, no Cordis, and no host `git`/`diff3`; it operates on explicit tree roots and never guesses a prefix. The updater invokes it later as a CLI over the shipped tree; wiring it into `scripts/install.sh` belongs to P3.
+Compute and execute an update between two shipped releases without losing anything the user added or changed. The package is the P2 slice of the optimal install/update design (`dsh-migration/95-optimal-install-update-design.md`): manifest utilities (§2.1), the total decision matrix (§3.2), the embedded 3-way merge net (§3.1–§3.5), and the staged apply with interruption journal and qualified verification (§2.3). It is pure Node/TypeScript with no dependencies, no Cordis, and no host `git`/`diff3`; it operates on explicit tree roots and never guesses a prefix. `scripts/install.sh` invokes it as a CLI for every prebuilt update.
 
 ## Table of Contents
 
@@ -57,7 +57,7 @@ The §3.2 matrix is total over the union of the three manifests; each path gets 
 
 ### Merge engine
 
-The base is the pristine previous version directory; no remote base bytes are ever fetched. `merge3` computes patience-anchor LCS matches (with a bounded dynamic-programming fallback) and splits the file at lines unchanged in both sides, then applies the diff3 region rules; adjacent different-side changes conflict exactly as GNU diff3 does. The default conflict markers are `<<<<<<< local`, `||||||| baseline`, and `>>>>>>> shipped`. Binary both-changed files are never text-merged: local is kept and the shipped bytes go to `<file>.new-<version>`.
+The base is the checksum-verified pristine archive of the installed version (the retained `.bases/<version>.tar[.gz]` or the cached full release), extracted read-only; no remote base bytes are ever fetched. When no such archive is available, both-changed files keep local bytes with a shipped sidecar and the report says so. `merge3` computes patience-anchor LCS matches (with a bounded dynamic-programming fallback) and splits the file at lines unchanged in both sides, then applies the diff3 region rules; adjacent different-side changes conflict exactly as GNU diff3 does. The default conflict markers are `<<<<<<< local`, `||||||| baseline`, and `>>>>>>> shipped`. Binary both-changed files are never text-merged: local is kept and the shipped bytes go to `<file>.new-<version>`.
 
 ### Conflict severity
 
@@ -85,10 +85,10 @@ Seeding hardlinks the local tree into staging; every write unlinks its target fi
 
 ## Further Exploration
 
-Start with the design document this package implements, then the updater that will call it.
+Start with the design document this package implements, then the updater that calls it.
 
-- [95 — Optimal install & update system](../../../dsh-migration/95-optimal-install-update-design.md) — §2.3 staged apply, §3 preservation matrix, §5 reporting, §8 P2 scope.
-- [`scripts/install.sh`](../../../scripts/install.sh) — the existing installer whose `switch_current` pattern P3 reuses.
+- 95 — Optimal install & update system (`~/dsh-migration/95-optimal-install-update-design.md`; outside this repository) — §2.3 staged apply, §3 preservation matrix, §5 reporting, §8 P2 scope.
+- [`scripts/install.sh`](../../../scripts/install.sh) — the updater that invokes this engine (`delta_apply_delta`/`delta_apply_full`) and owns transport, the atomic `switch_current`, and rollback.
 
 <a id="model-experience"></a>
 ## Model Experience
@@ -103,7 +103,7 @@ None; this package neither assembles nor sends a provider request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **Transport, atomic switch, and rollback remain P3.** This package stages a new tree, verifies it, and reports; applying diffs, choosing the ladder rung, and moving `current` are out of scope here.
+- **Transport, atomic switch, and rollback live in the updater.** This package stages a new tree, verifies it, and reports; applying diffs, choosing the ladder rung, and moving `current` are out of scope here.
 - **Directories and symlinks are not merged.** A both-changed directory or symlink keeps local and reports; only regular text files reach the merge engine.
 - **Deleting a directory never removes untracked content.** A non-empty directory scheduled for deletion is retained and reported as `retained`.
 - **The runtime-code split is extension-based.** A binary module path (`.node`, `.wasm`) aborts like other runtime code when changed on both sides.

@@ -384,7 +384,8 @@ describe('apply pipeline', () => {
 
   it('applies a diff chain over the seeded tree, preserving user edits', async () => {
     const f = pipelineFixture()
-    const outcome = await runApplyPipeline(pipelineOptions(f))
+    const retained = join(f.dir, 'retained-base.tar')
+    const outcome = await runApplyPipeline(pipelineOptions(f, { persistBasePath: retained }))
     expect(outcome.status).toBe('applied')
     expect(outcome.exitCode).toBe(0)
     if (outcome.status === 'applied') {
@@ -396,11 +397,52 @@ describe('apply pipeline', () => {
       // core/app.js was both-changed: with a pristine base the merge keeps the
       // user's line; the upstream additions land.
       expect(outcome.plan.actions.find((action: { path: string }) => action.path === 'core/app.js')?.kind).toBe('merge')
+      expect(outcome.result.baseArchive?.path).toBe(retained)
+      expect(outcome.result.baseArchive?.bytes ?? 0).toBeGreaterThan(0)
     }
     expect(readFileSync(join(f.staging, 'core/app.js'), 'utf8')).toBe('one\nUSER\ntwo\nthree\nFOUR\nFIVE\n')
     expect(readFileSync(join(f.staging, 'untracked/notes.txt'), 'utf8')).toBe('user notes\n')
     expect(readFileSync(join(f.staging, 'added.txt'), 'utf8')).toBe('new in v2\n')
     expect(existsSync(join(f.staging, 'mode/mode.txt'))).toBe(true)
+
+    // The retained archive is pristine: shipped bytes, no user data, no
+    // sidecars, and a valid sidecar hash of its own.
+    expect(existsSync(`${retained}.sha256`)).toBe(true)
+    const extracted = join(f.dir, 'base-extracted')
+    mkdirSync(extracted, { recursive: true })
+    const untar = spawnSync('tar', ['-xf', retained, '-C', extracted], { encoding: 'utf8' })
+    expect(untar.status).toBe(0)
+    expect(readFileSync(join(extracted, 'core/app.js'), 'utf8')).toBe('one\ntwo\nthree\nFOUR\nFIVE\n')
+    expect(existsSync(join(extracted, 'untracked/notes.txt'))).toBe(false)
+    expect(existsSync(join(extracted, 'core/app.js.new-v3'))).toBe(false)
+    expect(readFileSync(join(extracted, 'mode/mode.txt'), 'utf8')).toBe('same\n')
+    expect(readFileSync(join(extracted, 'docs/readme.txt'), 'utf8')).toBe('v3\n')
+  })
+
+  it('resolves a clean merge on a later hop from a synthesized base', async () => {
+    const f = pipelineFixture()
+    const retained = join(f.dir, 'retained-base.tar')
+    const first = await runApplyPipeline(pipelineOptions(f, { persistBasePath: retained }))
+    expect(first.status).toBe('applied')
+    const baseDir = join(f.dir, 'base-for-second-hop')
+    mkdirSync(baseDir, { recursive: true })
+    const untar = spawnSync('tar', ['-xf', retained, '-C', baseDir], { encoding: 'utf8' })
+    expect(untar.status).toBe(0)
+    // The installed tree for the second hop is the applied v3 tree (user edit
+    // preserved); the base must be the pristine v3 shipped bytes.
+    const second = await runApplyPipeline({
+      ...pipelineOptions(f, {}),
+      localRoot: f.staging,
+      baseRoot: baseDir,
+      stagingRoot: join(f.dir, 'staging-2'),
+      journalPath: join(f.dir, 'staging-2.journal.json'),
+    })
+    expect(second.status).toBe('applied')
+    const action = second.plan.actions.find((candidate: { path: string }) => candidate.path === 'core/app.js')
+    expect(action?.kind).toBe('merge')
+    expect(action?.merge?.status).toBe('clean')
+    expect(second.result.verification?.ok).toBe(true)
+    expect(readFileSync(join(f.dir, 'staging-2', 'core/app.js'), 'utf8')).toBe('one\nUSER\ntwo\nthree\nFOUR\nFIVE\n')
   })
 
   it('degrades a both-changed config file to keep-local with a sidecar when no base exists', async () => {
@@ -417,6 +459,18 @@ describe('apply pipeline', () => {
     expect(existsSync(join(f.staging, 'cfg/both.yaml.new-v3'))).toBe(true)
     expect(outcome.result.verification?.ok).toBe(true)
     expect(outcome.result.report.conflicts.length).toBe(1)
+  })
+
+  it('never fails an update when the base archive cannot be retained', async () => {
+    const f = pipelineFixture()
+    const blocker = join(f.dir, 'blocker-file')
+    writeFileSync(blocker, 'not a directory\n')
+    const outcome = await runApplyPipeline(pipelineOptions(f, { persistBasePath: join(blocker, 'base.tar') }))
+    expect(outcome.status).toBe('applied')
+    expect(outcome.result.verification?.ok).toBe(true)
+    expect(outcome.result.baseArchive).toBeNull()
+    expect(outcome.result.baseArchiveError).toBeTruthy()
+    expect(readFileSync(join(f.staging, 'core/app.js'), 'utf8')).toBe('one\nUSER\ntwo\nthree\nFOUR\nFIVE\n')
   })
 
   it('interrupts deterministically and resumes from the journal', async () => {
@@ -459,6 +513,7 @@ describe('apply pipeline', () => {
       '--platform', 'linux-x64',
       '--diff', join(f.dir, 'diff-linux-x64-v1-v2.tar.gz'),
       '--diff', join(f.dir, 'diff-linux-x64-v2-v3.tar.gz'),
+      '--persist-base', join(f.dir, 'cli-retained.tar'),
       '--out', f.result,
     ], {
       encoding: 'utf8',
@@ -466,9 +521,11 @@ describe('apply pipeline', () => {
     })
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('dsh update:')
-    const parsed = JSON.parse(readFileSync(f.result, 'utf8')) as { status: string; verification: { ok: boolean } }
+    const parsed = JSON.parse(readFileSync(f.result, 'utf8')) as { status: string; verification: { ok: boolean }; baseArchive: { path: string } | null }
     expect(parsed.status).toBe('applied')
     expect(parsed.verification.ok).toBe(true)
+    expect(parsed.baseArchive?.path).toBe(join(f.dir, 'cli-retained.tar'))
+    expect(existsSync(join(f.dir, 'cli-retained.tar'))).toBe(true)
   })
 
   it('reports a corrupt gzip through the CLI as exit 2', () => {

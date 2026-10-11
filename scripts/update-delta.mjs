@@ -18,7 +18,12 @@
  *   3. run the preservation engine from the shipped tree: `buildPlan` over
  *      (previous manifest, next manifest, local scan, pristine base, release
  *      view, pins, tombstones) and `applyPlan` into the staging directory;
- *   4. write the structured result (engine report included) for the updater.
+ *   4. write the structured result (engine report included) for the updater,
+ *      and — when asked — retain a pristine base archive for the newly
+ *      installed version (copied from a downloaded full release, or
+ *      synthesized from the verified staging tree with preserved paths filled
+ *      from the release view and unknowable paths omitted) so the next update
+ *      keeps a true 3-way merge base.
  *
  * The engine bundle is imported dynamically from the installed tree; this
  * module itself is dependency-free because the updater may stream it from the
@@ -475,6 +480,82 @@ export function supplementReleaseView(options) {
   return { supplemented, unresolved }
 }
 
+// ── retained pristine base archive ──────────────────────────────────────────
+
+/**
+ * Build a pristine base archive for a freshly verified version from an
+ * applied plan. The archive carries exactly the release's shipped bytes: paths
+ * whose staged content is the shipped content are hardlinked straight from the
+ * verified staging tree; preserved paths (keep-local, merged, pinned,
+ * tombstoned) take their shipped bytes from the release view when the release
+ * changed the path, and are omitted when those bytes are unknowable locally
+ * (an unchanged preserved path). Omitted paths degrade to the engine's
+ * keep-local + sidecar fallback on the next update, never to a wrong merge
+ * base, and no untracked/user path ever enters the archive.
+ * @param {{plan: object, stagingRoot: string, releaseRoot: string, outPath: string}} options synthesis inputs
+ * @returns {{path: string, bytes: number, files: number, omitted: string[]}}
+ */
+export function synthesizePristineArchive(options) {
+  const { plan, stagingRoot, releaseRoot, outPath } = options
+  const scratch = `${outPath}.tree-${process.pid}`
+  const tmpArchive = `${outPath}.tmp-${process.pid}`
+  fs.rmSync(scratch, { recursive: true, force: true })
+  fs.mkdirSync(scratch, { recursive: true })
+  const omitted = []
+  let files = 0
+  try {
+    for (const action of plan.actions) {
+      const shipped = action.shipped
+      if (shipped === null || shipped === undefined) continue
+      const destination = joinRel(scratch, action.path)
+      if (shipped.type === 'dir') {
+        fs.mkdirSync(destination, { recursive: true })
+        try { fs.chmodSync(destination, shipped.mode) } catch { /* best effort mode */ }
+        continue
+      }
+      fs.mkdirSync(path.dirname(destination), { recursive: true })
+      if (shipped.type === 'symlink') {
+        fs.symlinkSync(shipped.target ?? '', destination)
+        continue
+      }
+      if (action.outcome.disposition === 'shipped') {
+        const source = joinRel(stagingRoot, action.path)
+        try {
+          fs.linkSync(source, destination)
+        } catch {
+          fs.copyFileSync(source, destination)
+        }
+        files += 1
+        continue
+      }
+      let stats = null
+      const viewSource = joinRel(releaseRoot, action.path)
+      try { stats = fs.lstatSync(viewSource) } catch { stats = null }
+      if (stats !== null && stats.isFile() && sha256FileSync(viewSource) === shipped.sha256) {
+        try {
+          fs.linkSync(viewSource, destination)
+        } catch {
+          fs.copyFileSync(viewSource, destination)
+        }
+        files += 1
+        continue
+      }
+      omitted.push(action.path)
+    }
+    const tarred = spawnSync('tar', ['-cf', tmpArchive, '-C', scratch, '.'], { encoding: 'utf8' })
+    if (tarred.error) throw tarred.error
+    if (tarred.status !== 0) throw new Error(`tar failed (${tarred.status}): ${String(tarred.stderr ?? '').trim()}`)
+    fs.mkdirSync(path.dirname(outPath), { recursive: true })
+    fs.renameSync(tmpArchive, outPath)
+    const digest = sha256FileSync(outPath)
+    fs.writeFileSync(`${outPath}.sha256`, `${digest}  ${path.basename(outPath)}\n`)
+    return { path: outPath, bytes: fs.statSync(outPath).size, files, omitted }
+  } finally {
+    fs.rmSync(tmpArchive, { force: true })
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 // ── apply pipeline ──────────────────────────────────────────────────────────
 
 /**
@@ -547,6 +628,23 @@ export async function runApplyPipeline(options) {
       : applied.status === 'failed'
         ? 1
         : 0
+  let baseArchive = null
+  let baseArchiveError = null
+  if (options.persistBasePath !== undefined && exitCode === 0) {
+    try {
+      baseArchive = synthesizePristineArchive({
+        plan,
+        stagingRoot: options.stagingRoot,
+        releaseRoot: options.releaseRoot,
+        outPath: options.persistBasePath,
+      })
+    } catch (error) {
+      // Never fail the update over a missing base: the next update degrades to
+      // keep-local + sidecar exactly as it would without this lane.
+      baseArchiveError = error instanceof Error ? error.message : String(error)
+      process.stderr.write(`update-delta: merge base not retained (${baseArchiveError})\n`)
+    }
+  }
   const result = {
     schema: 'dsh-update-apply/1',
     fromVersion: options.fromVersion ?? null,
@@ -571,6 +669,8 @@ export async function runApplyPipeline(options) {
     backupDir: applied.backupDir,
     stagingRoot: applied.stagingRoot,
     journalPath: applied.journalPath,
+    baseArchive,
+    baseArchiveError,
   }
   return { status: applied.status, exitCode, result, plan, transport, view }
 }
@@ -601,7 +701,8 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        --journal <file> --to-version <v> [--from-version <v>] [--diff <archive>]...
        [--backup <dir>] [--pins <file>] [--tombstones <file>]
        [--stop-after-actions <n>] [--timestamp <iso>] [--platform <os-arch>]
-       [--base-mode <cache|empty>] [--out <result.json>]`
+       [--base-mode <retained|cache|empty>] [--persist-base <archive.tar>]
+       [--out <result.json>]`
 
 /**
  * Run the CLI.
@@ -636,6 +737,7 @@ export async function main(argv) {
     ...(args.tombstones === undefined ? {} : { tombstonesPath: args.tombstones }),
     ...(args.timestamp === undefined ? {} : { timestamp: args.timestamp }),
     ...(stopAfter === undefined ? {} : { stopAfterActions: Number.parseInt(stopAfter, 10) }),
+    ...(args['persist-base'] === undefined ? {} : { persistBasePath: args['persist-base'] }),
   }
   const outcome = await runApplyPipeline(options)
   if (args.out !== undefined) fs.writeFileSync(args.out, `${JSON.stringify(outcome.result, null, 2)}\n`)

@@ -72,6 +72,10 @@ export interface ApplyPipelineResult {
   backupDir: string | null
   stagingRoot: string
   journalPath: string
+  /** Retained pristine base archive for the installed version; null when not requested or not synthesized. */
+  baseArchive: { path: string; bytes: number; files: number; omitted: string[] } | null
+  /** Why the base archive was not retained; null when it was or was not requested. */
+  baseArchiveError: string | null
 }
 
 /** Options for {@link runApplyPipeline}. */
@@ -94,6 +98,8 @@ export interface RunApplyPipelineOptions {
   tombstonesPath?: string
   timestamp?: string
   stopAfterActions?: number
+  /** When set, synthesize the pristine base archive for the installed version. */
+  persistBasePath?: string
 }
 
 /** Outcome of the apply pipeline. */
@@ -233,6 +239,18 @@ export function supplementReleaseView(options: {
  * @returns pipeline outcome
  */
 export function runApplyPipeline(options: RunApplyPipelineOptions): Promise<ApplyPipelineOutcome>
+
+/**
+ * Build a pristine base archive for a freshly verified version from an applied plan.
+ * @param options - synthesis inputs
+ * @returns archive path, bytes, files linked, and omitted preserved paths
+ */
+export function synthesizePristineArchive(options: {
+  plan: { actions: ApplyPlannedAction[] }
+  stagingRoot: string
+  releaseRoot: string
+  outPath: string
+}): { path: string; bytes: number; files: number; omitted: string[] }
 
 /**
  * Run the CLI.

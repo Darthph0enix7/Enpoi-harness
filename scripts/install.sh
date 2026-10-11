@@ -150,6 +150,11 @@ TREE_DIR_NAME=""
 REUSED_TREE_DIR=""
 PRE_SWITCH_RESTORE=""
 UPDATE_LOCK_DIR=""
+FORGET_PATHS=""
+ACCEPT_SHIPPED_PATHS=""
+FORGOT_RESULTS=""
+ACCEPTED_RESULTS=""
+UPDATE_ACTIONS_JSON=""
 PROFILE_REF_EXPLICIT=0
 PROFILE_REF_DERIVED=0
 PROFILE_SHIPPED_DIR=""
@@ -592,6 +597,14 @@ Options:
                       (timestamped backups; never fail closed)
   --no-profile-merge  skip the additive shipped-profile patch merge (new shipped
                       rows/sections are not added; the live patch stays untouched)
+  --forget PATH       with --update: record PATH in $DSH_HOME/update/tombstones.txt
+                      so updates keep it deleted (repeatable; relative paths only).
+                      CLI parity for the tombstone file — the file stays canonical
+  --accept-shipped PATH
+                      with --update: remove PATH's pin from $DSH_HOME/update/pins.yaml
+                      and take the shipped file now when the installed version's
+                      pristine archive has it; otherwise the next update takes it
+                      (repeatable; relative paths only)
   --update            mechanical update: install, migrate, switch, self-check,
                       roll back to the previous versioned dir on failure
   --repair            verify the install's invariants (version dirs, current,
@@ -682,6 +695,14 @@ while [ "$#" -gt 0 ]; do
     --merge-baseline) need_value "$@"; MERGE_BASELINE="$2"; shift 2;;
     --merge-baseline=*) MERGE_BASELINE="${arg#*=}"; shift;;
     --no-profile-merge) NO_PROFILE_MERGE=1; shift;;
+    --forget) need_value "$@"; FORGET_PATHS="${FORGET_PATHS:+$FORGET_PATHS
+}$2"; shift 2;;
+    --forget=*) FORGET_PATHS="${FORGET_PATHS:+$FORGET_PATHS
+}${arg#*=}"; shift;;
+    --accept-shipped) need_value "$@"; ACCEPT_SHIPPED_PATHS="${ACCEPT_SHIPPED_PATHS:+$ACCEPT_SHIPPED_PATHS
+}$2"; shift 2;;
+    --accept-shipped=*) ACCEPT_SHIPPED_PATHS="${ACCEPT_SHIPPED_PATHS:+$ACCEPT_SHIPPED_PATHS
+}${arg#*=}"; shift;;
     --update) UPDATE_MODE=1; shift;;
     --repair) REPAIR_MODE=1; shift;;
     --clean) CLEAN_MODE=1; shift;;
@@ -827,6 +848,21 @@ EOF
   return 1
 }
 
+# Evaluate one Homebrew `shellenv` export under POSIX rules. The user's login
+# shell decides `brew shellenv`'s syntax; forcing SHELL=/bin/sh asks for POSIX
+# output, and the guard refuses fish/csh forms outright so no foreign syntax is
+# ever eval'd by this sh (observed otherwise as `set: --: invalid option` /
+# `fish_add_path: command not found` on macOS fish users).
+load_brew_env() { # brew-binary -> 0
+  local brew_bin="$1" env_out
+  env_out="$(SHELL=/bin/sh HOMEBREW_NO_AUTO_UPDATE=1 "$brew_bin" shellenv 2>/dev/null || true)"
+  case "$env_out" in
+    *'set --global'*|*'set -gx'*|*'fish_add_path'*|*'setenv '*|*'endif'*) env_out="" ;;
+  esac
+  [ -n "$env_out" ] && eval "$env_out"
+  return 0
+}
+
 detect_os_arch() {
   local uname_s
   uname_s="$(uname -s)"
@@ -848,17 +884,17 @@ detect_os_arch() {
   DISTRO_NAME=""
   if [ "$OS" = "darwin" ]; then
     DISTRO_NAME="macOS $(sw_vers -productVersion 2>/dev/null || uname -r)"
-    # Homebrew environment detection: Apple Silicon (/opt/homebrew) or Intel (/usr/local)
+    # Homebrew environment detection: Apple Silicon (/opt/homebrew) or Intel (/usr/local).
     if [ -x "/opt/homebrew/bin/brew" ]; then
-      eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
+      load_brew_env "/opt/homebrew/bin/brew"
       export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
       DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     elif [ -x "/usr/local/bin/brew" ]; then
-      eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
+      load_brew_env "/usr/local/bin/brew"
       export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
       DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     elif command -v brew >/dev/null 2>&1; then
-      eval "$(brew shellenv 2>/dev/null || true)"
+      load_brew_env "$(command -v brew)"
       DISTRO_NAME="$DISTRO_NAME (Homebrew)"
     fi
   elif [ "$OS" = "linux" ]; then
@@ -2935,10 +2971,14 @@ profile_install() {
   export HARNESS_ROOT="${HARNESS:-$PREFIX/harness/current}"
 
   local deps_hash="" hash_file="$PROFILE_DIR/.pnpm-deps.hash"
+  # The workspace file is an install input: the refresh merges shipped
+  # `patchedDependencies` entries into it, and a patch declaration that changes
+  # without a package/lock change must still force the install that applies it
+  # (otherwise a shipped patch never reaches the live node_modules).
   if command -v sha256sum >/dev/null 2>&1; then
-    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" 2>/dev/null | sha256sum | cut -d' ' -f1)"
+    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" "$PROFILE_DIR/pnpm-workspace.yaml" 2>/dev/null | sha256sum | cut -d' ' -f1)"
   elif command -v shasum >/dev/null 2>&1; then
-    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
+    deps_hash="$(cat "$PROFILE_DIR/package.json" "$PROFILE_DIR/pnpm-lock.yaml" "$PROFILE_DIR/pnpm-workspace.yaml" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
   fi
 
   if [ -n "$deps_hash" ] && [ -d "$PROFILE_DIR/node_modules" ] && [ -f "$hash_file" ]; then
@@ -4182,6 +4222,7 @@ emit_json() { # action ok
   local extra=""
   [ -n "${DRY_INSPECTION_JSON:-}" ] && extra="$extra, \"inspection\": $DRY_INSPECTION_JSON"
   [ -n "${UPDATE_DETAIL_JSON:-}" ] && extra="$extra, \"update\": $UPDATE_DETAIL_JSON"
+  [ -n "${UPDATE_ACTIONS_JSON:-}" ] && extra="$extra, \"updateActions\": $UPDATE_ACTIONS_JSON"
   printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "profileSource": "%s", "profileRef": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}%s}\n' \
     "$2" "$1" "$DRY_RUN" "$(json_escape "$PREFIX")" "$(json_escape "$VERSION")" "$(json_escape "${PREV_VERSION:-}")" \
     "$(json_escape "$CHANNEL")" "$(json_escape "$SOURCE")" "$(json_escape "$SOURCE_URL")" "$(json_escape "$HARNESS")" \
@@ -4422,6 +4463,276 @@ update_inspect_run() { # args... -> module stdout; nonzero when the module is un
     | DSH_UPDATE_INSPECT_MAIN=1 "$NODE" --input-type=module - "$@"
 }
 
+# ── Update request flags (`--forget`, `--accept-shipped`) ───────────────────
+# Design §3.5 CLI parity for the preservation controls: the files stay canonical
+# and hand-editable, and these flags record the same entries, report every
+# action, and never fail an update (an unsafe path is refused loudly).
+
+update_path_unsafe() { # path -> 0 when unsafe (mirrors the engine's rel-path rules)
+  case "$1" in
+    ''|/*|*\\*|./*|*/./*|*/../*|../*|*/..|*//*|*/) return 0;;
+    *[[:cntrl:]]*) return 0;;
+  esac
+  return 1
+}
+
+update_forget_path() { # relpath -> 0 handled, 1 refused; sets FORGET_OUTCOME
+  local rel="$1" file="$DSH_HOME/update/tombstones.txt"
+  FORGET_OUTCOME=""
+  if update_path_unsafe "$rel"; then
+    warn "--forget: refusing unsafe path '$rel' (relative paths only, no '..' or control characters)"
+    FORGET_OUTCOME="refused: unsafe path"
+    return 1
+  fi
+  mkdir -p "$DSH_HOME/update" 2>/dev/null || true
+  if [ -f "$file" ] && { grep -qxF -- "$rel" "$file" 2>/dev/null || grep -qxF -- "'$rel'" "$file" 2>/dev/null || grep -qxF -- "\"$rel\"" "$file" 2>/dev/null; }; then
+    say "  forget:   $rel is already tombstoned (no change)"
+    FORGET_OUTCOME="already"
+    return 0
+  fi
+  if printf '%s\n' "$rel" >> "$file" 2>/dev/null; then
+    say "  forget:   recorded $rel in $file"
+    log "--forget: appended $rel to $file"
+    FORGET_OUTCOME="recorded"
+    return 0
+  fi
+  warn "--forget: could not write $file"
+  FORGET_OUTCOME="could not write tombstones.txt"
+  return 1
+}
+
+update_base_member() { # archive relpath -> member name; empty when absent
+  local archive="$1" rel="$2"
+  case "$archive" in
+    *.gz) tar -tzf "$archive" 2>/dev/null | update_member_awk "$rel";;
+    *) tar -tf "$archive" 2>/dev/null | update_member_awk "$rel";;
+  esac
+}
+
+update_member_awk() { # relpath; reads members on stdin, prints the match
+  awk -v p="$1" '
+    { s = $0
+      s2 = s
+      if (substr(s2, length(s2), 1) == "/") s2 = substr(s2, 1, length(s2) - 1)
+      n = length(p)
+      if (s2 == p || s2 == "./" p) { print s; exit }
+      if (length(s2) > n && substr(s2, length(s2) - n + 1) == p && substr(s2, length(s2) - n, 1) == "/") { print s; exit }
+    }'
+}
+
+# Remove the pin for one path and, when the installed version's pristine base
+# archive is available and checksum-verified, restore that path's shipped bytes
+# now. The archive is the release tree by construction, so a member extracted
+# from it carries the file at its manifest hash. Without a base the file is left
+# alone and the next update takes the shipped version (the pin is gone either
+# way). Sets ACCEPT_RESULT_RESTORED/ACCEPT_RESULT_NOTE.
+update_accept_shipped_path() { # relpath -> 0 handled (see result globals), 1 refused
+  local rel="$1" pins="$DSH_HOME/update/pins.yaml" rc=0
+  ACCEPT_RESULT_RESTORED=0
+  ACCEPT_RESULT_NOTE=""
+  if update_path_unsafe "$rel"; then
+    warn "--accept-shipped: refusing unsafe path '$rel' (relative paths only, no '..' or control characters)"
+    ACCEPT_RESULT_NOTE="refused: unsafe path"
+    return 1
+  fi
+  if [ -f "$pins" ]; then
+    local tmp="$pins.tmp.$$"
+    awk -v p="$rel" '
+      function norm(s, sq, dq, c) {
+        sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
+        if (s ~ /^-[[:space:]]+/) sub(/^-[[:space:]]+/, "", s)
+        sq = sprintf("%c", 39); dq = sprintf("%c", 34)
+        c = substr(s, 1, 1); if (c == sq || c == dq) s = substr(s, 2)
+        c = substr(s, length(s), 1); if (c == sq || c == dq) s = substr(s, 1, length(s) - 1)
+        return s
+      }
+      { if (norm($0) == p) { found = 1; next } print }
+      END { if (!found) exit 3 }
+    ' "$pins" > "$tmp"
+    rc=$?
+    case "$rc" in
+      0)
+        if mv "$tmp" "$pins" 2>/dev/null; then
+          say "  accept:   pin removed for $rel ($pins)"
+          log "--accept-shipped: removed the pin for $rel from $pins"
+        else
+          rm -f "$tmp"
+          warn "--accept-shipped: could not rewrite $pins; the pin is unchanged"
+          ACCEPT_RESULT_NOTE="could not rewrite pins.yaml; the pin is unchanged"
+          return 0
+        fi
+        ;;
+      3)
+        rm -f "$tmp"
+        say "  accept:   no pin for $rel in $pins (nothing to remove)"
+        ;;
+      *)
+        rm -f "$tmp"
+        warn "--accept-shipped: could not parse $pins (awk exit $rc); the pin is untouched"
+        ACCEPT_RESULT_NOTE="pins.yaml unreadable; the pin is untouched"
+        return 0
+        ;;
+    esac
+  else
+    say "  accept:   no pin file at $pins (nothing to remove)"
+  fi
+
+  local base=""
+  local slot_gz="$PREFIX/harness/.bases/$installed_version.tar.gz" slot_tar="$PREFIX/harness/.bases/$installed_version.tar"
+  local cache_archive="$PREFIX/harness/.cache/dsh-harness-$installed_version-$OS-$ARCH.tar.gz"
+  if [ -s "$slot_gz" ] && [ -s "$slot_gz.sha256" ]; then base="$slot_gz"
+  elif [ -s "$slot_tar" ] && [ -s "$slot_tar.sha256" ]; then base="$slot_tar"
+  elif [ -s "$cache_archive" ] && [ -s "$cache_archive.sha256" ]; then base="$cache_archive"
+  fi
+  if [ -z "$base" ]; then
+    say "  accept:   no pristine archive for $installed_version; the next update will take the shipped $rel"
+    ACCEPT_RESULT_NOTE="no pristine archive for $installed_version; the next update will take the shipped file"
+    return 0
+  fi
+  local expected actual
+  expected="$(awk 'NR==1 {print $1}' "$base.sha256" 2>/dev/null || true)"
+  actual="$(sha256_of "$base" 2>/dev/null || true)"
+  if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+    say "  accept:   the pristine archive for $installed_version failed its checksum; the next update will take the shipped $rel"
+    ACCEPT_RESULT_NOTE="pristine archive failed its checksum; the next update will take the shipped file"
+    return 0
+  fi
+  local member=""
+  member="$(update_base_member "$base" "$rel")"
+  if [ -z "$member" ]; then
+    say "  accept:   the pristine archive carries no $rel; the next update will take the shipped file"
+    ACCEPT_RESULT_NOTE="pristine archive carries no such file; the next update will take the shipped file"
+    return 0
+  fi
+  local tmpdir="$PREFIX/harness/.accept-shipped-$$" target version_tree
+  rm -rf "$tmpdir"
+  mkdir -p "$tmpdir" || { warn "--accept-shipped: could not create a temp dir"; ACCEPT_RESULT_NOTE="could not create a temp dir"; return 0; }
+  case "$base" in
+    *.gz) tar -xzf "$base" -C "$tmpdir" "$member" 2>/dev/null || true;;
+    *) tar -xf "$base" -C "$tmpdir" "$member" 2>/dev/null || true;;
+  esac
+  target="$tmpdir/$member"
+  version_tree="$PREFIX/harness/$current"
+  if [ ! -f "$target" ]; then
+    rm -rf "$tmpdir"
+    say "  accept:   $rel is not a regular file in the pristine archive; nothing restored"
+    ACCEPT_RESULT_NOTE="not a regular file in the pristine archive; the next update will take the shipped file"
+    return 0
+  fi
+  if [ -f "$version_tree/$rel" ] && cmp -s "$target" "$version_tree/$rel"; then
+    rm -rf "$tmpdir"
+    say "  accept:   $rel already matches the shipped file (nothing to restore)"
+    ACCEPT_RESULT_NOTE="already the shipped file"
+    return 0
+  fi
+  if mkdir -p "$(dirname "$version_tree/$rel")" 2>/dev/null && mv -f "$target" "$version_tree/$rel"; then
+    ACCEPT_RESULT_RESTORED=1
+    say "  accept:   restored the shipped $rel from the pristine $installed_version archive"
+    log "--accept-shipped: restored $version_tree/$rel from $base"
+  else
+    warn "--accept-shipped: could not write $version_tree/$rel"
+    ACCEPT_RESULT_NOTE="could not write the installed tree"
+  fi
+  rm -rf "$tmpdir"
+  return 0
+}
+
+update_actions_json() { # build UPDATE_ACTIONS_JSON from the result globals
+  if [ -z "$FORGOT_RESULTS" ] && [ -z "$ACCEPTED_RESULTS" ]; then
+    UPDATE_ACTIONS_JSON=""
+    return 0
+  fi
+  if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    UPDATE_ACTIONS_JSON=""
+    return 0
+  fi
+  UPDATE_ACTIONS_JSON="$(FORGOT="$FORGOT_RESULTS" ACCEPTED="$ACCEPTED_RESULTS" "$NODE" -e '
+const forgotten = []
+for (const line of (process.env.FORGOT ?? "").split("\n")) {
+  if (line === "") continue
+  const [path, outcome] = line.split("|")
+  forgotten.push({ path, outcome })
+}
+const acceptedShipped = []
+for (const line of (process.env.ACCEPTED ?? "").split("\n")) {
+  if (line === "") continue
+  const [path, restored, ...noteParts] = line.split("|")
+  acceptedShipped.push({ path, restored: restored === "1", note: noteParts.join("|") || null })
+}
+process.stdout.write(JSON.stringify({ forgotten, acceptedShipped }))
+' 2>/dev/null || true)"
+  [ -n "$UPDATE_ACTIONS_JSON" ] || UPDATE_ACTIONS_JSON=""
+  return 0
+}
+
+update_request_flags_apply() { # applies --forget/--accept-shipped; never fails the update
+  if [ -z "$FORGET_PATHS" ] && [ -z "$ACCEPT_SHIPPED_PATHS" ]; then return 0; fi
+  FORGOT_RESULTS=""
+  ACCEPTED_RESULTS=""
+  local rel
+  if [ -n "$FORGET_PATHS" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      if [ "$DRY_RUN" = 1 ]; then
+        if update_path_unsafe "$rel"; then
+          warn "--forget: refusing unsafe path '$rel'"
+        else
+          say "  forget:   would record $rel in $DSH_HOME/update/tombstones.txt"
+          FORGOT_RESULTS="${FORGOT_RESULTS:+$FORGOT_RESULTS
+}$rel|would-record"
+        fi
+        continue
+      fi
+      if update_forget_path "$rel"; then
+        FORGOT_RESULTS="${FORGOT_RESULTS:+$FORGOT_RESULTS
+}$rel|${FORGET_OUTCOME:-recorded}"
+      else
+        FORGOT_RESULTS="${FORGOT_RESULTS:+$FORGOT_RESULTS
+}$rel|${FORGET_OUTCOME:-refused}"
+      fi
+    done <<EOF
+$FORGET_PATHS
+EOF
+  fi
+  if [ -n "$ACCEPT_SHIPPED_PATHS" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      if [ "$DRY_RUN" = 1 ]; then
+        if update_path_unsafe "$rel"; then
+          warn "--accept-shipped: refusing unsafe path '$rel'"
+        else
+          say "  accept:   would remove the pin for $rel and take the shipped file"
+          ACCEPTED_RESULTS="${ACCEPTED_RESULTS:+$ACCEPTED_RESULTS
+}$rel|0|would-accept"
+        fi
+        continue
+      fi
+      update_accept_shipped_path "$rel" || true
+      ACCEPTED_RESULTS="${ACCEPTED_RESULTS:+$ACCEPTED_RESULTS
+}$rel|$ACCEPT_RESULT_RESTORED|$ACCEPT_RESULT_NOTE"
+    done <<EOF
+$ACCEPT_SHIPPED_PATHS
+EOF
+  fi
+  update_actions_json
+  return 0
+}
+
+# pnpm is required only when a profile dependency install can run.
+# profile_install returns before touching pnpm when no profile source is
+# recorded, and no other update step invokes it (migrations and the config
+# merge are Node scripts), so a source-less update proceeds on a device without
+# pnpm. A recorded profile source can introduce a package.json mid-update, so
+# it keeps the hard requirement.
+ensure_update_pnpm() {
+  if setup_pnpm; then return 0; fi
+  if [ -z "$PROFILE_SOURCE" ]; then
+    warn "pnpm unavailable; this update has no profile dependency step (no profile source recorded); continuing"
+    return 0
+  fi
+  die "could not enable pnpm through corepack"
+}
+
 # ── Delta update apply (P3) ─────────────────────────────────────────────────
 # `ds update` picks the ladder rung with the same read-only planner the dry run
 # uses (scripts/update-inspect.mjs): rung 1/2 apply a consecutive diff chain,
@@ -4642,35 +4953,86 @@ delta_fetch_asset() { # name url dir required -> 0 ok
   return 0
 }
 
-# Extract the installed version's cached full-release archive as the pristine
-# merge base. A version directory cannot serve as the base: it holds the user's
-# modifications, and merging against modified bytes would silently drop them.
-# When no verifiable archive is cached, the base stays empty and the engine
-# keeps both-changed files locally with a shipped sidecar (reported).
+# Extract the pristine merge base for the installed version. A version
+# directory cannot serve as the base: it holds the user's modifications, and
+# merging against modified bytes would silently drop them. Sources, in order:
+#   1. the per-version retained archive (harness/.bases/<version>.tar[.gz]),
+#      written by every manifest-era update (a downloaded full release copied
+#      verbatim, or a synthesized pristine archive);
+#   2. the legacy full-release cache entry (pre-retention installs).
+# Every candidate is checksum-verified; when none verifies the base stays
+# empty and the engine keeps both-changed files locally with a shipped sidecar
+# (reported). Sets DELTA_BASE_MODE to retained|cache|empty.
 delta_prepare_base() { # from base_dir -> 0 full base, 1 empty fallback
-  local from="$1" base_dir="$2" archive expected actual
-  archive="$PREFIX/harness/.cache/dsh-harness-$from-$OS-$ARCH.tar.gz"
+  local from="$1" base_dir="$2" candidate="" expected actual
+  local slot_gz="$PREFIX/harness/.bases/$from.tar.gz" slot_tar="$PREFIX/harness/.bases/$from.tar"
+  local cache_archive="$PREFIX/harness/.cache/dsh-harness-$from-$OS-$ARCH.tar.gz"
+  DELTA_BASE_MODE="empty"
   mkdir -p "$base_dir" || return 1
-  if [ -s "$archive" ] && [ -s "$archive.sha256" ]; then
-    expected="$(awk 'NR==1 {print $1}' "$archive.sha256" 2>/dev/null || true)"
-    actual="$(sha256_of "$archive" 2>/dev/null || true)"
+  if [ -s "$slot_gz" ] && [ -s "$slot_gz.sha256" ]; then candidate="$slot_gz"
+  elif [ -s "$slot_tar" ] && [ -s "$slot_tar.sha256" ]; then candidate="$slot_tar"
+  elif [ -s "$cache_archive" ] && [ -s "$cache_archive.sha256" ]; then candidate="$cache_archive"
+  fi
+  if [ -n "$candidate" ]; then
+    expected="$(awk 'NR==1 {print $1}' "$candidate.sha256" 2>/dev/null || true)"
+    actual="$(sha256_of "$candidate" 2>/dev/null || true)"
     if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
-      if tar -xzf "$archive" -C "$base_dir" 2>/dev/null; then
+      local extracted=0
+      case "$candidate" in
+        *.tar.gz) tar -xzf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
+        *.tar) tar -xf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
+        *) extracted=1;;
+      esac
+      if [ "$extracted" = 0 ]; then
         flatten_stage "$base_dir"
         if [ -f "$base_dir/package.json" ]; then
-          log "delta: pristine merge base from the cached release archive ($from)"
+          case "$candidate" in
+            "$PREFIX/harness/.bases/"*) DELTA_BASE_MODE="retained"; log "delta: pristine merge base from the retained per-version archive ($candidate)";;
+            *) DELTA_BASE_MODE="cache"; log "delta: pristine merge base from the legacy cached release archive ($from)";;
+          esac
           return 0
         fi
-        warn "delta: cached release archive for $from carries no package.json; merge base unavailable"
+        warn "delta: merge base archive $candidate carries no package.json; merge base unavailable"
       else
-        warn "delta: could not extract the cached release archive for $from"
+        warn "delta: could not extract the merge base archive $candidate"
       fi
     else
-      warn "delta: cached release archive for $from failed its checksum; merge base unavailable"
+      warn "delta: merge base archive $candidate failed its checksum; merge base unavailable"
     fi
   fi
   find "$base_dir" -mindepth 1 -delete 2>/dev/null || rm -rf "$base_dir"/* 2>/dev/null || true
   log "delta: no pristine merge base for $from; both-changed files will keep local bytes with shipped sidecars"
+  return 1
+}
+
+# Retain the downloaded (or cached) full release archive as the merge base for
+# a version — zero extra network and no synthesis. Never fatal.
+delta_retain_full_base() { # version platform
+  # One assignment per statement: a single `local a="$1" b="$a/..."` line does
+  # not see a/b yet (bash evaluates the RHS list in the outer scope).
+  local to="$1" plat="$2"
+  local src="$PREFIX/harness/.cache/dsh-harness-$to-$plat.tar.gz"
+  local dest="$PREFIX/harness/.bases/$to.tar.gz"
+  [ -s "$src" ] && [ -s "$src.sha256" ] || { log "merge base: no cached full archive for $to; nothing retained"; return 0; }
+  [ -e "$dest" ] && return 0
+  mkdir -p "$PREFIX/harness/.bases" || return 0
+  if cp -f "$src" "$dest.tmp-$$" 2>/dev/null && cp -f "$src.sha256" "$dest.sha256.tmp-$$" 2>/dev/null \
+    && mv -f "$dest.tmp-$$" "$dest" 2>/dev/null && mv -f "$dest.sha256.tmp-$$" "$dest.sha256" 2>/dev/null; then
+    log "merge base retained for $to: $dest ($(human_bytes "$(file_size "$dest")"))"
+  else
+    rm -f "$dest.tmp-$$" "$dest.sha256.tmp-$$"
+    warn "merge base: could not retain the full archive for $to"
+  fi
+  return 0
+}
+
+# Warn (never fail) when an update left the newly installed version without a
+# retained base: the next update degrades to keep-local + sidecar for
+# both-changed files.
+delta_base_retained_check() { # version
+  local to="$1"
+  if [ -s "$PREFIX/harness/.bases/$to.tar" ] || [ -s "$PREFIX/harness/.bases/$to.tar.gz" ]; then return 0; fi
+  warn "merge base: no pristine archive retained for $to; a future update will keep both-changed files local until a full update refreshes the base"
   return 1
 }
 
@@ -4688,7 +5050,8 @@ delta_cleanup_scratch() {
 
 # Move a verified staging directory into place and write its build marker.
 delta_finalize_tree() { # staging to
-  local staging="$1" to="$2" target="$PREFIX/harness/$to" displaced=""
+  local staging="$1" to="$2" displaced=""
+  local target="$PREFIX/harness/$to"
   if [ -e "$target" ]; then
     if [ -f "$target/.dsh-install-complete" ] && [ "${FORCE:-0}" != 1 ]; then
       log "delta: version $to is already installed at $target (reusing)"
@@ -4732,6 +5095,10 @@ delta_report() { # result_json to from base_mode
   restored="$(json_pick "$result" plan counts restore 2>/dev/null || printf '0')"
   conflicts="$(json_pick "$result" plan conflicts 2>/dev/null || printf '0')"
   preserved="$(json_pick "$result" report preserved 2>/dev/null | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).length)}catch{console.log(0)}})' 2>/dev/null || printf '0')"
+  local retained_base="" retained_bytes=""
+  if [ -s "$PREFIX/harness/.bases/$to.tar" ]; then retained_base="$PREFIX/harness/.bases/$to.tar"
+  elif [ -s "$PREFIX/harness/.bases/$to.tar.gz" ]; then retained_base="$PREFIX/harness/.bases/$to.tar.gz"; fi
+  [ -n "$retained_base" ] && retained_bytes="$(file_size "$retained_base")"
   bytes="${DELTA_DOWNLOAD_BYTES:-0}"
   full="${DELTA_FULL_BYTES:-}"
   [ -n "$full" ] || full="$(json_pick "$result" report bytes replaced 2>/dev/null || true)"
@@ -4750,7 +5117,10 @@ delta_report() { # result_json to from base_mode
   fi
   say "  update:     $from -> $to; $replaced replaced, $added added, $restored restored, $merged merged, $keptlocal kept local, $untracked untracked kept, $pinned pinned, $deleted deleted, $conflicts conflict(s)"
   if [ "$base_mode" = "empty" ]; then
-    say "  merge base: unavailable (no cached release archive for $from); both-changed files were kept local with sidecars"
+    say "  merge base: unavailable for $from; both-changed files were kept local with sidecars"
+  fi
+  if [ -n "$retained_base" ]; then
+    say "  merge base: retained for $to — $(human_bytes "$retained_bytes") ($retained_base)"
   fi
   say "  report:     $report_json"
   if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then
@@ -4772,10 +5142,11 @@ process.stdout.write(JSON.stringify({
   downloadedBytes: Number(process.argv[4] || 0),
   fullTarballBytes: process.argv[5] === "" ? null : Number(process.argv[5]),
   base: result.transport?.base ?? null,
+  baseArchive: process.argv[6] === "" ? null : { path: process.argv[6], bytes: Number(process.argv[7] || 0) },
   counts: { replaced: counts.replace ?? 0, added: counts.add ?? 0, merged: counts.merge ?? 0, keptLocal: counts["keep-local"] ?? 0, untracked: counts["keep-untracked"] ?? 0, pinned: counts["pin-skip"] ?? 0, deleted: counts.delete ?? 0, restored: counts.restore ?? 0, conflicts: result.plan?.conflicts ?? 0 },
   preserved: Array.isArray(result.report?.preserved) ? result.report.preserved.length : 0,
   verificationOk: result.verification?.ok ?? null,
-}))' "$result" "${DELTA_RUNG:-0}" "$DELTA_KIND" "${bytes:-0}" "${full:-}" 2>/dev/null || true)"
+}))' "$result" "${DELTA_RUNG:-0}" "$DELTA_KIND" "${bytes:-0}" "${full:-}" "${retained_base:-}" "${retained_bytes:-0}" 2>/dev/null || true)"
   fi
   return 0
 }
@@ -4785,7 +5156,7 @@ process.stdout.write(JSON.stringify({
 delta_apply_delta() { # backup_dir [retry]
   local backup="$1" retry="${2:-0}"
   local to="$DELTA_TARGET_VERSION" from="$installed_version" platform="$OS-$ARCH"
-  local cache="$PREFIX/harness/.cache" engine rc status prev_asset next_asset name tag base_mode="" chain_count=0
+  local cache="$PREFIX/harness/.cache" engine rc status prev_asset next_asset name tag base_mode="" chain_count=0 persist_base=""
   local -a apply_args=()
   DELTA_DOWNLOAD_BYTES=0
   DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
@@ -4812,7 +5183,8 @@ delta_apply_delta() { # backup_dir [retry]
     delta_cleanup_scratch; return 2
   fi
   DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$next_asset")))
-  if delta_prepare_base "$from" "$DELTA_BASE_DIR"; then base_mode="cache"; else base_mode="empty"; fi
+  delta_prepare_base "$from" "$DELTA_BASE_DIR"
+  base_mode="$DELTA_BASE_MODE"
   while IFS=$'\t' read -r name tag; do
     [ -n "$name" ] || continue
     if ! delta_fetch_asset "$name" "$DSH_GITHUB_URL/releases/download/v$tag/$name" "$cache" 1; then
@@ -4851,6 +5223,14 @@ delta_apply_delta() { # backup_dir [retry]
   done
   if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
   if [ -n "${backup:-}" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
+  # Retain this version's pristine merge base for the next update. A cached
+  # full release is copied afterwards; otherwise the module synthesizes one
+  # from the verified staging tree as an uncompressed tar (no compression cost).
+  if [ ! -e "$PREFIX/harness/.bases/$to.tar" ] && [ ! -e "$PREFIX/harness/.bases/$to.tar.gz" ] \
+    && [ ! -s "$PREFIX/harness/.cache/dsh-harness-$to-$platform.tar.gz" ]; then
+    persist_base="$PREFIX/harness/.bases/$to.tar"
+  fi
+  if [ -n "$persist_base" ]; then apply_args+=(--persist-base "$persist_base"); fi
   update_delta_run "${apply_args[@]}" > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
   rc=$?
   status="$(json_pick "$DELTA_RUN_DIR/result.json" status 2>/dev/null || true)"
@@ -4870,6 +5250,10 @@ delta_apply_delta() { # backup_dir [retry]
         delta_cleanup_scratch
         return 1
       fi
+      if [ ! -e "$PREFIX/harness/.bases/$to.tar" ] && [ ! -e "$PREFIX/harness/.bases/$to.tar.gz" ]; then
+        delta_retain_full_base "$to" "$platform"
+      fi
+      delta_base_retained_check "$to" || true
       delta_report "$DELTA_RUN_DIR/result.json" "$to" "$from" "$base_mode"
       delta_cleanup_scratch
       return 0
@@ -4960,7 +5344,8 @@ delta_apply_full() { # release_tree [retry]
     delta_cleanup_scratch
     return 1
   fi
-  if delta_prepare_base "$from" "$DELTA_BASE_DIR"; then base_mode="cache"; else base_mode="empty"; fi
+  delta_prepare_base "$from" "$DELTA_BASE_DIR"
+  base_mode="$DELTA_BASE_MODE"
   apply_args=(
     apply
     --engine "$engine"
@@ -5000,6 +5385,10 @@ delta_apply_full() { # release_tree [retry]
         delta_cleanup_scratch
         return 1
       fi
+      # A full release was downloaded (or reused from the cache): retain it
+      # verbatim as the pristine base for the next update at zero extra cost.
+      delta_retain_full_base "$to" "$platform"
+      delta_base_retained_check "$to" || true
       if [ "$release" = "${STAGED:-}" ]; then rm -rf "$STAGED"; STAGED=""; fi
       delta_report "$DELTA_RUN_DIR/result.json" "$to" "$from" "$base_mode"
       delta_cleanup_scratch
@@ -5071,7 +5460,9 @@ for (const file of process.argv.slice(1)) {
     if (!/^\s/.test(line)) break
     const m = /^\s+([^#\s][^:]*?):\s+(.+?)\s*$/.exec(line)
     if (m === null) continue
-    const key = m[1]
+    // YAML keys may be quoted (`'@scope/pkg@1.2.3'`); the quotes are not part
+    // of the package name used to resolve node_modules/<pkg>.
+    const key = m[1].replace(/^["'"'"']|["'"'"']$/g, "")
     let value = m[2].replace(/^["'"'"']|["'"'"']$/g, "")
     if (seen.has(key)) continue
     seen.add(key)
@@ -5265,10 +5656,26 @@ rollback() { # prev backup failed_version
   return 0
 }
 
+# Remove the retained merge-base slot files for one version (no-op when none).
+prune_version_bases() { # version
+  local name="$1" bases="$PREFIX/harness/.bases" f sz freed=""
+  [ -d "$bases" ] || return 0
+  for f in "$bases/$name.tar" "$bases/$name.tar.sha256" "$bases/$name.tar.gz" "$bases/$name.tar.gz.sha256"; do
+    [ -e "$f" ] || continue
+    sz="$(du -sh "$f" 2>/dev/null | awk '{print $1}')"
+    [ -n "$sz" ] && freed="${freed}${freed:+, }$sz"
+    rm -f "$f"
+  done
+  [ -n "$freed" ] && log "pruned merge base for $name (freed $freed)"
+  return 0
+}
+
 # Version retention (design §2.3): keep the last K version directories
 # (DSH_KEEP_VERSIONS, default 3) — they are the rollback targets and carry the
 # installer state a later update inspects. Never prune within K; every removal
-# and the kept set are reported.
+# and the kept set are reported. Each version's retained pristine merge base
+# follows its version directory, and orphaned slots (a crash between archive
+# write and version install) are reaped here too.
 prune_versions() { # keep1 keep2
   local keep1="$1" keep2="${2:-}" keep_k="${DSH_KEEP_VERSIONS:-3}" removed=0 kept_n=0 d name size
   case "$keep_k" in ''|*[!0-9]*) keep_k=3;; esac
@@ -5301,12 +5708,47 @@ EOF
     if [ "$pinned" = 1 ]; then kept_n=$((kept_n + 1)); continue; fi
     if [ -d "$PREFIX/harness/$name" ]; then
       size="$(du -sh "$PREFIX/harness/$name" 2>/dev/null | awk '{print $1}')"
-      log "pruning old version $name (retention K=$keep_k${size:+; freed $size})"
+      log "pruning old version $name (retention K=$keep_k${size:+; tree freed $size})"
+      prune_version_bases "$name"
       if rm -rf "$PREFIX/harness/$name"; then removed=$((removed + 1)); else warn "could not prune $name"; fi
     fi
   done
+  prune_orphaned_bases
   prune_failed_versions
   log "retention: kept $kept_n version tree(s) (K=$keep_k); pruned $removed"
+  return 0
+}
+
+# Bases are keyed by version directory: a slot whose version directory no
+# longer exists (or never completed) is orphaned and removed, with the disk it
+# held reported. Stale synthesis scratch (pid-suffixed) is reaped as well.
+prune_orphaned_bases() {
+  local bases="$PREFIX/harness/.bases" b bname name pid sz removed=0
+  [ -d "$bases" ] || return 0
+  for b in "$bases"/*; do
+    [ -e "$b" ] || continue
+    bname="$(basename "$b")"
+    case "$bname" in
+      *.tmp-*|*.tree-*)
+        pid="${bname##*-}"
+        case "$pid" in ''|*[!0-9]*) :;; *) kill -0 "$pid" 2>/dev/null && continue;; esac
+        rm -rf -- "$b" 2>/dev/null && removed=$((removed + 1))
+        continue
+        ;;
+      *.tar) name="${bname%.tar}";;
+      *.tar.sha256) name="${bname%.tar.sha256}";;
+      *.tar.gz) name="${bname%.tar.gz}";;
+      *.tar.gz.sha256) name="${bname%.tar.gz.sha256}";;
+      *) continue;;
+    esac
+    case "$name" in ''|*/*|.*) continue;; esac
+    if [ ! -d "$PREFIX/harness/$name" ] || [ ! -f "$PREFIX/harness/$name/.dsh-install-complete" ]; then
+      sz="$(du -sh "$b" 2>/dev/null | awk '{print $1}')"
+      log "pruning orphaned merge base $bname${sz:+ (freed $sz)}"
+      if rm -rf -- "$b"; then removed=$((removed + 1)); else warn "could not prune merge base $bname"; fi
+    fi
+  done
+  [ "$removed" -gt 0 ] && log "pruned $removed orphaned merge-base/stale-synthesis artifact(s)"
   return 0
 }
 
@@ -5328,6 +5770,32 @@ prune_failed_versions() {
     if rm -rf "$f"; then removed=$((removed + 1)); else warn "could not prune failed tree $name"; fi
   done < <(ls -1dt "$PREFIX/harness"/*.failed-* 2>/dev/null)
   [ "$removed" -gt 0 ] && log "pruned $removed failed tree(s); kept the newest $keep for diagnosis"
+  return 0
+}
+
+# Update reports are retained by RUN: one update's JSON and human report count
+# as a single unit, and the newest 3 runs survive. Ordering by mtime keeps the
+# newest run first regardless of which of its two files was written last.
+prune_update_reports() {
+  local dir="$PREFIX/harness" f base key kept="" n=0 removed=0
+  [ -d "$dir" ] || return 0
+  while IFS= read -r f; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    key="${base#.last-update-}"; key="${key%.json}"; key="${key%.txt}"
+    case "$kept" in
+      *"|$key|"*) continue;;
+    esac
+    if [ "$n" -lt 3 ]; then
+      kept="$kept|$key|"
+      n=$((n + 1))
+    else
+      if rm -f "$f" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune update report $f"; fi
+    fi
+  done <<EOF
+$(ls -1t "$dir"/.last-update-* 2>/dev/null)
+EOF
+  [ "$removed" -gt 0 ] && log "pruned $removed stale update-report file(s) (newest 3 runs kept)"
   return 0
 }
 
@@ -5354,14 +5822,7 @@ prune_update_artifacts() {
       if rm -f "$f" "$f.sha256" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune cached release artifact $f"; fi
     done < <(ls -1t "$PREFIX/harness/.cache"/$pattern 2>/dev/null)
   done
-  # Update reports: keep the newest 3 per prefix.
-  i=0
-  while IFS= read -r f; do
-    [ -e "$f" ] || continue
-    i=$((i + 1))
-    [ "$i" -le 3 ] && continue
-    if rm -f "$f" 2>/dev/null; then removed=$((removed + 1)); else warn "could not prune update report $f"; fi
-  done < <(ls -1t "$PREFIX/harness"/.last-update-* 2>/dev/null)
+  prune_update_reports
   for group in "$PREFIX/harness" "$PROFILE_DIR"; do
     [ -d "$group" ] || continue
     i=0
@@ -5494,6 +5955,16 @@ clean_remove() { # path label
   return 0
 }
 
+# A staging path may appear as the directory itself, its journal, or its owner
+# record; map any of them back to the staging root for owner checks.
+staging_guard_base() { # path -> staging path (suffixes stripped)
+  case "$1" in
+    *.journal.json) printf '%s' "${1%.journal.json}";;
+    *.owner) printf '%s' "${1%.owner}";;
+    *) printf '%s' "$1";;
+  esac
+}
+
 do_clean() {
   # --dry-run must not even open the log file.
   [ "$DRY_RUN" = 1 ] || init_log_file
@@ -5531,8 +6002,19 @@ do_clean() {
     fi
   done
 
-  # 3. Prune staging, download, backup, and delta scratch directories
+  # 3. Prune staging, download, backup, and delta scratch directories.
+  # Staging with a live owner is never removed: an interrupted update resumes
+  # from exactly that directory and journal (`dsh update` continues by
+  # fingerprint), so `dsh clean` must not break the resume path.
   for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-* "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
+    case "$p" in
+      "$PREFIX/harness"/.staging-*|"$PREFIX/harness"/.profile-staging-*)
+        if scratch_owner_alive "$(staging_guard_base "$p")"; then
+          say "  ${C_DIM}skipped${C_RESET} active staging $(basename "$p") (owner still running; an update may resume it)"
+          continue
+        fi
+        ;;
+    esac
     clean_remove "$p" "staging artifact"
   done
 
@@ -5609,7 +6091,7 @@ acquire_update_lock() {
 
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart
-  STEP_TOTAL=8
+  STEP_TOTAL=9
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   acquire_update_lock
   detect_os_arch
@@ -5660,6 +6142,7 @@ do_update() {
   [ -n "$installed_version" ] || installed_version="$(read_version "$PREFIX/harness/$current/package.json" 2>/dev/null || true)"
   [ -n "$installed_version" ] || installed_version="$(json_field "$state" version)"
   INSTALLED_COMMIT="$(installed_tree_commit "$PREFIX/harness/$current")"
+  update_request_flags_apply
   if [ "$DRY_RUN" = 1 ]; then
     local target_value="" dry_target_commit=""
     if [ -z "$SOURCE" ]; then
@@ -5862,7 +6345,7 @@ do_update() {
   fi
 
   step "pnpm: corepack"
-  setup_pnpm || die "could not enable pnpm through corepack"
+  ensure_update_pnpm
   backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup" 2>/dev/null || warn "could not create backup dir $backup"
   backup_user_files "$backup"
@@ -6633,6 +7116,9 @@ if [ "$PURGE" = 1 ] && [ "$UNINSTALL_MODE" != 1 ]; then
 fi
 if [ -n "$MERGE_BASELINE" ] && [ "$UPDATE_MODE" != 1 ]; then
   die "--merge-baseline applies to --update only"
+fi
+if { [ -n "$FORGET_PATHS" ] || [ -n "$ACCEPT_SHIPPED_PATHS" ]; } && [ "$UPDATE_MODE" != 1 ]; then
+  die "--forget/--accept-shipped apply to --update only"
 fi
 if [ "$CLEAN_MODE" = 1 ]; then
   do_clean

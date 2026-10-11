@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-Updates are versioned directory switches with rollback on failure; `$DSH_HOME` is only ever seeded, never overwritten. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
+Updates ship only changed bytes and apply through the preservation engine — user edits, added files, pinned paths, and deliberate deletions survive — with rollback to the previous versioned directory on failure; `$DSH_HOME` is only ever seeded, never overwritten. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
 
 ## What is ours vs upstream
 

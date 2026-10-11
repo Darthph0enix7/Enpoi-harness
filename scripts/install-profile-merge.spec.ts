@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -916,6 +916,47 @@ onlyBuiltDependencies:
     expect(result.status).toBe(0)
     expect(readFileSync(live, 'utf8')).toBe(before)
     expect(result.output).toContain('already carries every shipped patchedDependencies entry')
+  })
+
+  it('a patchedDependencies-only merge forces the profile install', () => {
+    const home = mkdtempSync(join(root, 'profile-install-'))
+    const profileDir = join(home, 'profiles', 'web')
+    mkdirSync(join(profileDir, 'node_modules'), { recursive: true })
+    const manifest = '{"name":"dsh-profile-web"}'
+    const lock = "lockfileVersion: '9.0'\n"
+    const workspace = 'packages:\n  - .\n\npatchedDependencies:\n  dsh-fast@0.2.14: patches/dsh-fast@0.2.14.patch\n'
+    writeFileSync(join(profileDir, 'package.json'), manifest)
+    writeFileSync(join(profileDir, 'pnpm-lock.yaml'), lock)
+    writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), workspace)
+    // The recorded hash is what the installer must recompute over the same
+    // inputs; this fixture pins the workspace file as one of them.
+    writeFileSync(join(profileDir, '.pnpm-deps.hash'), `${createHash('sha256').update(manifest + lock + workspace).digest('hex')}\n`)
+    const marker = join(home, 'pnpm-ran')
+    const fakePnpm = join(home, 'pnpm')
+    writeFileSync(fakePnpm, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`)
+    chmodSync(fakePnpm, 0o755)
+    const run = () => spawnSync('bash', ['-c', [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'VERBOSE=1',
+      `LOG_FILE='${join(home, 'install.log')}'`,
+      `DSH_HOME='${home}'`,
+      'PROFILE=web',
+      'PROFILE_SOURCE=https://profile.invalid/web',
+      `PNPM='${fakePnpm}'`,
+      'profile_install',
+    ].join('\n')], { env: { ...process.env, INSTALL_SH: installSh }, encoding: 'utf8' })
+    try {
+      const untouched = run()
+      expect(untouched.status).toBe(0)
+      expect(existsSync(marker)).toBe(false)
+      writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), `${workspace}  '@linxin666/dsh-client-ui-skin-center@0.3.21': patches/@linxin666__dsh-client-ui-skin-center@0.3.21.patch\n`)
+      const merged = run()
+      expect(merged.status).toBe(0)
+      expect(existsSync(marker)).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 

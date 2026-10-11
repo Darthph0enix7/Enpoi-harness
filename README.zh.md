@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-更新采用版本化目录切换，并在失败时自动回滚；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
+更新只传输发生变化的字节，并通过保留引擎应用 —— 用户修改、新增文件、固定路径与主动删除都会被保留 —— 失败时回滚到上一个版本化目录；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
 
 ## 自研组件与上游分工
 

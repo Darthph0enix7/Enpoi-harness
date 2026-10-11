@@ -46,7 +46,11 @@ export interface BuildPlanOptions {
   local: Manifest
   /** Current installed tree root (local bytes). */
   localRoot: string
-  /** Previous version directory (pristine base bytes). */
+  /**
+   * Retained or cached pristine archive of the installed version (extracted):
+   * merge base bytes for `modified/changed` files. Never the live version
+   * directory — its user-modified bytes would silently win the merge.
+   */
   baseRoot: string
   /** New release tree (shipped bytes). */
   releaseRoot: string
